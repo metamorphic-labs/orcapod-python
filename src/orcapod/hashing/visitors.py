@@ -10,6 +10,7 @@ import typing
 from typing import TYPE_CHECKING, Any
 
 from orcapod.logical_types.identifier import arrow_type_identifier
+from orcapod.logical_types.ignore_list import IgnoreListHandler, parse_ignore_metadata
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -199,8 +200,10 @@ class SemanticHashingVisitor(ArrowTypeDataVisitor):
 
     1. Look up the corresponding Python type via ``type_converter``.
     2. If the Python type has a semantic hasher registered in ``python_hasher``,
-       convert the storage value to a Python object and hash it, replacing the
-       column with a ``pa.large_binary()`` value of the form::
+       convert the storage value to a Python object and hash it (a handler with
+       an ignore list, ``IgnoreListHandler``, hashes it under the list in the
+       column's own extension metadata), replacing the column with a
+       ``pa.large_binary()`` value of the form::
 
            <identifier_text_bytes> + b"::" + content_hash.digest
 
@@ -297,7 +300,8 @@ class SemanticHashingVisitor(ArrowTypeDataVisitor):
 
         The same type-level decision ``visit_extension`` takes for a non-null
         value: a registered value hasher for the Python type, or for the innermost
-        element of a list- or set-backed extension type.
+        element of a list- or set-backed extension type when that element is a
+        logical type.
         """
         python_type = self._type_converter.arrow_type_to_python_type(extension_type)
         if typing.get_origin(python_type) in (list, set) and pa.types.is_large_list(
@@ -305,18 +309,37 @@ class SemanticHashingVisitor(ArrowTypeDataVisitor):
         ):
             args = typing.get_args(python_type)
             if args:
-                inner = args[0]
-                while typing.get_origin(inner) in (list, set):
-                    inner_args = typing.get_args(inner)
-                    if not inner_args:
-                        break
-                    inner = inner_args[0]
-                return isinstance(
-                    inner, type
-                ) and self._python_hasher.type_handler_registry.has_handler(inner)
+                return self._hashes_container_elements(args[0])
         if python_type is typing.Any or not isinstance(python_type, type):
             return False
         return self._python_hasher.type_handler_registry.has_handler(python_type)
+
+    def _hashes_container_elements(self, element_python_type: Any) -> bool:
+        """Return True if a native container's elements are hashed by value.
+
+        Unwraps list and set nesting to the innermost element type. Its values are
+        hashed by value only when it is a logical type with a registered value
+        hasher. A container of a plain Arrow element (``set[bytes]``, ITL-611) is
+        hashed as stored, like a plain ``list[bytes]`` column, even where the
+        semantic hasher has a handler for the element's Python type.
+
+        Args:
+            element_python_type: The Python type of the container's elements.
+
+        Returns:
+            Whether the elements are replaced by their value hashes.
+        """
+        inner = element_python_type
+        while typing.get_origin(inner) in (list, set):
+            inner_args = typing.get_args(inner)
+            if not inner_args:
+                break
+            inner = inner_args[0]
+        return (
+            isinstance(inner, type)
+            and self._type_converter.get_logical_type(inner) is not None
+            and self._python_hasher.type_handler_registry.has_handler(inner)
+        )
 
     def visit_extension(
         self,
@@ -367,19 +390,11 @@ class SemanticHashingVisitor(ArrowTypeDataVisitor):
                 elem_python_type = args[0]
 
                 # Type-driven hashability: unwrap list/set nesting to the innermost
-                # non-container type and check whether it has a semantic handler.
-                # Decision is made once per column (not per row) so empty and null
-                # inner lists are handled correctly without crashing.
-                inner = elem_python_type
-                while typing.get_origin(inner) in (list, set):
-                    inner_args = typing.get_args(inner)
-                    if not inner_args:
-                        break
-                    inner = inner_args[0]
-                hashable = isinstance(
-                    inner, type
-                ) and self._python_hasher.type_handler_registry.has_handler(inner)
-                if not hashable:
+                # non-container type and check whether it is a logical type with a
+                # semantic handler. Decision is made once per column (not per row)
+                # so empty and null inner lists are handled correctly without
+                # crashing.
+                if not self._hashes_container_elements(elem_python_type):
                     # Innermost element type has no semantic handler — whole-column
                     # passthrough, identical to main-branch behaviour.
                     return extension_type, storage_value
@@ -422,7 +437,15 @@ class SemanticHashingVisitor(ArrowTypeDataVisitor):
 
         # Convert storage value → Python object and hash it.
         python_obj = self._type_converter.storage_to_python(storage_value, python_type)
-        content_hash = self._python_hasher.hash_object(python_obj)
+        handler = self._python_hasher.type_handler_registry.get_handler(python_obj)
+        if isinstance(handler, IgnoreListHandler):
+            # A value type with an ignore list (ITL-981): the cell is hashed under
+            # the list of its own column, read from the column's extension
+            # metadata, never under the list the data context configures.
+            _, ignore = parse_ignore_metadata(extension_type.__arrow_ext_serialize__())
+            content_hash = handler.hash_ignoring(python_obj, ignore)
+        else:
+            content_hash = self._python_hasher.hash_object(python_obj)
 
         # Encode as binary: "<identifier text>::<digest>", where the identifier text
         # is "<extension name>;<hex of extension metadata>"

@@ -33,6 +33,53 @@ if not _JSONSCHEMA_AVAILABLE:
     logger.info("jsonschema not available, skipping schema validation")
 
 
+def _object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Build one JSON object, refusing a key that occurs twice.
+
+    ``json.load`` alone keeps the last of two equal keys and drops the others. A merge of
+    two branches that each add the same object to a data context file can produce such a
+    file without a conflict, so the entries of one branch would vanish silently.
+
+    Args:
+        pairs: The object's members in file order, as ``json`` passes them to an
+            ``object_pairs_hook``.
+
+    Returns:
+        The object as a ``dict``.
+
+    Raises:
+        ValueError: If a key occurs more than once; the message names the key.
+    """
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"a JSON object repeats the key {key!r}")
+        result[key] = value
+    return result
+
+
+def _read_json_file(path: Path) -> Any:
+    """Read a data context JSON file, refusing duplicate keys at any depth.
+
+    Args:
+        path: The file to read.
+
+    Returns:
+        The parsed document.
+
+    Raises:
+        ContextValidationError: If an object in the file repeats a key; the message
+            names the file and the key.
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        try:
+            return json.load(f, object_pairs_hook=_object_without_duplicate_keys)
+        except ValueError as error:
+            if isinstance(error, json.JSONDecodeError):
+                raise
+            raise ContextValidationError(f"{path}: {error}") from error
+
+
 class JSONDataContextRegistry:
     """
     Registry that loads data contexts from JSON files with validation.
@@ -105,9 +152,11 @@ class JSONDataContextRegistry:
         """Load JSON schema for validation if available."""
         if self.schema_file and self.schema_file.exists():
             try:
-                with open(self.schema_file, "r") as f:
-                    self._schema = json.load(f)
+                self._schema = _read_json_file(self.schema_file)
                 logger.info(f"Loaded validation schema from {self.schema_file}")
+            except ContextValidationError:
+                # A schema file that repeats a key is refused like any other context file.
+                raise
             except Exception as e:
                 logger.warning(f"Failed to load schema from {self.schema_file}: {e}")
                 self._schema = None
@@ -140,8 +189,7 @@ class JSONDataContextRegistry:
         version = json_file.stem  # e.g., "v1" from "v1.json"
 
         # Load JSON
-        with open(json_file, "r") as f:
-            spec = json.load(f)
+        spec = _read_json_file(json_file)
 
         # Validate basic structure
         if not isinstance(spec, dict):
@@ -321,6 +369,14 @@ class JSONDataContextRegistry:
     # to them by this name, as ``{"_ref": "logical_type_registry"}``.
     _LOGICAL_TYPE_REGISTRY_REF = "logical_type_registry"
 
+    # The ignore list declared for an extension name in the registration file's
+    # ``hash_ignore`` object is referred to as ``hash_ignore:<extension name>``.
+    _HASH_IGNORE_REF_PREFIX = "hash_ignore:"
+
+    # The registration file's ``provisional`` list (extension names of the types
+    # whose value hash is provisional, ITL-1068) is referred to by this name.
+    _PROVISIONAL_REF = "provisional"
+
     def _uses_logical_type_registration(self, spec: dict[str, Any]) -> bool:
         """Whether ``spec`` takes its logical types from the registration file.
 
@@ -339,11 +395,14 @@ class JSONDataContextRegistry:
         """Read the logical type registration file.
 
         Returns:
-            Its ``logical_type_registry`` object spec and its ``value_handlers``
-            list of ``[type, handler]`` object-spec pairs.
+            Its ``logical_type_registry`` object spec, its ``value_handlers`` list
+            of ``[type, handler]`` object-spec pairs and, when present, its
+            ``deferred_value_handlers`` list of handlers loaded on first use and
+            its ``hash_ignore`` object: per extension name, the property names the
+            value hash of that type ignores; and its ``provisional`` list: the
+            extension names of the types whose value hash is provisional.
         """
-        with open(self.logical_types_file, "r") as f:
-            return json.load(f)
+        return _read_json_file(self.logical_types_file)
 
     def _create_context_from_spec(self, spec: dict[str, Any]) -> DataContext:
         """Create DataContext instance from validated specification.
@@ -365,6 +424,33 @@ class JSONDataContextRegistry:
             registration: dict[str, Any] | None = None
             if self._uses_logical_type_registration(spec):
                 registration = self._load_logical_type_registration()
+                # The ignore list of each library value type is declared once, by
+                # extension name; its logical type and its value handler both take
+                # it as ``{"_ref": "hash_ignore:<extension name>"}`` (ITL-981).
+                for name, ignore in registration.get("hash_ignore", {}).items():
+                    # A JSON object or string would iterate as names; only a list
+                    # of names is a list of names.
+                    if not isinstance(ignore, list) or not all(
+                        isinstance(item, str) for item in ignore
+                    ):
+                        raise ValueError(
+                            f"hash_ignore[{name!r}] must be a list of property "
+                            f"names, got {ignore!r}"
+                        )
+                    ref_lut[f"{self._HASH_IGNORE_REF_PREFIX}{name}"] = list(ignore)
+                # The types whose value hash is provisional are declared once, by
+                # extension name; the logical type registry takes the list as
+                # ``{"_ref": "provisional"}`` and the value handler registry below
+                # is given it. It never enters an identifier or a hash (ITL-1068).
+                provisional = registration.get(self._PROVISIONAL_REF, [])
+                if not isinstance(provisional, list) or not all(
+                    isinstance(item, str) for item in provisional
+                ):
+                    raise ValueError(
+                        f"provisional must be a list of extension names, got "
+                        f"{provisional!r}"
+                    )
+                ref_lut[self._PROVISIONAL_REF] = list(provisional)
                 ref_lut[self._LOGICAL_TYPE_REGISTRY_REF] = parse_objectspec(
                     registration["logical_type_registry"], ref_lut=ref_lut
                 )
@@ -386,6 +472,15 @@ class JSONDataContextRegistry:
                     pair = parse_objectspec(pair_spec, ref_lut=ref_lut)
                     if pair and len(pair) == 2 and all(x is not None for x in pair):
                         handler_registry.register(pair[0], pair[1])
+                # Handlers of optional value types are named, not built: the
+                # library is imported when a value of the type is first hashed.
+                for entry in registration.get("deferred_value_handlers", []):
+                    handler_registry.register_deferred(
+                        entry["python_type"],
+                        entry["handler"],
+                        parse_objectspec(entry.get("_config", {}), ref_lut=ref_lut),
+                    )
+                handler_registry.declare_provisional(ref_lut[self._PROVISIONAL_REF])
 
             return DataContext(
                 context_key=context_key,

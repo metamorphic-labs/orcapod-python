@@ -12,6 +12,7 @@ import pytest
 
 from orcapod.channels import Channel
 from orcapod.core.nodes.source_node import SourceJobNode
+from orcapod.core.sources import ArrowTableSource
 from orcapod.core.sources.polling_source import PollingSource
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.errors import CursorInvalidatedError
@@ -244,7 +245,8 @@ class TestAsyncIterDataDefault:
         """SourceJobNode.async_execute routes through async_iter_data — no regression."""
         from orcapod.types import Schema
 
-        stream = _make_arrow_stream(2)
+        # A bound source needs one system-tag pair (ITL-1126); a raw stream has none.
+        stream = ArrowTableSource(_make_arrow_stream(2).as_table(), tag_columns=["id"])
         node = SourceJobNode(
             name="test",
             tag_schema=Schema({"id": int}),
@@ -262,7 +264,8 @@ class TestAsyncIterDataDefault:
     async def test_source_node_closes_channel_after_exhaustion(self):
         from orcapod.types import Schema
 
-        stream = _make_arrow_stream(1)
+        # A bound source needs one system-tag pair (ITL-1126); a raw stream has none.
+        stream = ArrowTableSource(_make_arrow_stream(1).as_table(), tag_columns=["id"])
         node = SourceJobNode(
             name="test",
             tag_schema=Schema({"id": int}),
@@ -426,6 +429,32 @@ class TestPollingSourceSyncMode:
         assert len(fake.fetch_cursors) == 1
         assert len(fake.poll_cursors) == 1
 
+    def test_zero_row_table_is_the_polled_batches_and_never_polls(self):
+        """``typed_zero_row_table``: ``None`` before a poll; then the polled table's.
+
+        Non-public on purpose: the test is about the helper's contract (ITL-912).
+        """
+        from orcapod.core.streams.base import typed_zero_row_table
+
+        fake = FakeDynamicSource(batches=[_batch(1, 10), _batch(2, 20)])
+        src = PollingSource(
+            fake, tag_columns="id", polling_config=PollingConfig(interval=1.0)
+        )
+        assert typed_zero_row_table(src) is None
+        assert fake.fetch_cursors == [] and fake.poll_cursors == []
+
+        list(src.iter_data())
+        list(src.iter_data())  # two batches polled and combined
+        expected = src.as_table(columns={"system_tags": True, "source": True})
+        polls = (len(fake.poll_cursors), len(fake.fetch_cursors))
+
+        table = typed_zero_row_table(src)
+
+        assert table is not None
+        assert table.num_rows == 0
+        assert table.schema == expected.schema
+        assert (len(fake.poll_cursors), len(fake.fetch_cursors)) == polls
+
     def test_sync_cache_miss_refetches_and_combines(self):
         """Second iter_data() re-fetches when poll returns True."""
         fake = FakeDynamicSource(batches=[_batch(1, 10), _batch(2, 20)])
@@ -456,18 +485,23 @@ class TestPollingSourceSyncMode:
         assert fake.fetch_cursors[1] is not None
         assert fake.fetch_cursors[1].value == 1
 
-    def test_last_modified_updated_from_cursor_modified_at(self):
-        """cursor.modified_at updates last_modified; None falls back to wall clock."""
+    def test_last_modified_is_the_moment_rows_are_found_not_the_cursor_time(self):
+        """cursor.modified_at is informational: last_modified is the moment the rows
+        were found (ITL-1102), so rows modified before a downstream node's last run
+        but found after it still make that node stale."""
         ts = datetime(2026, 3, 15, 12, 0, 0, tzinfo=timezone.utc)
         fake = FakeDynamicSource(batches=[_batch(1, 10)], cursor_modified_at=ts)
         src = PollingSource(
             fake, tag_columns="id", polling_config=PollingConfig(interval=1.0)
         )
 
+        before = datetime.now(timezone.utc)
         list(src.iter_data())
-        assert src.last_modified == ts
+        after = datetime.now(timezone.utc)
+        assert src.last_modified is not None
+        assert before <= src.last_modified <= after
 
-    def test_last_modified_falls_back_to_wall_clock_when_none(self):
+    def test_last_modified_is_wall_clock_when_cursor_time_is_none(self):
         """When cursor.modified_at is None, last_modified is updated to wall clock."""
         fake = FakeDynamicSource(batches=[_batch(1, 10)], cursor_modified_at=None)
         src = PollingSource(

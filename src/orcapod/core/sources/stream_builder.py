@@ -17,7 +17,7 @@ from orcapod.core.sources.source_ids import hash_source_id
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.system_constants import constants
 from orcapod.types import ContentHash
-from orcapod.utils import arrow_utils
+from orcapod.utils import arrow_utils, schema_utils
 from orcapod.utils.schema_utils import compute_source_schema_hash
 from orcapod.utils.lazy_module import LazyModule
 
@@ -186,6 +186,10 @@ class SourceStreamBuilder:
         tag_columns_tuple = tuple(tag_columns)
         system_tag_columns_tuple = tuple(system_tag_columns)
 
+        # A tag never has a meta column's name; the meta columns are dropped next,
+        # so say so here rather than report the tag as missing (ITL-1080).
+        schema_utils.require_names_not_meta(tag_columns_tuple)
+
         # 1. Drop system columns from raw input.
         table = arrow_utils.drop_system_columns(table)
 
@@ -276,36 +280,13 @@ class SourceStreamBuilder:
             _make_provenance_token(record_id_column, i, value)
             for i, value in enumerate(record_values)
         ]
-        source_info = [
-            f"{source_id}{constants.BLOCK_SEPARATOR}{token}"
-            for token in provenance_tokens
-        ]
-        # Record IDs stored in the system tag column are stable UUID v5 bytes —
-        # deterministically derived from source_id and per-row provenance token.
-        # Same source_id + same row position/content → same record_id bytes.
-        record_id_values = [
-            _make_record_id(source_id, token).bytes for token in provenance_tokens
-        ]
-
-        # 8. Add source-info provenance columns.
-        table = arrow_utils.add_source_info(
-            table, source_info, exclude_columns=tag_columns_tuple
-        )
-
-        # 9. Add system tag columns.
-        table = arrow_utils.add_system_tag_columns(
+        stream = self.attach_provenance(
             table,
-            schema_hash,
-            source_id,
-            record_id_values,
-        )
-
-        # 10. Wrap in ArrowTableStream. Nullable flags are already correct —
-        # the caller set them before calling build().
-        stream = ArrowTableStream(
-            table=table,
             tag_columns=tag_columns_tuple,
             system_tag_columns=system_tag_columns_tuple,
+            schema_hash=schema_hash,
+            source_id=source_id,
+            provenance_tokens=provenance_tokens,
         )
 
         return SourceStreamResult(
@@ -315,4 +296,59 @@ class SourceStreamBuilder:
             source_id=source_id,
             tag_columns=tag_columns_tuple,
             system_tag_columns=system_tag_columns_tuple,
+        )
+
+    def attach_provenance(
+        self,
+        table: pa.Table,
+        *,
+        tag_columns: Sequence[str],
+        system_tag_columns: Sequence[str],
+        schema_hash: str,
+        source_id: str,
+        provenance_tokens: Sequence[str],
+    ) -> ArrowTableStream:
+        """Add source-info and system-tag columns to ``table`` and wrap it as a stream.
+
+        Each row's source-info prefix is ``<source_id>::<token>``: the value in a
+        source-info column is that prefix followed by ``::<column>`` (for example
+        ``_source_amplitude`` holds ``<source_id>::<token>::amplitude``). The row's
+        record ID is the UUID v5 of ``source_id`` and ``token``, so a row keeps its
+        record ID wherever and however often it is read, as long as its token is the
+        same.
+
+        Args:
+            table: The rows, with nullable flags already set correctly.
+            tag_columns: Column names forming the tag for each row.
+            system_tag_columns: Additional system-level tag columns.
+            schema_hash: The source's schema hash, which names its system-tag columns.
+            source_id: The canonical source name.
+            provenance_tokens: One token per row, identifying the row within the source.
+
+        Returns:
+            The stream over the enriched table.
+        """
+        source_info = [
+            f"{source_id}{constants.BLOCK_SEPARATOR}{token}"
+            for token in provenance_tokens
+        ]
+        # Record IDs stored in the system tag column are stable UUID v5 bytes —
+        # deterministically derived from source_id and per-row provenance token.
+        record_id_values = [
+            _make_record_id(source_id, token).bytes for token in provenance_tokens
+        ]
+        table = arrow_utils.add_source_info(
+            table, source_info, exclude_columns=tag_columns
+        )
+        table = arrow_utils.add_system_tag_columns(
+            table,
+            schema_hash,
+            source_id,
+            record_id_values,
+        )
+        # Nullable flags are already correct — the caller set them.
+        return ArrowTableStream(
+            table=table,
+            tag_columns=tag_columns,
+            system_tag_columns=system_tag_columns,
         )

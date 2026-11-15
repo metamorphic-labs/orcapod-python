@@ -41,7 +41,35 @@ from orcapod import function_pod
 
 CaseFn = Callable[[], dict[str, Any]]
 
-GROUPS = ("semantic", "schema", "arrow", "datagram", "pipeline")
+GROUPS = ("semantic", "schema", "arrow", "datagram", "pipeline", "torch")
+
+OPTIONAL_GROUPS: dict[str, str] = {"torch": "torch"}
+"""Groups that need an optional dependency, mapped to the module they need (ITL-871).
+
+Such a group is computed, generated and checked only where the module is installed; its
+golden file is never rewritten without it.
+"""
+
+
+def group_available(group: str) -> bool:
+    """Whether ``group`` can be computed in this environment.
+
+    Args:
+        group: One of ``GROUPS``.
+
+    Returns:
+        False when the group needs an optional module that is not installed.
+    """
+    import importlib.util
+
+    module = OPTIONAL_GROUPS.get(group)
+    return module is None or importlib.util.find_spec(module) is not None
+
+
+def available_groups() -> tuple[str, ...]:
+    """The groups that can be computed in this environment, in ``GROUPS`` order."""
+    return tuple(g for g in GROUPS if group_available(g))
+
 
 _CASES: dict[str, list[tuple[str, CaseFn]]] = {group: [] for group in GROUPS}
 
@@ -94,7 +122,7 @@ def compute_group(group: str, *, allow_errors: bool = False) -> dict[str, Any]:
 
 
 def compute_all(*, allow_errors: bool = False) -> dict[str, dict[str, Any]]:
-    """Compute every golden group.
+    """Compute every golden group this environment can compute (``available_groups``).
 
     Args:
         allow_errors: Passed to ``compute_group``.
@@ -102,7 +130,7 @@ def compute_all(*, allow_errors: bool = False) -> dict[str, dict[str, Any]]:
     Returns:
         A dict mapping each group name to its computed entries.
     """
-    return {g: compute_group(g, allow_errors=allow_errors) for g in GROUPS}
+    return {g: compute_group(g, allow_errors=allow_errors) for g in available_groups()}
 
 
 # ---------------------------------------------------------------------------
@@ -349,6 +377,13 @@ SEMANTIC_VALUES: dict[str, Any] = {
     "ndarray.int64": np.arange(6, dtype=np.int64).reshape(2, 3),
     "ndarray.float64": np.array([[0.5, 1.5], [2.5, 3.5]], dtype=np.float64),
     "ndarray.empty": np.zeros((0,), dtype=np.float32),
+    # Added by ITL-981: the properties the strict array hash counts or never counts.
+    "ndarray.fortran": np.asfortranarray(np.arange(6, dtype=np.int32).reshape(2, 3)),
+    "ndarray.big_endian": np.arange(6, dtype=">i4").reshape(2, 3),
+    "ndarray.aligned_struct": np.array(
+        [(1, 0.5), (-2, 1.5)], dtype=np.dtype([("a", "i1"), ("b", "<f8")], align=True)
+    ),
+    "ndarray.strided_view": np.arange(12, dtype=np.int32).reshape(2, 6)[:, ::2],
     "dataframe.basic": pd.DataFrame({"a": [1, 2], "b": ["x", "y"]}),
     # Added by ITL-942: set order, dict keys and '__type__' dicts.
     "set.mixed_str_equal": {1, "1", 2, "2"},
@@ -357,6 +392,29 @@ SEMANTIC_VALUES: dict[str, Any] = {
     "dict.type_key": {"__type__": "tuple", "items": [1, 2]},
     "namedtuple.xy": _POINT_XY(x=1, y=2),
     "namedtuple.yx": _POINT_YX(y=2, x=1),
+    # Added by ITL-897: pandas value hashes (pandas_dataframe_v1 / pandas_series_v1).
+    "dataframe.reordered": pd.DataFrame({"b": ["x", "y"], "a": [1, 2]}),
+    "dataframe.categorical": pd.DataFrame(
+        {"c": pd.Categorical(["x", "y", "x"], categories=["y", "x", "z"])}
+    ),
+    "dataframe.multiindex": pd.DataFrame(
+        {"a": [1, 2]},
+        index=pd.MultiIndex.from_tuples([(0, "p"), (1, "q")], names=["i", "j"]),
+    ),
+    "series.named": pd.Series([1.5, 2.5], name="metric"),
+    "series.unnamed": pd.Series([1, 2, 3]),
+    # Added by ITL-897 (review round 6): columns whose restored Arrow type is null hash as an
+    # all-null large_string column; a decimal and an object column of None hash equal.
+    "series.null_decimal": pd.Series(
+        pd.array([None, None], dtype=pd.ArrowDtype(pa.decimal128(5, 2)))
+    ),
+    "dataframe.null_object": pd.DataFrame({"c": pd.Series([None, None], dtype=object)}),
+    "series.null_arrow_null": pd.Series(
+        pd.array([None, None], dtype=pd.ArrowDtype(pa.null()))
+    ),
+    "series.null_arrow_large_string": pd.Series(
+        pd.array([None, None], dtype=pd.ArrowDtype(pa.large_string()))
+    ),
 }
 
 
@@ -454,6 +512,10 @@ def _semantic_types() -> dict[str, Any]:
         "dataclass_subclass": GoldenChild,
         "dataclass_with_structural": GoldenHolder,
         "list_dataclass": list[GoldenPoint],
+        # Added by ITL-611: a set of a primitive is the native set container.
+        "set_int": set[int],
+        "set_str": set[str],
+        "set_bytes": set[bytes],
     }
 
 
@@ -929,6 +991,10 @@ def _datagram_rows() -> dict[str, list[dict[str, Any]]]:
             {"k": "r1", "c": GoldenHolder(GoldenInner(1), "a")},
             {"k": "r2", "c": GoldenHolder(GoldenInner(2), "b")},
         ],
+        # Added by ITL-611: a set of a primitive is the native set container.
+        "set_int": [{"k": "r1", "c": {10, 2, 1}}, {"k": "r2", "c": {-1}}],
+        "set_str": [{"k": "r1", "c": {"b", "a", "10"}}, {"k": "r2", "c": {"x"}}],
+        "set_bytes": [{"k": "r1", "c": {b"y", b"\x00"}}, {"k": "r2", "c": {b"x"}}],
     }
 
 
@@ -1131,6 +1197,58 @@ def pipeline_semi_join() -> dict[str, Any]:
     return stream_summary(SemiJoin()(_subjects(), _scans()))
 
 
+def _keyed(source_id: str, value: str, nullable_key: bool) -> Any:
+    """A source on tag ``subject`` (``large_string``), nullable with a null if asked."""
+    from orcapod.sources import ArrowTableSource
+
+    subjects = ["s1", None, "s3"] if nullable_key else ["s1", "s2", "s3"]
+    table = pa.table(
+        {
+            "subject": pa.array(subjects, pa.large_string()),
+            value: pa.array([1, 2, 3], pa.int64()),
+        },
+        schema=pa.schema(
+            [
+                pa.field("subject", pa.large_string(), nullable=nullable_key),
+                pa.field(value, pa.int64(), nullable=False),
+            ]
+        ),
+    )
+    return ArrowTableSource(table, tag_columns=["subject"], source_id=source_id)
+
+
+@case("pipeline", "join_key_nullability")
+def pipeline_join_key_nullability() -> dict[str, Any]:
+    """Pin the joins over a tag key that is ``T`` in one input and ``T | None`` in the other.
+
+    Accepted since ITL-829 (it raised before, so nothing was stored): ``Join`` and
+    ``MergeJoin`` give the key ``T``; ``SemiJoin`` keeps the left input's schema.
+    """
+    from orcapod.operators import Join, MergeJoin, SemiJoin
+
+    def nullable() -> Any:
+        return _keyed("golden_nullable_key", "x", nullable_key=True)
+
+    def plain() -> Any:
+        return _keyed("golden_plain_key", "y", nullable_key=False)
+
+    out = _prefixed("join", stream_summary(Join()(nullable(), plain())))
+    out.update(
+        _prefixed("merge_join", stream_summary(MergeJoin()(nullable(), plain())))
+    )
+    out.update(
+        _prefixed(
+            "semi_join_left_nullable", stream_summary(SemiJoin()(nullable(), plain()))
+        )
+    )
+    out.update(
+        _prefixed(
+            "semi_join_right_nullable", stream_summary(SemiJoin()(plain(), nullable()))
+        )
+    )
+    return out
+
+
 @case("pipeline", "batch")
 def pipeline_batch() -> dict[str, Any]:
     from orcapod.operators import Batch
@@ -1217,6 +1335,38 @@ def pipeline_column_selection() -> dict[str, Any]:
     return out
 
 
+@case("pipeline", "tag_and_data_columns")
+def pipeline_tag_and_data_columns() -> dict[str, Any]:
+    """``DropColumns`` and ``SelectColumns`` across tag and data columns (ITL-1084).
+
+    ``stream_summary`` keys rows by user tags, so every stream pinned here keeps a
+    tag whose values are unique per row.
+    """
+    from orcapod.operators import DropColumns, SelectColumns
+    from orcapod.sources import DictSource
+
+    cohort_subjects = DictSource(
+        data=[
+            {"cohort": "a", "subject": "s1", "age": 3, "weight": 20.5},
+            {"cohort": "a", "subject": "s2", "age": 4, "weight": 22.25},
+            {"cohort": "b", "subject": "s3", "age": 5, "weight": 19.0},
+        ],
+        tag_columns=["cohort", "subject"],
+        source_id="cohort_subjects",
+    )
+    streams = {
+        "drop": DropColumns(columns=["cohort", "age"])(cohort_subjects),
+        "select": SelectColumns(columns=["subject", "weight"])(cohort_subjects),
+        "select_tag_and_data": SelectColumns(columns=["subject", "age"])(_subjects()),
+    }
+    out: dict[str, Any] = {}
+    for name, stream in streams.items():
+        row_keys = [_row_key(tag.as_dict()) for tag, _ in stream.iter_data()]
+        assert len(set(row_keys)) == len(row_keys) == 3, (name, row_keys)
+        out.update(_prefixed(name, stream_summary(stream)))
+    return out
+
+
 @case("pipeline", "polars_filter")
 def pipeline_polars_filter() -> dict[str, Any]:
     from orcapod.operators import PolarsFilter
@@ -1231,7 +1381,7 @@ def pipeline_job() -> dict[str, Any]:
     from orcapod.operators import Join
 
     db = InMemoryArrowDatabase()
-    job = PipelineJob(name="golden_job", store=db)
+    job = PipelineJob(name="golden_job", database=db)
     with job:
         joined = Join(label="joined")(_subjects(), _scans())
         golden_adjust.pod(joined, label="adjust")
@@ -1257,6 +1407,185 @@ def pipeline_job() -> dict[str, Any]:
                 _jsonable(v) for v in records.column("__golden_record_id").to_pylist()
             )
     return out
+
+
+# ---------------------------------------------------------------------------
+# Polars values (ITL-578) — semantic, schema and datagram entries
+# ---------------------------------------------------------------------------
+#
+# Each Polars case is separate from the groups' general cases, so running the generator
+# against a release without the Polars logical types (``--allow-errors``) loses only these
+# entries. The hash of a Polars value is a cache key carrying the label
+# ``polars_dataframe_v1`` / ``polars_series_v1`` (``orcapod.logical_types.polars_type``); an
+# intended change to it is a new definition under new labels, never new bytes under these.
+
+
+def _polars_values() -> dict[str, Any]:
+    """Polars values whose hashes are pinned: one per dtype family the grammar names."""
+    import datetime as dt
+    import decimal
+
+    import polars as pl
+
+    return {
+        "simple": pl.DataFrame(
+            {"x": pl.Series([1, 2, 3], dtype=pl.Int64), "y": ["a", "b", "c"]}
+        ),
+        "nulls_and_temporal": pl.DataFrame(
+            {
+                "i": pl.Series([1, None, -3], dtype=pl.Int8),
+                "t": pl.Series(
+                    [dt.datetime(2020, 1, 1, 12), None, dt.datetime(1999, 12, 31)],
+                    dtype=pl.Datetime("ms", "America/New_York"),
+                ),
+                "d": pl.Series(
+                    [dt.timedelta(seconds=1), dt.timedelta(0), None],
+                    dtype=pl.Duration("us"),
+                ),
+                "m": pl.Series(
+                    [decimal.Decimal("1.25"), None, decimal.Decimal("-0.50")],
+                    dtype=pl.Decimal(10, 2),
+                ),
+            }
+        ),
+        "nested_and_categorical": pl.DataFrame(
+            {
+                "e": pl.Series(["x", "y", None], dtype=pl.Enum(["y", "x", "z"])),
+                "c": pl.Series(["p", None, "q"], dtype=pl.Categorical),
+                "a": pl.Series([[1, 2], [3, 4], None], dtype=pl.Array(pl.Int16, 2)),
+                "s": pl.Series(
+                    [{"u": 1, "l": [1.5]}, None, {"u": None, "l": []}],
+                    dtype=pl.Struct({"u": pl.UInt16, "l": pl.List(pl.Float32)}),
+                ),
+                "n": pl.Series([None, None, None], dtype=pl.Null),
+            }
+        ),
+        "empty_with_schema": pl.DataFrame(schema={"x": pl.Int32, "b": pl.Binary}),
+        "series": pl.Series("metric", [1.5, None, 3.0], dtype=pl.Float32),
+    }
+
+
+def _polars_types() -> dict[str, Any]:
+    """Polars classes whose type, stored Arrow type and ``Schema`` hashes are pinned."""
+    import polars as pl
+
+    return {"dataframe": pl.DataFrame, "series": pl.Series}
+
+
+@case("semantic", "polars_value")
+def semantic_polars_values() -> dict[str, Any]:
+    """Semantic hash of each Polars value (the ``PolarsDataFrameHandler`` digest)."""
+    hasher = _ctx().semantic_hasher
+    return {k: hasher.hash_object(v).to_string() for k, v in _polars_values().items()}
+
+
+@case("semantic", "polars_type")
+def semantic_polars_types() -> dict[str, Any]:
+    """Semantic hash of the ``pl.DataFrame`` and ``pl.Series`` type objects."""
+    hasher = _ctx().semantic_hasher
+    return {k: hasher.hash_object(t).to_string() for k, t in _polars_types().items()}
+
+
+@case("schema", "polars_single_field")
+def schema_polars_single_field() -> dict[str, Any]:
+    """Stored Arrow type and single-field ``Schema`` hash of each Polars class."""
+    from orcapod.types import Schema
+
+    ctx = _ctx()
+    out: dict[str, Any] = {}
+    for name, tp in _polars_types().items():
+        out[f"{name}.arrow_type"] = _arrow_type_text(
+            ctx.type_converter.python_type_to_arrow_type(tp)
+        )
+        out[f"{name}.schema_hash"] = ctx.semantic_hasher.hash_object(
+            Schema({"c": tp})
+        ).to_string()
+    return out
+
+
+@case("datagram", "polars_data_hash")
+def datagram_polars_data_hash() -> dict[str, Any]:
+    """Content hash of the ``Data`` holding each Polars value in its only data column."""
+    from orcapod.sources import DictSource
+
+    out: dict[str, Any] = {}
+    for name, value in _polars_values().items():
+        source = DictSource(
+            [{"k": "a", "v": value}],
+            tag_columns=["k"],
+            data_schema={"k": str, "v": type(value)},
+        )
+        ((_, data),) = list(source.iter_data())
+        out[name] = data.content_hash().to_string()
+    return out
+
+
+def _polars_rows() -> dict[str, list[dict[str, Any]]]:
+    """Rows of the Polars-valued sources whose identities are pinned."""
+    import polars as pl
+
+    return {
+        "polars_dataframe": [
+            {"k": "r1", "c": pl.DataFrame({"a": [1, 2]})},
+            {"k": "r2", "c": pl.DataFrame({"a": [3], "b": ["x"]})},
+        ],
+        "polars_series": [
+            {"k": "r1", "c": pl.Series("a", [1, 2])},
+            {"k": "r2", "c": pl.Series("b", ["x"])},
+        ],
+    }
+
+
+def _make_polars_datagram_case(name: str) -> CaseFn:
+    """Build the case summarizing the Polars-valued ``DictSource`` named ``name``.
+
+    Args:
+        name: A key of ``_polars_rows()``.
+
+    Returns:
+        A case function returning the source's ``stream_summary``.
+    """
+
+    def run() -> dict[str, Any]:
+        """Return the ``stream_summary`` of the Polars-valued source."""
+        import polars as pl
+
+        from orcapod.sources import DictSource
+
+        column_type = pl.DataFrame if name == "polars_dataframe" else pl.Series
+        source = DictSource(
+            data=_polars_rows()[name],
+            tag_columns=["k"],
+            data_schema={"k": str, "c": column_type},
+            source_id=f"golden_{name}",
+        )
+        return stream_summary(source)
+
+    return run
+
+
+for _name in ("polars_dataframe", "polars_series"):
+    case("datagram", _name)(_make_polars_datagram_case(_name))
+
+
+@case("arrow", "polars_extension_no_values")
+def arrow_polars_extension_columns_without_values() -> dict[str, Any]:
+    """Table hashes of Polars-typed columns with zero rows or nulls only.
+
+    The Polars counterpart of ``arrow:extension_no_values``: such a column has no cell
+    token, so its logical type enters the hash through the hashed field alone (ITL-967).
+    """
+    ctx = _ctx()
+    entries: dict[str, Any] = {}
+    for rows, label in ((0, "zero_rows"), (2, "all_null")):
+        for name, python_type in _polars_types().items():
+            arrow_type = ctx.type_converter.python_type_to_arrow_type(python_type)
+            storage = pa.array([None] * rows, arrow_type.storage_type)
+            column = pa.ExtensionArray.from_storage(arrow_type, storage)
+            entries[f"{label}.{name}"] = ctx.arrow_hasher.hash_table(
+                pa.table({"c": column})
+            ).to_string()
+    return entries
 
 
 def _polars_exprs() -> dict[str, Any]:
@@ -1322,7 +1651,7 @@ def pipeline_polars_filter_expr_job() -> dict[str, Any]:
     from orcapod.operators import Join
 
     db = InMemoryArrowDatabase()
-    job = PipelineJob(name="golden_filter_job", store=db)
+    job = PipelineJob(name="golden_filter_job", database=db)
     with job:
         older = _subjects().polars_filter(pl.col("age") > 3, label="older")
         joined = Join(label="joined")(older, _scans())
@@ -1456,12 +1785,12 @@ def pipeline_drop_nulls_job() -> dict[str, Any]:
     from orcapod.databases import InMemoryArrowDatabase
 
     db = InMemoryArrowDatabase()
-    job = PipelineJob(name="golden_drop_null_job", store=db)
+    job = PipelineJob(name="golden_drop_null_job", database=db)
     with job:
         present = (
             _nullable_readings()
             .drop_nulls(["x", "y"], label="present")
-            .map_data({"x": "age", "y": "weight"}, label="renamed")
+            .map_data({"x": "age", "y": "weight"}, drop_unmapped=True, label="renamed")
         )
         golden_ratio.pod(present, label="ratio")
     job.run()
@@ -1520,7 +1849,9 @@ def pipeline_default_source_ids() -> dict[str, Any]:
         out[f"{name}.source_id"] = source.source_id
         out[f"{name}.content_hash"] = source.content_hash().to_string()
 
-    job = PipelineJob(name="golden_default_source_ids", store=InMemoryArrowDatabase())
+    job = PipelineJob(
+        name="golden_default_source_ids", database=InMemoryArrowDatabase()
+    )
     with job:
         joined = Join(label="joined")(_subjects(), _scans())
         golden_adjust.pod(joined, label="adjust")
@@ -1532,3 +1863,200 @@ def pipeline_default_source_ids() -> dict[str, Any]:
         job.nodes["adjust"].as_source().source_id
     )
     return out
+
+
+# ---------------------------------------------------------------------------
+# Group: torch — torch.Tensor values (ITL-871); needs the optional torch package
+# ---------------------------------------------------------------------------
+
+
+def _torch_values() -> dict[str, Any]:
+    """Tensors whose hashes are pinned: the ndarray cases' values, torch-only dtypes
+    and one case per optional property of the value hash."""
+    import torch
+
+    base = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+    return {
+        # The same values as the ndarray.* semantic cases.
+        "int32": torch.arange(6, dtype=torch.int32).reshape(2, 3),
+        "int64": torch.arange(6, dtype=torch.int64).reshape(2, 3),
+        "float64": torch.tensor([[0.5, 1.5], [2.5, 3.5]], dtype=torch.float64),
+        "empty": torch.zeros((0,), dtype=torch.float32),
+        "bool": torch.tensor([True, False, True]),
+        "bfloat16": torch.tensor([1.5, -2.25, 3.0], dtype=torch.bfloat16),
+        "complex32": torch.tensor([1 + 2j, -0.5 + 0.25j], dtype=torch.complex32),
+        "zero_dim": torch.tensor(2.5),
+        # One case per optional property of the hash (all others canonical).
+        "non_contiguous": base.T,
+        "requires_grad": base.clone().requires_grad_(True),
+        "parameter": torch.nn.Parameter(base.clone(), requires_grad=False),
+        "conj": torch.tensor([1 + 2j, 3 - 4j], dtype=torch.complex64).conj(),
+        # A view of a larger buffer is hashed as its clone: contiguous strides.
+        "step_slice": torch.arange(12, dtype=torch.float32).reshape(2, 6)[:, ::2],
+        # Powers of two are exact in every float8 format. A dtype this torch lacks is
+        # left out; its pinned entry is listed by unavailable_entries.
+        **{
+            name: torch.tensor([0.5, 1.0, 2.0]).to(dtype)
+            for name in TORCH_VERSIONED_DTYPES
+            if (dtype := installed_torch_dtype(name)) is not None
+        },
+    }
+
+
+TORCH_VERSIONED_DTYPES = (
+    "float8_e4m3fn",
+    "float8_e5m2",
+    "float8_e4m3fnuz",
+    "float8_e5m2fnuz",
+    "float8_e8m0fnu",
+)
+"""Pinned torch dtypes that a supported torch may lack (``float8_e8m0fnu`` needs 2.7)."""
+
+
+def installed_torch_dtype(name: str) -> Any:
+    """Return the installed torch's dtype called ``name``, or ``None`` if it has none.
+
+    The one place the torch cases ask whether a dtype exists, so a test can stand
+    in for an older torch by replacing this function.
+
+    Args:
+        name: A torch dtype name, for example ``"float8_e8m0fnu"``.
+
+    Returns:
+        The ``torch.dtype``, or ``None``.
+    """
+    import torch
+
+    dtype = getattr(torch, name, None)
+    return dtype if isinstance(dtype, torch.dtype) else None
+
+
+def unavailable_entries(group: str) -> set[str]:
+    """Pinned entries of ``group`` that this environment cannot compute.
+
+    These are the ``value.*`` entries of torch dtypes the installed torch lacks. The
+    golden test skips them and the generator keeps their pins.
+
+    Args:
+        group: One of ``GROUPS``.
+
+    Returns:
+        The entry names; empty for every group but an available ``torch`` group.
+    """
+    if group != "torch" or not group_available(group):
+        return set()
+    return {
+        f"value.{name}"
+        for name in TORCH_VERSIONED_DTYPES
+        if installed_torch_dtype(name) is None
+    }
+
+
+@case("torch", "value")
+def torch_values() -> dict[str, Any]:
+    """Semantic hashes of the pinned tensors."""
+    hasher = _ctx().semantic_hasher
+    return {k: hasher.hash_object(v).to_string() for k, v in _torch_values().items()}
+
+
+@case("torch", "type")
+def torch_type() -> dict[str, Any]:
+    """Semantic hash of the ``torch.Tensor`` type."""
+    import torch
+
+    return {
+        "torch_tensor": _ctx().semantic_hasher.hash_object(torch.Tensor).to_string()
+    }
+
+
+@case("torch", "single_field")
+def torch_single_field() -> dict[str, Any]:
+    """Arrow type and schema hash of a one-field ``torch.Tensor`` schema."""
+    import torch
+
+    from orcapod.types import Schema
+
+    ctx = _ctx()
+    return {
+        "torch_tensor.arrow_type": _arrow_type_text(
+            ctx.type_converter.python_type_to_arrow_type(torch.Tensor)
+        ),
+        "torch_tensor.schema_hash": ctx.semantic_hasher.hash_object(
+            Schema({"c": torch.Tensor})
+        ).to_string(),
+    }
+
+
+@case("torch", "datagram")
+def torch_datagram() -> dict[str, Any]:
+    """Identity of a two-row tensor source."""
+    import torch
+
+    from orcapod.sources import DictSource
+
+    rows = [
+        {"k": "r1", "c": torch.arange(4, dtype=torch.int64)},
+        {"k": "r2", "c": torch.tensor([[0.5, 1.5]], dtype=torch.float64)},
+    ]
+    return stream_summary(
+        DictSource(data=rows, tag_columns=["k"], source_id="golden_torch_tensor")
+    )
+
+
+@case("pipeline", "tagless_producerless_stream")
+def pipeline_tagless_producerless_stream() -> dict[str, Any]:
+    """Pin the content hash of a stream with no tag column and no producer (ITL-1053).
+
+    Its identity hashes the rows sorted by their system tags, so the hash is the same
+    for rows given in any order.
+
+    Returns:
+        The content hash for two orders of the same rows.
+    """
+    from orcapod.core.streams import ArrowTableStream
+
+    def table(record_ids: list[str], xs: list[int]) -> pa.Table:
+        return pa.table(
+            [pa.array(record_ids, pa.string()), pa.array(xs, pa.int64())],
+            names=["record_id", "x"],
+        )
+
+    rows = table(["b", "c", "a"], [1, 2, 3])
+    reordered = table(["c", "a", "b"], [2, 3, 1])
+    return {
+        "as_given": ArrowTableStream(
+            rows, tag_columns=[], system_tag_columns=["record_id"]
+        )
+        .content_hash()
+        .to_string(),
+        "reordered": ArrowTableStream(
+            reordered, tag_columns=[], system_tag_columns=["record_id"]
+        )
+        .content_hash()
+        .to_string(),
+    }
+
+
+@case("pipeline", "list_tag_producerless_stream")
+def pipeline_list_tag_producerless_stream() -> dict[str, Any]:
+    """Pin the content hash of a stream with a list-valued tag and no producer (ITL-1053).
+
+    Arrow cannot order a list column, so the stream's identity hashes its rows in the
+    order given: the hash of the same rows in two orders differs.
+
+    Returns:
+        The content hash for two orders of the same rows.
+    """
+    from orcapod.core.streams import ArrowTableStream
+
+    def stream(ks: list[list[int]], xs: list[int]) -> ArrowTableStream:
+        table = pa.table(
+            [pa.array(ks, pa.large_list(pa.int64())), pa.array(xs, pa.int64())],
+            names=["k", "x"],
+        )
+        return ArrowTableStream(table, tag_columns=["k"])
+
+    return {
+        "as_given": stream([[2], [1]], [20, 10]).content_hash().to_string(),
+        "reversed": stream([[1], [2]], [10, 20]).content_hash().to_string(),
+    }

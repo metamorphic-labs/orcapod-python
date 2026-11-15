@@ -2,12 +2,12 @@
 
 Run as a script in a separate process, ``python save_job_script.py <directory>``, so
 that the test loading the job starts from a fresh process: nothing the save created
-(function pods, sources, the store object) is reachable from the loading process.
+(function pods, sources, the database object) is reachable from the loading process.
 
 Writes into ``<directory>``:
 
 * ``c.csv`` and ``dt/`` -- the CSV and Delta inputs;
-* ``store/`` -- the Delta store the job ran against;
+* ``store/`` -- the Delta database the job ran against;
 * ``job.json`` -- the saved job;
 * ``expected/<label>.parquet`` and ``expected/<label>.all_info.parquet`` -- each function
   node's ``as_table()`` read in the saving process right after the run, the reference the
@@ -93,7 +93,9 @@ def main(root: pathlib.Path) -> None:
     )
     list_source = ListSource("z", [1, 2], source_id="lsrc")
 
-    job = PipelineJob(name="loaded_demo", store=DeltaTableDatabase(str(root / "store")))
+    job = PipelineJob(
+        name="loaded_demo", database=DeltaTableDatabase(str(root / "store"))
+    )
     with job:
         # A pod whose output feeds an operator: the shape that used to make
         # PipelineJob.load crash.

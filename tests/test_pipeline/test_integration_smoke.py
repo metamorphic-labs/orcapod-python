@@ -36,12 +36,12 @@ def test_smoke_run_completes():
     pod = FunctionPod(pf)
     db = InMemoryArrowDatabase()
 
-    job = PipelineJob(name="smoke", store=db)
+    job = PipelineJob(name="smoke", database=db)
     with job:
         pod(_make_source(), label="doubler")
 
-    completed = job.run()
-    assert completed._has_run is True
+    _ = job.run()
+    assert job._has_run is True
 
 
 def test_smoke_nodes_accessible_after_run():
@@ -50,18 +50,18 @@ def test_smoke_nodes_accessible_after_run():
     pod = FunctionPod(pf)
     db = InMemoryArrowDatabase()
 
-    job = PipelineJob(name="smoke2", store=db)
+    job = PipelineJob(name="smoke2", database=db)
     with job:
         pod(_make_source(), label="adder")
 
-    completed = job.run()
-    assert "adder" in completed.pipeline.nodes
+    _ = job.run()
+    assert "adder" in job.pipeline.nodes
 
 
 def test_smoke_run_raises_without_pipeline():
     """run() raises RuntimeError when no pipeline has been recorded."""
     db = InMemoryArrowDatabase()
-    job = PipelineJob(name="empty", store=db)
+    job = PipelineJob(name="empty", database=db)
     # Don't enter context — no pipeline recorded
     # run() should raise RuntimeError("No compiled pipeline")
     with pytest.raises(RuntimeError, match="no compiled pipeline"):

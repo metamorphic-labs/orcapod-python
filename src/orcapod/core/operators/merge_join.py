@@ -1,7 +1,15 @@
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from orcapod.core.operators.base import BinaryOperator, require_shared_arrow_type
+from orcapod.core.operators.base import (
+    BinaryOperator,
+    require_shared_arrow_type,
+    require_tag_data_roles_agree,
+)
+from orcapod.core.operators.key_nullability import (
+    key_nullable,
+    reconcile_key_nullability,
+)
 from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import StreamProtocol
@@ -60,8 +68,8 @@ def _storage_sort_key(
 ) -> Callable[[Any], Any]:
     """Return the ordering key MergeJoin uses for a column's stored values.
 
-    The array logical type defines ``storage_sort_key`` (its stored ``(dtype tag,
-    shape, data)``). A list of such values, at any depth (an array column after
+    The array logical type defines ``storage_sort_key`` (the value digest of the
+    stored array). A list of such values, at any depth (an array column after
     ``GroupBy`` or ``Batch``), is ordered by the tuple of its elements' keys, with
     ``None`` first. Every other type is ordered by its stored value as before.
     General struct ordering is ITL-839.
@@ -202,6 +210,8 @@ class MergeJoin(BinaryOperator):
         # single definition of the order; ``binary_static_process`` reads it
         # back from here.
         #
+        self._require_tag_data_roles_agree(left_stream, right_stream)
+
         # Always get input schemas WITHOUT system tags for the base computation.
         # System tags are computed separately because the join renames them.
         (first_stream, _), (second_stream, _) = self._canonical_order(
@@ -210,8 +220,11 @@ class MergeJoin(BinaryOperator):
         left_tag_schema, left_data_schema = first_stream.output_schema()
         right_tag_schema, right_data_schema = second_stream.output_schema()
 
-        # Tag schema: union of both tag schemas
-        tag_schema = schema_utils.union_schemas(left_tag_schema, right_tag_schema)
+        # Tag schema: union of both tag schemas. A shared tag key that differs in
+        # nullability only is non-nullable (ITL-829): a null key matches nothing.
+        tag_schema = schema_utils.union_schemas(
+            *reconcile_key_nullability(left_tag_schema, right_tag_schema)
+        )
 
         # Data schema: colliding columns become list[T], non-colliding stay scalar
         colliding_schema = schema_utils.intersection_schemas(
@@ -238,6 +251,23 @@ class MergeJoin(BinaryOperator):
             tag_schema = schema_utils.union_schemas(tag_schema, system_tag_schema)
 
         return tag_schema, Schema(merged_data_schema)
+
+    @staticmethod
+    def _require_tag_data_roles_agree(
+        left_stream: StreamProtocol, right_stream: StreamProtocol
+    ) -> None:
+        """Raise if a name is a tag in one input and a data column in the other.
+
+        Called by the schema prediction (so by input validation) and at the start
+        of ``binary_static_process`` (the async path calls it directly).
+
+        Raises:
+            InputValidationError: Naming the column, the roles and the remedy.
+        """
+        try:
+            require_tag_data_roles_agree(*left_stream.keys(), *right_stream.keys())
+        except InputValidationError as exc:
+            raise InputValidationError(f"MergeJoin: {exc}") from exc
 
     def _canonical_order(
         self, left_stream: StreamProtocol, right_stream: StreamProtocol
@@ -294,6 +324,7 @@ class MergeJoin(BinaryOperator):
         Returns:
             The joined stream, with tag columns first.
         """
+        self._require_tag_data_roles_agree(left_stream, right_stream)
         n_char = self.orcapod_config.hashing.system_tag_n_char
 
         # Determine canonical ordering for system tag positions
@@ -358,6 +389,12 @@ class MergeJoin(BinaryOperator):
         for name, nullable in right_nullable.items():
             if name not in output_nullable:
                 output_nullable[name] = nullable
+        # A shared tag key is nullable only when nullable in both inputs: a null
+        # key matches nothing (ITL-829). Equal flags give the flag as before.
+        for name in shared_tag_keys:
+            output_nullable[name] = key_nullable(
+                left_nullable[name], right_nullable[name]
+            )
         # Merged (colliding) data columns become 2-element lists — always non-null
         for col in colliding_keys:
             output_nullable[col] = False

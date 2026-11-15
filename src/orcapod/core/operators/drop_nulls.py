@@ -7,6 +7,7 @@ import typing
 from collections.abc import Collection, Sequence
 from typing import TYPE_CHECKING, Any
 
+from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.datagrams import Data, Tag
 from orcapod.core.operators.base import UnaryOperator
@@ -14,7 +15,7 @@ from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
 from orcapod.system_constants import constants
-from orcapod.types import ColumnConfig, DataType, Schema
+from orcapod.types import ColumnConfig, ContentHash, DataType, Schema
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
 
@@ -313,7 +314,8 @@ class DropNulls(UnaryOperator):
         self,
         inputs: Sequence[ReadableChannel[tuple[TagProtocol, DataProtocol]]],
         output: WritableChannel[tuple[TagProtocol, DataProtocol]],
-        **kwargs: Any,
+        *,
+        input_pipeline_hashes: Sequence[ContentHash],
     ) -> None:
         """Streaming: test and narrow each row as it arrives, without materializing.
 
@@ -325,9 +327,12 @@ class DropNulls(UnaryOperator):
         Args:
             inputs: Single-element sequence of readable channels.
             output: Channel to send surviving rows to.
-            **kwargs: Ignored; present for protocol compliance.
+            input_pipeline_hashes: Not used: this operator keeps system-tag
+                names as they are, so no column is named after an input's
+                pipeline hash.
         """
         try:
+            output = WithoutMetaWriter(output)
             async for tag, data in inputs[0]:
                 names = self._target_columns(tag.keys(), data.keys())
                 tag_table = self._narrow_table(

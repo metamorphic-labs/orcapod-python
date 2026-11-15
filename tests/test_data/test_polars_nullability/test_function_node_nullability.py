@@ -45,13 +45,13 @@ class TestFunctionNodeGetAllRecordsNullability:
         def double(x: int) -> int:
             return x * 2
 
-        job = PipelineJob(store=database)
+        job = PipelineJob(database=database)
         with job:
             double.pod(source)
 
-        result_job = job.run()
+        _ = job.run()
 
-        fn_nodes = _get_function_nodes(result_job)
+        fn_nodes = _get_function_nodes(job)
         assert len(fn_nodes) == 1, "Expected exactly one FunctionNode"
         fn_node = fn_nodes[0]
 
@@ -80,13 +80,13 @@ class TestFunctionNodeGetAllRecordsNullability:
         def triple(x: int) -> int:
             return x * 3
 
-        job = PipelineJob(store=database)
+        job = PipelineJob(database=database)
         with job:
             triple.pod(source)
 
-        result_job = job.run()
+        _ = job.run()
 
-        fn_nodes = _get_function_nodes(result_job)
+        fn_nodes = _get_function_nodes(job)
         fn_node = fn_nodes[0]
 
         table = fn_node.get_all_records()
@@ -122,13 +122,13 @@ class TestFunctionNodeIterDatasNullability:
         def add_one(x: int) -> int:
             return x + 1
 
-        job = PipelineJob(store=database)
+        job = PipelineJob(database=database)
         with job:
             add_one.pod(source)
 
-        result_job = job.run()
+        _ = job.run()
 
-        fn_nodes = _get_function_nodes(result_job)
+        fn_nodes = _get_function_nodes(job)
         fn_node = fn_nodes[0]
 
         # Force a DB-backed iteration by going through _load_cached_entries

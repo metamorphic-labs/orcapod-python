@@ -496,3 +496,145 @@ class TestHashTableExtensionAware:
             _make_hasher().hash_table(t_clean).digest
             == _make_hasher().hash_table(t_noise).digest
         )
+
+
+# ---------------------------------------------------------------------------
+# hash_table_ordered (ITL-897): a table hashed as a value
+# ---------------------------------------------------------------------------
+
+_UV = pa.struct([("u", pa.int64()), ("v", pa.large_string())])
+_VU = pa.struct([("v", pa.large_string()), ("u", pa.int64())])
+
+
+def _file_table(ctx, path) -> pa.Table:
+    """One-row table whose ``f`` column is the logical ``File`` type."""
+    from orcapod.logical_types.file_type import File
+
+    arrow_type = ctx.type_converter.register_python_class(File)
+    storage = ctx.type_converter.python_to_storage(File(path), File)
+    column = pa.ExtensionArray.from_storage(
+        arrow_type, pa.array([storage], arrow_type.storage_type)
+    )
+    return pa.Table.from_arrays([column], names=["f"])
+
+
+class TestHashTableOrdered:
+    """``hash_table_ordered`` = ``hash_table`` with column and struct field order included."""
+
+    def test_column_order_is_part_of_the_hash(self):
+        """Reordered columns: equal under ``hash_table``, different under ``hash_table_ordered``."""
+        table = pa.table({"a": [1, 2], "b": ["x", "y"]})
+        reordered = table.select(["b", "a"])
+        hasher = _make_hasher()
+        assert hasher.hash_table(table) == hasher.hash_table(reordered)
+        assert hasher.hash_table_ordered(table) != hasher.hash_table_ordered(reordered)
+
+    def test_struct_field_order_is_part_of_the_hash(self):
+        """Reordered struct fields differ under ``hash_table_ordered`` only."""
+        first = pa.table({"s": pa.array([{"u": 1, "v": "x"}], _UV)})
+        second = pa.table({"s": pa.array([{"v": "x", "u": 1}], _VU)})
+        hasher = _make_hasher()
+        assert hasher.hash_table(first) == hasher.hash_table(second)
+        assert hasher.hash_table_ordered(first) != hasher.hash_table_ordered(second)
+
+    def test_nested_struct_field_order_is_part_of_the_hash(self):
+        """Struct field order counts inside a list too."""
+        first = pa.table({"s": pa.array([[{"u": 1, "v": "x"}]], pa.large_list(_UV))})
+        second = pa.table({"s": pa.array([[{"v": "x", "u": 1}]], pa.large_list(_VU))})
+        hasher = _make_hasher()
+        assert hasher.hash_table_ordered(first) != hasher.hash_table_ordered(second)
+
+    def test_chunking_is_not_part_of_the_hash(self):
+        """A table and the same table in two chunks hash equal."""
+        table = pa.table({"a": [1, 2], "b": ["x", "y"]})
+        rechunked = pa.concat_tables([table.slice(0, 1), table.slice(1, 1)])
+        hasher = _make_hasher()
+        assert hasher.hash_table_ordered(table) == hasher.hash_table_ordered(rechunked)
+
+    def test_ordered_and_unordered_hashes_never_coincide(self):
+        """The two modes give different hashes for one table."""
+        table = pa.table({"a": [1, 2]})
+        hasher = _make_hasher()
+        assert hasher.hash_table_ordered(table) != hasher.hash_table(table)
+
+    def test_record_batch_hashes_like_its_table(self):
+        """A record batch hashes like the table it came from."""
+        table = pa.table({"a": [1, 2], "b": ["x", "y"]})
+        hasher = _make_hasher()
+        assert hasher.hash_table_ordered(
+            table.to_batches()[0]
+        ) == hasher.hash_table_ordered(table)
+
+    def test_logical_column_hashed_by_content_in_both_modes(self, tmp_path):
+        """Semantic preprocessing (a ``File`` by its content) applies to both modes."""
+        from orcapod.contexts import get_default_context
+
+        ctx = get_default_context()
+        same_a, same_b, other = (tmp_path / n for n in ("a.txt", "b.txt", "c.txt"))
+        same_a.write_text("same")
+        same_b.write_text("same")
+        other.write_text("other")
+        hasher = _make_hasher()
+        for digest in (hasher.hash_table, hasher.hash_table_ordered):
+            assert digest(_file_table(ctx, same_a)) == digest(_file_table(ctx, same_b))
+            assert digest(_file_table(ctx, same_a)) != digest(_file_table(ctx, other))
+
+
+class TestSchemaHashFieldRule:
+    """``hash_schema`` hashes a field under the same rule as ``hash_table`` (ITL-981)."""
+
+    @staticmethod
+    def _identified(storage: pa.DataType, extension: pa.ExtensionType) -> pa.Schema:
+        """A plain ``storage`` field that carries the identifier of ``extension``."""
+        return pa.schema(
+            [
+                pa.field(
+                    "c",
+                    storage,
+                    metadata={
+                        "ARROW:extension:name": extension.extension_name,
+                        "ARROW:extension:metadata": extension.__arrow_ext_serialize__(),
+                    },
+                )
+            ]
+        )
+
+    def test_value_hashed_type_does_not_depend_on_its_storage_type(self):
+        """A type hashed by a value handler is a ``large_binary`` field with its identifier."""
+        import numpy as np
+
+        import orcapod as op
+        from orcapod.contexts import get_default_context
+
+        context = get_default_context()
+        hasher = context.arrow_hasher
+        assert isinstance(hasher, StarfixArrowHasher)
+        for python_type in (op.File, np.ndarray):
+            extension = context.type_converter.python_type_to_arrow_type(python_type)
+            assert isinstance(extension, pa.ExtensionType)
+            schema_hash = hasher.hash_schema(pa.schema([pa.field("c", extension)]))
+            assert schema_hash == hasher.hash_schema(
+                self._identified(pa.large_binary(), extension)
+            )
+        # ``File`` is stored as a string; that storage type is not in its schema hash.
+        file_type = context.type_converter.python_type_to_arrow_type(op.File)
+        assert isinstance(file_type, pa.ExtensionType)
+        assert file_type.storage_type == pa.large_string()
+        assert hasher.hash_schema(
+            pa.schema([pa.field("c", file_type)])
+        ) != hasher.hash_schema(self._identified(pa.large_string(), file_type))
+
+    def test_type_without_value_handler_keeps_its_storage_type(self):
+        """A type whose stored values are hashed keeps its storage type in the schema hash."""
+        from pathlib import Path
+
+        from orcapod.contexts import get_default_context
+
+        context = get_default_context()
+        hasher = context.arrow_hasher
+        assert isinstance(hasher, StarfixArrowHasher)
+        extension = context.type_converter.python_type_to_arrow_type(Path)
+        assert isinstance(extension, pa.ExtensionType)
+        assert hasher.hash_schema(
+            pa.schema([pa.field("c", extension)])
+        ) == hasher.hash_schema(self._identified(extension.storage_type, extension))

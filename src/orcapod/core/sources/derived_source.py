@@ -1,12 +1,25 @@
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Mapping
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from typing_extensions import override
+
 from orcapod.core.sources.base import RootSource
+from orcapod.core.sources.reload import same_rows
 from orcapod.core.sources.source_ids import hash_source_id
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+from orcapod.core.streams.view import (
+    ViewStatus,
+    StreamView,
+)
+from orcapod.core.streams.base import (
+    check_head_size,
+    schema_requires_io,
+)
 from orcapod.errors import InputValidationError
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, ContentHash, Schema
@@ -58,20 +71,22 @@ def _derivation_hash(
     )
 
 
-def _validate_tags_as_data(
+def validate_tags_as_data(
     tags_as_data: Mapping[str, str],
     tag_keys: tuple[str, ...],
     data_keys: tuple[str, ...],
 ) -> None:
-    """Check a ``tags_as_data`` mapping against the origin's columns.
+    """Check a ``tags_as_data`` mapping against the columns it copies from.
+
+    The one rule for ``DerivedSource`` and ``SpiralDBTableSource``.
 
     Args:
-        tags_as_data: Maps a tag column of the origin to the name of its data copy.
-        tag_keys: The origin's user tag columns.
-        data_keys: The origin's data columns.
+        tags_as_data: Maps a tag column to the name of its data copy.
+        tag_keys: The user tag columns of the stream copied from.
+        data_keys: The data columns of the stream copied from.
 
     Raises:
-        InputValidationError: If a key is not a tag column of the origin, or a new
+        InputValidationError: If a key is not a tag column, or a new
             name is already a column, is used twice, or starts with the prefix
             reserved for system columns.
     """
@@ -80,13 +95,13 @@ def _validate_tags_as_data(
         if tag not in tag_keys:
             kind = "a data column" if tag in data_keys else "not a column"
             raise InputValidationError(
-                f"tags_as_data: {tag!r} is {kind} of the origin, not a tag column. "
+                f"tags_as_data: {tag!r} is {kind}, not a tag column. "
                 f"Tag columns: {list(tag_keys)}."
             )
         if name in tag_keys or name in data_keys:
             raise InputValidationError(
                 f"tags_as_data: cannot copy tag {tag!r} to {name!r}, which is "
-                "already a column of the origin. Choose a new name."
+                "already a column. Choose a new name."
             )
         if name in seen:
             raise InputValidationError(
@@ -136,8 +151,9 @@ class DerivedSource(RootSource):
           the ``record_id_column`` when one is set. It changes when the origin's
           identity or one of these parameters changes. An explicit ``source_id``
           replaces it.
-        - ``content_hash`` follows the rule of every root source: class name,
-          output schema and ``source_id``.
+        - ``content_hash`` follows the rule of every root source (class name,
+          output schema and ``source_id``) plus the sorted ``tags_as_data`` items,
+          since two mappings can give one schema and one explicit ``source_id``.
         - ``pipeline_hash`` is schema-only, as for every root source.
 
     Identity (plain form):
@@ -233,7 +249,7 @@ class DerivedSource(RootSource):
         else:
             self._tags_as_data = dict(tags_as_data)
             tag_keys, data_keys = origin.keys()
-            _validate_tags_as_data(self._tags_as_data, tag_keys, data_keys)
+            validate_tags_as_data(self._tags_as_data, tag_keys, data_keys)
             kwargs.setdefault("data_context", origin.data_context_key)
 
         self._explicit_source_id = source_id
@@ -253,16 +269,34 @@ class DerivedSource(RootSource):
         self._record_id_column = record_id_column
         self._cached_table: pa.Table | None = None
         self._cached_stream: ArrowTableStream | None = None
+        # The origin job node's modified time when its rows were cached: a check reads
+        # its stored rows again only after it ran again (ITL-1102).
+        self._origin_seen: datetime | None = None
 
     # -------------------------------------------------------------------------
     # Identity
     # -------------------------------------------------------------------------
 
     def identity_structure(self) -> Any:
+        """Return what the content hash is built from.
+
+        The plain form is tied to the origin node's content hash. The
+        ``tags_as_data`` form is the root source rule (class name, output schema,
+        ``source_id``) followed by the sorted mapping items: two mappings can give
+        the same schema (two tag columns of one type copied to one name) while the
+        copy holds different values, so with an explicit ``source_id`` the mapping
+        has to tell the sources apart (ITL-1000).
+
+        Returns:
+            The identity structure.
+        """
         if self._tags_as_data is None:
             # Tied precisely to the specific node's data identity
             return (self._origin.content_hash(),)
-        return super().identity_structure()
+        return (
+            *super().identity_structure(),
+            ("tags_as_data", tuple(sorted(self._tags_as_data.items()))),
+        )
 
     # -------------------------------------------------------------------------
     # Serialization
@@ -387,6 +421,17 @@ class DerivedSource(RootSource):
         has_rows = table is not None
         if table is None:
             table = self._empty_origin_table()
+        return self._derive_from(table, tags_as_data), has_rows
+
+    def _derive_from(
+        self, table: "pa.Table", tags_as_data: Mapping[str, str]
+    ) -> ArrowTableStream:
+        """Append the tag copies to the origin rows ``table`` and enrich it as a source.
+
+        Args:
+            table: Rows of the origin.
+            tags_as_data: Maps a tag column of the origin to the name of its copy.
+        """
         for tag, name in tags_as_data.items():
             # The copy is the tag's own Arrow column under a renamed field, so its
             # type, nullability and field metadata are the tag's exactly.
@@ -400,12 +445,13 @@ class DerivedSource(RootSource):
             source_id=self.source_id,
             record_id_column=self._record_id_column,
         )
-        return result.stream, has_rows
+        return result.stream
 
     def _get_stream(self) -> ArrowTableStream:
         if self._tags_as_data is not None:
             if self._cached_stream is not None:
                 return self._cached_stream
+            self._origin_seen = self._origin.last_modified
             stream, has_rows = self._build_derived_stream(self._tags_as_data)
             if has_rows:
                 # An origin node that has not run yet is not cached, so the rows
@@ -414,6 +460,7 @@ class DerivedSource(RootSource):
             return stream
 
         if self._cached_table is None:
+            self._origin_seen = self._origin.last_modified
             records = self._origin_records()
             if records is None:
                 self._cached_table = self._empty_origin_table()
@@ -421,6 +468,166 @@ class DerivedSource(RootSource):
                 self._cached_table = records
         tag_keys = self._origin.keys()[0]
         return ArrowTableStream(self._cached_table, tag_columns=tag_keys)
+
+    def _held_rows(self) -> "pa.Table | None":
+        """The rows this source holds from its origin, or ``None`` before a read."""
+        if self._tags_as_data is not None:
+            return (
+                None if self._cached_stream is None else self._cached_stream.as_table()
+            )
+        return self._cached_table
+
+    @override
+    def check_for_new_data(self) -> bool:
+        """Take in the origin's rows if they changed since this source read them.
+
+        Developer, November 14, 2026 (ITL-1102). Over a source, the origin is checked
+        first (``check_for_new_data``). Then the origin's rows are read again only when
+        its modified time moved since this source last read them: a source origin that
+        took in new data, by this check or by a check made through another source over
+        it, or a job node that ran again. The rows read are compared with the rows
+        held (in any order only when a ``record_id_column`` gives the record ids); when
+        they differ the source holds the new ones and moves its
+        modified time. A read or comparison that raises leaves everything as it was, so
+        the next check reads again. A source that holds nothing (it has not read its
+        origin yet, or read none of its rows: a job node that had not run) reads the
+        origin at its next read; when the origin's time moved, its own time moves too,
+        so a node that read no rows from it runs again.
+
+        Returns:
+            ``True`` if the source's modified time moved: it holds new rows, or it holds
+            none and its origin changed.
+        """
+        if isinstance(self._origin, RootSource):
+            _ = self._origin.check_for_new_data()
+        seen = self._origin.last_modified
+        if seen == self._origin_seen:
+            return False
+        held = self._held_rows()
+        if held is None:
+            self._origin_seen = seen
+            self._update_modified_time()
+            return True
+        if self._tags_as_data is not None:
+            stream, has_rows = self._build_derived_stream(self._tags_as_data)
+            unchanged = same_rows(
+                held, stream.as_table(), ordered=self._record_id_column is None
+            )
+            self._origin_seen = seen
+            if unchanged:
+                return False
+            self._cached_stream = stream if has_rows else None
+        else:
+            records = self._origin_records()
+            read = self._empty_origin_table() if records is None else records
+            # The stored rows' ids may not be theirs to keep in another order: order
+            # counts unless a record_id_column was given (never assume).
+            unchanged = same_rows(held, read, ordered=self._record_id_column is None)
+            self._origin_seen = seen
+            if unchanged:
+                return False
+            self._cached_table = read
+        self._update_modified_time()
+        return True
+
+    def _schema_requires_io(self, config: ColumnConfig) -> bool:
+        """Whether reading the schema with ``config`` would poll: as for the origin."""
+        return schema_requires_io(self._origin, config)
+
+    def head(
+        self,
+        n: int = 10,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> StreamView:
+        """Return the first rows of the origin's records, without computing.
+
+        The records are the ones this source already read. Otherwise, an origin source
+        gives its own ``head(n)`` (so a polling or caching origin is never polled or
+        written), and an origin job node gives its stored rows, read now and not kept.
+        An origin job node that has not run gives no rows. With ``sort_by_tags`` (or
+        ``all_info``), the rows are sorted by tag as ``as_table`` sorts them: all the
+        stored rows of an origin job node, but only the rows an origin source reads for
+        its head (see ``StreamBase.head``).
+        """
+        check_head_size(n)
+        config = ColumnConfig.handle_config(columns, all_info=all_info)
+        origin_kind = "held" if isinstance(self._origin, RootSource) else "stored"
+        if self._tags_as_data is not None and self._cached_stream is not None:
+            return self._cached_stream.head(n, columns=config).for_stream(
+                self, origin=origin_kind
+            )
+        if self._tags_as_data is None and self._cached_table is not None:
+            stream = ArrowTableStream(
+                self._cached_table, tag_columns=self._origin.keys()[0]
+            )
+            return stream.head(n, columns=config).for_stream(self, origin=origin_kind)
+        if isinstance(self._origin, RootSource):
+            origin_head = self._origin.head(n)
+            if (
+                config.sort_by_tags
+                and origin_head.status is ViewStatus.ROWS
+                and not origin_head.total_is_estimate
+                and origin_head.total_rows is not None
+                and origin_head.total_rows > n
+            ):
+                # The origin has all its rows (its total is exact): sorting needs them
+                # all, and the system tags this source adds follow the origin's row
+                # order, so the origin is not sorted first. A bounded origin (an
+                # estimated total) is sorted among the rows it read.
+                origin_head = self._origin.head(origin_head.total_rows)
+            if origin_head.status is not ViewStatus.ROWS:
+                if origin_head.table.num_columns == 0:
+                    # The origin's columns are not known without polling it.
+                    return origin_head.for_stream(self)
+                # No rows: this source's own columns (tag copies included), with the
+                # origin's status and explanation.
+                empty = self._stream_over(origin_head.table.slice(0, 0))
+                return dataclasses.replace(
+                    StreamView.without_rows(
+                        self,
+                        origin_head.status,
+                        empty.as_table(columns=config),
+                        tag_columns=empty.keys(columns=config)[0],
+                        note=origin_head.note,
+                    ),
+                    total_rows=origin_head.total_rows,
+                    total_is_estimate=origin_head.total_is_estimate,
+                    description=origin_head.description,
+                )
+            stream = self._stream_over(origin_head.table)
+            return dataclasses.replace(
+                stream.head(n, columns=config).for_stream(self),
+                total_rows=origin_head.total_rows,
+                total_is_estimate=origin_head.total_is_estimate,
+                origin=origin_head.origin,
+                note=origin_head.note,
+            )
+        records = self._origin_records()
+        if records is None or records.num_rows == 0:
+            stream = self._stream_over(self._empty_origin_table())
+            return StreamView.without_rows(
+                self,
+                ViewStatus.NOTHING_STORED,
+                stream.as_table(columns=config),
+                tag_columns=stream.keys(columns=config)[0],
+                note="nothing stored: its origin has not run",
+            )
+        # Without sorting only the shown rows are enriched. With sorting every stored
+        # row is (they are all read already), so the head is as_table cut to n rows.
+        # The total is the whole stored count.
+        rows = records if config.sort_by_tags else records.slice(0, n)
+        head = self._stream_over(rows).head(n, columns=config)
+        return dataclasses.replace(
+            head.for_stream(self, origin="stored"), total_rows=records.num_rows
+        )
+
+    def _stream_over(self, table: "pa.Table") -> ArrowTableStream:
+        """Return this source's stream over the origin rows ``table``."""
+        if self._tags_as_data is not None:
+            return self._derive_from(table, self._tags_as_data)
+        return ArrowTableStream(table, tag_columns=self._origin.keys()[0])
 
     def iter_data(self):
         return self._get_stream().iter_data()

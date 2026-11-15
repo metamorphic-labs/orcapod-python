@@ -7,13 +7,15 @@ import typing
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, cast
 
+from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import UnaryOperator
+from orcapod.system_constants import constants
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
-from orcapod.types import ColumnConfig, ContentHash, Schema
-from orcapod.utils import arrow_utils
+from orcapod.types import ColumnConfig, ContentHash, Schema, SourceInfoValue
+from orcapod.utils import arrow_utils, schema_utils
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -58,6 +60,10 @@ class Index(UnaryOperator):
     ) -> None:
         self.column = column
         self.i = i
+        # A data column never gets a meta column's name (ITL-1080): refused here,
+        # as ``MapData`` refuses it, so no path can produce one and drop it.
+        if out is not None:
+            schema_utils.require_names_not_meta([out])
         self.out = out
         self.fail_on_miss = fail_on_miss
         self._output_type: type = None  # type: ignore[assignment]
@@ -133,13 +139,20 @@ class Index(UnaryOperator):
             NotImplementedError: If the column holds an extension type whose
                 ``index_element`` is not yet implemented.
         """
-        _, data_schema = stream.output_schema()
+        tag_schema, data_schema = stream.output_schema()
         data_columns = list(data_schema.keys())
 
         if self.column not in data_columns:
             raise InputValidationError(
                 f"Index: column {self.column!r} not found in data schema. "
                 f"Available data columns: {data_columns}"
+            )
+
+        if self.out is not None and self.out in tag_schema:
+            raise InputValidationError(
+                f"Index: out column {self.out!r} is a tag column of the input, "
+                f"and a name cannot be both a tag and a data column. Choose a "
+                f"different name, or rename the tag with map_tags."
             )
 
         if self.out is not None and self.out in data_columns:
@@ -279,7 +292,15 @@ class Index(UnaryOperator):
             )
 
         old_src = data.source_info().get(self.column)
-        new_src = f"{old_src}[{self.i}]" if old_src else None
+        new_src: SourceInfoValue
+        if isinstance(old_src, list):
+            # A many->one operator (Batch, GroupBy) left one token per member: the
+            # element's provenance is its own token, one list level removed (the
+            # inner list after two aggregations). ``effective_i`` is in range for
+            # the value, and a token list holds one entry per member.
+            new_src = old_src[effective_i] if effective_i < len(old_src) else None
+        else:
+            new_src = f"{old_src}[{self.i}]" if old_src else None
 
         element_field = pa.field(
             self.out or self.column,
@@ -347,8 +368,13 @@ class Index(UnaryOperator):
             # The schema is the input's Arrow schema (large-normalized, as for
             # a non-empty result) with only the projected column changed.
             tag_columns, _ = stream.keys()
+            # The source-info columns are part of it: the projected column's token
+            # type is the input's with one list level removed, as for a non-empty
+            # result (ITL-1046), and every other token column keeps its input type.
+            # The system tags are part of it too: a result with rows keeps each row's
+            # (ITL-1131).
             input_schema = arrow_utils.normalize_schema_to_large_types(
-                stream.as_table().schema
+                stream.as_table(columns={"source": True, "system_tags": True}).schema
             )
             element_field = pa.field(
                 self.out or self.column,
@@ -357,13 +383,30 @@ class Index(UnaryOperator):
                 ),
                 nullable=self._output_nullable(),
             )
+            token_name = f"{constants.SOURCE_PREFIX}{self.column}"
+            input_token = input_schema.field(token_name)
+            input_token_type = input_token.type
+            token_type = (
+                input_token_type.value_type
+                if pa.types.is_large_list(input_token_type)
+                else input_token_type
+            )
+            token_field = pa.field(
+                f"{constants.SOURCE_PREFIX}{self.out or self.column}",
+                token_type,
+                nullable=input_token.nullable,
+            )
             if self.out is None:
                 position = input_schema.get_field_index(self.column)
                 output_schema = input_schema.set(position, element_field)  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
+                output_schema = output_schema.set(
+                    output_schema.get_field_index(token_name), token_field
+                )  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
             else:
                 output_schema = input_schema.append(element_field)  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
+                output_schema = output_schema.append(token_field)  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
             return ArrowTableStream(
-                output_schema.empty_table(),
+                self._as_row_built_table(output_schema.empty_table(), tag_columns),
                 tag_columns=tag_columns,
                 data_context=stream.data_context,
             )
@@ -379,7 +422,7 @@ class Index(UnaryOperator):
         inputs: Sequence[ReadableChannel[tuple[TagProtocol, DataProtocol]]],
         output: WritableChannel[tuple[TagProtocol, DataProtocol]],
         *,
-        input_pipeline_hashes: Sequence[ContentHash] | None = None,
+        input_pipeline_hashes: Sequence[ContentHash],
     ) -> None:
         """Process packets one at a time as they arrive (true streaming).
 
@@ -389,9 +432,12 @@ class Index(UnaryOperator):
         Args:
             inputs: Single-element sequence of readable channels.
             output: Channel to send transformed packets to.
-            input_pipeline_hashes: Ignored; present for protocol compliance.
+            input_pipeline_hashes: Not used: this operator keeps system-tag
+                names as they are, so no column is named after an input's
+                pipeline hash.
         """
         try:
+            output = WithoutMetaWriter(output)
             async for tag, data in inputs[0]:
                 result = self._process_one(tag, data)
                 if result is not None:

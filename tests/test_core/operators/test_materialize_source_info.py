@@ -391,7 +391,12 @@ class TestAsyncOperatorsKeepPerRowSourceInfo:
             empty: Channel[Row] = Channel(buffer_size=4)
             await empty.writer.close()
             output: Channel[Row] = Channel(buffer_size=4)
-            await make_op().async_execute([empty.reader], output.writer)
+            # An input that delivers no rows still has a pipeline hash.
+            await make_op().async_execute(
+                [empty.reader],
+                output.writer,
+                input_pipeline_hashes=[_source().pipeline_hash()],
+            )
             return await output.reader.collect()
 
         # The generic barrier path (e.g. ``PolarsFilter``) still raises on zero rows,
@@ -640,7 +645,7 @@ PRE_FIX_RECORD_IDS = frozenset(
 
 
 class TestStoreWrittenBeforeFix:
-    """What a user sees when a store written by pre-fix ``main`` is re-run.
+    """What a user sees when a database written by pre-fix ``main`` is re-run.
 
     Operator-node tables written by ``main`` from c398e7d4 (ITL-539) up to the fix
     hold row 0's source-info tokens on every row. The fixed code gives the corrected
@@ -689,6 +694,7 @@ class TestStoreWrittenBeforeFix:
         )
 
         replay = self._node(db, CacheMode.REPLAY)
+        _ = replay.run()  # a node shows rows only after a run (ITL-1095)
         assert len(list(replay.iter_data())) == 5
 
     def test_v014_store_is_not_read(self, tmp_path: Path):
@@ -734,6 +740,7 @@ class TestStoreWrittenBeforeFix:
         tokens = _source_info_tokens(list(_pin_source().iter_data()))
         assert _stored_source(new) == tokens
         replay = self._node(db, CacheMode.REPLAY)
+        _ = replay.run()  # a node shows rows only after a run (ITL-1095)
         assert _source_info_tokens(list(replay.iter_data())) == tokens
 
 

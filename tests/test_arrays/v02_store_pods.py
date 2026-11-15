@@ -24,7 +24,7 @@ ARRAYS = {
 
 
 def build_job(store_root: Path) -> Any:
-    """Build the fixture's pipeline on a Delta store at ``store_root``."""
+    """Build the fixture's pipeline on a Delta database at ``store_root``."""
     from orcapod import PipelineJob, function_pod
     from orcapod.databases import DeltaTableDatabase
     from orcapod.operators import DropDataColumns
@@ -66,7 +66,7 @@ def build_job(store_root: Path) -> Any:
         tag_columns=["k"],
         source_id="mixed",
     )
-    job = PipelineJob(name="v02", store=DeltaTableDatabase(base_path=store_root))
+    job = PipelineJob(name="v02", database=DeltaTableDatabase(base_path=store_root))
     with job:
         total.pod(double.pod(arrays, label="double"), label="total")
         direct_sum.pod(arrays, label="direct_sum")

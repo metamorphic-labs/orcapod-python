@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from collections.abc import Iterator
+from typing import TYPE_CHECKING, Any
 
 from orcapod.core.datagrams import Datagram
-from orcapod.core.function_pod import WrappedFunctionPod
+from orcapod.core.function_pod import (
+    FunctionPodStream,
+    WrappedFunctionPod,
+    function_zero_row_table,
+)
+from orcapod.core.streams.view import StreamView
+from orcapod.system_constants import constants
+from orcapod.types import ColumnConfig, Schema
 from orcapod.contexts.stored import StaleTables
 from orcapod.core.result_cache import ResultCache
 from orcapod.hooks import InvocationStatus
@@ -69,7 +78,7 @@ class CachedFunctionPod(WrappedFunctionPod):
 
     @property
     def record_path(self) -> tuple[str, ...]:
-        """Return the path to the cached records in the result store (versioned)."""
+        """Return the path to the cached records in the result database (versioned)."""
         return self._cache.record_path
 
     def stale_result_tables(self, include_current: bool = True) -> StaleTables:
@@ -393,11 +402,23 @@ class CachedFunctionPod(WrappedFunctionPod):
     def get_all_cached_outputs(
         self, include_system_columns: bool = False
     ) -> "pa.Table | None":
-        """Return all cached records from the result store for this pod."""
+        """Return all cached records from the result database for this pod."""
         return self._cache.get_all_records(
             self.data_context_key,
             include_system_columns=include_system_columns,
         )
+
+    def to_config(self) -> dict[str, Any]:
+        """Serialize this pod as its inner function pod.
+
+        A saved job describes the function, not where its results are cached, so a
+        pod-cached pod is saved exactly as the uncached pod would be. The pod cache
+        database is not part of the saved job, and a loaded job does not use it.
+
+        Returns:
+            The inner function pod's config.
+        """
+        return self._function_pod.to_config()
 
     def process(
         self, *streams: StreamProtocol, label: str | None = None
@@ -405,16 +426,95 @@ class CachedFunctionPod(WrappedFunctionPod):
         """Invoke the inner pod but with pod-level caching on process_data.
 
         The stream returned uses *this* pod's ``process_data`` (which
-        includes caching) rather than the inner pod's.
+        includes caching) rather than the inner pod's. Like ``FunctionPod.process``
+        it joins the inputs once, validates them and records the invocation with the
+        active trackers (so a ``PipelineJob`` records this pod).
         """
-        from orcapod.core.function_pod import FunctionPodStream
-
-        # Validate and prepare the input stream
-        input_stream = self._function_pod.handle_input_streams(*streams)
-        self._function_pod.validate_inputs(*streams)
-
-        return FunctionPodStream(
+        input_stream = self.handle_input_streams(*streams)
+        tag_schema, data_schema = input_stream.output_schema()
+        self._validate_input_schema(data_schema)
+        self._validate_output_keys(tag_schema.keys())
+        # The pod has no ``from_config`` (it cannot be rebuilt without its cache
+        # database), the one member of FunctionPodProtocol it lacks; the tracker uses
+        # none of it.
+        self.tracker_manager.record_function_pod_invocation(
+            self,  # pyright: ignore[reportArgumentType]
+            input_stream,
+            label=label,
+        )
+        return _CachedFunctionPodStream(
             function_pod=self,
             input_stream=input_stream,
             label=label,
         )
+
+
+class _CachedFunctionPodStream(FunctionPodStream):
+    """The stream of a ``CachedFunctionPod``, with the same columns in every cache state.
+
+    A row computed in this process carries only the ``__computed`` meta column; a row
+    served from the cache also carries the function variation and execution columns it
+    was stored with. This stream keeps ``__computed`` and drops the others, and its
+    table has no meta columns unless asked for, as an uncached pod's table.
+    """
+
+    def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
+        for tag, data in super().iter_data():
+            yield tag, _without_stored_meta(data)
+
+    def _zero_row_output_table(self) -> pa.Table | None:
+        """The table of this stream's rows with no row, ``__computed`` included."""
+        return function_zero_row_table(
+            self._input_stream,
+            self.output_schema()[1],
+            self.data_context,
+            Schema({CachedFunctionPod.RESULT_COMPUTED_FLAG: bool}),
+        )
+
+    def _computed_prefix(
+        self, limit: int, contiguous: bool = True
+    ) -> tuple[list[tuple[TagProtocol, DataProtocol]], int]:
+        shown, total = super()._computed_prefix(limit, contiguous)
+        return [(tag, _without_stored_meta(data)) for tag, data in shown], total
+
+    def head(
+        self,
+        n: int = 10,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> StreamView:
+        """Return the first computed rows, with the columns ``as_table`` gives.
+
+        The pod's result database is not looked up: that needs the input rows' hashes,
+        i.e. reading the input. See ``FunctionPodStream.head``.
+        """
+        head = super().head(n, columns=columns, all_info=all_info)
+        column_config = ColumnConfig.handle_config(columns, all_info=all_info)
+        if column_config.meta or column_config.all_info:
+            return head
+        table = head.table.drop_columns(
+            [n for n in head.table.column_names if n.startswith(constants.META_PREFIX)]
+        )
+        return dataclasses.replace(head, table=table)
+
+    def as_table(
+        self,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> "pa.Table":
+        table = super().as_table(columns=columns, all_info=all_info)
+        column_config = ColumnConfig.handle_config(columns, all_info=all_info)
+        if column_config.meta or column_config.all_info:
+            return table
+        return table.drop_columns(
+            [n for n in table.column_names if n.startswith(constants.META_PREFIX)]
+        )
+
+
+def _without_stored_meta(data: DataProtocol) -> DataProtocol:
+    """Return ``data`` with only the ``__computed`` meta column of its stored ones."""
+    keep = CachedFunctionPod.RESULT_COMPUTED_FLAG
+    stored = [name for name in data.meta_columns if name != keep]
+    return data.drop_meta_columns(*stored) if stored else data

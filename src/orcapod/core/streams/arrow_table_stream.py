@@ -1,17 +1,23 @@
 from __future__ import annotations
 
+import itertools
 import logging
 from collections.abc import Collection, Iterator
 from typing import TYPE_CHECKING, Any
 
 from orcapod import contexts
 from orcapod.core.datagrams import Data, Tag
-from orcapod.core.streams.base import StreamBase
+from orcapod.core.streams.base import (
+    ZERO_ROW_INPUT_COLUMNS,
+    StreamBase,
+    check_head_size,
+)
+from orcapod.core.streams.view import StreamView
 from orcapod.protocols.core_protocols import PodProtocol, StreamProtocol, TagProtocol
 from orcapod.protocols.hashing_protocols import PipelineElementProtocol
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema, SourceInfoValue
-from orcapod.utils import arrow_utils
+from orcapod.utils import arrow_utils, schema_utils
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -33,7 +39,18 @@ class ArrowTableStream(StreamBase):
     This is useful for ensuring that the data in the stream remains consistent and unchanging.
 
     The types of the tag and data columns are inferred from the PyArrow Table schema.
+
+    Every column takes the large variant of its Arrow type (developer, November 14,
+    2026, ITL-1122): ``string`` is ``large_string``, ``binary`` is ``large_binary``,
+    ``list`` is ``large_list``, recursively. This is the one place a table becomes a
+    stream, so every source (each builds its stream here, from a user's Arrow table
+    too) and every operator result presents large types. Width, nullability, field
+    metadata and logical types are kept; large and non-large variants hash identically.
     """
+
+    # The table's rows are held, not computed: a run() view says "all N rows", as
+    # head() does.
+    _RUN_ORIGIN: str = "held"
 
     def __init__(
         self,
@@ -49,6 +66,9 @@ class ArrowTableStream(StreamBase):
 
         self._producer = producer
         self._upstreams = upstreams
+
+        # Every table Orcapod presents is in its large variants (ITL-1122).
+        table = arrow_utils.normalize_table_to_large_types(table, keep_null=True)
 
         data_table, data_context_table = arrow_utils.split_by_column_groups(
             table, [constants.CONTEXT_KEY]
@@ -75,6 +95,8 @@ class ArrowTableStream(StreamBase):
 
         prefix_info = {constants.SOURCE_PREFIX: source_info}
 
+        # A tag never has a meta column's name (ITL-1080).
+        schema_utils.require_names_not_meta(tag_columns)
         # determine tag columns first and then exclude any source info
         self._tag_columns = tuple(c for c in tag_columns if c in table.column_names)
         self._system_tag_columns = tuple(
@@ -145,17 +167,31 @@ class ArrowTableStream(StreamBase):
         # hash label, which must never enter a hash input.
         return (
             self.__class__.__name__,
-            self.as_table(
-                columns=ColumnConfig(
-                    meta=True,
-                    context=True,
-                    source=True,
-                    system_tags=True,
-                    sort_by_tags=True,
-                )
-            ),
+            self._identity_table(),
             self._tag_columns,
         )
+
+    def _identity_table(self) -> "pa.Table":
+        """Return the rows in the order and columns that ``identity_structure`` hashes.
+
+        THIS ORDER IS A HASH INPUT AND MUST NOT CHANGE: it is the ordering that every
+        stream's content hash has been built from since before ITL-1053. It is kept apart
+        from ``as_table``'s sort on purpose; the sort in the body is the code
+        ``as_table(sort_by_tags=True)`` had on origin/main, unchanged: the tags and
+        system tags in this stream's own priority, a type Arrow cannot order leaving the
+        rows in stream order, and a stream with nothing to sort by raising.
+        """
+        table = self._assemble_table(
+            ColumnConfig(meta=True, context=True, source=True, system_tags=True),
+            limit=None,
+        )
+        try:
+            return table.sort_by(
+                [(column, "ascending") for column in self._all_tag_columns]
+            )
+        except pa.ArrowTypeError:
+            # If sorting fails, fall back to unsorted table
+            return table
 
     def pipeline_identity_structure(self) -> Any:
         if self._producer is None or not isinstance(
@@ -224,43 +260,91 @@ class ArrowTableStream(StreamBase):
         This is useful for converting the stream to a table format.
         """
         columns_config = ColumnConfig.handle_config(columns, all_info=all_info)
+        return self._assemble_table(columns_config, limit=None)
+
+    def head(
+        self,
+        n: int = 10,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> StreamView:
+        """Return the first ``n`` rows of the table this stream holds.
+
+        Without sorting only those rows are assembled: content hashes, when asked for,
+        are computed for them alone. With ``sort_by_tags`` (or ``all_info``) the rows are
+        sorted first, as ``as_table`` sorts them, and the first ``n`` of those are
+        returned, so the head is always ``as_table(...)`` cut to ``n`` rows. See
+        ``StreamBase.head``.
+        """
+        check_head_size(n)
+        config = ColumnConfig.handle_config(columns, all_info=all_info)
+        if config.sort_by_tags:
+            table = self._assemble_table(config, limit=None).slice(0, n)
+        else:
+            table = self._assemble_table(config, limit=n)
+        return StreamView.of_rows(
+            self,
+            table,
+            tag_columns=self.keys(columns=config)[0],
+            total_rows=self._table.num_rows,
+        )
+
+    def _typed_zero_row_table(self) -> "pa.Table":
+        """This stream's table cut to no rows: its own Arrow types, no row assembled."""
+        return self._assemble_table(ZERO_ROW_INPUT_COLUMNS, limit=0)
+
+    def _assemble_table(
+        self, columns_config: ColumnConfig, limit: int | None
+    ) -> "pa.Table":
+        """Return the stream's rows with the column groups of ``columns_config``.
+
+        Args:
+            columns_config: The column groups to include, and whether to sort by tags.
+            limit: Assemble only the first ``limit`` rows; ``None`` for all of them.
+        """
         output_table = self._table
-        if columns_config.content_hash:
-            hash_column_name = (
-                "_content_hash"
-                if columns_config.content_hash is True
-                else columns_config.content_hash
+        data_context_table = self._data_context_table
+        source_info_table = self._source_info_table
+        if limit is not None:
+            output_table = output_table.slice(0, limit)
+            data_context_table = data_context_table.slice(0, limit)
+            source_info_table = source_info_table.slice(0, limit)
+
+        def hashes() -> pa.Array[Any]:
+            rows = self.iter_data()
+            if limit is not None:
+                rows = itertools.islice(rows, limit)
+            return pa.array(
+                [str(data.content_hash()) for _, data in rows], type=pa.large_string()
             )
-            content_hashes = [str(data.content_hash()) for _, data in self.iter_data()]
-            output_table = output_table.append_column(
-                pa.field(hash_column_name, pa.large_string(), nullable=False),
-                pa.array(content_hashes, type=pa.large_string()),
-            )
-        if not columns_config.system_tags:
-            # Check in original implementation
-            output_table = output_table.drop_columns(list(self._system_tag_columns))
-        table_stack = (output_table,)
-        if columns_config.context:
-            table_stack += (self._data_context_table,)
-        if columns_config.source:
-            table_stack += (self._source_info_table,)
 
-        table = arrow_utils.hstack_tables(*table_stack)
+        def shape(carried: "pa.Table") -> "pa.Table":
+            table_stack = (carried,)
+            if columns_config.context:
+                table_stack += (data_context_table,)
+            if columns_config.source:
+                table_stack += (source_info_table,)
+            table = arrow_utils.hstack_tables(*table_stack)
+            if columns_config.sort_by_tags and (
+                self._tag_columns or columns_config.system_tags
+            ):
+                # The presentation sort (not the identity order, see
+                # ``_identity_table``). A stream with no tag column is sorted only when
+                # the system tags are asked for. The system tags stay in the table
+                # through the sort: they break ties between equal tags.
+                table = arrow_utils.sort_by_tag_columns(table, tuple(self._tag_columns))
+            if not columns_config.system_tags:
+                table = table.drop_columns(list(self._system_tag_columns))
+            return table
 
-        if columns_config.sort_by_tags:
-            # TODO: cleanup the sorting tag selection logic
-            try:
-                target_tags = (
-                    self._all_tag_columns
-                    if columns_config.system_tags
-                    else self._tag_columns
-                )
-                return table.sort_by([(column, "ascending") for column in target_tags])
-            except pa.ArrowTypeError:
-                # If sorting fails, fall back to unsorted table
-                return table
-
-        return table
+        return arrow_utils.with_content_hash_column(
+            output_table,
+            columns_config.content_hash,
+            hashes,
+            shape,
+            nullable=False,
+        )
 
     def clear_cache(self) -> None:
         """

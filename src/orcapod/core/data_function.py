@@ -37,6 +37,7 @@ from orcapod.utils import schema_utils
 from orcapod.utils.canonical_type_names import stabilize_type_names
 from orcapod.utils.git_utils import get_git_info_for_python_object
 from orcapod.utils.lazy_module import LazyModule
+from orcapod.utils.tensor_conversions import describe, tensor_conversions, warn_once
 
 from orcapod.protocols.observability_protocols import DataExecutionLoggerProtocol
 
@@ -236,6 +237,17 @@ class DataFunctionBase(TraceableBase, Generic[E]):
     def input_data_schema(self) -> Schema:
         """Schema describing the input data this function accepts."""
         ...
+
+    @property
+    def accepts_arbitrary_keywords(self) -> bool:
+        """Whether the function takes input columns beyond ``input_data_schema``.
+
+        ``False`` for every data function kind today: the parameters are a fixed
+        set (``PythonDataFunction`` rejects ``**kwargs``). A kind that passes every
+        input column to its function overrides this to return ``True``; a function
+        pod then never drops a column for it (ITL-807).
+        """
+        return False
 
     @property
     @abstractmethod
@@ -443,6 +455,8 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
 
         assert function_name is not None
         self._function_name = function_name
+        # (output key, conversion) pairs already reported with ValueConversionWarning.
+        self._reported_conversions: set[tuple[str, str]] = set()
 
         super().__init__(
             label=label,
@@ -626,6 +640,17 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
                     value,
                     mismatch.describe(),
                     mismatch.hint,
+                )
+            conversions = tensor_conversions(value)
+            if conversions:
+                warn_once(
+                    self._reported_conversions,
+                    key,
+                    conversions,
+                    f"Function {self._function_name!r} output {key!r} returned a "
+                    f"torch tensor {describe(conversions)}; Orcapod stored a CPU "
+                    "tensor without autograd history, and the returned tensor is "
+                    "unchanged. Return value.detach().cpu() to avoid this warning.",
                 )
 
         def combine(*components: tuple[str, ...]) -> str:
@@ -939,6 +964,11 @@ class DataFunctionWrapper(DataFunctionBase[E]):
         return self._data_function.label
 
     @property
+    def is_async(self) -> bool:
+        """Whether the wrapped function is an async coroutine function."""
+        return getattr(self._data_function, "is_async", False) is True
+
+    @property
     def major_version(self) -> int:
         return self._data_function.major_version
 
@@ -957,6 +987,10 @@ class DataFunctionWrapper(DataFunctionBase[E]):
     @property
     def input_data_schema(self) -> Schema:
         return self._data_function.input_data_schema
+
+    @property
+    def accepts_arbitrary_keywords(self) -> bool:
+        return self._data_function.accepts_arbitrary_keywords
 
     @property
     def output_data_schema(self) -> Schema:
@@ -1101,7 +1135,7 @@ class CachedDataFunction(DataFunctionWrapper):
 
     @property
     def record_path(self) -> tuple[str, ...]:
-        """Return the path to the cached records in the result store (versioned)."""
+        """Return the path to the cached records in the result database (versioned)."""
         return self._cache.record_path
 
     def call(
@@ -1232,7 +1266,7 @@ class CachedDataFunction(DataFunctionWrapper):
     def get_all_cached_outputs(
         self, include_system_columns: bool = False
     ) -> "pa.Table | None":
-        """Return all cached records from the result store for this function.
+        """Return all cached records from the result database for this function.
 
         Args:
             include_system_columns: If True, include system columns

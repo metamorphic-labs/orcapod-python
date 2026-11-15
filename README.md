@@ -18,8 +18,8 @@ pip install orcapod
 uv add orcapod
 ```
 
-`0.3.0` is the first release since `0.1.4` on PyPI; `0.2.0` exists only as the tag `v0.2.0` of
-the repository. A store written by `0.2.0` or earlier is not read by `0.3.0`: see
+`0.3.0` is the first release on PyPI since `0.1.4`; `0.2.0` was never published to PyPI.
+Tables written by `0.2.0` or earlier are not read by `0.3.0`: see
 [`CHANGELOG.md`](CHANGELOG.md), *Upgrading from 0.2.0*.
 
 Optional features are installed as extras:
@@ -36,7 +36,7 @@ SpikeInterface support lives in a separate package,
 [`orcapod-extension-spikeinterface`](https://github.com/nauticalab/orcapod-extension-spikeinterface).
 It is not published on PyPI; install it from its repository.
 
-See [CHANGELOG.md](https://github.com/metamorphic-labs/orcapod-python/blob/main/CHANGELOG.md)
+See [CHANGELOG.md](https://github.com/nauticalab/orcapod-python/blob/main/CHANGELOG.md)
 for release notes, including the migration steps for databases written by an earlier
 release.
 
@@ -46,13 +46,13 @@ Releases are cut by running the GitHub Actions **Release** workflow by hand. It 
 tests and the license check, creates and pushes the version tag, builds the wheel and
 sdist, and publishes them to TestPyPI and then PyPI through trusted publishing. The version
 comes from the tag via `hatch-vcs`, so there is no version number to bump in the source
-tree. See [RELEASING.md](https://github.com/metamorphic-labs/orcapod-python/blob/main/RELEASING.md)
+tree. See [RELEASING.md](https://github.com/nauticalab/orcapod-python/blob/main/RELEASING.md)
 for the full workflow.
 
 ## License
 
 Orcapod is released under the
-[MIT License](https://github.com/metamorphic-labs/orcapod-python/blob/main/LICENSE).
+[MIT License](https://github.com/nauticalab/orcapod-python/blob/main/LICENSE).
 
 ## Continuous Integration
 
@@ -239,7 +239,7 @@ While the following is subject to change based on future development, it represe
       │   on success:
       │       ctx_observer.on_data_end(node_label, tag, data, result, cached=False)
       │       emit (tag_out, result) downstream
-      │   on StoreError (the store could not be read or written):
+      │   on OrcapodDatabaseError (the database could not be read or written):
       │       ctx_observer.on_data_crash(node_label, tag, data, exc)
       │       raise, whatever error_policy is — the run stops (ITL-878, ITL-884)
       │   on any other exception (the function failed):

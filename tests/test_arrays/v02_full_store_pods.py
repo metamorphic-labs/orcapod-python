@@ -79,7 +79,7 @@ def build_job(
         NOTIFIED.append(m)
         return m
 
-    job = PipelineJob(name=JOB_NAME, store=store)
+    job = PipelineJob(name=JOB_NAME, database=store)
     with job:
         ints = DictSource(data=ROWS, tag_columns=["k"], source_id="ints")
         ones = plus_one.pod(ints, label="plus_one")
@@ -118,7 +118,7 @@ def build_cached_source(store: Any) -> Any:
 
 
 def write_store(store_root: Path) -> None:
-    """Run the job and fill the cached source on a Delta store at ``store_root``."""
+    """Run the job and fill the cached source on a Delta database at ``store_root``."""
     from orcapod.databases import DeltaTableDatabase
 
     store = DeltaTableDatabase(base_path=store_root)

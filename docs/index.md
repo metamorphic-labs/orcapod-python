@@ -16,8 +16,8 @@ pip install orcapod
 uv add orcapod
 ```
 
-`0.3.0` is the first release since `0.1.4` on PyPI; `0.2.0` exists only as the tag `v0.2.0` of
-the repository. A store written by `0.2.0` or earlier is not read by `0.3.0`: see
+`0.3.0` is the first release on PyPI since `0.1.4`; `0.2.0` was never published to PyPI.
+Tables written by `0.2.0` or earlier are not read by `0.3.0`: see
 `CHANGELOG.md` in the repository, *Upgrading from 0.2.0*.
 
 Rendering pipeline graphs additionally requires the [Graphviz](https://graphviz.org/download/)

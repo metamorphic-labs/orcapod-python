@@ -1,7 +1,7 @@
 # Logical Type Identifiers
 
 A *logical type* binds a Python class to the way its values are stored in an Arrow column:
-`pathlib.Path` is stored as a string, `numpy.ndarray` as a struct, a dataclass as a struct
+`pathlib.Path` is stored as a string, `numpy.ndarray` as a `.npy` file, a dataclass as a struct
 of its fields. Orcapod ships logical types for paths, files, directories, UUIDs, NumPy
 arrays and pandas objects, and you can register your own.
 
@@ -68,7 +68,7 @@ under one identifier.
 ## Built-in types
 
 Orcapod's own types follow the same contract as yours. Their metadata is the JSON text
-`{"version":N}`:
+`{"version":N}`, or `{"ignore":[...],"version":N}` for a library value type (below):
 
 | Python type | Extension name | Extension metadata |
 |---|---|---|
@@ -77,11 +77,34 @@ Orcapod's own types follow the same contract as yours. Their metadata is the JSO
 | `uuid.UUID` | `orcapod.uuid` | `{"version":1}` |
 | `orcapod.File` | `orcapod.file` | `{"version":1}` |
 | `orcapod.Directory` | `orcapod.directory` | `{"version":1}` |
-| `numpy.ndarray` | `orcapod.ndarray` | `{"version":1}` |
-| `pandas.DataFrame` | `pandas.dataframe` | `{"version":1}` |
-| `pandas.Series` | `pandas.series` | `{"version":1}` |
+| `numpy.ndarray` | `orcapod.numpy.ndarray` | `{"ignore":[],"version":1}` |
+| `torch.Tensor` (optional, needs PyTorch) | `orcapod.torch.tensor` | `{"ignore":[],"version":1}` |
+| `pandas.DataFrame` | `orcapod.pandas.dataframe` | `{"ignore":[],"version":1}` |
+| `pandas.Series` | `orcapod.pandas.series` | `{"ignore":[],"version":1}` |
+| `polars.DataFrame` | `orcapod.polars.dataframe` | `{"ignore":[],"version":1}` |
+| `polars.Series` | `orcapod.polars.series` | `{"ignore":[],"version":1}` |
 
 `{"version":N}` is the convention of the built-in types only. Your types may use any bytes.
+
+### Library value types: the ignore list
+
+A value from a library such as NumPy has properties beyond its content, for example memory
+order and byte order. Its hash counts every property the storage keeps, and the type names
+the properties a data context may choose to ignore. The names a data context ignores are the
+type's *ignore list*, and the list is part of the identifier: the extension metadata is
+
+```
+{"ignore":[],"version":1}
+{"ignore":["byte_order","memory_order"],"version":1}
+```
+
+with the names sorted, each once, the keys sorted and no whitespace; `ignore` is present
+also when empty. So one type under two lists is two logical types: the schema hashes differ,
+a join of two such columns is an error, and a data context reads only columns stored under
+its own list (anything else raises `LogicalTypeIdentifierError`, naming the column and both
+lists). Storage is the same under every list. `numpy.ndarray` is the first such type; its
+property names are in [NumPy Arrays](arrays.md#the-ignore-list). `torch.Tensor` is another;
+its names are in [PyTorch tensors](arrays.md#what-counts-as-the-same-tensor).
 
 ### Native containers: `list[T]` and `set[T]`
 
@@ -91,7 +114,8 @@ containers*. They are logical types only because Arrow cannot hold an extension 
 a list; conceptually they are an ordinary list or set of `T`. By design:
 
 - **A native container has no version of its own.** Its metadata is JSON with `category`
-  (`list` or `set`) and the element's extension name and metadata, and nothing else. Its
+  (`list` or `set`) and the element's extension name and metadata (for a set of a primitive,
+  the element's Arrow type; see below), and nothing else. Its
   identifier is the container kind plus the element's identifier, so it changes exactly when
   the element's identifier changes. Because the element's metadata is written into that
   JSON as text, a logical type used inside `list[T]` or `set[T]` must have extension
@@ -103,6 +127,46 @@ a list; conceptually they are an ordinary list or set of `T`. By design:
 - **A change to how native containers are stored or hashed is a change of Orcapod's core
   hashing**, recorded by the data context (the global hash version), never a change of a
   logical type.
+
+**A set of a primitive is a native container too** (ITL-611). `set[T]` where `T` has no
+logical type (`set[int]`, `set[str]`, `set[bytes]`, `set[datetime]`) is stored under the
+wrapper `set[<element Arrow type>]`, so a set reads back as a set everywhere: from the
+node, in a downstream pod, from `as_source()` and from a job loaded in another process.
+The element's identifier is its Arrow type in the large variants, as text, inside the
+extension name, which is the key the type is registered under. The metadata does not repeat
+it: `"element_kind": "arrow"` (never `element_ext_name`, which names a logical type) says
+that the element is a plain Arrow type, which a reader takes from the storage
+(`large_list<large_string>`). A stored column whose storage is not a list of the element its
+name names is refused with `LogicalTypeIdentifierError`.
+
+```python
+from orcapod.sources import DictSource
+
+source = DictSource(
+    data=[{"k": "r", "labels": {"b", "a"}}],
+    tag_columns=["k"],
+    data_schema={"k": str, "labels": set[str]},
+)
+labels_type = source.as_table().schema.field("labels").type
+print(labels_type.extension_name)
+# set[large_string]
+print(labels_type.__arrow_ext_serialize__().decode())
+# {"category": "set", "element_kind": "arrow"}
+print(labels_type.storage_type)
+# large_list<item: large_string>
+```
+
+- `list[T]` of a primitive is not a native container: it stays a plain `large_list`, because
+  a list is a list in Arrow too.
+- `set[T | None]` has the identifier of `set[T]`, as `set[Path | None]` has that of
+  `set[Path]`: the element's nullability is not part of a native container's identifier.
+- The elements are stored in the canonical set order (see the hashing reference, section 1e),
+  so equal sets store, and hash, identically. A set row never hashes like the list row with
+  the same elements, because the container's identifier is part of the row hash.
+- **Known limit:** inside a dict value or a tuple field (`dict[str, set[int]]`,
+  `dict[str, list[set[int]]]`), a set of a primitive keeps its plain `large_list` storage, because Arrow cannot hold an extension
+  type inside a struct field; read back without the declared type, such a value is a list.
+- `frozenset[T]` is not supported: declare `set[T]`. Support is to be evaluated in ITL-1140.
 
 A container type you implement yourself is not a native container. It is an ordinary logical
 type with its own identifier, which you declare and change like that of any other type.

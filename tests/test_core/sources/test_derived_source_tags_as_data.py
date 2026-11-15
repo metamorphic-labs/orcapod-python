@@ -24,6 +24,7 @@ from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import InputValidationError
 from orcapod.operators import Join
 from orcapod.pipeline import AsyncPipelineOrchestrator
+from orcapod.types import ColumnConfig
 from orcapod.sources import ArrowTableSource, DictSource, SQLiteTableSource
 
 UTC = dt.timezone.utc
@@ -400,13 +401,62 @@ class TestIdentity:
         )
         assert base.content_hash() != _experiment().content_hash()
 
-    def test_content_hash_is_the_root_source_rule(self):
+    def test_content_hash_is_the_root_source_rule_plus_the_mapping(self):
+        """The identity structure is the root source rule followed by the sorted mapping."""
         derived = DerivedSource(_experiment(), tags_as_data=COPY)
+        # identity_structure is the non-public entry point this test is about: the
+        # structure is the root source rule followed by the sorted mapping items.
         assert derived.identity_structure() == (
             "DerivedSource",
             derived.output_schema(),
             derived.source_id,
+            ("tags_as_data", tuple(sorted(COPY.items()))),
         )
+
+    def test_mappings_with_one_schema_have_different_content_hashes(self):
+        """Two mappings with one schema and one source_id still differ in content hash (ITL-1000)."""
+        # ITL-1000: two tag columns of one type copied to one name give one schema
+        # but different values, so with one explicit source_id the mapping must tell
+        # the sources apart.
+        table = pa.table(
+            {
+                "a": pa.array([1, 2], pa.int64()),
+                "b": pa.array([3, 4], pa.int64()),
+                "x": pa.array([0.5, 1.5], pa.float64()),
+            }
+        )
+        base = ArrowTableSource(table, tag_columns=["a", "b"], source_id="two_tags")
+        from_a = DerivedSource(base, source_id="same", tags_as_data={"a": "k"})
+        from_b = DerivedSource(base, source_id="same", tags_as_data={"b": "k"})
+        assert from_a.output_schema() == from_b.output_schema()
+        assert from_a.source_id == from_b.source_id
+        assert from_a.pipeline_hash() == from_b.pipeline_hash()
+        assert from_a.content_hash() != from_b.content_hash()
+        # The copies hold different values, and record ids (from the source id and
+        # row position) are equal.
+        ta, tb = from_a.as_table(), from_b.as_table()
+        assert ta.column("k").to_pylist() != tb.column("k").to_pylist()
+        ca, cb = (
+            from_a.as_table(columns=ColumnConfig(system_tags=True)),
+            from_b.as_table(columns=ColumnConfig(system_tags=True)),
+        )
+        (rid_a,) = _prefixed(ca, "_tag_record_id")
+        (rid_b,) = _prefixed(cb, "_tag_record_id")
+        assert ca.column(rid_a).to_pylist() == cb.column(rid_b).to_pylist()
+
+    def test_mapping_order_does_not_change_content_hash(self):
+        """The mapping enters the identity sorted, so its order does not matter."""
+        a = DerivedSource(
+            _experiment(),
+            source_id="s",
+            tags_as_data={"subject_id": "p", "experiment_index": "q"},
+        )
+        b = DerivedSource(
+            _experiment(),
+            source_id="s",
+            tags_as_data={"experiment_index": "q", "subject_id": "p"},
+        )
+        assert a.content_hash() == b.content_hash()
 
 
 # ---------------------------------------------------------------------------
@@ -535,7 +585,7 @@ def _make_probe_db(path: Path) -> str:
 
 def _probe_job(db_path: str, name: str = "probes") -> PipelineJob:
     """Return a job that copies the ``name`` key into data and measures its length."""
-    job = PipelineJob(name=name, store=InMemoryArrowDatabase())
+    job = PipelineJob(name=name, database=InMemoryArrowDatabase())
     with job:
         derived = DerivedSource(
             SQLiteTableSource(db_path, "probe"), tags_as_data={"name": "name_copy"}
@@ -556,7 +606,7 @@ class TestPipelineJob:
 
     def test_origin_and_derived_source_in_one_job(self, tmp_path):
         db_path = _make_probe_db(tmp_path / "edi.db")
-        job = PipelineJob(name="both", store=InMemoryArrowDatabase())
+        job = PipelineJob(name="both", database=InMemoryArrowDatabase())
         with job:
             probe = SQLiteTableSource(db_path, "probe")
             derived = DerivedSource(probe, tags_as_data={"name": "name_copy"})
@@ -577,7 +627,7 @@ class TestPipelineJob:
         path = tmp_path / "job.json"
         job.save(path)
 
-        loaded = PipelineJob.load(path, store=InMemoryArrowDatabase())
+        loaded = PipelineJob.load(path, database=InMemoryArrowDatabase())
         assert loaded.unbound_sources == []
         reloaded = loaded.sources[source_name]
         assert isinstance(reloaded, DerivedSource)
@@ -586,6 +636,8 @@ class TestPipelineJob:
         assert reloaded.content_hash() == original.content_hash()
         assert reloaded.as_table(all_info=True).equals(original.as_table(all_info=True))
         assert loaded.nodes["len"].pipeline_hash() == job.nodes["len"].pipeline_hash()
+        # The node identities include the mapping through the source's content hash.
+        assert loaded.nodes["len"].content_hash() == job.nodes["len"].content_hash()
 
     def test_config_round_trip_keeps_an_explicit_source_id(self, tmp_path):
         db_path = _make_probe_db(tmp_path / "edi.db")
@@ -600,10 +652,11 @@ class TestPipelineJob:
         assert config["tags_as_data"] == {"name": "name_copy"}
         rebuilt = DerivedSource.from_config(config)
         assert rebuilt.source_id == "probe_named"
+        assert rebuilt.content_hash() == derived.content_hash()
         assert rebuilt.as_table(all_info=True).equals(derived.as_table(all_info=True))
 
     def test_not_reloadable_when_the_origin_is_not(self, tmp_path):
-        job = PipelineJob(name="memory", store=InMemoryArrowDatabase())
+        job = PipelineJob(name="memory", database=InMemoryArrowDatabase())
         with job:
             derived = DerivedSource(_experiment(), tags_as_data=COPY)
             onset_s.pod(
@@ -615,7 +668,7 @@ class TestPipelineJob:
         job.run()
         path = tmp_path / "job.json"
         job.save(path)
-        loaded = PipelineJob.load(path, store=InMemoryArrowDatabase())
+        loaded = PipelineJob.load(path, database=InMemoryArrowDatabase())
         assert loaded.unbound_sources == [derived.source_id]
 
 
@@ -652,7 +705,7 @@ def task_upper(task_id: str) -> str:
 
 def _upper_job() -> PipelineJob:
     """Return a job with one function node, ``upper``, over the ``experiment`` table."""
-    job = PipelineJob(name="stage1", store=InMemoryArrowDatabase())
+    job = PipelineJob(name="stage1", database=InMemoryArrowDatabase())
     with job:
         task_upper.pod(_experiment().select_data_columns(["task_id"]), label="upper")
     return job
@@ -702,7 +755,7 @@ class TestNodeOrigin:
     def test_feeds_a_second_job(self):
         job = _upper_job()
         job.run()
-        stage2 = PipelineJob(name="stage2", store=InMemoryArrowDatabase())
+        stage2 = PipelineJob(name="stage2", database=InMemoryArrowDatabase())
         with stage2:
             derived = job.nodes["upper"].as_source(tags_as_data=COPY)
             Join()(

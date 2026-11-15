@@ -15,14 +15,28 @@ import logging
 from collections.abc import Callable, Collection, Iterator, Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
+from typing_extensions import override
+
 from orcapod.core.base import TraceableBase
-from orcapod.core.nodes.function_node import _build_record_id_preimage
-from orcapod.core.streams.base import StreamBase
+from orcapod.core.nodes.staleness import RunHoldingNode
+from orcapod.core.nodes.function_node import _build_record_id_preimage, run_job_node
+from orcapod.core.streams.base import (
+    StreamBase,
+    check_head_size,
+    schema_requires_io,
+    typed_zero_row_input,
+)
+from orcapod.core.streams.view import (
+    LOADED_ONLY_SIDE_EFFECT_NOTE,
+    SIDE_EFFECTS_NOTE,
+    ViewStatus,
+    StreamView,
+)
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
 from orcapod.errors import (
-    StoreError,
-    StoreReadError,
-    StoreWriteError,
+    OrcapodDatabaseError,
+    OrcapodDatabaseReadError,
+    OrcapodDatabaseWriteError,
 )
 from orcapod.contexts.stored import (
     StaleTables,
@@ -38,8 +52,11 @@ from orcapod.invocation import (
 from orcapod.system_constants import (
     OLD_TRACKING_DB_SCHEMA_VERSIONS,
     TRACKING_DB_SCHEMA_VERSION,
+    constants,
 )
+from orcapod.types import ColumnConfig
 from orcapod.utils import arrow_utils
+from orcapod.utils.database_errors import flush_best_effort
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -53,7 +70,8 @@ if TYPE_CHECKING:
     )
     from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
-    from orcapod.types import ColumnConfig, ContentHash, Schema
+    from orcapod.contexts import DataContext
+    from orcapod.types import ContentHash, Schema
 else:
     pa = LazyModule("pyarrow")
 
@@ -148,6 +166,36 @@ class SideEffectPodStream(StreamBase):
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         return self._input_stream.keys(columns=columns, all_info=all_info)
 
+    def head(
+        self,
+        n: int = 10,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> StreamView:
+        """Return no rows: showing this stream must never deliver its side effects."""
+        check_head_size(n)
+        config = ColumnConfig.handle_config(columns, all_info=all_info)
+        return self._head_without_rows(
+            config, ViewStatus.NOT_COMPUTED, note=SIDE_EFFECTS_NOTE
+        )
+
+    # The rows a run() view shows were passed on while delivering, not computed.
+    _RUN_ORIGIN: str = "delivered"
+
+    def run(self) -> StreamView:
+        """Deliver the side effects for every row and return a ``StreamView`` of the rows.
+
+        Does exactly what ``as_table()`` does: every call delivers every side effect
+        again (no invocation log is written), because the stream keeps no rows. The view holds the rows that call
+        passed on. ``head()`` and the notebook preview never deliver, so they keep showing
+        no rows.
+
+        Returns:
+            A ``StreamView`` of the rows this call delivered for.
+        """
+        return super().run()
+
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         for tag, data in self._input_stream.iter_data():
             result = _execute_side_effect_row(
@@ -171,22 +219,134 @@ class SideEffectPodStream(StreamBase):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> pa.Table:
-        from orcapod.types import ColumnConfig as _ColumnConfig
+        column_config = ColumnConfig.handle_config(columns, all_info=all_info)
+        return _table_of_rows(
+            self.iter_data(),
+            column_config,
+            tag_keys=lambda: self.keys()[0],
+            zero_rows=self._typed_zero_row_table,
+            declared_schema=lambda: self.output_schema(all_info=True),
+            type_converter=self._pod.data_context.type_converter,
+        )
 
-        column_config = _ColumnConfig.handle_config(columns, all_info=all_info)
-        tag_tables = []
-        data_tables = []
-        for tag, data in self.iter_data():
-            tag_tables.append(tag.as_table(columns=column_config))
-            data_tables.append(data.as_table(columns=column_config))
-        if not tag_tables:
-            # Return an empty table preserving declared field nullability.
-            tag_schema, data_schema = self.output_schema(columns=column_config)
-            tc = self._pod.data_context.type_converter
-            return arrow_utils.make_empty_table({**tag_schema, **data_schema}, tc)
-        combined_tags = pa.concat_tables(tag_tables)
-        combined_data = pa.concat_tables(data_tables)
-        return arrow_utils.hstack_tables(combined_tags, combined_data)
+    def _zero_row_table(self, config: ColumnConfig) -> pa.Table | None:
+        """``as_table(columns=config)`` with no rows; nothing is delivered (ITL-912)."""
+        typed = self._typed_zero_row_table()
+        if typed is None:
+            return None
+        return _table_of_rows(
+            iter(()),
+            config,
+            tag_keys=lambda: self.keys()[0],
+            zero_rows=lambda: typed,
+            declared_schema=lambda: self.output_schema(all_info=True),
+            type_converter=self._pod.data_context.type_converter,
+        )
+
+    def _typed_zero_row_table(self) -> pa.Table | None:
+        """The input's zero-row table: the pod passes its input's rows through.
+
+        See ``typed_zero_row_table``; the pod's function is not called (ITL-912).
+        """
+        return typed_zero_row_input(self._input_stream)
+
+
+def _table_of_rows(
+    rows: Iterator[tuple[TagProtocol, DataProtocol]],
+    column_config: ColumnConfig,
+    *,
+    tag_keys: Callable[[], tuple[str, ...]],
+    zero_rows: Callable[[], pa.Table | None],
+    declared_schema: Callable[[], tuple[Schema, Schema]],
+    type_converter: Any,
+) -> pa.Table:
+    """Return the delivered rows as one table with the column groups of ``column_config``.
+
+    The one place the side-effect stream and node build their table (ITL-1066). Every
+    requested column group is collected once per row (the tag's system tags, the data's
+    source info, meta and context) and the shared shaping helpers then choose the groups, sort
+    and attach the content hash, as the function pod streams do. A row's content hash is
+    that of its own data, and it stays with its row when the rows are sorted.
+
+    Args:
+        rows: The (tag, data) pairs to tabulate.
+        column_config: The column groups to keep, and whether to sort by tags.
+        tag_keys: Returns the names of the regular tag columns. Called after the rows were
+            read: asking a source for its keys can poll it.
+        zero_rows: Returns the rows' table with no row (``typed_zero_row_table``: user
+            tags, system tags, data and source info, typed as the rows are), or ``None``
+            when it is unknown without rows. Called only for the table of no rows.
+        declared_schema: Returns the declared (tag, data) schemas with every group. Called
+            only for the table of no rows that ``zero_rows`` cannot type: asking a source
+            for its schema can poll it.
+        type_converter: The data context's type converter, to type the table of no rows.
+    """
+    tag_tables: list[pa.Table] = []
+    data_tables: list[pa.Table] = []
+    hashes: list[str] = []
+    for tag, data in rows:
+        tag_tables.append(tag.as_table(columns={"system_tags": True}))
+        # Only the requested auxiliary groups, so a group that is not shown cannot
+        # make the rows' tables differ; the hash is that of the data, whatever is shown.
+        data_tables.append(
+            data.as_table(
+                columns={
+                    "source": column_config.source,
+                    "meta": column_config.meta,
+                    "context": column_config.context,
+                }
+            )
+        )
+        hashes.append(data.content_hash().to_string())
+    typed = None if tag_tables else zero_rows()
+    if tag_tables:
+        full = arrow_utils.hstack_tables(
+            pa.concat_tables(tag_tables), pa.concat_tables(data_tables)
+        )
+    elif typed is not None:
+        # No rows: the rows' columns and types (ITL-912), in the order a row's tag and
+        # data tables give them: tags, system tags, data, context, source info.
+        from orcapod.core.datagrams.datagram import context_key_field
+
+        names = typed.column_names
+        source_info = [n for n in names if n.startswith(constants.SOURCE_PREFIX)]
+        system_tags = [n for n in names if n.startswith(constants.SYSTEM_TAG_PREFIX)]
+        parts = [typed.select([*tag_keys(), *system_tags])]
+        parts.append(
+            typed.select(
+                [
+                    n
+                    for n in names
+                    if n not in parts[0].column_names and n not in source_info
+                ]
+            )
+        )
+        if column_config.context:
+            parts.append(pa.schema([context_key_field()]).empty_table())
+        # A row's data table declares every source-info field nullable
+        # (``Data.as_table``), and the rows' table is those tables concatenated.
+        source_table = typed.select(source_info)
+        nullable = pa.schema([f.with_nullable(True) for f in source_table.schema])
+        # Same arrays, new field flags: no cast.
+        parts.append(pa.Table.from_arrays(source_table.columns, schema=nullable))
+        full = arrow_utils.hstack_tables(*parts)
+    else:
+        # No rows and no Arrow types without them: the declared columns, with the
+        # declared field nullability.
+        tag_schema, data_schema = declared_schema()
+        full = arrow_utils.make_empty_table(
+            {**tag_schema, **data_schema}, type_converter
+        )
+
+    def shape(carried: pa.Table) -> pa.Table:
+        return arrow_utils.apply_column_config(carried, column_config, tag_keys())
+
+    return arrow_utils.with_content_hash_column(
+        full,
+        column_config.content_hash,
+        lambda: pa.array(hashes, type=pa.large_string()),
+        shape,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +419,7 @@ def _execute_side_effect_row(
     ):
         try:
             prior = pipeline_database.get_record_by_id(table_path, record_id)
-        except StoreError as exc:
+        except OrcapodDatabaseError as exc:
             # A failed lookup fails the run like a failed write: name pod and row.
             exc.add_context(node_label=pod_name, tag=tag.as_dict())
             raise
@@ -295,8 +455,8 @@ def _execute_side_effect_row(
                 data_context_key=data_context_key,
             )
         return (tag, data)
-    except StoreError as exc:
-        # A failed store read or write fails the run, even under on_error="log".
+    except OrcapodDatabaseError as exc:
+        # A failed database read or write fails the run, even under on_error="log".
         exc.add_context(node_label=pod_name, tag=tag.as_dict())
         raise
     except Exception as exc:
@@ -354,11 +514,11 @@ def _write_invocation_row(
             with_data_context(record, data_context_key),
             skip_duplicates=True,
         )
-    except StoreReadError:
+    except OrcapodDatabaseReadError:
         # The stored table could not be read: report the read failure itself.
         raise
     except Exception as exc:
-        raise StoreWriteError(table_path) from exc
+        raise OrcapodDatabaseWriteError(table_path) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -381,7 +541,10 @@ class SideEffectPod(TraceableBase):
     ``SideEffectPodStream`` with no invocation logging.
 
     In pipeline mode, promoted to ``SideEffectJobNode`` at compile time,
-    which adds DB-backed invocation logging and completion tracking.
+    which adds DB-backed invocation logging and completion tracking. A job
+    delivers only when it runs (``job.run()`` or the node's ``run()``); every
+    read of the node returns the rows its last run passed on and delivers
+    nothing (ITL-1091).
 
     Args:
         fn: A callable ``(data, ctx: InvocationContext) -> None``.
@@ -698,7 +861,8 @@ class SideEffectNode(StreamBase):
     # ------------------------------------------------------------------
 
     @property
-    def producer(self) -> SideEffectPod:  # type: ignore[override]
+    def producer(self) -> SideEffectPod | None:  # type: ignore[override]
+        """The node's pod; ``None`` for a node loaded from a saved file (ITL-1094)."""
         return self._pod
 
     @property
@@ -730,6 +894,38 @@ class SideEffectNode(StreamBase):
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         return self._input_stream.keys(columns=columns, all_info=all_info)
 
+    def head(
+        self,
+        n: int = 10,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> StreamView:
+        """Return no rows: showing this stream must never deliver its side effects."""
+        check_head_size(n)
+        config = ColumnConfig.handle_config(columns, all_info=all_info)
+        return self._head_without_rows(
+            config, ViewStatus.NOT_COMPUTED, note=SIDE_EFFECTS_NOTE
+        )
+
+    # The rows a run() view shows were passed on while delivering, not computed.
+    _RUN_ORIGIN: str = "delivered"
+
+    def run(self) -> StreamView:
+        """Deliver the side effects for every row and return a ``StreamView`` of the rows.
+
+        Does exactly what ``as_table()`` does: every call delivers every side effect
+        again, standalone, with no invocation log, because the node keeps no rows. A
+        blueprint node's input is an unbound slot, so it raises. ``SideEffectJobNode``
+        overrides this: a job's node delivers as ``job.run()`` does and its reads never
+        deliver. The view holds the rows that call passed on. ``head()`` and the notebook
+        preview never deliver, so they keep showing no rows.
+
+        Returns:
+            A ``StreamView`` of the rows this call delivered for.
+        """
+        return super().run()
+
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         """Standalone iteration — executes delivery with no DB logging."""
         for tag, data in self._input_stream.iter_data():
@@ -757,23 +953,40 @@ class SideEffectNode(StreamBase):
         all_info: bool = False,
     ) -> pa.Table:
         """Collect all rows from ``iter_data()`` into an Arrow table."""
-        from orcapod.types import ColumnConfig as _ColumnConfig
-
-        column_config = _ColumnConfig.handle_config(columns, all_info=all_info)
-        tag_tables = []
-        data_tables = []
-        for tag, data in self.iter_data():
-            tag_tables.append(tag.as_table(columns=column_config))
-            data_tables.append(data.as_table(columns=column_config))
-        if not tag_tables:
-            # Return an empty table preserving declared field nullability.
-            tag_schema, data_schema = self.output_schema(columns=column_config)
-            tc = self._pod.data_context.type_converter
-            return arrow_utils.make_empty_table({**tag_schema, **data_schema}, tc)
-        return arrow_utils.hstack_tables(
-            pa.concat_tables(tag_tables),
-            pa.concat_tables(data_tables),
+        column_config = ColumnConfig.handle_config(columns, all_info=all_info)
+        return _table_of_rows(
+            self.iter_data(),
+            column_config,
+            tag_keys=lambda: self.keys()[0],
+            zero_rows=self._typed_zero_row_table,
+            declared_schema=lambda: self.output_schema(all_info=True),
+            type_converter=self._rows_data_context().type_converter,
         )
+
+    def _rows_data_context(self) -> DataContext:
+        """The data context the node's rows are typed and hashed with: its pod's."""
+        return self._pod.data_context
+
+    def _zero_row_table(self, config: ColumnConfig) -> pa.Table | None:
+        """``as_table(columns=config)`` with no rows; nothing is delivered (ITL-912)."""
+        typed = self._typed_zero_row_table()
+        if typed is None:
+            return None
+        return _table_of_rows(
+            iter(()),
+            config,
+            tag_keys=lambda: self.keys()[0],
+            zero_rows=lambda: typed,
+            declared_schema=lambda: self.output_schema(all_info=True),
+            type_converter=self._rows_data_context().type_converter,
+        )
+
+    def _typed_zero_row_table(self) -> pa.Table | None:
+        """The input's zero-row table: the pod passes its input's rows through.
+
+        See ``typed_zero_row_table``; the pod's function is not called (ITL-912).
+        """
+        return typed_zero_row_input(self._input_stream)
 
     @property
     def node_uri(self) -> tuple[str, ...]:
@@ -790,7 +1003,7 @@ class SideEffectNode(StreamBase):
 # ---------------------------------------------------------------------------
 
 
-class SideEffectJobNode(SideEffectNode):
+class SideEffectJobNode(RunHoldingNode, SideEffectNode):
     """DB-backed execution node for side-effect pods.
 
     Created at pipeline compile time by ``PipelineJob``. Receives a
@@ -798,7 +1011,10 @@ class SideEffectJobNode(SideEffectNode):
     as a call-time keyword argument from the orchestrator.
 
     Extends ``SideEffectNode`` with DB attachment and orchestrated execution
-    methods. Analogous to ``FunctionJobNode`` in the function pod hierarchy.
+    methods. Analogous to ``FunctionJobNode`` in the function pod hierarchy: it
+    holds the rows its last run passed on (in memory), and every read returns
+    them without delivering (ITL-1091). Only ``execute``, ``async_execute`` and
+    ``run()`` deliver.
 
     Args:
         side_effect_pod: The ``SideEffectPod`` this node wraps.
@@ -819,6 +1035,31 @@ class SideEffectJobNode(SideEffectNode):
         self._table_path: tuple[str, ...] | None = None
         self._unlisted_store_reported = False
         self._current_log_checked = False
+        # The rows the last completed run passed on, in the order it passed them;
+        # ``None`` when no run in this process completed (ITL-1091).
+        self._held_rows: list[tuple[TagProtocol, DataProtocol]] | None = None
+        # Whether those rows came from a load-only run, which delivers nothing.
+        self._run_load_only = False
+        # A node that has not run in this process holds nothing and is stale (ITL-1095).
+        self._set_modified_time(None)
+
+    def _holds_run(self, *, load_only: bool) -> bool:
+        """Whether the node holds a run's rows; a load-only run's only for ``load_only``.
+
+        A load-only run delivers nothing, so a full run does not take its rows as the
+        result of a delivery.
+        """
+        return self._held_rows is not None and (load_only or not self._run_load_only)
+
+    def clear_cache(self) -> None:
+        """Drop the rows the last run passed on: the node is stale and reads empty.
+
+        Its next ``run()`` (or job run) delivers again what its invocation log does not
+        record (every row without ``track_completion``) (ITL-1095).
+        """
+        self._held_rows = None
+        self._run_load_only = False
+        self._set_modified_time(None)
 
     def _refuse_log_of_another_data_context(self) -> None:
         """Refuse an invocation log holding deliveries of another data context.
@@ -829,10 +1070,10 @@ class SideEffectJobNode(SideEffectNode):
         older table layout (written by Orcapod up to v0.2), and rows of another data
         context in the current log. An older log is looked for at this node's own
         path and, because the hash in the path can differ between versions, anywhere
-        under the pod's name in the store (ITL-954). Checked at the start of every
+        under the pod's name in the database (ITL-954). Checked at the start of every
         run, so a log that appears between two runs of one node object is found too.
         The current log is read and counted by data context the first time only;
-        the later runs list the store, which reads no table.
+        the later runs list the database, which reads no table.
 
         Raises:
             SideEffectLogDataContextError: If such deliveries are found; nothing has
@@ -852,7 +1093,7 @@ class SideEffectJobNode(SideEffectNode):
             name_path=self.node_uri,
         )
         if found.unlisted:
-            # The check runs before every run; that the store cannot list its tables
+            # The check runs before every run; that the database cannot list its tables
             # is reported once per node object and attached database.
             if self._unlisted_store_reported:
                 found = StaleTables(tables=found.tables)
@@ -861,7 +1102,7 @@ class SideEffectJobNode(SideEffectNode):
             account_for_stale_tables(
                 found, delivers_side_effects=True, current_context=current
             )
-        except StoreError as exc:
+        except OrcapodDatabaseError as exc:
             exc.add_context(node_label=self.label)
             raise
         self._current_log_checked = True
@@ -905,6 +1146,7 @@ class SideEffectJobNode(SideEffectNode):
         *,
         observer: ExecutionObserverProtocol | None = None,
         run_id: str | None = None,
+        load_only: bool = False,
     ) -> list[tuple[TagProtocol, DataProtocol]]:
         """Execute side-effect delivery for all rows in ``input_stream``.
 
@@ -912,6 +1154,11 @@ class SideEffectJobNode(SideEffectNode):
             input_stream: Stream of ``(tag, data)`` pairs to process.
             observer: Optional execution observer (currently unused).
             run_id: Pipeline run identifier forwarded from the orchestrator.
+            load_only: A load-only run (ITL-1095): every row passes on and nothing is
+                delivered or logged.
+
+        The node keeps the rows it passed on, which every later read returns without
+        delivering (ITL-1091). A run that raises leaves the node with no rows.
 
         Returns:
             List of ``(tag, data)`` tuples — the pass-through rows.
@@ -920,8 +1167,32 @@ class SideEffectJobNode(SideEffectNode):
             SideEffectLogDataContextError: If the invocation log holds deliveries
                 logged under another data context; nothing is delivered then.
         """
+        self._held_rows = None
+        if load_only:
+            try:
+                rows = list(input_stream.iter_data())
+            except BaseException:
+                # A run that raised defines no rows, as on the async path (ITL-1121).
+                self.clear_cache()
+                raise
+            self._hold(rows, load_only=True)
+            return rows
+        try:
+            results = self._deliver_rows(input_stream, run_id=run_id)
+        except BaseException:
+            # A run that raised defines no rows: the node is stale, and so is every
+            # node below it (ITL-1095).
+            self.clear_cache()
+            raise
+        self._hold(results)
+        return results
+
+    def _deliver_rows(
+        self, input_stream: StreamProtocol, *, run_id: str | None
+    ) -> list[tuple[TagProtocol, DataProtocol]]:
+        """Deliver every row of ``input_stream``; return the rows passed on."""
         self._refuse_log_of_another_data_context()
-        results = []
+        results: list[tuple[TagProtocol, DataProtocol]] = []
         for tag, data in input_stream.iter_data():
             result = _execute_side_effect_row(
                 fn=self._pod._fn,
@@ -941,6 +1212,161 @@ class SideEffectJobNode(SideEffectNode):
                 results.append(result)
         return results
 
+    def _hold(
+        self, rows: list[tuple[TagProtocol, DataProtocol]], *, load_only: bool = False
+    ) -> None:
+        """Keep the rows a completed run passed on and stamp the node as modified.
+
+        Stamped after the upstream nodes, which stamp at the end of their own run, so the
+        rows are current until an upstream changes again (``is_stale``).
+
+        Args:
+            rows: The rows the run passed on.
+            load_only: Whether the run was load-only (it delivered nothing).
+        """
+        self._held_rows = rows
+        self._run_load_only = load_only
+        self._update_modified_time()
+
+    def _current_rows(self) -> list[tuple[TagProtocol, DataProtocol]] | None:
+        """The rows the last run passed on, or ``None`` if there are none or they are stale.
+
+        Held rows go stale, and are dropped, when an upstream changed after the run: the
+        judgement ``FunctionJobNode`` uses for the rows it holds.
+        """
+        if self._held_rows is not None and self.is_stale:
+            self._held_rows = None
+        return self._held_rows
+
+    # ------------------------------------------------------------------
+    # Reads: never deliver
+    # ------------------------------------------------------------------
+
+    @override
+    def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
+        """Yield the rows the last run of this node passed on; never delivers.
+
+        Every read of a job node only reads (developer, November 13, 2026, ITL-1091):
+        ``as_table()``, the dataframe methods, ``flow()`` and ``async_iter_data()`` go
+        through this method. With no rows from a completed run in this process (the
+        job has not run, the last run raised, or an upstream changed since), there are
+        no rows. ``run()`` or ``job.run()`` delivers.
+        """
+        yield from self._current_rows() or ()
+
+    @override
+    def head(
+        self,
+        n: int = 10,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> StreamView:
+        """Return the first rows the last run passed on; never delivers.
+
+        After a run, the first ``n`` of ``as_table`` with the same column configuration.
+        Without rows from a run, no rows, with a note that ``run()`` delivers. After a
+        run that passed on no rows, when the columns asked for are known only by
+        polling a source, no columns either: ``head`` never polls. See
+        ``StreamBase.head``.
+        """
+        check_head_size(n)
+        config = ColumnConfig.handle_config(columns, all_info=all_info)
+        rows = self._current_rows()
+        if rows is None:
+            return self._head_without_rows(
+                config, ViewStatus.NOT_COMPUTED, note=SIDE_EFFECTS_NOTE
+            )
+        if not rows and schema_requires_io(self, config):
+            # The table of no rows takes its columns from the schema, which here only a
+            # poll of the source could give: show the empty content with no columns.
+            return self._head_without_rows(
+                config, ViewStatus.ROWS, note="its last run passed on no rows"
+            )
+        view = StreamView.of_rows(
+            self,
+            self.as_table(columns=config).slice(0, n),
+            tag_columns=self.keys(columns=config)[0],
+            total_rows=len(rows),
+            origin="held",
+        )
+        return self._with_run_status(view)
+
+    def _with_run_status(self, view: StreamView) -> StreamView:
+        """``view`` with the status of the node's last run: ``loaded_only`` after a
+        load-only run, which passed the rows on and delivered nothing (ITL-1095)."""
+        if not self._run_load_only:
+            return view
+        return dataclasses.replace(
+            view, status=ViewStatus.LOADED_ONLY, note=LOADED_ONLY_SIDE_EFFECT_NOTE
+        )
+
+    @override
+    def run(self, *, load_only: bool = False) -> StreamView:
+        """Run the node as ``job.run()`` runs it and return a ``StreamView`` of its rows.
+
+        State-driven, as every job node's ``run()`` (developer, November 13, 2026;
+        ITL-1095): a node that holds the rows of a completed, non-stale run delivers
+        nothing and returns them; call ``clear_cache()`` first to deliver again.
+        Otherwise the job nodes it depends on that hold no current run run first, and
+        the node reads its input and delivers through the invocation log, as a job run
+        does: with ``track_completion`` only the rows the log does not record as
+        delivered; without it every row. With no database attached nothing is logged
+        and every row is delivered. The node then holds the rows it passed on, which
+        ``as_table()`` and every other read return without delivering. The run's writes
+        (the invocation log included) are committed before ``run()`` returns; after a
+        failed delivery the log rows of the deliveries that succeeded are committed too,
+        and the delivery's error is raised.
+
+        Args:
+            load_only: Deliver nothing: the rows pass on, and the nodes run first load
+                their stored results only (as ``job.run(load_only=True)``).
+
+        Returns:
+            A ``StreamView`` of the rows this run passed on.
+
+        Raises:
+            SideEffectLogDataContextError: As for ``execute``.
+            OrcapodDatabaseWriteError: If committing the invocation log fails.
+        """
+        import sys
+
+        run_job_node(
+            self,
+            load_only=load_only,
+            run_alone=lambda _unchecked: self._run_alone(load_only=load_only),
+            caller=sys._getframe(1),  # pyright: ignore[reportPrivateUsage]  # the caller's line is where a failure warning is shown
+        )
+        return self._with_run_status(self._view_of_rows(self.as_table(), "held"))
+
+    def _run_alone(self, *, load_only: bool) -> None:
+        """Run this node over an input stream that is not a job node; commit its log."""
+        # A load-only run writes nothing, so it commits nothing (ITL-1095).
+        database = None if load_only else self._pipeline_database
+        try:
+            _ = self.execute(self._input_stream, load_only=load_only)
+        except Exception as run_error:
+            if database is not None:
+                flush_best_effort(run_error, database)
+            raise
+        if database is not None:
+            # Committed as at the end of a job run (PipelineJob._finish_run).
+            try:
+                database.flush()
+            except OrcapodDatabaseReadError:
+                # A stored table could not be read: report the read failure itself.
+                # The run raised, so it leaves the node no rows.
+                self.clear_cache()
+                raise
+            except Exception as exc:
+                self.clear_cache()
+                raise OrcapodDatabaseWriteError(database.base_path, flush=True) from exc
+            except BaseException:
+                # An interruption leaves the commit's outcome unknown: the node holds no
+                # run, so the next run runs and commits again (ITL-1121).
+                self.clear_cache()
+                raise
+
     # ------------------------------------------------------------------
     # Async execution
     # ------------------------------------------------------------------
@@ -952,6 +1378,7 @@ class SideEffectJobNode(SideEffectNode):
         *,
         observer: ExecutionObserverProtocol | None = None,
         run_id: str | None = None,
+        load_only: bool = False,
     ) -> None:
         """Async side-effect delivery with semaphore-bounded concurrency.
 
@@ -963,11 +1390,17 @@ class SideEffectJobNode(SideEffectNode):
         Emits non-``None`` results to ``output``. Always closes ``output``
         in a ``finally`` block.
 
+        The node then holds exactly this run's rows, in the order they were sent
+        downstream, which every later read returns without delivering (ITL-1091). A run
+        that raises leaves the node with no rows.
+
         Args:
             inputs: Single-element sequence containing the input channel.
             output: Writable channel for pass-through ``(tag, data)`` pairs.
             observer: Optional execution observer (currently unused).
             run_id: Pipeline run identifier from the orchestrator.
+            load_only: A load-only run (ITL-1095): every row passes on and nothing is
+                delivered or logged.
 
         Raises:
             ValueError: If ``inputs`` does not contain exactly one channel.
@@ -977,11 +1410,32 @@ class SideEffectJobNode(SideEffectNode):
                 f"SideEffectJobNode.async_execute expects exactly 1 input channel; "
                 f"got {len(inputs)}."
             )
+        self._held_rows = None
+        # A load-only run reads no pod configuration: it delivers nothing.
+        if load_only:
+            try:
+                rows: list[tuple[TagProtocol, DataProtocol]] = []
+                async for item in inputs[0]:
+                    rows.append(item)
+                    await output.send(item)
+                # Held and stamped before the output closes (ITL-1042).
+                self._hold(rows, load_only=True)
+            except BaseException:
+                self.clear_cache()
+                raise
+            finally:
+                await self._close_output(output)
+            return
         max_concurrency = self._pod.pod_config.max_concurrency
         sem = (
             asyncio.Semaphore(max_concurrency) if max_concurrency is not None else None
         )
-
+        # This run's rows, in the order they were sent downstream.
+        passed_on: list[tuple[TagProtocol, DataProtocol]] = []
+        # Makes recording a row and sending it one step: a send blocked by a full channel
+        # can be overtaken by a later one, so without it the held order could differ from
+        # the order downstream received. Never held across the delivery itself.
+        send_lock = asyncio.Lock()
         try:
             self._refuse_log_of_another_data_context()
 
@@ -1002,7 +1456,9 @@ class SideEffectJobNode(SideEffectNode):
                         table_path=self._table_path,
                     )
                     if result is not None:
-                        await output.send(result)
+                        async with send_lock:
+                            passed_on.append(result)
+                            await output.send(result)
                 finally:
                     if sem is not None:
                         sem.release()
@@ -1012,5 +1468,22 @@ class SideEffectJobNode(SideEffectNode):
                     if sem is not None:
                         await sem.acquire()
                     tg.create_task(process_one(tag, data))
+            # Held and stamped before the output closes, so every downstream node, which
+            # stamps after it has seen that close, is newer than this one (ITL-1042).
+            self._hold(passed_on)
+        except BaseException:
+            # A run that raised or was cancelled defines no rows (ITL-1095).
+            self.clear_cache()
+            raise
         finally:
+            await self._close_output(output)
+
+    async def _close_output(
+        self, output: WritableChannel[tuple[TagProtocol, DataProtocol]]
+    ) -> None:
+        """Close ``output``; a close that fails fails the run, which then holds no rows."""
+        try:
             await output.close()
+        except BaseException:
+            self.clear_cache()
+            raise

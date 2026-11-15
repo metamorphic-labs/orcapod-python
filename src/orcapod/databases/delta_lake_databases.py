@@ -19,9 +19,15 @@ from orcapod.databases._row_index import (
 from orcapod.databases.utils import coerce_record_id
 from orcapod.errors import (
     InputValidationError,
-    StoreReadError,
+    OrcapodDatabaseReadError,
     TableListingNotSupportedError,
     TypeIdentityError,
+)
+from orcapod.databases.delta_arrow_types import (
+    first_column_out_of_stored_range,
+    from_delta_layout,
+    recorded_type,
+    to_delta_layout,
 )
 from orcapod.databases.storage_utils import (
     delta_to_pyarrow_dataset,
@@ -251,6 +257,53 @@ def _as_delta_writer_stores(schema: pa.Schema) -> pa.Schema:
     )
 
 
+def _merge_source_in_stored_layout(
+    delta_table: deltalake.DeltaTable, batch: pa.Table
+) -> pa.Table:
+    """Return ``batch`` with its list columns in the layout the table stores.
+
+    Delta stores ``large_list<large_binary>`` as ``list<binary>``, and the MERGE
+    cannot plan a ``CASE WHEN`` over the two (ITL-984). A list column, a logical
+    list included, is therefore handed to the MERGE as its storage type cast to
+    the stored type. The values are unchanged and the stored field metadata stays
+    as it is; every other column, and a list column the table does not have yet,
+    is passed as it is.
+
+    Args:
+        delta_table: The loaded stored table.
+        batch: The rows about to be merged.
+
+    Returns:
+        ``batch``, with the cast list columns.
+    """
+    stored = _stored_arrow_schema(delta_table)
+    for index, field in enumerate(batch.schema):
+        column = batch.column(index)
+        if isinstance(field.type, pa.ExtensionType):
+            plain = column.combine_chunks().storage  # pyright: ignore[reportAttributeAccessIssue]  # an extension array
+            is_list = pa.types.is_large_list(plain.type) or pa.types.is_list(plain.type)
+        else:
+            plain = column
+            is_list = pa.types.is_large_list(field.type) or pa.types.is_list(field.type)
+        if not is_list or field.name not in stored.names:
+            continue
+        target = stored.field(field.name).type
+        if arrow_utils.normalize_to_large_types(
+            plain.type
+        ) != arrow_utils.normalize_to_large_types(target):
+            # More than the layout differs (a timestamp unit, a width, an evolved
+            # struct): the MERGE decides, and no cast may change a value.
+            continue
+        batch = batch.set_column(
+            index,
+            pa.field(field.name, target, nullable=field.nullable),
+            pa.chunked_array([plain]).cast(target)
+            if isinstance(plain, pa.Array)
+            else plain.cast(target),
+        )
+    return batch
+
+
 def _without_field_metadata(delta_type: Any) -> Any:
     """Return a Delta type with the metadata of every nested field dropped.
 
@@ -349,10 +402,10 @@ def _types_conflict(stored: pa.DataType, incoming: pa.DataType) -> bool:
     return stored != incoming
 
 
-def _store_error_to_raise(errors: list[Exception]) -> Exception | None:
-    """Pick the store error a failed flush raises as itself.
+def _database_error_to_raise(errors: list[Exception]) -> Exception | None:
+    """Pick the database error a failed flush raises as itself.
 
-    A ``StoreReadError`` is preferred, because it is the error that fails a run
+    A ``OrcapodDatabaseReadError`` is preferred, because it is the error that fails a run
     whatever the orchestrator's ``error_policy``; failing that, an
     ``InputValidationError`` from a refused append.
 
@@ -360,10 +413,10 @@ def _store_error_to_raise(errors: list[Exception]) -> Exception | None:
         errors: The error of every batch that failed, in flush order.
 
     Returns:
-        The first ``StoreReadError``, else the first ``InputValidationError``, or
-        ``None`` when no batch failed with a store error.
+        The first ``OrcapodDatabaseReadError``, else the first ``InputValidationError``, or
+        ``None`` when no batch failed with a database error.
     """
-    for kind in (StoreReadError, InputValidationError):
+    for kind in (OrcapodDatabaseReadError, InputValidationError):
         chosen = next((e for e in errors if isinstance(e, kind)), None)
         if chosen is not None:
             return chosen
@@ -375,7 +428,7 @@ class _CommittedSnapshot:
     """What one version of a stored Delta table holds, kept in memory (ITL-919).
 
     Per-row lookups are answered from this snapshot instead of re-reading the table.
-    Each part is read on first use and extended in place after this store's own
+    Each part is read on first use and extended in place after this database's own
     commits, so its cost follows the rows written, not the rows stored.
 
     Attributes:
@@ -601,17 +654,17 @@ class DeltaTableDatabase:
             self._delta_table_cache.pop(record_key, None)
             raise self._read_failed(record_path) from e
 
-    def _read_failed(self, record_path: tuple[str, ...]) -> StoreReadError:
+    def _read_failed(self, record_path: tuple[str, ...]) -> OrcapodDatabaseReadError:
         """Build the error for a table at ``record_path`` that exists but cannot be read.
 
         Args:
             record_path: Path components relative to this database view.
 
         Returns:
-            A ``StoreReadError`` naming the table; the caller raises it from the
+            A ``OrcapodDatabaseReadError`` naming the table; the caller raises it from the
             backend's exception.
         """
-        return StoreReadError(
+        return OrcapodDatabaseReadError(
             self._get_table_uri(record_path), self._path_prefix + record_path
         )
 
@@ -624,11 +677,11 @@ class DeltaTableDatabase:
         v0.2 stored it), and never enters ``_delta_log``. No table is opened. Only
         flushed tables are listed, as with ``table_exists``.
 
-        A local store is listed exactly. A cloud store is listed through ``fsspec``
+        A local database is listed exactly. A cloud database is listed through ``fsspec``
         with one list request per directory: ``s3://`` and ``s3a://`` through
         ``s3fs`` with the credentials, endpoint and region of this database's
         storage options; ``gs://``, ``az://`` and ``abfs://`` only when the matching
-        ``fsspec`` package is installed and reaches the store with its default
+        ``fsspec`` package is installed and reaches the database with its default
         credentials.
 
         Args:
@@ -638,9 +691,9 @@ class DeltaTableDatabase:
             The table paths, relative to ``self.base_path``, sorted.
 
         Raises:
-            TableListingNotSupportedError: If the store is on cloud storage and
+            TableListingNotSupportedError: If the database is on cloud storage and
                 could not be listed; the reason is chained.
-            StoreReadError: If a local directory could not be listed.
+            OrcapodDatabaseReadError: If a local directory could not be listed.
         """
         full_prefix = self._path_prefix + prefix
         if self._is_cloud:
@@ -671,10 +724,10 @@ class DeltaTableDatabase:
             except Exception as exc:
                 if self._is_cloud:
                     raise TableListingNotSupportedError(
-                        f"Could not list the tables of the Delta store at "
+                        f"Could not list the tables of the Delta database at "
                         f"{self._root_uri!r}: {type(exc).__name__}: {exc}"
                     ) from exc
-                raise StoreReadError(directory, full_prefix + below) from exc
+                raise OrcapodDatabaseReadError(directory, full_prefix + below) from exc
             for name in children:
                 if name == _DELTA_LOG_DIRECTORY:
                     found.append(prefix + below)
@@ -691,7 +744,7 @@ class DeltaTableDatabase:
 
         Raises:
             TableListingNotSupportedError: If no ``fsspec`` file system is available
-                for this store's scheme.
+                for this database's scheme.
         """
         import fsspec
 
@@ -711,7 +764,7 @@ class DeltaTableDatabase:
             # deltalake refuses a plain-HTTP endpoint unless AWS_ALLOW_HTTP is set;
             # the listing follows the same rule and sends no credentials over it.
             raise TableListingNotSupportedError(
-                f"The Delta store at {self._root_uri!r} cannot list its tables: its "
+                f"The Delta database at {self._root_uri!r} cannot list its tables: its "
                 "endpoint uses plain HTTP and AWS_ALLOW_HTTP is not set."
             )
         try:
@@ -721,7 +774,7 @@ class DeltaTableDatabase:
             )
         except Exception as exc:
             raise TableListingNotSupportedError(
-                f"The Delta store at {self._root_uri!r} cannot list its tables: no "
+                f"The Delta database at {self._root_uri!r} cannot list its tables: no "
                 f"usable fsspec file system for {scheme!r} "
                 f"({type(exc).__name__}: {exc})."
             ) from exc
@@ -864,14 +917,16 @@ class DeltaTableDatabase:
             "pa_ds.FileSystemDataset",
             delta_to_pyarrow_dataset(delta_table, as_large_types=True),
         )
-        table = arrow_utils.normalize_table_view_types(dataset.to_table())
+        table = from_delta_layout(
+            arrow_utils.normalize_table_view_types(dataset.to_table())
+        )
         return table.combine_chunks(), frozenset(dataset.files), dataset.schema
 
     def _stored_ids(self, record_path: tuple[str, ...]) -> set[bytes]:
         """Return the record ids stored at ``record_path`` (in the loaded version).
 
         Raises:
-            StoreReadError: If the table exists but its ids could not be read.
+            OrcapodDatabaseReadError: If the table exists but its ids could not be read.
         """
         delta_table = self._get_delta_table(record_path)
         if delta_table is None:
@@ -891,7 +946,7 @@ class DeltaTableDatabase:
         """Return the indexed rows stored at ``record_path``, or ``None`` if no table.
 
         Raises:
-            StoreReadError: If the table exists but could not be read.
+            OrcapodDatabaseReadError: If the table exists but could not be read.
         """
         delta_table = self._get_delta_table(record_path)
         if delta_table is None:
@@ -1218,7 +1273,7 @@ class DeltaTableDatabase:
         ``when_not_matched_insert_all``), so a pending row with a stored id is
         never returned by a read: the stored row is. The stored ids are read even
         when ``pending`` is empty, so a read with rows pending raises
-        ``StoreReadError`` whenever the stored ids cannot be read.
+        ``OrcapodDatabaseReadError`` whenever the stored ids cannot be read.
 
         Args:
             record_path: Path components relative to this database view.
@@ -1333,7 +1388,7 @@ class DeltaTableDatabase:
             Combined Arrow table with all records, or None if no records exist
 
         Raises:
-            StoreReadError: If the Delta table exists but could not be read.
+            OrcapodDatabaseReadError: If the Delta table exists but could not be read.
         """
         tables_to_combine = []
 
@@ -1349,6 +1404,7 @@ class DeltaTableDatabase:
                 raise
             except Exception as e:
                 raise self._read_failed(record_path) from e
+            delta_table_data = from_delta_layout(delta_table_data)
             if delta_table_data.num_rows > 0:
                 tables_to_combine.append(delta_table_data)
 
@@ -1514,7 +1570,7 @@ class DeltaTableDatabase:
         if pending is not None:
             id_type = pending.table.schema.field(self.RECORD_ID_COLUMN).type
             # Reading the stored ids drops the pending rows a flush would not
-            # insert; it raises StoreReadError when the stored table cannot be read.
+            # insert; it raises OrcapodDatabaseReadError when the stored table cannot be read.
             pending_matches = self._without_stored_ids(
                 record_path, self._rows_with_ids(pending, record_ids_list, id_type)
             )
@@ -1572,10 +1628,10 @@ class DeltaTableDatabase:
         stays queued, so a later flush tries it again, and each failure is logged.
 
         Raises:
-            StoreReadError: If a batch's existing table could not be loaded. It is
+            OrcapodDatabaseReadError: If a batch's existing table could not be loaded. It is
                 raised as itself; every other batch that failed in this flush is
                 added to it as a note.
-            InputValidationError: If no batch failed with ``StoreReadError`` but a
+            InputValidationError: If no batch failed with ``OrcapodDatabaseReadError`` but a
                 batch's column types differ from its stored table's. Other failed
                 batches are added to it as notes.
             RuntimeError: If batches failed with other errors only, naming the
@@ -1589,16 +1645,16 @@ class DeltaTableDatabase:
                 logger.error(f"Error flushing batch for {record_key}: {e}")
                 errors.append((record_key, e))
         if errors:
-            store_error = _store_error_to_raise([e for _, e in errors])
-            if store_error is not None:
+            database_error = _database_error_to_raise([e for _, e in errors])
+            if database_error is not None:
                 # Keep every other failure visible on the error that is raised.
                 for record_key, other in errors:
-                    if other is not store_error:
-                        store_error.add_note(
+                    if other is not database_error:
+                        database_error.add_note(
                             f"Another batch also failed to flush ({record_key}): "
                             f"{type(other).__name__}: {other}"
                         )
-                raise store_error
+                raise database_error
             failed_keys = [k for k, _ in errors]
             raise RuntimeError(
                 f"Failed to flush {len(errors)} batch(es): {failed_keys}"
@@ -1646,9 +1702,12 @@ class DeltaTableDatabase:
         try:
             # Combine all tables in the batch. Convert view types so they never
             # reach storage (ENG-601).
-            combined_table = arrow_utils.normalize_table_view_types(
+            original_table = arrow_utils.normalize_table_view_types(
                 pending_batch.combine_chunks()
             )
+            # A column whose type Delta would not give back is written in its
+            # integer form with its type recorded (ITL-928).
+            combined_table = to_delta_layout(original_table)
 
             # Ensure parent directory exists (local only)
             if not self._is_cloud:
@@ -1668,7 +1727,9 @@ class DeltaTableDatabase:
             except TableNotFoundError:
                 delta_table = None
             except Exception as load_error:
-                raise StoreReadError(table_uri, abs_path_components) from load_error
+                raise OrcapodDatabaseReadError(
+                    table_uri, abs_path_components
+                ) from load_error
 
             if delta_table is None:
                 # TODO: reconsider mode="overwrite" here
@@ -1685,15 +1746,35 @@ class DeltaTableDatabase:
                     f"Created new Delta table for {record_key} with {len(combined_table)} records"
                 )
             else:
-                mismatch = self._incompatible_append_column(delta_table, combined_table)
+                mismatch = self._incompatible_append_column(
+                    delta_table, original_table, combined_table
+                )
                 if mismatch is not None:
                     column, stored_type, incoming_type = mismatch
                     raise InputValidationError(
                         f"Cannot append to the stored table {table_uri!r}: column "
                         f"{column!r} is stored as {stored_type} but the new rows have "
                         f"{incoming_type} (input type "
-                        f"{combined_table.schema.field(column).type}). "
+                        f"{original_table.schema.field(column).type}). "
                         "The stored rows are unchanged and nothing was written."
+                    )
+                overflowing = first_column_out_of_stored_range(
+                    original_table,
+                    [
+                        f.name
+                        for f in delta_table.schema().fields
+                        if recorded_type(f.metadata) is None
+                    ],
+                )
+                if overflowing is not None:
+                    raise InputValidationError(
+                        f"Cannot append to the stored table {table_uri!r}: column "
+                        f"{overflowing!r} is stored as a signed integer with no "
+                        "recorded Arrow type (a table written before ITL-928), and "
+                        "the new rows have "
+                        f"{original_table.schema.field(overflowing).type} values it "
+                        "cannot hold. The stored rows are unchanged and nothing was "
+                        "written; rebuild the database."
                     )
                 base = self._snapshot_for_commit(
                     record_key, delta_table, table_uri, abs_path_components
@@ -1716,7 +1797,9 @@ class DeltaTableDatabase:
                 else:
                     # Some pending ids are stored already: insert only the others.
                     delta_table.merge(
-                        source=combined_table,
+                        source=_merge_source_in_stored_layout(
+                            delta_table, combined_table
+                        ),
                         predicate=f"target.{self.RECORD_ID_COLUMN} = source.{self.RECORD_ID_COLUMN}",
                         source_alias="source",
                         target_alias="target",
@@ -1796,8 +1879,18 @@ class DeltaTableDatabase:
         Returns:
             Whether an append stores ``batch`` exactly as the MERGE would.
         """
+        # Delta stores a logical column as its storage type (ITL-984): compare that,
+        # or a batch with a logical list never equals the stored plain list.
+        schema = pa.schema(
+            [
+                f.with_type(f.type.storage_type)
+                if isinstance(f.type, pa.ExtensionType)
+                else f
+                for f in batch.schema
+            ]
+        )
         try:
-            incoming = _as_delta_writer_stores(batch.schema)
+            incoming = _as_delta_writer_stores(schema)
         except Exception:
             # A type Delta cannot store directly (null): leave it to the MERGE.
             return False
@@ -1836,7 +1929,7 @@ class DeltaTableDatabase:
             A snapshot of the loaded version with its ``ids`` read.
 
         Raises:
-            StoreReadError: If the stored ids could not be read.
+            OrcapodDatabaseReadError: If the stored ids could not be read.
         """
         cached = self._snapshots.get(record_key)
         if (
@@ -1848,7 +1941,7 @@ class DeltaTableDatabase:
         try:
             ids = self._scan_ids(delta_table)
         except Exception as e:
-            raise StoreReadError(table_uri, abs_path_components) from e
+            raise OrcapodDatabaseReadError(table_uri, abs_path_components) from e
         return _CommittedSnapshot(delta_table.version(), ids=ids)
 
     def _extend_snapshot(
@@ -1904,6 +1997,7 @@ class DeltaTableDatabase:
             if added
             else dataset.schema.empty_table()
         )
+        new_rows = from_delta_layout(new_rows)
         if not new_rows.schema.equals(base.rows.table.schema):
             return snapshot
         rows = base.rows
@@ -1915,7 +2009,7 @@ class DeltaTableDatabase:
 
     @staticmethod
     def _incompatible_append_column(
-        delta_table: deltalake.DeltaTable, batch: pa.Table
+        delta_table: deltalake.DeltaTable, batch: pa.Table, written: pa.Table
     ) -> tuple[str, pa.DataType, pa.DataType] | None:
         """Find a column whose type in ``batch`` differs from the stored table's.
 
@@ -1933,37 +2027,63 @@ class DeltaTableDatabase:
         see ``_types_conflict``. The stored schema comes from the loaded log; no
         data is read.
 
+        A stored column whose Arrow type is recorded (ITL-928, see
+        ``delta_arrow_types``) is compared by that type with the batch's own type
+        instead. A stored column without one was written before types were
+        recorded: besides the check above, the form the batch is written in
+        (``written``) must be the stored type, so a ``timestamp[ns]`` batch, now
+        written as ``int64``, is refused by a column stored as ``timestamp[us]``.
+
         Args:
             delta_table: The loaded stored table.
-            batch: The rows about to be merged into it.
+            batch: The rows about to be merged into it, with their own types.
+            written: ``batch`` as it is written (``to_delta_layout(batch)``).
 
         Returns:
             ``(column, stored_type, incoming_type)`` for the first column whose
             compared types differ, or ``None`` when the batch can be appended.
         """
         stored = _stored_arrow_schema(delta_table)
-        compared = [
-            (f.name, _without_null_types(_comparable_storage_type(f.type)))
-            for f in batch.schema
-        ]
-        incoming = _as_delta_writer_stores(
-            pa.schema([pa.field(name, t) for name, t in compared if t is not None])
-        )
-        for field in incoming:
-            index = stored.get_field_index(field.name)
-            if index < 0:
+        recorded = {
+            f.name: recorded_type(f.metadata) for f in delta_table.schema().fields
+        }
+
+        def comparable(arrow_type: pa.DataType) -> pa.DataType:
+            return _comparable_storage_type(
+                arrow_utils.normalize_to_large_types(arrow_type, keep_null=True)
+            )
+
+        def conflict(
+            stored_schema: pa.Schema, rows: pa.Schema
+        ) -> tuple[str, pa.DataType, pa.DataType] | None:
+            compared = [
+                (f.name, _without_null_types(_comparable_storage_type(f.type)))
+                for f in rows
+                if recorded.get(f.name) is None
+            ]
+            incoming = _as_delta_writer_stores(
+                pa.schema([pa.field(name, t) for name, t in compared if t is not None])
+            )
+            for field in incoming:
+                index = stored_schema.get_field_index(field.name)
+                if index < 0:
+                    continue
+                stored_type = comparable(stored_schema.field(index).type)
+                incoming_type = comparable(field.type)
+                if _types_conflict(stored_type, incoming_type):
+                    return field.name, stored_type, incoming_type
+            return None
+
+        for field in batch.schema:
+            stored_original = recorded.get(field.name)
+            if stored_original is None:
                 continue
-            stored_type = _comparable_storage_type(
-                arrow_utils.normalize_to_large_types(
-                    stored.field(index).type, keep_null=True
-                )
-            )
-            incoming_type = _comparable_storage_type(
-                arrow_utils.normalize_to_large_types(field.type, keep_null=True)
-            )
-            if _types_conflict(stored_type, incoming_type):
-                return field.name, stored_type, incoming_type
-        return None
+            reduced = _without_null_types(comparable(field.type))
+            if reduced is not None and _types_conflict(
+                comparable(stored_original), reduced
+            ):
+                return field.name, stored_original, field.type
+        return conflict(stored, batch.schema) or conflict(stored, written.schema)
 
     @property
     def base_path(self) -> tuple[str, ...]:

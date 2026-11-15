@@ -23,10 +23,11 @@ This boundary ensures that structural operations (joins, filters) and value comp
 (transformations, model inference) are cleanly separated, making pipelines easier to reason
 about and optimize.
 
-`GroupBy` is the one operator that reduces row count many-to-one: it collapses N rows sharing
-a tag tuple into a single row with list-valued members. It stays on the operator side of the
-boundary because it synthesizes no new data values -- every element of every emitted list came
-from an input row -- and it keys only on tags, never on data content.
+`GroupBy` is the one operator that reduces row count many-to-one by key: it collapses N rows
+sharing a key into a single row with list-valued data members, and keeps only its key tags. It
+stays on the operator side of the boundary because it synthesizes no new data values -- every
+element of every emitted list came from an input row -- and it keys only on tags, never on data
+content.
 
 One rule holds for every operator: **no data element comes from a tag value**. An operator may
 use tags to join, filter, group or order rows, but it never turns a tag column into a data
@@ -35,6 +36,14 @@ column, so a function pod never receives tag content.
 The filters are the operators that read data columns: `PolarsFilter` evaluates its predicate
 on values, and `DropNulls` reads only whether a value is present (its validity), never the
 value. Both decide which rows exist; neither synthesizes a value.
+
+No operator carries its inputs' meta columns: the `__`-prefixed columns, such as a cached
+function pod's `__computed`, that describe how an input row was produced. An operator's
+output row is produced by the operator, so its `Data` holds none of them and its predicted
+output schema lists none, on the sync and the async path alike. A way to carry them forward
+across operators is an open design question (ITL-867). The `__` prefix is reserved for meta
+columns: a stream and a source refuse a tag column named with it, and `MapTags` and `MapData`
+refuse it as the new name of a tag or data column.
 
 ## Operator categories
 
@@ -57,9 +66,22 @@ Takes one or more streams. Used for `Join`, which performs an N-ary inner join.
 
 N-ary inner join on shared tag columns. Requires that input streams have non-overlapping
 data columns (raises `InputValidationError` on collision). Join is **commutative** -- the
-order of input streams does not affect the result. Join drops its inputs' meta
-(`__`-prefixed) columns, such as a cached function pod's `__computed`, so they never collide
-and never appear in its output.
+order of input streams does not affect the result. Like every operator, Join drops its
+inputs' meta (`__`-prefixed) columns, so they never collide. Rows match on equality of every shared tag column, whatever
+its type (lists and structs compare element by element). A row with a null in any shared tag
+column matches nothing, a null list or struct included, and rows with null on both sides do
+not match each other (the SQL convention for nulls; `MergeJoin` and `SemiJoin` follow it too, on the sync and the async path, while `GroupBy` is the exception by design and puts null keys in one group); a null *inside* a list or struct is an ordinary element that equals
+another null, an empty list is not a null, and NaN equals NaN. The async path gives the same
+rows.
+
+Because a null key matches nothing, a shared tag column may differ between the inputs in
+nullability alone: `T` in one input and `T | None` in another is accepted by `Join`, `MergeJoin`
+and `SemiJoin`. In the output of `Join` and `MergeJoin` the column is `T` when any input has it
+`T`, and `T | None` only when every input has it nullable; `SemiJoin`'s output keeps the left
+input's type. Any other type difference is still an error, and a data column is never
+reconciled this way.
+
+A name is a tag or a data column, never both: if one input has `x` as a tag column and another has it as a data column, `Join` (and `MergeJoin`) raises `InputValidationError` when the graph is built; rename one with `map_tags` or `map_data`.
 
 Column order follows each operator's argument symmetry: commutative operators (`Join`,
 `MergeJoin`) list tag and data columns by first appearance across their inputs in canonical
@@ -137,6 +159,17 @@ stream. The right stream's data columns are discarded. SemiJoin is **not commuta
 the order of inputs matters. The first stream is the one being filtered; the second stream
 provides the set of matching tags.
 
+The match keys are exactly the columns that are tag columns of both streams. A name the two
+streams share as a data column, or a tag in one and a data column in the other, is not a key
+and is ignored: the right stream's data columns are never read. If the streams share no tag
+column, every left row is returned. Because such names were match keys before v0.3, SemiJoin
+names them in a `SemiJoinIgnoredColumnWarning` (from `orcapod.errors`). This behaviour is
+provisional in v0.3 and may become an error. To silence the warning, rename or drop the
+column on the right stream before the semi join (`map_data`, `select_data_columns`,
+`drop_data_columns`, or `map_tags` for a tag). A right stream must keep at least one data
+column, so a filtered copy of the left stream (which shares every data name) can be reduced
+to one renamed column, e.g. `subset.select_data_columns(["age"]).map_data({"age": "_age"})`.
+
 ```python
 from orcapod.sources import DictSource
 from orcapod.operators import SemiJoin
@@ -197,6 +230,10 @@ batch may be smaller; pass `drop_partial_batch=True` to discard it:
 batch = Batch(batch_size=10, drop_partial_batch=True)
 ```
 
+`Batch` keeps every tag, list-valued. It batches blindly, by count: it has no key, so the lists
+of tag values are the only thing that tells a batch's members apart. `GroupBy` (below) has a
+key and keeps only that.
+
 ### GroupBy
 
 Collapses every set of rows that share a tag tuple into a single row -- the one many-to-one
@@ -219,43 +256,58 @@ source = DictSource(
 
 grouped = GroupBy(by=["subject_id"])(source)
 print(grouped.keys())
-# (('subject_id', 'probe'), ('spike_count',))
+# (('subject_id',), ('spike_count',))
 for tag, data in grouped.iter_data():
     print("Tags:", tag.as_dict(), "Data:", data.as_dict())
-    # Tags: {'subject_id': 'mouse_01', 'probe': ['imec0', 'imec1']} Data: {'spike_count': [1200, 980]}
-    # Tags: {'subject_id': 'mouse_02', 'probe': ['imec0']} Data: {'spike_count': [1450]}
+    # Tags: {'subject_id': 'mouse_01'} Data: {'spike_count': [1200, 980]}
+    # Tags: {'subject_id': 'mouse_02'} Data: {'spike_count': [1450]}
 ```
 
 The output schema follows three rules:
 
-- **Group keys stay scalar tag columns** (`subject_id: str`).
-- **Non-key tag columns stay tag columns and become list-valued** (`probe: list[str]`), one
-  element per member, in the same order as the data lists. The output's tag columns are the
-  input's tag columns, in the same order. This is what `Batch` does with its tags too.
-- **Data columns become `list[T]`** (`spike_count: list[int]`).
+- **Group keys stay scalar tag columns** (`subject_id: str`), in the input's tag order. They are
+  the only tag columns of the output.
+- **A tag that is not a key is dropped** (`probe`). A list of the members' values is not a key
+  for the group, just as SQL drops a non-key, non-aggregated column after `GROUP BY`.
+- **Data columns become `list[T]`** (`spike_count: list[int]`), one element per member.
 
-The data columns of the output are exactly the data columns of the input. A function pod that
-follows `GroupBy` receives `spike_count` only; it cannot read `probe`, because a pod never sees
-tags. If the function needs to know which member each element came from, make that value a data
-column of the source. To remove the list-valued tags, use `drop_tag_columns`:
+!!! warning "Member tag values are not carried"
+    `GroupBy` does not keep the members' values of a non-key tag, as a tag or as data. If a
+    later step needs to know which member each element came from, make the column data
+    *before* grouping: declare it as data at the source, or derive a source that offers the tag
+    as data with `DerivedSource(origin, tags_as_data={...})`.
 
 ```python
-print(grouped.drop_tag_columns(["probe"]).keys())
-# (('subject_id',), ('spike_count',))
+from orcapod.sources import DerivedSource
+
+with_probe = DerivedSource(source, tags_as_data={"probe": "probe_name"})
+by_subject = GroupBy(by=["subject_id"])(with_probe)
+print(by_subject.keys())
+# (('subject_id',), ('spike_count', 'probe_name'))
+for tag, data in by_subject.iter_data():
+    print(tag.as_dict(), data.as_dict())
+    # {'subject_id': 'mouse_01'} {'spike_count': [1200, 980], 'probe_name': ['imec0', 'imec1']}
+    # {'subject_id': 'mouse_02'} {'spike_count': [1450], 'probe_name': ['imec0']}
 ```
 
-A grouped stream can be grouped again on a coarser key. Its list-valued tags then nest one level
-deeper (`list[list[T]]`), like the data lists.
+The data columns of the output are exactly the data columns of the input: a function pod that
+follows `GroupBy` receives `spike_count` (and `probe_name`, when the source offers it), never a
+tag.
 
 Ordering is deterministic by construction, because orcapod hashes the emitted lists to build
-cache keys: members are sorted by their non-key tag values (with the internal record id as a
-final tiebreaker), and groups are emitted in group-key order. A reordered input therefore
-produces a byte-identical output table.
+cache keys: members are sorted by the input's non-key tag values (with the internal record id
+as a final tiebreaker), even though those tags are dropped, and groups are emitted in group-key
+order. A reordered input therefore produces a byte-identical output table.
+
+A grouped stream can be grouped again on a coarser key; its data lists then nest one level
+deeper (`list[list[T]]`). The members of the second grouping are ordered by the first
+grouping's keys that are not in the coarser key, then by record id; a tag the first grouping
+dropped no longer takes part.
 
 Every name in `by` must be a **scalar tag column** of the input. `GroupBy` raises
 `InputValidationError` for an unknown column, a data column, or a list-valued tag column --
-the last means the stream came from `Batch` or from an earlier `GroupBy` that did not key on
-that column, so group *before* batching rather than after.
+the last usually means the stream came from `Batch`, so group *before* batching rather than
+after.
 
 Streams also expose this as a fluent method:
 
@@ -292,6 +344,39 @@ print(result.keys()[1])  # ('weight',)
 
 Selecting a column that does not exist raises `InputValidationError`; pass `strict=False` to
 ignore missing columns instead.
+
+Two more act on named columns whether each is a tag or a data column:
+
+- **`DropColumns(columns=["col1", "col2"])`** -- remove the named columns, tag or data
+- **`SelectColumns(columns=["col1", "col2"])`** -- keep exactly the named columns, tag or
+  data, and remove every other tag and data column
+
+Streams offer them as `drop_columns` and `select_columns`, which take the names as one or
+more strings or as one collection: `stream.drop_columns("a", "b")` is
+`stream.drop_columns(["a", "b"])`. A removed data column's source-info column goes with it,
+and system tags are kept, as with the four operators above.
+
+```python
+sessions = DictSource(
+    data=[
+        {"subject_id": "mouse_01", "session": 1, "age": 12, "weight": 25.3},
+        {"subject_id": "mouse_02", "session": 2, "age": 8, "weight": 22.1},
+    ],
+    tag_columns=["subject_id", "session"],
+)
+
+dropped = sessions.drop_columns("session", "age")
+print(dropped.keys())  # (('subject_id',), ('weight',))
+```
+
+```python
+selected = sessions.select_columns(["session", "weight"])
+print(selected.keys())  # (('session',), ('weight',))
+```
+
+A stream needs at least one data column, so `drop_columns` of every data column, or
+`select_columns` naming no data column, raises `InputValidationError` when it is called.
+Selecting no tag column is allowed.
 
 `SelectDataColumns` is also how you narrow a stream before a
 [function pod](function-pods.md), which accepts only the data columns its function declares.
@@ -449,9 +534,10 @@ The rules:
   was). The new hash is the one the row has in a stream that declared the column
   non-nullable from the start.
 
-Tag columns work the same way. A stream whose key column is `str | None` cannot be joined
-with one whose key is `str` (`Join` never reconciles types), so narrow the key first. The
-stream method is `drop_nulls`:
+Tag columns work the same way. A stream whose key column is `str | None` can be joined with
+one whose key is `str`: a null key matches nothing, so the joined key comes out `str` (see
+`Join`). Narrowing still matters wherever a column must be `T` before it is consumed, such
+as a pod parameter typed `str`. The stream method is `drop_nulls`:
 
 ```python
 by_method = recordings.drop_nulls(["session", "start_ms"])
@@ -464,7 +550,8 @@ print(by_method.pipeline_hash() == by_operator.pipeline_hash())
 
 `DropNulls()` and `stream.drop_nulls()`, with no names, drop every row that has a null in
 **any** tag or data column, and make every tag and data column non-nullable. System-tag,
-source-info, context and meta columns are never tested or changed.
+source-info, context and meta columns are never tested (meta columns are not carried
+at all, as by every operator).
 
 ```python
 visits = ArrowTableSource(
@@ -547,6 +634,10 @@ silent widening; convert explicitly.
 - **Types are normalized to their large variants.** `string` becomes `large_string`,
   `binary` becomes `large_binary` and `list` becomes `large_list`, recursively (also inside
   structs). The Arrow hasher treats each pair as identical, so this never changes a hash.
+  Every operator does this, also one that passes its rows through unchanged (a select, a
+  rename, a filter with nothing to filter, a join), on a plain stream as inside a job. Every
+  source gives large types too, so an operator's inputs already have them (see
+  [Arrow types of a source](sources.md#arrow-types-of-a-source)).
 - **Width, nullability and logical types are kept.** An `int8` column stays `int8`, a
   `float32` column stays `float32`, and a logical type such as `Path` keeps its logical type.
 - **List columns built by `MergeJoin`, `Batch` and `GroupBy`** are `large_list<T>`, where `T`
@@ -562,7 +653,12 @@ silent widening; convert explicitly.
   the join runs, not when the pipeline is built.
 - **Sync and async execution agree.** An operator run asynchronously (`async_execute`, as in
   an async pipeline) yields rows with the same Arrow types, column order, system tags and
-  content hashes as the same operator run synchronously.
+  content hashes as the same operator run synchronously, whether its inputs are sources or
+  the outputs of other operators and function pods. An input that delivers no rows gives no
+  rows on both paths. One limit remains: an async channel carries rows, not a schema, so
+  where the sync path returns an empty stream with typed columns the async path emits
+  nothing. An operator node that received no rows still reads back the sync path's columns
+  and Arrow types: its operator applied to its inputs' zero-row tables (ITL-858, ITL-912).
 
 ```python
 import pyarrow as pa
@@ -620,9 +716,8 @@ for tag, data in adults.iter_data():
 ```
 
 !!! note
-    The fluent `map_tags` and `map_data` methods default to `drop_unmapped=True`, the
-    opposite of the `MapTags` and `MapData` operator classes. Pass `drop_unmapped`
-    explicitly when you rename only some of the columns.
+    The fluent `map_tags` and `map_data` methods and the `MapTags` and `MapData` operator
+    classes all keep the columns they do not rename. Pass `drop_unmapped=True` to drop them.
 
 ## How it connects to other concepts
 

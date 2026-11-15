@@ -357,10 +357,10 @@ class NodeConfig:
     Attributes:
         is_result_ephemeral: ``None`` inherits the default (``False``).
             ``True`` writes new computation results to the pipeline-scoped
-            ephemeral store instead of the persistent result database.
+            ephemeral database instead of the persistent result database.
             Persistent cache hits are still served when available. Raises
             ``RuntimeError`` at execution time if ``True`` but no ephemeral
-            store has been injected via ``set_ephemeral_store()``.
+            database has been injected via ``set_ephemeral_database()``.
     """
 
     is_result_ephemeral: bool | None = None
@@ -505,11 +505,14 @@ class ColumnConfig:
             all_info: If True, override config to include all columns.
 
         Returns:
-            Normalized ColumnConfig instance.
+            Normalized ColumnConfig instance. When ``all_info`` is set, by the
+            keyword or inside ``config`` (``{"all_info": True}`` or
+            ``ColumnConfig(all_info=True)``), every group is on, whatever else
+            ``config`` says; an embedded ``all_info=True`` is not cancelled by a
+            ``False`` keyword.
         """
         if all_info:
             return cls.all()
-        # TODO: properly handle non-boolean values when using all_info
 
         if config is None:
             column_config = cls()
@@ -523,6 +526,8 @@ class ColumnConfig:
                 "Expected ColumnConfig instance or dict."
             )
 
+        if column_config.all_info and column_config != cls.all():
+            return cls.all()
         return column_config
 
 
@@ -710,10 +715,11 @@ class Cursor(Generic[_T]):
             timestamp, integer offset, string pagination token, or any
             other type meaningful to the implementation.
         modified_at: Optional wall-clock time when the source content at
-            this cursor position was last modified. When provided,
-            ``PollingSource`` uses this to update its ``last_modified``
-            timestamp for downstream staleness detection. When ``None``,
-            the framework falls back to its own wall clock.
+            this cursor position was last modified. Informational only: it is
+            not used for staleness. ``PollingSource`` moves its own
+            ``last_modified`` to the moment a poll finds rows it did not have
+            (ITL-1102), because content modified before a downstream node's
+            last run but found after it must still make that node stale.
     """
 
     value: _T

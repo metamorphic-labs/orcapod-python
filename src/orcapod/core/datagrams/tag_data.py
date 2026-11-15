@@ -22,7 +22,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Self
 
 from orcapod import contexts
-from orcapod.core.datagrams.datagram import Datagram
+from orcapod.core.datagrams.datagram import Datagram, context_key_field
 from orcapod.semantic_types import infer_python_schema_from_pylist_data
 from orcapod.system_constants import constants
 from orcapod.types import (
@@ -48,6 +48,13 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Tag
 # ---------------------------------------------------------------------------
+
+
+def _source_info_field(name: str, token: SourceInfoValue) -> pa.Field[Any]:
+    """The field of source-info column ``name`` holding ``token``, as a row's table has it."""
+    import pyarrow as _pa
+
+    return _pa.field(name, arrow_utils.source_info_arrow_type(token))
 
 
 class Tag(Datagram):
@@ -367,16 +374,19 @@ class Data(Datagram):
         if self._source_info_table is None:
             import pyarrow as _pa
 
-            if self._source_info:
+            # Only the source info of the data columns this Data holds, in the order of
+            # those columns, as every other view gives it (ITL-1040).
+            current = {
+                k: self._source_info[k]
+                for k in super().keys()
+                if k in self._source_info
+            }
+            if current:
                 prefixed = {
-                    f"{constants.SOURCE_PREFIX}{k}": v
-                    for k, v in self._source_info.items()
+                    f"{constants.SOURCE_PREFIX}{k}": v for k, v in current.items()
                 }
                 schema = _pa.schema(
-                    [
-                        _pa.field(k, arrow_utils.source_info_arrow_type(v))
-                        for k, v in prefixed.items()
-                    ]
+                    [_source_info_field(k, v) for k, v in prefixed.items()]
                 )
                 self._source_info_table = _pa.Table.from_pylist(
                     [prefixed], schema=schema
@@ -384,6 +394,55 @@ class Data(Datagram):
             else:
                 self._source_info_table = _pa.table({})
         return self._source_info_table
+
+    @staticmethod
+    def function_output_zero_row_table(
+        python_schema: Schema,
+        data_context: contexts.DataContext,
+        meta_python_schema: Schema | None = None,
+    ) -> pa.Table:
+        """The table a function's output rows give, with no row.
+
+        The zero-row form of ``Data.as_table(columns={"context": True, "source":
+        True})`` for the ``Data`` a data function returns: built with
+        ``python_schema=`` its declared output schema and a string source-info
+        token for every column. Each part comes from the code that types a
+        computed row: the data fields from the converter's
+        ``python_schema_to_arrow_schema`` (``Datagram._ensure_arrow_schema``), the
+        context field from ``context_key_field``, the meta fields from the same
+        conversion of their Python types (``Datagram._ensure_meta_table``) and the
+        source-info fields from ``_source_info_field`` with a string token
+        (ITL-912). The columns are in the order ``Data.arrow_schema`` gives them.
+
+        Args:
+            python_schema: The function's declared output schema.
+            data_context: The data context the rows are typed in.
+            meta_python_schema: The meta columns every output row carries (a
+                cached pod's ``__computed`` flag), if any.
+
+        Returns:
+            A zero-row table: data columns, ``_context_key``, meta columns,
+            source-info columns.
+        """
+        import pyarrow as _pa
+
+        fields = list(
+            data_context.type_converter.python_schema_to_arrow_schema(python_schema)
+        )
+        fields.append(context_key_field())
+        if meta_python_schema:
+            fields.extend(
+                data_context.type_converter.python_schema_to_arrow_schema(
+                    meta_python_schema
+                )
+            )
+        # A data function's source-info token is always a string (see
+        # ``PythonDataFunction``): the type is the one a string token gives.
+        fields.extend(
+            _source_info_field(f"{constants.SOURCE_PREFIX}{name}", "")
+            for name in python_schema
+        )
+        return _pa.schema(fields).empty_table()
 
     # ------------------------------------------------------------------
     # Source-info API
@@ -475,6 +534,30 @@ class Data(Datagram):
             if si_table.num_columns > 0 and si_table.num_rows > 0:
                 table = arrow_utils.hstack_tables(table, si_table)
         return table
+
+    def select(self, *column_names: str) -> Self:
+        """Return a copy holding only the given data columns and their source info.
+
+        The source info is in the order of the columns the copy holds.
+        """
+        new_p = super().select(*column_names)
+        # Datagram.keys: the data columns, also for an EmptyData, whose keys() raises.
+        new_p._source_info = {
+            k: self._source_info[k]
+            for k in Datagram.keys(new_p)
+            if k in self._source_info
+        }
+        new_p._source_info_table = None
+        return new_p
+
+    def drop(self, *column_names: str, ignore_missing: bool = False) -> Self:
+        """Return a copy without the given data columns and their source info."""
+        new_p = super().drop(*column_names, ignore_missing=ignore_missing)
+        new_p._source_info = {
+            k: v for k, v in self._source_info.items() if k not in column_names
+        }
+        new_p._source_info_table = None
+        return new_p
 
     def rename(self, column_mapping: "Mapping[str, str]") -> Self:
         new_p = super().rename(column_mapping)

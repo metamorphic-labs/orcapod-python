@@ -4,7 +4,8 @@ from typing import TYPE_CHECKING, Any
 
 from orcapod import contexts
 from orcapod.config import OrcapodConfig
-from orcapod.core.streams.base import StreamBase
+from orcapod.core.streams.base import StreamBase, typed_zero_row_table
+from orcapod.core.streams.view import StreamView
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.types import ColumnConfig, Schema
 
@@ -42,11 +43,6 @@ class RootSource(StreamBase):
         Concrete subclasses must ensure ``_source_id`` is set by the end of
         ``__init__``.  File-backed sources (DeltaTableSource, CSVSource) default
         to the file path; ``ArrowTableSource`` defaults to the table's data hash.
-
-    Field resolution:
-        All sources expose ``resolve_field(record_id, field_name)``.  The default
-        implementation raises ``NotImplementedError``; concrete subclasses
-        that back addressable data should override it.
 
     Concrete subclasses must set ``self._stream`` in their ``__init__`` to get
     the default stream delegation behavior. They may also override
@@ -89,24 +85,6 @@ class RootSource(StreamBase):
         return (self.__class__.__name__, self.output_schema(), self.source_id)
 
     # -------------------------------------------------------------------------
-    # Field resolution
-    # -------------------------------------------------------------------------
-
-    def resolve_field(self, record_id: str, field_name: str) -> Any:
-        """Resolve a field value for a record.
-
-        Not implemented by default. Subclasses that back addressable data
-        should override this method.
-
-        Raises:
-            NotImplementedError: Always, by default.
-        """
-        raise NotImplementedError(
-            f"{self.__class__.__name__} does not implement resolve_field. "
-            f"Cannot resolve field {field_name!r} for record {record_id!r}."
-        )
-
-    # -------------------------------------------------------------------------
     # PipelineElementProtocol — schema-only identity (base case of Merkle chain)
     # -------------------------------------------------------------------------
 
@@ -117,7 +95,10 @@ class RootSource(StreamBase):
         cannot be reconstructed from config, preserving identity hashes and
         schemas for downstream consumers.
         """
-        from orcapod.pipeline.serialization import serialize_schema
+        from orcapod.pipeline.serialization import (
+            serialize_nullability,
+            serialize_schema,
+        )
 
         tag_schema, data_schema = self.output_schema()
         type_converter = self.data_context.type_converter
@@ -126,6 +107,7 @@ class RootSource(StreamBase):
             "pipeline_hash": self.pipeline_hash().to_string(),
             "tag_schema": serialize_schema(tag_schema, type_converter),
             "data_schema": serialize_schema(data_schema, type_converter),
+            "nullable": serialize_nullability(tag_schema, data_schema, type_converter),
         }
 
     def pipeline_identity_structure(self) -> Any:
@@ -185,6 +167,73 @@ class RootSource(StreamBase):
     ) -> "pa.Table":
         """Delegate to the underlying stream's as_table."""
         return self._stream.as_table(columns=columns, all_info=all_info)
+
+    # -------------------------------------------------------------------------
+    # The start-of-run check (ITL-1102)
+    # -------------------------------------------------------------------------
+
+    def check_for_new_data(self) -> bool:
+        """Check whether the data behind the source changed; if so, take it in.
+
+        Every run (``job.run()``, ``run_async()``, a job node's ``run()``, a load-only
+        run too) calls this once on each source feeding it, before deciding which
+        nodes to run (developer, November 14, 2026, ITL-1102). A source that finds new
+        data takes it in and moves its modified time to that moment, so every job node
+        below it is stale and runs. A source that finds nothing changes nothing, so a
+        current job stays current. ``head()`` and the notebook preview never call it.
+
+        A source built over data held in memory (``ArrowTableSource``, ``DictSource``,
+        ``ListSource``, ``DataFrameSource``) cannot change: this default returns
+        ``False``. A source that raises here does not fail the run: the run issues a
+        ``SourceCheckFailedWarning`` and proceeds with the data the source holds, so a
+        source must leave its data and modified time as they were when it raises. A
+        source whose reads refresh it (``PollingSource``: a read polls) is refreshed
+        again by a run that reads it, and a refresh that fails then raises (ITL-1139).
+
+        Returns:
+            ``True`` if the source found new data and took it in.
+        """
+        return False
+
+    # A source's rows are its own, not computed: a run() view says "all N rows".
+    _RUN_ORIGIN: str = "held"
+
+    def _typed_zero_row_table(self) -> "pa.Table | None":
+        """The source's zero-row table, from the stream it holds; see ``typed_zero_row_table``.
+
+        A source that reads its table when it is built (Arrow table, dict, list, data
+        frame, CSV, Delta, SQLite, PostgreSQL) holds it in ``_stream``, and a SpiralDB
+        source holds a zero-row stream with the table's schema: either is cut to no
+        rows, so no row is read. A source with no such stream (polling, cached,
+        derived, proxy) reads or polls its rows later and answers ``None``.
+        """
+        return typed_zero_row_table(getattr(self, "_stream", None))
+
+    def _display_name(self) -> str:
+        """The name a preview header shows: the label when one was given, else the
+        source id (a source id is the source's name), e.g. a table's name. The label
+        itself is not changed."""
+        if self.has_assigned_label or self._source_id is None:
+            return self.label
+        return self._source_id
+
+    def head(
+        self,
+        n: int = 10,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> StreamView:
+        """Return the first ``n`` rows of the table the source holds, without computing.
+
+        A source that reads its table when it is built holds it in memory, so this is a
+        slice of it. A source that reads its table later overrides this with a bounded
+        read. See ``StreamBase.head``.
+        """
+        # _stream is set by each concrete subclass (see the class docstring), as for
+        # the other delegating methods here.
+        stream = self._stream  # pyright: ignore[reportAttributeAccessIssue]
+        return stream.head(n, columns=columns, all_info=all_info).for_stream(self)
 
     # -------------------------------------------------------------------------
     # Convenience — caching

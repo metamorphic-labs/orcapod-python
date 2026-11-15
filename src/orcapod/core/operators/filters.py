@@ -29,6 +29,9 @@ class PolarsFilter(UnaryOperator):
     Operator that applies Polars filtering to a stream
     """
 
+    # A filter chooses rows and never changes a column (ITL-912).
+    OUTPUT_SCHEMA_IS_INPUT_SCHEMA = True
+
     def __init__(
         self,
         predicates: Collection[

@@ -10,10 +10,9 @@ import logging
 import uuid
 from typing import TYPE_CHECKING, Any, Literal
 
-from orcapod.errors import StoreError, TypeIdentityError
+from orcapod.errors import OrcapodDatabaseError, TypeIdentityError
 from orcapod.pipeline.result import OrchestratorResult
-from orcapod.utils import arrow_utils
-from orcapod.utils.store_errors import keep_store_error
+from orcapod.utils.database_errors import keep_database_error
 from orcapod.protocols.node_protocols import (
     is_function_node,
     is_operator_node,
@@ -23,6 +22,8 @@ from orcapod.protocols.node_protocols import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from orcapod.pipeline.dag import GraphProtocol
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
     from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
@@ -55,6 +56,8 @@ class SyncPipelineOrchestrator:
         materialize_results: bool = True,
         run_id: str | None = None,
         pipeline_uri: str = "",
+        load_only: bool = False,
+        held_rows: Mapping[Any, list[tuple[TagProtocol, DataProtocol]]] | None = None,
     ) -> OrchestratorResult:
         """Execute the node graph synchronously.
 
@@ -69,6 +72,14 @@ class SyncPipelineOrchestrator:
             pipeline_uri: Opaque URI string identifying this pipeline run
                 (e.g. ``"my_pipeline@a1b2c3d4e5f6a1b2"``).  Forwarded
                 verbatim to ``observer.on_run_start``.
+            load_only: Fill the nodes from what is stored and compute nothing
+                (ITL-1095): function nodes load their inputs' stored results and skip
+                the others, operators run without storing, and a side-effect node
+                passes its rows on and delivers nothing.
+            held_rows: Nodes of ``graph`` that are not run: each one's rows (the rows
+                of its current run, or of a stream outside the job) feed its
+                successors as if it had just run. Used by ``node.run()``, which runs
+                only the nodes it depends on that hold no current run (ITL-1095).
 
         Returns:
             OrchestratorResult with node outputs.
@@ -79,16 +90,19 @@ class SyncPipelineOrchestrator:
         effective_observer = observer if observer is not None else NoOpObserver()
         effective_observer.on_run_start(run_id, pipeline_uri=pipeline_uri)
 
-        store_error: StoreError | TypeIdentityError | None = None
+        database_error: OrcapodDatabaseError | TypeIdentityError | None = None
         current: Any = None
         try:
             topo_order = list(graph.topological_sort())
             buffers: dict[Any, list[tuple[TagProtocol, DataProtocol]]] = {}
             processed: set[Any] = set()
 
+            held = held_rows if held_rows is not None else {}
             for node in topo_order:
                 current = node
-                if is_source_node(node):
+                if node in held:
+                    buffers[node] = list(held[node])
+                elif is_source_node(node):
                     buffers[node] = node.execute(observer=effective_observer)
                 elif is_function_node(node) or is_side_effect_function_node(node):
                     upstream_buf = self._gather_upstream(node, graph, buffers)
@@ -101,6 +115,7 @@ class SyncPipelineOrchestrator:
                         observer=effective_observer,
                         error_policy=self._error_policy,
                         run_id=run_id,
+                        load_only=load_only,
                     )
                 elif is_operator_node(node):
                     upstream_buffers = self._gather_upstream_multi(node, graph, buffers)
@@ -109,7 +124,7 @@ class SyncPipelineOrchestrator:
                         for buf, upstream_node in upstream_buffers
                     ]
                     buffers[node] = node.execute(
-                        *input_streams, observer=effective_observer
+                        *input_streams, observer=effective_observer, load_only=load_only
                     )
                 elif is_side_effect_node(node):
                     upstream_buf = self._gather_upstream(node, graph, buffers)
@@ -117,10 +132,12 @@ class SyncPipelineOrchestrator:
                     input_stream = self._materialize_as_stream(
                         upstream_buf, upstream_node
                     )
+                    # In a load-only run the node passes its rows on and delivers nothing.
                     buffers[node] = node.execute(
                         input_stream,
                         observer=effective_observer,
                         run_id=run_id,
+                        load_only=load_only,
                     )
                 else:
                     raise TypeError(
@@ -136,20 +153,20 @@ class SyncPipelineOrchestrator:
                 buffers.clear()
 
             return OrchestratorResult(node_outputs=buffers)
-        except StoreError as exc:
+        except OrcapodDatabaseError as exc:
             # Name the node the failure belongs to, if the raising site did not.
             if current is not None:
                 exc.add_context(node_label=current.label)
-            store_error = exc
+            database_error = exc
             raise
         except TypeIdentityError as exc:
             # A stored row that cannot be decoded as its class stops the run as a
-            # store error does; on_run_end must not replace it (ITL-881).
-            store_error = exc
+            # database error does; on_run_end must not replace it (ITL-881).
+            database_error = exc
             raise
         finally:
-            # A failing on_run_end must not replace a failed store write.
-            with keep_store_error(store_error, "Observer on_run_end"):
+            # A failing on_run_end must not replace a failed database write.
+            with keep_database_error(database_error, "Observer on_run_end"):
                 effective_observer.on_run_end(run_id)
 
     @staticmethod
@@ -187,58 +204,22 @@ class SyncPipelineOrchestrator:
 
     @staticmethod
     def _materialize_as_stream(buf: list[tuple[Any, Any]], upstream_node: Any) -> Any:
-        """Wrap a (tag, data) buffer as an ArrowTableStream.
+        """Wrap a (tag, data) buffer as the upstream node's stream.
 
-        Builds the table with ``StaticOutputOperatorPod._rows_to_table``, as
-        ``StaticOutputOperatorPod._materialize_to_stream`` does, so every row
-        keeps its own system tags and source info.
+        ``StaticOutputOperatorPod._materialize_upstream`` builds it, the one
+        definition an async operator node shares when it rebuilds its inputs
+        for a run that produced no row.
 
         Args:
             buf: List of (tag, data) tuples.
-            upstream_node: The node that produced this buffer (used to
-                determine tag column names).
+            upstream_node: The node that produced this buffer.
 
         Returns:
             An ArrowTableStream.
         """
-        from orcapod.core.streams.arrow_table_stream import ArrowTableStream
-
-        if not buf:
-            # Build an empty stream preserving declared field nullability.
-            tag_schema, data_schema = upstream_node.output_schema(
-                columns={"system_tags": True, "source": True}
-            )
-            type_converter = upstream_node.data_context.type_converter
-            empty_table = arrow_utils.make_empty_table(
-                {**tag_schema, **data_schema}, type_converter
-            )
-            tag_keys = upstream_node.keys()[0]
-            return ArrowTableStream(
-                empty_table,
-                tag_columns=tag_keys,
-                producer=upstream_node.producer,
-                upstreams=upstream_node.upstreams,
-            )
-
         from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 
-        # Each row keeps its own system tags and source info.
-        full_table, user_tag_keys = StaticOutputOperatorPod._rows_to_table(buf)
-
-        # Pass the upstream node's producer and upstreams so the
-        # materialized stream inherits the correct identity_structure
-        # and pipeline_identity_structure (via StreamBase delegation).
-        # This ensures downstream operators produce correct system tag
-        # column names (which embed pipeline hashes of their inputs).
-        producer = upstream_node.producer
-        upstreams = upstream_node.upstreams
-
-        return ArrowTableStream(
-            full_table,
-            tag_columns=user_tag_keys,
-            producer=producer,
-            upstreams=upstreams,
-        )
+        return StaticOutputOperatorPod._materialize_upstream(buf, upstream_node)
 
     @staticmethod
     def _gc_buffers(

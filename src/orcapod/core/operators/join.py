@@ -1,11 +1,24 @@
 import asyncio
+import itertools
 from collections.abc import Callable, Collection, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
+from orcapod.core.operators.meta_columns import (
+    WithoutMetaWriter,
+    without_input_meta,
+    without_meta_columns,
+    without_meta_fields,
+)
 from orcapod.channels import ReadableChannel, WritableChannel
+from orcapod.core.operators.match_keys import frozen_scalar
 from orcapod.core.operators.base import (
     NonZeroInputOperator,
     require_shared_arrow_type,
+    require_tag_data_roles_agree,
+)
+from orcapod.core.operators.key_nullability import (
+    key_nullable,
+    reconcile_key_nullability,
 )
 from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import InputValidationError
@@ -64,7 +77,10 @@ class Join(NonZeroInputOperator):
 
         if len(streams) == 1:
             # if single stream, simply return the output schema of the single input stream
-            return streams[0].output_schema(columns=columns, all_info=all_info)
+            tag_schema, data_schema = streams[0].output_schema(
+                columns=columns, all_info=all_info
+            )
+            return tag_schema, without_meta_fields(data_schema)
 
         tag_schema, data_schema = self._joined_user_schemas(*streams)
 
@@ -88,7 +104,7 @@ class Join(NonZeroInputOperator):
         System tags are excluded: the join renames them, and
         ``_predict_system_tag_schema`` computes them separately. Meta
         (``__``-prefixed) columns are excluded too: Join drops them
-        (``_without_meta``), including the ones a raw ``ArrowTableStream``
+        (``meta_columns.without_meta_columns``), including the ones a raw ``ArrowTableStream``
         lists as data columns in its ``output_schema``.
 
         Args:
@@ -100,14 +116,19 @@ class Join(NonZeroInputOperator):
         Raises:
             InputValidationError: If two inputs share a data column.
         """
+        self._require_tag_data_roles_agree(streams)
         ordered_streams = self.order_input_streams(*streams)
         stream = ordered_streams[0]
         tag_schema, data_schema = stream.output_schema()
-        data_schema = self._without_meta_fields(data_schema)
+        data_schema = without_meta_fields(data_schema)
         for other_stream in ordered_streams[1:]:
             other_tag_schema, other_data_schema = other_stream.output_schema()
-            other_data_schema = self._without_meta_fields(other_data_schema)
-            tag_schema = schema_utils.union_schemas(tag_schema, other_tag_schema)
+            other_data_schema = without_meta_fields(other_data_schema)
+            # A shared tag key that differs in nullability only is non-nullable
+            # (ITL-829): a null key matches nothing.
+            tag_schema = schema_utils.union_schemas(
+                *reconcile_key_nullability(tag_schema, other_tag_schema)
+            )
             intersection_data_schema = schema_utils.intersection_schemas(
                 data_schema, other_data_schema
             )
@@ -117,6 +138,30 @@ class Join(NonZeroInputOperator):
                     f"Datas should not have overlapping keys, but {data_schema.keys()} found in {stream} and {other_stream}."
                 )
         return tag_schema, data_schema
+
+    @staticmethod
+    def _require_tag_data_roles_agree(streams: Sequence[StreamProtocol]) -> None:
+        """Raise if a name is a tag in one input and a data column in another.
+
+        Every pair of inputs is checked, in call order, so the error does not
+        depend on the canonical order.
+
+        Args:
+            streams: The input streams, in call order.
+
+        Raises:
+            InputValidationError: Naming the column, the two inputs (counting
+                from 1 in call order) and the remedy.
+        """
+        keys = [stream.keys() for stream in streams]
+        for i, j in itertools.combinations(range(len(streams)), 2):
+            try:
+                require_tag_data_roles_agree(*keys[i], *keys[j])
+            except InputValidationError as exc:
+                raise InputValidationError(
+                    f"Join of input {i + 1} (the first) and input {j + 1} (the "
+                    + f"second): {exc}"
+                ) from exc
 
     def _predict_system_tag_schema(self, *streams: StreamProtocol) -> Schema:
         """Predict the system tag columns that the join would produce.
@@ -145,14 +190,14 @@ class Join(NonZeroInputOperator):
 
         The result holds every input's tag and data columns, source info and
         system tags (renamed per input). It holds none of the inputs' meta
-        (``__``-prefixed) columns, which Join drops (``_without_meta``).
+        (``__``-prefixed) columns, which Join drops (``meta_columns.without_meta_columns``).
 
         Raises:
             InputValidationError: If two inputs share a data column, or a
                 shared tag key has different Arrow types in two inputs.
         """
         if len(streams) == 1:
-            return streams[0]
+            return without_input_meta(streams[0], streams)
 
         # Canonically order streams by pipeline_hash for deterministic
         # system tag column names regardless of input order (Join is commutative)
@@ -168,8 +213,8 @@ class Join(NonZeroInputOperator):
         stream = ordered_streams[0]
 
         tag_keys, _ = [set(k) for k in stream.keys()]
-        table = self._without_meta(
-            stream.as_table(columns={"source": True, "system_tags": True})
+        table = without_meta_columns(
+            stream.as_table(columns={"source": True, "system_tags": True}), tag_keys
         )
         # trick to get cartesian product; use int8 explicitly so that zero-row
         # tables don't produce a null-typed column that Polars rejects on join
@@ -183,8 +228,9 @@ class Join(NonZeroInputOperator):
 
         for idx, next_stream in enumerate(ordered_streams[1:], start=1):
             next_tag_keys, _ = next_stream.keys()
-            next_table = self._without_meta(
-                next_stream.as_table(columns={"source": True, "system_tags": True})
+            next_table = without_meta_columns(
+                next_stream.as_table(columns={"source": True, "system_tags": True}),
+                next_tag_keys,
             )
             next_table = arrow_utils.append_to_system_tags(
                 next_table,
@@ -222,6 +268,9 @@ class Join(NonZeroInputOperator):
             table = arrow_utils.restore_schema_nullability(
                 table, table_ref_schema, next_ref_schema
             )
+            table = self._shared_key_nullability(
+                table, table_ref_schema, next_ref_schema, common_tag_keys
+            )
 
             tag_keys.update(next_tag_keys)
 
@@ -251,53 +300,47 @@ class Join(NonZeroInputOperator):
         )
 
     @staticmethod
-    def _without_meta(table: "pa.Table") -> "pa.Table":
-        """Drop the meta (``__``-prefixed) columns from an input table.
+    def _shared_key_nullability(
+        table: "pa.Table",
+        left_schema: "pa.Schema",
+        right_schema: "pa.Schema",
+        keys: Collection[str],
+    ) -> "pa.Table":
+        """Flag each shared tag key nullable only when both inputs have it nullable.
 
-        Join keeps none of its inputs' meta columns. They describe how one
-        input row was produced (a cached pod's ``__computed``, the result
-        cache's ``__pf_*`` and ``__pod_ts``), nothing downstream of a Join
-        reads them, and inputs routinely share their names. A raw
-        ``ArrowTableStream`` returns its ``__`` columns from ``as_table``
-        whatever the column configuration, together with a source-info
-        column for each (``_source___x``), so both are dropped by name.
-
-        Args:
-            table: An input's table.
-
-        Returns:
-            The table without its meta columns and their source-info columns.
-        """
-        meta_source_prefix = f"{constants.SOURCE_PREFIX}{constants.META_PREFIX}"
-        meta = [
-            name
-            for name in table.column_names
-            if name.startswith((constants.META_PREFIX, meta_source_prefix))
-        ]
-        return table.drop_columns(meta) if meta else table
-
-    @staticmethod
-    def _without_meta_fields(schema: Schema) -> Schema:
-        """Drop the meta (``__``-prefixed) fields from a data schema.
-
-        The prediction counterpart of ``_without_meta``: a raw
-        ``ArrowTableStream`` lists its ``__`` columns as data columns.
+        A null key matches nothing, so a key non-nullable in either input holds
+        no null after the join (ITL-829). The same arrays are re-wrapped under the
+        new field flags: no value or type changes. Equal flags keep the flag.
 
         Args:
-            schema: An input's data schema.
+            table: The joined table.
+            left_schema: The left input table's schema.
+            right_schema: The right input table's schema.
+            keys: The join keys; names absent from either schema are skipped.
 
         Returns:
-            The schema without its meta fields.
+            The table with each shared key's nullable flag decided by ``key_nullable``.
         """
-        if not any(name.startswith(constants.META_PREFIX) for name in schema):
-            return schema
-        return Schema(
-            {
-                name: data_type
-                for name, data_type in schema.items()
-                if not name.startswith(constants.META_PREFIX)
-            }
-        )
+        schema = table.schema
+        changed = False
+        for name in keys:
+            left_index = left_schema.get_field_index(name)
+            right_index = right_schema.get_field_index(name)
+            index = schema.get_field_index(name)
+            if left_index < 0 or right_index < 0 or index < 0:
+                continue
+            nullable = key_nullable(
+                left_schema.field(left_index).nullable,
+                right_schema.field(right_index).nullable,
+            )
+            if schema.field(index).nullable != nullable:
+                changed = True
+                schema = schema.set(  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
+                    index, schema.field(index).with_nullable(nullable)
+                )
+        if not changed:
+            return table
+        return pa.Table.from_arrays(table.columns, schema=schema)
 
     # ------------------------------------------------------------------
     # Async execution
@@ -343,7 +386,7 @@ class Join(NonZeroInputOperator):
         inputs: Sequence[ReadableChannel[tuple[TagProtocol, DataProtocol]]],
         output: WritableChannel[tuple[TagProtocol, DataProtocol]],
         *,
-        input_pipeline_hashes: Sequence[ContentHash] | None = None,
+        input_pipeline_hashes: Sequence[ContentHash],
     ) -> None:
         """Async streaming join with pairwise iterative semantics.
 
@@ -363,26 +406,26 @@ class Join(NonZeroInputOperator):
             inputs: Readable channels, one per upstream.
             output: Writable channel for downstream.
             input_pipeline_hashes: Pipeline hash for each input,
-                positionally matching ``inputs``.  Required for
-                correct system-tag renaming with 2+ inputs.
+                positionally matching ``inputs``. With 2+ inputs, each input's
+                system-tag columns are renamed after its hash, as on the sync
+                path.
+
+        Raises:
+            ValueError: If ``input_pipeline_hashes`` does not have one hash per input.
         """
         try:
+            output = WithoutMetaWriter(output)
+            if len(input_pipeline_hashes) != len(inputs):
+                raise ValueError(
+                    f"input_pipeline_hashes length ({len(input_pipeline_hashes)}) "
+                    f"must match inputs length ({len(inputs)})"
+                )
             if len(inputs) == 1:
                 async for tag, data in inputs[0]:
                     await output.send((tag, data))
                 return
 
-            n = len(inputs)
-            if input_pipeline_hashes is not None and len(input_pipeline_hashes) != n:
-                raise ValueError(
-                    f"input_pipeline_hashes length ({len(input_pipeline_hashes)}) "
-                    f"must match inputs length ({n})"
-                )
-            suffixes = (
-                self._compute_system_tag_suffixes(input_pipeline_hashes)
-                if input_pipeline_hashes is not None
-                else [str(i) for i in range(n)]
-            )
+            suffixes = self._compute_system_tag_suffixes(input_pipeline_hashes)
             await self._streaming_join(inputs, output, suffixes)
         finally:
             await output.close()
@@ -594,6 +637,17 @@ class Join(NonZeroInputOperator):
                         self._check_shared_key_types(
                             tag, buffers[other][0][0], shared_keys
                         )
+                        # The same, for a name that is a tag on one side and a data
+                        # column on the other (the sync path checks the schemas).
+                        try:
+                            require_tag_data_roles_agree(
+                                tag.keys(),
+                                pkt.keys(),
+                                buffers[other][0][0].keys(),
+                                buffers[other][0][1].keys(),
+                            )
+                        except InputValidationError as exc:
+                            raise InputValidationError(f"Join: {exc}") from exc
                         needs_reindex = True
 
                     # One-time re-index of rows buffered before shared_keys
@@ -601,19 +655,17 @@ class Join(NonZeroInputOperator):
                         needs_reindex = False
                         for buf_side in (0, 1):
                             for j, (bt, _bp) in enumerate(buffers[buf_side]):
-                                btd = bt.as_dict()
-                                k = (
-                                    tuple(btd[sk] for sk in shared_keys)
-                                    if shared_keys
-                                    else (0,)
-                                )
-                                indexes[buf_side].setdefault(k, []).append(j)
+                                k = self._match_key(bt, shared_keys)
+                                if k is not None:
+                                    indexes[buf_side].setdefault(k, []).append(j)
 
                     # Index the new row
-                    td = tag.as_dict()
-                    key = tuple(td[sk] for sk in shared_keys) if shared_keys else (0,)
+                    key = self._match_key(tag, shared_keys)
                     row_idx = len(buffers[side])
                     buffers[side].append((tag, pkt))
+                    if key is None:
+                        # A null key never matches, as in the sync join.
+                        continue
                     indexes[side].setdefault(key, []).append(row_idx)
 
                     # Probe the opposite side for matches
@@ -625,6 +677,33 @@ class Join(NonZeroInputOperator):
                             await output.send(merge_fn(ot, op, tag, pkt))
         finally:
             await output.close()
+
+    @staticmethod
+    def _match_key(tag: TagProtocol, keys: Sequence[str]) -> tuple[object, ...] | None:
+        """Return a row's hashable key over the shared tag columns.
+
+        Values come from the tag's Arrow columns and are frozen, so list and
+        struct keys are hashable and compare as the sync path's Polars join
+        compares them (see ``match_keys``).
+
+        Args:
+            tag: The row's tag.
+            keys: The shared tag columns; empty means every row matches.
+
+        Returns:
+            The key, or ``None`` when a key value is a null primitive and the
+            row therefore matches nothing.
+        """
+        if not keys:
+            return (0,)
+        table = tag.as_table()
+        values: list[object] = []
+        for key in keys:
+            value = frozen_scalar(table.column(key)[0])
+            if value is None:
+                return None
+            values.append(value)
+        return tuple(values)
 
     @staticmethod
     def _check_shared_key_types(
@@ -694,8 +773,10 @@ class Join(NonZeroInputOperator):
         left lacks. The async path joins in canonical order, so this is the
         order ``_joined_user_schemas`` defines. A shared (join-key) column
         takes the right tag's field, as ``static_process`` does
-        (``restore_schema_nullability`` lets the last reference win); the
-        values are equal because the rows matched on it.
+        (``restore_schema_nullability`` lets the last reference win), nullable
+        only when both tags have it nullable (``key_nullable``), and the
+        left tag's values, as its Polars join does (they are equal because the
+        rows matched on it, except ``0.0`` against ``-0.0``).
 
         Every column keeps the Arrow type it already has: nothing is
         re-inferred from Python values.
@@ -723,16 +804,29 @@ class Join(NonZeroInputOperator):
             # A tag without user columns is a zero-column, zero-row table.
             for index, name in enumerate(table.column_names):
                 arrow_type = table.schema.types[index]
+                field = table.schema.field(index)
                 if name in types:
                     _ = require_shared_arrow_type("Join", name, types[name], arrow_type)
+                    # A shared key is nullable only when both tags have it
+                    # nullable: a null key matches nothing (ITL-829).
+                    field = field.with_nullable(
+                        key_nullable(fields[name].nullable, field.nullable)
+                    )
                 types[name] = arrow_type
-                fields[name] = table.schema.field(index)
-                arrays[name] = table.column(index)
+                fields[name] = field
+                # A shared column keeps the left tag's values (the sync join's
+                # Polars join does): rows that match on ``0.0`` and ``-0.0``
+                # keep the left spelling.
+                arrays.setdefault(name, table.column(index))
         if not fields:
             return None
-        return pa.Table.from_arrays(
-            list(arrays.values()), schema=pa.schema(list(fields.values()))
-        )
+        columns = [
+            arrays[name].cast(field.type)
+            if arrays[name].type != field.type
+            else arrays[name]
+            for name, field in fields.items()
+        ]
+        return pa.Table.from_arrays(columns, schema=pa.schema(list(fields.values())))
 
     @staticmethod
     def _build_tag(
@@ -762,7 +856,7 @@ class Join(NonZeroInputOperator):
 
         Every column keeps the Arrow type it already has, and the source info
         of both sides is carried over. Neither side's meta columns are, as in
-        ``static_process`` (``_without_meta``).
+        ``static_process`` (``meta_columns.without_meta_columns``).
 
         Args:
             left: The canonically earlier data (in a staggered join, the

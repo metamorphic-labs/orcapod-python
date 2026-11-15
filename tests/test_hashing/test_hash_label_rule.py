@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
+import pandas as pd
 import polars as pl
 import pyarrow as pa
 import pytest
@@ -32,10 +33,16 @@ from orcapod.core.sources import CachedSource
 from orcapod.core.sources.derived_source import DerivedSource
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
-from orcapod.hashing import directory_hashers
+from orcapod.hashing import directory_hashers, pandas_value_hash
 from orcapod.hashing.file_hashers import FileHasher
 from orcapod.hashing.semantic_hashing import polars_expr
-from orcapod.hashing.semantic_hashing.builtin_handlers import NumpyArrayHandler
+from orcapod.hashing.semantic_hashing.builtin_handlers import (
+    NumpyArrayHandler,
+    PandasDataFrameHandler,
+    PandasSeriesHandler,
+    PolarsDataFrameHandler,
+    PolarsSeriesHandler,
+)
 from orcapod.operators import Join
 from orcapod.sources import DictSource
 from orcapod.types import CacheMode, ContentHash
@@ -92,11 +99,17 @@ class TestLabelFormat:
         assert hasher.hash_table(pa.table({"x": [1]})).method == "arrow_v1"
 
     def test_value_hash_labels(self, tmp_path: Path) -> None:
-        """Array, Polars expression and directory values carry their own ``_v1`` label."""
+        """Array, pandas, Polars expression and directory values carry their own label."""
         hasher = get_default_context().semantic_hasher
         (tmp_path / "f.txt").write_text("hello")
         assert hasher.hash_object(np.arange(3)).method == "ndarray_v1"
+        frame = pd.DataFrame({"a": [1]})
+        assert hasher.hash_object(frame).method == "pandas_dataframe_v1"
+        assert hasher.hash_object(frame["a"]).method == "pandas_series_v1"
         assert hasher.hash_object(pl.col("x") > 1).method == "polars_expr_v1"
+        frame = pl.DataFrame({"x": [1]})
+        assert hasher.hash_object(frame).method == "polars_dataframe_v1"
+        assert hasher.hash_object(frame["x"]).method == "polars_series_v1"
         assert hasher.hash_object(op.Directory(tmp_path)).method == "directory_v1"
 
     def test_file_hash_keeps_the_digest_function_name(self, tmp_path: Path) -> None:
@@ -117,7 +130,11 @@ class TestLabelFormat:
             context.semantic_hasher.hasher_id,
             context.arrow_hasher.hasher_id,
             context.semantic_hasher.hash_object(np.arange(3)).method,
+            context.semantic_hasher.hash_object(pd.DataFrame({"a": [1]})).method,
+            context.semantic_hasher.hash_object(pd.Series([1])).method,
             context.semantic_hasher.hash_object(pl.col("x") > 1).method,
+            context.semantic_hasher.hash_object(pl.DataFrame({"x": [1]})).method,
+            context.semantic_hasher.hash_object(pl.Series("x", [1])).method,
             context.semantic_hasher.hash_object(op.Directory(tmp_path)).method,
         }
         assert all(LABEL_FORMAT.fullmatch(label) for label in labels), labels
@@ -166,7 +183,11 @@ RENAMED = {
     "semantic_v1": "renamedsemantic_v9",
     "arrow_v1": "renamedarrow_v9",
     "ndarray_v1": "renamedndarray_v9",
+    "pandas_dataframe_v1": "renamedpandasdataframe_v9",
+    "pandas_series_v1": "renamedpandasseries_v9",
     "polars_expr_v1": "renamedpolarsexpr_v9",
+    "polars_dataframe_v1": "renamedpolarsdataframe_v9",
+    "polars_series_v1": "renamedpolarsseries_v9",
     "directory_v1": "renameddirectory_v9",
 }
 
@@ -187,9 +208,26 @@ def renamed_labels(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, str]]:
         context.arrow_hasher, "_hasher_id", RENAMED["arrow_v1"], raising=True
     )
     monkeypatch.setattr(NumpyArrayHandler, "HASH_LABEL", RENAMED["ndarray_v1"])
+    # The pandas labels: the definition, and the handlers that carry it.
+    monkeypatch.setattr(
+        pandas_value_hash,
+        "PANDAS_DATAFRAME_HASH_LABEL",
+        RENAMED["pandas_dataframe_v1"],
+    )
+    monkeypatch.setattr(
+        pandas_value_hash, "PANDAS_SERIES_HASH_LABEL", RENAMED["pandas_series_v1"]
+    )
+    monkeypatch.setattr(
+        PandasDataFrameHandler, "HASH_LABEL", RENAMED["pandas_dataframe_v1"]
+    )
+    monkeypatch.setattr(PandasSeriesHandler, "HASH_LABEL", RENAMED["pandas_series_v1"])
     monkeypatch.setattr(
         polars_expr, "POLARS_EXPR_HASH_LABEL", RENAMED["polars_expr_v1"]
     )
+    monkeypatch.setattr(
+        PolarsDataFrameHandler, "HASH_LABEL", RENAMED["polars_dataframe_v1"]
+    )
+    monkeypatch.setattr(PolarsSeriesHandler, "HASH_LABEL", RENAMED["polars_series_v1"])
     monkeypatch.setattr(
         directory_hashers, "DIRECTORY_HASH_LABEL", RENAMED["directory_v1"]
     )
@@ -232,6 +270,7 @@ class TestRenamingALabelChangesNoDigest:
         # The labels did change ...
         assert RENAMED["semantic_v1"] in after
         assert RENAMED["arrow_v1"] in after
+        assert RENAMED["pandas_dataframe_v1"] in after
         # ... and nothing else: putting the old labels back gives the old values.
         restored = after
         for old, new in renamed.items():
@@ -324,7 +363,7 @@ def _run_cached_join() -> tuple[OperatorJobNode, InMemoryArrowDatabase]:
 def _run_job() -> tuple[PipelineJob, InMemoryArrowDatabase]:
     """Run a job with a join and a function pod on an in-memory store."""
     store = InMemoryArrowDatabase()
-    job = PipelineJob(name="label_rule_job", store=store)
+    job = PipelineJob(name="label_rule_job", database=store)
     with job:
         joined = Join(label="joined")(_source(), _other_source())
         label_rule_double.pod(joined, label="double")
@@ -555,6 +594,8 @@ LABEL_DEFINITIONS = {
     "directory_v1": "hashing/directory_hashers.py",
     "ndarray_v1": "hashing/semantic_hashing/builtin_handlers.py",
     "polars_expr_v1": "hashing/semantic_hashing/polars_expr.py",
+    "polars_dataframe_v1": "hashing/semantic_hashing/builtin_handlers.py",
+    "polars_series_v1": "hashing/semantic_hashing/builtin_handlers.py",
 }
 
 

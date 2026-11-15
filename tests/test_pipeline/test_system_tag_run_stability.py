@@ -17,6 +17,8 @@ from typing import Any
 import pyarrow as pa
 import pytest
 
+from orcapod import contexts
+
 import orcapod as op
 from orcapod import side_effects
 from orcapod.core.datagrams import Data, Tag
@@ -96,7 +98,7 @@ def _run_once(
         delivered.append(metric)
 
     method_tags = ["probe", "method"] if shared_key else ["method"]
-    with PipelineJob(name="itl817", store=DeltaTableDatabase(db_path)) as job:
+    with PipelineJob(name="itl817", database=DeltaTableDatabase(db_path)) as job:
         probe_source = ArrowTableSource(
             _table(probes),
             tag_columns=["probe"],
@@ -146,10 +148,19 @@ class TestMaterializationAlignsColumnsByName:
 
     def test_orchestrator_materialize_as_stream(self) -> None:
         """The orchestrator materializer emits rows in the first row's column order."""
-        upstream = SimpleNamespace(producer=None, upstreams=())
-        stream = SyncPipelineOrchestrator._materialize_as_stream(
-            _rows_with_swapped_tag_order(), upstream
+        rows = _rows_with_swapped_tag_order()
+        # The rebuilt stream takes the upstream's data context (ITL-1080) and, for an
+        # upstream with no producer, its pipeline hash (ITL-1094): here a plain
+        # stream's.
+        upstream = SimpleNamespace(
+            producer=None,
+            upstreams=(),
+            data_context_key=contexts.get_default_context_key(),
+            pipeline_hash=StaticOutputOperatorPod._materialize_to_stream(
+                rows
+            ).pipeline_hash,
         )
+        stream = SyncPipelineOrchestrator._materialize_as_stream(rows, upstream)
         rows = stream.as_table().to_pylist()
         assert rows == [{"a": 1, "b": 2, "v": 10}, {"a": 3, "b": 4, "v": 20}]
 

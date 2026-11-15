@@ -88,6 +88,7 @@ class FunctionNodeProtocol(Protocol):
         observer: ExecutionObserverProtocol | None = None,
         error_policy: Literal["continue", "fail_fast"] = "continue",
         run_id: str | None = None,
+        load_only: bool = False,
     ) -> list[tuple[TagProtocol, DataProtocol]]: ...
 
     async def async_execute(
@@ -96,13 +97,15 @@ class FunctionNodeProtocol(Protocol):
         output: WritableChannel[tuple[TagProtocol, DataProtocol]],
         *,
         observer: ExecutionObserverProtocol | None = None,
+        error_policy: Literal["continue", "fail_fast"] = "continue",
         run_id: str | None = None,
+        load_only: bool = False,
     ) -> None: ...
 
-    def set_ephemeral_store(self, store: "ArrowDatabaseProtocol | None") -> None:
-        """Assign or remove the ephemeral result store for this node.
+    def set_ephemeral_database(self, database: "ArrowDatabaseProtocol | None") -> None:
+        """Assign or remove the ephemeral result database for this node.
 
-        Pass an ``ArrowDatabaseProtocol`` to attach the store.
+        Pass an ``ArrowDatabaseProtocol`` to attach the database.
         Pass ``None`` to detach it — the node falls back to persistent-only
         behaviour for subsequent writes. No-op for node types that do not
         support ephemeral result storage (e.g. blueprint ``FunctionNode``).
@@ -125,6 +128,7 @@ class OperatorNodeProtocol(Protocol):
         self,
         *input_streams: StreamProtocol,
         observer: ExecutionObserverProtocol | None = None,
+        load_only: bool = False,
     ) -> list[tuple[TagProtocol, DataProtocol]]: ...
 
     async def async_execute(
@@ -133,10 +137,11 @@ class OperatorNodeProtocol(Protocol):
         output: WritableChannel[tuple[TagProtocol, DataProtocol]],
         *,
         observer: ExecutionObserverProtocol | None = None,
+        load_only: bool = False,
     ) -> None: ...
 
-    def set_ephemeral_store(self, store: "ArrowDatabaseProtocol | None") -> None:
-        """Assign or remove the ephemeral result store for this node.
+    def set_ephemeral_database(self, database: "ArrowDatabaseProtocol | None") -> None:
+        """Assign or remove the ephemeral result database for this node.
 
         No-op for operator nodes in v1 — full ephemeral support for operators
         is deferred to ITL-509.
@@ -156,6 +161,7 @@ class SideEffectNodeProtocol(Protocol):
         *,
         observer: "ExecutionObserverProtocol | None" = None,
         run_id: str | None = None,
+        load_only: bool = False,
     ) -> "list[tuple[TagProtocol, DataProtocol]]": ...
 
     async def async_execute(
@@ -165,6 +171,7 @@ class SideEffectNodeProtocol(Protocol):
         *,
         observer: "ExecutionObserverProtocol | None" = None,
         run_id: str | None = None,
+        load_only: bool = False,
     ) -> None: ...
 
     def attach_databases(

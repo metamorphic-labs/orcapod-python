@@ -8,14 +8,18 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import TYPE_CHECKING, Iterable
+import threading
+from typing import TYPE_CHECKING, Any, Iterable
 
+from orcapod.errors import MissingOptionalDependencyError
 from orcapod.logical_types.identifier import LogicalTypeIdentifierError
 from orcapod.logical_types.identifier import LogicalTypeIdentifier
+from orcapod.logical_types.provisional import warn_provisional
 from orcapod.logical_types.protocols import (
     LogicalTypeProtocol,
     LogicalTypeFactoryProtocol,
 )
+from orcapod.utils.deferred_types import load_object, module_available, qualified_name
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -35,6 +39,29 @@ def _sanitize(name: str) -> str:
     ``pa.ExtensionType`` subclass name.
     """
     return re.sub(r"[^A-Za-z0-9]", "_", name)
+
+
+def storage_type_matches(expected: pa.DataType, stored: pa.DataType) -> bool:
+    """Return whether ``stored`` is an acceptable storage type for ``expected``.
+
+    When ``expected`` is in its large-normalized form, any physically equivalent
+    member of the same family is accepted, at any nesting depth (``string`` or
+    ``string_view`` for ``large_string``, ``binary`` for ``large_binary``): Delta
+    Lake compaction rewrites large columns as plain ones (ITL-602, ITL-881).
+    Otherwise the two types must be equal, so a narrowing is never accepted.
+
+    Args:
+        expected: The storage type the extension type declares.
+        stored: The storage type found with the stored column.
+
+    Returns:
+        ``True`` when a column stored as ``stored`` can be read as ``expected``.
+    """
+    from orcapod.utils.arrow_utils import normalize_to_large_types
+
+    if normalize_to_large_types(expected, keep_null=True) == expected:
+        return normalize_to_large_types(stored, keep_null=True) == expected
+    return stored == expected
 
 
 def make_arrow_extension_type(
@@ -111,21 +138,9 @@ def make_arrow_extension_type(
         #
         # Cross-family mismatches (string where large_binary was registered, or
         # vice-versa) are genuine semantic errors and always raise.
-        from orcapod.utils.arrow_utils import normalize_to_large_types
-
-        if normalize_to_large_types(_storage, keep_null=True) == _storage:
-            # _storage is the canonical large form — accept any same-family variant,
-            # at any nesting depth (a struct field rewritten from large_string to
-            # string by Delta compaction, ITL-881).
-            storage_ok = (
-                normalize_to_large_types(storage_type, keep_null=True) == _storage
-            )
-        else:
-            # Non-canonical _storage — require exact match.
-            storage_ok = storage_type == _storage
         from orcapod.errors import TypeIdentityError
 
-        if not storage_ok:
+        if not storage_type_matches(_storage, storage_type):
             raise TypeIdentityError(
                 f"Arrow extension type '{_name}': expected storage_type "
                 f"{_storage!r} but got {storage_type!r}."
@@ -247,6 +262,22 @@ class LogicalTypeRegistry:
     the same pattern as the ``logical_types`` constructor argument used by
     other registries in this package.
 
+    An optional ``deferred_logical_types`` list names logical types that are
+    loaded on first use, so an optional library is never imported up front
+    (ITL-871). Each entry is a dict: ``python_type`` (qualified class name, e.g.
+    ``"torch.Tensor"``), ``extension_name``, ``logical_type`` (dotted path of the
+    logical type class), ``requires`` (the module that must be importable) and,
+    optionally, ``_config`` (keyword arguments the class is instantiated with,
+    for example the ignore list of its value hash). See
+    ``orcapod.utils.deferred_types``.
+
+    An optional ``provisional`` collection names, by extension name, the types
+    whose value hash and stored identity may still change (ITL-1068): looking one
+    up (``get_by_python_type``, ``get_by_arrow_extension_name``) issues
+    ``ProvisionalHashWarning`` once per type per process. It is read from the
+    ``provisional`` list of ``contexts/logical_types.json`` and never enters an
+    identifier or a hash.
+
     An optional ``factories`` list can also be passed to pre-register
     ``LogicalTypeFactoryProtocol`` instances at construction time. Each entry is a
     dict with keys ``factory`` (the factory instance), ``category`` (optional str),
@@ -265,7 +296,18 @@ class LogicalTypeRegistry:
         self,
         logical_types: list[LogicalTypeProtocol] | None = None,
         factories: list[dict] | None = None,
+        deferred_logical_types: list[dict[str, Any]] | None = None,
+        provisional: Iterable[str] = (),
     ) -> None:
+        # Extension names of the types whose value hash is provisional (ITL-1068).
+        self._provisional: frozenset[str] = frozenset(provisional)
+        # Serialises loading a deferred type, so concurrent first lookups load it once.
+        self._deferred_lock = threading.Lock()
+        self._deferred_by_python_name: dict[str, dict[str, Any]] = {}
+        self._deferred_by_arrow_name: dict[str, dict[str, Any]] = {}
+        for entry in deferred_logical_types or []:
+            self._deferred_by_python_name[entry["python_type"]] = entry
+            self._deferred_by_arrow_name[entry["extension_name"]] = entry
         self._by_logical_name: dict[str, LogicalTypeProtocol] = {}
         self._by_arrow_name: dict[str, LogicalTypeProtocol] = {}
         self._by_python_type: dict[type, LogicalTypeProtocol] = {}
@@ -289,7 +331,9 @@ class LogicalTypeRegistry:
         Raises:
             ValueError: If any of the three keys (``logical_type_name``,
                 Arrow extension name, ``python_type``) is already bound to a
-                *different* ``LogicalTypeProtocol`` in this registry, or if the
+                *different* ``LogicalTypeProtocol`` in this registry (the
+                ``python_type`` only for a logical type that binds it, see
+                ``binds_python_type`` on ``ListLogicalType``), or if the
                 Arrow extension name contains ``;`` (the separator between name
                 and metadata in the identifier text that is hashed).
         """
@@ -302,10 +346,16 @@ class LogicalTypeRegistry:
             )
         py_type = logical_type.python_type
         logical_name = logical_type.logical_type_name
+        # A logical type whose Python type is shared by other logical types (a set
+        # of a plain Arrow element: ``set[int]`` reads as ``set[int64]`` and as
+        # ``set[int8]``) is found by its identifier only, never by its Python type.
+        binds_python_type = getattr(logical_type, "binds_python_type", True)
 
         existing_by_logical = self._by_logical_name.get(logical_name)
         existing_by_arrow = self._by_arrow_name.get(arrow_ext_name)
-        existing_by_python = self._by_python_type.get(py_type)
+        existing_by_python = (
+            self._by_python_type.get(py_type) if binds_python_type else None
+        )
 
         if (
             existing_by_python is None
@@ -337,11 +387,11 @@ class LogicalTypeRegistry:
                     f"'{existing.logical_type_name}'."
                 )
 
-        # Idempotent check: all three keys already bound to this same instance.
+        # Idempotent check: every key already bound to this same instance.
         if (
             existing_by_logical is logical_type
             and existing_by_arrow is logical_type
-            and existing_by_python is logical_type
+            and (existing_by_python is logical_type or not binds_python_type)
         ):
             return
 
@@ -368,7 +418,8 @@ class LogicalTypeRegistry:
         # Store three-way binding.
         self._by_logical_name[logical_name] = logical_type
         self._by_arrow_name[arrow_ext_name] = logical_type
-        self._by_python_type[py_type] = logical_type
+        if binds_python_type:
+            self._by_python_type[py_type] = logical_type
 
     def _rebind(
         self, previous: LogicalTypeProtocol, logical_type: LogicalTypeProtocol
@@ -427,8 +478,17 @@ class LogicalTypeRegistry:
     def get_by_python_type(self, python_type: type) -> LogicalTypeProtocol | None:
         """Return the logical type for *python_type*, or ``None``.
 
-        The most specific registered type wins: *python_type* itself, then each
-        class of its MRO in order, so a subclass registered with its own logical
+        A type declared provisional issues ``ProvisionalHashWarning`` on its first
+        lookup in the process (``_find_by_python_type`` gives the rules).
+        """
+        return self._noted(self._find_by_python_type(python_type))
+
+    def _find_by_python_type(self, python_type: type) -> LogicalTypeProtocol | None:
+        """Return the logical type for *python_type*, or ``None``.
+
+        The most specific type wins: *python_type* itself, then each class of its
+        MRO in order, and for each class a registered type before a deferred one
+        (which is loaded), so a subclass registered with its own logical
         type is used for itself and its subclasses whatever the registration
         order (an ``np.ndarray`` subclass without one is an array). A logical type
         with ``exact_python_type_only`` (a dataclass or pydantic model) is never
@@ -436,18 +496,34 @@ class LogicalTypeRegistry:
         subclasses only through ``__subclasshook__``/ABC registration fall back
         to an ``issubclass`` scan, where the first registered match wins.
         """
-        result = self._by_python_type.get(python_type)
-        if result is not None:
-            return result
-        for base in getattr(python_type, "__mro__", ())[1:]:
+        if not isinstance(python_type, type):
+            # An annotation that is not a class (a union, a generic alias) is
+            # found only as itself.
+            result = self._by_python_type.get(python_type)
+            if result is not None:
+                return result
+        for base in getattr(python_type, "__mro__", ()):
             result = self._by_python_type.get(base)
             # A user class matches exactly: its subclass is a different class with
             # its own fields and identity, never stored as the base (ITL-881).
-            if result is not None and not getattr(
-                result, "exact_python_type_only", False
+            if result is not None and (
+                base is python_type
+                or not getattr(result, "exact_python_type_only", False)
             ):
                 return result
-        for registered_type, registered_lt in self._by_python_type.items():
+            # A deferred type named for this class comes before any type of a base
+            # class, registered or deferred.
+            entry = self._deferred_by_python_name.get(qualified_name(base))
+            if entry is not None:
+                loaded = self._load_deferred(entry)
+                # The same exact-type rule as for a registered type: such a type
+                # of a base class is not a match, and the walk goes on.
+                if base is python_type or not getattr(
+                    loaded, "exact_python_type_only", False
+                ):
+                    return loaded
+        # A snapshot: a deferred type loaded by another thread adds an entry.
+        for registered_type, registered_lt in tuple(self._by_python_type.items()):
             if getattr(registered_lt, "exact_python_type_only", False):
                 continue
             try:
@@ -455,13 +531,92 @@ class LogicalTypeRegistry:
                     return registered_lt
             except TypeError:
                 continue
+        # Another thread may have loaded a deferred type between the two reads of the
+        # walk above: it registers the type before it removes the deferred entry.
+        for base in getattr(python_type, "__mro__", ()):
+            loaded = self._by_python_type.get(base)
+            if loaded is not None and not getattr(
+                loaded, "exact_python_type_only", False
+            ):
+                return loaded
         return None
 
     def get_by_arrow_extension_name(
         self, arrow_name: str
     ) -> LogicalTypeProtocol | None:
-        """Return the logical type registered under *arrow_name*, or ``None``."""
-        return self._by_arrow_name.get(arrow_name)
+        """Return the logical type registered under *arrow_name*, or ``None``.
+
+        A type declared provisional issues ``ProvisionalHashWarning`` on its first
+        lookup in the process.
+
+        Raises:
+            MissingOptionalDependencyError: If *arrow_name* belongs to a deferred
+                logical type whose required module is not installed.
+        """
+        return self._noted(self._find_by_arrow_extension_name(arrow_name))
+
+    def _noted(
+        self, logical_type: LogicalTypeProtocol | None
+    ) -> LogicalTypeProtocol | None:
+        """Warn when *logical_type* is declared provisional; return it unchanged."""
+        if (
+            logical_type is not None
+            and logical_type.logical_type_name in self._provisional
+        ):
+            warn_provisional(logical_type.logical_type_name)
+        return logical_type
+
+    def _find_by_arrow_extension_name(
+        self, arrow_name: str
+    ) -> LogicalTypeProtocol | None:
+        """Return the logical type registered under *arrow_name*, or ``None``.
+
+        A deferred logical type (see the class docstring) is loaded on the first
+        lookup of its extension name.
+
+        Raises:
+            MissingOptionalDependencyError: If *arrow_name* belongs to a deferred
+                logical type whose required module is not installed.
+        """
+        result = self._by_arrow_name.get(arrow_name)
+        if result is not None:
+            return result
+        entry = self._deferred_by_arrow_name.get(arrow_name)
+        if entry is None:
+            # Another thread may have loaded the deferred type between the two reads:
+            # it registers the type before it removes the deferred entry.
+            return self._by_arrow_name.get(arrow_name)
+        if not module_available(entry["requires"]):
+            raise MissingOptionalDependencyError(
+                f"Arrow extension type {arrow_name!r} needs the optional dependency "
+                f"{entry['requires']!r}, which is not installed. Install it to read "
+                "or write values of this type."
+            )
+        return self._load_deferred(entry)
+
+    def _load_deferred(self, entry: dict[str, Any]) -> LogicalTypeProtocol:
+        """Instantiate and register a deferred logical type.
+
+        Holds a lock and checks again whether another thread has already loaded
+        the type, so concurrent first lookups instantiate and register it once.
+
+        Args:
+            entry: The deferred entry (see the class docstring).
+
+        Returns:
+            The registered logical type.
+        """
+        with self._deferred_lock:
+            existing = self._by_arrow_name.get(entry["extension_name"])
+            if existing is not None:
+                return existing
+            logical_type = load_object(entry["logical_type"])(
+                **entry.get("_config", {})
+            )
+            self.register_logical_type(logical_type)
+            self._deferred_by_python_name.pop(entry["python_type"], None)
+            self._deferred_by_arrow_name.pop(entry["extension_name"], None)
+            return logical_type
 
     def register_logical_type_factory(
         self,

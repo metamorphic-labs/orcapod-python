@@ -53,7 +53,7 @@ def _reset() -> None:
 
 def _operator_job(store: InMemoryArrowDatabase) -> PipelineJob:
     """A job with function node ``dbl`` and a stored (``LOG``) operator node ``sel``."""
-    job = PipelineJob(name=JOB_NAME, store=store)
+    job = PipelineJob(name=JOB_NAME, database=store)
     with job:
         source = DictSource(data=ROWS, tag_columns=["k"], source_id="src")
         out = double.pod(source, label="dbl")
@@ -74,7 +74,7 @@ def notify(x: int, ctx: Any) -> int:
 
 def _notify_job(store: InMemoryArrowDatabase) -> PipelineJob:
     """A job whose only stored node is a function pod that takes the invocation context."""
-    job = PipelineJob(name=JOB_NAME, store=store)
+    job = PipelineJob(name=JOB_NAME, database=store)
     with job:
         source = DictSource(data=ROWS, tag_columns=["k"], source_id="src")
         notify.pod(source, label="notify")
@@ -99,7 +99,7 @@ def _add_table_written_before_v03(
 
 def _sink_job(store: InMemoryArrowDatabase) -> PipelineJob:
     """A job whose only stored node is a sink reading the source directly."""
-    job = PipelineJob(name=JOB_NAME, store=store)
+    job = PipelineJob(name=JOB_NAME, database=store)
     with job:
         source = DictSource(data=ROWS, tag_columns=["k"], source_id="src")
         sink = sink_pod(_deliver)
@@ -226,7 +226,10 @@ class TestSideEffectNodeChecksEveryRun:
         # A log of the same pod at the layout Orcapod v0.2 wrote, under another hash.
         old_path = _add_table_written_before_v03(store, "tdb_v2", "tdb_v1")
 
-        # The same job object runs again: the check is not remembered from the first run.
+        # The same job object runs the sink again (a node holding a current run is not
+        # run, ITL-1095, so it is cleared first): the check is not remembered from the
+        # first run.
+        job.nodes["sink"].clear_cache()
         with pytest.raises(SideEffectLogDataContextError) as info:
             _ = job.run()
         assert old_path in info.value.record_paths
@@ -239,18 +242,20 @@ class TestSideEffectNodeChecksEveryRun:
         _ = job.run()
         assert sorted(delivered) == [1, 2]
         delivered.clear()
-        _ = job.run()  # nothing new in the store: runs, and delivers nothing again
+        job.nodes["notify"].clear_cache()  # a current node is not run again (ITL-1095)
+        _ = job.run()  # nothing new in the database: runs, and delivers nothing again
         assert delivered == []
 
         old_path = _add_table_written_before_v03(store, "pdb_v2", "pdb_v1")
 
+        job.nodes["notify"].clear_cache()
         with pytest.raises(SideEffectLogDataContextError) as info:
             _ = job.run()
         assert old_path in info.value.record_paths
         assert delivered == []
 
     def test_the_error_does_not_offer_a_fresh_store_as_a_safe_retry(self):
-        """The error message warns that a fresh store repeats every side effect."""
+        """The error message warns that a fresh database repeats every side effect."""
         error = SideEffectLogDataContextError(
             (("j", "side_effects", "notify", "schema:abc", "tdb_v1"),),
             "std:v0.1:default",
@@ -258,9 +263,9 @@ class TestSideEffectNodeChecksEveryRun:
             node_label="notify",
         )
         message = str(error)
-        assert "Use a fresh store" not in message
+        assert "Use a fresh database" not in message
         assert (
-            "A fresh store holds no completions, so on it the node performs every "
+            "A fresh database holds no completions, so on it the node performs every "
             "side effect again" in message
         )
 
@@ -280,7 +285,7 @@ class TestTablesOfNodesTheRunLeavesOut:
         tag_schema, data_schema = DictSource(
             data=ROWS, tag_columns=["k"], source_id="src"
         ).output_schema()
-        job = PipelineJob(name=JOB_NAME, store=store)
+        job = PipelineJob(name=JOB_NAME, database=store)
         with job:
             unbound = SourceNode(
                 name="src", tag_schema=tag_schema, data_schema=data_schema

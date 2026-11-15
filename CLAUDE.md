@@ -227,6 +227,19 @@ resolves several issues uses its primary issue's id).
   (see `RELEASING.md`). Entries already in `CHANGELOG.md` on `main` stay there.
 - `changelog.d/README.md` is the full statement of the convention.
 
+## Releasing and the public repository
+
+Developer decisions, November 12, 2026 (ITL-1007); the full procedure is `RELEASING.md`.
+
+- All development, review and CI happen on `metamorphic-labs/orcapod-python`. The public
+  `nauticalab/orcapod-python` receives `main` only at release points, by **fast-forward push**
+  (never a squash, never a pull request), and runs the Release workflow.
+- An agent never pushes to `nauticalab`, adds a remote for it, creates or pushes a tag, runs the
+  Release workflow, or touches a setting, secret or environment there. The push happens only on
+  the developer's explicit go. The `v0.2.0` tag is never pushed.
+- Linear, Codecov and SpiralDB jobs run only when
+  `github.repository == 'metamorphic-labs/orcapod-python'`; `lint.yml` runs only on `nauticalab`.
+
 ## Lint, format and type checks
 
 Every pull request must pass the metamorphic-labs required CI, which runs exactly these
@@ -268,7 +281,11 @@ A logical type's identifier is its Arrow extension name plus its Arrow extension
 - The identifier is declared in one place, the extension type returned by
   `get_arrow_extension_type()`, and read through `logical_types/identifier.py`
   (`logical_type_identifier`, `LogicalTypeIdentifier.text`). Never put a logical type's bare
-  name into a hash input: use the identifier text.
+  name into a hash input: use the identifier text. Exception (developer, November 12, 2026):
+  the leading type text inside a library value hash (`numpy.ndarray`, `torch.Tensor`, pandas,
+  polars) is the extension name alone, because the metadata holds the ignore list, which must
+  not enter the value's preimage; the full identifier (name plus metadata) still enters every
+  type, schema and cell hash.
 - Change a type's identifier when, and only when, an existing value would be stored or hashed
   differently. It is not a package version. Built-in types use `version_metadata(N)`
   (`{"version":N}`); a new built-in type must write one, never empty metadata.
@@ -279,10 +296,62 @@ A logical type's identifier is its Arrow extension name plus its Arrow extension
   identifier is the container kind plus the element's identifier; the type hash treats them
   like any generic alias (origin and arguments). A change to how they are stored or hashed is
   a data context (global hash version) change, not a logical type change.
+- `set[T]` of a primitive is a native container too (developer, November 14, 2026, ITL-611):
+  `ListLogicalType` over an `ArrowElement`, extension name `set[<large Arrow type text>]`
+  (`set[int64]`), metadata `{"category": "set", "element_kind": "arrow"}` (developer,
+  November 15, 2026: the name holds the element as it is and is the registry key; the
+  metadata never repeats it), elements in the canonical set order (`sort_set_elements`). A
+  reader takes the element from the storage (`large_list<int64>`) and refuses
+  (`LogicalTypeIdentifierError`) a storage that is not a list of the element the name names.
+  It reads as `set[<Python type of the element Arrow type>]` (`set[int8]` and `set[int64]`
+  both as `set[int]`, as for lists), so it is
+  registered by identifier only, never bound to a Python type (`binds_python_type`), and
+  `set[T]` maps to Arrow through `T`. `list[T]` of a primitive stays a plain
+  `large_list`: never wrap it. Inside a dict value or tuple field a set of a primitive keeps
+  its plain storage (Arrow has no extension type in a struct field). A container's elements
+  are value-hashed only when its innermost element is a logical type. A saved schema rebuilds
+  an unregistered native container from its identifier (`serialization.parse_arrow_type_string`).
+  `frozenset[T]` is refused (ITL-1140).
 - On read, stored metadata must be one of the type's `readable_extension_metadata()`;
   otherwise raise `LogicalTypeIdentifierError`. Never wrap a stored column by name alone and
   never fall back to the storage type. List an older value in `also_reads` only when the
   current code decodes that layout.
+
+## Library value types: storage, strict hash, ignore list
+
+Developer, November 12, 2026 (ITL-981); see `docs/concepts/arrays.md` and
+`docs/reference/hashing.md` section 8.
+
+- Storage and hashing are decided separately. A value of a library type (`numpy.ndarray`,
+  later tensors and data frames) is stored with the library's own serialization and reads
+  back as given. Its hash is defined by Orcapod on the content: never hash the stored bytes.
+- The hash is strict by default: every property of a value that storage keeps is part of
+  its identity. A property storage does not restore never counts and has no option name,
+  because `hash(read(write(v)))` must equal `hash(v)`.
+- What the hash may ignore is a closed set of property names per type (`OPTIONS`). The names
+  a data context ignores are declared once, in `hash_ignore` of
+  `contexts/logical_types.json`, and referred to as `hash_ignore:<extension name>` by the
+  logical type entry and the value handler entry.
+- The list is in the extension metadata, `{"ignore":[...],"version":N}` (sorted names,
+  sorted keys, `ignore` always present), written only by `ignore_list.ignore_metadata`. Two
+  lists are two logical types. Never put the list into a hash preimage: an ignored property's
+  field is always written, with its canonical value.
+- Build such a type from `logical_types/ignore_list.py` (`IgnoreListLogicalType`,
+  `IgnoreListHandler`). A bare value is hashed with the handler's configured list; a cell
+  with the list of its own column (`SemanticHashingVisitor` calls `hash_ignoring`). A data
+  context reads only columns stored under its own list; anything else raises
+  `LogicalTypeIdentifierError`.
+- Extension names of library value types are lower case `orcapod.<library>.<type>`
+  (`orcapod.numpy.ndarray`). The leading type text of a value hash is the extension name.
+- `numpy.ndarray`: one `.npy` file per cell (`numpy.lib.format`, format 3.0,
+  `allow_pickle=False` on write and read; never raise `max_header_size`). Options:
+  `memory_order`, `byte_order`, `struct_layout`. Where stored arrays must be ordered, order
+  them by value hash (`storage_sort_key`), never by stored bytes.
+- Library value types are provisional until the v0.4 audit (developer, November 13, 2026,
+  ITL-1068): their extension names are listed in `provisional` of
+  `contexts/logical_types.json`, and using one issues `ProvisionalHashWarning` once per type
+  per process. A new library value type must be added to that list. The list never enters a
+  hash, identifier or stored path.
 
 ## User classes: exact and structural
 
@@ -374,7 +443,7 @@ against `static_process(...).output_schema(...)`; see "Important implementation 
 src/orcapod/
 ├── types.py                    # Schema, ColumnConfig, ContentHash
 ├── system_constants.py         # Column prefixes and separators
-├── errors.py                   # InputValidationError, DuplicateTagError, FieldNotResolvableError
+├── errors.py                   # InputValidationError, DuplicateTagError
 ├── config.py                   # Config dataclass
 ├── contexts/                   # DataContext (semantic_hasher, arrow_hasher, type_converter)
 ├── protocols/
@@ -409,7 +478,7 @@ src/orcapod/
 │       ├── semijoin.py         # SemiJoin (binary, non-commutative)
 │       ├── batch.py            # Batch (group rows by count, types become list[T])
 │       ├── group_by.py         # GroupBy (many→one reduction keyed on tag values)
-│       ├── column_selection.py # Select/Drop Tag/Data columns
+│       ├── column_selection.py # Select/Drop Tag/Data columns; SelectColumns/DropColumns (tag or data)
 │       ├── mappers.py          # MapTags, MapData (rename columns)
 │       ├── filters.py          # PolarsFilter
 │       └── drop_nulls.py       # DropNulls (drop rows with a null in named or all columns, T | None → T)
@@ -460,6 +529,14 @@ conversion. Two specializations:
 
 **Stream** (`core/streams/arrow_table_stream.py`) — immutable (Tag, Data) sequence.
 Key methods: `output_schema()`, `keys()`, `iter_data()`, `as_table()`.
+Every stream, source and node has `run()` with no positional arguments (developer, November 13,
+2026, ITL-1081): it does the work `as_table()` does (a job node runs as in a job) and returns a
+`StreamView` of every row; the view's `head`/`tail`/`sort_by_tags` choose what is shown.
+`head()` and the notebook preview never compute (ITL-991, ITL-912): they never compute, poll or deliver a row (they read only what is held or stored, or a bounded table read), never call user code (a function, a predicate, a side effect) and never
+write. With no rows to show they learn the column types by applying operators to zero-row
+tables, which processes no data; an operator whose output schema is its input's
+(`OUTPUT_SCHEMA_IS_INPUT_SCHEMA`, `PolarsFilter`) is not applied at all. A user-defined operator's `static_process` is applied to zero-row tables and must not have effects. A job node's `run()` takes one keyword-only
+argument, `load_only` (ITL-1095); never give any other `run()` an argument.
 
 **Source** (`core/sources/`) — produces a stream from external data. `ArrowTableSource` is the
 core implementation; CSV/Delta/DataFrame/Dict/List sources all delegate to it internally. Each
@@ -470,6 +547,26 @@ FunctionNode/OperatorNode's DB records as a new source.
 data. Never inspects tags. Two execution models:
 - `FunctionPod` → `FunctionPodStream`: lazy, in-memory
 - `FunctionNode`: DB-backed, two-phase (yield cached results first, then compute missing)
+
+**Calling a function pod** (developer, November 12, 2026, ITL-807). `pod(a, b)` is the
+convenient call and `pod.process(a, b)` the exact primitive:
+
+- `pod(a, b)` joins the inputs as `process` does and, when the joined stream carries data
+  columns that are not parameters of the function, places one automatic `SelectDataColumns`
+  after the automatic join and before the pod (`_FunctionPodBase.__call__`, the one place
+  that decides it). The select is an ordinary operator step: graph, hashes and stored tables
+  must equal those of a pipeline with that select written by hand (the stream's
+  `select_data_columns` method builds the same operator, and `a.join(b)` the same `Join`).
+  Nothing to drop means no step. One info log names the dropped columns; it is not a warning.
+- `pod(a, b, strict=True)` and `pod.process(a, b)` reject an extra column. `strict` is part of
+  no identity. `process` never takes a `strict` argument and never drops a column.
+- A missing required column is an error in every form. Tags are never dropped. A data column
+  shared by two inputs fails at the join, used or not: no special handling.
+- No select is added when the data function's `accepts_arbitrary_keywords` is true (no kind
+  today; `PythonDataFunction` rejects `**kwargs`).
+- Function pods only. An operator's and a `SideEffectPod`'s `__call__` stay aliases of
+  `process` with no `strict` argument. There is no global setting.
+- A test of the exact input contract uses `process` or `strict=True`.
 
 **Operator** (`core/operators/`) — structural pod transforming streams without synthesizing new
 data values. All subclass `StaticOutputPod`:
@@ -499,13 +596,24 @@ no input tag name may appear among the data columns.
 Two operators reduce row count many→one. `Batch` groups consecutive rows by count; `GroupBy`
 groups by tag values: it collapses the N rows sharing a tag tuple into one row with
 list-valued members. Neither synthesizes new data values — every emitted element came from an
-input row — and `GroupBy` keys only on tags, never on data. Its non-key tags stay tags,
-list-valued, as `Batch` keeps them.
+input row — and `GroupBy` keys only on tags, never on data. `GroupBy` keeps only its `by`
+tags and drops every other tag (developer, November 13, 2026, ITL-1070): a list of the members'
+values is not a key, as SQL drops a non-key column after `GROUP BY`. `Batch` has no key and keeps
+every tag, list-valued (developer, same day): its lists are what tells a batch's members apart.
 
 Filters are the operators that read data columns (ITL-943): `PolarsFilter` evaluates its
 predicate on values, and `DropNulls` reads only whether a value is present (its validity),
 never the value. A filter decides which rows exist and never synthesizes a value; no other
 operator reads data content.
+
+No operator carries its inputs' `Data` meta (`__`) columns (developer, November 13, 2026,
+ITL-1080): on the sync and the async path, in rows and in the predicted output schema, for a
+raw `ArrowTableStream`'s `__` columns and for the meta a cached pod's or function node's rows
+carry. The rule is in one place, `core/operators/meta_columns.py` (sync results through the
+operator base classes, async rows through `WithoutMetaWriter`). A carry-forward mode is ITL-867.
+The meta prefix (`__`) is reserved: `ArrowTableStream` and the source builder refuse a tag named
+with it, and `MapTags` / `MapData` (targets) and `Pick` / `Index` (`out`) refuse it as a new name
+(`schema_utils.require_names_not_meta`, at construction).
 
 **Operator or derived source?** (developer, November 11, 2026) The test is: does any data
 element come from a tag value, or from anywhere other than the input's data elements? If yes,
@@ -618,10 +726,10 @@ current data context are the current entries.
 2. **Name-extending** — multi-input ops (join, merge join). Each input's system tag column
    name gets `::{pipeline_hash}:{canonical_position}` appended. Commutative operators
    canonically order inputs by `pipeline_hash` and sort system tag values per row.
-3. **Reducing** — many→one ops (`Batch`, `GroupBy`). User tag and data columns become
-   `list[T]` and stay in their own group (a tag stays a tag; only the scalar keys of a
-   `GroupBy` are not list-wrapped), and source-info columns become `list[str]` with one element
-   per member. System
+3. **Reducing** — many→one ops (`Batch`, `GroupBy`). Data columns become `list[T]`; `Batch`
+   makes every user tag `list[T]` and keeps it a tag, while `GroupBy` keeps its scalar keys and
+   drops every other user tag (ITL-1070). No tag ever moves to the data group. Source-info
+   columns become `list[str]` with one element per member. System
    tag columns must stay **scalar**, because `_build_record_id_preimage`
    (`core/nodes/function_node.py`) hashes them directly to derive record identity. They fold
    to a deterministic digest via `arrow_utils.fold_system_tag_values` and their column name
@@ -662,6 +770,20 @@ side when its inputs' types disagree; a result's type never depends on data valu
 order or the path the data took; and inferring a type from Python values is a last resort for
 when no type is known.
 
+Large variants everywhere (developer, November 14, 2026, ITL-1122): every column of every table
+Orcapod presents or stores has its string, binary and list types in their large variants
+(`large_string`, `large_binary`, `large_list`, recursively), for every supported Arrow type, with
+no exception: a user's own Arrow table (`ArrowTableSource`, a raw `ArrowTableStream`) and an
+explicit Arrow `schema=` / `data_schema=` are normalized too. The one place is
+`ArrowTableStream.__init__` (`arrow_utils.normalize_table_to_large_types(table, keep_null=True)`),
+where every source and every operator result becomes a stream; never add a per-source or
+per-operator normalization. Names, nullability (top level and nested), field metadata, widths and
+logical (extension) types are untouched, and large and non-large variants hash identically, so no
+hash or default source id moves. Not covered: what is inside a library value (numpy, pandas,
+polars, torch) keeps its library's own distinction. `list_view` and `large_list_view` are not
+supported: a source refuses them (the Arrow hasher cannot hash them) and a raw `ArrowTableStream`
+holds them as given (ITL-1129).
+
 Respect the Arrow types the inputs already have, normalized to their large variants (developer,
 November 10, 2026: large and non-large variants hash identically, so always normalize to large
 for consistency). Infer an Arrow type from Python values only when no Arrow type is known, and
@@ -670,14 +792,42 @@ then through the data context's type converter — never call `pa.array(values)`
 inference widens `int8` to `int64`, `float32` to `double`, and takes decimal precision from the
 data. The rules:
 
+- **The Arrow schema is never computed** (developer, November 13, 2026, ITL-912): "Generally
+  Orcapod should never have to compute anything to get the arrow schema, all function pods and
+  operator pods can deterministically derive the output stream schema from the input stream
+  schemas, and ultimately no source can be created without having schema specified somehow."
+  A table with no rows (before a run, after `clear_cache()`, a zero-row result or input) has
+  exactly the types of the rows: get it from `streams/base.typed_zero_row_table`, never from
+  the Python schema (except when a stream cannot type itself without rows: an unbound input or a
+  `PollingSource` not yet polled, ITL-1089, which fall back to the declared schema), and never by
+  computing, reading or polling a row or calling a function.
+  An operator's is its result over its inputs' zero-row tables; a function pod's is the
+  input's tags plus the declared outputs (`function_zero_row_table`); a source's is the table
+  or schema it holds. A new stream kind implements `_typed_zero_row_table`. A head with no
+  rows is built in one place, `StreamBase._head_without_rows`, from the stream's
+  `_zero_row_table(config)`, which equals `as_table(columns=config)` with no rows; a kind
+  whose `as_table` shapes its table its own way overrides `_zero_row_table` with that shaping.
+  The zero-row table has the populated table's columns in the populated order too (ITL-1131).
+  A table built from rows (and a node's or operator input's table with no rows) is in row
+  order, user tags, system tags, data, source info, stated once in
+  `StaticOutputOperatorPod._in_row_order`; a node that keeps a run with no rows keeps
+  `_zero_rows_in_row_order`, and an operator's own empty result built from its input
+  goes through `_as_row_built_table`. An operator node keeps and stores the row order on every
+  path (`_kept_output`: a job run, sync or async, and `node.run()` on its own; ITL-1133),
+  and reads a stored operator cache in row order (`_in_row_order_on_read`). Never change
+  the order of any other populated table: stored tables depend on it.
 - **Type strictness** (developer, November 10, 2026): Orcapod is type strict. It never
   expands or converts a type implicitly; the only exception is normalization to large variants.
   Inputs that disagree on a column's type are an error naming the column and both types, on
   every execution path (sync and async).
-  Function-output rule (developer, November 12, 2026): the returned value must be an instance of the declared type, or an exact numeric equivalent; a subclass stands in for its base and is stored as the base.
+  Function-output rule (developer, November 12, 2026): the returned value must be an instance of the declared type, or an exact numeric equivalent; a subclass stands in for its base.
+  What is stored for a subclass instance is decided by the logical type of the declared
+  class (developer, November 12, 2026, ITL-871): a plain user class is stored as the base
+  (the declared class's fields only; subclass-only fields are omitted and do not enter the
+  stored row hash), while the tensor type keeps the class (an `nn.Parameter` returned for
+  `-> torch.Tensor` is stored, read back and hashed as an `nn.Parameter`).
   Structural classes additionally accept equivalent structural identities. Numeric
-  narrowing and unrelated container types require explicit conversion. Base storage
-  omits subclass-only fields, and those fields do not enter the stored row hash.
+  narrowing and unrelated container types require explicit conversion.
 
 - Every output column takes the large-normalized form of its input type
   (`arrow_utils.normalize_to_large_types`: `string` to `large_string`, `binary` to `large_binary`, `list`
@@ -687,6 +837,9 @@ data. The rules:
   operator that round-trips through Polars casts its columns back
   to the normalized input types (`arrow_utils.restore_column_types`, or
   `restore_schema_nullability` when nullability is restored too).
+  This holds for every operator, also one that passes its rows through unchanged (select,
+  map, a no-op filter, `Join`, `SemiJoin`), on a plain stream as inside a job: its result
+  is an `ArrowTableStream` (ITL-1122).
 - List columns built by `Batch`, `GroupBy` and `MergeJoin` are typed by
   `arrow_utils.aggregated_list_type` (directly or through `build_aggregated_table`):
   `large_list<normalized T>`, or for a logical `T` the logical list type from the type converter
@@ -721,6 +874,29 @@ data. The rules:
 ### Important implementation details
 
 - `ArrowTableSource.__init__` raises `ValueError` if any `tag_columns` are not in the table.
+- The pipeline determines every node's schema; a bound source never changes it (developer,
+  November 14, 2026, ITL-1112). No accepted bind changes any node's stored path or the
+  columns of any node's or stored table (names, tag or data roles, types, nullable flags,
+  system-tag column names); only values differ. Column order is not part of it: matching a
+  source to a slot, columns match by name within the tag group and within the data group,
+  and their order never decides acceptance (developer, November 14, 2026). Do not reorder
+  columns without a reason. `SourceNodeBase.validate` is the one check, used by
+  `PipelineJob.bind`, the `bound_source` setter (and `SourceJobNode.__init__`) and
+  `PipelineJob.load`: per column the declared Python type (structural classes of one identity
+  are one type, `equivalent_hints`), or `T` where the slot declares `T | None`; and exactly
+  one source-id (`str`) and one record-id (`bytes`) system-tag column, no other. Anything
+  else raises `SourceSpecMismatchError` before anything is bound. The
+  source's rows are given as the declared schema at one place, `_DeclaredForm` (nullable
+  fields over the same arrays; the system-tag column NAMES of the declared schema hash,
+  taken from the source's own pair by prefix, the VALUES the source's own; as a stable
+  convenience, not a guarantee, the declared column order, source id before record id). Limits: the check compares Python types, so a difference in Arrow width only
+  (`int32` against `int64`) is not yet refused (ITL-949). A source whose system-tag columns
+  are not exactly one source-id and one record-id column (a joined or merged stream, a raw
+  stream with none) is refused by the same check (developer, November 14, 2026, ITL-1126);
+  binding one properly is ITL-1127. That includes a pipeline's input: `Pipeline.compile`
+  binds each leaf through `SourceJobNode.from_stream`, so a pipeline built directly over a
+  raw `ArrowTableStream` is refused (developer, November 14, 2026; wrap the table as a
+  source). Never pass a bound stream's own system tags through.
 - A source id is the source's name (developer, November 11, 2026; ITL-957). A default id
   built from a hash is `<source kind>:<algorithm label>:<hex>` and is built only by
   `core/sources/source_ids.hash_source_id`: never format one by hand, and never write a label
@@ -731,11 +907,59 @@ data. The rules:
   by the user is never changed. `SourceStreamBuilder.build` has no bare-hash default: it
   needs a `source_id` or a `source_kind`.
 - `ArrowTableStream` requires at least one data column; raises `ValueError` otherwise.
-- `FunctionNode.iter_data()` Phase 1 returns ALL records in the shared `pipeline_path`
-  DB table (not filtered to current inputs). Phase 2 skips inputs whose hash is already
-  in the DB.
+- A job node shows its current run; `node.as_source()` shows everything stored for it
+  (developer, November 13, 2026, ITL-1095). After a run, a `FunctionJobNode` returns exactly
+  the rows of that run's inputs, sync or async (ITL-1093). Before a run in this process (a
+  fresh or loaded job), after a run that raised, after `clear_cache()`, and while stale, every
+  function and operator job node reads empty (zero typed rows; `head()` is `not_computed` and
+  points to `run()` and `as_source()`), in every cache mode: no read touches the database. A
+  never-run or cleared node has no modified time, so it is stale; a job node is stale also
+  when any function or operator job node it depends on is (`core/nodes/staleness.py`), and a
+  `SourceJobNode` is modified when it is bound or its bound source is. A run skips inputs
+  whose entry is already stored. A loaded operator's stored view raises when its run's rows
+  cannot be named (ITL-1043). `job.run(load_only=True)` computes nothing and writes nothing: function nodes
+  load their own stored entries for this run's inputs and skip (and count) the others,
+  operators run without storing, side-effect nodes pass rows on undelivered.
+  A job node's `run(*, load_only=False)` is state-driven: a node that holds a completed,
+  non-stale run (for a full run: not load-only, nor anything above it) runs nothing;
+  otherwise its non-current dependencies run first, each once, on the sync orchestrator
+  (`pipeline/node_run.py`), and the run commits as `job.run()` does. A failed end-of-run
+  commit clears only the nodes that ran; nodes it held keep their earlier run. A load-only run's rows have status
+  `loaded_only`. Only job nodes' `run()` takes an argument (`load_only`).
+  A loaded job (`PipelineJob.load`) runs only with `load_only=True`.
+  `job.run()`/`run_async()` use the same state rule and plan (`node_run.plan_run`): a current node is
+  held (not run; its rows feed its successors, both orchestrators take held rows), sources
+  are read only for nodes that run, a failed end-of-run commit clears only the nodes that ran,
+  and the summary reports held nodes (`NodeRunSummary.held`). REPLAY replays every logged run
+  of its key (ITL-1098).
+- A run checks its sources first (developer, November 14, 2026, ITL-1102). `job.run()`,
+  `run_async()` and a job node's `run()` (load-only too) call `check_for_new_data()` once on
+  each source feeding them (`node_run.check_sources`) before the state rule judges any node;
+  `head()` and the preview never do. A source that finds new data takes it in and moves its
+  modified time to NOW (never to a time the data reports, such as a cursor's `modified_at`);
+  one that finds nothing moves nothing. A check that raises warns once
+  (`SourceCheckFailedWarning`), keeps the source's data and modified time, lists the source
+  in `RunSummary.unchecked_sources`, and the run proceeds (a `PollingSource` a run reads
+  is polled again by that read, and a failing poll raises: ITL-1139). A `SourceJobNode`'s `run()` checks
+  too; a bare source's `run()` never does. A source over another (`CachedSource`, `DerivedSource`)
+  reads it again when its modified time moved since the last read, never on what the
+  inner check returned (another wrapper may have taken the change), and records that time
+  only after the read succeeded. Without a `record_id_column` a row's record id is its position: a
+  change of row order is a change; with one, only content counts
+  (`reload.same_rows(..., ordered=)`, decided by the caller; in doubt, order counts).
 - Empty data → `ArrowTableSource` raises `ValueError("Table is empty")`.
-- `DerivedSource` over a job node before `run()` → presents zero rows with the origin's columns
+- A side-effect job node delivers only when it runs (developer, November 13, 2026, ITL-1091):
+  `job.run()`, `node.run()` (state-driven, ITL-1095: a node holding a current run delivers
+  nothing, so `clear_cache()` it first to deliver again; otherwise the job run's work for that
+  node: with `track_completion` only what the invocation log does not record, without it every
+  row), `execute`, `async_execute`; a load-only run delivers nothing. Every read (`iter_data`, `as_table`, dataframes, `flow`, `head`, preview, a
+  downstream node's read) returns the rows its last run in this process passed on, held in
+  memory (`SideEffectJobNode._held_rows`), and delivers nothing; with none (no run, a run that
+  raised, or stale by `is_stale`) a read returns zero rows. Never route a job node's read to
+  the standalone delivery path. The standalone `SideEffectPodStream` still delivers on every
+  consuming read (`iter_data`, `as_table`, dataframes, `flow`, `run`); its `head()` and
+  preview deliver nothing.
+- `DerivedSource` over a job node with nothing stored → presents zero rows with the origin's columns
   (no computed records; no error), in the plain form and with `tags_as_data`.
 - Join requires non-overlapping data columns; raises `InputValidationError` on collision.
 - MergeJoin requires colliding data columns to have identical Python types; merges into sorted
@@ -761,16 +985,35 @@ data. The rules:
   async path) and never stored, so its identity is the fixed `("DropNulls", None)`,
   different from any list of names. System-tag, source-info, context and meta columns are
   never included. An explicitly empty collection is not "no argument": it raises `ValueError`.
+- `SemiJoin`'s match keys are exactly the names that are tag columns of both inputs
+  (developer, November 13, 2026, ITL-1088), from one helper, `SemiJoin._match_keys`, used by
+  validation, the sync path and the async path. A shared data column name, or a name that is a
+  tag on one side and data on the other, is ignored (by name only); the right input's data
+  columns are never read. No shared tag column: every left row is returned. Ignored names
+  raise `SemiJoinIgnoredColumnWarning` once per operator and set of names (provisional in
+  v0.3: may become an error); the async path warns only when no validation ran.
+- `Join`, `MergeJoin` and `SemiJoin` accept a shared TAG key whose types differ only in
+  nullability (`T` against `T | None`), because a null key matches nothing (developer,
+  November 13, 2026, ITL-829). `Join` and `MergeJoin` give the key `T` when any input has it
+  `T`, and `T | None` only when every input has it nullable; `SemiJoin`'s output is the left
+  input's schema as it is (its nullability; types in their large variants, ITL-1122). The rule is `core/operators/key_nullability.py`
+  (`reconcile_key_nullability` on tag schemas before they are combined, `key_nullable` for the
+  Arrow field flag, set by re-wrapping arrays, never by a cast). Equal nullability takes the
+  unchanged path; any other type difference, and every data column, behaves as before.
 - `GroupBy` requires every column in `by` to be a scalar tag column; it raises
   `InputValidationError` for unknown, data, or list-valued columns (the last usually means the
   stream came from `Batch` — group before batching, not after). Members are sorted by non-key
   tag values with the system `record_id` as tiebreaker, so the hashed lists are stable across
   runs. Groups themselves are emitted in key order, so a reordered input yields a
   byte-identical table.
-- `GroupBy`'s output tag columns are its input's tag columns, in input order: keys scalar,
-  every other tag `list[T]` (ITL-955). A grouped stream can be grouped again on a coarser key;
-  its list-valued tags then nest (`list[list[T]]`) and still order the members, so the member
-  sort key (`_null_last_key`) is recursive and sorts nulls last at every depth.
+- `GroupBy`'s output tag columns are its `by` columns, scalar, in the input's tag order; every
+  other tag is dropped (ITL-1070; ITL-955 had kept them as `list[T]` tags, never released). The
+  dropped tags still order the members, so the data lists are as before. Their values are not
+  carried: a step that needs them makes the column data before grouping (at the source, or
+  `DerivedSource(tags_as_data=...)`). A list-valued tag of the input (a list-typed source tag)
+  can still order members, so the member sort key (`_null_last_key`) is
+  recursive and sorts nulls last at every depth. A grouped stream grouped again on a coarser key
+  orders its members by the first grouping's keys outside the coarser key, then by record id. An opt-in mode that keeps non-key tags is ITL-1071.
 - `Data` source-info values may be `str`, `None`, or `list[...]`, nested to any depth; the
   Arrow and Python types are derived from the value, with `None` mapping to `large_string`.
   That rule has one definition, `arrow_utils.source_info_arrow_type`, and applies only to

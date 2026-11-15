@@ -2,7 +2,7 @@
 
 The workshop shape: a source whose value column is nullable by specification,
 ``drop_nulls``, then a pod with a non-optional parameter. A second run on
-the same store must reuse the stored results.
+the same database must reuse the stored results.
 """
 
 from __future__ import annotations
@@ -64,13 +64,14 @@ def _recordings(timestamps: list[int | None]) -> ArrowTableSource:
 def _run(store: DeltaTableDatabase, timestamps: list[int | None]) -> PipelineJob:
     """Record and run ``source -> drop_nulls -> to_seconds`` as a ``PipelineJob``."""
     pod = FunctionPod(PythonDataFunction(to_seconds, output_keys="seconds"))  # pyright: ignore[reportArgumentType]  # PythonDataFunction is not yet typed as matching DataFunctionProtocol (baselined in other tests); it works at runtime
-    job = PipelineJob(name="recordings", store=store)
+    job = PipelineJob(name="recordings", database=store)
     with job:
         present = _recordings(timestamps).drop_nulls(
             "recording_start_timestamp", label="present"
         )
         pod(present, label="seconds")
-    return job.run()
+    _ = job.run()
+    return job
 
 
 def _seconds(job: PipelineJob) -> dict[str, float]:
@@ -93,7 +94,7 @@ def test_job_drops_null_rows_and_runs_the_pod(store: DeltaTableDatabase) -> None
 
 
 def test_identical_rerun_hits_the_cache(store: DeltaTableDatabase) -> None:
-    """A second identical run on the same store makes no pod call."""
+    """A second identical run on the same database makes no pod call."""
     _run(store, [1000, None, 3000])
     assert sorted(_CALLS) == [1000, 3000]
 
@@ -104,7 +105,7 @@ def test_identical_rerun_hits_the_cache(store: DeltaTableDatabase) -> None:
 
 
 def test_fresh_store_recomputes(tmp_path: Path) -> None:
-    """Control for the cache-hit test: a different store has nothing to reuse."""
+    """Control for the cache-hit test: a different database has nothing to reuse."""
     _run(DeltaTableDatabase(base_path=tmp_path / "a"), [1000, None, 3000])
     _CALLS.clear()
     _run(DeltaTableDatabase(base_path=tmp_path / "b"), [1000, None, 3000])
@@ -140,7 +141,7 @@ def test_job_save_and_load_round_trips_the_operator(
     assert [c["class_name"] for c in saved] == ["DropNulls"]
     assert saved[0]["config"] == {"columns": ["recording_start_timestamp"]}
 
-    loaded = PipelineJob.load(str(path), store=store)
+    loaded = PipelineJob.load(str(path), database=store)
     present = loaded.nodes["present"]
     assert present.output_schema() == (
         {"session": str},

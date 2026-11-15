@@ -531,3 +531,29 @@ class TestArrowTableStreamNullablePreservation:
         result = builder.build(table, tag_columns=["tag"], source_kind="arrow_table")
         _, data_schema = result.stream.output_schema()
         assert data_schema["val"] is int
+
+
+class TestNotebookDisplay:
+    """A stream shown in a notebook renders its ``head()``: the first rows, tags first."""
+
+    def test_repr_html_is_the_rendered_head(self):
+        """The display is ``head()`` rendered: header, tag names, the first 10 rows."""
+        stream = make_table_stream(n_rows=25)
+        stream.label = "numbers"
+
+        html = stream._repr_html_()
+
+        sorted_head = stream.head(columns={"sort_by_tags": True})
+        assert (
+            html.split("</strong>")[1:]
+            == sorted_head._repr_html_().split("</strong>")[1:]
+        )
+        assert "ArrowTableStream[numbers] — first 10 of 25 rows, sorted by tags" in html
+        assert "bold = tag" in html
+        assert "shape: (10, 2)" in html
+
+    def test_head_is_the_first_rows_of_the_table(self):
+        """``head(n)`` holds the first ``n`` rows of ``as_table()``."""
+        stream = make_table_stream(n_rows=25)
+
+        assert stream.head(5).table.equals(stream.as_table().slice(0, 5))
