@@ -306,6 +306,12 @@ class _RowChecker:
                 if not candidates:
                     continue
                 explained.update(column for column, _, _ in given)
+                # Every candidate has these values and tags: the comparison is done
+                # even when no single origin can be named.
+                self.checked.update(column for column, _, _ in given)
+                self.checked.update(
+                    k for k in tags if self.oracle.base_name(k) in rows[0].values
+                )
                 if len(candidates) == 1:
                     (origin,) = candidates
                     self._assign(member, given[0][0], origin)
@@ -738,6 +744,15 @@ def assert_same_rows_by_identity(
     assert left.column_names == right.column_names, (
         f"columns differ: {left.column_names} vs {right.column_names}"
     )
+    # Arrow types and nullability too: the async rows must equal the sync rows in both.
+    for name in left.column_names:
+        if name in ignore:
+            continue
+        a, b = left.schema.field(name), right.schema.field(name)
+        assert (a.type, a.nullable) == (b.type, b.nullable), (
+            f"column {name!r}: {a.type} (nullable={a.nullable}) vs "
+            f"{b.type} (nullable={b.nullable})"
+        )
     left_rows = rows_by_identity(left, ignore)
     right_rows = rows_by_identity(right, ignore)
     assert left_rows.keys() == right_rows.keys(), "the tables hold different records"

@@ -599,3 +599,44 @@ def test_a_folded_row_whose_members_only_the_tags_resolve_passes() -> None:
     )
     assert any(None in (v or []) for v in bare.column("m").to_pylist())
     assert_rows_aligned(bare, layout, sources.oracle, batched.data_context)
+
+
+def test_tables_differing_only_in_an_arrow_type_or_nullability_are_not_the_same_rows() -> (
+    None
+):
+    """Async must match sync in types and nullability, not only in Python values."""
+    table, _, _, _ = source_table()
+    assert_same_rows_by_identity(table, table)
+    index = table.column_names.index("m")
+    field = table.field("m")
+    wider = table.set_column(
+        index, pa.field("m", pa.int64()), table.column("m").cast(pa.int64())
+    )
+    if field.type != pa.int64():
+        with pytest.raises(AssertionError, match="column 'm'"):
+            assert_same_rows_by_identity(table, wider)
+    flipped = table.set_column(
+        index, field.with_nullable(not field.nullable), table.column("m")
+    )
+    with pytest.raises(AssertionError, match="column 'm'"):
+        assert_same_rows_by_identity(table, flipped)
+
+
+def test_a_column_every_candidate_origin_matches_counts_as_compared() -> None:
+    """Rows whose tags and ``m`` repeat leave several origins; the comparison is still done."""
+    sources = make_sources("duplicate")
+    table = sources.a.as_table(all_info=True)
+    layout = Layout(tag_keys=TAG_COLUMNS, data_keys=("m",))
+    bare = table.select([*TAG_COLUMNS, "m"])
+    pairs_seen = list(zip(*(bare.column(c).to_pylist() for c in (*TAG_COLUMNS, "m"))))
+    assert len(set(pairs_seen)) < len(pairs_seen), "the scenario has no repeated row"
+    # Only the repeated rows: no row of the table has a single candidate origin.
+    from collections import Counter
+
+    counts = Counter(pairs_seen)
+    keep = [i for i, p in enumerate(pairs_seen) if counts[p] > 1]
+    repeated = bare.take(keep)
+    checked = assert_rows_aligned(
+        repeated, layout, sources.oracle, sources.a.data_context
+    )
+    assert "m" in checked
