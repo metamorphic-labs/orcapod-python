@@ -45,8 +45,8 @@ from orcapod.contexts import enable_file_hash_caching
 enable_file_hash_caching()
 ```
 
-`enable_file_hash_caching` lives in `orcapod.contexts`; it is not re-exported from the
-top-level `orcapod` namespace.
+`enable_file_hash_caching` lives in `orcapod.contexts` and is also exported from the
+top-level `orcapod` namespace, as `orcapod.enable_file_hash_caching`.
 
 You can also supply an explicit path for the SQLite database, as a `pathlib.Path`. Parent
 directories are created if they do not exist:

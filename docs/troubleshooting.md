@@ -34,8 +34,9 @@ it an explicit schema (for example `data_schema=` on `DictSource`).
 
 ### `TypeError: 'PosixPath' object is not iterable` from `CSVSource`
 
-**Cause.** `CSVSource` was given a `pathlib.Path`. It accepts the file path only as a
-string. This is a known defect.
+**Cause.** `CSVSource` was given a `pathlib.Path` and no `source_id`. The file path is
+typed as a string; without a `source_id` it is used to build the default one, which fails
+for a `Path`. This is a known defect.
 
 **Fix.** `CSVSource(str(path), ...)`.
 
