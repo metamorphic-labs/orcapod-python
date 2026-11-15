@@ -150,7 +150,9 @@ When such a function runs inside a [`PipelineJob`](pipeline-job.md):
 - **The database holds the path, not the file.** A re-run finds the stored path and does
   not call the function again, whether or not the file is still there. Keep or delete output
   files together with the database that refers to them.
-- **Derive the output name from the inputs**, so that each row writes its own file.
+- **Derive the output name from the inputs**, so that rows with different inputs write
+  different files. Rows whose inputs have the same content share one result and one output
+  path (see above); put a digest of the content into the name when that matters.
 - **Prefer absolute output paths** for results you keep. A relative path is stored as
   written and only resolves from the directory the job was run in.
 

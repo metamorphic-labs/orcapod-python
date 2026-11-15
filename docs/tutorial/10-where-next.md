@@ -24,7 +24,9 @@ durations = sessions.select_data_columns(["duration_s"])
 A function pod returns a value. Some steps exist for their effect: send a notification,
 upload a file, write a row to a lab database. These are **side-effect pods**. The most
 useful kind is the **sink**, made with `@sink_pod`: it runs once for each row and remembers
-which rows it has already handled, so a re-run does not repeat the effect.
+which rows it has already handled, so a re-run does not repeat the effect for them. A row
+counts as handled once its function has returned and that has been recorded; if the process
+stops in between, the next run calls the function for that row again.
 
 ```python
 from orcapod import InvocationContext, sink_pod

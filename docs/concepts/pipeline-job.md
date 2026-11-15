@@ -41,7 +41,7 @@ with job:
     compute_bmi.pod(mice(cohort_a), label="bmi")
 job.run()
 
-print(job.nodes["bmi"].as_table().to_pylist())
+print(job.nodes["bmi"].as_table().sort_by("subject_id").to_pylist())
 # [{'subject_id': 'mouse_01', 'bmi': 1756.9444444444446}, {'subject_id': 'mouse_02', 'bmi': 2209.9999999999995}]
 ```
 
