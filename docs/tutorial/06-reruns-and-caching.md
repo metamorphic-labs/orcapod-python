@@ -20,7 +20,7 @@ from orcapod.databases import InMemoryArrowDatabase
 from orcapod.sources import CSVSource
 
 data_dir = make_dataset()
-store = InMemoryArrowDatabase()
+database = InMemoryArrowDatabase()
 calls = []
 
 sessions = CSVSource(
@@ -31,13 +31,13 @@ sessions = CSVSource(
 
 
 def run(pod, units_file="units.csv"):
-    """Build the firing-rate job over ``store``, run it, and return the rates as a DataFrame."""
+    """Build the firing-rate job over ``database``, run it, and return the rates as a DataFrame."""
     units = CSVSource(
         str(data_dir / units_file),
         tag_columns=["subject_id", "session", "probe", "unit"],
         source_id="units",
     )
-    job = PipelineJob(name="workshop", store=store)
+    job = PipelineJob(name="workshop", database=database)
     with job:
         pod(
             units.select_data_columns(["n_spikes"]),
@@ -60,11 +60,11 @@ print(len(rates), len(calls))
 # 64 63
 ```
 
-This part uses an in-memory store so that the page runs quickly. Everything shown behaves
+This part uses an in-memory database so that the page runs quickly. Everything shown behaves
 the same with a `DeltaTableDatabase`.
 
 The helper `run` builds the job from Part 5 (without the per-session mean, to keep the
-output short), runs it over the one shared `store`, and returns the result sorted. The first
+output short), runs it over the one shared `database`, and returns the result sorted. The first
 run computed 63 results for 64 units, as before.
 
 ## New rows: only the new rows are computed
@@ -84,7 +84,7 @@ print(len(rates), len(calls))
 # 66 65
 ```
 
-66 rows in the result, and two more calls. The other 64 rows were read from the store.
+66 rows in the result, and two more calls. The other 64 rows were read from the database.
 
 ## A corrected value: only that row is computed
 
@@ -119,8 +119,10 @@ print(len(calls))
 ```
 
 No call. `firing_rate` only receives `n_spikes` and `duration_s`, and those are unchanged.
-This is the benefit of the strict rule from Part 2: a result depends on exactly the columns
-you handed to the function, so Orcapod knows precisely when it is still valid.
+This is why Part 2's Rule 2 drops the data columns a function does not take before the pod
+sees a row: a result depends on exactly the columns the function receives, so a change to any
+other column leaves it valid. (The `select_data_columns` calls in `run` only make that
+explicit; the pod would drop `depth_um` without them.)
 
 ## An edited function: nothing is recomputed
 
@@ -172,7 +174,7 @@ print(rates.head(2))
 # 1   mouse_01      s1  imec0     1    326.0
 ```
 
-63 new calls and new values. The results of version 0 are still in the store, untouched;
+63 new calls and new values. The results of version 0 are still in the database, untouched;
 version 1 has its own. If you went back to the `v0.0` function you would get the old numbers
 without any computation.
 
@@ -189,11 +191,11 @@ A stored result is reused when **all** of these are the same as when it was comp
 
 1. the function's name, output and major version;
 2. the values of the function's inputs for that row;
-3. the shape of the pipeline up to that function: which sources (by their column names and
-   types), which operators, which functions, connected in the same way;
-4. the job's `name` and store.
+3. the job's `name` and database.
 
-Change any one and the affected rows are computed. Change none and nothing is.
+Change any one and the affected rows are computed. Change none and nothing is. Where the
+input values came from does not matter: which file, which source, which steps before the
+function.
 
 Orcapod implements this with hashes. A **hash** is a short fingerprint computed from some
 content: the same content always gives the same hash, and different content gives, in
@@ -218,18 +220,19 @@ print(units.pipeline_hash() == units_more.pipeline_hash())
 
 The **pipeline hash** covers structure only: column names and types, and the steps applied.
 The two files have different rows but the same columns, so their pipeline hashes are equal.
-The pipeline hash decides *which table* in the store a function's results go to, which is
-why the run over `units_more.csv` found the results computed from `units.csv`.
+The job uses it to name the table in which it records which inputs each function node
+received, so runs of one pipeline over different files share that record.
 
-Within that table, each result is filed under a hash of the input values of its row. That
-is how two extra rows meant two extra calls.
+The results themselves are filed under the function (its name, output and major version)
+and a hash of the input values of each row. That is why the run over `units_more.csv` found
+the results computed from `units.csv`, and how two extra rows meant two extra calls.
 
 The second hash, the **content hash**, also covers which sources the data came from. See
 [Identity & Hashing](../concepts/identity.md) for the full picture.
 
 ## What to remember
 
-- New or changed input rows are computed; everything else is read from the store.
+- New or changed input rows are computed; everything else is read from the database.
 - **Editing a function body does not recompute.** Bump the major version (`"v0.0"` to
   `"v1.0"`), or rename the function.
 - A minor version bump (`"v0.0"` to `"v0.1"`) does not recompute.
@@ -238,7 +241,7 @@ The second hash, the **content hash**, also covers which sources the data came f
 
 ## Exercises
 
-**1.** Predict, then check. Starting from the `v1.0` function above and the current store,
+**1.** Predict, then check. Starting from the `v1.0` function above and the current database,
 which of these four changes cause function calls on the next `run(...)`, and how many?
 
 (a) Change the body to `return 60.0 * n_spikes / duration_s`, same version.<br>
@@ -302,13 +305,13 @@ run the pipeline since. Which stored results are wrong, and what do you do?
     cannot tell them apart from the results alone.
 
     Bump the major version and run again. Every row is then computed with the current code
-    and stored under the new version. The mixed results stay in the store under the old
+    and stored under the new version. The mixed results stay in the database under the old
     version and are no longer used.
 
     The habit to build: change the behaviour of a function, change its major version, in
     the same edit.
 
-**3.** A colleague runs the same pipeline code over the same store directory, but named
+**3.** A colleague runs the same pipeline code over the same database directory, but named
 their job `"analysis"` instead of `"workshop"`. Are your stored results reused?
 
 ??? success "Solution"
@@ -322,7 +325,7 @@ their job `"analysis"` instead of `"workshop"`. Are your stored results reused?
         return n_spikes / duration_s
 
 
-    other = PipelineJob(name="analysis", store=store)
+    other = PipelineJob(name="analysis", database=database)
     with other:
         firing_rate.pod(
             units.select_data_columns(["n_spikes"]),
@@ -335,6 +338,6 @@ their job `"analysis"` instead of `"workshop"`. Are your stored results reused?
     # 63
     ```
 
-    Agree on a job name with the people you share a store with.
+    Agree on a job name with the people you share a database with.
 
 Next: [Part 7: Working with files](07-files.md).

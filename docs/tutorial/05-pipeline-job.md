@@ -52,15 +52,14 @@ lets us count how often each function was really called.
 
 ## Record, then run
 
-A job needs a **store**: the database its results go into. Start with one that lives in
-memory. Then write the pipeline exactly as before, inside a `with` block:
+A job needs a **database** to put its results in. Start with one that lives in memory. Then write the pipeline exactly as before, inside a `with` block:
 
 ```python
 from orcapod.databases import InMemoryArrowDatabase
 
-store = InMemoryArrowDatabase()
+database = InMemoryArrowDatabase()
 
-job = PipelineJob(name="workshop", store=store)
+job = PipelineJob(name="workshop", database=database)
 with job:
     rates = firing_rate.pod(
         units.select_data_columns(["n_spikes"]),
@@ -80,7 +79,7 @@ Nothing has been computed. Inside the `with` block the job only **records** whic
 and pods are applied to which streams. The one new thing in the code is `label=`: a name for
 the step, which you will use to find its results.
 
-`run()` executes what was recorded and writes every result to the store:
+`run()` executes what was recorded and writes every result to the database:
 
 ```python
 job.run()
@@ -134,16 +133,17 @@ print(job.nodes["rates"].as_table().num_rows)
 ```
 
 !!! warning "Read nodes after `run()`"
-    Before `run()`, a function node has no results and gives you an empty table without
-    complaint. If a node looks empty, check that you ran the job.
+    A node shows the rows of the job's run in this Python session. Before `run()`, every node
+    except the sources gives you an empty table without complaint; only `head()` and the
+    notebook preview say "not run". If a node looks empty, check that you ran the job.
 
 ## Run it again
 
-Record the same pipeline in a new job over the same store. A small function saves retyping:
+Record the same pipeline in a new job over the same database. A small function saves retyping:
 
 ```python
-def build_job(store):
-    job = PipelineJob(name="workshop", store=store)
+def build_job(database):
+    job = PipelineJob(name="workshop", database=database)
     with job:
         rates = firing_rate.pod(
             units.select_data_columns(["n_spikes"]),
@@ -157,7 +157,7 @@ def build_job(store):
     return job
 
 
-job = build_job(store)
+job = build_job(database)
 job.run()
 
 print(len(calls))
@@ -166,7 +166,7 @@ print(job.nodes["session_means"].as_table().num_rows)
 # 8
 ```
 
-Still 71. The second run called no function at all. Every result was found in the store,
+Still 71. The second run called no function at all. Every result was found in the database,
 and the node holds the same 8 rows.
 
 ## Keep results on disk
@@ -183,7 +183,7 @@ print(len(calls))
 # 142
 ```
 
-This is a different, empty store, so everything was computed once more: 71 further calls.
+This is a different, empty database, so everything was computed once more: 71 further calls.
 (You will see many `WARN deltalake_core::writer::stats` lines while it writes. They are
 harmless; see [Part 0](00-setup.md#messages-you-can-ignore).)
 
@@ -203,8 +203,8 @@ print(means.sort_values(["subject_id", "session"], ignore_index=True).head(2))
 # 1   mouse_01      s2      6.793750
 ```
 
-No calls. The results came from the files in `workshop_db/`. Rows read back from a store are
-not guaranteed to come in the order they were first computed in, which is why the sample
+No calls. The results came from the files in `workshop_db/`. Rows read back from a database
+are not guaranteed to come in the order they were first computed in, which is why the sample
 sorts them before printing. Sort whenever the order matters to you.
 
 ```python
@@ -216,17 +216,18 @@ print(sorted(p.name for p in Path("workshop_db/workshop").iterdir()))
 # ['_result', 'firing_rate', 'mean_rate']
 ```
 
-The first level is the job's `name`; below it there is one directory per function. Two jobs
-with different names over the same directory do not share results. You never need to read
+The first level is the job's `name`. Below it, `_result` holds each function's results, and
+the directory named after each function records which inputs the job gave it. Two jobs with
+different names over the same directory do not share results. You never need to read
 these files yourself, and deleting the whole directory is safe: it only means the next run
 computes everything again.
 
 ## What to remember
 
-- `PipelineJob(name=..., store=...)`, a `with` block to record, `job.run()` to execute.
+- `PipelineJob(name=..., database=...)`, a `with` block to record, `job.run()` to execute.
 - Give pods a `label`; read results from `job.nodes[label]` after `run()`.
-- Results are stored per function and per input values. A second run over the same store
-  computes only what is missing.
+- Results are stored per function and per input values. A second run over the same
+  database computes only what is missing.
 - `InMemoryArrowDatabase` for trying things out; `DeltaTableDatabase("directory")` to keep
   results between sessions.
 
@@ -255,7 +256,7 @@ def to_mm(depth_um: int) -> float:
     return depth_um / 1000
 
 
-job = PipelineJob(name="depths", store=DeltaTableDatabase("exercise_db"))
+job = PipelineJob(name="depths", database=DeltaTableDatabase("exercise_db"))
 with job:
     units = CSVSource(
         str(data_dir / "units.csv"),
@@ -288,7 +289,7 @@ arguments? Predict, then try it with a new job over an `InMemoryArrowDatabase`.
     The two function nodes are listed under their function names.
 
     ```python
-    unlabelled = PipelineJob(name="unlabelled", store=InMemoryArrowDatabase())
+    unlabelled = PipelineJob(name="unlabelled", database=InMemoryArrowDatabase())
     with unlabelled:
         rates = firing_rate.pod(
             units.select_data_columns(["n_spikes"]),
@@ -303,13 +304,13 @@ arguments? Predict, then try it with a new job over an `InMemoryArrowDatabase`.
 
     Labels become useful when the same function is applied in two places of one pipeline.
 
-**3.** Create a job without a store, record one step, and call `run()`. Read the error and do
+**3.** Create a job without a database, record one step, and call `run()`. Read the error and do
 what it suggests.
 
 ??? success "Solution"
     ```python
-    no_store = PipelineJob(name="no_store")
-    with no_store:
+    no_database = PipelineJob(name="no_database")
+    with no_database:
         firing_rate.pod(
             units.select_data_columns(["n_spikes"]),
             sessions.select_data_columns(["duration_s"]),
@@ -317,14 +318,14 @@ what it suggests.
         )
 
     try:
-        no_store.run()
+        no_database.run()
     except ValueError as err:
         print(err)
-    # PipelineJob.run() requires a store. Call job.bind(store=db) before run(). For transient (in-memory) storage use job.bind(store=InMemoryArrowDatabase()).
+    # PipelineJob.run() requires a database. Call job.bind(database=db) before run(). For transient (in-memory) storage use job.bind(database=InMemoryArrowDatabase()).
 
-    no_store.bind(store=InMemoryArrowDatabase())
-    no_store.run()
-    print(no_store.nodes["rates"].as_table().num_rows)
+    no_database.bind(database=InMemoryArrowDatabase())
+    no_database.run()
+    print(no_database.nodes["rates"].as_table().num_rows)
     # 64
     ```
 

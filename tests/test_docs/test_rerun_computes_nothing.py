@@ -1,10 +1,10 @@
-"""The tutorial's central claim: a second run over the same store computes nothing.
+"""The tutorial's central claim: a second run over the same database computes nothing.
 
 Parts 5 and 6 of ``docs/tutorial/`` are built on it. The claim once failed for
 about half of all Python processes: ``Join`` emitted tag columns in ``set``
 order, ``GroupBy`` sorted group members by those columns, and so the lists a
 downstream function received (which are its cache key) differed between a first
-run and a re-run read back from the store (ITL-817). The failure depends on
+run and a re-run read back from the database (ITL-817). The failure depends on
 ``PYTHONHASHSEED``, so each seed runs in its own interpreter.
 """
 
@@ -22,8 +22,8 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # The shape of the tutorial pipeline, reduced: two sources joined inside a
-# function pod, grouped so that two tag columns ("p" and "u") are folded into
-# lists, then a second function pod over the lists.
+# function pod, grouped on "s" so that each group's members are ordered by the two
+# other tag columns ("p" and "u"), then a second function pod over the lists.
 _SCRIPT = textwrap.dedent(
     """
     import json
@@ -55,10 +55,10 @@ _SCRIPT = textwrap.dedent(
     ]
     sessions = [{"s": "a", "dur": 2.0}, {"s": "b", "dur": 4.0}]
 
-    store = InMemoryArrowDatabase()
+    database = InMemoryArrowDatabase()
     runs = []
     for _ in range(2):
-        job = PipelineJob(name="w", store=store)
+        job = PipelineJob(name="w", database=database)
         with job:
             u = DictSource(data=units, tag_columns=["s", "p", "u"], source_id="units")
             s = DictSource(data=sessions, tag_columns=["s"], source_id="sessions")
@@ -78,7 +78,7 @@ _SCRIPT = textwrap.dedent(
 
 
 @pytest.mark.parametrize("seed", ["0", "1", "2", "3", "5"])
-def test_second_run_over_the_same_store_computes_nothing(seed: str, tmp_path: Path):
+def test_second_run_over_the_same_database_computes_nothing(seed: str, tmp_path: Path):
     env = dict(os.environ)
     env["PYTHONPATH"] = str(REPO_ROOT / "src")
     env["PYTHONHASHSEED"] = seed
