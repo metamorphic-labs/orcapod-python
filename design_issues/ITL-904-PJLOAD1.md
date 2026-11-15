@@ -26,7 +26,7 @@ Saving a job and loading it with `PipelineJob.load` failed in four ways:
   `run.node_job_content_hashes`, the same set `get_all_records()` returns. `as_table()` is an
   `ArrowTableStream` over the stored Arrow records, so stored types are kept and `all_info`
   includes system tags, source info and the data context.
-- Without a database, reading names `PipelineJob.load(path, store=...)` and `job.bind(store=...)`.
+- Without a database, reading names `PipelineJob.load(path, database=...)` and `job.bind(database=...)`.
 - `save()` records `run.node_has_stored_records`: whether the database held at least one pipeline
   record carrying each function node's content hash. This is an additive, optional field, and
   the format version is unchanged. A node saved with records raises, naming the database and the
