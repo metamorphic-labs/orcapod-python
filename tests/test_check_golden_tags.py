@@ -76,6 +76,7 @@ def repo(tmp_path: Path) -> Path:
     """A repository with an open commit tagged ``v0.2.0`` and a release tagged ``v0.3.0``."""
     root = tmp_path / "repo"
     store.copy_tree(store.PROJECT_ROOT, root, VERSION)
+    store.reopen_tree(root, VERSION, "2026-11-15")
     _git(root.parent, "init", "-q", str(root))
     _commit(root, "open data context")
     _git(root, "tag", "v0.2.0")
@@ -94,6 +95,7 @@ def test_head_at_the_release_passes(repo: Path) -> None:
 def test_a_tag_that_released_nothing_is_not_checked(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     store.copy_tree(store.PROJECT_ROOT, root, VERSION)
+    store.reopen_tree(root, VERSION, "2026-11-15")
     _git(root.parent, "init", "-q", str(root))
     _commit(root, "open data context")
     _git(root, "tag", "v0.2.0")
@@ -183,6 +185,7 @@ def test_a_changed_manifest_pin_fails(repo: Path) -> None:
 def test_outside_a_repository_it_skips_locally_and_fails_in_ci(tmp_path: Path) -> None:
     plain = tmp_path / "plain"
     store.copy_tree(store.PROJECT_ROOT, plain, VERSION)
+    store.reopen_tree(plain, VERSION, "2026-11-15")
     local = _check(plain)
     assert local.returncode == 0
     assert "skipped" in local.stdout
@@ -208,6 +211,7 @@ def test_a_shallow_clone_fails_in_ci(repo: Path, tmp_path: Path) -> None:
 def test_a_repository_without_tags_fails_in_ci(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     store.copy_tree(store.PROJECT_ROOT, root, VERSION)
+    store.reopen_tree(root, VERSION, "2026-11-15")
     _git(root.parent, "init", "-q", str(root))
     _commit(root, "open data context")
     result = _check(root, ci=True)

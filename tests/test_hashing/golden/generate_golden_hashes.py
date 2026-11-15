@@ -74,6 +74,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import hashlib
 import json
 import pathlib
 import sys
@@ -135,7 +136,9 @@ def add(root: pathlib.Path, version: str, groups: list[str]) -> list[str]:
     files = store.group_files(folder)
     history = manifest["golden"]["history"]
     released = store.released_files(history)
-    written: list[str] = []
+    # Compute and plan every group before writing anything, so a failure leaves the files
+    # and their history as they were.
+    planned: list[tuple[pathlib.Path, bytes, int]] = []
     for group in groups:
         live = cases.compute_group(group)
         clash = sorted(e for e in live if owner.get(e, group) != group)
@@ -159,18 +162,20 @@ def add(root: pathlib.Path, version: str, groups: list[str]) -> list[str]:
                 raise SystemExit(f"{group} has no free file counter")
             target = folder / f"{group}-{number:02d}.json"
             values = new
-        _ = target.write_text(dump(values), encoding="utf-8")
+        data = dump(values).encode("utf-8")
         history = store.with_file(
-            history, target.name, store.file_digest(target), _today()
+            history, target.name, hashlib.sha256(data).hexdigest(), _today()
         )
-        written.append(target.name)
-        print(f"added {len(new)} {group} entries to {target}")
-    if written:
-        manifest["golden"]["history"] = history
-        store.write_json(path, manifest)
-    else:
+        planned.append((target, data, len(new)))
+    if not planned:
         print("nothing to add: every computed entry is pinned")
-    return written
+        return []
+    for target, data, count in planned:
+        _ = target.write_bytes(data)
+        print(f"added {count} entries to {target}")
+    manifest["golden"]["history"] = history
+    store.write_json(path, manifest)
+    return [target.name for target, _, _ in planned]
 
 
 def check(root: pathlib.Path, version: str, groups: list[str]) -> list[str]:

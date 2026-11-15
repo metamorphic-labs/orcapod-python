@@ -106,8 +106,8 @@ def write_json(path: Path, value: Any) -> None:
 
     Four-space indentation, keys in their given order, a trailing newline.
     """
-    path.write_text(
-        json.dumps(value, indent=4, ensure_ascii=False) + "\n", encoding="utf-8"
+    _ = path.write_bytes(
+        (json.dumps(value, indent=4, ensure_ascii=False) + "\n").encode("utf-8")
     )
 
 
@@ -130,6 +130,37 @@ def copy_tree(source_root: Path, target_root: Path, version: str) -> None:
         _ = shutil.copyfile(path, target)
     folder = golden_folder(source_root, manifest)
     _ = shutil.copytree(folder, target_root / folder.relative_to(source_root))
+
+
+def reopen_tree(root: Path, version: str, date: str) -> None:
+    """Give a copied tree a fixed open starting point, whatever the repository released.
+
+    The history becomes one open revision listing every file of the golden folder with its
+    sha256; ``released_in`` is cleared and the pin becomes ``{"manifest": null,
+    "releases": {}}``. The golden files are not touched. Tests that add or release on a
+    copy start from this state, so they keep working after the repository's own releases.
+
+    Args:
+        root: Root of a copy made by ``copy_tree``; never the repository.
+        version: Data context version.
+        date: Date of the open revision, ``YYYY-MM-DD``.
+    """
+    path = manifest_path(root, version)
+    manifest = read_json(path)
+    folder = golden_folder(root, manifest)
+    revision: dict[str, Any] = {
+        "date": date,
+        "release": None,
+        "added": {p.name: file_digest(p) for p in sorted(folder.iterdir())},
+        "previous": None,
+    }
+    revision["digest"] = revision_digest(revision)
+    manifest["golden"]["history"] = [revision]
+    manifest["released_in"] = None
+    write_json(path, manifest)
+    pins = read_json(pins_path(root))
+    pins[version] = {"manifest": None, "releases": {}}
+    write_json(pins_path(root), pins)
 
 
 # ---------------------------------------------------------------------------

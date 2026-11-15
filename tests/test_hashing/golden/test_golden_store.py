@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from orcapod.contexts import get_default_context
-from tests.test_hashing.golden import store
+from tests.test_hashing.golden import cases, store
 from tests.test_hashing.golden.generate_golden_hashes import dump, main
 
 VERSION = get_default_context().version
@@ -26,9 +26,10 @@ def _write(folder: Path, name: str, values: dict[str, Any]) -> None:
 
 @pytest.fixture
 def tree(tmp_path: Path) -> Path:
-    """A copy of the repository's golden tree."""
+    """A copy of the repository's golden tree, reopened: one open revision, no release."""
     root = tmp_path / "tree"
     store.copy_tree(store.PROJECT_ROOT, root, VERSION)
+    store.reopen_tree(root, VERSION, "2026-11-15")
     return root
 
 
@@ -234,8 +235,8 @@ def test_a_build_that_is_not_a_final_release_needs_no_releases_line(
     )
 
 
-def test_the_open_repository_pin_is_consistent() -> None:
-    """While the manifest is open: no manifest pin, no releases, no released_in."""
+def test_the_repository_pin_is_consistent() -> None:
+    """The repository's pin, manifest and history agree, open or released."""
     pin = _pin(store.PROJECT_ROOT)
     manifest = _manifest(store.PROJECT_ROOT)
     assert store.pin_problems(manifest, pin, manifest["golden"]["history"]) == []
@@ -276,6 +277,27 @@ def test_add_after_a_release_writes_a_new_file_and_a_new_revision(tree: Path) ->
     assert [r["release"] for r in history] == [None, "0.3.0", None]
     assert history[2]["previous"] == history[1]["digest"]
     assert list(history[2]["added"]) == ["schema-02.json"]
+    assert store.tree_problems(tree, VERSION) == []
+
+
+def test_add_changes_nothing_when_a_later_group_fails(
+    tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every group is computed before anything is written: files and history stay in step."""
+    _ = _drop_entries(tree, "schema-01.json", 1)
+    before = _snapshot(_folder(tree)), store.manifest_path(tree, VERSION).read_bytes()
+    compute = cases.compute_group
+
+    def failing(group: str, **kwargs: Any) -> dict[str, Any]:
+        if group == "semantic":
+            raise RuntimeError("semantic failed")
+        return compute(group, **kwargs)
+
+    monkeypatch.setattr(cases, "compute_group", failing)
+    with pytest.raises(RuntimeError, match="semantic failed"):
+        main(["--root", str(tree), "--group", "schema", "--group", "semantic"])
+    after = _snapshot(_folder(tree)), store.manifest_path(tree, VERSION).read_bytes()
+    assert after == before
     assert store.tree_problems(tree, VERSION) == []
 
 
