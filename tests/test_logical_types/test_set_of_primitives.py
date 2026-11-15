@@ -301,3 +301,56 @@ def test_a_loaded_job_in_a_fresh_process_reads_a_set(case: str, tmp_path: Path) 
     assert read["python_type"] == type(value).__name__
     assert read["elements"] == sorted(repr(v) for v in value)
     assert read["row_hash"] == in_process_hash
+
+
+_REGISTRATION_ORDER = textwrap.dedent(
+    """
+    import json, sys
+    from typing import Literal
+    from orcapod.sources import DictSource
+
+    declared = {"int": set[int], "literal": set[Literal[1, 2]]}
+    report = {}
+    for name in sys.argv[1:]:
+        source = DictSource(
+            [{"k": 0, "v": {1}}],
+            tag_columns=["k"],
+            data_schema={"k": int, "v": declared[name]},
+            source_id="one_row",
+        )
+        report[name] = {
+            "schema": str(source.output_schema()[1]["v"]),
+            "pipeline_hash": source.pipeline_hash().to_string(),
+        }
+    print(json.dumps(report))
+    """
+)
+
+
+def _declare_in_fresh_process(*names: str) -> dict[str, dict[str, str]]:
+    """Build one source per name, in order, in a fresh process; report each."""
+    result = subprocess.run(
+        [sys.executable, "-c", _REGISTRATION_ORDER, *names],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def test_a_set_type_does_not_depend_on_what_was_declared_first() -> None:
+    """``set[int]`` reads as ``set[int]`` even after ``set[Literal[1, 2]]``.
+
+    Both annotations map to the one container ``set[int64]``; its Python type is the
+    element Arrow type's Python type, so neither the schema nor the pipeline hash of a
+    source depends on what the process declared before it.
+    """
+    alone = _declare_in_fresh_process("int")["int"]
+    literal_first = _declare_in_fresh_process("literal", "int")
+    int_first = _declare_in_fresh_process("int", "literal")
+
+    assert alone["schema"] == "set[int]"
+    for report in (literal_first, int_first):
+        assert report["int"] == alone
+        assert report["literal"] == alone

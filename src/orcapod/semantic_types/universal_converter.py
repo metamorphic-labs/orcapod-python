@@ -393,7 +393,7 @@ class UniversalTypeConverter:
                 )
                 if element_lt is not None:
                     return self._make_or_get_list_logical_type(element_lt, is_set=True)
-            return self._make_or_get_arrow_element_set_type(args[0], inner)
+            return self._make_or_get_arrow_element_set_type(inner)
 
         if origin is frozenset:
             raise ValueError(_FROZENSET_UNSUPPORTED.format(annotation=annotation))
@@ -503,18 +503,19 @@ class UniversalTypeConverter:
         return lt.get_arrow_extension_type()
 
     def _make_or_get_arrow_element_set_type(
-        self, element_annotation: Any, element_arrow_type: "pa.DataType"
+        self, element_arrow_type: "pa.DataType"
     ) -> "pa.DataType":
         """Return the native set container of a plain Arrow element type (ITL-611).
 
         Created and registered on first use, looked up by extension name after that,
-        like ``_make_or_get_list_logical_type``. The element's Python type is its
-        annotation without ``None``: ``set[int | None]`` and ``set[int]`` are one
-        container (``set[int64]``), as ``set[Path | None]`` and ``set[Path]`` are, so
-        the Python type a column reads as never depends on which was declared first.
+        like ``_make_or_get_list_logical_type``. The element's Python type is the
+        Python type of its Arrow type, never the annotation that declared it:
+        ``set[int]``, ``set[int | None]`` and ``set[Literal[1, 2]]`` are one container
+        (``set[int64]``) that reads as ``set[int]``, as a job loaded in a fresh process
+        reads it, so neither a column's Python type nor a schema hash depends on which
+        annotation was declared first.
 
         Args:
-            element_annotation: The annotation of the set's elements.
             element_arrow_type: The Arrow type the element annotation maps to; an
                 extension type here (a type with no registered logical type) is not
                 wrapped.
@@ -532,13 +533,11 @@ class UniversalTypeConverter:
             element_arrow_type, pa.BaseExtensionType
         ):
             return pa.large_list(element_arrow_type)
-        origin = get_origin(element_annotation)
-        if origin is typing.Union or origin is types.UnionType:
-            non_none = [a for a in get_args(element_annotation) if a is not type(None)]
-            if len(non_none) == 1:
-                element_annotation = non_none[0]
         lt = ListLogicalType(
-            ArrowElement(element_annotation, element_arrow_type), is_set=True
+            ArrowElement(
+                self.arrow_type_to_python_type(element_arrow_type), element_arrow_type
+            ),
+            is_set=True,
         )
         existing = self._logical_type_registry.get_by_arrow_extension_name(
             lt.logical_type_name
@@ -1495,7 +1494,7 @@ class UniversalTypeConverter:
                 )
                 if element_lt is not None:
                     return self._make_or_get_list_logical_type(element_lt, is_set=True)
-            return self._make_or_get_arrow_element_set_type(args[0], element_type)
+            return self._make_or_get_arrow_element_set_type(element_type)
 
         elif origin is frozenset:
             raise ValueError(_FROZENSET_UNSUPPORTED.format(annotation=python_type))

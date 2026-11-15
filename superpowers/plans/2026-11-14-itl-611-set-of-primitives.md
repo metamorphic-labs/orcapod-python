@@ -142,7 +142,7 @@ movement are waiting on the developer. **No library code until the coordinator's
   column is hashed as stored (verified: a pod returning an aware `set[datetime]` gives a row
   hash). Naive datetimes are refused as pod outputs for scalar/list/set alike (existing rule).
 
-### CodeRabbit round 1 (review 5908025110 on b22cb6ff), plan pending coordinator
+### CodeRabbit round 1 (review 5908025110 on b22cb6ff), plan approved by coordinator, fix done
 
 - 4576307086 (Literal first wins) — ACCEPT. Reproduced: after a `set[Literal[1, 2]]` source,
   a `set[int]` source's schema is `set[Literal[1, 2]]` and its pipeline hash differs from the
