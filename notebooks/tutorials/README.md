@@ -7,7 +7,7 @@ It is a self-paced course in eleven short parts on one small synthetic dataset. 
 the dataset:
 
 ```bash
-python docs/tutorial/workshop_data.py
+uv run python docs/tutorial/workshop_data.py
 ```
 
 The notebooks that used to be in this directory were written against an earlier API and no
