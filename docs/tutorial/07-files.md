@@ -87,11 +87,11 @@ def count_spikes(spikes: op.File) -> int:
         return sum(1 for _ in csv.DictReader(f))
 
 
-store = InMemoryArrowDatabase()
+database = InMemoryArrowDatabase()
 
 
 def run_counts():
-    job = PipelineJob(name="files", store=store)
+    job = PipelineJob(name="files", database=database)
     with job:
         files = DictSource(
             data=spike_file_rows(),
@@ -150,7 +150,7 @@ import shutil
 moved = data_dir / "sessions" / "mouse_01_s1" / "spikes_imec0_copy.csv"
 shutil.copy(first, moved)
 
-job = PipelineJob(name="files", store=store)
+job = PipelineJob(name="files", database=database)
 with job:
     one_file = DictSource(
         data=[
@@ -199,7 +199,7 @@ def write_summary(spikes: op.File) -> Path:
     return out_path
 
 
-job = PipelineJob(name="files", store=store)
+job = PipelineJob(name="files", database=database)
 with job:
     files = DictSource(
         data=spike_file_rows(),
@@ -224,9 +224,9 @@ Three things to keep in mind when a function writes files:
 
 - **Choose the output name from the inputs**, as above, so that two rows never write to the
   same file.
-- **The store remembers the path, not the file.** If you delete `spike_summaries/` and run
-  again, Orcapod finds the stored results, calls nothing, and hands you paths to files that
-  no longer exist. Treat output files as part of the store: delete both or neither.
+- **The database remembers the path, not the file.** If you delete `spike_summaries/` and
+  run again, Orcapod finds the stored results, calls nothing, and hands you paths to files
+  that no longer exist. Treat output files as part of the database: delete both or neither.
 - **Paths are stored as you returned them.** A relative path, as here, only means something
   from the directory the script was run in. For work you intend to keep, build output paths
   from an absolute directory.
@@ -234,7 +234,7 @@ Three things to keep in mind when a function writes files:
 ## A folder as one input
 
 Some inputs are a folder, not a file: a session directory, an image stack. `op.Directory`
-identifies a folder by the content of everything in it:
+identifies a folder by the names and content of everything in it:
 
 ```python
 @function_pod(output_keys="n_spike_files")
@@ -244,7 +244,7 @@ def count_spike_files(folder: op.Directory) -> int:
 
 
 def run_folders():
-    job = PipelineJob(name="folders", store=store)
+    job = PipelineJob(name="folders", database=database)
     with job:
         folders = DictSource(
             data=[
@@ -291,22 +291,18 @@ as long as the file's size and modification time are unchanged. Turn this on onc
 start of your script:
 
 ```python
-from orcapod.contexts import enable_file_hash_caching
-
-enable_file_hash_caching()
+op.enable_file_hash_caching()
 ```
 
-Note where it is imported from: `orcapod.contexts`. It is not available as
-`op.enable_file_hash_caching`. The details and options are on the
-[File Hash Caching](../concepts/file-hash-caching.md) page. With the small files of this
-tutorial it makes no noticeable difference.
+The details and options are on the [File Hash Caching](../concepts/file-hash-caching.md)
+page. With the small files of this tutorial it makes no noticeable difference.
 
 ## What to remember
 
 - `op.File(path)` in a source, `op.File` as a parameter type. Files are identified by
   content: edit a file and its results are recomputed; move it and they are not.
 - Plain `Path` values are identified by path only.
-- A function that writes a file returns its `Path`. The store keeps the path; keep the file.
+- A function that writes a file returns its `Path`. The database keeps the path; keep the file.
 - `op.Directory(path, ignore=[...])` treats a folder as one input.
 
 More detail: [File and path types](../concepts/file-types.md).
@@ -371,7 +367,7 @@ containing the total number of spikes over both probes. (Hint: Part 4. After
         return out_path
 
 
-    per_session = spike_files.group_by(["subject_id", "session"]).select_data_columns(["spikes"])
+    per_session = spike_files.group_by(["subject_id", "session"])
     print(per_session.output_schema()[1])
     # Schema({'spikes': list[orcapod.logical_types.file_type.File]})
 
@@ -399,7 +395,7 @@ containing the total number of spikes over both probes. (Hint: Part 4. After
 
     ```python
     def run_folders_strict():
-        job = PipelineJob(name="folders", store=store)
+        job = PipelineJob(name="folders", database=database)
         with job:
             folders = DictSource(
                 data=[

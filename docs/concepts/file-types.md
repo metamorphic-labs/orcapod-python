@@ -11,7 +11,7 @@ For a guided introduction see the tutorial, [Part 7](../tutorial/07-files.md).
 | Type | What it refers to | Identified by |
 |---|---|---|
 | `op.File` | One existing file | The file's **content** |
-| `op.Directory` | One existing directory and everything in it | The **content** of the files in it |
+| `op.Directory` | One existing directory and everything in it | The **names and content** of the files in it |
 | `pathlib.Path` (also available as `op.Path`) | A location | The **path string** |
 
 "Identified by" is what Orcapod hashes when it decides whether a function's stored result
@@ -139,15 +139,15 @@ for tag, data in result.iter_data():
 
 When such a function runs inside a [`PipelineJob`](pipeline-job.md):
 
-- **The store holds the path, not the file.** A re-run finds the stored path and does not
-  call the function again, whether or not the file is still there. Keep or delete output
-  files together with the store that refers to them.
+- **The database holds the path, not the file.** A re-run finds the stored path and does
+  not call the function again, whether or not the file is still there. Keep or delete output
+  files together with the database that refers to them.
 - **Derive the output name from the inputs**, so that each row writes its own file.
 - **Prefer absolute output paths** for results you keep. A relative path is stored as
   written and only resolves from the directory the job was run in.
 
 A function may also return an `op.File`. The file must then exist when the function returns,
-and a result read back from the store raises `FileNotFoundError` if the file has since been
+and a result read back from the database raises `FileNotFoundError` if the file has since been
 deleted.
 
 ## Lists of files
@@ -161,7 +161,7 @@ def total_lines(recording: list[op.File]) -> int:
     return sum(len(f.read_text().splitlines()) for f in recording)
 
 
-everything = files.batch().select_data_columns(["recording"])
+everything = files.batch()
 for _, data in total_lines.pod(everything).iter_data():
     print(data.as_dict())
 # {'total_lines': 5}
@@ -173,15 +173,11 @@ Hashing a file means reading it. For large files Orcapod can cache the hash, key
 file's path, size and modification time, so that an unchanged file is not read again:
 
 ```python
-from orcapod.contexts import enable_file_hash_caching
-
-enable_file_hash_caching()
+op.enable_file_hash_caching()
 ```
 
-The function is imported from `orcapod.contexts`; it is not available as
-`op.enable_file_hash_caching`. See [File Hash Caching](file-hash-caching.md) for how the
-cache works and its options, and the `orcapod warm-cache` command for filling it ahead of a
-run.
+See [File Hash Caching](file-hash-caching.md) for how the cache works and its options, and
+the `orcapod warm-cache` command for filling it ahead of a run.
 
 ## How it connects to other concepts
 
@@ -190,3 +186,5 @@ run.
 - [Function Pods](function-pods.md) receive and return them like any other typed value.
 - Their content hashes feed the [identity chain](identity.md) that decides what a
   [`PipelineJob`](pipeline-job.md) recomputes.
+- How each type is stored and named in a database is listed under
+  [Logical Type Identifiers](logical-type-identifiers.md).

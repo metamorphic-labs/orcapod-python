@@ -37,11 +37,11 @@ def announce(duration_s: float, ctx: InvocationContext) -> None:
     delivered.append(duration_s)  # stands in for "send a message"
 
 
-store = InMemoryArrowDatabase()
+database = InMemoryArrowDatabase()
 
 
 def run_announcements():
-    job = PipelineJob(name="announcements", store=store)
+    job = PipelineJob(name="announcements", database=database)
     with job:
         announce(durations, label="announce")
     job.run()
@@ -57,11 +57,14 @@ print(len(delivered))
 
 Eight sessions, eight deliveries, and none on the second run.
 
-Two differences from a function pod. A sink is applied by calling it directly
-(`announce(stream)`, no `.pod`). And its function **must** take a second parameter named
-`ctx`, which receives an `InvocationContext` describing the call; without it the run fails
-with `TypeError: ... got an unexpected keyword argument 'ctx'`. `@tap_pod` and
-`@side_effect_pod` are variants with different defaults for tracking and failure handling.
+Three differences from a function pod. A sink is applied by calling it directly
+(`announce(stream)`, no `.pod`). Its function **must** take a parameter named `ctx`, which
+receives an `InvocationContext` describing the call; without it the run fails with
+`TypeError: ... got an unexpected keyword argument 'ctx'`. And it does not drop data columns
+it does not take: given `sessions`, whose `date` column `announce` has no parameter for, the
+run fails with `TypeError: announce() got an unexpected keyword argument 'date'`. Give a sink
+a stream with exactly its columns, as `durations` is here. `@tap_pod` and `@side_effect_pod`
+are variants with different defaults for tracking and failure handling.
 
 ## Pods without the decorator
 
@@ -83,14 +86,13 @@ print(minutes_pod(durations).as_pandas_df().head(2))
 # 1   mouse_01      s2           2.0
 ```
 
-One trap: `FunctionPod.from_fn` defaults to `version="v1.0"`, while `@function_pod` defaults
-to `"v0.0"`. Switching a function from one form to the other therefore changes its major
-version and recomputes its results (Part 6). Pass `version=` explicitly when you care.
+`from_fn` takes the same `output_keys` and `version` arguments as the decorator, and the pod
+it returns is applied by calling it: `minutes_pod(stream)`.
 
 ## Saving a job
 
 `job.save(path)` writes a description of a job to a JSON file: its steps, how they connect,
-and whether it has run. `PipelineJob.load(path)` reads it back.
+and whether it has run. `PipelineJob.load(path, database=...)` reads it back.
 
 ```python
 @function_pod(output_keys="duration_min")
@@ -98,30 +100,34 @@ def minutes(duration_s: float) -> float:
     return duration_s / 60
 
 
-job = PipelineJob(name="durations", store=store)
+job = PipelineJob(name="durations", database=database)
 with job:
-    minutes.pod(durations, label="minutes")
+    minutes.pod(sessions, label="minutes")
 job.run()
 job.save("durations_job.json")
 
-loaded = PipelineJob.load("durations_job.json", store=store)
+loaded = PipelineJob.load("durations_job.json", database=database)
 print("minutes" in loaded.nodes)
 # True
-print(loaded.nodes["minutes"].get_all_records().num_rows)
+print(loaded.nodes["minutes"].as_table().num_rows)  # not run in this process: empty
+# 0
+loaded.run(load_only=True)
+print(loaded.nodes["minutes"].as_table().num_rows)
 # 8
 ```
 
 A loaded job is for **looking at results**. It does not contain your functions, only their
-names, so it cannot compute anything: `loaded.run()` raises `RuntimeError`, and on a loaded
-function node use `get_all_records()` (not `as_table()`). To compute, run the script that
-defines the pipeline. More in [Pipelines and jobs](../concepts/pipeline-job.md).
+names, so it cannot compute anything: `loaded.run()` raises `RuntimeError`.
+`loaded.run(load_only=True)` fills its nodes with the results already in the database and
+computes nothing. To compute, run the script that defines the pipeline. More in
+[Pipelines and jobs](../concepts/pipeline-job.md).
 
 ## Further topics
 
 Not covered here, with pointers:
 
 - **Pipeline blueprints.** Define a pipeline once with `Pipeline`, then create jobs from it
-  with different sources or stores using `PipelineJob.from_pipeline(...)` and
+  with different sources or databases using `PipelineJob.from_pipeline(...)` and
   `job.bind(...)`. See [Pipelines and jobs](../concepts/pipeline-job.md).
 - **Other sources.** pandas and Polars DataFrames, Delta tables, SQLite and PostgreSQL
   tables, and `PollingSource` for data that keeps arriving. See
@@ -129,8 +135,14 @@ Not covered here, with pointers:
 - **Running in parallel.** The `orcapod[ray]` extra adds an executor that runs function
   calls on a [Ray](https://www.ray.io/) cluster. `AsyncPipelineOrchestrator` in
   `orcapod.pipeline` runs independent branches of a pipeline concurrently.
+- **Arrays and your own classes as values.** NumPy arrays and tensors can be data values:
+  see [Arrays and Tensors](../concepts/arrays.md). So can your own dataclasses and pydantic
+  models: see [Your Own Data Types](../concepts/your-own-data-types.md).
+  [Logical Type Identifiers](../concepts/logical-type-identifiers.md) explains how Orcapod
+  names the way each type is stored.
 - **How identity works.** [Identity & Hashing](../concepts/identity.md) explains the two
-  hashes behind caching.
+  hashes behind caching; the [Hashing reference](../reference/hashing.md) lists every place
+  Orcapod computes a hash.
 - **The API reference.** Every public class and function is listed under
   [API Reference](../api/index.md).
 
@@ -150,9 +162,9 @@ the job a new name, and run it twice. How many deliveries are there after each r
     # 4
     ```
 
-    The natural design is to filter the stream before the sink. Inside a job an expression
-    filter (`duration_s > 100`) cannot be used yet (Part 3), so make the decision in the
-    function instead:
+    You can make the decision in the function, or filter the stream before the sink with an
+    expression filter (Part 3), which works inside a job like any other operator. Filtering
+    keeps the sink itself unchanged:
 
     ```python
     delivered_long = []
@@ -160,14 +172,15 @@ the job a new name, and run it twice. How many deliveries are there after each r
 
     @sink_pod
     def announce_long(duration_s: float, ctx: InvocationContext) -> None:
-        if duration_s > 100:
-            delivered_long.append(duration_s)
+        delivered_long.append(duration_s)
 
 
     def run_long():
-        job = PipelineJob(name="long_announcements", store=store)
+        job = PipelineJob(name="long_announcements", database=database)
         with job:
-            announce_long(durations, label="announce_long")
+            announce_long(
+                durations.polars_filter(pl.col("duration_s") > 100), label="announce_long"
+            )
         job.run()
 
 
@@ -179,9 +192,8 @@ the job a new name, and run it twice. How many deliveries are there after each r
     # 4
     ```
 
-    Four after the first run, still four after the second. The sink ran for all eight rows
-    the first time (it decided to do nothing for four of them) and for none the second
-    time.
+    Four after the first run, still four after the second. The sink saw only the four long
+    sessions, and the second time it ran for none of them.
 
 **2.** Wrap Python's built-in `round` with `FunctionPod.from_fn`? Try it, and explain what
 happens.

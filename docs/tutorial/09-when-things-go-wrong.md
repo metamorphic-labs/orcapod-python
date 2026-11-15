@@ -42,10 +42,15 @@ and types as soon as you connect two things. You have met these already:
 | Named a tag column that does not exist | `ValueError: tag_columns not found in table` | Part 1 |
 | Made every column a tag | `ValueError: No data columns found in the table` | Part 1 |
 | Left out a type annotation | `ValueError: Parameter '...' has no type annotation` | Part 2 |
-| Gave a pod a stream with extra, missing or differently typed columns | `ValueError: Incoming data data type ... is not compatible with expected input schema ...` | Part 2 |
+| Gave a pod a stream with a missing or differently typed column | `ValueError: Incoming data schema ... is not compatible with expected input schema ...: ...` | Part 2 |
 | Joined streams that share a data column | `InputValidationError: ... should not have overlapping keys` | Part 3 |
 | Grouped by a data column | `InputValidationError: GroupBy: ... are not tag columns` | Part 4 |
-| Ran a job without a store | `ValueError: PipelineJob.run() requires a store` | Part 5 |
+| Ran a job without a database | `ValueError: PipelineJob.run() requires a database` | Part 5 |
+
+The end of a pod's message names the problem, with the column and both types:
+`required parameter 'duration_s' has no matching column`, or
+`column 'duration_s' has type float, the function expects int`. Data columns the function
+does not take are not a problem: the pod drops them.
 
 The habit that makes these quick to fix: when a pod or operator refuses a stream, print
 `stream.keys()` or `stream.output_schema()` for the stream you passed, and compare it with
@@ -71,8 +76,8 @@ def firing_rate(n_spikes: int, duration_s: float) -> float:
     return n_spikes / duration_s
 
 
-def build_job(store):
-    job = PipelineJob(name="workshop", store=store)
+def build_job(database):
+    job = PipelineJob(name="workshop", database=database)
     with job:
         firing_rate.pod(
             units.select_data_columns(["n_spikes"]),
@@ -102,32 +107,44 @@ except ValueError as err:
 **Inside a job**, the default is different. The run carries on:
 
 ```python
-store = InMemoryArrowDatabase()
+database = InMemoryArrowDatabase()
 calls.clear()
 
-job = build_job(store)
-job.run()
-
+job = build_job(database)
+summary = job.run()
+# RowFailuresWarning: 3 of 64 rows failed in node 'rates' (first error: ValueError: implausible spike count: 1221). Full traceback: job.last_run.print_traceback("rates").
+print(summary)
+# Run of job 'workshop': 3 rows failed.
+#   rates: 64 rows: 60 computed, 1 from store, 3 failed
+#     first error: ValueError: implausible spike count: 1221
+#     Full traceback: job.last_run.print_traceback("rates")
 print(job.nodes["rates"].as_table().num_rows)
 # 61
-print(len(calls))
-# 63
 ```
 
-`run()` did not raise. The three failing rows are missing from the result; the other 61 were
-computed and stored. For each failure Orcapod writes a line such as
-`Data execution failed in rates: implausible spike count: 1221`, followed by the traceback,
-to the log on your screen.
+`run()` did not raise. It skipped the three failing rows, computed and stored the other 61,
+and at the end issued one `RowFailuresWarning` and returned a **run summary** (the job also
+keeps it as `job.last_run`). `job.last_run.print_traceback("rates")` prints the full
+traceback of the first failure. (Why "1 from store" in a first run? Two units have the same
+spike count and the same session duration. Their inputs are identical, so the second one
+reuses the result computed for the first.)
 
 This default suits long runs: one bad file should not throw away a night of computation.
 It also means that **a job that finishes is not a job in which everything succeeded**.
-Compare the number of rows you got with the number you expected.
+Read the warning and the summary; in a script, check `summary.ok`, which is `False` when
+any row failed.
 
-Failures are not stored. Run again and the failed rows are tried again, and only those:
+A row also fails when the function returns a value of a different type than it declares,
+for example a `float` from a function annotated `-> int`. That raises an `OutputTypeError`
+(from `orcapod.errors`) naming the function, the output and both types; Orcapod does not
+convert the value for you. Inside a job it is skipped and reported like any other failure.
+
+Failures are not stored. Run again and the failed rows are tried again, and only those (they
+fail again, so the warning appears again):
 
 ```python
 calls.clear()
-job = build_job(store)
+job = build_job(database)
 job.run()
 print(len(calls))
 # 3
@@ -177,7 +194,7 @@ print(status_table.group_by("_status_state").len().sort("_status_state").rows())
 ```
 
 Every row is recorded as `RUNNING` when it starts, and then as `SUCCESS` or `FAILED`. (On a
-re-run, rows read from the store are recorded as `CACHED`.) The failed rows, with their
+re-run, rows read from the database are recorded as `CACHED`.) The failed rows, with their
 tags and the error message:
 
 ```python
@@ -221,7 +238,7 @@ def firing_rate(n_spikes: int, duration_s: float) -> float:
 
 
 calls.clear()
-job = build_job(store)
+job = build_job(database)
 job.run()
 print(job.nodes["rates"].as_table().num_rows, len(calls))
 # 64 3
@@ -235,8 +252,8 @@ what the function returns for rows that had succeeded, bump the major version (P
 
 - Mistakes in how a pipeline is put together raise at the line that makes them. Print the
   stream's `keys()` and compare.
-- Inside a job, a function that raises loses that row and the run continues. **Check row
-  counts.**
+- Inside a job, a function that raises loses that row and the run continues. At the end a
+  `RowFailuresWarning` and the run summary say how many rows failed. **Read them.**
 - `SyncPipelineOrchestrator(error_policy="fail_fast")` stops at the first failure. Use it
   while developing.
 - `StatusObserver` and `LoggingObserver` tell you which rows failed and why.
@@ -248,7 +265,7 @@ what the function returns for rows that had succeeded, bump the major version (P
 one.
 
 (a) `CSVSource(str(data_dir / "sessions.csv"), tag_columns=["subject", "session"])`<br>
-(b) `firing_rate.pod(units, sessions)`<br>
+(b) `firing_rate.pod(sessions)`<br>
 (c) `units.join(units)`
 
 ??? success "Solution"
@@ -262,10 +279,10 @@ one.
     # a: tag_columns not found in table: {'subject'}. Available columns: ['subject_id', 'session', 'date', 'duration_s']
 
     try:
-        firing_rate.pod(units, sessions)
+        firing_rate.pod(sessions)
     except ValueError as err:
-        print("b:", str(err)[:42])
-    # b: Incoming data data type Schema({'region':
+        print("b:", str(err).split("): ")[-1])
+    # b: required parameter 'n_spikes' has no matching column
 
     try:
         units.join(units)
@@ -274,8 +291,8 @@ one.
     # c: Input streams are not compatible: Datas should not have overlapping keys
     ```
 
-    (a) The column is called `subject_id`. (b) Both streams carry columns the function does
-    not take; narrow each with `select_data_columns`. (c) Both sides have the same data
+    (a) The column is called `subject_id`. (b) `n_spikes` is in `units`, not `sessions`:
+    pass both, `firing_rate.pod(units, sessions)`. (c) Both sides have the same data
     columns; a stream joined with itself is rarely what you want, but if two tables really
     share a column name, rename one side or use `MergeJoin` (Part 3).
 
@@ -315,7 +332,7 @@ session contain?
         return len(rate_hz), sum(rate_hz) / len(rate_hz)
 
 
-    job = PipelineJob(name="two_steps", store=InMemoryArrowDatabase())
+    job = PipelineJob(name="two_steps", database=InMemoryArrowDatabase())
     with job:
         rates = firing_rate.pod(
             units.select_data_columns(["n_spikes"]),
@@ -323,7 +340,7 @@ session contain?
             label="rates",
         )
         count_and_mean.pod(
-            rates.group_by(["subject_id", "session"]).select_data_columns(["rate_hz"]),
+            rates.group_by(["subject_id", "session"]),
             label="session_means",
         )
     job.run()
