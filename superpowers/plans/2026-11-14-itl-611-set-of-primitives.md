@@ -189,3 +189,14 @@ Containers of logical elements unchanged.
   design_issues/ITL-611-NC1.md, spec table, PR description.
 - [ ] Golden: regenerate only; diff vs origin/main must remain additions only.
 - [ ] Targeted suites, push, CI, one signed `@coderabbitai review`.
+- Done: writer/reader/serialization, docs, golden (6 set_* data hashes, vs main still 53+/0-),
+  pushed 928482fc, CI green.
+
+### CodeRabbit round 3 (review 5908556654 on 24cc3d9f), plan approved by coordinator
+
+- 4576679626 (registered name: storage not checked) — ACCEPT, generic: the registry-hit
+  branch of `register_logical_type_from_arrow_metadata` compares the stored storage with the
+  registered type's (large-normalized) and raises `LogicalTypeIdentifierError` with a note.
+  Was refused before too, by Arrow's `TypeError`. Hashing, logical types, semantic types,
+  pipeline and database suites pass with it (8322 passed).
+- ast-grep notes (jsonify x2, subprocess x2): DECLINE, false positives; one signed comment.

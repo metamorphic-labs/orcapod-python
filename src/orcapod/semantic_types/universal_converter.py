@@ -800,13 +800,20 @@ class UniversalTypeConverter:
         Raises:
             LogicalTypeIdentifierError: If the extension name is known (or was
                 reconstructed by a factory) and ``extension_metadata`` is not one
-                of the values the logical type declares readable.
+                of the values the logical type declares readable, or the name is
+                known and ``storage_type`` (in its large variants) is not the
+                registered type's storage.
             ValueError: If metadata is missing, malformed, lacks ``"category"``, or
                 no factory is registered for the category.
         """
         import json as _json
 
-        from orcapod.logical_types.identifier import require_readable
+        from orcapod.logical_types.identifier import (
+            LogicalTypeIdentifier,
+            LogicalTypeIdentifierError,
+            require_readable,
+        )
+        from orcapod.utils.arrow_utils import normalize_to_large_types
 
         if self._logical_type_registry is None:
             raise ValueError(
@@ -819,9 +826,25 @@ class UniversalTypeConverter:
             arrow_extension_name
         )
         if lt is not None:
-            # The name is known: the stored metadata must be one the type reads.
+            # The name is known: the stored metadata must be one the type reads,
+            # and the stored storage the type's own; never wrap by name alone.
             require_readable(lt, extension_metadata or b"")
-            return lt.get_arrow_extension_type()
+            extension_type = lt.get_arrow_extension_type()
+            if normalize_to_large_types(
+                storage_type, keep_null=True
+            ) != normalize_to_large_types(extension_type.storage_type, keep_null=True):
+                error = LogicalTypeIdentifierError(
+                    LogicalTypeIdentifier(
+                        arrow_extension_name, extension_metadata or b""
+                    ),
+                    (),
+                )
+                error.add_note(
+                    f"Its storage {storage_type} is not the storage of "
+                    f"{arrow_extension_name!r}, {extension_type.storage_type}."
+                )
+                raise error
+            return extension_type
 
         # Missing metadata — cannot auto-register
         if not extension_metadata:

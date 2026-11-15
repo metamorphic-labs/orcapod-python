@@ -614,3 +614,36 @@ def test_a_set_with_the_unreleased_element_arrow_type_metadata_is_refused() -> N
     )
     assert result.returncode != 0
     assert "ValueError" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "storage",
+    [pa.array(["a"], pa.large_string()), pa.array([[1]], pa.large_list(pa.int8()))],
+    ids=["string_storage", "other_element_width"],
+)
+def test_a_registered_set_whose_storage_does_not_hold_its_element_is_refused(
+    storage: "pa.Array[Any]",
+) -> None:
+    """With ``set[int64]`` already registered, a stored ``set[int64]`` column over another
+    storage is refused as it is in a fresh process, with ``LogicalTypeIdentifierError``.
+    """
+    from orcapod.contexts import get_default_context
+    from orcapod.logical_types.identifier import LogicalTypeIdentifierError
+    from orcapod.semantic_types.universal_converter import UniversalTypeConverter
+
+    _row_hash(set[int], {1})  # registers set[int64] in this process
+    field_metadata = {
+        b"ARROW:extension:name": b"set[int64]",
+        b"ARROW:extension:metadata": SET_METADATA,
+    }
+    table = pa.table(
+        [storage],
+        schema=pa.schema([pa.field("c", storage.type, metadata=field_metadata)]),
+    )
+    converter = get_default_context().type_converter
+    assert isinstance(converter, UniversalTypeConverter)
+    with pytest.raises(LogicalTypeIdentifierError) as excinfo:
+        converter.load_logical_types(table)
+    assert excinfo.value.column == "c"
+    notes = getattr(excinfo.value, "__notes__", [])
+    assert any(str(storage.type) in note for note in notes), notes
