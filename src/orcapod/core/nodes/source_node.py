@@ -330,10 +330,28 @@ class SourceNodeBase(TraceableBase, ABC):
                     )
 
     def _take_saved_state_of(self, other: "SourceNodeBase") -> None:
-        """Keep the saved hashes and pending types of *other*, a slot of the same schema."""
+        """Keep the saved state of *other*, a slot of the same schema.
+
+        The pending types and the saved pipeline hash, which does not depend on the
+        slot's name, are always kept. The saved content hash covers the name too, so
+        it is kept only when this slot has *other*'s name.
+        """
         self._saved_pipeline_hash = other._saved_pipeline_hash
-        self._saved_content_hash = other._saved_content_hash
+        if self._name == other._name:
+            self._saved_content_hash = other._saved_content_hash
         self._pending_types = dict(other._pending_types)
+
+    def _pending_nullable_columns(self) -> dict[str, list[str]]:
+        """The pending columns the saved job records as nullable, by role.
+
+        A column whose type is still the saved text has no Python type to read its
+        nullability from, so a job saved again records the saved nullability (ITL-1138).
+        """
+        names: dict[str, list[str]] = {"tag": [], "data": []}
+        for name, pending in self._pending_types.items():
+            if pending.nullable:
+                names[pending.role].append(name)
+        return names
 
     def _restore_pending_types(self) -> dict[str, str]:
         """Restore the pending columns whose type this process can now restore.
@@ -900,11 +918,16 @@ class SourceNode(SourceNodeBase):
                 slot_name = stream.source_id
             else:
                 slot_name = f"{stream.label}:{stream.content_hash().to_hex()}"
-        return cls(
+        node = cls(
             name=slot_name,
             tag_schema=tag_schema,
             data_schema=data_schema,
         )
+        if isinstance(stream, SourceNodeBase):
+            # A loaded job's slot keeps its pending types (ITL-1138); its saved
+            # hashes stay behind, since the new slot has another name.
+            node._pending_types = dict(stream._pending_types)
+        return node
 
 
 class SourceJobNode(SourceNodeBase):

@@ -242,3 +242,140 @@ def test_a_file_without_the_slots_saved_hashes_loads_and_binds(
     assert loaded.pop("_reused") == {"add": 2, "read_u": 2}
     _ = loaded.pop("_unbound_slots")  # no saved hashes: recomputed once bound
     assert loaded == saved
+
+
+# ---------------------------------------------------------------------------
+# A loaded slot's pending column: saving the job again, and copies of the slot
+# ---------------------------------------------------------------------------
+
+_NULLABLE_SCRIPT = textwrap.dedent(
+    """\
+    import json
+    import sys
+    import warnings
+
+    warnings.simplefilter("ignore")
+    sys.path.insert(0, sys.argv[1])
+    mode, work = sys.argv[2], sys.argv[3]
+
+    from orcapod import PipelineJob, function_pod
+    from orcapod.core.nodes.source_node import SourceJobNode, SourceNode
+    from orcapod.databases import DeltaTableDatabase
+    from orcapod.sources import DictSource
+
+
+    def source(cls):
+        return DictSource(
+            [{"id": 1, "p": cls(u=1, v="a")}, {"id": 2, "p": None}],
+            tag_columns=["id"],
+            data_schema={"id": int, "p": cls | None},
+            source_id="s",
+        )
+
+
+    def slot_view(job):
+        node = job.nodes["s"]
+        return {
+            "data_schema": {k: str(v) for k, v in node.output_schema()[1].items()},
+            "pipeline_hash": node.pipeline_hash().to_string(),
+        }
+
+
+    if mode == "save":
+        from classes import Exact
+
+        @function_pod(output_keys="q")
+        def u_or_zero(p: Exact | None) -> int:
+            return 0 if p is None else p.u
+
+        job = PipelineJob(name="demo", database=DeltaTableDatabase(work + "/store"))
+        with job:
+            u_or_zero.pod(source(Exact), label="u_or_zero")
+        job.run()
+        job.save(work + "/saved.json")
+        print(json.dumps(slot_view(job)))
+    elif mode in ("load_bind_save", "load_save"):
+        # Nothing registers the class before the load; the job is saved again.
+        job = PipelineJob.load(work + "/saved.json")
+        if mode == "load_bind_save":
+            from classes import Exact
+
+            job.bind(sources={"s": source(Exact)})
+        job.save(work + "/resaved.json")
+        print(json.dumps({}))
+    elif mode == "reload":
+        from classes import Exact
+
+        _ = source(Exact)  # registers the class before the load
+        job = PipelineJob.load(work + "/" + sys.argv[4])
+        print(json.dumps(slot_view(job)))
+    else:  # copies of a loaded slot whose class is not registered
+        job = PipelineJob.load(work + "/saved.json")
+        slot = job.nodes["s"]
+        renamed = SourceJobNode.from_stream(slot, name="renamed")
+        same_name = SourceJobNode.from_stream(slot)
+        wrapped = SourceNode.from_stream(slot)
+        from classes import Exact
+
+        exact = source(Exact)  # registers the class now
+        bound = SourceJobNode.from_stream(wrapped)
+        bound.bound_source = exact
+        print(json.dumps({
+            "renamed_keeps_content_hash": renamed.content_hash() == slot.content_hash(),
+            "same_name_keeps_content_hash": same_name.content_hash() == slot.content_hash(),
+            "renamed_keeps_pipeline_hash": renamed.pipeline_hash() == slot.pipeline_hash(),
+            "wrapped_then_bound_schema": str(bound.output_schema()[1]["p"]),
+        }))
+    """
+)
+
+
+@pytest.fixture
+def nullable_job(tmp_path: Path):
+    """Save a job over ``p: Exact | None`` and return how to run the other modes."""
+    _ = (tmp_path / "classes.py").write_text(_CLASSES)
+    _ = (tmp_path / "nullable.py").write_text(_NULLABLE_SCRIPT)
+    work = tmp_path / "work"
+
+    def run(*args: str) -> dict[str, Any]:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(tmp_path / "nullable.py"),
+                str(tmp_path),
+                args[0],
+                str(work),
+                *args[1:],
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr[-3000:]
+        return json.loads(result.stdout.strip().splitlines()[-1])
+
+    saved = run("save")
+    return saved, run
+
+
+@pytest.mark.parametrize("mode", ["load_bind_save", "load_save"])
+def test_saving_a_loaded_job_again_keeps_a_pending_columns_nullability(
+    nullable_job, mode: str
+) -> None:
+    """A job loaded before its class is registered and saved again reloads as saved."""
+    saved, run = nullable_job
+    _ = run(mode)
+    assert run("reload", "resaved.json") == run("reload", "saved.json") == saved
+
+
+def test_copies_of_a_loaded_slot_keep_its_pending_types_and_name_bound_hashes(
+    nullable_job,
+) -> None:
+    """A copy keeps pending types; only a copy of the same name keeps its content hash."""
+    _, run = nullable_job
+    copies = run("copies")
+    assert copies == {
+        "renamed_keeps_content_hash": False,
+        "same_name_keeps_content_hash": True,
+        "renamed_keeps_pipeline_hash": True,
+        "wrapped_then_bound_schema": "classes.Exact | None",
+    }
