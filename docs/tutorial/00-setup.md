@@ -90,7 +90,7 @@ Download [`workshop_data.py`](workshop_data.py) into your working directory, or 
 the command line:
 
 ```bash
-curl -O https://raw.githubusercontent.com/nauticalab/orcapod-python/main/docs/tutorial/workshop_data.py
+curl -fO https://raw.githubusercontent.com/nauticalab/orcapod-python/main/docs/tutorial/workshop_data.py
 ```
 
 Then run it:

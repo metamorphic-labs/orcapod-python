@@ -29,7 +29,7 @@ while there is still time. It is the content of `docs/tutorial/00-setup.md`.
 3. The dataset generator, in that directory:
 
    ```bash
-   curl -O https://raw.githubusercontent.com/nauticalab/orcapod-python/main/docs/tutorial/workshop_data.py
+   curl -fO https://raw.githubusercontent.com/nauticalab/orcapod-python/main/docs/tutorial/workshop_data.py
    python workshop_data.py
    ```
 

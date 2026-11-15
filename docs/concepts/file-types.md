@@ -18,8 +18,9 @@ For a guided introduction see the tutorial, [Part 7](../tutorial/07-files.md).
 can be reused (see [Identity & Hashing](identity.md)).
 
 - With `op.File` and `op.Directory`, editing the file makes it a new input and results
-  computed from it are recomputed. Moving or renaming it without changing its content does
-  not. The edit is seen when the source is built again, for example by a new job in a new
+  computed from it are recomputed. Moving or renaming the file or the directory itself
+  without changing its content does not. Renaming a file inside an `op.Directory` does,
+  because the names of its files are part of the directory's identity. The edit is seen when the source is built again, for example by a new job in a new
   Python session. A job that already ran over a `DictSource` holds its run and does not see
   the edit: build a new source and bind it (see
   [Pipelines and Jobs](pipeline-job.md#what-a-re-run-computes)).
