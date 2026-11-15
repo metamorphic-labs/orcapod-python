@@ -107,6 +107,8 @@ class _RowChecker:
         self.failures: list[str] = []
         self.state = _Row()
         self.checked: set[str] = set()
+        # The sources whose system tag pair was valid.
+        self.paired: set[str] = set()
         # (member, column, value, token) of every data element no single origin
         # explained.
         self.unresolved: list[tuple[int, str, Any, str | None]] = []
@@ -316,9 +318,12 @@ class _RowChecker:
                     (origin,) = candidates
                     self._assign(member, given[0][0], origin)
                     self.checked.update(column for column, _, _ in given)
-                    for column, _, token in given:
-                        if token is not None and column in self.oracle.derivations:
-                            self._check_function_token(column, origin, token)
+                for column, _, token in given:
+                    if token is not None and column in self.oracle.derivations:
+                        if len(candidates) == 1:
+                            self._check_function_token(column, candidates[0], token)
+                        else:
+                            self._check_function_token_of_any(column, candidates, token)
             unexplained = {c: v for c, v, _ in entries if c not in explained}
             if unexplained:
                 self.fail(
@@ -332,26 +337,45 @@ class _RowChecker:
         self._assign(0, column, origin)
         self.checked.add(column)
 
-    def _check_function_token(self, column: str, origin: Origin, token: str) -> None:
-        """A derived column's token: recomputed, or the one stored for this row's record."""
-        name = f"{constants.SOURCE_PREFIX}{column}"
+    def _token_error(self, column: str, origin: Origin, token: str) -> str | None:
+        """Why ``token`` is not the derived column's token of ``origin``; ``None`` if it is.
+
+        The token is recomputed, or the one stored for this row's record.
+        """
         recompute = self.oracle.derivations[column].token
         if recompute is not None:
             expected = recompute(origin)
             if token != expected:
-                self.fail(name, f"token {token!r}, its row's token is {expected!r}")
-            return
+                return f"token {token!r}, its row's token is {expected!r}"
+            return None
         if self.function_tokens is None:
             _, row_token, _ = split_token(token)
             if len(row_token) != 32:
-                self.fail(name, f"token {token!r} does not name an output datagram")
-            return
+                return f"token {token!r} does not name an output datagram"
+            return None
         expected = self.function_tokens.get((column, origin.record_id))
         if expected != token:
-            self.fail(
-                name,
+            return (
                 f"token {token!r}, but the record of row {origin.token!r} stores "
-                f"{expected!r}",
+                f"{expected!r}"
+            )
+        return None
+
+    def _check_function_token(self, column: str, origin: Origin, token: str) -> None:
+        """A derived column's token must be the token of ``origin``."""
+        error = self._token_error(column, origin, token)
+        if error is not None:
+            self.fail(f"{constants.SOURCE_PREFIX}{column}", error)
+
+    def _check_function_token_of_any(
+        self, column: str, origins: Sequence[Origin], token: str
+    ) -> None:
+        """A derived column's token must be the token of at least one of ``origins``."""
+        errors = [self._token_error(column, o, token) for o in origins]
+        if all(e is not None for e in errors):
+            self.fail(
+                f"{constants.SOURCE_PREFIX}{column}",
+                f"no candidate origin has this token: {errors[0]}",
             )
 
     # -- system tags ---------------------------------------------------------
@@ -361,9 +385,7 @@ class _RowChecker:
         source_prefix = constants.SYSTEM_TAG_SOURCE_ID_PREFIX
         record_prefix = constants.SYSTEM_TAG_RECORD_ID_PREFIX
         folded = bool(self.layout.members)
-        # The sources the row's data came from, before the pairs add their own.
-        data_sources = {s for member in self.state.members for s in member}
-        paired: set[str] = set()
+        paired = self.paired
         for name in self.row:
             if not name.startswith(source_prefix):
                 continue
@@ -390,8 +412,16 @@ class _RowChecker:
                 )
             if source is not None:
                 paired.add(source)
-        # A row with system tags has a pair for every source its data came from: a pair
-        # copied over another input's pair (two inputs of one schema) leaves one out.
+
+    def check_pairs_complete(self) -> None:
+        """A row with system tags has a pair for every source its data came from.
+
+        Run after every origin is resolved: a pair copied over another input's pair
+        (two inputs of one schema) leaves one out, also when only the tags name the
+        source.
+        """
+        paired = self.paired
+        data_sources = {s for member in self.state.members for s in member}
         if paired and (missing := sorted(data_sources - paired)):
             self.fail(
                 "system tags",
@@ -607,6 +637,7 @@ def assert_rows_aligned(
         else:
             checker.check_system_tags()
             checker.resolve_remaining()
+        checker.check_pairs_complete()
         checker.check_values()
         if hash_column in row:
             data_row = table.slice(index, 1).select(list(layout.data_keys))

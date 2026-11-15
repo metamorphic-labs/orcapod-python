@@ -653,3 +653,73 @@ def test_a_chain_of_renames_resolves_to_the_original_column_and_a_cycle_fails() 
     oracle.rename("x", "z")
     with pytest.raises(ValueError, match="cycle"):
         oracle.base_name("z")
+
+
+def test_a_bad_token_of_a_derived_value_several_origins_share_is_named() -> None:
+    """Two origins with one tag tuple and one derived value leave the token unexplained
+    by origin; its form is still checked."""
+    sources = make_sources("duplicate")
+    oracle = sources.oracle
+    oracle.derive("p", "A", lambda o: 0)
+    origins = [o for o in oracle.origins if o.source_id == "A"]
+    tags = [(o.values["g"], o.values["n"]) for o in origins]
+    repeated = [o for o, t in zip(origins, tags) if tags.count(t) > 1]
+    assert repeated, "the scenario has no repeated tag tuple"
+    sep = constants.BLOCK_SEPARATOR
+
+    def table_with(token: str) -> pa.Table:
+        return pa.table(
+            {
+                "g": [o.values["g"] for o in repeated],
+                "n": [o.values["n"] for o in repeated],
+                "p": [0 for _ in repeated],
+                "_source_p": [token for _ in repeated],
+            }
+        )
+
+    layout = Layout(tag_keys=TAG_COLUMNS, data_keys=("p",))
+    context = sources.a.data_context
+    good = f"fn{sep}{'0' * 32}{sep}p"
+    assert_rows_aligned(table_with(good), layout, oracle, context)
+    with pytest.raises(AssertionError, match="column '_source_p'"):
+        assert_rows_aligned(table_with("fake::bad::p"), layout, oracle, context)
+
+
+def test_a_source_only_the_tags_name_still_needs_a_system_tag_pair() -> None:
+    """A's null ``m`` is resolved from the tags; a row with no pair for A must still fail."""
+    sources = make_sources("unique")
+    joined = Join()(sources.a, sources.b)
+    full = joined.as_table(all_info=True)
+    sep = constants.BLOCK_SEPARATOR
+    lineage = f"{sep}{sources.oracle.schema_hashes['A']}{sep}"
+    a_pair = [
+        c
+        for c in full.column_names
+        if c.startswith(
+            (
+                f"{constants.SYSTEM_TAG_SOURCE_ID_PREFIX}{lineage}",
+                f"{constants.SYSTEM_TAG_RECORD_ID_PREFIX}{lineage}",
+            )
+        )
+    ]
+    assert len(a_pair) == 2
+    pairs_left = [
+        c
+        for c in full.column_names
+        if c.startswith(
+            (
+                constants.SYSTEM_TAG_SOURCE_ID_PREFIX,
+                constants.SYSTEM_TAG_RECORD_ID_PREFIX,
+            )
+        )
+        and c not in a_pair
+    ]
+    # B's z names B's row; A's nullable m names nothing but the tags.
+    table = full.select([*TAG_COLUMNS, "m", "z", *pairs_left])
+    layout = Layout(tag_keys=TAG_COLUMNS, data_keys=("m", "z"))
+    # Only the null-m rows: no row names A by a value.
+    nulls = [i for i, v in enumerate(table.column("m").to_pylist()) if v is None]
+    assert nulls
+    table = table.take(nulls)
+    with pytest.raises(AssertionError, match=re.escape("sources ['A']")):
+        assert_rows_aligned(table, layout, sources.oracle, joined.data_context)
