@@ -141,3 +141,14 @@ movement are waiting on the developer. **No library code until the coordinator's
   Not reachable in a row hash: `set[datetime]` elements are not a logical type, so the
   column is hashed as stored (verified: a pod returning an aware `set[datetime]` gives a row
   hash). Naive datetimes are refused as pod outputs for scalar/list/set alike (existing rule).
+
+### CodeRabbit round 1 (review 5908025110 on b22cb6ff), plan pending coordinator
+
+- 4576307086 (Literal first wins) — ACCEPT. Reproduced: after a `set[Literal[1, 2]]` source,
+  a `set[int]` source's schema is `set[Literal[1, 2]]` and its pipeline hash differs from the
+  same source built alone. Fix in `_make_or_get_arrow_element_set_type`: the element Python
+  type is `arrow_type_to_python_type(element Arrow type)` (what fresh-process reconstruction
+  uses), never the first annotation. Test first (public: two DictSources, both orders).
+- 4576307078 (None in `list[set[int] | None]`) — DECLINE as pre-existing: main reads the same
+  column as `[[], [1], []]`; `list[set[UUID] | None]` reads `[set(), ...]` on main;
+  `list[UUID | None]` crashes on read on main. Report out of scope.
