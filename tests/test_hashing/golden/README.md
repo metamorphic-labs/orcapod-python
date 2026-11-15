@@ -17,7 +17,7 @@ In short:
 | File | Role |
 | --- | --- |
 | `cases.py` | The cases. Never move or rename a fixture: they hash with their module path. |
-| `generate_golden_hashes.py` | Adds new entries (default), reports drift (`--check`), records a release (`--release X.Y.Z`). Read its header first. |
+| `generate_golden_hashes.py` | Adds new entries (default), reports drift (`--check`), removes an unreleased entry (`--remove`), records a release (`--release X.Y.Z`). Read its header first. |
 | `store.py` | The rules: file names, digests, history, pins. |
 | `test_golden_hashes.py` | Computes every entry again; refuses skips but the optional-package rule. |
 | `test_golden_store.py` | The rules and the generator, on copies of the tree. |

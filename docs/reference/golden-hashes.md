@@ -153,14 +153,19 @@ writes go through `tests/test_hashing/golden/generate_golden_hashes.py`.
    without writing anything.
 
 Before a release, a value that no release lists can change only with the developer's
-approval and a written migration assessment: remove the entry from its file and run the
-generator again.
+approval and a written migration assessment. `--remove <entry>` (repeatable) takes the entry
+out of its file and records the file's new sha256 in the open revision; it refuses an entry
+in a file a release lists and writes nothing unless every entry can be removed. `--add` then
+writes the new value. Editing the file by hand does not work: the file hashes report the
+edit and the generator refuses to write over it.
 
 ### Releasing (the release pull request)
 
-1. The data context's `v*` release tags are protected on both `metamorphic-labs/orcapod-python`
-   and `nauticalab/orcapod-python` (developer decision, 2026-11-15). The developer sets
-   this; no agent changes repository settings.
+1. Precondition, in place since 2026-11-15 (developer decision): the repository ruleset
+   `protect-release-tags` on both `metamorphic-labs/orcapod-python` and
+   `nauticalab/orcapod-python` targets `refs/tags/v*` with the rules deletion, update and
+   non-fast-forward and no bypass actors. A `v*` tag can be created (the Release workflow
+   pushes it) but never moved or deleted. Agents never change repository settings.
 2. Run `uv run python tests/test_hashing/golden/generate_golden_hashes.py --release X.Y.Z`.
    It computes no hash. It appends a revision with `added: {}` and `release: "X.Y.Z"`, writes
    its digest into `released_manifests.json` under `releases`, and at the data context's first
@@ -331,7 +336,7 @@ so the bytes that are hashed are the bytes that were committed (4).
 
 | Risk or assumption | Why it matters | What covers it |
 | --- | --- | --- |
-| Git history and `v*` tags are protected on both repositories | The tag check trusts the tags | Branch and tag protection on both repositories (developer decision, 2026-11-15) |
+| Git history and `v*` tags are protected on both repositories | The tag check trusts the tags | The `protect-release-tags` ruleset on both repositories (in place since 2026-11-15) and branch protection |
 | The checks themselves can be edited (17) | A weakened check passes | Review: changes to these tests and scripts get explicit review |
 | Golden values are computed only with the `uv.lock` versions | A user's newer pyarrow, polars or numpy could hash differently unnoticed | ITL-1151: CI against the lowest and highest allowed dependency versions |
 | A hash with no golden entry is not protected | Coverage is only as wide as `cases.py` | Add cases whenever a new stored or embedded hash appears |

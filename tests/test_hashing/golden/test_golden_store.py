@@ -336,6 +336,40 @@ def test_add_refuses_a_tree_that_breaks_the_rules(tree: Path) -> None:
     assert store.manifest_path(tree, VERSION).read_bytes() == manifest
 
 
+def test_remove_then_add_changes_an_unreleased_value(tree: Path) -> None:
+    """The approved-change procedure: ``--remove`` the entry, then ``--add`` writes it."""
+    name = "schema-01.json"
+    values = store.read_json(_folder(tree) / name)
+    entry = next(iter(values))
+    _record(tree, name, {**values, entry: "old value"})
+    main(["--root", str(tree), "--remove", entry])
+    assert entry not in store.read_json(_folder(tree) / name)
+    assert store.tree_problems(tree, VERSION) == []
+    main(["--root", str(tree), "--group", "schema"])
+    assert store.read_json(_folder(tree) / name) == values
+    assert len(_history(tree)) == 1
+    assert store.tree_problems(tree, VERSION) == []
+
+
+def test_remove_refuses_an_entry_a_release_lists(tree: Path) -> None:
+    main(["--root", str(tree), "--release", "0.3.0"])
+    entry = next(iter(store.read_json(_folder(tree) / "schema-01.json")))
+    before = _snapshot(_folder(tree)), _snapshot(tree / store.CONTEXTS_DIR / "data")
+    with pytest.raises(SystemExit, match="released"):
+        main(["--root", str(tree), "--remove", entry])
+    after = _snapshot(_folder(tree)), _snapshot(tree / store.CONTEXTS_DIR / "data")
+    assert after == before
+
+
+def test_remove_refuses_an_unknown_entry_and_writes_nothing(tree: Path) -> None:
+    entry = next(iter(store.read_json(_folder(tree) / "schema-01.json")))
+    before = _snapshot(_folder(tree)), _snapshot(tree / store.CONTEXTS_DIR / "data")
+    with pytest.raises(SystemExit, match="no.such.entry"):
+        main(["--root", str(tree), "--remove", entry, "--remove", "no.such.entry"])
+    after = _snapshot(_folder(tree)), _snapshot(tree / store.CONTEXTS_DIR / "data")
+    assert after == before
+
+
 def test_check_reports_a_moved_value_and_writes_nothing(tree: Path) -> None:
     name = "schema-01.json"
     values = store.read_json(_folder(tree) / name)

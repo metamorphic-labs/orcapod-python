@@ -103,10 +103,13 @@ against are in `docs/reference/golden-hashes.md`.
   (before 1.0) or a major one, never in a patch.
 - When a new data context starts, the old context's golden files and code move to
   `orcapod-sanctuary`; this repository carries only the current context's golden folder.
-- Release tags (`v*`) are protected on both `metamorphic-labs/orcapod-python` and
-  `nauticalab/orcapod-python`. This is a precondition of the CI tag check
-  (`scripts/check_golden_tags.py`), which compares HEAD with every release tag of the current
-  data context. The developer sets the protection; no agent changes repository settings.
+- Release tags are protected on both `metamorphic-labs/orcapod-python` and
+  `nauticalab/orcapod-python`: the repository ruleset `protect-release-tags` (target
+  `refs/tags/v*`; rules deletion, update and non-fast-forward; no bypass actors) is in place
+  since 2026-11-15. A `v*` tag can be created, as the Release workflow does, but never moved
+  or deleted. This is a precondition of the CI tag check (`scripts/check_golden_tags.py`),
+  which compares HEAD with every release tag of the current data context. Agents never change
+  repository settings.
 
 ## Cutting a Release
 
@@ -173,9 +176,10 @@ environments:
    that name `metamorphic-labs`, if any.
 3. Protect `main` on `nauticalab` (no force push, no deletion). It is written only by the
    fast-forward push above.
-4. Protect release tags (`v*`) on both `metamorphic-labs/orcapod-python` and
-   `nauticalab/orcapod-python` (no update, no deletion), so the golden tag check has a fixed
-   anchor (ITL-946).
+4. Protect release tags on both `metamorphic-labs/orcapod-python` and
+   `nauticalab/orcapod-python` with the ruleset `protect-release-tags` (target
+   `refs/tags/v*`; deletion, update, non-fast-forward; no bypass actors), so the golden tag
+   check has a fixed anchor (ITL-946). Done on 2026-11-15.
 5. Optional: set `CODECOV_TOKEN` there. The Codecov, SpiralDB and Linear jobs run only on
    `metamorphic-labs` and are skipped on `nauticalab`.
 

@@ -5,6 +5,7 @@ Usage::
     uv run python tests/test_hashing/golden/generate_golden_hashes.py            # add
     uv run python tests/test_hashing/golden/generate_golden_hashes.py --check    # report
     uv run python tests/test_hashing/golden/generate_golden_hashes.py --release 0.3.0
+    uv run python tests/test_hashing/golden/generate_golden_hashes.py --remove <entry>
 
 The golden values of the current data context live in
 ``tests/test_hashing/golden/data/<folder>/<group>-NN.json``, and the manifest of the data
@@ -33,8 +34,9 @@ The rules (developer, November 15, 2026, ITL-946):
    shipped only in a minor (before 1.0) or major release. The old context's golden files and
    code move to ``orcapod-sanctuary``.
 4. Before a release, a value no release lists may change only with the developer's approval
-   and a written migration assessment: remove the entry from its (unreleased) file and run
-   ``--add``.
+   and a written migration assessment: ``--remove <entry>`` takes the entry out of its
+   unreleased file and records that file again in the open revision (it refuses an entry a
+   release lists), then ``--add`` writes the new value.
 
 Never edit a golden file to make a failing test pass. If a test fails and you did not mean to
 change a hash, the code change is the bug.
@@ -215,6 +217,62 @@ def check(root: pathlib.Path, version: str, groups: list[str]) -> list[str]:
     return problems
 
 
+def remove(root: pathlib.Path, version: str, entries: list[str]) -> list[str]:
+    """Remove entries from golden files no release lists, recording the files again.
+
+    The first step of an approved change to an unreleased value: remove the entry, then
+    ``--add`` writes its new value. An entry in a file a release lists is refused, and
+    nothing is written unless every entry can be removed.
+
+    Args:
+        root: Project root.
+        version: Data context version.
+        entries: Entry names to remove.
+
+    Returns:
+        Names of the files rewritten.
+    """
+    _require_sound(root, version)
+    path = store.manifest_path(root, version)
+    manifest = store.read_json(path)
+    folder = store.golden_folder(root, manifest)
+    history = manifest["golden"]["history"]
+    released = store.released_files(history)
+    where = {
+        entry: file
+        for files in store.group_files(folder).values()
+        for file in files
+        for entry in store.read_json(file)
+    }
+    unknown = sorted(e for e in entries if e not in where)
+    if unknown:
+        raise SystemExit(f"no golden file pins {unknown}; nothing written")
+    frozen = sorted(e for e in entries if where[e].name in released)
+    if frozen:
+        raise SystemExit(
+            f"{frozen} are in files a release lists; a released value never changes "
+            "(a change needs a new data context version); nothing written"
+        )
+    planned: dict[pathlib.Path, dict[str, Any]] = {}
+    for entry in dict.fromkeys(entries):
+        file = where[entry]
+        values = planned.setdefault(file, store.read_json(file))
+        _ = values.pop(entry)
+    writes: list[tuple[pathlib.Path, bytes]] = []
+    for file, values in planned.items():
+        data = dump(values).encode("utf-8")
+        history = store.with_file(
+            history, file.name, hashlib.sha256(data).hexdigest(), _today()
+        )
+        writes.append((file, data))
+    for file, data in writes:
+        _ = file.write_bytes(data)
+        print(f"removed entries from {file}")
+    manifest["golden"]["history"] = history
+    store.write_json(path, manifest)
+    return [file.name for file, _ in writes]
+
+
 def release(root: pathlib.Path, version: str, release_text: str) -> str:
     """Record a library release in the golden history and the pins.
 
@@ -281,6 +339,15 @@ def main(argv: list[str] | None = None) -> None:
         help="append the release revision and pin it; computes no hash",
     )
     _ = mode.add_argument(
+        "--remove",
+        metavar="ENTRY",
+        action="append",
+        help=(
+            "remove an entry from a file no release lists (repeatable); with the "
+            "developer's approval, the first step of changing an unreleased value"
+        ),
+    )
+    _ = mode.add_argument(
         "--stdout",
         action="store_true",
         help="print all computed groups as one JSON object; write nothing",
@@ -302,6 +369,9 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--allow-errors is only for --stdout: errors are never pinned")
 
     version = get_default_context().version
+    if args.remove:
+        _ = remove(args.root, version, args.remove)
+        return
     if args.release is not None:
         _ = release(args.root, version, args.release)
         return

@@ -422,7 +422,8 @@ Orcapod stores or embeds in a name is pinned in the golden folder of the current
   context's golden files and code move to `orcapod-sanctuary`; this repository carries only
   the current context's golden folder.
 - Before a release, a value no release lists changes only with the developer's approval and
-  a migration assessment: remove the entry from its file and run the generator.
+  a migration assessment: `generate_golden_hashes.py --remove <entry>` (refuses an entry a
+  release lists), then the generator writes the new value.
 - The release pull request runs `generate_golden_hashes.py --release X.Y.Z`. CI checks HEAD
   against every release tag (`scripts/check_golden_tags.py`). Never mark a golden entry
   `skip` or `xfail`; the only skip is the optional-package rule (`torch`).
