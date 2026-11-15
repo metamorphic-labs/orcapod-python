@@ -183,10 +183,20 @@ class Oracle:
         return column
 
     def _derivation(self, column: str) -> Derivation | None:
-        """The derivation of ``column``, or of the column it is a rename of."""
-        return self.derivations.get(column) or self.derivations.get(
-            self.base_name(column)
-        )
+        """The derivation of ``column``, or of the nearest name in its rename chain.
+
+        Raises:
+            ValueError: If the renames form a cycle.
+        """
+        seen = {column}
+        while True:
+            derivation = self.derivations.get(column)
+            if derivation is not None or column not in self.renames:
+                return derivation
+            column = self.renames[column]
+            if column in seen:
+                raise ValueError(f"the renames form a cycle at {column!r}")
+            seen.add(column)
 
     def origins_for_value(self, column: str, value: Any) -> list[Origin]:
         """Every origin whose value of the output column ``column`` is ``value``."""

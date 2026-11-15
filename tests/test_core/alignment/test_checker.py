@@ -763,3 +763,13 @@ def test_a_merged_column_whose_elements_both_come_from_one_input_is_named() -> N
     assert_rows_aligned(table_with([token_a, token_c]), layout, oracle, context)
     with pytest.raises(AssertionError, match="its elements come from the inputs"):
         assert_rows_aligned(table_with([token_a, token_a]), layout, oracle, context)
+
+
+def test_a_derivation_on_an_intermediate_rename_name_is_found() -> None:
+    """``x`` is a rename of ``raw`` and derived; ``y`` renames ``x``: ``y`` is derived."""
+    oracle = make_sources("unique").oracle
+    oracle.rename("x", "raw")
+    oracle.derive("x", "A", lambda o: 2 * o.values["x"])
+    oracle.rename("y", "x")
+    origin = next(o for o in oracle.origins if o.source_id == "A")
+    assert oracle.expected_value("y", origin) == 2 * origin.values["x"]
