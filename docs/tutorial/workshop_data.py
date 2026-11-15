@@ -30,6 +30,7 @@ from __future__ import annotations
 import csv
 import random
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 SEED = 20261109
@@ -47,7 +48,7 @@ REGIONS = {"imec0": "V1", "imec1": "CA1"}
 UNITS_PER_PROBE = 4
 
 
-def _write_csv(path: Path, header: list[str], rows: list[list]) -> None:
+def _write_csv(path: Path, header: list[str], rows: Sequence[Sequence[object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f, lineterminator="\n")
@@ -76,8 +77,8 @@ def make_dataset(root: str | Path = "workshop_data") -> Path:
         [list(s) for s in SUBJECTS],
     )
 
-    session_rows: list[list] = []
-    unit_rows: list[list] = []
+    session_rows: list[list[object]] = []
+    unit_rows: list[list[object]] = []
     for subject_id, _sex, _age, genotype in SUBJECTS:
         for i, session in enumerate(SESSIONS):
             duration_s = rng.choice([60.0, 90.0, 120.0])
