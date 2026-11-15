@@ -299,6 +299,8 @@ def check_tables(
                 # could repeat one whole group and leave out another, or give none.
                 if (covered := member_values(case, sources)) is not None:
                     assert_members_cover(table, *covered)
+                # Requested columns are names only: an empty table has them too.
+                assert_requested_columns(table, config, layout)
                 # An empty table is right only when the fixture-derived rows are none.
                 if (
                     table.num_rows == 0
@@ -306,7 +308,6 @@ def check_tables(
                     and not case.expected(sources)
                 ):
                     continue
-                assert_requested_columns(table, config, layout)
                 assert_rows_aligned(
                     table,
                     layout,
