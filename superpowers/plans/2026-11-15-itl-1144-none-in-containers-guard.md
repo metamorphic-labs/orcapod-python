@@ -1,7 +1,7 @@
 # ITL-1144: guard against a None inside a container column that a read cannot restore
 
-Status: measurement done (main fe433eab, PR #393 head 8b75ccea); proposal sent to the
-coordinator; implementation waits for the reply.
+Status: implemented (guard: (a) + (c)); measurement on main fe433eab and PR #393 head 8b75ccea;
+approved by the coordinator November 15, 2026. Draft PR open; full fix still open (ITL-1144).
 
 ## Measurement
 
