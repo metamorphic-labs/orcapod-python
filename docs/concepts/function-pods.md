@@ -250,6 +250,16 @@ before standalone iteration, table materialization, or sync/async storage can di
 Errors name the function, output, declared type and returned type; nested locations show
 structure without including returned dictionary keys or converter messages.
 
+A declared type that storage cannot keep is refused when the pod is defined, before any value
+is returned. A dictionary is stored as a list of key/value structs, and Arrow cannot hold a
+logical type inside a struct field, so a logical type or native container (`Path`, `UUID`, a
+user class, `numpy.ndarray`, `set[int]`, `list[set[int]]`, `list[Path]`) as a dictionary key
+or value, at any depth (`dict[str, set[int]]`, `list[dict[str, set[int]]]`, a dataclass field
+typed `dict[str, set[int]]`), raises `NestedTypeNotStorableError` naming the parameter or
+output (ITL-1150). The same types are faithful as a column, inside a list, and as a field of a
+dataclass, an `orcapod.dataclass` or a pydantic model: hold such a value in a dataclass
+field, or declare the plain type (`dict[str, list[int]]`).
+
 Outputs are validated against the declared storage schema immediately, and accepted numeric
 exceptions are normalized so downstream pods, hashes and stored rows see the same value.
 Eager validation never replaces a compatible user-class object; stored reads keep their
@@ -742,6 +752,9 @@ object that has already loaded the table until its own next commit to that table
 a new `DeltaTableDatabase` object reads them at once. This was already the case before
 batching; only the re-reading per lookup is gone.
 
+[Pipelines and Jobs](pipeline-job.md) covers jobs in full: nodes, databases, pipeline
+blueprints, and saving and loading.
+
 A node from a job that has run also provides:
 
 - **`get_all_records()`** -- every record this step of the job has stored, as a PyArrow
@@ -750,7 +763,8 @@ A node from a job that has run also provides:
   function produced in a job with a different name, or from a source with a different
   `source_id`, are not included
 - **`as_source()`** -- a `DerivedSource` backed by those stored records, usable as the input
-  of another pipeline
+  of another pipeline (not yet as a source of a new `PipelineJob` when the node is
+  downstream of a join; see [`DerivedSource`](sources.md#derivedsource))
 
 An operator node (a `Join`, `Batch`, column selection and so on, applied inside the job) is
 read the same way: after `job.run()` its `as_table()` and `iter_data()` return the rows it
