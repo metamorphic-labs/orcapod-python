@@ -18,10 +18,10 @@ from typing import TYPE_CHECKING, Any, get_args, get_origin
 if TYPE_CHECKING:
     import pyarrow as pa
 
-    from orcapod.logical_types.protocols import LogicalTypeProtocol
-
-LogicalTypeLookup = Callable[[str], "LogicalTypeProtocol | None"]
-"""Find the registered logical type of an Arrow extension name."""
+IsUserClass = Callable[[str], bool]
+"""Whether an Arrow extension name is the logical type of a user class (a dataclass,
+an ``orcapod.dataclass`` or a pydantic model). The caller supplies it, so this module
+does not import the user-class logical types, which import it."""
 
 _FOLLOW_UP = "ITL-1144"
 
@@ -30,7 +30,7 @@ class NestedNoneNotRestorableError(ValueError):
     """A None at a nested position cannot be read back faithfully (ITL-1144)."""
 
 
-def none_is_restorable(arrow_type: pa.DataType, lookup: LogicalTypeLookup) -> bool:
+def none_is_restorable(arrow_type: pa.DataType, is_user_class: IsUserClass) -> bool:
     """Whether a read restores a null at a nested position of ``arrow_type`` as None.
 
     A user class (dataclass, ``orcapod.dataclass``, pydantic model) and every scalar
@@ -39,17 +39,15 @@ def none_is_restorable(arrow_type: pa.DataType, lookup: LogicalTypeLookup) -> bo
 
     Args:
         arrow_type: The Arrow type of the nested position.
-        lookup: Finds the logical type registered for an extension name.
+        is_user_class: Whether an extension name is a user class's logical type.
 
     Returns:
         True when a null there is read back as None.
     """
     import pyarrow as pa
 
-    from orcapod.logical_types.user_class_logical_type import UserClassLogicalType
-
     if isinstance(arrow_type, pa.ExtensionType):
-        return isinstance(lookup(arrow_type.extension_name), UserClassLogicalType)
+        return is_user_class(arrow_type.extension_name)
     return not (
         pa.types.is_list(arrow_type)
         or pa.types.is_large_list(arrow_type)
@@ -70,7 +68,7 @@ def _is_optional(annotation: Any) -> bool:
 
 
 def require_restorable_none(
-    annotation: Any, arrow_type: pa.DataType, lookup: LogicalTypeLookup
+    annotation: Any, arrow_type: pa.DataType, is_user_class: IsUserClass
 ) -> None:
     """Refuse a nested position declared ``X | None`` whose None a read cannot restore.
 
@@ -78,13 +76,13 @@ def require_restorable_none(
         annotation: The declared type of the nested position (a list or set element, a
             dict value, a user-class field).
         arrow_type: The Arrow type ``annotation`` registers as.
-        lookup: Finds the logical type registered for an extension name.
+        is_user_class: Whether an extension name is a user class's logical type.
 
     Raises:
         NestedNoneNotRestorableError: If ``annotation`` admits None and a stored None
             there would not be read back as None.
     """
-    if _is_optional(annotation) and not none_is_restorable(arrow_type, lookup):
+    if _is_optional(annotation) and not none_is_restorable(arrow_type, is_user_class):
         raise NestedNoneNotRestorableError(
             f"{annotation} is not supported inside a container or as a class field yet: "
             f"a None there is stored but not read back faithfully (it would read as an "

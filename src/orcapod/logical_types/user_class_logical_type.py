@@ -326,7 +326,10 @@ class UserClassLogicalTypeFactory:
                 require_restorable_none(
                     annotation,
                     arrow_type,
-                    converter.get_logical_type_by_arrow_extension_name,
+                    lambda name: isinstance(
+                        converter.get_logical_type_by_arrow_extension_name(name),
+                        UserClassLogicalType,
+                    ),
                 )
             except NestedNoneNotRestorableError as exc:
                 raise with_context(

@@ -65,7 +65,7 @@ REFUSED_TYPES = [
     set[uuid.UUID | None],
     list[Path | None],
     list[list[uuid.UUID] | None],
-    list[np.ndarray | None],
+    list[np.ndarray | None],  # pyright: ignore[reportMissingTypeArgument]  # the bare class is how a pod declares it
 ]
 
 REFUSED_CLASSES = [OptionalList, OptionalUUID, OptionalPath]
@@ -199,7 +199,12 @@ class TestReducingOperators:
     @pytest.mark.parametrize("operator", OPERATORS)
     @pytest.mark.parametrize(
         ("annotation", "second"),
-        [(list[int] | None, [1]), (set[int] | None, {1}), (Path | None, P), (uuid.UUID | None, U)],
+        [
+            (list[int] | None, [1]),
+            (set[int] | None, {1}),
+            (Path | None, P),
+            (uuid.UUID | None, U),
+        ],
         ids=["list", "set", "Path", "UUID"],
     )
     def test_a_nullable_container_or_logical_column_raises_at_read(

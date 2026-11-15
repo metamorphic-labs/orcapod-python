@@ -381,9 +381,7 @@ class UniversalTypeConverter:
                     "element type (e.g. list[int], list[str])."
                 )
             inner = self.register_python_class(args[0])
-            require_restorable_none(
-                args[0], inner, self.get_logical_type_by_arrow_extension_name
-            )
+            require_restorable_none(args[0], inner, self._is_user_class_extension)
             if self._logical_type_registry is not None and hasattr(
                 inner, "extension_name"
             ):
@@ -402,9 +400,7 @@ class UniversalTypeConverter:
                     "element type (e.g. set[int], set[str])."
                 )
             inner = self.register_python_class(args[0])
-            require_restorable_none(
-                args[0], inner, self.get_logical_type_by_arrow_extension_name
-            )
+            require_restorable_none(args[0], inner, self._is_user_class_extension)
             if self._logical_type_registry is not None and hasattr(
                 inner, "extension_name"
             ):
@@ -426,9 +422,7 @@ class UniversalTypeConverter:
                 )
             key_arrow = self.register_python_class(args[0])
             val_arrow = self.register_python_class(args[1])
-            require_restorable_none(
-                args[1], val_arrow, self.get_logical_type_by_arrow_extension_name
-            )
+            require_restorable_none(args[1], val_arrow, self._is_user_class_extension)
             if isinstance(key_arrow, pa.ExtensionType):
                 raise ValueError(
                     f"'dict[{args[0]}, ...]' is not yet supported: the key type maps to Arrow "
@@ -857,7 +851,7 @@ class UniversalTypeConverter:
         """
         arrow_type = self.python_type_to_arrow_type(annotation)
         if storage_value is None and not none_is_restorable(
-            arrow_type, self.get_logical_type_by_arrow_extension_name
+            arrow_type, self._is_user_class_extension
         ):
             raise unrestorable_none_error(arrow_type)
         converter_fn = self.get_arrow_to_python_converter(arrow_type)
@@ -1930,6 +1924,22 @@ class UniversalTypeConverter:
             # Default passthrough
             return lambda value: value
 
+    def _is_user_class_extension(self, extension_name: str) -> bool:
+        """Whether *extension_name* is the logical type of a user class (ITL-1144).
+
+        Args:
+            extension_name: An Arrow extension name.
+
+        Returns:
+            True for a registered dataclass, ``orcapod.dataclass`` or pydantic type.
+        """
+        from orcapod.logical_types.user_class_logical_type import UserClassLogicalType
+
+        return isinstance(
+            self.get_logical_type_by_arrow_extension_name(extension_name),
+            UserClassLogicalType,
+        )
+
     def _nested_value_converter(self, arrow_type: pa.DataType) -> Callable[[Any], Any]:
         """The converter of a nested position (list element, dict value, struct field).
 
@@ -1943,7 +1953,7 @@ class UniversalTypeConverter:
             A function converting one stored value of ``arrow_type`` to Python.
         """
         convert = self.get_arrow_to_python_converter(arrow_type)
-        if none_is_restorable(arrow_type, self.get_logical_type_by_arrow_extension_name):
+        if none_is_restorable(arrow_type, self._is_user_class_extension):
             return convert
 
         def convert_or_refuse(value: Any) -> Any:
