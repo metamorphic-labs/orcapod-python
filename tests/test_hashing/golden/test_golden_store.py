@@ -147,8 +147,9 @@ def test_an_edited_listed_file_is_reported(tree: Path) -> None:
 
 
 def test_an_unlisted_file_is_reported(tree: Path) -> None:
-    _write(_folder(tree), "arrow-02.json", {"new": 1})
-    assert "arrow-02.json is in" in " ".join(store.tree_problems(tree, VERSION))
+    name = store.next_file_name(_REPOSITORY_FILES["arrow"][-1].name)
+    _write(_folder(tree), name, {"new": 1})
+    assert f"{name} is in" in " ".join(store.tree_problems(tree, VERSION))
 
 
 def test_a_missing_listed_file_is_reported(tree: Path) -> None:
