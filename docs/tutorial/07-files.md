@@ -212,7 +212,8 @@ job.run()
 summaries = job.nodes["summaries"]
 print(summaries.output_schema()[1])
 # Schema({'summary': Path})
-tag, data = next(iter(summaries.iter_data()))
+wanted = {"subject_id": "mouse_01", "session": "s1", "probe": "imec0"}
+data = next(data for tag, data in summaries.iter_data() if tag.as_dict() == wanted)
 print(data.as_dict()["summary"].read_text())
 # n_spikes: 1737
 # last_spike_s: 59.9999

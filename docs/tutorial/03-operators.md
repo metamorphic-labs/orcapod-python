@@ -241,6 +241,12 @@ except InputValidationError as err:
 # Input streams are not compatible: Datas should not have overlapping keys, but KeysView(Schema({'n_spikes': int})) found in SelectDataColumns and SelectDataColumns.
 ```
 
+The split above only serves to produce the clash. Unit numbers restart on each probe
+(Part 1), so unit 0 of `imec0` and unit 0 of `imec1` are different cells, and the two joins
+below pair unrelated units: run them to see how the operators behave, not as an analysis.
+The pairing means something when the two columns describe the same thing, for example the
+spike counts of one unit from two spike-sorting runs.
+
 There are two ways out, and they mean different things.
 
 **Rename**, when the two columns are different quantities that happen to share a name:
