@@ -152,6 +152,24 @@ def test_an_unlisted_file_is_reported(tree: Path) -> None:
     assert f"{name} is in" in " ".join(store.tree_problems(tree, VERSION))
 
 
+def test_a_recorded_file_repeating_an_entry_name_is_reported(tree: Path) -> None:
+    """A duplicate entry name in correctly recorded files is a problem, and no release."""
+    entry, value = next(iter(store.read_json(_folder(tree) / NEWEST_SCHEMA).items()))
+    _record(tree, NEXT_SCHEMA, {entry: value})
+    assert any("pinned twice" in p for p in store.tree_problems(tree, VERSION))
+    with pytest.raises(SystemExit, match="pinned twice"):
+        main(["--root", str(tree), "--release", "0.3.0"])
+
+
+def test_a_recorded_file_of_an_unknown_group_is_reported(tree: Path) -> None:
+    """A file whose group is not one of ``cases.GROUPS`` is a problem, even when recorded."""
+    _record(tree, "obsolete-01.json", {"obsolete.entry": "x"})
+    assert any(
+        "obsolete-01.json" in p and "known group" in p
+        for p in store.tree_problems(tree, VERSION)
+    )
+
+
 def test_a_missing_listed_file_is_reported(tree: Path) -> None:
     (_folder(tree) / "torch-01.json").unlink()
     assert any(

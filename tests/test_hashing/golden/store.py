@@ -36,6 +36,8 @@ from typing import Any
 
 from packaging.version import InvalidVersion, Version
 
+from tests.test_hashing.golden.cases import GROUPS
+
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 CONTEXTS_DIR = Path("src/orcapod/contexts")
@@ -449,7 +451,8 @@ def folder_problems(history: Sequence[Mapping[str, Any]], folder: Path) -> list[
     """What breaks the agreement between a history and its golden folder.
 
     Every listed file exists and has the listed sha256; every file in the folder is listed
-    by exactly one revision.
+    by exactly one revision, is named ``<group>-NN.json`` for a group of ``cases.GROUPS``,
+    and holds a JSON object; and no entry name appears in two files.
 
     Args:
         history: A history without ``history_problems``.
@@ -479,12 +482,20 @@ def folder_problems(history: Sequence[Mapping[str, Any]], folder: Path) -> list[
                         else "run generate_golden_hashes.py to record it"
                     )
                 )
-    if folder.is_dir():
-        for path in sorted(folder.iterdir()):
-            if path.name not in listed:
-                problems.append(f"{path.name} is in {folder} but no revision lists it")
-    else:
-        problems.append(f"the golden folder {folder} does not exist")
+    if not folder.is_dir():
+        return [*problems, f"the golden folder {folder} does not exist"]
+    for path in sorted(folder.iterdir()):
+        if path.name not in listed:
+            problems.append(f"{path.name} is in {folder} but no revision lists it")
+        match = FILE_NAME.match(path.name)
+        if match is not None and match["group"] not in GROUPS:
+            problems.append(
+                f"{path.name} belongs to no known group (cases.GROUPS: {list(GROUPS)})"
+            )
+    try:
+        _ = load_folder(folder)
+    except GoldenLayoutError as exc:
+        problems.append(str(exc))
     return problems
 
 
