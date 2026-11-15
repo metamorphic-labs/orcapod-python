@@ -209,7 +209,7 @@ print(result.as_table().to_pandas())
 
 ## Keeping results
 
-Everything above runs in memory: results are recomputed each time and nothing is stored. To
+Everything above runs in memory: nothing is stored, so each new run computes everything again. To
 save results in a database and have later runs compute only what is new, record the same
 steps inside a `PipelineJob`. See [Pipelines and Jobs](concepts/pipeline-job.md), or work
 through the [Tutorial](tutorial/index.md), which builds up to it step by step.

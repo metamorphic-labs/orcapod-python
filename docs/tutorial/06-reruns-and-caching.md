@@ -195,7 +195,9 @@ A stored result is reused when **all** of these are the same as when it was comp
 2. the values of the function's inputs for that row;
 3. the job's `name` and database.
 
-Change any one and the affected rows are computed. Change none and nothing is. Where the
+Change any one and the affected rows are computed, unless a result is already stored for
+the new combination (going back to an earlier version finds that version's results). Change
+none and nothing is. Where the
 input values came from does not matter: which file, which source, which steps before the
 function.
 

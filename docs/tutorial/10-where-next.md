@@ -26,7 +26,10 @@ upload a file, write a row to a lab database. These are **side-effect pods**. Th
 useful kind is the **sink**, made with `@sink_pod`: it runs once for each row and remembers
 which rows it has already handled, so a re-run does not repeat the effect for them. A row
 counts as handled once its function has returned and that has been recorded; if the process
-stops in between, the next run calls the function for that row again.
+stops in between, the next run calls the function for that row again. A row is identified by
+its position unless its source names a column that is unique per row (`record_id_column`
+on `ArrowTableSource`), so reordering the rows of a source without one can make the sink
+handle them again.
 
 ```python
 from orcapod import InvocationContext, sink_pod

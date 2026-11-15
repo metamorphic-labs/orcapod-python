@@ -269,7 +269,6 @@ Requires `psycopg` (install with `pip install 'orcapod[postgresql]'`) and a reac
 Postgres server:
 
 <!-- docs-test: skip -->
-
 ```python
 from orcapod.contexts import enable_file_hash_caching
 
@@ -282,7 +281,6 @@ You can also construct `PostgresHashCacher` directly and pass it to
 `CachedFileHasher` for advanced configurations:
 
 <!-- docs-test: skip -->
-
 ```python
 from orcapod.hashing import CachedFileHasher, FileHasher, PostgresHashCacher
 

@@ -131,7 +131,7 @@ summaries.mkdir()
 
 @function_pod(output_keys="summary")
 def summarize(recording: op.File) -> Path:
-    out_path = summaries / f"{recording.stem}_summary.txt"
+    out_path = summaries / f"{recording.name}_summary.txt"
     out_path.write_text(f"{len(recording.read_text().splitlines())} lines\n")
     return out_path
 
