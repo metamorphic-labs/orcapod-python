@@ -227,9 +227,23 @@
         "polars": "1.41.2: serialisation of filter expressions, which is hashed"
     },
     "golden": {
-        "files": "tests/test_hashing/golden/data/*.json",
-        "algorithm": "sha256 over the files in name order; each contributes its name, a NUL byte, its bytes and a NUL byte",
-        "digest": null
+        "folder": "v1",
+        "history": [
+            {
+                "date": "2026-11-15",
+                "release": null,
+                "added": {
+                    "arrow-01.json": "d62d1fd8ef374e4fd55a82d7eeb09f3ed5906b9de6fc96b6b1596edcb1579da8",
+                    "datagram-01.json": "1151c8d391f6f7303657da83720e4fcfc8c5b5082e9cd670ef51ba8886575ca9",
+                    "pipeline-01.json": "e4e4e71b4ef9bdd9211b5c5dc15db03ee333f66af606a832d1b5fccfa21f44da",
+                    "schema-01.json": "315a5206497f86a69029810800045e542e8f85ef733c3f1108ef2e7526024a72",
+                    "semantic-01.json": "187c1845303e90fd79f2f8afa1a4a54addfb0be91f087570e56bfc130e2cffcd",
+                    "torch-01.json": "99af07350bc23a0200cecfd786ccd6c17985c2270ad5e3f44aca74273a1bcdc2"
+                },
+                "previous": null,
+                "digest": "2bc703287b8342d9187c491123ca69665485d8cb0ded4f6bb814cdfb33037917"
+            }
+        ]
     },
     "changes": [
         {
