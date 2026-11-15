@@ -60,15 +60,18 @@ large-normalized Arrow type text (`str(normalize_to_large_types(element_type))`)
 
 | Python | extension name | extension metadata (exact bytes) |
 |---|---|---|
-| `set[int]` | `set[int64]` | `{"category": "set", "element_arrow_type": "int64"}` |
-| `set[str]` | `set[large_string]` | `{"category": "set", "element_arrow_type": "large_string"}` |
-| `set[bytes]` | `set[large_binary]` | `{"category": "set", "element_arrow_type": "large_binary"}` |
-| `set[float]` | `set[double]` | `{"category": "set", "element_arrow_type": "double"}` |
-| `set[datetime]` | `set[timestamp[us, tz=UTC]]` | `{"category": "set", "element_arrow_type": "timestamp[us, tz=UTC]"}` |
-| `list[set[int]]` | `list[set[int64]]` | `{"category": "list", "element_ext_name": "set[int64]", "element_ext_metadata": "{\"category\": \"set\", \"element_arrow_type\": \"int64\"}"}` |
+| `set[int]` | `set[int64]` | `{"category": "set", "element_kind": "arrow"}` |
+| `set[str]` | `set[large_string]` | `{"category": "set", "element_kind": "arrow"}` |
+| `set[bytes]` | `set[large_binary]` | `{"category": "set", "element_kind": "arrow"}` |
+| `set[float]` | `set[double]` | `{"category": "set", "element_kind": "arrow"}` |
+| `set[datetime]` | `set[timestamp[us, tz=UTC]]` | `{"category": "set", "element_kind": "arrow"}` |
+| `list[set[int]]` | `list[set[int64]]` | `{"category": "list", "element_ext_name": "set[int64]", "element_ext_metadata": "{\"category\": \"set\", \"element_kind\": \"arrow\"}"}` |
 
-The key `element_arrow_type` (not `element_ext_name`) marks a primitive element, so a
-logical type can never be confused with an Arrow type name. JSON is written as the
+`element_kind: arrow` (not `element_ext_name`) marks a primitive element, so a
+logical type can never be confused with an Arrow type name. Developer decision, November 15,
+2026: the element type is in the name only (the registry key, unique per element type); the
+metadata does not repeat it, and a reader takes the element from the storage. (The first
+form, `element_arrow_type`, was never released.) JSON is written as the
 existing container metadata is (`json.dumps`, insertion order).
 
 - `list[primitive]` is unchanged (plain `large_list`); a regression test pins it.
@@ -78,8 +81,9 @@ existing container metadata is (`json.dumps`, insertion order).
 - Element order: unchanged, `sort_set_elements` on the converted storage values, so the
   stored bytes of every value are as before and only the type identity moves.
 - Reading: `storage_to_python` converts each element with the converter and returns a
-  `set`. `ListLogicalTypeFactory.reconstruct_from_arrow` rebuilds the type from
-  `element_arrow_type` (checking it equals the storage's element type).
+  `set`. `ListLogicalTypeFactory.reconstruct_from_arrow` rebuilds the type from the
+  storage's element type and refuses (`LogicalTypeIdentifierError`) a storage that is not a
+  list or whose set would have another name than the stored one.
 - Hashing: the `SemanticHashingVisitor` value-hashes a native container only when its
   innermost element is a logical type; a container of a primitive element is hashed as
   stored, with its identifier in the field metadata (starfix `include_metadata`).

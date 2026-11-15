@@ -132,8 +132,12 @@ a list; conceptually they are an ordinary list or set of `T`. By design:
 logical type (`set[int]`, `set[str]`, `set[bytes]`, `set[datetime]`) is stored under the
 wrapper `set[<element Arrow type>]`, so a set reads back as a set everywhere: from the
 node, in a downstream pod, from `as_source()` and from a job loaded in another process.
-The element's identifier is its Arrow type in the large variants, as text, under the
-metadata key `element_arrow_type` (never `element_ext_name`, which names a logical type):
+The element's identifier is its Arrow type in the large variants, as text, inside the
+extension name, which is the key the type is registered under. The metadata does not repeat
+it: `"element_kind": "arrow"` (never `element_ext_name`, which names a logical type) says
+that the element is a plain Arrow type, which a reader takes from the storage
+(`large_list<large_string>`). A stored column whose storage is not a list of the element its
+name names is refused with `LogicalTypeIdentifierError`.
 
 ```python
 from orcapod.sources import DictSource
@@ -147,7 +151,9 @@ labels_type = source.as_table().schema.field("labels").type
 print(labels_type.extension_name)
 # set[large_string]
 print(labels_type.__arrow_ext_serialize__().decode())
-# {"category": "set", "element_arrow_type": "large_string"}
+# {"category": "set", "element_kind": "arrow"}
+print(labels_type.storage_type)
+# large_list<item: large_string>
 ```
 
 - `list[T]` of a primitive is not a native container: it stays a plain `large_list`, because

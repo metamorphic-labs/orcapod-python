@@ -19,7 +19,10 @@ that differed from the in-process one.
 **Fix:** the developer approved (November 14, 2026) storing a set of a primitive as the
 native set container: `ListLogicalType` over an `ArrowElement`, extension name
 `set[<element Arrow type in its large variants>]` (`set[int64]`), metadata
-`{"category": "set", "element_arrow_type": "int64"}`, no version key, elements in the
+`{"category": "set", "element_kind": "arrow"}` (developer, November 15, 2026: the name
+holds the element as it is and is the registry key; the metadata does not repeat it, and a
+reader takes the element from the storage, refusing a storage that is not a list of the
+element the name names), no version key, elements in the
 canonical set order of `canonical_order.sort_set_elements` (unchanged, so the stored values
 are as before and only the type identity moves). `list[T]` of a primitive stays a plain
 `large_list`. A container's elements are value-hashed only when its innermost element is a
