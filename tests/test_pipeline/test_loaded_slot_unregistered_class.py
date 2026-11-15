@@ -95,7 +95,9 @@ _SCRIPT = textwrap.dedent(
             out[label] = {
                 "pipeline_hash": node.pipeline_hash().to_string(),
                 "content_hash": node.content_hash().to_string(),
-                "schema": [f"{field.name}: {field.type}" for field in schema],
+                "schema": [
+                    f"{field.name}: {field.type} nullable={field.nullable}" for field in schema
+                ],
                 # Values of the user columns: a load-only run's status and execution
                 # columns differ from the saving run's by design.
                 "rows": rows(node.as_table()),
