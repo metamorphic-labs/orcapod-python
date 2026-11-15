@@ -242,10 +242,10 @@ version to regenerate them.
 
 ## A script finishes its work but the process never exits
 
-**Symptom.** A Python script that used a Delta database prints all of its output and then
-hangs, and has to be killed. On Linux with Python 3.11 or 3.12 the process may instead end
-with `terminate called without an active exception` and exit code 134 (SIGABRT). Notebooks
-are not affected in the same way, because the kernel keeps running.
+**Symptom.** A Python script that used a Delta database prints all of its output and then hangs,
+and has to be killed. On Linux with Python 3.11 or 3.12 the process may instead end with
+`terminate called without an active exception` and exit code 134 (SIGABRT). Notebooks are not
+affected in the same way, because the kernel keeps running.
 
 **Cause.** This is a bug in pyarrow, not in your pipeline
 ([apache/arrow#50482](https://github.com/apache/arrow/issues/50482),
