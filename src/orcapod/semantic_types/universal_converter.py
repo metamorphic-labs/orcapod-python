@@ -553,12 +553,15 @@ class UniversalTypeConverter:
         Arrow cannot hold an extension type inside a struct field, so a set of a
         plain element type keeps the plain ``large_list`` storage it had before it
         was a native container where it is a dict value or a tuple field (ITL-611).
+        So does a native container whose innermost element is such a set
+        (``list[set[int]]``): its storage holds no extension type either.
 
         Args:
             arrow_type: An Arrow type the converter produced.
 
         Returns:
-            The storage type of a set of a plain element; otherwise ``arrow_type``.
+            The storage type of a set of a plain element, or of a native container
+            whose innermost element is one; otherwise ``arrow_type``.
         """
         from orcapod.logical_types.list_logical_type_factory import ListLogicalType
 
@@ -569,8 +572,11 @@ class UniversalTypeConverter:
         lt = self._logical_type_registry.get_by_arrow_extension_name(
             arrow_type.extension_name
         )
-        if isinstance(lt, ListLogicalType) and lt.element_logical_type is None:
-            return arrow_type.storage_type
+        innermost = lt
+        while isinstance(innermost, ListLogicalType):
+            if innermost.element_logical_type is None:
+                return arrow_type.storage_type
+            innermost = innermost.element_logical_type
         return arrow_type
 
     def _find_factory_for_class(

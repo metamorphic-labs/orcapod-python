@@ -124,7 +124,8 @@ class ListLogicalType(BaseLogicalType):
             type. ``False`` for a set of a plain Arrow element: ``set[int]`` is the
             Python type of ``set[int64]`` and of ``set[int8]`` alike, so such a set is
             found by its identifier only, and ``set[T]`` maps to Arrow through ``T``'s
-            own Arrow type, as ``list[T]`` does (ITL-611).
+            own Arrow type, as ``list[T]`` does (ITL-611). A container takes its
+            element's value, so ``list[set[int]]`` is found by its identifier only too.
 
     Raises:
         ValueError: If the element is an ``ArrowElement`` and ``is_set`` is ``False``: a
@@ -163,6 +164,12 @@ class ListLogicalType(BaseLogicalType):
 
         self._element_logical_type: LogicalTypeProtocol | None = element_logical_type
         self._element_python_type = element_logical_type.python_type
+        # A container of an element found by its identifier only (a set of a plain
+        # element) is found by its identifier only too: ``list[set[int8]]`` and
+        # ``list[set[int64]]`` both read as ``list[set[int]]`` (ITL-611).
+        self.binds_python_type = getattr(
+            element_logical_type, "binds_python_type", True
+        )
 
         # Derive Arrow extension details from the element logical type.
         element_ext_type = element_logical_type.get_arrow_extension_type()

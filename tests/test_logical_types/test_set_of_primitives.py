@@ -647,3 +647,83 @@ def test_a_registered_set_whose_storage_does_not_hold_its_element_is_refused(
     assert excinfo.value.column == "c"
     notes = getattr(excinfo.value, "__notes__", [])
     assert any(str(storage.type) in note for note in notes), notes
+
+
+_TWO_WIDTHS_IN_A_LIST = textwrap.dedent(
+    """
+    import json, sys
+    import numpy as np
+    from orcapod.sources import DictSource
+
+    declared = {
+        "int8": (list[set[np.int8]], [{1, 2}]),
+        "int64": (list[set[int]], [{1, 300}]),
+    }
+    report = {}
+    for name in sys.argv[1:]:
+        annotation, value = declared[name]
+        source = DictSource(
+            [{"k": 0, "v": value}],
+            tag_columns=["k"],
+            data_schema={"k": int, "v": annotation},
+            source_id="one_row",
+        )
+        _, data = next(iter(source.iter_data()))
+        read = data.as_dict()["v"]
+        report[name] = {
+            "arrow_type": str(source.as_table().schema.field("v").type),
+            "schema": str(source.output_schema()[1]["v"]),
+            "read": [sorted(int(v) for v in s) for s in read],
+            "read_type": [type(s).__name__ for s in read],
+        }
+    print(json.dumps(report))
+    """
+)
+
+
+@pytest.mark.parametrize("order", [("int8", "int64"), ("int64", "int8")])
+def test_two_integer_widths_of_a_list_of_sets_live_in_one_process(
+    order: tuple[str, str],
+) -> None:
+    """``list[set[np.int8]]`` and ``list[set[int]]`` are two containers in one process.
+
+    A list of a set of a plain element is found by its identifier only, as the set is.
+    """
+    result = subprocess.run(
+        [sys.executable, "-c", _TWO_WIDTHS_IN_A_LIST, *order],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    report = json.loads(result.stdout.strip().splitlines()[-1])
+    assert report["int8"] == {
+        "arrow_type": "extension<list[set[int8]]<_ArrowExt_list_set_int8__>>",
+        "schema": "list[set[int]]",
+        "read": [[1, 2]],
+        "read_type": ["set"],
+    }
+    assert report["int64"] == {
+        "arrow_type": "extension<list[set[int64]]<_ArrowExt_list_set_int64__>>",
+        "schema": "list[set[int]]",
+        "read": [[1, 300]],
+        "read_type": ["set"],
+    }
+
+
+def test_a_list_of_sets_inside_a_dict_value_keeps_plain_storage() -> None:
+    """``dict[str, list[set[int]]]`` is stored as it was before sets were containers."""
+    source = DictSource(
+        [{"k": 0, "v": {"a": [{2, 1}]}}],
+        tag_columns=["k"],
+        data_schema={"k": int, "v": dict[str, list[set[int]]]},
+        source_id="one_row",
+    )
+    assert source.as_table().schema.field("v").type == pa.large_list(
+        pa.struct(
+            [
+                pa.field("key", pa.large_string()),
+                pa.field("value", pa.large_list(pa.large_list(pa.int64()))),
+            ]
+        )
+    )

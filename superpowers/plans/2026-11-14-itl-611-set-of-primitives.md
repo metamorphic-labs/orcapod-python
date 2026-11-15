@@ -200,3 +200,12 @@ Containers of logical elements unchanged.
   Was refused before too, by Arrow's `TypeError`. Hashing, logical types, semantic types,
   pipeline and database suites pass with it (8322 passed).
 - ast-grep notes (jsonify x2, subprocess x2): DECLINE, false positives; one signed comment.
+
+### CodeRabbit CLI (pre-push gate) on e3baffa8: 2 findings, both reproduced, fixed
+
+- minor list_logical_type_factory.py:234 — list[set[np.int8]] then list[set[int]] raised
+  (python_type 'list' already bound); main: plain lists, fine. Fix: a container takes its
+  element's `binds_python_type`. Test: both orders, fresh process.
+- major universal_converter.py:572 — dict[str, list[set[int]]] raised (extension in struct);
+  main: plain storage. Fix: `_plain_set_storage` lowers a container whose innermost element is
+  a plain set. Tuple part declined: tuple[int, list[int]] is unsupported on main too.

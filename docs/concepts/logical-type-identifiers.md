@@ -163,8 +163,8 @@ print(labels_type.storage_type)
 - The elements are stored in the canonical set order (see the hashing reference, section 1e),
   so equal sets store, and hash, identically. A set row never hashes like the list row with
   the same elements, because the container's identifier is part of the row hash.
-- **Known limit:** inside a dict value or a tuple field (`dict[str, set[int]]`), a set of a
-  primitive keeps its plain `large_list` storage, because Arrow cannot hold an extension
+- **Known limit:** inside a dict value or a tuple field (`dict[str, set[int]]`,
+  `dict[str, list[set[int]]]`), a set of a primitive keeps its plain `large_list` storage, because Arrow cannot hold an extension
   type inside a struct field; read back without the declared type, such a value is a list.
 - `frozenset[T]` is not supported: declare `set[T]`. Support is to be evaluated in ITL-1140.
 
