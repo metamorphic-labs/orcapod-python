@@ -298,3 +298,62 @@ def test_a_null_map_element_still_reads_as_none() -> None:
     [(_, data)] = list(ArrowTableStream(table, tag_columns=["id"]).iter_data())
     value: Any = data.as_dict()["v"]
     assert value[0] is None
+
+
+class TestNoneForANonOptionalLogicalType:
+    """A None given where a logical type is declared without ``| None`` is refused.
+
+    The logical type's own encoder took it: a ``Path`` stored the string ``'None'``
+    and read back ``Path('None')``; a ``list[UUID]`` stored ``[]`` (CodeRabbit round 2,
+    PR #394).
+    """
+
+    def test_a_path_given_none_is_not_stored_as_the_string_none(self) -> None:
+        with pytest.raises(ValueError, match=r"(?s)Column 'v'.*does not admit None"):
+            _source(None, Path)
+
+    @pytest.mark.parametrize(
+        ("annotation", "value"),
+        [
+            (list[Path], [None]),
+            (list[uuid.UUID], None),
+            (set[uuid.UUID], None),
+            (list[list[uuid.UUID]], [None]),
+            (uuid.UUID, None),
+        ],
+        ids=str,
+    )
+    def test_a_dict_source_refuses(self, annotation: Any, value: Any) -> None:
+        with pytest.raises(ValueError, match=r"(?s)Column 'v'.*does not admit None"):
+            _source(value, annotation)
+
+    @pytest.mark.parametrize(
+        ("annotation", "value"),
+        [
+            (Path | None, None),
+            (list[uuid.UUID] | None, None),
+            (list[Path] | None, None),
+        ],
+        ids=str,
+    )
+    def test_an_optional_column_still_takes_none(
+        self, annotation: Any, value: Any
+    ) -> None:
+        read, _ = _read_v(_source(value, annotation))
+        assert read is None
+
+
+def test_a_null_dict_entry_raises_at_read() -> None:
+    """A null key/value entry of a stored dict is not dropped (CodeRabbit round 2)."""
+    entries = pa.large_list(
+        pa.struct([("key", pa.large_string()), ("value", pa.int64())])
+    )
+    table = pa.table(
+        {
+            "id": pa.array([1], pa.int64()),
+            "v": pa.array([[None, {"key": "a", "value": 1}]], entries),
+        }
+    )
+    source = ArrowTableSource(table, tag_columns=["id"], source_id="v")
+    with pytest.raises(ValueError, match=r"(?s)Column 'v'.*ITL-1144"):
+        _read_v(source)

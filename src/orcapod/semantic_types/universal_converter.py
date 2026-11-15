@@ -1683,7 +1683,16 @@ class UniversalTypeConverter:
             if lt is not None:
                 _lt = lt
                 _self = self
-                return lambda value: _lt.python_to_storage(value, _self)
+
+                def convert_logical(value: Any) -> Any:
+                    # A None at a position whose type does not admit one never reaches
+                    # the logical type's encoder, which would store a wrong value (a
+                    # Path stored the string 'None', a list[UUID] an empty list).
+                    if value is None:
+                        raise _none_not_admitted(python_type)
+                    return _lt.python_to_storage(value, _self)
+
+                return convert_logical
 
         # Get the Arrow type for this Python type
         # TODO: check if this step is necessary
@@ -1864,15 +1873,20 @@ class UniversalTypeConverter:
                     key_converter = self.get_arrow_to_python_converter(key_field.type)
                     value_converter = self._nested_value_converter(value_field.type)
 
-                    return lambda value: (
-                        {
-                            key_converter(item["key"]): value_converter(item["value"])
-                            for item in value
-                            if item is not None
-                        }
-                        if value
-                        else {}
-                    )
+                    def convert_entries(value: Any) -> dict[Any, Any]:
+                        if not value:
+                            return {}
+                        converted = {}
+                        for item in value:
+                            # A null entry is not a key/value pair: never drop it.
+                            if item is None:
+                                raise unrestorable_none_error(element_type)
+                            converted[key_converter(item["key"])] = value_converter(
+                                item["value"]
+                            )
+                        return converted
+
+                    return convert_entries
 
             # Regular list
             element_converter = self._nested_value_converter(element_type)
@@ -2000,21 +2014,23 @@ class UniversalTypeConverter:
 
 # Public API functions
 def _none_not_admitted(python_type: DataType) -> UnsupportedValueError:
-    """The error for a None given where a container type without None is declared.
+    """The error for a None given where a type that does not admit None is declared.
 
-    The container converters stored such a None as an empty container, a silent value
-    change (ITL-1144). The caller adds the column name.
+    The container converters stored such a None as an empty container and a logical
+    type's encoder as a wrong value (a ``Path`` as the string ``'None'``): a silent
+    value change (ITL-1144). The caller adds the column name.
 
     Args:
-        python_type: The declared container type the None was given for.
+        python_type: The declared type the None was given for.
 
     Returns:
         The error to raise.
     """
     return UnsupportedValueError(
         f"a None is given where {python_type} is declared, which does not admit None "
-        f"(it would be stored as an empty container). Give an empty container, or "
-        f"declare the column's own type '| None' if a missing value is meant."
+        f"(it would be stored as an empty container or a wrong value). Give a value of "
+        f"that type, or declare the column's own type '| None' if a missing value is "
+        f"meant."
     )
 
 
