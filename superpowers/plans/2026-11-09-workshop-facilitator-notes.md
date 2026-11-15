@@ -1,12 +1,14 @@
 # Workshop Facilitator Notes (PLT-4864)
 
-Date: 2026-11-09. For the Orcapod workshop with external collaborators next week.
+Date: 2026-11-09, refreshed 2026-11-14 against `main` for v0.3.0. For the Orcapod workshop
+with external collaborators on Thursday 2026-11-19.
 Material: `docs/tutorial/` (parts 0-10), `docs/troubleshooting.md`.
 
 **Bottom line:** the tutorial is about 3.5 hours of self-paced work; a live session of 90 to
 120 minutes should demo parts 1-6 and run four exercises live, and leave parts 7-10 as
 self-study. Three decisions are needed from you before the day (first three open
-questions), and two library bugs will be visible to attendees in part 3.
+questions). The two part-3 bugs of the first draft are fixed on `main`; the library
+limits attendees can still meet are listed below.
 
 ## Before the workshop: send this to attendees
 
@@ -26,7 +28,7 @@ while there is still time. It is the content of `docs/tutorial/00-setup.md`.
 3. The dataset generator, in that directory:
 
    ```bash
-   curl -O https://raw.githubusercontent.com/metamorphic-labs/orcapod-python/main/docs/tutorial/workshop_data.py
+   curl -O https://raw.githubusercontent.com/nauticalab/orcapod-python/main/docs/tutorial/workshop_data.py
    python workshop_data.py
    ```
 
@@ -45,7 +47,7 @@ while there is still time. It is the content of `docs/tutorial/00-setup.md`.
        return n_spikes / 60
 
    d = make_dataset()
-   job = PipelineJob(name='check', store=InMemoryArrowDatabase())
+   job = PipelineJob(name='check', database=InMemoryArrowDatabase())
    with job:
        units = CSVSource(str(d / 'units.csv'), tag_columns=['subject_id', 'session', 'probe', 'unit'], source_id='units')
        rate.pod(units.select_data_columns(['n_spikes']), label='rate')
@@ -70,9 +72,9 @@ showing slides; attendees follow on their own laptops with the page open.
 |---|---|---|---|
 | 0-5 | Framing | One slide or two sentences: the goal is the per-session mean firing rate, stored and re-runnable. Show the dataset tree from the tutorial front page. | |
 | 5-20 | 1. First stream | `CSVSource` for subjects and sessions; tags versus data; `output_schema`, `as_pandas_df`. **Exercise 1 live** (choose tags for `units.csv`, 4 min), then discuss the "is `region` a tag?" point. | `DictSource`: mention. Exercise 2 (the two errors): show both yourself in one minute. |
-| 20-40 | 2. Function pods | `to_mm`, then the exact-column error **on purpose** before `select_data_columns`. `firing_rate` over two streams. **Exercise 1 live** (fix the failing call, 3 min). | Multiple outputs: show `describe_depth`, no exercise. |
-| 40-50 | 3. Operators | `join` on shared tags; equality `polars_filter`. Say plainly that expression filters and mixed-origin `semi_join` are broken today and show the page's two warning boxes. | `MergeJoin`, `map_data`: mention only. No live exercise. |
-| 50-62 | 4. Many rows into one | `group_by`, the list-valued row, `mean_rate`. The result table with knockouts lower. | `batch`: one sentence. Exercise 1 (per probe) as a 3-minute warm-up if the room is fast. |
+| 20-40 | 2. Function pods | `to_mm`, then `to_mm.pod(units)`: the pod drops the columns it does not take. `firing_rate` over two streams. **Exercise 1 live** (fix the failing call: a missing column, 3 min). | Multiple outputs: show `describe_depth`, no exercise. |
+| 40-50 | 3. Operators | `join` on shared tags; `polars_filter` with an expression; `semi_join`. | `MergeJoin`, `map_data`: mention only. No live exercise. |
+| 50-62 | 4. Many rows into one | `group_by` (it keeps only the `by` tags), the list-valued row, `mean_rate`. The result table with knockouts lower. | `batch`: one sentence. Exercise 1 (per probe) as a 3-minute warm-up if the room is fast. |
 | 62-80 | 5. Keeping results | The `with` block, `run()`, `calls` going 0 → 71 → 71. Then `DeltaTableDatabase` and the second job that computes nothing. **Exercise 1 live** (`run_pipeline.py` twice, 5 min): this is the moment the product makes sense. | Directory layout: show `ls`, do not explain. |
 | 80-97 | 6. Re-runs | Add two rows (2 calls). Then **edit the function and get the old numbers**: let it land, ask the room why. Then `version="v1.0"`. **Exercise 1 live** as a show of hands (predict a-d), then run it. | The hashes section: one sentence, point to the concept page. |
 | 97-105 | Wrap-up | Open `docs/troubleshooting.md` and scroll it. Point to parts 7-10 by need: files (7) for anyone with per-session folders, tracing (8), failures (9). | |
@@ -86,16 +88,21 @@ recompute" (15 min); it is the most persuasive demo for people whose data is fil
 - **"I changed my function and nothing happened."** Part 6. Major version. This will
   happen to someone during the session whether or not you have reached part 6; when it does,
   use it.
-- **"It says my schema is not compatible."** Part 2, rule 2. `select_data_columns`.
+- **"It says my schema is not compatible."** Part 2, rule 2. The text after the colon names
+  the column: missing, or a different type (an `int` column for a `float` parameter is
+  refused; Orcapod does not convert).
 - **"Why 63 calls for 64 rows?"** Identical inputs share one result. It is in part 5; it is
   a good question to take from the room.
-- **"My output has the rows in a different order."** Rows read back from a store are not
+- **"My output has the rows in a different order."** Rows read back from a database are not
   ordered. Sort. (Part 5 says so.)
 - **A wall of `WARN deltalake_core` lines** on the first Delta run. Harmless; warn people
   before you press enter, because it looks like a failure on a projector.
-- **Tracebacks during part 9.** The default error policy prints a full traceback per failed
-  row and carries on. On a projector this looks like a crash. Say "the run is still going"
-  before running it.
+- **The warning during part 9.** Under the default error policy a failed row is skipped
+  and the run carries on; it ends with one `RowFailuresWarning` and a run summary that
+  counts the failures. Say "the run finished; three rows failed" before running it.
+- **"My node is empty."** A job node shows its current run: it is empty until `job.run()`
+  in this Python session, even when the database holds results. `node.as_source()` reads
+  everything stored. Parts 5 and 8.
 
 ### What is deliberately not in the live path
 
@@ -106,17 +113,15 @@ in a first session.
 ## State of the material
 
 - Every `python` sample in the tutorial, the two new concept pages and the troubleshooting
-  page runs in the test suite (`tests/test_docs/`): 135 samples on the new pages, one
-  skipped (`show_graph()`, needs Graphviz). The whole `tests/test_docs` directory takes
-  about 30 seconds.
+  page runs in the test suite (`tests/test_docs/`), one skipped (`show_graph()`, needs
+  Graphviz).
 - The tutorial's central claim, "a second run computes nothing", is pinned by
-  `tests/test_docs/test_rerun_computes_nothing.py` under five hash seeds. It failed on about
-  half of all Python processes before PR #272; **the workshop depends on #272 being in
-  v0.2**.
+  `tests/test_docs/test_rerun_computes_nothing.py` under five hash seeds (fixed by #272,
+  on `main`).
 - The dataset generator is tested for byte-identical output
   (`tests/test_docs/test_workshop_data.py`).
-- Not tested: Windows; a real `pip install orcapod` of the released v0.2 wheel (the samples
-  ran against the source tree of this branch).
+- Not tested: Windows; a real `pip install orcapod` of the released v0.3.0 wheel (the
+  samples ran against the source tree of this branch).
 
 ## Library problems attendees will see
 
@@ -125,26 +130,25 @@ silently.
 
 | Problem | Where it shows | What the tutorial says |
 |---|---|---|
-| `polars_filter` with a Polars expression cannot be hashed: fails before a join and anywhere in a `PipelineJob` | Part 3 | Known bug; use equality filters in pipelines |
-| `semi_join` between a `CSVSource` and a `DictSource` or filtered stream: `ArrowInvalid ... string and ... large_string` | Part 3 | Known bug; use `join` plus a filter |
-| `CSVSource` rejects `pathlib.Path` | Part 1 onwards | Wrap in `str(...)` |
+| `CSVSource` given a `pathlib.Path` and no `source_id` raises `TypeError` | Part 1 onwards | Wrap in `str(...)` |
 | Editing a function body does not invalidate results | Part 6 | Bump the major version |
-| Function pods reject extra columns (ITL-807) | Part 2 | `select_data_columns` |
 | `list(job.nodes)` order varies with the hash seed | Part 5 | Samples print `sorted(job.nodes)` |
 | `job.show_graph()` does not exist; it is `job.pipeline.show_graph()` | Part 8 | Stated |
+| The stored result of a node downstream of a join cannot be bound as a source of a new `PipelineJob` (`SourceSpecMismatchError`; ITL-1127) | Part 8 | The next stage runs in memory; to store it, add it to the first job |
 | A `@sink_pod` function without a `ctx` parameter fails at run time | Part 10 | Stated |
-| A loaded job cannot `as_table()` a function node, and its operator nodes are named `SelectDataColumns:semantic_v0.1:...` | Part 10 | Use `get_all_records()` |
-| Under the default error policy a failed row silently shrinks a downstream group | Part 9, exercise 3 | Check row counts; `fail_fast` |
+| A sink does not drop data columns it has no parameter for; it fails at run time | Part 10 | Stated |
+| A loaded job runs only with `run(load_only=True)`; its nodes are empty until then | Part 10 | Stated |
+| Under the default error policy a failed row shrinks a downstream group | Part 9, exercise 3 | Read the run summary; `fail_fast` |
 | Default record IDs are positional (ITL-817, ST2): reordering the rows of a source file changes row identity, so sinks re-deliver | Not shown; could surface if an attendee sorts a CSV | Not covered; `record_id_column` is documented in `docs/concepts/sources.md` |
-| `FunctionPod.from_fn` defaults to `v1.0`, `@function_pod` to `v0.0`; `map_data` method drops unmapped columns, `MapData` class keeps them | Parts 10 and 3 | Stated |
 
 ## Open questions for the developer
 
-1. **Is `pip install orcapod` the v0.2 release by workshop day?** The setup page says
+1. **Is `pip install orcapod` the v0.3.0 release by workshop day?** The setup page says
    `pip install orcapod` / `uv add orcapod`, with the GitHub install as the fallback. If the
    release is not on PyPI in time, the checklist above must say
-   `pip install git+https://github.com/metamorphic-labs/orcapod-python.git` instead (and
-   attendees then need `git`).
+   `pip install git+https://github.com/nauticalab/orcapod-python.git` instead (and
+   attendees then need `git`). `metamorphic-labs` is the private development repository;
+   attendee-facing URLs point at the public `nauticalab` one.
 2. **Where will attendees read the tutorial?** The pages assume a published docs site, from
    which `workshop_data.py` can be downloaded (MkDocs serves it next to the pages). If the
    site is not published by then, the `curl` line from the repository works as long as the
@@ -155,10 +159,8 @@ silently.
    `python -m orcapod.tutorial_data` would remove the download step and the one command
    attendees are most likely to get wrong. It needs no dependency. Your call for v0.2 or
    later.
-4. **Will the two part-3 bugs be fixed before the workshop?** If the expression-filter and
-   `semi_join` bugs are fixed, two warning boxes and two `try/except` samples in
-   `03-operators.md` (and three entries in `troubleshooting.md`) should be removed; the
-   samples will fail the docs test when the behaviour changes, which is the reminder.
+4. **The two part-3 bugs** (expression filter, `semi_join` key types) were fixed on `main`
+   (ITL-828 #298, ITL-829/847 #291); the warning boxes are gone.
 5. **Does #267 (no `pygraphviz`) make v0.2?** The setup and troubleshooting pages assume
    it does: they say Graphviz is optional and that the `pygraphviz` build failure means an
    older version.
