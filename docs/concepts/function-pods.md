@@ -1166,8 +1166,11 @@ for tag, data in labels.iter_data():
 A column that already holds such a `None` (an Arrow table given to `ArrowTableSource`, or
 `GroupBy` or `Batch` over a column of a nullable list, set, `Path` or `UUID`) raises a
 `ValueError` naming the column when its values are read as Python values, instead of
-returning a wrong value. Drop the nulls
-first (`DropNulls` on that column) or keep the value in a dataclass.
+returning a wrong value. Before `GroupBy` or `Batch`, `DropNulls` on that column removes
+the rows whose value is `None`, so no `None` reaches the lists they build. `DropNulls` reads
+only whether a column's own value is null, so it cannot remove a `None` already nested inside
+a list: remove it from an Arrow table before giving the table to `ArrowTableSource`. Keeping
+the value in a dataclass (`list[MyData | None]`) works on both paths.
 
 A `None` given where the declared type does not allow one (`[None, [1]]` for
 `list[list[int]]`) is refused when a source is built from it, naming the column: it used to
