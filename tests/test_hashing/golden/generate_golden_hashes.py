@@ -147,6 +147,8 @@ def add(root: pathlib.Path, version: str, groups: list[str]) -> list[str]:
         new = {e: v for e, v in live.items() if e not in owner}
         if not new:
             continue
+        # An entry name appears once in a folder: claim it before the next group plans.
+        owner.update(dict.fromkeys(new, group))
         existing = files.get(group, [])
         latest = existing[-1] if existing else None
         if latest is not None and latest.name not in released:

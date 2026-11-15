@@ -301,6 +301,23 @@ def test_add_changes_nothing_when_a_later_group_fails(
     assert store.tree_problems(tree, VERSION) == []
 
 
+def test_add_refuses_one_new_entry_name_in_two_groups(
+    tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two groups that compute the same new entry name in one run write nothing."""
+    before = _snapshot(_folder(tree)), store.manifest_path(tree, VERSION).read_bytes()
+    compute = cases.compute_group
+
+    def with_shared_entry(group: str, **kwargs: Any) -> dict[str, Any]:
+        return {**compute(group, **kwargs), "shared.new_entry": group}
+
+    monkeypatch.setattr(cases, "compute_group", with_shared_entry)
+    with pytest.raises(SystemExit, match="shared.new_entry"):
+        main(["--root", str(tree), "--group", "schema", "--group", "arrow"])
+    after = _snapshot(_folder(tree)), store.manifest_path(tree, VERSION).read_bytes()
+    assert after == before
+
+
 def test_add_writes_nothing_when_every_entry_is_pinned(tree: Path) -> None:
     before = _snapshot(tree / store.CONTEXTS_DIR / "data"), _snapshot(_folder(tree))
     main(["--root", str(tree), "--group", "schema"])
