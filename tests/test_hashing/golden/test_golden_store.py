@@ -397,7 +397,9 @@ def test_check_reports_a_moved_value_and_writes_nothing(tree: Path) -> None:
 
 def test_check_reports_an_unpinned_entry(tree: Path) -> None:
     dropped = _drop_entries(tree, NEWEST_SCHEMA, 1)
-    with pytest.raises(SystemExit, match=re.escape(f"schema:{next(iter(dropped))} is computed")):
+    with pytest.raises(
+        SystemExit, match=re.escape(f"schema:{next(iter(dropped))} is computed")
+    ):
         main(["--root", str(tree), "--check", "--group", "schema"])
 
 
