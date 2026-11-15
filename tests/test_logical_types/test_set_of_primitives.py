@@ -354,3 +354,121 @@ def test_a_set_type_does_not_depend_on_what_was_declared_first() -> None:
     for report in (literal_first, int_first):
         assert report["int"] == alone
         assert report["literal"] == alone
+
+
+_TWO_WIDTHS = textwrap.dedent(
+    """
+    import json, sys
+    import numpy as np
+    from orcapod.sources import DictSource
+
+    declared = {"int8": (set[np.int8], {1, 2}), "int64": (set[int], {1, 300})}
+    report = {}
+    for name in sys.argv[1:]:
+        annotation, value = declared[name]
+        source = DictSource(
+            [{"k": 0, "v": value}],
+            tag_columns=["k"],
+            data_schema={"k": int, "v": annotation},
+            source_id="one_row",
+        )
+        _, data = next(iter(source.iter_data()))
+        read = data.as_dict()["v"]
+        report[name] = {
+            "arrow_type": str(source.as_table().schema.field("v").type),
+            "schema": str(source.output_schema()[1]["v"]),
+            "read": sorted(int(v) for v in read),
+            "read_type": type(read).__name__,
+        }
+    print(json.dumps(report))
+    """
+)
+
+
+@pytest.mark.parametrize("order", [("int8", "int64"), ("int64", "int8")])
+def test_two_integer_widths_of_a_set_live_in_one_process(
+    order: tuple[str, str],
+) -> None:
+    """``set[np.int8]`` and ``set[int]`` are two containers in one process, in any order.
+
+    Both read as ``set[int]``, as ``list[np.int8]`` and ``list[int]`` both read as
+    ``list[int]``; each column keeps its own element width.
+    """
+    result = subprocess.run(
+        [sys.executable, "-c", _TWO_WIDTHS, *order],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    report = json.loads(result.stdout.strip().splitlines()[-1])
+    assert report["int8"] == {
+        "arrow_type": "extension<set[int8]<_ArrowExt_set_int8_>>",
+        "schema": "set[int]",
+        "read": [1, 2],
+        "read_type": "set",
+    }
+    assert report["int64"] == {
+        "arrow_type": "extension<set[int64]<_ArrowExt_set_int64_>>",
+        "schema": "set[int]",
+        "read": [1, 300],
+        "read_type": "set",
+    }
+
+
+_LOAD_THEN_DECLARE = textwrap.dedent(
+    """
+    import json, sys
+    from orcapod import PipelineJob
+    from orcapod.databases import DeltaTableDatabase
+    from orcapod.sources import DictSource
+
+    job = PipelineJob.load(sys.argv[1], database=DeltaTableDatabase(sys.argv[2]))
+    stored = job.nodes["produce"].as_source()
+    _, data = next(iter(stored.iter_data()))
+    loaded = data.as_dict()["out"]
+    source = DictSource(
+        [{"k": 0, "v": {1, 300}}],
+        tag_columns=["k"],
+        data_schema={"k": int, "v": set[int]},
+        source_id="one_row",
+    )
+    _, data = next(iter(source.iter_data()))
+    print(json.dumps({
+        "loaded": sorted(int(v) for v in loaded),
+        "declared_arrow_type": str(source.as_table().schema.field("v").type),
+        "declared": sorted(data.as_dict()["v"]),
+    }))
+    """
+)
+
+
+def test_a_loaded_set_of_one_width_leaves_other_widths_declarable(
+    tmp_path: Path,
+) -> None:
+    """A job loaded with a ``set[np.int8]`` node does not take over ``set[int]``."""
+    import numpy as np
+
+    store = tmp_path / "store"
+    job = _run_job(
+        DeltaTableDatabase(store),
+        set[np.int8],
+        {np.int8(1), np.int8(2)},
+        use_async=False,
+    )
+    saved = tmp_path / "job.json"
+    job.save(saved)
+
+    result = subprocess.run(
+        [sys.executable, "-c", _LOAD_THEN_DECLARE, str(saved), str(store)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    report = json.loads(result.stdout.strip().splitlines()[-1])
+    assert report == {
+        "loaded": [1, 2],
+        "declared_arrow_type": "extension<set[int64]<_ArrowExt_set_int64_>>",
+        "declared": [1, 300],
+    }

@@ -163,4 +163,4 @@ movement are waiting on the developer. **No library code until the coordinator's
   types read as one Python type (int8/int64, float/double, timestamp units/tz, date32/64).
 - Proposed (A): plain-element set containers are registered by identifier only, never bound
   to a Python type; set[T] -> Arrow goes through T's Arrow type, as list[T] does. Pending
-  coordinator decision.
+  coordinator decision. APPROVED (A) and implemented.

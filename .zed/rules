@@ -288,7 +288,10 @@ A logical type's identifier is its Arrow extension name plus its Arrow extension
 - `set[T]` of a primitive is a native container too (developer, November 14, 2026, ITL-611):
   `ListLogicalType` over an `ArrowElement`, extension name `set[<large Arrow type text>]`
   (`set[int64]`), metadata `{"category": "set", "element_arrow_type": "int64"}`, elements in
-  the canonical set order (`sort_set_elements`). `list[T]` of a primitive stays a plain
+  the canonical set order (`sort_set_elements`). It reads as `set[<Python type of the element
+  Arrow type>]` (`set[int8]` and `set[int64]` both as `set[int]`, as for lists), so it is
+  registered by identifier only, never bound to a Python type (`binds_python_type`), and
+  `set[T]` maps to Arrow through `T`. `list[T]` of a primitive stays a plain
   `large_list`: never wrap it. Inside a dict value or tuple field a set of a primitive keeps
   its plain storage (Arrow has no extension type in a struct field). A container's elements
   are value-hashed only when its innermost element is a logical type. A saved schema rebuilds

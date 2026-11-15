@@ -114,6 +114,13 @@ class ListLogicalType(BaseLogicalType):
             ``set``; ``python_to_storage`` sorts storage values for determinism). Defaults to
             ``False`` (``list[T]`` semantics).
 
+    Attributes:
+        binds_python_type: Whether the registry binds ``python_type`` to this logical
+            type. ``False`` for a set of a plain Arrow element: ``set[int]`` is the
+            Python type of ``set[int64]`` and of ``set[int8]`` alike, so such a set is
+            found by its identifier only, and ``set[T]`` maps to Arrow through ``T``'s
+            own Arrow type, as ``list[T]`` does (ITL-611).
+
     Raises:
         ValueError: If the element is an ``ArrowElement`` and ``is_set`` is ``False``: a
             list of a plain Arrow type is a plain ``large_list``, not a logical type.
@@ -126,6 +133,8 @@ class ListLogicalType(BaseLogicalType):
         >>> lt.python_type
         list[uuid.UUID]
     """
+
+    binds_python_type: bool = True
 
     def __init__(
         self,
@@ -213,6 +222,9 @@ class ListLogicalType(BaseLogicalType):
             element.arrow_type, keep_null=True
         )
         element_text = str(element_arrow_type)
+        # Many element Arrow types read as one Python type (int8 and int64 as int),
+        # so a set of a plain element is found by its identifier only (ITL-611).
+        self.binds_python_type = False
         self._element_logical_type = None
         self._element_python_type = element.python_type
         self._metadata_bytes = json.dumps(
