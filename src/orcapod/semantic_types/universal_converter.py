@@ -258,7 +258,12 @@ class UniversalTypeConverter:
                 nested position that a read cannot restore (ITL-1144), naming the
                 column.
             NestedTypeNotStorableError: If an annotation declares a logical type as
-                a dict key or value or a tuple field (ITL-1150), naming the column.
+                a dict key or value (ITL-1150), naming the column. A tuple
+                annotation is not covered here: registration does not support
+                tuples and raises a plain ``ValueError`` (``Unsupported
+                annotation``). The tuple-field refusal applies where a tuple is
+                converted to Arrow, in ``python_type_to_arrow_type`` and
+                ``python_schema_to_arrow_schema``.
         """
         if self._logical_type_registry is None:
             return
