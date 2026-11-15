@@ -640,3 +640,16 @@ def test_a_column_every_candidate_origin_matches_counts_as_compared() -> None:
         repeated, layout, sources.oracle, sources.a.data_context
     )
     assert "m" in checked
+
+
+def test_a_chain_of_renames_resolves_to_the_original_column_and_a_cycle_fails() -> None:
+    """``x`` renamed to ``y`` and then ``y`` to ``z`` is still the input column ``x``."""
+    oracle = make_sources("unique").oracle
+    oracle.rename("y", "x")
+    oracle.rename("z", "y")
+    assert oracle.base_name("z") == "x"
+    assert oracle.base_name("y") == "x"
+    assert oracle.base_name("x") == "x"
+    oracle.rename("x", "z")
+    with pytest.raises(ValueError, match="cycle"):
+        oracle.base_name("z")

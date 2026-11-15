@@ -169,8 +169,18 @@ class Oracle:
         self.renames[new] = old
 
     def base_name(self, column: str) -> str:
-        """The input column an output column holds, following renames."""
-        return self.renames.get(column, column)
+        """The input column an output column holds, following the whole rename chain.
+
+        Raises:
+            ValueError: If the renames form a cycle.
+        """
+        seen = {column}
+        while column in self.renames:
+            column = self.renames[column]
+            if column in seen:
+                raise ValueError(f"the renames form a cycle at {column!r}")
+            seen.add(column)
+        return column
 
     def origins_for_value(self, column: str, value: Any) -> list[Origin]:
         """Every origin whose value of the output column ``column`` is ``value``."""
