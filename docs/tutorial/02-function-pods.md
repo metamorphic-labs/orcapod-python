@@ -173,7 +173,8 @@ rates = firing_rate.pod(
     units.select_data_columns(["n_spikes"]),
     sessions.select_data_columns(["duration_s"]),
 )
-print(rates.as_pandas_df().head(5))
+unit_tags = ["subject_id", "session", "probe", "unit"]
+print(rates.as_pandas_df().sort_values(unit_tags, ignore_index=True).head(5))
 #   subject_id session  probe  unit    rate_hz
 # 0   mouse_01      s1  imec0     0   2.483333
 # 1   mouse_01      s1  imec0     1   5.433333
@@ -190,6 +191,10 @@ and the function receives `n_spikes` from one and `duration_s` from the other. T
 is a **join**; Part 3 covers it properly. Rule 2 applies to the combined stream. Narrowing
 each input first is not required, since the pod would drop the combined stream's other
 columns itself, but it shows at a glance which table each parameter comes from.
+
+A join does not promise an order for its rows, so the sample sorts them by their tags
+before showing the first five. Sort whenever you look at, or compare, rows that went through
+a join.
 
 Notice that this is why tags matter: you never wrote the code that looks up a unit's
 session. Choosing the tags in Part 1 was enough.
@@ -226,12 +231,14 @@ except ValueError as err:
 
     ```python
     rates_again = firing_rate.pod(units, sessions)
-    print(rates_again.as_pandas_df().head(3))
+    rates_again_df = rates_again.as_pandas_df().sort_values(unit_tags, ignore_index=True)
+    print(rates_again_df.head(3))
     #   subject_id session  probe  unit    rate_hz
     # 0   mouse_01      s1  imec0     0   2.483333
     # 1   mouse_01      s1  imec0     1   5.433333
     # 2   mouse_01      s1  imec0     2  11.033333
-    print(rates_again.as_pandas_df().equals(rates.as_pandas_df()))
+    rates_df = rates.as_pandas_df().sort_values(unit_tags, ignore_index=True)
+    print(rates_again_df.equals(rates_df))
     # True
     ```
 

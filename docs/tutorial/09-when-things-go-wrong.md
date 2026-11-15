@@ -324,7 +324,9 @@ session contain?
 ??? success "Solution"
     The mean of the units that succeeded. The failed row is absent from `rates`, so
     `group_by` gathers seven units for that session where there should be eight, and the
-    mean is computed over seven. No error is raised anywhere.
+    mean is computed over seven. `job.run()` reports failed rows in its warning and its
+    summary, but raises no exception, and nothing in the mean's row says that a unit is
+    missing.
 
     ```python
     @function_pod(output_keys=["n_units", "mean_rate_hz"])

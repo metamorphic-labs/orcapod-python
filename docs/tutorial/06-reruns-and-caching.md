@@ -106,11 +106,13 @@ print(rates.head(2))
 
 One call, for the one row whose input changed, and the result shows the new value.
 
-Now change a value the function does **not** use, the depth of that unit:
+Now change a value the function does **not** use, the depth of that unit. Start from the
+corrected file, so that the spike count stays 150 and only the depth differs:
 
 ```python
+fixed = (data_dir / "units_fixed.csv").read_text()
 (data_dir / "units_depth.csv").write_text(
-    original.replace("mouse_01,s1,imec0,0,V1,1580,149", "mouse_01,s1,imec0,0,V1,9999,149")
+    fixed.replace("mouse_01,s1,imec0,0,V1,1580,150", "mouse_01,s1,imec0,0,V1,9999,150")
 )
 
 rates = run(firing_rate.pod, "units_depth.csv")

@@ -49,7 +49,9 @@ unit_info = units.join(sessions)
 
 print(unit_info.keys())
 # (('subject_id', 'session', 'probe', 'unit'), ('date', 'duration_s', 'region', 'depth_um', 'n_spikes'))
-print(unit_info.select_data_columns(["n_spikes", "duration_s"]).as_pandas_df().head(3))
+unit_tags = ["subject_id", "session", "probe", "unit"]
+narrow = unit_info.select_data_columns(["n_spikes", "duration_s"])
+print(narrow.as_pandas_df().sort_values(unit_tags, ignore_index=True).head(3))
 #   subject_id session  probe  unit  duration_s  n_spikes
 # 0   mouse_01      s1  imec0     0        60.0       149
 # 1   mouse_01      s1  imec0     1        60.0       326
@@ -64,11 +66,13 @@ did for you.
 The column order is chosen by Orcapod, not by the order you wrote the streams in: here the
 columns of `sessions` come first. Refer to columns by name, never by position.
 
-Three things to know:
+Four things to know:
 
+- It does not promise a row order. The samples on this page sort by the tags before
+  showing the first rows; do the same when the order matters to you.
 - It is an **inner** join: a row with no partner in the other stream is dropped.
-- The order does not matter. `units.join(sessions)` and `sessions.join(units)` give the same
-  rows and the same columns.
+- The order of the streams does not matter. `units.join(sessions)` and
+  `sessions.join(units)` give the same rows and the same columns.
 - If the streams share **no** tag column, every row is paired with every row.
 
 Joins chain. This attaches both the session and the animal to every unit:
@@ -255,7 +259,8 @@ There are two ways out, and they mean different things.
 side_by_side = imec0.map_data({"n_spikes": "n_imec0"}).join(
     imec1.map_data({"n_spikes": "n_imec1"})
 )
-print(side_by_side.as_pandas_df().head(3))
+pair_tags = ["subject_id", "session", "unit"]
+print(side_by_side.as_pandas_df().sort_values(pair_tags, ignore_index=True).head(3))
 #   subject_id session  unit  n_imec1  n_imec0
 # 0   mouse_01      s1     0      215      149
 # 1   mouse_01      s1     1      299      326
@@ -271,7 +276,7 @@ from orcapod.operators import MergeJoin
 merged = MergeJoin()(imec0, imec1)
 print(merged.output_schema()[1])
 # Schema({'n_spikes': list[int]})
-print(merged.as_pandas_df().head(3))
+print(merged.as_pandas_df().sort_values(pair_tags, ignore_index=True).head(3))
 #   subject_id session  unit    n_spikes
 # 0   mouse_01      s1     0  [149, 215]
 # 1   mouse_01      s1     1  [299, 326]
@@ -306,7 +311,7 @@ with exactly two data columns: `n_spikes` and `age_weeks`. How many rows does it
         .polars_filter(genotype="knockout", probe="imec1")
         .select_data_columns(["n_spikes", "age_weeks"])
     )
-    print(answer.as_pandas_df().head(4))
+    print(answer.as_pandas_df().sort_values(unit_tags, ignore_index=True).head(4))
     #   subject_id session  probe  unit  age_weeks  n_spikes
     # 0   mouse_03      s1  imec1     0         11       399
     # 1   mouse_03      s1  imec1     1         11       483
