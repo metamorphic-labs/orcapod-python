@@ -97,29 +97,31 @@ except ValueError as err:
 # Parameter 'depth_um' has no type annotation and is not specified in input_types.
 ```
 
-## Rule 2: the stream's data columns must be exactly the function's parameters
+## Rule 2: every parameter needs a data column with its name and type
 
 A function pod takes each data column of the incoming stream as the parameter of the same
-name. The match has to be exact: same names, same types, nothing missing and **nothing
-extra**. That is why the sample above first narrowed `units` to the one column `to_mm`
-takes. Without that step:
+name. Every parameter must find its column, and the column's type must fit the parameter's
+annotation. A missing column or a wrong type is an error as soon as the pod is applied;
+Exercises 1 and 3 below show both.
+
+Data columns the function does *not* take are dropped. The sample above narrowed `units` to
+`depth_um` with `select_data_columns` first, but the pod does that step for you:
 
 ```python
-try:
-    to_mm.pod(units)
-except ValueError as err:
-    print(err)
-# Incoming data data type Schema({'region': str, 'depth_um': int, 'n_spikes': int}) is not compatible with expected input schema Schema({'depth_um': int})
+whole = to_mm.pod(units)
+print(whole.output_schema())
+# (Schema({'subject_id': str, 'session': str, 'probe': str, 'unit': int}), Schema({'depth_mm': float}))
+print(whole.as_pandas_df().equals(result.as_pandas_df()))
+# True
 ```
 
-Read the message as "the stream has these data columns; the function expects those". Here
-the stream has `region` and `n_spikes` as well, and the pod refuses it. (You will also see a
-short line such as `Key 'region' not found in parameter types.` printed just before the
-error. It says the same thing.)
+`region` and `n_spikes` were dropped before the function saw a row. The drop is not hidden:
+Orcapod adds the same `select_data_columns` step you would have written by hand, so the two
+calls build the same pipeline.
 
-Almost every real table is wider than one function's inputs, so you will use
-`select_data_columns` constantly. Its counterpart `drop_data_columns` removes the columns you
-name and keeps the rest:
+You can still narrow a stream yourself, and it often makes a pipeline easier to read: it
+shows which columns a step uses. `select_data_columns` keeps the columns you name; its
+counterpart `drop_data_columns` removes the columns you name and keeps the rest:
 
 ```python
 print(units.select_data_columns(["depth_um"]).keys())
@@ -130,10 +132,13 @@ print(units.drop_data_columns(["region", "n_spikes"]).keys())
 
 Neither touches the tags. The rule is about data columns only.
 
-!!! note "Why so strict?"
-    The strictness is how Orcapod behaves today, and you should write your pipelines to it.
-    It does have one benefit: a pod's result can only depend on the columns you handed it, so
-    an unrelated column changing upstream cannot silently change what was computed.
+!!! note "Why drop the other columns?"
+    A pod's result can only depend on the columns its function takes. The unused columns are
+    dropped before the pod receives a row, so they are not part of the inputs Orcapod
+    remembers a result by: a change in an unrelated column upstream does not make Orcapod
+    compute the result again (Part 6 shows this). If you would rather have an extra column
+    rejected than dropped, pass `strict=True`: `to_mm.pod(units, strict=True)` raises
+    `ValueError`. See [Input columns](../concepts/function-pods.md#input-columns).
 
 ## Returning more than one value
 
@@ -182,8 +187,9 @@ print(rates.as_table().num_rows)
 Given several streams, a pod first combines them by matching rows on the tag columns they
 share, here `subject_id` and `session`. Each unit row is paired with the row of its session,
 and the function receives `n_spikes` from one and `duration_s` from the other. This matching
-is a **join**; Part 3 covers it properly. Rule 2 applies to the combined stream, which is
-why each input is narrowed to the one column the function needs.
+is a **join**; Part 3 covers it properly. Rule 2 applies to the combined stream. Narrowing
+each input first is not required, since the pod would drop the combined stream's other
+columns itself, but it shows at a glance which table each parameter comes from.
 
 Notice that this is why tags matter: you never wrote the code that looks up a unit's
 session. Choosing the tags in Part 1 was enough.
@@ -194,41 +200,43 @@ session. Choosing the tags in Part 1 was enough.
   applies it to every row.
 - Tags pass through unchanged. Data columns are replaced by the outputs.
 - Rule 1: annotate every parameter and the return value.
-- Rule 2: the incoming data columns must be exactly the function's parameters. Use
-  `select_data_columns` first.
+- Rule 2: every parameter needs a data column with its name and a matching type. Data
+  columns the function does not take are dropped.
 - Nothing is stored yet. Every result on this page was computed in memory and is gone when
   Python exits. Part 5 changes that.
 
 ## Exercises
 
-**1.** A colleague wrote this pod to convert session durations to minutes, and it fails. Run
-it, read the message, and fix the call (not the function).
+**1.** A colleague wanted every unit's firing rate and wrote this call, which fails. Run it,
+read the message, and fix the call (not the function).
 
 ```python
-@function_pod(output_keys="duration_min")
-def to_minutes(duration_s: float) -> float:
-    return duration_s / 60
-
-
 try:
-    to_minutes.pod(sessions)
+    firing_rate.pod(units)
 except ValueError as err:
     print(err)
-# Incoming data data type Schema({'date': date, 'duration_s': float}) is not compatible with expected input schema Schema({'duration_s': float})
+# Incoming data schema Schema({'n_spikes': int}) is not compatible with expected input schema Schema({'n_spikes': int, 'duration_s': float}): required parameter 'duration_s' has no matching column
 ```
 
 ??? success "Solution"
-    `sessions` has two data columns, `date` and `duration_s`; the function takes only
-    `duration_s`. Narrow the stream first.
+    Read the message as "the stream has these data columns; the function expects those", and
+    the part after the colon names the first problem. `units` has no `duration_s` column:
+    the duration is in `sessions`. (The message shows `units` after its unused columns,
+    `region` and `depth_um`, were dropped.) Pass both streams:
 
     ```python
-    minutes = to_minutes.pod(sessions.select_data_columns(["duration_s"]))
-    print(minutes.as_pandas_df().head(3))
-    #   subject_id session  duration_min
-    # 0   mouse_01      s1           1.0
-    # 1   mouse_01      s2           2.0
-    # 2   mouse_02      s1           1.5
+    rates_again = firing_rate.pod(units, sessions)
+    print(rates_again.as_pandas_df().head(3))
+    #   subject_id session  probe  unit    rate_hz
+    # 0   mouse_01      s1  imec0     0   2.483333
+    # 1   mouse_01      s1  imec0     1   5.433333
+    # 2   mouse_01      s1  imec0     2  11.033333
+    print(rates_again.as_pandas_df().equals(rates.as_pandas_df()))
+    # True
     ```
+
+    The pod joins the two streams on `subject_id` and `session` and drops every data column
+    except the two its function takes, so the rates are the ones computed above.
 
 **2.** Write a pod `rate_and_activity` that returns two values for each unit: its firing rate
 in Hz, and `True` if that rate is above 5 Hz. Apply it to the same two streams as
@@ -250,9 +258,23 @@ in Hz, and `True` if that rate is above 5 Hz. Apply it to the same two streams a
     # Schema({'rate_hz': float, 'is_active': bool})
     ```
 
-**3.** Change the annotation in `to_minutes` from `duration_s: float` to `duration_s: int` (give
-the function a new name, `to_minutes_int`) and apply it to the narrowed stream. What happens,
-and when?
+**3.** This pod converts session durations to minutes:
+
+```python
+@function_pod(output_keys="duration_min")
+def to_minutes(duration_s: float) -> float:
+    return duration_s / 60
+
+
+print(to_minutes.pod(sessions).as_pandas_df().head(3))
+#   subject_id session  duration_min
+# 0   mouse_01      s1           1.0
+# 1   mouse_01      s2           2.0
+# 2   mouse_02      s1           1.5
+```
+
+Change the annotation from `duration_s: float` to `duration_s: int` (give the function a new
+name, `to_minutes_int`) and apply it to `sessions`. What happens, and when?
 
 ??? success "Solution"
     The column in the stream is a `float`, the parameter says `int`, and the pod refuses the
@@ -265,10 +287,10 @@ and when?
 
 
     try:
-        to_minutes_int.pod(sessions.select_data_columns(["duration_s"]))
+        to_minutes_int.pod(sessions)
     except ValueError as err:
         print(err)
-    # Incoming data data type Schema({'duration_s': float}) is not compatible with expected input schema Schema({'duration_s': int})
+    # Incoming data schema Schema({'duration_s': float}) is not compatible with expected input schema Schema({'duration_s': int}): column 'duration_s' has type float, the function expects int
     ```
 
     Types are part of the match. Orcapod does not convert `60.0` to `60` for you.

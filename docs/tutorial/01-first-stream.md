@@ -39,8 +39,8 @@ print(subjects.as_pandas_df())
 
 Three arguments:
 
-- The file path, **as a string**. `CSVSource` does not accept a `pathlib.Path` at the moment,
-  hence the `str(...)`.
+- The file path, **as a string**. `CSVSource` takes a string, not a `pathlib.Path`, hence
+  the `str(...)`.
 - `tag_columns`: the columns that identify a row. More on this below.
 - `source_id`: a name for this source. Orcapod uses it when it records where a value came
   from. Give every source a short, stable name.
@@ -118,10 +118,10 @@ DataFrame, `as_polars_df()` a Polars one, and `as_table()` a PyArrow table:
 
 ```python
 print(sessions.as_pandas_df().head(3))
-#   subject_id session        date  duration_s
-# 0   mouse_01      s1  2026-10-05        60.0
-# 1   mouse_01      s2  2026-10-12       120.0
-# 2   mouse_02      s1  2026-10-05        90.0
+#   subject_id session       date  duration_s
+# 0   mouse_01      s1 2026-10-05        60.0
+# 1   mouse_01      s2 2026-10-12       120.0
+# 2   mouse_02      s1 2026-10-05        90.0
 print(sessions.as_table().num_rows)
 # 8
 ```

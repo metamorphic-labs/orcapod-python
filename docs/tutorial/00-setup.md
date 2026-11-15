@@ -33,7 +33,8 @@ The tutorial needs nothing beyond this. Orcapod already depends on `pandas`, `po
 
 !!! note "Optional extras"
     `orcapod[ray]`, `orcapod[redis]`, `orcapod[postgresql]` and `orcapod[spiraldb]` add
-    support for distributed execution and other storage backends. None of them is used here.
+    support for distributed execution and other storage backends, and `orcapod[torch]`
+    installs PyTorch. None of them is used here.
 
     Drawing a pipeline graph ([Part 8](08-inspecting-and-tracing.md)) needs the Graphviz
     `dot` program on your `PATH`. It is optional; skip that one sample if you do not have it.
@@ -54,7 +55,7 @@ def double(value: int) -> int:
     return 2 * value
 
 
-job = PipelineJob(name="install_check", store=InMemoryArrowDatabase())
+job = PipelineJob(name="install_check", database=InMemoryArrowDatabase())
 with job:
     numbers = DictSource(
         data=[{"name": "a", "value": 1}, {"name": "b", "value": 2}],
