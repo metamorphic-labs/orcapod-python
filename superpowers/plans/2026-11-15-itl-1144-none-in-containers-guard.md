@@ -53,6 +53,28 @@ Extra probes (path B):
 - An in-memory pod -> pod chain (no job, no storage, no source built from the values)
   keeps the None for every refused type.
 
+Operator-built lists (coordinator follow-up; `ops.py`): source tags `g`, `k` (`k` null in
+one row for Batch), one nullable data column per job; GroupBy(by=g), Batch(2), MergeJoin.
+Read via the plain stream, the operator job node (`iter_data`), its LOG cache
+`as_source()`, a downstream echo function (what it receives, its `as_source()`), and the
+echo node of the job loaded in a fresh process.
+
+| operator | column | predicted | every path |
+|---|---|---|---|
+| GroupBy, Batch | `m: int \| None` | `list[int \| None]` | OK `[None, 2]` (loaded job too); Batch list tag `k` `[None, 8]` OK |
+| GroupBy, Batch | `l: list[int] \| None`, `t: set[int] \| None` | `list[list[int] \| None]` | LOST `[[], [1]]`; the echo function receives and STORES `[[], [1]]` |
+| GroupBy, Batch | `p: Path \| None`, `u: UUID \| None` | `list[Path \| None]`, `list[UUID \| None]` | CRASH `TypeError` on read; job.run() counts the downstream row as failed |
+| MergeJoin | any colliding column with a None (even int) | `list[T \| None]` | CRASH in MergeJoin itself: `'<' not supported between NoneType` (separate bug) |
+
+Out-of-scope findings met on the way:
+- MergeJoin cannot merge a colliding column holding a None (sort of None), any type.
+- A function after GroupBy/Batch whose output key equals an input data column name: its
+  `as_source()` raises `ArrowNotImplementedError: Unsupported cast from
+  large_list<item: large_string> to large_utf8` (source-info column list vs scalar).
+- A job with a `list[Path]` output loaded in a fresh process before anything registers
+  `list[Path]`: "Cannot restore the output schema ... list[orcapod.path]" and
+  `as_source()` returns `['/tmp/a']` (str, not Path): a wrong value, no None involved.
+
 Rule found: a None at a NESTED position (list or set element, dict value, user-class
 field) is restored only when the position's type is a primitive (int, float, str, bool,
 bytes, datetime, date, Literal) or a user class (dataclass, orcapod.dataclass, pydantic).
