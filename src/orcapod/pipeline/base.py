@@ -156,7 +156,7 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
                 to detach.
         """
         for node in self._nodes.values():
-            if node.node_type != "source":
+            if node.node_type not in ("source", "side_effect"):
                 node.set_ephemeral_database(database)
 
     @property
