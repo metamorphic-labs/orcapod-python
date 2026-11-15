@@ -28,6 +28,13 @@ from orcapod.semantic_types.canonical_order import (
     sort_dict_entries,
     sort_set_elements,
 )
+from orcapod.semantic_types.nested_none import (
+    NestedNoneNotRestorableError,
+    none_is_restorable,
+    require_restorable_none,
+    unrestorable_none_error,
+    with_context,
+)
 from orcapod.semantic_types.type_inference import infer_python_schema_from_pylist_data
 from orcapod.types import DataType, Schema, SchemaLike
 from orcapod.utils import arrow_utils
@@ -238,23 +245,33 @@ class UniversalTypeConverter:
         Raises:
             TypeError: If a leaf class has no registered ``LogicalType`` and
                 no registered factory covers it.
+            NestedNoneNotRestorableError: If an annotation declares a None at a
+                nested position that a read cannot restore (ITL-1144), naming the
+                column.
         """
         if self._logical_type_registry is None:
             return
         for schema in schemas:
-            for annotation in schema.values():
-                origin = get_origin(annotation)
-                if origin is typing.Union or origin is types.UnionType:
-                    # Union types (e.g. str | Path) are valid in function input
-                    # schemas — they express that the pod accepts either concrete
-                    # type. Register each non-None branch so its LogicalType is
-                    # available when a stream is bound; the union itself has no
-                    # Arrow representation.
-                    for branch in get_args(annotation):
-                        if branch is not type(None):
-                            self.register_python_class(branch)
-                else:
-                    self.register_python_class(annotation)
+            for name, annotation in schema.items():
+                try:
+                    self._register_annotation(annotation)
+                except NestedNoneNotRestorableError as exc:
+                    raise with_context(f"Column {name!r} ({annotation})", exc) from exc
+
+    def _register_annotation(self, annotation: Any) -> None:
+        """Register one schema annotation; a union registers each non-None branch."""
+        origin = get_origin(annotation)
+        if origin is typing.Union or origin is types.UnionType:
+            # Union types (e.g. str | Path) are valid in function input
+            # schemas — they express that the pod accepts either concrete
+            # type. Register each non-None branch so its LogicalType is
+            # available when a stream is bound; the union itself has no
+            # Arrow representation.
+            for branch in get_args(annotation):
+                if branch is not type(None):
+                    self.register_python_class(branch)
+        else:
+            self.register_python_class(annotation)
 
     def register_python_class(self, annotation: Any) -> "pa.DataType":
         """Register a Python type annotation and return its Arrow type.
@@ -279,6 +296,9 @@ class UniversalTypeConverter:
             TypeError: If a concrete class has no registered ``LogicalType`` and
                 no factory covers it, or if a circular dependency is detected.
             ValueError: If a complex (non-Optional) union is encountered.
+            NestedNoneNotRestorableError: If a list or set element or a dict value is
+                declared ``X | None`` and a stored None there cannot be read back
+                (ITL-1144).
         """
         in_progress = _register_in_progress.get()
         if in_progress is None:
@@ -361,6 +381,9 @@ class UniversalTypeConverter:
                     "element type (e.g. list[int], list[str])."
                 )
             inner = self.register_python_class(args[0])
+            require_restorable_none(
+                args[0], inner, self.get_logical_type_by_arrow_extension_name
+            )
             if self._logical_type_registry is not None and hasattr(
                 inner, "extension_name"
             ):
@@ -379,6 +402,9 @@ class UniversalTypeConverter:
                     "element type (e.g. set[int], set[str])."
                 )
             inner = self.register_python_class(args[0])
+            require_restorable_none(
+                args[0], inner, self.get_logical_type_by_arrow_extension_name
+            )
             if self._logical_type_registry is not None and hasattr(
                 inner, "extension_name"
             ):
@@ -400,6 +426,9 @@ class UniversalTypeConverter:
                 )
             key_arrow = self.register_python_class(args[0])
             val_arrow = self.register_python_class(args[1])
+            require_restorable_none(
+                args[1], val_arrow, self.get_logical_type_by_arrow_extension_name
+            )
             if isinstance(key_arrow, pa.ExtensionType):
                 raise ValueError(
                     f"'dict[{args[0]}, ...]' is not yet supported: the key type maps to Arrow "
@@ -819,8 +848,18 @@ class UniversalTypeConverter:
 
         Returns:
             A Python object of the type described by ``annotation``.
+
+        Raises:
+            NestedNoneNotRestorableError: If ``storage_value`` is None and a None of
+                ``annotation`` cannot be read back faithfully (ITL-1144). This method
+                decodes nested positions (list elements, class fields); a column's own
+                null never reaches it.
         """
         arrow_type = self.python_type_to_arrow_type(annotation)
+        if storage_value is None and not none_is_restorable(
+            arrow_type, self.get_logical_type_by_arrow_extension_name
+        ):
+            raise unrestorable_none_error(arrow_type)
         converter_fn = self.get_arrow_to_python_converter(arrow_type)
         return converter_fn(storage_value)
 
@@ -1211,7 +1250,10 @@ class UniversalTypeConverter:
             python_dict = {}
             for field_name, value in row.items():
                 if value is not None:
-                    python_dict[field_name] = converters[field_name](value)
+                    try:
+                        python_dict[field_name] = converters[field_name](value)
+                    except NestedNoneNotRestorableError as exc:
+                        raise with_context(f"Column {field_name!r}", exc) from exc
                 else:
                     python_dict[field_name] = None
             python_dicts.append(python_dict)
@@ -1822,9 +1864,7 @@ class UniversalTypeConverter:
                     value_field = next(f for f in element_type if f.name == "value")
 
                     key_converter = self.get_arrow_to_python_converter(key_field.type)
-                    value_converter = self.get_arrow_to_python_converter(
-                        value_field.type
-                    )
+                    value_converter = self._nested_value_converter(value_field.type)
 
                     return lambda value: (
                         {
@@ -1837,7 +1877,7 @@ class UniversalTypeConverter:
                     )
 
             # Regular list
-            element_converter = self.get_arrow_to_python_converter(element_type)
+            element_converter = self._nested_value_converter(element_type)
 
             if pa.types.is_fixed_size_list(arrow_type):
                 # Fixed-size list → tuple
@@ -1857,7 +1897,7 @@ class UniversalTypeConverter:
                 n = len(get_args(python_type))
                 # prepare list of converters
                 converters = [
-                    self.get_arrow_to_python_converter(arrow_type.field(f"f{i}").type)
+                    self._nested_value_converter(arrow_type.field(f"f{i}").type)
                     for i in range(n)
                 ]
                 # this is a heterogeneous tuple
@@ -1868,9 +1908,7 @@ class UniversalTypeConverter:
             # Create converters for each field
             field_converters = {}
             for field in arrow_type:
-                field_converters[field.name] = self.get_arrow_to_python_converter(
-                    field.type
-                )
+                field_converters[field.name] = self._nested_value_converter(field.type)
 
             return lambda value: (
                 {
@@ -1891,6 +1929,29 @@ class UniversalTypeConverter:
         else:
             # Default passthrough
             return lambda value: value
+
+    def _nested_value_converter(self, arrow_type: pa.DataType) -> Callable[[Any], Any]:
+        """The converter of a nested position (list element, dict value, struct field).
+
+        A null at a position whose None a read cannot restore raises instead of reading
+        as an empty value or failing inside the element's converter (ITL-1144).
+
+        Args:
+            arrow_type: The Arrow type of the nested position.
+
+        Returns:
+            A function converting one stored value of ``arrow_type`` to Python.
+        """
+        convert = self.get_arrow_to_python_converter(arrow_type)
+        if none_is_restorable(arrow_type, self.get_logical_type_by_arrow_extension_name):
+            return convert
+
+        def convert_or_refuse(value: Any) -> Any:
+            if value is None:
+                raise unrestorable_none_error(arrow_type)
+            return convert(value)
+
+        return convert_or_refuse
 
     def is_dynamic_typeddict(self, python_type: type) -> bool:
         """Check if a type is one of our dynamically created TypedDicts."""

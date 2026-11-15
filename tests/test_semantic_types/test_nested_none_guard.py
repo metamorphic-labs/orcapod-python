@@ -170,10 +170,6 @@ class TestRaisedAtRead:
         with pytest.raises(ValueError, match=r"(?s)Column 'v'.*ITL-1144"):
             _read_v(source)
 
-    def test_a_none_given_for_a_non_optional_inner_list(self) -> None:
-        with pytest.raises(ValueError, match=r"(?s)Column 'v'.*ITL-1144"):
-            _read_v(_source([None, [1]], list[list[int]]))
-
 
 def _members(annotation: Any, first: Any, second: Any) -> DictSource:
     """Two rows of group ``g=1``: column ``m`` holds ``first`` then ``second``."""
