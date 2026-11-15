@@ -5,16 +5,16 @@ sessions each, two probes per session. Nothing here is real data. The generator
 uses only the Python standard library and a fixed random seed, so every run
 produces byte-identical files.
 
-Run it from the directory you want to work in::
+Run it from the directory you want to work in:
 
     python workshop_data.py
 
-which writes ``./workshop_data/``. Or call it from Python::
+which writes ``./workshop_data/``. Or call it from Python:
 
     from workshop_data import make_dataset
     data_dir = make_dataset("workshop_data")
 
-Files written (27 files, about 0.4 MB in total)::
+Files written (27 files, about 0.4 MB in total):
 
     workshop_data/
         subjects.csv                  one row per mouse

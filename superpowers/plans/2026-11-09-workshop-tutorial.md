@@ -62,7 +62,7 @@ These are the facts the pages are written from. Each was observed, not read.
   `polars_filter` are `large_string`.
 - Function pods: exact-column rule, annotation rule, multiple outputs via `output_keys=[...]`.
 - `stream.as_pandas_df()` exists on sources, pod streams and job nodes.
-- `PipelineJob(name=..., store=db)`; `job.nodes` lists sources by `source_id`, operators as
+- `PipelineJob(name=..., database=db)`; `job.nodes` lists sources by `source_id`, operators as
   `SelectDataColumns_1`, `Join`, `GroupBy`, pods by `label`.
 - Two input rows with identical data values share one stored result (64 unit rows, 63 calls).
 - `DeltaTableDatabase("dir")` layout: `dir/<job name>/<function name>/<hash>/v0` and
@@ -74,7 +74,7 @@ These are the facts the pages are written from. Each was observed, not read.
   `run()` both raise `RuntimeError` (read-only stubs).
 - `show_graph()` is on `Pipeline` (`job.pipeline.show_graph()`), not on `PipelineJob`, and
   needs the Graphviz `dot` binary (`ExecutableNotFound` otherwise).
-- `Pipeline` blueprint: `PipelineJob.from_pipeline(p, store=db)` → `unbound_sources`,
+- `Pipeline` blueprint: `PipelineJob.from_pipeline(p, database=db)` → `unbound_sources`,
   `job.bind(sources={...})`, then `run()`.
 - Files: `op.File(path)` validates existence, is hashed by content (edit → recompute; same
   content under another path → cache hit). A `pathlib.Path` column is hashed by its path

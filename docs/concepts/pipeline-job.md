@@ -2,8 +2,9 @@
 
 Applying a [function pod](function-pods.md) or an [operator](operators.md) to a
 [stream](streams.md) directly computes in memory and keeps nothing. A **`PipelineJob`** runs
-the same steps against a database: every result is stored, and a later run computes only
-what is not stored yet. A **`Pipeline`** is the description of the steps on its own, without
+the same steps against a database: every function result is stored, and a later run computes
+only what is not stored yet. Operator steps are not stored by default; they run again on
+every run. A **`Pipeline`** is the description of the steps on its own, without
 data or a database, from which several jobs can be made.
 
 For a guided introduction see the tutorial, [Part 5](../tutorial/05-pipeline-job.md) and
