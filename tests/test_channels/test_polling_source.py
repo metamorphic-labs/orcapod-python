@@ -1,4 +1,5 @@
 """Tests for PollingSource and DynamicSourceProtocol."""
+
 from __future__ import annotations
 
 import asyncio
@@ -11,6 +12,7 @@ import pytest
 
 from orcapod.channels import Channel
 from orcapod.core.nodes.source_node import SourceJobNode
+from orcapod.core.sources import ArrowTableSource
 from orcapod.core.sources.polling_source import PollingSource
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.errors import CursorInvalidatedError
@@ -122,7 +124,9 @@ class _MinimalImpl:
     async def poll(self, cursor: Cursor[int] | None = None) -> bool:
         return False
 
-    async def fetch(self, cursor: Cursor[int] | None = None) -> tuple[Cursor[int], dict]:
+    async def fetch(
+        self, cursor: Cursor[int] | None = None
+    ) -> tuple[Cursor[int], dict]:
         return Cursor(value=0), {}
 
     async def close(self) -> None:
@@ -136,38 +140,65 @@ class TestDynamicSourceProtocol:
 
     def test_missing_poll_fails_isinstance(self):
         class NoPoll:
-            def schema(self): return None
-            async def fetch(self, cursor=None): return Cursor(value=0), {}
-            async def close(self): pass
+            def schema(self):
+                return None
+
+            async def fetch(self, cursor=None):
+                return Cursor(value=0), {}
+
+            async def close(self):
+                pass
 
         assert not isinstance(NoPoll(), DynamicSourceProtocol)
 
     def test_missing_fetch_fails_isinstance(self):
         class NoFetch:
-            def schema(self): return None
-            async def poll(self, cursor=None): return False
-            async def close(self): pass
+            def schema(self):
+                return None
+
+            async def poll(self, cursor=None):
+                return False
+
+            async def close(self):
+                pass
 
         assert not isinstance(NoFetch(), DynamicSourceProtocol)
 
     def test_missing_close_fails_isinstance(self):
         class NoClose:
-            def schema(self): return None
-            async def poll(self, cursor=None): return False
-            async def fetch(self, cursor=None): return Cursor(value=0), {}
+            def schema(self):
+                return None
+
+            async def poll(self, cursor=None):
+                return False
+
+            async def fetch(self, cursor=None):
+                return Cursor(value=0), {}
 
         assert not isinstance(NoClose(), DynamicSourceProtocol)
 
     def test_missing_schema_fails_isinstance(self):
         """schema() is now a required protocol method."""
+
         class NoSchema:
-            def identity(self): return "NoSchema"
-            def to_config(self): return None
+            def identity(self):
+                return "NoSchema"
+
+            def to_config(self):
+                return None
+
             @classmethod
-            def from_config(cls, config): return cls()
-            async def poll(self, cursor=None): return False
-            async def fetch(self, cursor=None): return Cursor(value=0), {}
-            async def close(self): pass
+            def from_config(cls, config):
+                return cls()
+
+            async def poll(self, cursor=None):
+                return False
+
+            async def fetch(self, cursor=None):
+                return Cursor(value=0), {}
+
+            async def close(self):
+                pass
 
         assert not isinstance(NoSchema(), DynamicSourceProtocol)
 
@@ -179,13 +210,17 @@ class TestDynamicSourceProtocol:
 
 def _make_arrow_stream(n: int = 3) -> ArrowTableStream:
     """Build a minimal ArrowTableStream with `id` tag and `val` data column."""
-    schema = pa.schema([
-        pa.field("id", pa.int64(), nullable=False),
-        pa.field("val", pa.int64(), nullable=False),
-    ])
+    schema = pa.schema(
+        [
+            pa.field("id", pa.int64(), nullable=False),
+            pa.field("val", pa.int64(), nullable=False),
+        ]
+    )
     table = pa.table(
-        {"id": pa.array(list(range(n)), type=pa.int64()),
-         "val": pa.array([i * 10 for i in range(n)], type=pa.int64())},
+        {
+            "id": pa.array(list(range(n)), type=pa.int64()),
+            "val": pa.array([i * 10 for i in range(n)], type=pa.int64()),
+        },
         schema=schema,
     )
     return ArrowTableStream(table, tag_columns=["id"])
@@ -210,7 +245,8 @@ class TestAsyncIterDataDefault:
         """SourceJobNode.async_execute routes through async_iter_data — no regression."""
         from orcapod.types import Schema
 
-        stream = _make_arrow_stream(2)
+        # A bound source needs one system-tag pair (ITL-1126); a raw stream has none.
+        stream = ArrowTableSource(_make_arrow_stream(2).as_table(), tag_columns=["id"])
         node = SourceJobNode(
             name="test",
             tag_schema=Schema({"id": int}),
@@ -228,7 +264,8 @@ class TestAsyncIterDataDefault:
     async def test_source_node_closes_channel_after_exhaustion(self):
         from orcapod.types import Schema
 
-        stream = _make_arrow_stream(1)
+        # A bound source needs one system-tag pair (ITL-1126); a raw stream has none.
+        stream = ArrowTableSource(_make_arrow_stream(1).as_table(), tag_columns=["id"])
         node = SourceJobNode(
             name="test",
             tag_schema=Schema({"id": int}),
@@ -304,9 +341,7 @@ class FakeDynamicSource:
         current_idx = cursor.value if cursor is not None else 0
         return current_idx < len(self._batches)
 
-    async def fetch(
-        self, cursor: Cursor[int] | None = None
-    ) -> tuple[Cursor[int], Any]:
+    async def fetch(self, cursor: Cursor[int] | None = None) -> tuple[Cursor[int], Any]:
         self.fetch_cursors.append(cursor)
         if self._fetch_raises is not None:
             raise self._fetch_raises
@@ -348,9 +383,7 @@ class NoArgSource:
     async def poll(self, cursor: Cursor[int] | None = None) -> bool:
         return False
 
-    async def fetch(
-        self, cursor: Cursor[int] | None = None
-    ) -> tuple[Cursor[int], Any]:
+    async def fetch(self, cursor: Cursor[int] | None = None) -> tuple[Cursor[int], Any]:
         return Cursor(value=0), []
 
     async def close(self) -> None:
@@ -363,14 +396,19 @@ class NoArgSource:
 
 
 def _batch(id_: int, val: int) -> dict:
-    return {"id": pa.array([id_], type=pa.int64()), "val": pa.array([val], type=pa.int64())}
+    return {
+        "id": pa.array([id_], type=pa.int64()),
+        "val": pa.array([val], type=pa.int64()),
+    }
 
 
 class TestPollingSourceSyncMode:
     def test_sync_snapshot_fetches_on_first_iter_data(self):
         """First iter_data() triggers fetch(cursor=None) and returns rows."""
         fake = FakeDynamicSource(batches=[_batch(1, 10)])
-        src = PollingSource(fake, tag_columns="id", polling_config=PollingConfig(interval=1.0))
+        src = PollingSource(
+            fake, tag_columns="id", polling_config=PollingConfig(interval=1.0)
+        )
 
         rows = list(src.iter_data())
         assert len(rows) == 1
@@ -380,7 +418,9 @@ class TestPollingSourceSyncMode:
     def test_sync_snapshot_fetch_called_once_on_repeated_access(self):
         """Second iter_data() polls first; if poll returns False, cache is served."""
         fake = FakeDynamicSource(batches=[_batch(1, 10)], poll_always_false=True)
-        src = PollingSource(fake, tag_columns="id", polling_config=PollingConfig(interval=1.0))
+        src = PollingSource(
+            fake, tag_columns="id", polling_config=PollingConfig(interval=1.0)
+        )
 
         list(src.iter_data())  # first call — fetches
         list(src.iter_data())  # second call — polls (False) → serves cache
@@ -389,26 +429,54 @@ class TestPollingSourceSyncMode:
         assert len(fake.fetch_cursors) == 1
         assert len(fake.poll_cursors) == 1
 
+    def test_zero_row_table_is_the_polled_batches_and_never_polls(self):
+        """``typed_zero_row_table``: ``None`` before a poll; then the polled table's.
+
+        Non-public on purpose: the test is about the helper's contract (ITL-912).
+        """
+        from orcapod.core.streams.base import typed_zero_row_table
+
+        fake = FakeDynamicSource(batches=[_batch(1, 10), _batch(2, 20)])
+        src = PollingSource(
+            fake, tag_columns="id", polling_config=PollingConfig(interval=1.0)
+        )
+        assert typed_zero_row_table(src) is None
+        assert fake.fetch_cursors == [] and fake.poll_cursors == []
+
+        list(src.iter_data())
+        list(src.iter_data())  # two batches polled and combined
+        expected = src.as_table(columns={"system_tags": True, "source": True})
+        polls = (len(fake.poll_cursors), len(fake.fetch_cursors))
+
+        table = typed_zero_row_table(src)
+
+        assert table is not None
+        assert table.num_rows == 0
+        assert table.schema == expected.schema
+        assert (len(fake.poll_cursors), len(fake.fetch_cursors)) == polls
+
     def test_sync_cache_miss_refetches_and_combines(self):
         """Second iter_data() re-fetches when poll returns True."""
-        fake = FakeDynamicSource(
-            batches=[_batch(1, 10), _batch(2, 20)]
+        fake = FakeDynamicSource(batches=[_batch(1, 10), _batch(2, 20)])
+        src = PollingSource(
+            fake, tag_columns="id", polling_config=PollingConfig(interval=1.0)
         )
-        src = PollingSource(fake, tag_columns="id", polling_config=PollingConfig(interval=1.0))
 
-        rows1 = list(src.iter_data())   # fetches batch 0
-        rows2 = list(src.iter_data())   # polls → True, fetches batch 1 → combines
+        rows1 = list(src.iter_data())  # fetches batch 0
+        rows2 = list(src.iter_data())  # polls → True, fetches batch 1 → combines
 
         assert len(rows1) == 1
-        assert len(rows2) == 2   # accumulated: batch 0 + batch 1
+        assert len(rows2) == 2  # accumulated: batch 0 + batch 1
 
     def test_cursor_threading_fetch_receives_previous_fetch_cursor(self):
         """fetch() receives the cursor returned by the previous fetch call."""
         fake = FakeDynamicSource(batches=[_batch(1, 10), _batch(2, 20)])
-        src = PollingSource(fake, tag_columns="id", polling_config=PollingConfig(interval=1.0))
+        src = PollingSource(
+            fake, tag_columns="id", polling_config=PollingConfig(interval=1.0)
+        )
 
-        list(src.iter_data())   # first fetch → cursor returned is Cursor(value=1)
-        list(src.iter_data())   # poll(Cursor(1)), then fetch(Cursor(1))
+        list(src.iter_data())  # first fetch → cursor returned is Cursor(value=1)
+        list(src.iter_data())  # poll(Cursor(1)), then fetch(Cursor(1))
 
         # poll should receive the cursor from the first fetch
         assert fake.poll_cursors[0] is not None
@@ -417,19 +485,28 @@ class TestPollingSourceSyncMode:
         assert fake.fetch_cursors[1] is not None
         assert fake.fetch_cursors[1].value == 1
 
-    def test_last_modified_updated_from_cursor_modified_at(self):
-        """cursor.modified_at updates last_modified; None falls back to wall clock."""
+    def test_last_modified_is_the_moment_rows_are_found_not_the_cursor_time(self):
+        """cursor.modified_at is informational: last_modified is the moment the rows
+        were found (ITL-1102), so rows modified before a downstream node's last run
+        but found after it still make that node stale."""
         ts = datetime(2026, 3, 15, 12, 0, 0, tzinfo=timezone.utc)
         fake = FakeDynamicSource(batches=[_batch(1, 10)], cursor_modified_at=ts)
-        src = PollingSource(fake, tag_columns="id", polling_config=PollingConfig(interval=1.0))
+        src = PollingSource(
+            fake, tag_columns="id", polling_config=PollingConfig(interval=1.0)
+        )
 
+        before = datetime.now(timezone.utc)
         list(src.iter_data())
-        assert src.last_modified == ts
+        after = datetime.now(timezone.utc)
+        assert src.last_modified is not None
+        assert before <= src.last_modified <= after
 
-    def test_last_modified_falls_back_to_wall_clock_when_none(self):
+    def test_last_modified_is_wall_clock_when_cursor_time_is_none(self):
         """When cursor.modified_at is None, last_modified is updated to wall clock."""
         fake = FakeDynamicSource(batches=[_batch(1, 10)], cursor_modified_at=None)
-        src = PollingSource(fake, tag_columns="id", polling_config=PollingConfig(interval=1.0))
+        src = PollingSource(
+            fake, tag_columns="id", polling_config=PollingConfig(interval=1.0)
+        )
 
         before = datetime.now(timezone.utc)
         list(src.iter_data())
@@ -441,7 +518,9 @@ class TestPollingSourceSyncMode:
     def test_output_schema_triggers_fetch(self):
         """output_schema() lazily triggers fetch on first access."""
         fake = FakeDynamicSource(batches=[_batch(1, 10)])
-        src = PollingSource(fake, tag_columns="id", polling_config=PollingConfig(interval=1.0))
+        src = PollingSource(
+            fake, tag_columns="id", polling_config=PollingConfig(interval=1.0)
+        )
 
         tag_schema, data_schema = src.output_schema()
         assert "id" in tag_schema
@@ -449,7 +528,9 @@ class TestPollingSourceSyncMode:
 
     def test_keys_triggers_fetch(self):
         fake = FakeDynamicSource(batches=[_batch(1, 10)])
-        src = PollingSource(fake, tag_columns="id", polling_config=PollingConfig(interval=1.0))
+        src = PollingSource(
+            fake, tag_columns="id", polling_config=PollingConfig(interval=1.0)
+        )
 
         tag_keys, data_keys = src.keys()
         assert "id" in tag_keys
@@ -459,7 +540,9 @@ class TestPollingSourceSyncMode:
         """identity_structure() does not require a fetch (schema-independent)."""
         fake = FakeDynamicSource(batches=[])
         src = PollingSource(
-            fake, tag_columns="id", polling_config=PollingConfig(interval=1.0),
+            fake,
+            tag_columns="id",
+            polling_config=PollingConfig(interval=1.0),
         )
         # Should not raise even though no fetch has occurred
         ident = src.identity_structure()
@@ -471,16 +554,22 @@ class TestPollingSourceSyncMode:
         """Different impl classes produce different identity structures."""
         fake1 = FakeDynamicSource(batches=[])
         fake2 = NoArgSource()
-        src1 = PollingSource(fake1, tag_columns="id", polling_config=PollingConfig(interval=1.0))
-        src2 = PollingSource(fake2, tag_columns="id", polling_config=PollingConfig(interval=1.0))
+        src1 = PollingSource(
+            fake1, tag_columns="id", polling_config=PollingConfig(interval=1.0)
+        )
+        src2 = PollingSource(
+            fake2, tag_columns="id", polling_config=PollingConfig(interval=1.0)
+        )
         assert src1.identity_structure() != src2.identity_structure()
 
     def test_to_config_includes_impl_location(self):
         """to_config() serializes impl class module/qualname and polling config."""
         fake = FakeDynamicSource(batches=[])
         src = PollingSource(
-            fake, tag_columns="id", polling_config=PollingConfig(),
-            source_id="my_source"
+            fake,
+            tag_columns="id",
+            polling_config=PollingConfig(),
+            source_id="my_source",
         )
         cfg = src.to_config()
         assert cfg["source_type"] == "polling_source"
@@ -494,8 +583,10 @@ class TestPollingSourceSyncMode:
     def test_from_config_reconstructs_no_arg_impl(self):
         """from_config() reconstructs a PollingSource when impl has a no-arg constructor."""
         src = PollingSource(
-            NoArgSource(), tag_columns="id", polling_config=PollingConfig(interval=2.0),
-            source_id="recon_source"
+            NoArgSource(),
+            tag_columns="id",
+            polling_config=PollingConfig(interval=2.0),
+            source_id="recon_source",
         )
         cfg = src.to_config()
         reconstructed = PollingSource.from_config(cfg)
@@ -507,7 +598,9 @@ class TestPollingSourceSyncMode:
     def test_from_config_raises_on_missing_impl_module(self):
         """from_config() raises KeyError when impl_module is absent."""
         with pytest.raises(KeyError):
-            PollingSource.from_config({"source_type": "polling_source", "tag_columns": ["id"]})
+            PollingSource.from_config(
+                {"source_type": "polling_source", "tag_columns": ["id"]}
+            )
 
 
 # ===========================================================================
@@ -526,7 +619,9 @@ class TestPollingSourceAsyncMode:
             # Use a wider interval and generous overrun budget so stream-building
             # latency (Arrow schema inference, SourceStreamBuilder) never trips
             # the overrun guard in CI environments.
-            polling_config=PollingConfig(interval=0.05, duration=0.5, max_missed_intervals=50),
+            polling_config=PollingConfig(
+                interval=0.05, duration=0.5, max_missed_intervals=50
+            ),
         )
 
         items = []
@@ -588,7 +683,9 @@ class TestPollingSourceAsyncMode:
             tag_columns="id",
             # Wide interval + generous overrun budget — same rationale as
             # test_async_streaming_emits_rows.
-            polling_config=PollingConfig(interval=0.05, duration=0.5, max_missed_intervals=50),
+            polling_config=PollingConfig(
+                interval=0.05, duration=0.5, max_missed_intervals=50
+            ),
         )
 
         items = []
@@ -677,7 +774,9 @@ class TestPollingSourceAsyncMode:
             tag_columns="id",
             # Wide interval + generous overrun budget — same rationale as
             # test_async_streaming_emits_rows.
-            polling_config=PollingConfig(interval=0.05, duration=0.5, max_missed_intervals=50),
+            polling_config=PollingConfig(
+                interval=0.05, duration=0.5, max_missed_intervals=50
+            ),
         )
 
         async for _ in src.async_iter_data():
@@ -704,11 +803,13 @@ class TestPollingSourceAsyncMode:
         src = PollingSource(
             fake,
             tag_columns="id",
-            polling_config=PollingConfig(interval=0.01, duration=0.01, max_missed_intervals=1000),
+            polling_config=PollingConfig(
+                interval=0.01, duration=0.01, max_missed_intervals=1000
+            ),
         )
 
         rows = [item async for item in src.async_iter_data()]
-        assert len(rows) == 1   # must not be 0
+        assert len(rows) == 1  # must not be 0
 
 
 # ===========================================================================
@@ -730,7 +831,8 @@ class TestPollingSourceErrorHandling:
             def identity(self):
                 return "TransientImpl"
 
-            def schema(self): return None
+            def schema(self):
+                return None
 
             async def poll(self, cursor=None) -> bool:
                 nonlocal call_count
@@ -819,9 +921,9 @@ class TestPollingSourceErrorHandling:
             fake,
             tag_columns="id",
             polling_config=PollingConfig(
-                interval=0.01,           # 10 ms tick — fetch will always overrun
+                interval=0.01,  # 10 ms tick — fetch will always overrun
                 max_missed_intervals=3,  # terminate after 3 cumulative misses
-                duration=0.0,            # run indefinitely (until overrun)
+                duration=0.0,  # run indefinitely (until overrun)
             ),
         )
 
@@ -846,7 +948,8 @@ class TestPollingSourceErrorHandling:
             def identity(self):
                 return "DriftingImpl"
 
-            def schema(self): return None
+            def schema(self):
+                return None
 
             async def poll(self, cursor=None) -> bool:
                 return self._call < 2
@@ -856,15 +959,19 @@ class TestPollingSourceErrorHandling:
                 if self._call == 1:
                     return (
                         Cursor(value=1),
-                        {"id": pa.array([1], type=pa.int64()),
-                         "val": pa.array([10], type=pa.int64())},
+                        {
+                            "id": pa.array([1], type=pa.int64()),
+                            "val": pa.array([10], type=pa.int64()),
+                        },
                     )
                 # Second fetch has an extra column — schema mismatch
                 return (
                     Cursor(value=2),
-                    {"id": pa.array([2], type=pa.int64()),
-                     "val": pa.array([20], type=pa.int64()),
-                     "extra": pa.array(["x"], type=pa.large_string())},
+                    {
+                        "id": pa.array([2], type=pa.int64()),
+                        "val": pa.array([20], type=pa.int64()),
+                        "extra": pa.array(["x"], type=pa.large_string()),
+                    },
                 )
 
             async def close(self):
@@ -873,7 +980,9 @@ class TestPollingSourceErrorHandling:
         src = PollingSource(
             DriftingImpl(),
             tag_columns="id",
-            polling_config=PollingConfig(interval=0.05, duration=0.5, max_missed_intervals=50),
+            polling_config=PollingConfig(
+                interval=0.05, duration=0.5, max_missed_intervals=50
+            ),
         )
 
         with pytest.raises(SchemaInconsistencyError, match="schema mismatch"):
@@ -1012,7 +1121,9 @@ class TestPollingSourceSchemaValidation:
         fake = FakeDynamicSource(batches=[_batch(1, 10)], schema_override=declared)
 
         with pytest.raises(ValueError, match="missing tag columns"):
-            PollingSource(fake, tag_columns="id", polling_config=PollingConfig(interval=1.0))
+            PollingSource(
+                fake, tag_columns="id", polling_config=PollingConfig(interval=1.0)
+            )
 
     # -----------------------------------------------------------------------
     # Combining-schema validation
@@ -1029,7 +1140,8 @@ class TestPollingSourceSchemaValidation:
             def identity(self):
                 return "TypeDriftImpl"
 
-            def schema(self): return None
+            def schema(self):
+                return None
 
             async def poll(self, cursor=None) -> bool:
                 return self._call < 2
@@ -1053,7 +1165,9 @@ class TestPollingSourceSchemaValidation:
         src = PollingSource(
             TypeDriftImpl(),
             tag_columns="id",
-            polling_config=PollingConfig(interval=0.05, duration=0.5, max_missed_intervals=50),
+            polling_config=PollingConfig(
+                interval=0.05, duration=0.5, max_missed_intervals=50
+            ),
         )
 
         with pytest.raises(SchemaInconsistencyError, match="schema"):
@@ -1071,7 +1185,8 @@ class TestPollingSourceSchemaValidation:
             def identity(self):
                 return "ColumnDriftImpl"
 
-            def schema(self): return None
+            def schema(self):
+                return None
 
             async def poll(self, cursor=None) -> bool:
                 return self._call < 2
@@ -1095,7 +1210,9 @@ class TestPollingSourceSchemaValidation:
         src = PollingSource(
             ColumnDriftImpl(),
             tag_columns="id",
-            polling_config=PollingConfig(interval=0.05, duration=0.5, max_missed_intervals=50),
+            polling_config=PollingConfig(
+                interval=0.05, duration=0.5, max_missed_intervals=50
+            ),
         )
 
         with pytest.raises(SchemaInconsistencyError, match="schema mismatch"):
@@ -1110,16 +1227,14 @@ class TestPollingSourceSchemaValidation:
         which injected the synthetic _content_hash column into the stored stream.
         The second combine then raised SchemaInconsistencyError.
         """
-        fake = FakeDynamicSource(
-            batches=[_batch(1, 10), _batch(2, 20), _batch(3, 30)]
-        )
+        fake = FakeDynamicSource(batches=[_batch(1, 10), _batch(2, 20), _batch(3, 30)])
         src = PollingSource(
             fake, tag_columns="id", polling_config=PollingConfig(interval=1.0)
         )
 
-        rows1 = list(src.iter_data())   # fetch 1 — builds initial stream
-        rows2 = list(src.iter_data())   # fetch 2 — first combine
-        rows3 = list(src.iter_data())   # fetch 3 — second combine (crashed before fix)
+        rows1 = list(src.iter_data())  # fetch 1 — builds initial stream
+        rows2 = list(src.iter_data())  # fetch 2 — first combine
+        rows3 = list(src.iter_data())  # fetch 3 — second combine (crashed before fix)
 
         assert len(rows1) == 1
         assert len(rows2) == 2
@@ -1138,9 +1253,7 @@ class TestPollingSourceSchemaValidation:
 
         Regression test for ITL-616: same root cause as the sync path.
         """
-        fake = FakeDynamicSource(
-            batches=[_batch(1, 10), _batch(2, 20), _batch(3, 30)]
-        )
+        fake = FakeDynamicSource(batches=[_batch(1, 10), _batch(2, 20), _batch(3, 30)])
         src = PollingSource(
             fake,
             tag_columns="id",
@@ -1192,7 +1305,9 @@ class TestPollingSourceSyncAccessDuringAsyncRun:
         src = PollingSource(
             fake,
             tag_columns="id",
-            polling_config=PollingConfig(interval=0.02, duration=1.0, max_missed_intervals=100),
+            polling_config=PollingConfig(
+                interval=0.02, duration=1.0, max_missed_intervals=100
+            ),
         )
 
         rows_from_async: list = []
@@ -1235,7 +1350,9 @@ class TestPollingSourceSyncAccessDuringAsyncRun:
         src = PollingSource(
             fake,
             tag_columns="id",
-            polling_config=PollingConfig(interval=0.02, duration=1.0, max_missed_intervals=100),
+            polling_config=PollingConfig(
+                interval=0.02, duration=1.0, max_missed_intervals=100
+            ),
         )
 
         rows_from_async: list = []
@@ -1353,7 +1470,9 @@ class TestPollingSourceZeroRowBatch:
         src = PollingSource(
             self._make_emit_once_then_empty_impl(),
             tag_columns="id",
-            polling_config=PollingConfig(interval=0.05, duration=0.5, max_missed_intervals=50),
+            polling_config=PollingConfig(
+                interval=0.05, duration=0.5, max_missed_intervals=50
+            ),
         )
 
         rows = []
@@ -1377,7 +1496,9 @@ class TestPollingSourceZeroRowBatch:
         src = PollingSource(
             self._make_emit_once_then_empty_impl(),
             tag_columns="id",
-            polling_config=PollingConfig(interval=0.05, duration=0.5, max_missed_intervals=50),
+            polling_config=PollingConfig(
+                interval=0.05, duration=0.5, max_missed_intervals=50
+            ),
         )
 
         async for _ in src.async_iter_data():
@@ -1438,10 +1559,14 @@ class TestPollingSourceZeroRowBatch:
         src = PollingSource(
             DeclaredNullableImpl(),
             tag_columns="id",
-            polling_config=PollingConfig(interval=0.05, duration=0.5, max_missed_intervals=50),
+            polling_config=PollingConfig(
+                interval=0.05, duration=0.5, max_missed_intervals=50
+            ),
         )
 
-        with caplog.at_level(logging.WARNING, logger="orcapod.core.sources.polling_source"):
+        with caplog.at_level(
+            logging.WARNING, logger="orcapod.core.sources.polling_source"
+        ):
             rows = []
             async for tag, data in src.async_iter_data():
                 rows.append((tag, data))
@@ -1470,10 +1595,14 @@ class TestPollingSourceZeroRowBatch:
         src = PollingSource(
             fake,
             tag_columns="id",
-            polling_config=PollingConfig(interval=0.05, duration=0.5, max_missed_intervals=50),
+            polling_config=PollingConfig(
+                interval=0.05, duration=0.5, max_missed_intervals=50
+            ),
         )
 
-        with caplog.at_level(logging.WARNING, logger="orcapod.core.sources.polling_source"):
+        with caplog.at_level(
+            logging.WARNING, logger="orcapod.core.sources.polling_source"
+        ):
             async for _ in src.async_iter_data():
                 pass
 
@@ -1541,7 +1670,9 @@ class TestPollingSourceZeroRowBatch:
         src = PollingSource(
             ZeroFirstImpl(),
             tag_columns="id",
-            polling_config=PollingConfig(interval=0.05, duration=0.5, max_missed_intervals=50),
+            polling_config=PollingConfig(
+                interval=0.05, duration=0.5, max_missed_intervals=50
+            ),
         )
 
         rows = []

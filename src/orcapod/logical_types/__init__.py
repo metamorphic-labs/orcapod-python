@@ -4,7 +4,7 @@ This subpackage provides the registry and protocol for logical types that bind
 Python classes to their Arrow/Polars extension type representation.
 
 Built-in registrations (``LogicalPath``, ``LogicalUPath``, ``LogicalUUID``) are
-wired into ``DataContext`` via ``contexts/data/v0.1.json``. Use
+wired into ``DataContext`` via ``contexts/logical_types.json``. Use
 ``get_default_context().type_converter.register_python_class()`` to register new
 types, ``register_logical_type_factory()`` to add factories, and
 ``apply_logical_types()`` to re-wrap Arrow tables with their registered extension types.
@@ -19,17 +19,42 @@ will be auto-registered on pod declaration.
 
 from __future__ import annotations
 
+from .identifier import (
+    LogicalTypeIdentifier,
+    LogicalTypeIdentifierError,
+    arrow_type_identifier,
+    logical_type_identifier,
+    version_metadata,
+)
 from .protocols import LogicalTypeProtocol, LogicalTypeFactoryProtocol
-from .registry import LogicalTypeRegistry, make_arrow_extension_type, make_polars_extension_type
+from .registry import (
+    LogicalTypeRegistry,
+    make_arrow_extension_type,
+    make_polars_extension_type,
+)
 from .schema_walker import ExtensionTypeInfo, walk_field, walk_schema
 from .database_hooks import apply_logical_types, register_discovered_logical_types
-from .dataclass_logical_type_factory import DATACLASS_CATEGORY, DataclassLogicalType, DataclassLogicalTypeFactory
-from .pydantic_logical_type_factory import PYDANTIC_CATEGORY, PydanticLogicalType, PydanticLogicalTypeFactory
-from .list_logical_type_factory import LIST_CATEGORY, SET_CATEGORY, ListLogicalType, ListLogicalTypeFactory
+from .dataclass_logical_type_factory import (
+    DATACLASS_CATEGORY,
+    DataclassLogicalType,
+    DataclassLogicalTypeFactory,
+)
+from .pydantic_logical_type_factory import (
+    PYDANTIC_CATEGORY,
+    PydanticLogicalType,
+    PydanticLogicalTypeFactory,
+)
+from .list_logical_type_factory import (
+    LIST_CATEGORY,
+    SET_CATEGORY,
+    ListLogicalType,
+    ListLogicalTypeFactory,
+)
 from .file_type import LogicalFile  # ITL-450
 from .directory_type import LogicalDirectory  # ITL-451
 from .numpy_type import LogicalNumpyArray  # ITL-460
 from .pandas_type import LogicalPandasDataFrame, LogicalPandasSeries  # PLT-1869
+from .polars_type import LogicalPolarsDataFrame, LogicalPolarsSeries  # ITL-578
 
 __all__ = [
     "LogicalTypeProtocol",
@@ -37,6 +62,12 @@ __all__ = [
     "LogicalTypeRegistry",
     "make_arrow_extension_type",
     "make_polars_extension_type",
+    # ITL-935
+    "LogicalTypeIdentifier",
+    "LogicalTypeIdentifierError",
+    "arrow_type_identifier",
+    "logical_type_identifier",
+    "version_metadata",
     # PLT-1654
     "ExtensionTypeInfo",
     "walk_schema",
@@ -66,4 +97,7 @@ __all__ = [
     # PLT-1869
     "LogicalPandasDataFrame",
     "LogicalPandasSeries",
+    # ITL-578
+    "LogicalPolarsDataFrame",
+    "LogicalPolarsSeries",
 ]

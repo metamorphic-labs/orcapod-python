@@ -57,4 +57,6 @@ class TypeConverterProtocol(Protocol):
 
     def get_logical_type(self, python_type: type) -> "LogicalTypeProtocol | None": ...
 
-
+    def get_logical_type_for_python_type(
+        self, annotation: Any
+    ) -> "LogicalTypeProtocol | None": ...

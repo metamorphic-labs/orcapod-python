@@ -5,8 +5,17 @@ from __future__ import annotations
 import hashlib
 import json as _json
 import logging
+from collections.abc import Collection
 from enum import Enum
 from typing import TYPE_CHECKING, Any
+
+from orcapod.types import Schema
+from orcapod.logical_types.identifier import (
+    LogicalTypeIdentifier,
+    LogicalTypeIdentifierError,
+    arrow_type_identifier,
+    require_readable,
+)
 
 if TYPE_CHECKING:
     from orcapod.protocols.database_protocols import DatabaseRegistryProtocol
@@ -17,8 +26,13 @@ logger = logging.getLogger(__name__)
 # Format version
 # ---------------------------------------------------------------------------
 
-PIPELINE_FORMAT_VERSION = "0.1.0"
-SUPPORTED_FORMAT_VERSIONS = frozenset({"0.1.0"})
+# The version a pipeline file is written at, and the versions a load accepts.
+# A format change adds the new version here and to the supported set; the loaders
+# only test membership (``Pipeline.load``).
+#   0.1.0: first format (v0.2.0).
+#   0.2.0: adds ``orcapod_version`` (v0.3.0); a 0.1.0 file loads unchanged.
+PIPELINE_FORMAT_VERSION = "0.2.0"
+SUPPORTED_FORMAT_VERSIONS = frozenset({"0.1.0", "0.2.0"})
 
 # ---------------------------------------------------------------------------
 # LoadStatus
@@ -137,6 +151,7 @@ def _build_source_registry() -> dict[str, type]:
     from orcapod.core.sources.csv_source import CSVSource
     from orcapod.core.sources.data_frame_source import DataFrameSource
     from orcapod.core.sources.delta_table_source import DeltaTableSource
+    from orcapod.core.sources.derived_source import DerivedSource
     from orcapod.core.sources.dict_source import DictSource
     from orcapod.core.sources.list_source import ListSource
     from orcapod.core.sources.spiraldb_table_source import SpiralDBTableSource
@@ -146,11 +161,12 @@ def _build_source_registry() -> dict[str, type]:
     return {
         "csv": CSVSource,
         "delta_table": DeltaTableSource,
-        "dict": DictSource,
-        "list": ListSource,
-        "data_frame": DataFrameSource,
-        "arrow_table": ArrowTableSource,
+        DictSource.SOURCE_KIND: DictSource,
+        ListSource.SOURCE_KIND: ListSource,
+        DataFrameSource.SOURCE_KIND: DataFrameSource,
+        ArrowTableSource.SOURCE_KIND: ArrowTableSource,
         "cached": CachedSource,
+        "derived": DerivedSource,
         "spiraldb_table": SpiralDBTableSource,
         "sqlite_table": SQLiteTableSource,
         "postgresql_table": PostgreSQLTableSource,
@@ -165,7 +181,9 @@ def _build_operator_registry() -> dict[str, type]:
     """
     from orcapod.core.operators import (
         Batch,
+        DropColumns,
         DropDataColumns,
+        DropNulls,
         DropTagColumns,
         GroupBy,
         Join,
@@ -173,6 +191,7 @@ def _build_operator_registry() -> dict[str, type]:
         MapTags,
         MergeJoin,
         PolarsFilter,
+        SelectColumns,
         SelectDataColumns,
         SelectTagColumns,
         SemiJoin,
@@ -188,9 +207,12 @@ def _build_operator_registry() -> dict[str, type]:
         "DropTagColumns": DropTagColumns,
         "SelectDataColumns": SelectDataColumns,
         "DropDataColumns": DropDataColumns,
+        "SelectColumns": SelectColumns,
+        "DropColumns": DropColumns,
         "MapTags": MapTags,
         "MapData": MapData,
         "PolarsFilter": PolarsFilter,
+        "DropNulls": DropNulls,
     }
 
 
@@ -224,9 +246,10 @@ def _get_observer_registry() -> dict[str, Any]:
         from orcapod.pipeline.status_observer import StatusObserver
         from orcapod.pipeline.logging_observer import LoggingObserver
         from orcapod.pipeline.composite_observer import CompositeObserver
+
         _observer_registry = {
-            "status":    lambda cfg, reg: StatusObserver.from_config(cfg, reg),
-            "logging":   lambda cfg, reg: LoggingObserver.from_config(cfg, reg),
+            "status": lambda cfg, reg: StatusObserver.from_config(cfg, reg),
+            "logging": lambda cfg, reg: LoggingObserver.from_config(cfg, reg),
             "composite": lambda cfg, reg: CompositeObserver.from_config(cfg, reg),
         }
     return _observer_registry
@@ -271,7 +294,9 @@ def _ensure_registries() -> None:
 # ---------------------------------------------------------------------------
 
 
-def resolve_database_from_config(config: dict[str, Any], db_registry: dict | None = None) -> Any:
+def resolve_database_from_config(
+    config: dict[str, Any], db_registry: dict | None = None
+) -> Any:
     """Reconstruct a database instance from a config dict.
 
     Args:
@@ -296,7 +321,9 @@ def resolve_database_from_config(config: dict[str, Any], db_registry: dict | Non
             raise ValueError("db_registry required to resolve scoped database config")
         ref = config["ref"]
         if ref not in db_registry:
-            raise ValueError(f"Registry key {ref!r} not found; available keys: {sorted(db_registry.keys())}")
+            raise ValueError(
+                f"Registry key {ref!r} not found; available keys: {sorted(db_registry.keys())}"
+            )
         root_config = db_registry[ref]
         root_db = resolve_database_from_config(root_config)
         return root_db.at(*config["path"])
@@ -484,12 +511,14 @@ def _source_proxy_from_config(
         output_schema = node_descriptor.get("output_schema", {})
         tag_schema_dict = output_schema.get("tag", {})
         data_schema_dict = output_schema.get("data", {})
+        saved_nullable = output_schema.get("nullable")
     else:
         # Inner sources (e.g. inside CachedSource) embed identity via _identity_config()
         content_hash = config.get("content_hash")
         pipeline_hash_val = config.get("pipeline_hash")
         tag_schema_dict = config.get("tag_schema", {})
         data_schema_dict = config.get("data_schema", {})
+        saved_nullable = config.get("nullable")
 
     if not content_hash or not pipeline_hash_val:
         raise ValueError(
@@ -505,8 +534,19 @@ def _source_proxy_from_config(
     if source_type and source_type in SOURCE_REGISTRY:
         expected_class_name = SOURCE_REGISTRY[source_type].__name__
 
-    tag_schema = Schema(deserialize_schema(tag_schema_dict))
-    data_schema = Schema(deserialize_schema(data_schema_dict))
+    # A config without the nullability record (written before ITL-1043) is lossy.
+    tag_schema = Schema(
+        deserialize_schema(
+            tag_schema_dict,
+            nullable=None if saved_nullable is None else saved_nullable["tag"],
+        )
+    )
+    data_schema = Schema(
+        deserialize_schema(
+            data_schema_dict,
+            nullable=None if saved_nullable is None else saved_nullable["data"],
+        )
+    )
 
     return SourceProxy(
         source_id=config.get("source_id", "unknown"),
@@ -573,14 +613,53 @@ def register_data_function(type_id: str, cls: type) -> None:
 # ---------------------------------------------------------------------------
 
 
+class SavedSchemaVersionError(ValueError):
+    """A saved schema predates complete logical type identifiers."""
+
+
+def _serialize_arrow_type(arrow_type: Any) -> str:
+    """Render a schema type, preserving complete logical identifiers at every depth."""
+    import pyarrow as pa
+
+    if isinstance(arrow_type, pa.ExtensionType):
+        return f"extension<{arrow_type_identifier(arrow_type).text}>"
+    if pa.types.is_list(arrow_type) or pa.types.is_large_list(arrow_type):
+        field = arrow_type.value_field
+        child = _serialize_arrow_type(field.type)
+        nullable = "" if field.nullable else " not null"
+        outer = "large_list" if pa.types.is_large_list(arrow_type) else "list"
+        return f"{outer}<{field.name}: {child}{nullable}>"
+    if pa.types.is_fixed_size_list(arrow_type):
+        field = arrow_type.value_field
+        nullable = "" if field.nullable else " not null"
+        return (
+            f"fixed_size_list<{field.name}: {_serialize_arrow_type(field.type)}"
+            f"{nullable}>[{arrow_type.list_size}]"
+        )
+    if pa.types.is_struct(arrow_type):
+        fields = [
+            f"{field.name}: {_serialize_arrow_type(field.type)}"
+            + ("" if field.nullable else " not null")
+            for field in arrow_type
+        ]
+        return "struct<" + ", ".join(fields) + ">"
+    if pa.types.is_map(arrow_type):
+        ordered = ", keys_sorted" if arrow_type.keys_sorted else ""
+        return (
+            f"map<{_serialize_arrow_type(arrow_type.key_type)}, "
+            f"{_serialize_arrow_type(arrow_type.item_type)}{ordered}>"
+        )
+    return str(arrow_type)
+
+
 def serialize_schema(schema: Any, type_converter: Any | None = None) -> dict[str, str]:
     """Convert a Schema mapping to JSON-serializable Arrow type strings.
 
     The result contains human-readable Arrow type strings for each field
     (e.g. ``"int64"``, ``"large_string"``, ``"list<item: int64>"``).
-    These strings follow Arrow's canonical format and can be parsed back
-    by `deserialize_schema` in any language that implements the
-    Arrow type grammar.
+    Primitive/container strings follow Arrow's format. Logical types use
+    ``extension<name;hex-metadata>`` with the canonical full identifier, including
+    nested positions; the reader validates it against the registered type.
 
     Args:
         schema: A Schema-like mapping from field name to data type.
@@ -597,16 +676,99 @@ def serialize_schema(schema: Any, type_converter: Any | None = None) -> dict[str
         for k, v in schema.items():
             try:
                 arrow_type = type_converter.python_type_to_arrow_type(v)
-                result[k] = str(arrow_type)
+                result[k] = _serialize_arrow_type(arrow_type)
             except Exception:
                 result[k] = str(v)
         return result
-    return {k: str(v) for k, v in schema.items()}
+    import pyarrow as pa
+
+    return {
+        k: _serialize_arrow_type(v) if isinstance(v, pa.DataType) else str(v)
+        for k, v in schema.items()
+    }
+
+
+def nullable_column_names(schema: Any, type_converter: Any) -> list[str]:
+    """Return the names of the columns of ``schema`` whose values may be null.
+
+    A column may be null when its type is ``T | None``, by the rule
+    ``type_converter.python_schema_to_arrow_schema`` uses to set a field's
+    nullability. ``serialize_schema`` writes an Arrow type, which carries no field
+    nullability, so a saved schema records these names beside its type strings
+    (ITL-1043). A column whose type has no Arrow type is left out: its saved type text
+    cannot be restored either.
+
+    Args:
+        schema: A Schema-like mapping from column name to Python type.
+        type_converter: The type converter that writes the schema's type strings.
+
+    Returns:
+        The names, in the schema's column order.
+    """
+    names: list[str] = []
+    for name, python_type in schema.items():
+        try:
+            arrow_schema = type_converter.python_schema_to_arrow_schema(
+                {name: python_type}
+            )
+        except Exception:
+            continue
+        if arrow_schema.field(name).nullable:
+            names.append(name)
+    return names
+
+
+def serialize_nullability(
+    tag_schema: Any, data_schema: Any, type_converter: Any
+) -> dict[str, list[str]]:
+    """Return the saved record of which tag and data columns may be null.
+
+    Written next to the type strings of a saved ``(tag, data)`` schema pair, as
+    ``{"tag": [...], "data": [...]}``. An empty list records that no column of that
+    group may be null; a schema saved without the record has unknown nullability.
+
+    Args:
+        tag_schema: The tag schema, a mapping from column name to Python type.
+        data_schema: The data schema, a mapping from column name to Python type.
+        type_converter: The type converter that writes the schemas' type strings.
+
+    Returns:
+        The nullable tag and data column names.
+    """
+    return {
+        "tag": nullable_column_names(tag_schema, type_converter),
+        "data": nullable_column_names(data_schema, type_converter),
+    }
+
+
+def _python_type_of_saved_column(
+    name: str, arrow_type: Any, nullable: bool, type_converter: Any
+) -> Any:
+    """Return the Python type of a saved column: its Arrow type, ``T | None`` if nullable.
+
+    Goes through ``arrow_schema_to_python_schema``, the converter's own rule for a
+    field's nullability, so a restored type hashes as the running node's does.
+    """
+    import pyarrow as pa
+
+    field = pa.field(name, arrow_type, nullable=nullable)
+    return type_converter.arrow_schema_to_python_schema(pa.schema([field]))[name]
+
+
+def _check_nullable_names(columns: Any, nullable: Any) -> None:
+    """Raise ``ValueError`` if a saved nullable column name is not a saved column."""
+    unknown = sorted(set(nullable) - set(columns))
+    if unknown:
+        raise ValueError(
+            f"The saved nullable columns {unknown} are not among the saved columns "
+            f"{list(columns)}."
+        )
 
 
 def deserialize_schema(
     schema_dict: dict[str, str],
     type_converter: Any | None = None,
+    nullable: Collection[str] | None = None,
 ) -> dict[str, Any]:
     """Reconstruct a Python-type schema from Arrow type string values.
 
@@ -620,27 +782,126 @@ def deserialize_schema(
             produced by `serialize_schema`.
         type_converter: Optional type converter for Arrow→Python conversion.
             When ``None``, the default data context's converter is used.
+        nullable: The columns saved as nullable (one group of
+            ``serialize_nullability``); each becomes ``T | None``. ``None`` when the
+            file records no nullability: every column is then restored as ``T``.
 
     Returns:
         A dict mapping field names to Python types (or raw strings if
         parsing fails).
+
+    Raises:
+        ValueError: If ``nullable`` names a column that is not in ``schema_dict``.
     """
     if type_converter is None:
         from orcapod.contexts import resolve_context
 
         type_converter = resolve_context(None).type_converter
+    if nullable is not None:
+        _check_nullable_names(schema_dict, nullable)
 
     result: dict[str, Any] = {}
     for name, type_str in schema_dict.items():
         try:
-            arrow_type = parse_arrow_type_string(type_str)
-            result[name] = type_converter.arrow_type_to_python_type(arrow_type)
+            arrow_type = parse_arrow_type_string(type_str, type_converter)
+            result[name] = _python_type_of_saved_column(
+                name,
+                arrow_type,
+                nullable is not None and name in nullable,
+                type_converter,
+            )
+        except LogicalTypeIdentifierError as exc:
+            raise exc.for_column(name) from exc
+        except SavedSchemaVersionError:
+            raise
         except Exception:
             result[name] = type_str
     return result
 
 
-def parse_arrow_type_string(type_str: str) -> Any:
+def serialize_output_schema(
+    tag_schema: Any, data_schema: Any, type_converter: Any
+) -> dict[str, Any]:
+    """Return a node's saved ``output_schema`` entry.
+
+    ``{"tag": {...}, "data": {...}, "nullable": {"tag": [...], "data": [...]}}``: the
+    type strings of `serialize_schema` and the record of `serialize_nullability`.
+
+    Args:
+        tag_schema: The node's tag schema.
+        data_schema: The node's data schema.
+        type_converter: The node's type converter.
+
+    Returns:
+        The entry, ready for JSON.
+    """
+    return {
+        "tag": serialize_schema(tag_schema, type_converter),
+        "data": serialize_schema(data_schema, type_converter),
+        "nullable": serialize_nullability(tag_schema, data_schema, type_converter),
+    }
+
+
+def deserialize_output_schema(
+    output_schema: dict[str, Any],
+    type_converter: Any,
+) -> tuple[Schema, Schema]:
+    """Reconstruct a node's ``(tag, data)`` output schema from its saved descriptor.
+
+    Args:
+        output_schema: The descriptor's ``output_schema`` entry, as written by
+            `serialize_output_schema`. An entry without ``"nullable"`` (a file written
+            before it was recorded) restores every column as ``T``: lossy.
+        type_converter: The node's type converter, used to turn each Arrow type back
+            into the Python type that ``output_schema()`` reports.
+
+    Returns:
+        The tag schema and the data schema, with Python types.
+
+    Raises:
+        ValueError: If a column's saved type cannot be restored to a Python type,
+            such as an unregistered logical type, or a saved nullable column name is
+            not a saved column. The message names the column and its saved type string.
+    """
+    saved_nullable: dict[str, list[str]] | None = output_schema.get("nullable")
+
+    def restore(columns: dict[str, str], nullable: list[str] | None) -> Schema:
+        if nullable is not None:
+            _check_nullable_names(columns, nullable)
+        restored: dict[str, Any] = {}
+        for name, type_str in columns.items():
+            try:
+                arrow_type = parse_arrow_type_string(type_str, type_converter)
+                restored[name] = _python_type_of_saved_column(
+                    name,
+                    arrow_type,
+                    nullable is not None and name in nullable,
+                    type_converter,
+                )
+            except LogicalTypeIdentifierError as exc:
+                raise exc.for_column(name) from exc
+            except SavedSchemaVersionError as exc:
+                raise SavedSchemaVersionError(f"Column {name!r}: {exc}") from exc
+            except Exception as exc:
+                raise ValueError(
+                    f"Column {name!r} has the saved type {type_str!r}, which cannot "
+                    "be restored to a Python type."
+                ) from exc
+        return Schema(restored)
+
+    return (
+        restore(
+            output_schema.get("tag", {}),
+            None if saved_nullable is None else saved_nullable["tag"],
+        ),
+        restore(
+            output_schema.get("data", {}),
+            None if saved_nullable is None else saved_nullable["data"],
+        ),
+    )
+
+
+def parse_arrow_type_string(type_str: str, type_converter: Any | None = None) -> Any:
     """Parse an Arrow type string into a ``pa.DataType``.
 
     Handles both primitive types (``"int64"``, ``"large_string"``) and
@@ -651,6 +912,8 @@ def parse_arrow_type_string(type_str: str) -> Any:
 
     Args:
         type_str: Arrow type string to parse.
+        type_converter: The saved node's converter for resolving logical identifiers.
+            If omitted, logical types use the default context's converter.
 
     Returns:
         The corresponding ``pa.DataType``.
@@ -662,11 +925,57 @@ def parse_arrow_type_string(type_str: str) -> Any:
 
     type_str = type_str.strip()
 
+    if type_str.startswith("fixed_size_list<"):
+        import re
+
+        match = re.fullmatch(r"fixed_size_list<(.*)>\[(\d+)\]", type_str)
+        if match is None:
+            raise ValueError(f"Malformed fixed-size list: {type_str!r}")
+        return pa.list_(
+            _parse_arrow_field(match.group(1), type_converter), int(match.group(2))
+        )
+
+    if type_str.startswith("extension<"):
+        if not type_str.endswith(">"):
+            raise LogicalTypeIdentifierError(LogicalTypeIdentifier(type_str, b""), ())
+        identifier = type_str[len("extension<") : -1]
+        name, separator, metadata_text = identifier.partition(";")
+        if not name:
+            raise LogicalTypeIdentifierError(
+                LogicalTypeIdentifier(name, metadata_text.encode()), ()
+            )
+        if not separator:
+            raise SavedSchemaVersionError(
+                "This file was saved by an earlier version without a full logical "
+                "type identifier; read it with that version and save it again with "
+                "the original pipeline under the current version."
+            )
+        try:
+            metadata = bytes.fromhex(metadata_text)
+        except ValueError as exc:
+            error = LogicalTypeIdentifierError(
+                LogicalTypeIdentifier(name, metadata_text.encode()), ()
+            )
+            error.add_note("Saved logical type metadata is not hexadecimal.")
+            raise error from exc
+        if type_converter is None:
+            from orcapod.contexts import resolve_context
+
+            type_converter = resolve_context(None).type_converter
+        logical_type = type_converter.get_logical_type_by_arrow_extension_name(name)
+        if logical_type is None:
+            raise ValueError(f"Unregistered extension type: {name!r}")
+        require_readable(logical_type, metadata)
+        return logical_type.get_arrow_extension_type()
+
     # Primitive types — try direct lookup via pa.<name>()
     if "<" not in type_str:
         factory = _get_arrow_primitive_types().get(type_str)
         if factory is not None:
             return factory()
+        parameterized = _parse_parameterized_type(type_str)
+        if parameterized is not None:
+            return parameterized
         raise ValueError(f"Unknown Arrow type: {type_str!r}")
 
     # Nested types — parse the outer type and recurse
@@ -676,8 +985,7 @@ def parse_arrow_type_string(type_str: str) -> Any:
 
     if outer in ("list", "large_list"):
         # "list<item: int64>" or "list<item: struct<...>>"
-        child_type_str = _strip_field_name(inner)
-        child_type = parse_arrow_type_string(child_type_str)
+        child_type = _parse_arrow_field(inner, type_converter)
         return (
             pa.large_list(child_type) if outer == "large_list" else pa.list_(child_type)
         )
@@ -685,26 +993,82 @@ def parse_arrow_type_string(type_str: str) -> Any:
     if outer == "struct":
         # "struct<a: int64, b: string>" — split on top-level commas
         fields = _split_struct_fields(inner)
-        pa_fields = []
-        for field_str in fields:
-            colon_pos = field_str.index(":")
-            field_name = field_str[:colon_pos].strip()
-            field_type_str = field_str[colon_pos + 1 :].strip()
-            pa_fields.append(
-                pa.field(field_name, parse_arrow_type_string(field_type_str))
-            )
+        pa_fields = [
+            _parse_arrow_field(field_str, type_converter) for field_str in fields
+        ]
         return pa.struct(pa_fields)
 
     if outer == "map":
         # "map<large_string, int64>" — split on first top-level comma
-        parts = _split_top_level(inner, ",", max_splits=1)
+        parts = _split_top_level(inner, ",")
+        keys_sorted = len(parts) == 3 and parts[-1].strip() == "keys_sorted"
+        if keys_sorted:
+            parts = parts[:-1]
         if len(parts) != 2:
             raise ValueError(f"Cannot parse map type: {type_str!r}")
-        key_type = parse_arrow_type_string(parts[0].strip())
-        value_type = parse_arrow_type_string(parts[1].strip())
-        return pa.map_(key_type, value_type)
+        key_type = parse_arrow_type_string(parts[0].strip(), type_converter)
+        value_type = parse_arrow_type_string(parts[1].strip(), type_converter)
+        if keys_sorted:
+            return pa.map_(key_type, value_type, True)
+        return pa.map_(key_type, value_type, False)
 
     raise ValueError(f"Unknown nested Arrow type: {type_str!r}")
+
+
+def _parse_arrow_field(text: str, type_converter: Any | None) -> Any:
+    """Restore a nested field's type and nullability from schema text."""
+    import pyarrow as pa
+
+    name, separator, type_text = text.strip().partition(":")
+    if not separator:
+        name, type_text = "item", text
+    type_text = type_text.strip()
+    nullable = not type_text.endswith(" not null")
+    if not nullable:
+        type_text = type_text[: -len(" not null")]
+    return pa.field(
+        name.strip(),
+        parse_arrow_type_string(type_text, type_converter),
+        nullable=nullable,
+    )
+
+
+def _parse_parameterized_type(type_str: str) -> Any | None:
+    """Parse a parameterized non-nested Arrow type string, or return ``None``.
+
+    Handles the canonical ``str()`` forms of ``timestamp[us]``,
+    ``timestamp[us, tz=UTC]``, ``duration[us]``, ``time32[ms]``,
+    ``time64[us]``, ``date64[ms]``, ``decimal128(10, 2)`` and
+    ``decimal256(40, 2)``.
+
+    Args:
+        type_str: Arrow type string, stripped of surrounding whitespace.
+
+    Returns:
+        The corresponding ``pa.DataType``, or ``None`` if *type_str* is not one
+        of these forms.
+    """
+    import re
+    from typing import Literal, cast
+
+    import pyarrow as pa
+
+    # Each regex admits only the units Arrow accepts, so the casts below hold.
+    if match := re.fullmatch(r"timestamp\[(s|ms|us|ns)(?:, tz=(.+))?\]", type_str):
+        unit = cast(Literal["s", "ms", "us", "ns"], match.group(1))
+        return pa.timestamp(unit, tz=match.group(2))
+    if match := re.fullmatch(r"duration\[(s|ms|us|ns)\]", type_str):
+        return pa.duration(cast(Literal["s", "ms", "us", "ns"], match.group(1)))
+    if match := re.fullmatch(r"time32\[(s|ms)\]", type_str):
+        return pa.time32(cast(Literal["s", "ms"], match.group(1)))
+    if match := re.fullmatch(r"time64\[(us|ns)\]", type_str):
+        return pa.time64(cast(Literal["us", "ns"], match.group(1)))
+    if type_str == "date64[ms]":
+        return pa.date64()
+    if match := re.fullmatch(r"decimal(128|256)\((\d+), (-?\d+)\)", type_str):
+        factory = pa.decimal128 if match.group(1) == "128" else pa.decimal256
+        return factory(int(match.group(2)), int(match.group(3)))
+    return None
 
 
 def _strip_field_name(s: str) -> str:
@@ -719,7 +1083,10 @@ def _strip_field_name(s: str) -> str:
 
 
 def _split_top_level(s: str, sep: str, max_splits: int = -1) -> list[str]:
-    """Split *s* on *sep*, but only at the top level (not inside ``<>``).
+    """Split *s* on *sep*, but only at the top level (not inside ``<>``, ``[]`` or ``()``).
+
+    Brackets and parentheses count because parameterized types carry commas,
+    e.g. ``timestamp[us, tz=UTC]`` and ``decimal128(10, 2)``.
 
     Args:
         s: String to split.
@@ -733,9 +1100,9 @@ def _split_top_level(s: str, sep: str, max_splits: int = -1) -> list[str]:
     depth = 0
     current: list[str] = []
     for ch in s:
-        if ch == "<":
+        if ch in "<[(":
             depth += 1
-        elif ch == ">":
+        elif ch in ">])":
             depth -= 1
         if ch == sep and depth == 0 and (max_splits == -1 or len(parts) < max_splits):
             parts.append("".join(current))
@@ -831,5 +1198,7 @@ _BUILTIN_TYPE_MAP: dict[str, type] = {
 # PipelineJob format version
 # ---------------------------------------------------------------------------
 
-PIPELINE_JOB_FORMAT_VERSION = "0.1.0"
-SUPPORTED_JOB_FORMAT_VERSIONS = frozenset({"0.1.0"})
+# Same scheme as ``PIPELINE_FORMAT_VERSION``: the written version, and the set a
+# load accepts (``PipelineJob.load``).
+PIPELINE_JOB_FORMAT_VERSION = "0.2.0"
+SUPPORTED_JOB_FORMAT_VERSIONS = frozenset({"0.1.0", "0.2.0"})

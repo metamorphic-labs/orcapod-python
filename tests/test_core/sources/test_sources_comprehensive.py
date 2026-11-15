@@ -4,11 +4,11 @@ behaviours not already exercised in test_sources.py or
 test_source_protocol_conformance.py.
 
 Coverage added here:
-- CSVSource: construction, source_id defaulting, record_id_column, resolve_field,
+- CSVSource: construction, source_id defaulting, record_id_column,
   file-not-found, protocol conformance
-- DeltaTableSource: construction, source_id defaulting, resolve_field, bad path
+- DeltaTableSource: construction, source_id defaulting, bad path
   error, protocol conformance
-- DataFrameSource: string tag_columns, resolve_field raises, system-column
+- DataFrameSource: string tag_columns, system-column
   stripping from Polars input, source_id parameter
 - DictSource: data_schema parameter, empty-data raises, source_id, content
   hash with explicit schema
@@ -108,12 +108,6 @@ class TestCSVSource:
         src = CSVSource(file_path=csv_path, source_id="my_csv_name")
         assert src.source_id == "my_csv_name"
 
-    def test_resolve_field_raises_not_implemented(self, csv_path):
-        """CSVSource delegates to ArrowTableSource which no longer implements resolve_field."""
-        src = CSVSource(file_path=csv_path, tag_columns=["user_id"])
-        with pytest.raises(NotImplementedError):
-            src.resolve_field("row_0", "score")
-
     def test_file_not_found_raises(self, tmp_path):
         with pytest.raises(Exception):
             CSVSource(file_path=str(tmp_path / "no_such_file.csv"))
@@ -199,12 +193,6 @@ class TestDeltaTableSource:
         src = DeltaTableSource(delta_table_path=delta_path, source_id="my_delta")
         assert src.source_id == "my_delta"
 
-    def test_resolve_field_raises_not_implemented(self, delta_path):
-        """DeltaTableSource delegates to ArrowTableSource which no longer implements resolve_field."""
-        src = DeltaTableSource(delta_table_path=delta_path, tag_columns=["id"])
-        with pytest.raises(NotImplementedError):
-            src.resolve_field("row_0", "id")
-
     def test_bad_path_raises_value_error(self, tmp_path):
         with pytest.raises(ValueError, match="Delta table not found"):
             DeltaTableSource(delta_table_path=tmp_path / "no_delta_here")
@@ -235,11 +223,13 @@ def delta_mixed_nullable_path(tmp_path: Path) -> Path:
     """Create a Delta table with a mix of nullable and non-nullable columns."""
     from deltalake import write_deltalake
 
-    schema = pa.schema([
-        pa.field("id",    pa.int64(),        nullable=False),
-        pa.field("label", pa.large_string(), nullable=True),
-        pa.field("score", pa.float64(),      nullable=False),
-    ])
+    schema = pa.schema(
+        [
+            pa.field("id", pa.int64(), nullable=False),
+            pa.field("label", pa.large_string(), nullable=True),
+            pa.field("score", pa.float64(), nullable=False),
+        ]
+    )
     table = pa.table(
         {"id": [1, 2], "label": ["a", "b"], "score": [1.0, 2.0]},
         schema=schema,
@@ -256,9 +246,7 @@ class TestDeltaTableSourceNullability:
         self, delta_mixed_nullable_path: Path
     ) -> None:
         """Columns declared NOT NULL in the Delta schema must map to T, not T | None."""
-        source = DeltaTableSource(
-            delta_mixed_nullable_path, tag_columns=["id"]
-        )
+        source = DeltaTableSource(delta_mixed_nullable_path, tag_columns=["id"])
         _, data_schema = source.output_schema()
         # score is nullable=False in the Delta schema → must be float, not float | None
         assert data_schema["score"] is float
@@ -267,12 +255,10 @@ class TestDeltaTableSourceNullability:
         self, delta_mixed_nullable_path: Path
     ) -> None:
         """Columns declared nullable in the Delta schema must map to T | None."""
-        source = DeltaTableSource(
-            delta_mixed_nullable_path, tag_columns=["id"]
-        )
+        source = DeltaTableSource(delta_mixed_nullable_path, tag_columns=["id"])
         _, data_schema = source.output_schema()
         # label is nullable=True in the Delta schema → must be str | None
-        import types
+
         assert data_schema["label"] == str | None
 
 
@@ -289,13 +275,6 @@ class TestDataFrameSourceAdditional:
         tag_keys, data_keys = src.keys()
         assert "id" in tag_keys
         assert "value" in data_keys
-
-    def test_resolve_field_raises_not_implemented(self):
-        """DataFrameSource does not override resolve_field; must raise."""
-        df = pl.DataFrame({"id": [1, 2], "value": ["x", "y"]})
-        src = DataFrameSource(data=df, tag_columns="id")
-        with pytest.raises(NotImplementedError):
-            src.resolve_field("row_0", "value")
 
     def test_system_columns_stripped_from_polars_input(self):
         """Polars DataFrames with system-prefix columns have those columns dropped."""
@@ -375,12 +354,6 @@ class TestDictSourceAdditional:
         data = [{"id": 1, "val": "x"}]
         src = DictSource(data=data, tag_columns=["id"], source_id="my_dict")
         assert src.source_id == "my_dict"
-
-    def test_resolve_field_error_mentions_class_name(self):
-        data = [{"id": 1, "val": "a"}]
-        src = DictSource(data=data, tag_columns=["id"], source_id="named_dict")
-        with pytest.raises(NotImplementedError, match="DictSource"):
-            src.resolve_field("row_0", "val")
 
 
 # ---------------------------------------------------------------------------
@@ -536,17 +509,12 @@ class TestArrowTableSourceAdditional:
         token = t.column(source_cols[0])[0].as_py()
         assert token.startswith("my_source::")
 
-    def test_resolve_field_raises_not_implemented(self):
-        """ArrowTableSource no longer implements resolve_field."""
-        table = pa.table({"x": pa.array([1, 2, 3], type=pa.int64())})
-        src = ArrowTableSource(table=table, infer_nullable=True)
-        with pytest.raises(NotImplementedError):
-            src.resolve_field("row_0", "x")
-
     def test_system_tag_columns_forwarded_to_stream(self):
         """system_tag_columns passed at construction are preserved."""
         table = pa.table({"x": pa.array([1, 2], type=pa.int64())})
-        src = ArrowTableSource(table=table, system_tag_columns=["sys_col"], infer_nullable=True)
+        src = ArrowTableSource(
+            table=table, system_tag_columns=["sys_col"], infer_nullable=True
+        )
         assert "sys_col" in src._system_tag_columns
 
     def test_as_table_all_info_includes_system_tag_columns(self):
@@ -565,13 +533,6 @@ class TestArrowTableSourceAdditional:
             for c in enriched.column_names
         )
 
-    def test_resolve_field_on_empty_record_id_prefix_raises(self):
-        """An empty string record_id raises NotImplementedError."""
-        table = pa.table({"x": pa.array([1, 2], type=pa.int64())})
-        src = ArrowTableSource(table=table, infer_nullable=True)
-        with pytest.raises(NotImplementedError):
-            src.resolve_field("", "x")
-
     def test_tag_columns_not_present_in_table_raises(self):
         """tag_columns that don't exist in the table raise ValueError."""
         table = pa.table(
@@ -581,7 +542,9 @@ class TestArrowTableSourceAdditional:
             }
         )
         with pytest.raises(ValueError, match="tag_columns not found in table"):
-            ArrowTableSource(table=table, tag_columns=["nonexistent", "id"], infer_nullable=True)
+            ArrowTableSource(
+                table=table, tag_columns=["nonexistent", "id"], infer_nullable=True
+            )
 
     def test_tag_columns_all_missing_raises(self):
         """All tag_columns missing from the table raises ValueError."""
@@ -592,7 +555,9 @@ class TestArrowTableSourceAdditional:
             }
         )
         with pytest.raises(ValueError, match="tag_columns not found in table"):
-            ArrowTableSource(table=table, tag_columns=["foo", "bar"], infer_nullable=True)
+            ArrowTableSource(
+                table=table, tag_columns=["foo", "bar"], infer_nullable=True
+            )
 
     def test_tag_columns_all_valid_succeeds(self):
         """tag_columns that all exist in the table work correctly."""
@@ -680,3 +645,33 @@ class TestSourceRegistryAdditional:
             self.registry.register(name, src)
         pairs = dict(self.registry.items())
         assert pairs == srcs
+
+
+def _path_tag_fn(element: Path, _idx: int) -> dict[str, Path | str]:
+    return {"label": str(element)}
+
+
+# This module uses postponed annotations, which would leave plain strings here.
+# Install live type objects, as a module without the __future__ import has.
+_path_tag_fn.__annotations__ = {
+    "element": Path,
+    "_idx": int,
+    "return": dict[str, Path | str],
+}
+
+
+class TestListSourceSignatureModePythonVersionIndependence:
+    """ITL-825: the 'signature' tag-function hash must not embed ``pathlib._local``."""
+
+    def test_signature_hash_string_matches_python_312(self):
+        src = ListSource(
+            name="val",
+            data=[1, 2, 3],
+            tag_function=_path_tag_fn,
+            expected_tag_keys=["label"],
+            tag_function_hash_mode="signature",
+        )
+        # The pre-hash string is the subject; no public accessor exposes it.
+        assert src._hash_tag_function() == (  # pyright: ignore[reportPrivateUsage]
+            "(element: pathlib.Path, _idx: int) -> dict[str, pathlib.Path | str]"
+        )

@@ -4,6 +4,7 @@ After ENG-379:
 - iter_data() is strictly read-only — never triggers computation
 - Computation only via run() / execute() / async_execute()
 """
+
 from __future__ import annotations
 
 from unittest.mock import patch
@@ -12,7 +13,6 @@ import pyarrow as pa
 import pytest
 
 from orcapod.core.function_pod import FunctionPod
-from orcapod.core.nodes import FunctionNode
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.data_function import PythonDataFunction
 from orcapod.core.sources import ArrowTableSource
@@ -59,14 +59,17 @@ class TestIterDatasReadOnly:
             list(node.iter_data())
             mock_proc.assert_not_called()
 
-    def test_iter_after_db_populated_hot_loads_without_compute(self):
-        """iter_data() on a node with DB records hot-loads without _process_data_internal."""
+    def test_iter_after_db_populated_yields_nothing_until_a_run_loads(self):
+        """A node over a populated DB yields nothing before a run (ITL-1095); its run
+        loads every result from the DB without _process_data_internal."""
         db = InMemoryArrowDatabase()
         node1 = _make_node(n=3, db=db)
         node1.run()  # populate DB
 
         node2 = _make_node(n=3, db=db)
+        assert list(node2.iter_data()) == []
         with patch.object(node2, "_process_data_internal") as mock_proc:
+            node2.run()
             results = list(node2.iter_data())
             mock_proc.assert_not_called()
         assert len(results) == 3
@@ -90,7 +93,9 @@ class TestIterDatasReadOnly:
         node1.run()
 
         node2 = _make_node(n=3, db=db)
-        with patch.object(node2, "_load_cached_entries", wraps=node2._load_cached_entries) as mock_load:
+        with patch.object(
+            node2, "_load_cached_entries", wraps=node2._load_cached_entries
+        ) as mock_load:
             first = [(t["id"], p["result"]) for t, p in node2.iter_data()]
             second = [(t["id"], p["result"]) for t, p in node2.iter_data()]
             assert mock_load.call_count <= 1  # at most one DB query
@@ -102,7 +107,9 @@ class TestIterDatasReadOnly:
         node.run()
         assert len(node._cached_output_datas) == 3
         for key in node._cached_output_datas:
-            assert isinstance(key, bytes), f"Expected bytes key, got {type(key)}: {key!r}"
+            assert isinstance(key, bytes), (
+                f"Expected bytes key, got {type(key)}: {key!r}"
+            )
             assert b":" in key, f"Entry ID bytes should be method-prefixed, got {key!r}"
 
     def test_as_table_fresh_node_returns_empty_no_compute(self):
@@ -116,16 +123,20 @@ class TestIterDatasReadOnly:
         assert "id" in table.column_names
         assert "result" in table.column_names
 
-    def test_run_cache_only_is_noop(self):
-        """run() on a CACHE_ONLY node returns without error and without computation."""
+    def test_run_cache_only_raises_and_points_to_the_stored_view(self):
+        """run() on a CACHE_ONLY node computes nothing: its input is unavailable, so it
+        has nothing to run or look up, and it says to read ``as_source()`` (ITL-1095)."""
         from orcapod.pipeline.serialization import LoadStatus
 
         node = _make_node()
+        # A loaded node whose upstream is unavailable keeps that input stream; only its
+        # status says it cannot be read (FunctionJobNode.from_descriptor).
         node._load_status = LoadStatus.CACHE_ONLY
-        node._input_stream = None  # simulate no upstream
 
         with patch.object(node, "execute") as mock_exec:
-            node.run()
+            for load_only in (False, True):
+                with pytest.raises(RuntimeError, match=r"as_source\(\)"):
+                    node.run(load_only=load_only)
             mock_exec.assert_not_called()
 
     def test_run_unavailable_raises(self):
@@ -134,7 +145,7 @@ class TestIterDatasReadOnly:
 
         node = _make_node()
         node._load_status = LoadStatus.UNAVAILABLE
-        with pytest.raises(RuntimeError, match="unavailable"):
+        with pytest.raises(RuntimeError, match="was loaded without a database"):
             node.run()
 
     def test_execute_error_policy_continue_skips_failures(self):
@@ -150,7 +161,9 @@ class TestIterDatasReadOnly:
             return x * 2
 
         pf = PythonDataFunction(sometimes_fail, output_keys="result")
-        pf.executor = LocalPythonFunctionExecutor()  # supports_concurrent_execution is False
+        pf.executor = (
+            LocalPythonFunctionExecutor()
+        )  # supports_concurrent_execution is False
         pod = FunctionPod(pf)
         db = InMemoryArrowDatabase()
         node = FunctionJobNode(pod, _make_source(n=3), pipeline_database=db)
@@ -161,7 +174,9 @@ class TestIterDatasReadOnly:
             def on_data_crash(self, node_label, tag, data, exc):
                 errors.append(exc)
 
-        results = node.execute(node._input_stream, observer=CapturingObserver(), error_policy="continue")
+        results = node.execute(
+            node._input_stream, observer=CapturingObserver(), error_policy="continue"
+        )
         assert len(errors) == 1
         assert isinstance(errors[0], ValueError)
         # Two non-failing data should succeed
@@ -186,5 +201,3 @@ def test_as_table_empty_schema_matches_non_empty_schema():
         empty_table.schema.field(n).nullable == full_table.schema.field(n).nullable
         for n in empty_table.column_names
     )
-
-

@@ -11,6 +11,25 @@ Design decisions:
 - Storage type: ``pa.large_list(element_storage)`` — NO extension type inside list value
 - Metadata JSON: ``{"category": "list"|"set", "element_ext_name": "...", "element_ext_metadata": null_or_string}``
 - ``python_type`` returns the full generic alias ``list[uuid.UUID]`` (not bare ``list``)
+
+Native containers (developer, November 11, 2026, ITL-935). ``list[T]`` and ``set[T]``
+of a logical type ``T`` are the *native containers*, and the only ones. They are
+logical types only because Arrow cannot hold an extension type inside a list value
+field; conceptually they are an ordinary list or set of ``T``. Therefore:
+
+- A native container has **no version of its own**: its extension metadata carries no
+  ``"version"`` key. Its identifier is the container kind (``list`` / ``set``) plus the
+  element's identifier (extension name and metadata), so it changes exactly when the
+  element's identifier does.
+- In the type and schema hash a native container is hashed like any generic alias, as
+  its origin and arguments (``GenericAliasHandler``); the element's identifier enters
+  through the argument.
+- A change to how native containers are stored or hashed is a change of the core
+  hashing, that is of the data context (the global hash version), never a logical
+  type change.
+
+A container type supplied by a third party is not a native container: it is an
+ordinary logical type with its own identifier.
 """
 
 from __future__ import annotations
@@ -20,13 +39,19 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from orcapod.logical_types.base_logical_type import BaseLogicalType
-from orcapod.logical_types.registry import make_arrow_extension_type, make_polars_extension_type
+from orcapod.logical_types.registry import (
+    make_arrow_extension_type,
+    make_polars_extension_type,
+)
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
     import polars as pl
     import pyarrow as pa
-    from orcapod.logical_types.protocols import LogicalTypeProtocol, TypeConverterProtocol
+    from orcapod.logical_types.protocols import (
+        LogicalTypeProtocol,
+        TypeConverterProtocol,
+    )
 else:
     pa = LazyModule("pyarrow")
     pl = LazyModule("polars")
@@ -81,15 +106,42 @@ class ListLogicalType(BaseLogicalType):
         element_ext_type = element_logical_type.get_arrow_extension_type()
         element_ext_name = element_ext_type.extension_name
         raw_meta_bytes: bytes = element_ext_type.__arrow_ext_serialize__()
-        element_ext_metadata: str | None = raw_meta_bytes.decode("utf-8") if raw_meta_bytes else None
 
         category = SET_CATEGORY if is_set else LIST_CATEGORY
-        meta_dict = {
-            "category": category,
-            "element_ext_name": element_ext_name,
-            "element_ext_metadata": element_ext_metadata,
-        }
-        self._metadata_bytes: bytes = json.dumps(meta_dict).encode("utf-8")
+
+        def _container_metadata(element_metadata: bytes) -> bytes:
+            """Return the container's extension metadata for one element metadata.
+
+            The result is UTF-8 JSON with the keys ``category`` (list or set),
+            ``element_ext_name`` and ``element_ext_metadata``.
+
+            Args:
+                element_metadata: The element type's extension metadata bytes,
+                    which must be UTF-8 text. Empty bytes are written as JSON
+                    ``null``.
+
+            Returns:
+                The JSON document, encoded as UTF-8.
+            """
+            # No "version" key, by design: see "Native containers" in the module
+            # docstring. The identifier is the container kind plus the element's
+            # identifier, so it changes exactly when the element's does.
+            meta_dict: dict[str, Any] = {
+                "category": category,
+                "element_ext_name": element_ext_name,
+                "element_ext_metadata": (
+                    element_metadata.decode("utf-8") if element_metadata else None
+                ),
+            }
+            return json.dumps(meta_dict).encode("utf-8")
+
+        self._metadata_bytes: bytes = _container_metadata(raw_meta_bytes)
+        # A stored container is readable exactly when its element is: one
+        # readable container metadata value per readable element metadata value.
+        self._also_reads: tuple[bytes, ...] = tuple(
+            _container_metadata(element_metadata)
+            for element_metadata in element_logical_type.readable_extension_metadata()
+        )
 
         # Derive storage type: large_list of the element's storage type (not extension type).
         element_storage = element_ext_type.storage_type
@@ -106,6 +158,28 @@ class ListLogicalType(BaseLogicalType):
             A string like ``"list[orcapod.uuid]"`` or ``"set[orcapod.uuid]"``.
         """
         return self._logical_type_name
+
+    @property
+    def element_logical_type(self) -> LogicalTypeProtocol:
+        """The logical type of the list's elements.
+
+        Returns:
+            The element logical type this list type was built from.
+        """
+        return self._element_logical_type
+
+    def with_element(
+        self, element_logical_type: "LogicalTypeProtocol"
+    ) -> "ListLogicalType":
+        """Return this list or set logical type built over another element logical type.
+
+        Args:
+            element_logical_type: The logical type of the elements.
+
+        Returns:
+            A new ``ListLogicalType`` with the same list or set semantics.
+        """
+        return ListLogicalType(element_logical_type, is_set=self._is_set)
 
     @property
     def python_type(self) -> type:
@@ -135,6 +209,7 @@ class ListLogicalType(BaseLogicalType):
                 self._logical_type_name,
                 self._storage_type,
                 metadata=self._metadata_bytes,
+                also_reads=self._also_reads,
             )
             self._arrow_ext = arrow_ext_class()
         return self._arrow_ext
@@ -163,7 +238,9 @@ class ListLogicalType(BaseLogicalType):
         """
         return self._element_python_type
 
-    def python_to_storage(self, value: Any, converter: TypeConverterProtocol | None) -> list:
+    def python_to_storage(
+        self, value: Any, converter: TypeConverterProtocol | None
+    ) -> list:
         """Convert a Python list or set to its Arrow storage representation.
 
         Delegates per-element conversion to ``converter.python_to_storage`` using
@@ -188,7 +265,10 @@ class ListLogicalType(BaseLogicalType):
         if converter is None:
             elements = list(value)
         else:
-            elements = [converter.python_to_storage(item, self._element_python_type) for item in value]
+            elements = [
+                converter.python_to_storage(item, self._element_python_type)
+                for item in value
+            ]
         if self._is_set:
             try:
                 elements = sorted(elements)
@@ -196,7 +276,9 @@ class ListLogicalType(BaseLogicalType):
                 elements = sorted(elements, key=repr)
         return elements
 
-    def storage_to_python(self, storage_value: Any, converter: TypeConverterProtocol | None) -> list | set:
+    def storage_to_python(
+        self, storage_value: Any, converter: TypeConverterProtocol | None
+    ) -> list | set:
         """Reconstruct a Python list or set from its Arrow storage representation.
 
         Delegates per-element conversion to ``converter.storage_to_python`` using
@@ -271,6 +353,7 @@ class ListLogicalTypeFactory:
                 it lacks a type argument, or if ``T`` has no registered ``LogicalType``.
         """
         import typing
+
         origin = typing.get_origin(python_type)
         args = typing.get_args(python_type)
 
@@ -353,7 +436,9 @@ class ListLogicalTypeFactory:
         )
 
         # Retrieve the now-registered element logical type.
-        element_logical_type = converter.get_logical_type_by_arrow_extension_name(element_ext_name)
+        element_logical_type = converter.get_logical_type_by_arrow_extension_name(
+            element_ext_name
+        )
         if element_logical_type is None:
             raise ValueError(
                 f"ListLogicalTypeFactory.reconstruct_from_arrow: element extension "

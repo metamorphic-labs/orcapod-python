@@ -41,7 +41,9 @@ def simple_table():
 
 @pytest.fixture
 def simple_source(simple_table):
-    return ArrowTableSource(simple_table, tag_columns=["name"], source_id="src_1", infer_nullable=True)
+    return ArrowTableSource(
+        simple_table, tag_columns=["name"], source_id="src_1", infer_nullable=True
+    )
 
 
 @pytest.fixture
@@ -89,8 +91,10 @@ class TestCachedSourceCachePath:
     def test_cache_path_contains_content_hash(self, simple_source, db):
         ps = CachedSource(simple_source, cache_database=db)
         path = ps.cache_path
-        content_hash_str = simple_source.content_hash().to_string()
-        assert any(content_hash_str in segment for segment in path)
+        # The whole component: a labelled hash ("node:semantic_v1:...") must fail.
+        assert path[-2] == f"node:{simple_source.content_hash().to_hex()}"
+        # The layout version is always the last component (ITL-944).
+        assert path[-1] == "sdb_v1"
 
     def test_cache_path_prefix(self, simple_source, db):
         prefix = ("my_project", "v1")
@@ -99,8 +103,12 @@ class TestCachedSourceCachePath:
 
     def test_same_source_same_cache_path(self, simple_table, db):
         """Identical sources produce the same cache path."""
-        s1 = ArrowTableSource(simple_table, tag_columns=["name"], source_id="src", infer_nullable=True)
-        s2 = ArrowTableSource(simple_table, tag_columns=["name"], source_id="src", infer_nullable=True)
+        s1 = ArrowTableSource(
+            simple_table, tag_columns=["name"], source_id="src", infer_nullable=True
+        )
+        s2 = ArrowTableSource(
+            simple_table, tag_columns=["name"], source_id="src", infer_nullable=True
+        )
         ps1 = CachedSource(s1, cache_database=db)
         ps2 = CachedSource(s2, cache_database=db)
         assert ps1.cache_path == ps2.cache_path
@@ -118,8 +126,12 @@ class TestCachedSourceCachePath:
     def test_different_name_different_cache_path(self, db):
         """Different source_id produces different cache paths."""
         t1 = pa.table({"k": ["a"], "v": [1]})
-        s1 = ArrowTableSource(t1, tag_columns=["k"], source_id="src_a", infer_nullable=True)
-        s2 = ArrowTableSource(t1, tag_columns=["k"], source_id="src_b", infer_nullable=True)
+        s1 = ArrowTableSource(
+            t1, tag_columns=["k"], source_id="src_a", infer_nullable=True
+        )
+        s2 = ArrowTableSource(
+            t1, tag_columns=["k"], source_id="src_b", infer_nullable=True
+        )
         ps1 = CachedSource(s1, cache_database=db)
         ps2 = CachedSource(s2, cache_database=db)
         assert ps1.cache_path != ps2.cache_path
@@ -256,8 +268,12 @@ class TestCachedSourceCumulative:
         # but with different data (different content_hash → different cache_path)
         t1 = pa.table({"k": ["a", "b"], "v": [1, 2]})
         t2 = pa.table({"k": ["a", "b", "c"], "v": [1, 2, 3]})
-        s1 = ArrowTableSource(t1, tag_columns=["k"], source_id="shared", infer_nullable=True)
-        s2 = ArrowTableSource(t2, tag_columns=["k"], source_id="shared", infer_nullable=True)
+        s1 = ArrowTableSource(
+            t1, tag_columns=["k"], source_id="shared", infer_nullable=True
+        )
+        s2 = ArrowTableSource(
+            t2, tag_columns=["k"], source_id="shared", infer_nullable=True
+        )
 
         # Different data → different content_hash → different cache_paths
         # So cumulative within the SAME cache_path requires same content_hash
@@ -266,7 +282,9 @@ class TestCachedSourceCumulative:
         assert ps1.as_table().num_rows == 2
 
         # Same data source: should dedup
-        s1_again = ArrowTableSource(t1, tag_columns=["k"], source_id="shared", infer_nullable=True)
+        s1_again = ArrowTableSource(
+            t1, tag_columns=["k"], source_id="shared", infer_nullable=True
+        )
         ps1_again = CachedSource(s1_again, cache_database=db)
         ps1_again.flow()
         assert ps1_again.as_table().num_rows == 2
@@ -282,28 +300,6 @@ class TestCachedSourceCumulative:
 # ---------------------------------------------------------------------------
 
 
-class TestCachedSourceFieldResolution:
-    def test_resolve_field_delegates_raises_not_implemented(self, simple_source, db):
-        """CachedSource delegates to wrapped source which raises NotImplementedError."""
-        ps = CachedSource(simple_source, cache_database=db)
-        with pytest.raises(NotImplementedError):
-            ps.resolve_field("row_0", "age")
-
-    def test_resolve_field_with_record_id_column_raises(self, db):
-        table = pa.table(
-            {
-                "user_id": pa.array(["u1", "u2"], type=pa.large_string()),
-                "score": pa.array([100, 200], type=pa.int64()),
-            }
-        )
-        source = ArrowTableSource(
-            table, tag_columns=["user_id"], record_id_column="user_id", source_id="test", infer_nullable=True
-        )
-        ps = CachedSource(source, cache_database=db)
-        with pytest.raises(NotImplementedError):
-            ps.resolve_field("user_id=u1", "score")
-
-
 # ---------------------------------------------------------------------------
 # Integration with downstream operators
 # ---------------------------------------------------------------------------
@@ -316,8 +312,12 @@ class TestCachedSourceIntegration:
 
         t1 = pa.table({"id": [1, 2, 3], "val_a": [10, 20, 30]})
         t2 = pa.table({"id": [2, 3, 4], "val_b": [200, 300, 400]})
-        s1 = ArrowTableSource(t1, tag_columns=["id"], source_id="a", infer_nullable=True)
-        s2 = ArrowTableSource(t2, tag_columns=["id"], source_id="b", infer_nullable=True)
+        s1 = ArrowTableSource(
+            t1, tag_columns=["id"], source_id="a", infer_nullable=True
+        )
+        s2 = ArrowTableSource(
+            t2, tag_columns=["id"], source_id="b", infer_nullable=True
+        )
 
         ps1 = CachedSource(s1, cache_database=db)
         ps2 = CachedSource(s2, cache_database=db)
@@ -340,7 +340,9 @@ class TestCachedSourceIntegration:
         pod = FunctionPod(data_function=pf)
 
         table = pa.table({"name": ["Alice", "Bob"], "age": [30, 25]})
-        source = ArrowTableSource(table, tag_columns=["name"], source_id="test", infer_nullable=True)
+        source = ArrowTableSource(
+            table, tag_columns=["name"], source_id="test", infer_nullable=True
+        )
         ps = CachedSource(source, cache_database=db)
 
         result = pod(ps)
@@ -363,7 +365,6 @@ class TestCachedSourceWithSourceProxy:
     def _make_proxy(source):
         """Create a SourceProxy matching the given source's identity."""
         from orcapod.core.sources.source_proxy import SourceProxy
-        from orcapod.types import Schema
 
         tag_schema, data_schema = source.output_schema()
         return SourceProxy(
@@ -384,7 +385,9 @@ class TestCachedSourceWithSourceProxy:
                 "age": pa.array([30, 25], type=pa.int64()),
             }
         )
-        source = ArrowTableSource(table, tag_columns=["name"], source_id="test_src", infer_nullable=True)
+        source = ArrowTableSource(
+            table, tag_columns=["name"], source_id="test_src", infer_nullable=True
+        )
         cached = CachedSource(source, cache_database=db)
 
         # Force data into the cache
@@ -395,7 +398,8 @@ class TestCachedSourceWithSourceProxy:
         loaded = CachedSource(
             source=proxy,
             cache_database=db,
-            cache_path=cached.cache_path,
+            # An explicit cache_path excludes the layout component (sdb_v1).
+            cache_path=cached.cache_path[:-1],
             source_id=source.source_id,
         )
 
@@ -414,7 +418,9 @@ class TestCachedSourceWithSourceProxy:
                 "value": pa.array([10, 20], type=pa.int64()),
             }
         )
-        source = ArrowTableSource(table, tag_columns=["id"], source_id="proxy_test", infer_nullable=True)
+        source = ArrowTableSource(
+            table, tag_columns=["id"], source_id="proxy_test", infer_nullable=True
+        )
         proxy = self._make_proxy(source)
         loaded = CachedSource(source=proxy, cache_database=db)
 
@@ -430,7 +436,9 @@ class TestCachedSourceWithSourceProxy:
                 "val": pa.array([1, 2], type=pa.int64()),
             }
         )
-        source = ArrowTableSource(table, tag_columns=["key"], source_id="id_test", infer_nullable=True)
+        source = ArrowTableSource(
+            table, tag_columns=["key"], source_id="id_test", infer_nullable=True
+        )
         cached = CachedSource(source, cache_database=db)
 
         original_content = cached.content_hash()
@@ -440,7 +448,8 @@ class TestCachedSourceWithSourceProxy:
         loaded = CachedSource(
             source=proxy,
             cache_database=db,
-            cache_path=cached.cache_path,
+            # An explicit cache_path excludes the layout component (sdb_v1).
+            cache_path=cached.cache_path[:-1],
             source_id=source.source_id,
         )
         assert loaded.content_hash() == original_content
@@ -455,7 +464,9 @@ class TestCachedSourceWithSourceProxy:
                 "y": pa.array([1], type=pa.int64()),
             }
         )
-        source = ArrowTableSource(table, tag_columns=["x"], source_id="empty_test", infer_nullable=True)
+        source = ArrowTableSource(
+            table, tag_columns=["x"], source_id="empty_test", infer_nullable=True
+        )
         proxy = self._make_proxy(source)
 
         loaded = CachedSource(

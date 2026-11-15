@@ -17,18 +17,36 @@ import io
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
-import polars as pl
 import pyarrow as pa
 import pyarrow.ipc
 
-from orcapod.logical_types.base_logical_type import BaseLogicalType
-from orcapod.logical_types.registry import make_arrow_extension_type, make_polars_extension_type
+from orcapod.hashing.pandas_value_hash import (
+    PANDAS_DATAFRAME_OPTIONS,
+    PANDAS_SERIES_OPTIONS,
+    PANDAS_UNNAMED_SERIES_COLUMN,
+    pandas_attrs_as_stored,
+    pandas_frame_to_arrow,
+    require_restorable,
+)
+from orcapod.logical_types.ignore_list import IgnoreListLogicalType
 
 if TYPE_CHECKING:
     from orcapod.logical_types.protocols import TypeConverterProtocol
 
 
-_SERIES_UNNAMED_SENTINEL = "__pandas_series_unnamed__"
+_SERIES_UNNAMED_SENTINEL = PANDAS_UNNAMED_SERIES_COLUMN
+
+
+_LAYOUT_VERSION = 1
+"""Version of the stored layout and hashing of the types in this module.
+
+The extension metadata is ``{"ignore":[...],"version":1}``: the version, and the property
+names the data context configures the value hash to ignore (none by default).
+
+Before v0.3 these types were stored under the names ``pandas.dataframe`` and
+``pandas.series`` (with empty metadata). Those names are not registered any more, so a
+column stored under them is refused on read, never read as the current types.
+"""
 
 
 def _table_to_ipc_bytes(table: pa.Table) -> bytes:
@@ -59,7 +77,7 @@ def _ipc_bytes_to_table(data: Any) -> pa.Table:
     return pa.ipc.open_stream(buf).read_all()
 
 
-class LogicalPandasDataFrame(BaseLogicalType):
+class LogicalPandasDataFrame(IgnoreListLogicalType):
     """Logical type for ``pd.DataFrame``.
 
     Stores DataFrames as Arrow ``large_binary`` using Arrow IPC stream format.
@@ -70,8 +88,7 @@ class LogicalPandasDataFrame(BaseLogicalType):
     nullable integer, boolean, datetime, categorical) is supported. Columns with
     truly mixed Python types that Arrow cannot infer raise ``ValueError``.
 
-    The extension name ``"pandas.dataframe"`` is library-qualified, following the
-    ``"numpy.ndarray"`` precedent.
+    The extension name ``"orcapod.pandas.dataframe"`` names the library, under Orcapod's own prefix.
 
     Example:
         >>> lt = LogicalPandasDataFrame()
@@ -81,36 +98,15 @@ class LogicalPandasDataFrame(BaseLogicalType):
         True
     """
 
-    _arrow_ext_class = make_arrow_extension_type("pandas.dataframe", pa.large_binary())
-    _arrow_ext: pa.ExtensionType | None = None
-    _polars_ext_class = make_polars_extension_type("pandas.dataframe", pa.large_binary())
-    _polars_ext: pl.BaseExtension | None = None
-
-    logical_type_name: str = "pandas.dataframe"
+    EXTENSION_NAME = "orcapod.pandas.dataframe"
+    STORAGE_TYPE = pa.large_binary()
+    VERSION = _LAYOUT_VERSION
+    OPTIONS = PANDAS_DATAFRAME_OPTIONS
     python_type: type = pd.DataFrame
 
-    def get_arrow_extension_type(self) -> pa.ExtensionType:
-        """Return the cached Arrow extension type for ``pd.DataFrame``.
-
-        Returns:
-            A ``pa.ExtensionType`` instance with extension name
-            ``"pandas.dataframe"`` and storage type ``pa.large_binary()``.
-        """
-        if LogicalPandasDataFrame._arrow_ext is None:
-            LogicalPandasDataFrame._arrow_ext = LogicalPandasDataFrame._arrow_ext_class()
-        return LogicalPandasDataFrame._arrow_ext
-
-    def get_polars_extension_type(self) -> pl.BaseExtension:
-        """Return the cached Polars extension type for ``pd.DataFrame``.
-
-        Returns:
-            A ``pl.BaseExtension`` instance registered under ``"pandas.dataframe"``.
-        """
-        if LogicalPandasDataFrame._polars_ext is None:
-            LogicalPandasDataFrame._polars_ext = LogicalPandasDataFrame._polars_ext_class()
-        return LogicalPandasDataFrame._polars_ext
-
-    def python_to_storage(self, value: Any, converter: TypeConverterProtocol | None = None) -> bytes:
+    def python_to_storage(
+        self, value: Any, converter: TypeConverterProtocol | None = None
+    ) -> bytes:
         """Serialise a ``pd.DataFrame`` to Arrow IPC stream bytes.
 
         Args:
@@ -125,19 +121,21 @@ class LogicalPandasDataFrame(BaseLogicalType):
             schema, index, and data.
 
         Raises:
-            ValueError: If any column cannot be converted to an Arrow type.
+            ValueError: If the frame cannot be converted to Arrow, storage would not
+                restore it (labels and names that collide once written as text,
+                MultiIndex levels written in another order, a column, index level or
+                column-axis level that cannot be read back; see ``require_restorable``),
+                or ``attrs`` cannot be written as JSON. The message names the column or
+                level.
         """
-        try:
-            table = pa.Table.from_pandas(value, preserve_index=True)
-        except pa.lib.ArrowInvalid as exc:
-            raise ValueError(
-                f"LogicalPandasDataFrame: cannot convert DataFrame to Arrow. "
-                f"Check for columns with mixed or non-Arrow-serialisable types. "
-                f"Original error: {exc}"
-            ) from exc
+        pandas_attrs_as_stored(value.attrs)  # refuses attrs that are not JSON
+        table = pandas_frame_to_arrow(value)
+        require_restorable(table, value)
         return _table_to_ipc_bytes(table)
 
-    def storage_to_python(self, storage_value: Any, converter: TypeConverterProtocol | None = None) -> pd.DataFrame:
+    def storage_to_python(
+        self, storage_value: Any, converter: TypeConverterProtocol | None = None
+    ) -> pd.DataFrame:
         """Reconstruct a ``pd.DataFrame`` from Arrow IPC stream bytes.
 
         Args:
@@ -150,7 +148,7 @@ class LogicalPandasDataFrame(BaseLogicalType):
         return _ipc_bytes_to_table(storage_value).to_pandas()
 
 
-class LogicalPandasSeries(BaseLogicalType):
+class LogicalPandasSeries(IgnoreListLogicalType):
     """Logical type for ``pd.Series``.
 
     Stores Series as Arrow ``large_binary`` using Arrow IPC stream format.
@@ -161,7 +159,7 @@ class LogicalPandasSeries(BaseLogicalType):
     ``"__pandas_series_unnamed__"`` to distinguish it from a Series named with
     an empty string.
 
-    The extension name ``"pandas.series"`` is library-qualified.
+    The extension name ``"orcapod.pandas.series"`` names the library, under Orcapod's own prefix.
 
     Example:
         >>> lt = LogicalPandasSeries()
@@ -171,36 +169,15 @@ class LogicalPandasSeries(BaseLogicalType):
         True
     """
 
-    _arrow_ext_class = make_arrow_extension_type("pandas.series", pa.large_binary())
-    _arrow_ext: pa.ExtensionType | None = None
-    _polars_ext_class = make_polars_extension_type("pandas.series", pa.large_binary())
-    _polars_ext: pl.BaseExtension | None = None
-
-    logical_type_name: str = "pandas.series"
+    EXTENSION_NAME = "orcapod.pandas.series"
+    STORAGE_TYPE = pa.large_binary()
+    VERSION = _LAYOUT_VERSION
+    OPTIONS = PANDAS_SERIES_OPTIONS
     python_type: type = pd.Series
 
-    def get_arrow_extension_type(self) -> pa.ExtensionType:
-        """Return the cached Arrow extension type for ``pd.Series``.
-
-        Returns:
-            A ``pa.ExtensionType`` instance with extension name
-            ``"pandas.series"`` and storage type ``pa.large_binary()``.
-        """
-        if LogicalPandasSeries._arrow_ext is None:
-            LogicalPandasSeries._arrow_ext = LogicalPandasSeries._arrow_ext_class()
-        return LogicalPandasSeries._arrow_ext
-
-    def get_polars_extension_type(self) -> pl.BaseExtension:
-        """Return the cached Polars extension type for ``pd.Series``.
-
-        Returns:
-            A ``pl.BaseExtension`` instance registered under ``"pandas.series"``.
-        """
-        if LogicalPandasSeries._polars_ext is None:
-            LogicalPandasSeries._polars_ext = LogicalPandasSeries._polars_ext_class()
-        return LogicalPandasSeries._polars_ext
-
-    def python_to_storage(self, value: Any, converter: TypeConverterProtocol | None = None) -> bytes:
+    def python_to_storage(
+        self, value: Any, converter: TypeConverterProtocol | None = None
+    ) -> bytes:
         """Serialise a ``pd.Series`` to Arrow IPC stream bytes.
 
         Args:
@@ -215,8 +192,11 @@ class LogicalPandasSeries(BaseLogicalType):
             Raw bytes in Arrow IPC stream format.
 
         Raises:
-            ValueError: If ``value.name`` equals the reserved sentinel, or if
-                the Series values cannot be converted to an Arrow type.
+            ValueError: If ``value.name`` equals the reserved sentinel, the Series
+                cannot be converted to Arrow, storage would not restore it (see
+                ``require_restorable``: the name and the index names collide once written
+                as text, MultiIndex levels written in another order, values or an index
+                level that cannot be read back), or ``attrs`` cannot be written as JSON.
         """
         if value.name == _SERIES_UNNAMED_SENTINEL:
             raise ValueError(
@@ -225,18 +205,15 @@ class LogicalPandasSeries(BaseLogicalType):
                 "Rename the Series before storing it."
             )
         col_name = value.name if value.name is not None else _SERIES_UNNAMED_SENTINEL
+        pandas_attrs_as_stored(value.attrs)  # refuses attrs that are not JSON
         df = value.to_frame(name=col_name)
-        try:
-            table = pa.Table.from_pandas(df, preserve_index=True)
-        except pa.lib.ArrowInvalid as exc:
-            raise ValueError(
-                f"LogicalPandasSeries: cannot convert Series to Arrow. "
-                f"Check for non-Arrow-serialisable values. "
-                f"Original error: {exc}"
-            ) from exc
+        table = pandas_frame_to_arrow(df)
+        require_restorable(table, df)
         return _table_to_ipc_bytes(table)
 
-    def storage_to_python(self, storage_value: Any, converter: TypeConverterProtocol | None = None) -> pd.Series:
+    def storage_to_python(
+        self, storage_value: Any, converter: TypeConverterProtocol | None = None
+    ) -> pd.Series:
         """Reconstruct a ``pd.Series`` from Arrow IPC stream bytes.
 
         Args:

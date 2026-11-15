@@ -1,4 +1,5 @@
 """Tests for LogicalPandasDataFrame and LogicalPandasSeries."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -12,38 +13,52 @@ from orcapod.logical_types.protocols import LogicalTypeProtocol
 class TestLogicalPandasDataFrameProtocol:
     def test_isinstance_logical_type(self):
         from orcapod.logical_types.pandas_type import LogicalPandasDataFrame
+
         assert isinstance(LogicalPandasDataFrame(), LogicalTypeProtocol)
 
     def test_logical_type_name(self):
         from orcapod.logical_types.pandas_type import LogicalPandasDataFrame
-        assert LogicalPandasDataFrame().logical_type_name == "pandas.dataframe"
+
+        assert LogicalPandasDataFrame().logical_type_name == "orcapod.pandas.dataframe"
 
     def test_python_type(self):
         from orcapod.logical_types.pandas_type import LogicalPandasDataFrame
+
         assert LogicalPandasDataFrame().python_type is pd.DataFrame
 
     def test_arrow_ext_name(self):
         from orcapod.logical_types.pandas_type import LogicalPandasDataFrame
-        assert LogicalPandasDataFrame().get_arrow_extension_type().extension_name == "pandas.dataframe"
+
+        assert (
+            LogicalPandasDataFrame().get_arrow_extension_type().extension_name
+            == "orcapod.pandas.dataframe"
+        )
 
     def test_arrow_ext_storage_type(self):
         from orcapod.logical_types.pandas_type import LogicalPandasDataFrame
-        assert LogicalPandasDataFrame().get_arrow_extension_type().storage_type == pa.large_binary()
+
+        assert (
+            LogicalPandasDataFrame().get_arrow_extension_type().storage_type
+            == pa.large_binary()
+        )
 
     def test_arrow_ext_is_cached(self):
         from orcapod.logical_types.pandas_type import LogicalPandasDataFrame
+
         lt = LogicalPandasDataFrame()
         assert lt.get_arrow_extension_type() is lt.get_arrow_extension_type()
 
-    def test_polars_ext_is_cached(self):
+    def test_polars_ext_is_the_same_type_every_time(self):
         from orcapod.logical_types.pandas_type import LogicalPandasDataFrame
+
         lt = LogicalPandasDataFrame()
-        assert lt.get_polars_extension_type() is lt.get_polars_extension_type()
+        assert lt.get_polars_extension_type() == lt.get_polars_extension_type()
 
 
 class TestLogicalPandasDataFrameStorage:
     def test_python_to_storage_returns_bytes(self):
         from orcapod.logical_types.pandas_type import LogicalPandasDataFrame
+
         df = pd.DataFrame({"a": [1.0, 2.0], "b": [3, 4]})
         result = LogicalPandasDataFrame().python_to_storage(df)
         assert isinstance(result, bytes)
@@ -59,9 +74,65 @@ class TestLogicalPandasDataFrameStorage:
             LogicalPandasDataFrame().python_to_storage(df)
 
 
+class TestNamesThatCollideAsText:
+    """Storage writes column labels and index names as text; a collision is refused.
+
+    Arrow would write two fields of one name, and the frame read back would have lost its
+    index (the levels come back as columns). So the write raises.
+    """
+
+    @pytest.mark.parametrize(
+        "frame",
+        [
+            pd.DataFrame(
+                {"a": [5]},
+                index=pd.MultiIndex.from_tuples([(0, 9)], names=[1, 2]),
+            ),
+            pd.DataFrame(
+                {"a": [5]},
+                index=pd.MultiIndex.from_tuples([(0, 9)], names=[1, "1"]),
+            ),
+            pd.DataFrame({"1": [5]}, index=pd.Index([0], name=1)),
+        ],
+        ids=["integer level names", "level names 1 and '1'", "column '1', index 1"],
+    )
+    def test_frame_is_refused(self, frame: pd.DataFrame):
+        """Index level names, or an index name and a column label, with one text."""
+        from orcapod.logical_types.pandas_type import LogicalPandasDataFrame
+
+        with pytest.raises(ValueError, match="'1'"):
+            LogicalPandasDataFrame().python_to_storage(frame)
+
+    def test_labels_read_back_as_duplicates_are_refused(self):
+        """The labels ``True`` and ``False`` are written as text and both read back ``True``."""
+        from orcapod.logical_types.pandas_type import LogicalPandasDataFrame
+
+        frame = pd.DataFrame({True: [1], False: [2]})
+        with pytest.raises(ValueError, match="True"):
+            LogicalPandasDataFrame().python_to_storage(frame)
+
+    def test_series_is_refused(self):
+        """A Series named ``"1"`` whose index is named ``1``: one field name twice."""
+        from orcapod.logical_types.pandas_type import LogicalPandasSeries
+
+        series = pd.Series([5], name="1", index=pd.Index([0], name=1))
+        with pytest.raises(ValueError, match="'1'"):
+            LogicalPandasSeries().python_to_storage(series)
+
+    def test_index_named_like_a_column_is_stored(self):
+        """Not a collision: Arrow gives the index its own field name."""
+        from orcapod.logical_types.pandas_type import LogicalPandasDataFrame
+
+        logical = LogicalPandasDataFrame()
+        frame = pd.DataFrame({"a": [5]}, index=pd.Index([0], name="a"))
+        back = logical.storage_to_python(logical.python_to_storage(frame))
+        pd.testing.assert_frame_equal(back, frame)
+
+
 class TestLogicalPandasDataFrameRoundTrip:
     def _rt(self, df: pd.DataFrame) -> pd.DataFrame:
         from orcapod.logical_types.pandas_type import LogicalPandasDataFrame
+
         lt = LogicalPandasDataFrame()
         return lt.storage_to_python(lt.python_to_storage(df))
 
@@ -118,38 +189,52 @@ class TestLogicalPandasDataFrameRoundTrip:
 class TestLogicalPandasSeriesProtocol:
     def test_isinstance_logical_type(self):
         from orcapod.logical_types.pandas_type import LogicalPandasSeries
+
         assert isinstance(LogicalPandasSeries(), LogicalTypeProtocol)
 
     def test_logical_type_name(self):
         from orcapod.logical_types.pandas_type import LogicalPandasSeries
-        assert LogicalPandasSeries().logical_type_name == "pandas.series"
+
+        assert LogicalPandasSeries().logical_type_name == "orcapod.pandas.series"
 
     def test_python_type(self):
         from orcapod.logical_types.pandas_type import LogicalPandasSeries
+
         assert LogicalPandasSeries().python_type is pd.Series
 
     def test_arrow_ext_name(self):
         from orcapod.logical_types.pandas_type import LogicalPandasSeries
-        assert LogicalPandasSeries().get_arrow_extension_type().extension_name == "pandas.series"
+
+        assert (
+            LogicalPandasSeries().get_arrow_extension_type().extension_name
+            == "orcapod.pandas.series"
+        )
 
     def test_arrow_ext_storage_type(self):
         from orcapod.logical_types.pandas_type import LogicalPandasSeries
-        assert LogicalPandasSeries().get_arrow_extension_type().storage_type == pa.large_binary()
+
+        assert (
+            LogicalPandasSeries().get_arrow_extension_type().storage_type
+            == pa.large_binary()
+        )
 
     def test_arrow_ext_is_cached(self):
         from orcapod.logical_types.pandas_type import LogicalPandasSeries
+
         lt = LogicalPandasSeries()
         assert lt.get_arrow_extension_type() is lt.get_arrow_extension_type()
 
-    def test_polars_ext_is_cached(self):
+    def test_polars_ext_is_the_same_type_every_time(self):
         from orcapod.logical_types.pandas_type import LogicalPandasSeries
+
         lt = LogicalPandasSeries()
-        assert lt.get_polars_extension_type() is lt.get_polars_extension_type()
+        assert lt.get_polars_extension_type() == lt.get_polars_extension_type()
 
 
 class TestLogicalPandasSeriesRoundTrip:
     def _rt(self, s: pd.Series) -> pd.Series:
         from orcapod.logical_types.pandas_type import LogicalPandasSeries
+
         lt = LogicalPandasSeries()
         return lt.storage_to_python(lt.python_to_storage(s))
 
@@ -195,6 +280,7 @@ class TestLogicalPandasSeriesRoundTrip:
 
     def test_reserved_name_raises_value_error(self):
         from orcapod.logical_types.pandas_type import LogicalPandasSeries
+
         s = pd.Series([1.0, 2.0], name="__pandas_series_unnamed__")
         with pytest.raises(ValueError, match="reserved"):
             LogicalPandasSeries().python_to_storage(s)

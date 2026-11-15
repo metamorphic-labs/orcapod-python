@@ -21,7 +21,6 @@ import pytest
 from deltalake import write_deltalake
 
 from orcapod.core.function_pod import FunctionPod
-from orcapod.core.nodes import FunctionNode, OperatorNode
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.nodes.operator_node import OperatorJobNode
 from orcapod.core.operators import Join
@@ -29,6 +28,7 @@ from orcapod.core.data_function import PythonDataFunction
 from orcapod.core.sources import ArrowTableSource, DeltaTableSource, CachedSource
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.types import CacheMode
+from orcapod.system_constants import OPERATOR_DB_SCHEMA_VERSION
 
 
 # ---------------------------------------------------------------------------
@@ -41,10 +41,12 @@ def _write_delta(path: Path, table: pa.Table, *, mode: str = "error") -> None:
 
 
 def _make_patients(path: Path, ids: list[str], ages: list[int]) -> pa.Table:
-    schema = pa.schema([
-        pa.field("patient_id", pa.large_string(), nullable=False),
-        pa.field("age", pa.int64(), nullable=False),
-    ])
+    schema = pa.schema(
+        [
+            pa.field("patient_id", pa.large_string(), nullable=False),
+            pa.field("age", pa.int64(), nullable=False),
+        ]
+    )
     t = pa.table(
         {
             "patient_id": ids,
@@ -57,10 +59,12 @@ def _make_patients(path: Path, ids: list[str], ages: list[int]) -> pa.Table:
 
 
 def _make_labs(path: Path, ids: list[str], chols: list[int]) -> pa.Table:
-    schema = pa.schema([
-        pa.field("patient_id", pa.large_string(), nullable=False),
-        pa.field("cholesterol", pa.int64(), nullable=False),
-    ])
+    schema = pa.schema(
+        [
+            pa.field("patient_id", pa.large_string(), nullable=False),
+            pa.field("cholesterol", pa.int64(), nullable=False),
+        ]
+    )
     t = pa.table(
         {
             "patient_id": ids,
@@ -110,20 +114,20 @@ def delta_dir(tmp_path):
 def clinic_a(delta_dir):
     """Create clinic A's Delta tables and return (patients_path, labs_path)."""
     p = delta_dir / "clinic_a_patients"
-    l = delta_dir / "clinic_a_labs"
+    labs = delta_dir / "clinic_a_labs"
     _make_patients(p, ["p1", "p2", "p3"], [30, 45, 60])
-    _make_labs(l, ["p1", "p2", "p3"], [180, 220, 260])
-    return p, l
+    _make_labs(labs, ["p1", "p2", "p3"], [180, 220, 260])
+    return p, labs
 
 
 @pytest.fixture
 def clinic_b(delta_dir):
     """Create clinic B's Delta tables and return (patients_path, labs_path)."""
     p = delta_dir / "clinic_b_patients"
-    l = delta_dir / "clinic_b_labs"
+    labs = delta_dir / "clinic_b_labs"
     _make_patients(p, ["x1", "x2"], [28, 72])
-    _make_labs(l, ["x1", "x2"], [160, 290])
-    return p, l
+    _make_labs(labs, ["x1", "x2"], [160, 290])
+    return p, labs
 
 
 @pytest.fixture
@@ -198,10 +202,12 @@ class TestSourcePodCaching:
                     "patient_id": ["p1", "p2", "p3", "p4"],
                     "age": [30, 45, 60, 25],
                 },
-                schema=pa.schema([
-                    pa.field("patient_id", pa.large_string(), nullable=False),
-                    pa.field("age", pa.int64(), nullable=False),
-                ]),
+                schema=pa.schema(
+                    [
+                        pa.field("patient_id", pa.large_string(), nullable=False),
+                        pa.field("age", pa.int64(), nullable=False),
+                    ]
+                ),
             ),
             mode="overwrite",
         )
@@ -230,10 +236,12 @@ class TestSourcePodCaching:
                     "patient_id": ["p1", "p2", "p3", "p4"],
                     "age": [30, 45, 60, 25],
                 },
-                schema=pa.schema([
-                    pa.field("patient_id", pa.large_string(), nullable=False),
-                    pa.field("age", pa.int64(), nullable=False),
-                ]),
+                schema=pa.schema(
+                    [
+                        pa.field("patient_id", pa.large_string(), nullable=False),
+                        pa.field("age", pa.int64(), nullable=False),
+                    ]
+                ),
             ),
             mode="overwrite",
         )
@@ -431,7 +439,15 @@ class TestOperatorPodCaching:
         )
         node.run()
         assert node.as_table().num_rows == 3
-        assert operator_db.get_all_records(node.node_identity_path) is None
+        assert (
+            operator_db.get_all_records(
+                node.node_identity_path + (OPERATOR_DB_SCHEMA_VERSION,)
+            )
+            is None
+        )
+        # Nothing was written anywhere else either (for example at the path
+        # without the layout component).
+        assert operator_db.list_table_paths() == []
 
     def test_log_computes_and_writes(self, clinic_a, source_db, operator_db):
         patients, labs = self._make_joined_streams(clinic_a, source_db)
@@ -443,7 +459,9 @@ class TestOperatorPodCaching:
         )
         node.run()
         assert node.as_table().num_rows == 3
-        records = operator_db.get_all_records(node.node_identity_path)
+        records = operator_db.get_all_records(
+            node.node_identity_path + (OPERATOR_DB_SCHEMA_VERSION,)
+        )
         assert records is not None
         assert records.num_rows == 3
 
@@ -573,7 +591,12 @@ class TestEndToEndPipeline:
             cache_mode=CacheMode.LOG,
         )
         op_node.run()
-        assert operator_db.get_all_records(op_node.node_identity_path).num_rows == 3
+        assert (
+            operator_db.get_all_records(
+                op_node.node_identity_path + (OPERATOR_DB_SCHEMA_VERSION,)
+            ).num_rows
+            == 3
+        )
 
         # Step 4: REPLAY from operator cache
         op_replay = OperatorJobNode(

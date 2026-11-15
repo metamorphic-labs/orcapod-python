@@ -116,6 +116,60 @@ class TestExtractBlocks:
         with pytest.raises(ValueError, match="line 1"):
             extract_blocks("```python\nx = 1\n")
 
+    @pytest.mark.parametrize("fence", ["````", "~~~", "~~~~~"])
+    def test_longer_and_tilde_fences_are_extracted(self, fence: str):
+        text = "\n".join([f"{fence}python", "x = 1", "```", "y = 2", fence])
+        assert extract_blocks(text) == [
+            Block(lineno=1, source="x = 1\n```\ny = 2\n", skip=False)
+        ]
+
+    def test_fence_with_attributes_is_extracted(self):
+        text = "\n".join(['```python title="demo.py"', "x = 1", "```"])
+        assert extract_blocks(text) == [Block(lineno=1, source="x = 1\n", skip=False)]
+
+    def test_python_fence_quoted_inside_another_fence_is_not_a_sample(self):
+        text = "\n".join(
+            [
+                "````markdown",
+                "```python",
+                "raise SystemExit('quoted, not a sample')",
+                "```",
+                "````",
+                "```python",
+                "x = 1",
+                "```",
+            ]
+        )
+        assert extract_blocks(text) == [Block(lineno=6, source="x = 1\n", skip=False)]
+
+    def test_python_line_inside_a_plain_fence_is_not_a_sample(self):
+        # Inside a fence, "```python" is not a closing fence, so it is text.
+        text = "\n".join(["```text", "```python", "x = 1", "```", "y = 2"])
+        assert extract_blocks(text) == []
+
+    def test_other_language_fence_cancels_the_skip_marker(self):
+        text = "\n".join(
+            [
+                "<!-- docs-test: skip -->",
+                "```bash",
+                "uv add orcapod",
+                "```",
+                "```python",
+                "y = 2",
+                "```",
+            ]
+        )
+        (block,) = extract_blocks(text)
+        assert block.skip is False
+
+    def test_ambiguous_longer_closing_fence_raises(self):
+        with pytest.raises(ValueError, match="line 3"):
+            extract_blocks("```python\nx = 1\n````\n")
+
+    def test_inline_code_line_is_not_a_fence(self):
+        text = "\n".join(["```not a fence```", "```python", "x = 1", "```"])
+        assert extract_blocks(text) == [Block(lineno=2, source="x = 1\n", skip=False)]
+
 
 class TestExpectedPatterns:
     def test_collects_full_line_and_trailing_comments(self):
@@ -225,8 +279,9 @@ def test_doc_pages_are_discovered():
 def test_doc_page_samples_run(page: str, tmp_path: Path):
     """Every python sample on the page runs and prints what the page shows.
 
-    Each page runs in its own interpreter, with ``HOME`` and the working
-    directory pointed at a temp directory: samples such as
+    Each page runs in its own interpreter, with the home directory (``HOME``,
+    and ``USERPROFILE``, which is what ``Path.home()`` reads on Windows) and
+    the working directory pointed at a temp directory: samples such as
     ``enable_file_hash_caching()`` change process-global state and write under
     ``~/.orcapod``.
     """
@@ -235,6 +290,7 @@ def test_doc_page_samples_run(page: str, tmp_path: Path):
         [str(REPO_ROOT), str(REPO_ROOT / "src"), str(TUTORIAL_DIR)]
     )
     env["HOME"] = str(tmp_path)
+    env["USERPROFILE"] = str(tmp_path)
     env.pop("ORCAPOD_HASH_CACHE_DB", None)
 
     proc = subprocess.run(
@@ -244,17 +300,22 @@ def test_doc_page_samples_run(page: str, tmp_path: Path):
         capture_output=True,
         text=True,
         timeout=300,
+        check=False,
     )
     assert proc.returncode == 0, (
         f"sample runner crashed on {page}:\n{proc.stdout}\n{proc.stderr}"
     )
-    results = json.loads(proc.stdout.splitlines()[-1])
+    stdout_lines = proc.stdout.splitlines()
+    assert stdout_lines, f"sample runner printed no results for {page}:\n{proc.stderr}"
+    results = json.loads(stdout_lines[-1])
 
     failures = []
     for r in results:
         if r["status"] != "failed":
             continue
-        detail = r["error"] or "printed output is not shown in the sample:\n" + "\n".join(
+        detail = r[
+            "error"
+        ] or "printed output is not shown in the sample:\n" + "\n".join(
             f"    {line}" for line in r["unmatched"]
         )
         failures.append(f"{page}:{r['lineno']}\n{detail}")

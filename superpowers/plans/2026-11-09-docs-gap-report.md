@@ -46,12 +46,17 @@ beyond "every name resolves and the build is clean", and the internal directorie
 
 ### Install — thin
 
-`docs/index.md` shows `uv add orcapod` and a GitHub install. Fixed here: the GitHub URL and
-`mkdocs.yml` `repo_url` pointed at `walkerlab/orcapod-python`; the repository is
-`nauticalab/orcapod-python`.
+`docs/index.md` shows `pip install orcapod` and `uv add orcapod`, nothing else. Fixed here:
+the page also showed an install-from-GitHub command and `mkdocs.yml` had a `repo_url`, both
+pointing at a stale location. The repository is private and Orcapod is distributed through
+the organization's internal package index, so the git install, the PyPI link and the site's
+repository link were removed. (Releases up to 0.1.4 are on public PyPI; the page does not
+point readers there.) The section now lists the supported Python
+versions (3.11, 3.12 and 3.13) and marks the exact install command as pending.
 
-Missing: supported Python versions, the optional extras (`redis`, `ray`, `postgresql`,
-`spiraldb`), and a "check your install" snippet. Two things a workshop will hit on day one:
+Missing: the exact install command and index URL, the optional extras (`redis`, `ray`,
+`postgresql`, `spiraldb`), and a "check your install" snippet. Two things a workshop will hit
+on day one:
 
 - `pygraphviz` is a declared dependency and needs the Graphviz C headers to build. On a
   machine without them `uv sync` fails. (Being removed under ITL-134.)
@@ -60,16 +65,16 @@ Missing: supported Python versions, the optional extras (`redis`, `ray`, `postgr
   `DeltaTableDatabase` writes print `WARN deltalake_core::writer::stats Skipping column ...`
   lines. Harmless, but a newcomer will ask.
 
-Whether `uv add orcapod` installs the v0.2 release could not be checked from here; verify once
-the release is cut (ITL-810 owns the version and install strings).
+The index URL and install command are not known yet; fill them in once the internal registry
+is set up (ITL-810 owns the version and install strings).
 
 ### First pipeline — covered well
 
 `docs/getting-started.md` walks source → inspect → function pod → inspect result, and all 11
 samples run. Fixed: the shown schema output was out of date in two samples
 (`Schema({'experiment': <class 'str'>})` is now printed as `Schema({'experiment': str})`).
-Added: the exact-column rule, that type annotations are required, and a pointer to
-`PipelineJob` for keeping results.
+Added: the exact-column rule, that every parameter needs a type (an annotation or an
+`input_schema` entry), and a pointer to `PipelineJob` for keeping results.
 
 ### Sources — partly covered
 
@@ -93,12 +98,14 @@ than it looks — see "Things a newcomer will trip on".
 ### Function pods — was wrong, now fixed
 
 - **Extra columns (ITL-807).** The page said a pod extracts the columns it needs from a wider
-  stream. It does not: any extra, missing or differently typed data column raises
-  `ValueError`. The page now states the strict rule and shows the `SelectDataColumns` step.
+  stream. It does not: an extra data column, a missing column for a parameter without a
+  default, or a column of an incompatible type raises `ValueError` (a parameter with a default
+  may be left out; the default is used). The page now states the strict rule and shows the
+  `SelectDataColumns` step.
   Whether to relax the behaviour is the open v0.3 decision.
 - **Multiple input streams.** The sample used undefined names; it is now runnable.
-- Type annotations are required on every parameter (`ValueError` at decoration time
-  otherwise); this was not stated.
+- Every parameter needs a type, from an annotation or the decorator's `input_schema`
+  (`ValueError` at decoration time otherwise); this was not stated.
 
 Missing entirely:
 

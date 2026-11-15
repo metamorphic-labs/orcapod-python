@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Collection
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
@@ -27,6 +27,9 @@ class DataFrameSource(RootSource):
     The DataFrame is converted to an Arrow table and enriched by
     ``SourceStreamBuilder`` (source-info, schema-hash, system tags).
     """
+
+    # The config type key; also the kind prefix of the default source id.
+    SOURCE_KIND: ClassVar[str] = "data_frame"
 
     def __init__(
         self,
@@ -66,13 +69,16 @@ class DataFrameSource(RootSource):
         else:
             # Polars defaults all fields to nullable=True; infer the correct
             # flags from the actual data before passing to the builder.
-            arrow_table = arrow_table.cast(arrow_utils.infer_schema_nullable(arrow_table))
+            arrow_table = arrow_table.cast(
+                arrow_utils.infer_schema_nullable(arrow_table)
+            )
 
         builder = SourceStreamBuilder(self.data_context, self.orcapod_config)
         result = builder.build(
             arrow_table,
             tag_columns=tag_columns,
             source_id=self._source_id,
+            source_kind=self.SOURCE_KIND,
             system_tag_columns=system_tag_columns,
         )
 
@@ -84,7 +90,7 @@ class DataFrameSource(RootSource):
     def to_config(self, db_registry=None) -> dict[str, Any]:
         """Serialize metadata-only config (DataFrame is not serializable)."""
         return {
-            "source_type": "data_frame",
+            "source_type": self.SOURCE_KIND,
             "tag_columns": list(self._tag_columns),
             "source_id": self.source_id,
             **self._identity_config(),

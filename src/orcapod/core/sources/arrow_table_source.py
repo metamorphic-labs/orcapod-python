@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Collection
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
@@ -55,12 +55,22 @@ class ArrowTableSource(RootSource):
     Every row gets a record ID system tag derived from ``source_id`` and a
     per-row token.  With ``record_id_column`` the token is that column's value,
     so the ID follows the row.  Without it the token is the row's position
-    (``row_0``, ``row_1``, ...): supplying the same rows in a different order
-    under the same ``source_id`` moves each record ID to a different row, which
-    invalidates downstream pipeline entries and ``SideEffectPod`` completion
-    records and misattributes lineage.  Set ``record_id_column`` to a column
-    that is unique per row whenever row order can vary between runs.
+    (``row_0``, ``row_1``, ...), so a row supplied at a different position
+    under the same ``source_id`` gets a different record ID.  Downstream
+    pipeline entries and ``SideEffectPod`` completion records are keyed on
+    the system tags plus the hash of the row's data, so the moved row is
+    treated as a new entry: it is recorded again (two entries with identical
+    tag values but distinct record IDs) and delivered again by a
+    ``SideEffectPod``.  No result is paired with the wrong row, because every
+    key includes the row's own data hash.  ``source_id`` must be stable too:
+    when omitted it defaults to ``arrow_table:<algorithm label>:<hex>`` of the
+    table hash, which changes with row order.
+    Whenever row order can vary between runs, pass an explicit ``source_id``
+    and set ``record_id_column`` to a column that is unique per row.
     """
+
+    # The config type key; also the kind prefix of the default source id.
+    SOURCE_KIND: ClassVar[str] = "arrow_table"
 
     def __init__(
         self,
@@ -87,6 +97,7 @@ class ArrowTableSource(RootSource):
             table,
             tag_columns=tag_columns,
             source_id=self._source_id,
+            source_kind=self.SOURCE_KIND,
             record_id_column=record_id_column,
             system_tag_columns=system_tag_columns,
         )
@@ -104,7 +115,7 @@ class ArrowTableSource(RootSource):
     def to_config(self, db_registry=None) -> dict[str, Any]:
         """Serialize metadata-only config (in-memory table is not serializable)."""
         return {
-            "source_type": "arrow_table",
+            "source_type": self.SOURCE_KIND,
             "tag_columns": list(self._tag_columns),
             "source_id": self.source_id,
             **self._identity_config(),

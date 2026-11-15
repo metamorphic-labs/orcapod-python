@@ -88,6 +88,7 @@ class FunctionNodeProtocol(Protocol):
         observer: ExecutionObserverProtocol | None = None,
         error_policy: Literal["continue", "fail_fast"] = "continue",
         run_id: str | None = None,
+        load_only: bool = False,
     ) -> list[tuple[TagProtocol, DataProtocol]]: ...
 
     async def async_execute(
@@ -96,7 +97,9 @@ class FunctionNodeProtocol(Protocol):
         output: WritableChannel[tuple[TagProtocol, DataProtocol]],
         *,
         observer: ExecutionObserverProtocol | None = None,
+        error_policy: Literal["continue", "fail_fast"] = "continue",
         run_id: str | None = None,
+        load_only: bool = False,
     ) -> None: ...
 
     def set_ephemeral_store(self, store: "ArrowDatabaseProtocol | None") -> None:
@@ -125,6 +128,7 @@ class OperatorNodeProtocol(Protocol):
         self,
         *input_streams: StreamProtocol,
         observer: ExecutionObserverProtocol | None = None,
+        load_only: bool = False,
     ) -> list[tuple[TagProtocol, DataProtocol]]: ...
 
     async def async_execute(
@@ -133,6 +137,7 @@ class OperatorNodeProtocol(Protocol):
         output: WritableChannel[tuple[TagProtocol, DataProtocol]],
         *,
         observer: ExecutionObserverProtocol | None = None,
+        load_only: bool = False,
     ) -> None: ...
 
     def set_ephemeral_store(self, store: "ArrowDatabaseProtocol | None") -> None:
@@ -156,6 +161,7 @@ class SideEffectNodeProtocol(Protocol):
         *,
         observer: "ExecutionObserverProtocol | None" = None,
         run_id: str | None = None,
+        load_only: bool = False,
     ) -> "list[tuple[TagProtocol, DataProtocol]]": ...
 
     async def async_execute(
@@ -165,6 +171,7 @@ class SideEffectNodeProtocol(Protocol):
         *,
         observer: "ExecutionObserverProtocol | None" = None,
         run_id: str | None = None,
+        load_only: bool = False,
     ) -> None: ...
 
     def attach_databases(

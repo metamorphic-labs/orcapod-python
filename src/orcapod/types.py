@@ -57,7 +57,9 @@ PathSet: TypeAlias = PathLike | Collection[PathLike | None]
 ``None`` entries). Used when operations need to address multiple files at
 once, e.g. batch hashing."""
 
-SupportedNativePythonData: TypeAlias = str | int | float | bool | bytes | date | datetime
+SupportedNativePythonData: TypeAlias = (
+    str | int | float | bool | bytes | date | datetime
+)
 """The simple Python scalar types that have a direct Arrow / Polars
 correspondence, including temporal types (date and datetime)."""
 
@@ -77,6 +79,7 @@ SchemaLike: TypeAlias = Mapping[str, DataType]
 Accepted wherever a ``Schema`` is expected so callers can pass plain dicts."""
 
 _T = TypeVar("_T")
+
 
 class Schema(Mapping[str, DataType]):
     """Immutable schema representing a mapping of field names to Python types.
@@ -200,9 +203,7 @@ class Schema(Mapping[str, DataType]):
         """
         if isinstance(other, Schema):
             return self.merge(other)
-        raise NotImplementedError(
-            f"Adding {Schema} to {type(other)} is not supported"
-        )
+        raise NotImplementedError(f"Adding {Schema} to {type(other)} is not supported")
 
     def with_values(self, other: dict[str, type] | None, **kwargs: type) -> Schema:
         """Return a new Schema with the specified fields added or overridden.
@@ -360,15 +361,9 @@ class NodeConfig:
             Persistent cache hits are still served when available. Raises
             ``RuntimeError`` at execution time if ``True`` but no ephemeral
             store has been injected via ``set_ephemeral_store()``.
-        ignore_schema: Tuple of schema version strings that this node will
-            tolerate without raising ``SchemaVersionError``. ``None`` (default)
-            means no old schema is tolerated — any detected v0 table raises
-            ``SchemaVersionError``. Pass ``("v0",)`` to suppress the error
-            and allow the node to recompute all results from scratch.
     """
 
     is_result_ephemeral: bool | None = None
-    ignore_schema: tuple[str, ...] | None = None
 
     def merge(self, other: "NodeConfig") -> "NodeConfig":
         """Return a new ``NodeConfig`` with ``other``'s non-``None`` fields overriding self.
@@ -394,11 +389,6 @@ class NodeConfig:
                 other.is_result_ephemeral
                 if other.is_result_ephemeral is not None
                 else self.is_result_ephemeral
-            ),
-            ignore_schema=(
-                other.ignore_schema
-                if other.ignore_schema is not None
-                else self.ignore_schema
             ),
         )
 
@@ -515,11 +505,14 @@ class ColumnConfig:
             all_info: If True, override config to include all columns.
 
         Returns:
-            Normalized ColumnConfig instance.
+            Normalized ColumnConfig instance. When ``all_info`` is set, by the
+            keyword or inside ``config`` (``{"all_info": True}`` or
+            ``ColumnConfig(all_info=True)``), every group is on, whatever else
+            ``config`` says; an embedded ``all_info=True`` is not cancelled by a
+            ``False`` keyword.
         """
         if all_info:
             return cls.all()
-        # TODO: properly handle non-boolean values when using all_info
 
         if config is None:
             column_config = cls()
@@ -533,6 +526,8 @@ class ColumnConfig:
                 "Expected ColumnConfig instance or dict."
             )
 
+        if column_config.all_info and column_config != cls.all():
+            return cls.all()
         return column_config
 
 
@@ -679,7 +674,7 @@ class ContentHash:
         """
         colon_idx = data.index(b":")
         method = data[:colon_idx].decode("ascii")
-        digest = data[colon_idx + 1:]
+        digest = data[colon_idx + 1 :]
         return cls(method=method, digest=digest)
 
     def __str__(self) -> str:
@@ -720,10 +715,11 @@ class Cursor(Generic[_T]):
             timestamp, integer offset, string pagination token, or any
             other type meaningful to the implementation.
         modified_at: Optional wall-clock time when the source content at
-            this cursor position was last modified. When provided,
-            ``PollingSource`` uses this to update its ``last_modified``
-            timestamp for downstream staleness detection. When ``None``,
-            the framework falls back to its own wall clock.
+            this cursor position was last modified. Informational only: it is
+            not used for staleness. ``PollingSource`` moves its own
+            ``last_modified`` to the moment a poll finds rows it did not have
+            (ITL-1102), because content modified before a downstream node's
+            last run but found after it must still make that node stale.
     """
 
     value: _T
@@ -771,9 +767,7 @@ class PollingConfig:
 
     def __post_init__(self) -> None:
         if self.interval <= 0:
-            raise ValueError(
-                f"PollingConfig.interval must be > 0, got {self.interval}"
-            )
+            raise ValueError(f"PollingConfig.interval must be > 0, got {self.interval}")
         if self.duration < 0:
             raise ValueError(
                 f"PollingConfig.duration must be >= 0, got {self.duration}"
@@ -793,5 +787,3 @@ class PollingConfig:
                 f"PollingConfig.error_backoff_base must be > 0, "
                 f"got {self.error_backoff_base}"
             )
-
-

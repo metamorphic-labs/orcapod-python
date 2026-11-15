@@ -9,11 +9,21 @@ from pathlib import Path
 
 import pytest
 import orcapod as op
+from orcapod.contexts import get_default_context
+from orcapod.hashing.semantic_hashing.function_info_extractors import ParameterDefault
+
+
+def _annotations(info: dict[str, typing.Any]) -> dict[str, str]:
+    """Map each parameter name of an extracted description to its annotation text."""
+    return {entry["name"]: entry["annotation"] for entry in info["parameters"]}
 
 
 class TestFunctionNameExtractor:
     def _make(self):
-        from orcapod.hashing.semantic_hashing.function_info_extractors import FunctionNameExtractor
+        from orcapod.hashing.semantic_hashing.function_info_extractors import (
+            FunctionNameExtractor,
+        )
+
         return FunctionNameExtractor()
 
     def test_returns_function_name(self):
@@ -41,26 +51,37 @@ class TestFunctionNameExtractor:
 
     def test_ignores_typespec_args(self):
         """input_typespec and output_typespec are accepted but not used."""
+
         def fn(x: int) -> str:
             return str(x)
 
-        result = self._make().extract_function_info(fn, input_typespec={"x": int}, output_typespec={"return": str})
+        result = self._make().extract_function_info(
+            fn, input_typespec={"x": int}, output_typespec={"return": str}
+        )
         assert result == {"name": "fn"}
 
 
 class TestFunctionSignatureExtractor:
     def _make(self, **kwargs):
-        from orcapod.hashing.semantic_hashing.function_info_extractors import FunctionSignatureExtractor
+        from orcapod.hashing.semantic_hashing.function_info_extractors import (
+            FunctionSignatureExtractor,
+        )
+
         return FunctionSignatureExtractor(**kwargs)
 
-    def test_basic_extraction_returns_dict_with_name_and_params(self):
+    def test_basic_extraction_returns_dict_with_name_and_parameters(self):
+        """The description holds the name, the module and one entry per parameter."""
+
         def my_func(x: int, y: str) -> bool:
             return True
 
         result = self._make().extract_function_info(my_func)
         assert "name" in result
         assert result["name"] == "my_func"
-        assert "params" in result
+        assert result["parameters"] == [
+            {"name": "x", "kind": "POSITIONAL_OR_KEYWORD", "annotation": "int"},
+            {"name": "y", "kind": "POSITIONAL_OR_KEYWORD", "annotation": "str"},
+        ]
         assert "module" in result
 
     def test_non_callable_raises_type_error(self):
@@ -82,18 +103,54 @@ class TestFunctionSignatureExtractor:
         assert "module" in result
 
     def test_include_defaults_false_strips_defaults(self):
+        """With ``include_defaults=False`` no entry reports a default."""
+
         def fn(x: int = 42, y: str = "hi") -> None:
             pass
 
         result = self._make(include_defaults=False).extract_function_info(fn)
-        assert result["params"] == "x: int, y: str"
+        assert _annotations(result) == {"x": "int", "y": "str"}
+        assert all("default" not in entry for entry in result["parameters"])
 
     def test_include_defaults_true_keeps_defaults(self):
+        """A default is reported as a ``ParameterDefault`` holding the value."""
+
         def fn(x: int = 42) -> None:
             pass
 
         result = self._make(include_defaults=True).extract_function_info(fn)
-        assert result["params"] == "x: int = 42"
+        assert result["parameters"] == [
+            {
+                "name": "x",
+                "kind": "POSITIONAL_OR_KEYWORD",
+                "annotation": "int",
+                "default": ParameterDefault(42),
+            }
+        ]
+
+    def test_default_none_is_reported_and_no_default_is_absent(self):
+        """``y=None`` has a ``default`` entry; a required parameter has none."""
+
+        def fn(x: int, y: int | None = None) -> None:
+            pass
+
+        x, y = self._make().extract_function_info(fn)["parameters"]
+        assert "default" not in x
+        assert y["default"] == ParameterDefault(None)
+
+    def test_unannotated_parameter_has_no_annotation_entry(self):
+        """A parameter without an annotation has no ``annotation`` member."""
+
+        def fn(x, y=1):  # noqa: ANN001, ANN202  (unannotated on purpose)
+            pass
+
+        x, y = self._make().extract_function_info(fn)["parameters"]
+        assert x == {"name": "x", "kind": "POSITIONAL_OR_KEYWORD"}
+        assert y == {
+            "name": "y",
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "default": ParameterDefault(1),
+        }
 
     def test_return_annotation_present(self):
         def fn() -> str:
@@ -119,25 +176,27 @@ class TestFunctionSignatureExtractor:
 
     def test_union_annotation_canonicalized(self):
         """Union annotations are sorted byte-wise for order stability."""
+
         def fn1(x: str | Path) -> None:
             pass
 
         def fn2(x: Path | str) -> None:
             pass
 
-        r1 = self._make(include_module=False).extract_function_info(fn1, function_name="fn")
-        r2 = self._make(include_module=False).extract_function_info(fn2, function_name="fn")
-        assert r1["params"] == "x: pathlib.Path | str"
-        assert r2["params"] == "x: pathlib.Path | str"
+        r1 = self._make(include_module=False).extract_function_info(
+            fn1, function_name="fn"
+        )
+        r2 = self._make(include_module=False).extract_function_info(
+            fn2, function_name="fn"
+        )
+        assert _annotations(r1) == {"x": "pathlib.Path | str"}
+        assert _annotations(r2) == {"x": "pathlib.Path | str"}
 
     def test_annotation_containing_equals_preserved_when_defaults_stripped(self):
         """Annotations containing ``=`` are not truncated when include_defaults=False.
 
-        The old approach stripped defaults via ``str(param).split('=')[0].strip()``,
-        which corrupts annotations that contain ``=``.  For example
-        ``Literal["a=b"] = "v"`` would be split to ``Literal["a``.  Confirmed that
-        this test FAILS with the old implementation and PASSES with ``_format_param``,
-        which checks ``param.default is not inspect.Parameter.empty`` directly.
+        The annotation and the default are separate members of the parameter's
+        entry, so no text is ever cut at ``=``.
         """
         from typing import Literal
 
@@ -150,37 +209,34 @@ class TestFunctionSignatureExtractor:
         # falls back and formatannotation wraps the string literal in quotes.
         # The key property is that the full annotation is present and the default
         # value ("default_value") is absent — verified exactly here.
-        assert "Literal" in result["params"] and "a=b" in result["params"]
-        assert "default_value" not in result["params"]
-        # No '=' from the default assignment should survive (annotation may contain
-        # its own '=' as part of Literal, but the default is stripped cleanly).
-        assert result["params"].count("=") == result["params"].count("a=b")
+        (entry,) = result["parameters"]
+        assert "Literal" in entry["annotation"] and "a=b" in entry["annotation"]
+        assert "default" not in entry
 
     def test_varargs_and_kwargs_with_annotations(self):
-        """*args and **kwargs with annotations are formatted correctly.
-
-        Verifies that ``_format_param`` produces the right ``*`` / ``**`` prefix
-        for VAR_POSITIONAL and VAR_KEYWORD parameters.
-        """
+        """*args and **kwargs are told apart by their kind, not by a name prefix."""
 
         def fn(*args: int, **kwargs: str) -> None:
             pass
 
         result = self._make().extract_function_info(fn)
-        assert result["params"] == "*args: int, **kwargs: str"
+        assert result["parameters"] == [
+            {"name": "args", "kind": "VAR_POSITIONAL", "annotation": "int"},
+            {"name": "kwargs", "kind": "VAR_KEYWORD", "annotation": "str"},
+        ]
 
-    def test_keyword_only_param_formatted_without_star_prefix(self):
-        """Keyword-only parameters appear without a ``*`` prefix in params.
+    def test_keyword_only_and_positional_only_kinds_are_recorded(self):
+        """``f(a, /, b, *, c)``: each parameter carries its kind (ITL-953)."""
 
-        The bare ``*`` separator is a signature-level token, not a parameter
-        attribute; it must not be prepended to keyword-only params.
-        """
-
-        def fn(a: int, *, b: str) -> None:
+        def fn(a: int, /, b: int, *, c: str) -> None:
             pass
 
         result = self._make().extract_function_info(fn)
-        assert result["params"] == "a: int, b: str"
+        assert [(e["name"], e["kind"]) for e in result["parameters"]] == [
+            ("a", "POSITIONAL_ONLY"),
+            ("b", "POSITIONAL_OR_KEYWORD"),
+            ("c", "KEYWORD_ONLY"),
+        ]
 
     def test_eval_str_fallback_on_unresolvable_annotation(self):
         """When eval_str=True fails, falls back to unresolved signature."""
@@ -194,26 +250,38 @@ class TestFunctionSignatureExtractor:
         # __globals__, which won't have it → NameError → fallback
         # This should not raise
         result = self._make().extract_function_info(fn)
-        assert "params" in result
+        assert [entry["name"] for entry in result["parameters"]] == ["x"]
 
 
 class TestFunctionInfoExtractorFactory:
     def _factory(self):
-        from orcapod.hashing.semantic_hashing.function_info_extractors import FunctionInfoExtractorFactory
+        from orcapod.hashing.semantic_hashing.function_info_extractors import (
+            FunctionInfoExtractorFactory,
+        )
+
         return FunctionInfoExtractorFactory
 
     def test_name_strategy_returns_function_name_extractor(self):
-        from orcapod.hashing.semantic_hashing.function_info_extractors import FunctionNameExtractor
+        from orcapod.hashing.semantic_hashing.function_info_extractors import (
+            FunctionNameExtractor,
+        )
+
         extractor = self._factory().create_function_info_extractor("name")
         assert isinstance(extractor, FunctionNameExtractor)
 
     def test_signature_strategy_returns_function_signature_extractor(self):
-        from orcapod.hashing.semantic_hashing.function_info_extractors import FunctionSignatureExtractor
+        from orcapod.hashing.semantic_hashing.function_info_extractors import (
+            FunctionSignatureExtractor,
+        )
+
         extractor = self._factory().create_function_info_extractor("signature")
         assert isinstance(extractor, FunctionSignatureExtractor)
 
     def test_default_strategy_is_signature(self):
-        from orcapod.hashing.semantic_hashing.function_info_extractors import FunctionSignatureExtractor
+        from orcapod.hashing.semantic_hashing.function_info_extractors import (
+            FunctionSignatureExtractor,
+        )
+
         extractor = self._factory().create_function_info_extractor()
         assert isinstance(extractor, FunctionSignatureExtractor)
 
@@ -227,10 +295,10 @@ class TestFunctionSignatureExtractorWithRegistry:
 
     @pytest.fixture
     def extractor(self):
-        from orcapod.contexts import get_default_context
         from orcapod.hashing.semantic_hashing.function_info_extractors import (
             FunctionSignatureExtractor,
         )
+
         return FunctionSignatureExtractor(
             include_module=True,
             include_defaults=True,
@@ -243,8 +311,8 @@ class TestFunctionSignatureExtractorWithRegistry:
         TypeObjectHandler (wired with the same type_converter) canonicalises it to
         ``"type:orcapod.file"`` at hash time — no special casing in the extractor.
         """
-        def fn(s: str) -> op.File:
-            ...
+
+        def fn(s: str) -> op.File: ...
 
         info = extractor.extract_function_info(fn)
         assert not isinstance(info["returns"], str), (
@@ -256,8 +324,8 @@ class TestFunctionSignatureExtractorWithRegistry:
 
     def test_return_annotation_builtin_keeps_type_object(self, extractor):
         """Non-registered return types keep their type-object form (hash unchanged)."""
-        def fn(x: int) -> float:
-            ...
+
+        def fn(x: int) -> float: ...
 
         info = extractor.extract_function_info(fn)
         assert not isinstance(info["returns"], str), (
@@ -269,19 +337,21 @@ class TestFunctionSignatureExtractorWithRegistry:
 
     def test_param_annotation_is_canonical_string(self, extractor):
         """Parameter annotation for a registered orcapod type uses logical_type_name."""
-        def fn(f: op.File) -> str:
-            ...
+
+        def fn(f: op.File) -> str: ...
 
         info = extractor.extract_function_info(fn)
-        assert info["params"] == "f: orcapod.file"
+        assert _annotations(info) == {"f": "orcapod.file;7b2276657273696f6e223a317d"}
 
     def test_generic_param_annotation_canonical(self, extractor):
         """list[op.File] in a parameter is canonicalized."""
-        def fn(files: list[op.File]) -> str:
-            ...
+
+        def fn(files: list[op.File]) -> str: ...
 
         info = extractor.extract_function_info(fn)
-        assert info["params"] == "files: list[orcapod.file]"
+        assert _annotations(info) == {
+            "files": "list[orcapod.file;7b2276657273696f6e223a317d]"
+        }
 
     def test_union_return_annotation_is_raw_union(self, extractor):
         """op.File | None return annotation is stored as a raw union type object.
@@ -289,8 +359,8 @@ class TestFunctionSignatureExtractorWithRegistry:
         TypeObjectHandler handles each union member individually at hash time;
         no string conversion happens in the extractor.
         """
-        def fn(s: str) -> op.File | None:
-            ...
+
+        def fn(s: str) -> op.File | None: ...
 
         info = extractor.extract_function_info(fn)
         assert not isinstance(info["returns"], str), (
@@ -310,6 +380,7 @@ class TestFunctionSignatureExtractorWithRegistry:
         stored value is NOT a str, regardless of whether the annotation contains
         a registered orcapod type, a builtin, a union, or a generic alias.
         """
+
         def fn_bare_file(s: str) -> op.File: ...
         def fn_bare_directory(s: str) -> op.Directory: ...
         def fn_union_file_none(s: str) -> op.File | None: ...
@@ -320,14 +391,14 @@ class TestFunctionSignatureExtractorWithRegistry:
         def fn_list_int(s: str) -> list[int]: ...
 
         cases = [
-            (fn_bare_file,        "op.File bare registered type"),
-            (fn_bare_directory,   "op.Directory bare registered type"),
-            (fn_union_file_none,  "op.File | None union"),
-            (fn_optional_file,    "typing.Optional[op.File] union"),
-            (fn_union_two,        "op.File | op.Directory multi-registered union"),
-            (fn_generic_file,     "list[op.File] generic wrapping registered type"),
-            (fn_float,            "float builtin"),
-            (fn_list_int,         "list[int] builtin generic"),
+            (fn_bare_file, "op.File bare registered type"),
+            (fn_bare_directory, "op.Directory bare registered type"),
+            (fn_union_file_none, "op.File | None union"),
+            (fn_optional_file, "typing.Optional[op.File] union"),
+            (fn_union_two, "op.File | op.Directory multi-registered union"),
+            (fn_generic_file, "list[op.File] generic wrapping registered type"),
+            (fn_float, "float builtin"),
+            (fn_list_int, "list[int] builtin generic"),
         ]
 
         for fn, label in cases:
@@ -345,36 +416,37 @@ class TestFunctionSignatureExtractorWithRegistry:
         In particular, the 'returns' for float stays as the float type object
         so existing cached hashes are not invalidated.
         """
-        def fn(x: int, y: str) -> float:
-            ...
+
+        def fn(x: int, y: str) -> float: ...
 
         info = extractor.extract_function_info(fn)
-        assert info["params"] == "x: int, y: str"
+        assert _annotations(info) == {"x": "int", "y": "str"}
         assert info["returns"] is float  # type object, not string "float"
 
     def test_param_canonical_string_and_return_type_object(self, extractor):
         """op.File in a param uses canonical string; op.File as return is type object.
 
-        Params are embedded in strings so ``canonical_annotation_str`` replaces the
-        module path inline.  Return annotations are raw objects — ``TypeObjectHandler``
+        A parameter's annotation is its canonical text (``canonical_annotation_str``
+        replaces the module path).  Return annotations are raw objects — ``TypeObjectHandler``
         canonicalises them (to ``"type:orcapod.file"``) at hash time.
         """
-        def fn_param(f: op.File) -> str:
-            ...
 
-        def fn_return(s: str) -> op.File:
-            ...
+        def fn_param(f: op.File) -> str: ...
+
+        def fn_return(s: str) -> op.File: ...
 
         info_param = extractor.extract_function_info(fn_param)
         info_return = extractor.extract_function_info(fn_return)
 
-        assert info_param["params"] == "f: orcapod.file"
+        assert _annotations(info_param) == {
+            "f": "orcapod.file;7b2276657273696f6e223a317d"
+        }
         assert info_return["returns"] is op.File
 
     def test_simulated_relocation_stable(self, extractor):
         """Patching __module__ on op.File does not change the extracted info."""
-        def fn(f: op.File) -> op.File:
-            ...
+
+        def fn(f: op.File) -> op.File: ...
 
         info_before = extractor.extract_function_info(fn)
 
@@ -385,7 +457,7 @@ class TestFunctionSignatureExtractorWithRegistry:
         finally:
             op.File.__module__ = original
 
-        assert info_before["params"] == info_after["params"]
+        assert info_before["parameters"] == info_after["parameters"]
         assert info_before["returns"] == info_after["returns"]
 
     def test_path_param_annotation_is_canonical_string(self, extractor):
@@ -395,11 +467,11 @@ class TestFunctionSignatureExtractorWithRegistry:
         logical_type_name 'orcapod.path'.  With the registry wired in, the
         extractor must emit the canonical name rather than the module path.
         """
-        def fn(p: Path) -> str:
-            ...
+
+        def fn(p: Path) -> str: ...
 
         info = extractor.extract_function_info(fn)
-        assert info["params"] == "p: orcapod.path"
+        assert _annotations(info) == {"p": "orcapod.path;7b2276657273696f6e223a317d"}
 
     def test_uuid_param_annotation_is_canonical_string(self, extractor):
         """uuid.UUID in a param annotation is canonicalized to 'orcapod.uuid'.
@@ -407,11 +479,11 @@ class TestFunctionSignatureExtractorWithRegistry:
         op.UUID is uuid.UUID — the same type object registered under
         logical_type_name 'orcapod.uuid'.
         """
-        def fn(u: uuid.UUID) -> str:
-            ...
+
+        def fn(u: uuid.UUID) -> str: ...
 
         info = extractor.extract_function_info(fn)
-        assert info["params"] == "u: orcapod.uuid"
+        assert _annotations(info) == {"u": "orcapod.uuid;7b2276657273696f6e223a317d"}
 
     def test_union_with_path_canonical(self, extractor):
         """str | Path union param: Path is canonicalized to 'orcapod.path'.
@@ -421,11 +493,13 @@ class TestFunctionSignatureExtractorWithRegistry:
         so the output is 'orcapod.path | str' — sort order is preserved since
         'orcapod.path' < 'str' lexicographically.
         """
-        def fn(x: str | Path) -> None:
-            ...
+
+        def fn(x: str | Path) -> None: ...
 
         info = extractor.extract_function_info(fn)
-        assert info["params"] == "x: orcapod.path | str"
+        assert _annotations(info) == {
+            "x": "orcapod.path;7b2276657273696f6e223a317d | str"
+        }
 
     def test_path_return_annotation_type_object_hashes_to_canonical(self, extractor):
         """pathlib.Path as return: extractor stores raw type, TypeObjectHandler gives 'type:orcapod.path'.
@@ -437,11 +511,9 @@ class TestFunctionSignatureExtractorWithRegistry:
            same ``type_converter``), it produces ``"type:orcapod.path"`` — the stable canonical
            form — not ``"type:pathlib.Path"`` (the old module-path form).
         """
-        from orcapod.contexts import get_default_context
         from orcapod.hashing.semantic_hashing.builtin_handlers import TypeObjectHandler
 
-        def fn(s: str) -> Path:
-            ...
+        def fn(s: str) -> Path: ...
 
         info = extractor.extract_function_info(fn)
 
@@ -455,7 +527,6 @@ class TestFunctionSignatureExtractorWithRegistry:
         handler = TypeObjectHandler(type_converter=tc)
         hasher = get_default_context().semantic_hasher
         serialized = handler.handle(info["returns"], hasher)
-        assert serialized == "type:orcapod.path", (
-            f"Expected 'type:orcapod.path', got {serialized!r}"
+        assert serialized == "type:orcapod.path;7b2276657273696f6e223a317d", (
+            f"Expected the identifier text of orcapod.path, got {serialized!r}"
         )
-

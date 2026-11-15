@@ -35,7 +35,6 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pyarrow as pa
-import pytest
 
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.data_function import PythonDataFunction
@@ -52,8 +51,8 @@ from orcapod.types import PodConfig
 
 _N_DATA = 5
 _SLEEP_S = 0.2
-_SEQUENTIAL_MIN = _N_DATA * _SLEEP_S * 0.8   # 80 % of serial time
-_CONCURRENT_MAX = _SLEEP_S * 2.5                 # at most 2.5× single-step
+_SEQUENTIAL_MIN = _N_DATA * _SLEEP_S * 0.8  # 80 % of serial time
+_CONCURRENT_MAX = _SLEEP_S * 2.5  # at most 2.5× single-step
 
 
 def _make_source(n: int = _N_DATA) -> ArrowTableSource:
@@ -77,7 +76,7 @@ def _build_pipeline(
     pf = PythonDataFunction(fn, output_keys="result")
     pod = FunctionPod(pf, pod_config=PodConfig(max_concurrency=max_concurrency))
     db = InMemoryArrowDatabase()
-    job = PipelineJob(name="matrix_test", store=db)
+    job = PipelineJob(name="matrix_test", database=db)
     with job:
         pod(_make_source(n), label="node")
     return job
@@ -106,6 +105,7 @@ def _run_async(job: PipelineJob) -> tuple[list[int], float]:
 # ---------------------------------------------------------------------------
 # Shared functions used across tests
 # ---------------------------------------------------------------------------
+
 
 def sync_double(x: int) -> int:
     """Sync function: double x, simulating a fast computation."""
@@ -138,12 +138,12 @@ _EXPECTED = [x * 2 for x in range(_N_DATA)]  # [0, 2, 4, 6, 8]
 # Use a deliberately small thread pool so the sync path is forced into
 # multiple rounds while the async path runs all coroutines concurrently.
 _POOL_WORKERS = 2
-_POOL_N_DATA = 6          # 3× the pool size → at least 3 rounds for sync
-_POOL_SLEEP_S = 0.1          # per-data sleep
+_POOL_N_DATA = 6  # 3× the pool size → at least 3 rounds for sync
+_POOL_SLEEP_S = 0.1  # per-data sleep
 # async+async: all 6 run at once → ~0.1 s
 # async+sync:  2 threads × 3 rounds → ~0.3 s
-_POOL_ASYNC_MAX = _POOL_SLEEP_S * 2.0    # generous upper bound for async path
-_POOL_SYNC_MIN = _POOL_SLEEP_S * 2.5    # conservative lower bound for sync path
+_POOL_ASYNC_MAX = _POOL_SLEEP_S * 2.0  # generous upper bound for async path
+_POOL_SYNC_MIN = _POOL_SLEEP_S * 2.5  # conservative lower bound for sync path
 
 
 # ===========================================================================
@@ -166,7 +166,7 @@ class TestSyncOrchestratorSyncFunction:
         pod = FunctionPod(pf)
         db = InMemoryArrowDatabase()
 
-        job = PipelineJob(name="direct_orch", store=db)
+        job = PipelineJob(name="direct_orch", database=db)
         with job:
             pod(_make_source(), label="node")
 
@@ -389,7 +389,7 @@ class TestConcurrencyBenefitAcrossMatrix:
 # become sequential and this test would fail.
 _SINGLE_N_DATA = 5
 _SINGLE_SLEEP_S = 0.15
-_SINGLE_ASYNC_MAX = _SINGLE_SLEEP_S * 2.0       # async fn: 1 concurrent round
+_SINGLE_ASYNC_MAX = _SINGLE_SLEEP_S * 2.0  # async fn: 1 concurrent round
 _SINGLE_SYNC_MIN = _SINGLE_N_DATA * _SINGLE_SLEEP_S * 0.8  # sync fn: serial
 
 
@@ -434,8 +434,8 @@ async def _run_async_with_limited_pool(
 
     # Flush pending database writes (PipelineJob.run() does this internally,
     # but here we call the orchestrator directly).
-    assert job.store is not None
-    job.store.at(*job.name).flush()
+    assert job.database is not None
+    job.database.at(*job.name).flush()
 
     records = job.nodes["node"].get_all_records()
     assert records is not None
@@ -456,9 +456,7 @@ class TestAsyncOrchestratorFunctionTypeDifference:
         expected = [x * 2 for x in range(_SINGLE_N_DATA)]
 
         # async+sync: one thread → data run one-at-a-time
-        p_sync = _build_pipeline(
-            _blocking_fn, n=_SINGLE_N_DATA, max_concurrency=None
-        )
+        p_sync = _build_pipeline(_blocking_fn, n=_SINGLE_N_DATA, max_concurrency=None)
         results_sync, elapsed_sync = asyncio.run(
             _run_async_with_limited_pool(p_sync, pool_workers=1)
         )
@@ -577,7 +575,7 @@ class TestSyncOrchestratorSyncFunctionPipelineJob:
         pod = FunctionPod(pf)
         db = InMemoryArrowDatabase()
 
-        job = PipelineJob(name="matrix_pj", store=db)
+        job = PipelineJob(name="matrix_pj", database=db)
         with job:
             pod(_make_source(), label="node")
 

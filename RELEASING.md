@@ -1,6 +1,28 @@
 # Releasing Orcapod
 
-This document describes how to cut a release of `orcapod` to PyPI.
+This document describes how to cut a release of `orcapod`.
+
+## Publish target and where things run
+
+Orcapod is published on public PyPI as [`orcapod`](https://pypi.org/project/orcapod/), under
+the MIT License (developer decision, 2026-11-10; the license is applied from `0.2.0`). Users
+install it with `pip install orcapod` or `uv add orcapod`. `0.2.0` was cut as a tag only
+(developer decision, 2026-11-10); `0.3.0` is the first release published to PyPI from this
+repository.
+
+Two repositories take part (developer decision, 2026-11-12, ITL-1007):
+
+| Repository | Role |
+|---|---|
+| `metamorphic-labs/orcapod-python` | **All development**: branches, pull requests, review, CI, Linear integration, the design log. |
+| `nauticalab/orcapod-python` (public) | **Releases only**: receives `main` by fast-forward push at a release point, and runs the Release workflow. |
+
+The Release workflow (`.github/workflows/release.yml`) is the only publishing route. It runs
+only when dispatched by hand **on `nauticalab/orcapod-python`**, uploads to TestPyPI first and then
+to PyPI, and authenticates to both through OIDC trusted publishing: the workflow uses no API
+token. That requires, on each index, a trusted publisher for the `orcapod` project naming owner
+`nauticalab`, repository `orcapod-python`, workflow `release.yml` and environment `testpypi`
+(TestPyPI) or `pypi` (PyPI); see *One-time setup* below.
 
 ## Branching Model
 
@@ -8,18 +30,80 @@ This document describes how to cut a release of `orcapod` to PyPI.
 - There are no long-lived branches (the historical `dev` branch has been retired).
 - No back-merges are needed.
 
+## Before You Cut
+
+Do these on `metamorphic-labs` `main` before anything is pushed:
+
+1. **Update `CHANGELOG.md`** in a release pull request, the only kind of pull request that
+   edits it. Feature pull requests add `changelog.d/<ISSUE-ID>.md` fragments instead (see
+   `changelog.d/README.md`).
+   1. Fold the fragments into the section of the version being released:
+
+      ```
+      uv run python scripts/assemble_changelog.py --version X.Y.Z
+      ```
+
+      This appends each fragment's text to the matching category of `## [X.Y.Z]` (in order
+      of issue id, without moving the lines already there), creates the section or a
+      category if it is missing, and deletes the fragments. It stops without changing
+      anything if a fragment is malformed; `--check` reports the same problems without
+      folding. Commit the changed `CHANGELOG.md` and the deleted fragments together;
+      `changelog.d/README.md` stays.
+   2. Set the section's heading to the version being released and its date
+      (`## [X.Y.Z] — YYYY-MM-DD`), and make sure breaking changes carry migration notes.
+
+   The GitHub Release body is generated from PR titles; `CHANGELOG.md` is the curated
+   record.
+2. **Check that `main` is green** — the `Run Tests` workflow on the commit you are
+   releasing. The Release workflow re-runs the unit tests on Python 3.11, 3.12 and 3.13
+   and the license check, but not the PostgreSQL or SpiralDB integration jobs.
+3. **Check the version is free** — the tag must not exist on origin, and the version must
+   not exist on PyPI or TestPyPI; neither index allows a version to be uploaded twice, even
+   after it is deleted.
+
+Per-release checklists live in `superpowers/plans/` (for example
+`2026-11-09-v0.2-release-checklist.md`).
+
+## Pre-push checklist
+
+All of these hold before the developer is asked for the go:
+
+1. **The full suite is green**: `uv run pytest tests/` passes on the commit to be pushed.
+2. **The release pull request is merged** on `metamorphic-labs` (`CHANGELOG.md` folded, section
+   dated, `changelog.d/` fragments deleted).
+3. **The data context freeze is done**: every released manifest is pinned in
+   `contexts/released_manifests.json` and the golden hash tests pass unchanged.
+4. **`main` is green** on `metamorphic-labs`, and `git status` is clean.
+5. **The version is free**: the tag does not exist on `nauticalab`, and the version is on
+   neither PyPI nor TestPyPI.
+
 ## Cutting a Release
 
 Releases are triggered from the GitHub Actions UI — no manual `git tag` step required.
+**Do not create the release tag by hand:** the `build` job aborts when the tag already exists
+on origin, so a hand-made `vX.Y.Z` tag means that version can no longer be published by the
+workflow until the tag is deleted.
 
-1. **Merge your branch into `main`** — open a PR, get it reviewed, merge it.
+1. **Push `main` to `nauticalab` as a fast-forward, on the developer's explicit go only.**
+   A push to a public repository cannot be undone, so no agent does this on its own.
 
-2. **Trigger the release workflow** — go to
+   ```
+   git remote add nauticalab https://github.com/nauticalab/orcapod-python.git   # once
+   git fetch nauticalab
+   git merge-base --is-ancestor nauticalab/main main && echo "fast-forward"       # must print it
+   git push nauticalab main:main                                                  # no --force
+   ```
+
+   Never a squash, never a pull request: commit ids must stay identical in both repositories,
+   because the version comes from the tag (`hatch-vcs`). Never push the `v0.2.0` tag (or any
+   tag): the Release workflow creates the release tag on `nauticalab`. The push also replaces
+   the workflows `nauticalab` carries (its old `tests.yml` is deleted by it, as `main` removed
+   that file).
+
+2. **Run Release on `nauticalab`** — go to
    **[Actions → Release → Run workflow](https://github.com/nauticalab/orcapod-python/actions/workflows/release.yml)**
-   in the GitHub UI, enter the version (e.g. `0.1.0`), optionally enter a branch name
-   (defaults to `main`), and click **Run workflow**.
-
-   A leading `v` is stripped automatically — `v0.1.0` and `0.1.0` both work.
+   in the GitHub UI, enter the version (e.g. `0.3.0`), optionally enter a branch name
+   (defaults to `main`), and click **Run workflow**. A leading `v` is stripped automatically.
 
 3. **CI takes over** — the workflow runs the following jobs automatically:
 
@@ -29,11 +113,37 @@ Releases are triggered from the GitHub Actions UI — no manual `git tag` step r
                                                  └─ linear-sync ──────────────────────┴─ linear-complete
    ```
 
-   - Pre-flight: branch validation, then tests on Python 3.11 and 3.12 and license check (parallel after validation)
-   - Build: normalises version, creates local tag, builds wheel + sdist, pushes tag to origin
-   - TestPyPI: publishes to test.pypi.org first as a staging step
-   - PyPI: publishes to pypi.org and creates a GitHub Release with generated release notes
+   - Pre-flight: branch validation, then tests on Python 3.11, 3.12 and 3.13 and license check (parallel after validation)
+   - Build: normalises version (strips a leading `v`), creates the local tag, builds wheel + sdist with `uv build`, aborts if the tag already exists on origin, pushes the tag, uploads `dist/` as an artifact
+   - TestPyPI: in the `testpypi` environment, `uv publish --publish-url https://test.pypi.org/legacy/ dist/*` with an OIDC token (`id-token: write`) — a staging upload
+   - PyPI: in the `pypi` environment, after TestPyPI succeeds, `uv publish dist/*` with an OIDC token, then creates the GitHub Release for the tag with generated release notes and the dist files attached
    - Linear: `linear-sync` starts immediately after build (parallel to publish); `linear-complete` runs after both PyPI publish and linear-sync succeed
+
+4. **Fetch the tag back into `metamorphic-labs`** once the run has succeeded:
+
+   ```
+   git fetch nauticalab --tags
+   git push origin vX.Y.Z
+   ```
+
+   `metamorphic-labs` then holds the same tag on the same commit.
+
+## One-time setup (only the developer can do this)
+
+On `nauticalab/orcapod-python` and the package indexes; no agent changes settings, secrets or
+environments:
+
+1. Create the environments `testpypi` and `pypi` (`Settings → Environments`).
+2. On pypi.org and test.pypi.org, an owner of the `orcapod` project opens
+   *Manage → Publishing* and adds a GitHub trusted publisher with owner `nauticalab`,
+   repository `orcapod-python`, workflow `release.yml` and environment `pypi` (PyPI) or
+   `testpypi` (TestPyPI). An upload from a repository that no trusted publisher names is
+   rejected, which fails `publish-testpypi` after the tag has been pushed. Remove the entries
+   that name `metamorphic-labs`, if any.
+3. Protect `main` on `nauticalab` (no force push, no deletion). It is written only by the
+   fast-forward push above.
+4. Optional: set `CODECOV_TOKEN` there. The Codecov, SpiralDB and Linear jobs run only on
+   `metamorphic-labs` and are skipped on `nauticalab`.
 
 ## Pre-releases
 
@@ -51,6 +161,10 @@ workflow.
 
 **Example:** cutting `v0.1.1` from `hotfix/0.1.x`:
 
+0. **Make sure `hotfix/0.1.x` on `nauticalab` points at the commit to release.** The workflow
+   resolves the **Branch** input only there and tags its tip. If the branch is missing or behind,
+   fast-forward it (on the developer's explicit go only, never with `--force`):
+   `git push nauticalab hotfix/0.1.x:hotfix/0.1.x`
 1. **Trigger the release workflow** — go to
    **[Actions → Release → Run workflow](https://github.com/nauticalab/orcapod-python/actions/workflows/release.yml)**
 2. In the **Use workflow from** dropdown, keep `main` selected (so the workflow version
@@ -60,7 +174,32 @@ workflow.
 5. Click **Run workflow**
 
 The workflow will confirm the branch exists, run tests against it, create the `v0.1.1`
-tag at its tip, and publish to PyPI — identical to a normal release.
+tag at its tip, and publish to TestPyPI and PyPI — identical to a normal release.
+
+## If a Run Fails Part-Way
+
+The `build` job pushes the `vX.Y.Z` tag to origin *before* anything is published, so a
+failure in a later job leaves the tag behind.
+
+| Failed job | State left behind | Recovery |
+|-----------|-------------------|----------|
+| `test` or `license-check` | Nothing | Fix on `main`, trigger a new run |
+| `build`, before "Push release tag" | Nothing | Fix, trigger a new run |
+| `build`, after "Push release tag" | Tag on origin, no artifact | Delete the tag (`git push origin :refs/tags/vX.Y.Z`), then trigger a new run |
+| `publish-testpypi` | Tag on origin | Use **Re-run failed jobs** on the same run — do not start a new run, which would fail creating a tag that already exists |
+| `publish-pypi` | Tag on origin, version on TestPyPI | Use **Re-run failed jobs**. If the upload to PyPI itself partly succeeded, the version is burned: release the next patch version instead |
+| `linear-sync` | Unknown: it needs only `build` and runs in parallel with publishing, so it can fail before anything is published | Check `publish-testpypi` and `publish-pypi` first and recover them by their rows above. Then re-run `linear-sync`; it does not affect publishing |
+| `linear-complete` | Release is published (it runs only after `publish-pypi` and `linear-sync` succeed) | Re-run the failed job; it does not affect publishing |
+
+Never delete a tag whose version has been published to any package index.
+
+## Release Lineage
+
+`v0.1.3` and `v0.1.4` were cut from a maintenance branch and are **not** ancestors of
+`main`; `git describe` on `main` therefore reports a distance from `v0.1.2`. This does not
+affect a release from `main`, because the workflow creates the release tag on the commit
+being built and `hatch-vcs` reads that tag. The fix those two releases carried is on
+`main`. The commit tagged `v0.1.4` is reachable only through its tag.
 
 ## Tag Format
 
@@ -77,44 +216,20 @@ manual version bump is needed.
 
 ## Linear Release System
 
-When a release is triggered, the CI automatically transitions all Linear issues in
-**"Merged"** status (whose PRs were included in the release) to **"Done"**. This is
-handled by two jobs in `release.yml` that call `linear/linear-release-action`, plus a
-separate `release-sync.yml` that runs on every push to `main`.
-
-### How it works
+Linear is wired to the development repository only. `release-sync.yml` and the `linear-sync` and
+`linear-complete` jobs of `release.yml` run only when
+`github.repository == 'metamorphic-labs/orcapod-python'`; on `nauticalab` they are skipped, which
+does not block or fail the release (no publish job depends on them). They call
+`linear/linear-release-action` and transition the issues in **"Merged"** status to **"Done"**.
 
 | Trigger | Workflow / Job | Action | Effect |
 |---------|---------------|--------|--------|
-| Push to `main` | `release-sync.yml / sync` | `sync` (no version) | Associates the merged PR with the open Linear release draft |
-| Release workflow `build` succeeds | `release.yml / linear-sync` | `sync --version <tag>` | Finalises the commit set for this release version in Linear |
-| After `publish-pypi` succeeds | `release.yml / linear-complete` | `complete --version <tag>` | Marks the release done in Linear; triggers Merged → Done |
+| Push to `main` (`metamorphic-labs`) | `release-sync.yml / sync` | `sync` (no version) | Associates the merged PR with the open Linear release draft |
+| Release workflow `build` succeeds (`metamorphic-labs` only) | `release.yml / linear-sync` | `sync --version <tag>` | Finalises the commit set for the version |
+| After `publish-pypi` succeeds (`metamorphic-labs` only) | `release.yml / linear-complete` | `complete --version <tag>` | Marks the release done in Linear |
 
-### Prerequisites
-
-Before cutting the first release with this system active, a workspace admin must:
-
-1. **Set the `LINEAR_ACCESS_KEY` repo secret** in `nauticalab/orcapod-python` GitHub
-   settings (`Settings → Secrets and variables → Actions → New repository secret`).
-   Use the same Linear API key as `metamorphic-brain/axon`.
-
-2. **Configure a Linear release** in the workspace for orcapod-python via the Linear UI:
-   set the release name, which statuses count as "included" (at minimum: Merged), and
-   the target state for the transition (Done).
-
-3. **Update PyPI/TestPyPI Trusted Publisher configs** — if the Trusted Publisher on
-   pypi.org or test.pypi.org still references `publish.yml` as the workflow file, update
-   it to `release.yml` before triggering the first release.
-
-If `LINEAR_ACCESS_KEY` is not set: the `release-sync` workflow runs but the Linear action
-may fail; the `linear-sync` and `linear-complete` jobs in `release.yml` fail but do not
-block the PyPI publish (they have no dependents in the publish chain).
-
-### Replicating for other orcapod repos
-
-1. Copy `.github/workflows/release-sync.yml` verbatim.
-2. Add `linear-sync` and `linear-complete` jobs to the repo's release workflow,
-   adjusting `needs:` in `linear-complete` to point at whichever job creates the GitHub
-   Release.
-3. Set the `LINEAR_ACCESS_KEY` repo secret.
-4. Configure a Linear release in the workspace for the new repo.
+Because the Release workflow runs on `nauticalab`, these jobs do not run for a release at all
+today; completing the Linear release is a manual step until the developer decides otherwise
+(the issue ITL-1007 notes this "needs more thought"). Setup on `metamorphic-labs`: the
+`LINEAR_ACCESS_KEY` repo secret (the key `metamorphic-brain/axon` uses) and a Linear release
+configured in the workspace.

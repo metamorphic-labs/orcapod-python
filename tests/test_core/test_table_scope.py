@@ -13,7 +13,7 @@ import pyarrow as pa
 import pytest
 
 from orcapod.core.function_pod import FunctionPod
-from orcapod.core.nodes import FunctionNode, OperatorNode
+from orcapod.core.nodes import FunctionNode
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.nodes.operator_node import OperatorJobNode
 from orcapod.core.operators import Join
@@ -65,10 +65,16 @@ def _make_join_streams(
         }
     )
     src_a = ArrowTableSource(
-        table_a, tag_columns=["key"], source_id=f"src_a_{source_id_suffix}", infer_nullable=True
+        table_a,
+        tag_columns=["key"],
+        source_id=f"src_a_{source_id_suffix}",
+        infer_nullable=True,
     )
     src_b = ArrowTableSource(
-        table_b, tag_columns=["key"], source_id=f"src_b_{source_id_suffix}", infer_nullable=True
+        table_b,
+        tag_columns=["key"],
+        source_id=f"src_b_{source_id_suffix}",
+        infer_nullable=True,
     )
     return src_a, src_b
 
@@ -104,8 +110,12 @@ class TestFunctionNodePipelineHashScope:
         # Both use same source_id → same schema structure → same pipeline_hash
         src_a = _make_source([{"x": 1, "y": 10}], source_id="src")
         src_b = _make_source([{"x": 2, "y": 20}], source_id="src")
-        node_a = FunctionJobNode(function_pod=pod, input_stream=src_a, pipeline_database=db)
-        node_b = FunctionJobNode(function_pod=pod, input_stream=src_b, pipeline_database=db)
+        node_a = FunctionJobNode(
+            function_pod=pod, input_stream=src_a, pipeline_database=db
+        )
+        node_b = FunctionJobNode(
+            function_pod=pod, input_stream=src_b, pipeline_database=db
+        )
 
         assert node_a.node_identity_path == node_b.node_identity_path
         assert node_a.pipeline_hash() == node_b.pipeline_hash()
@@ -119,7 +129,9 @@ class TestFunctionNodePipelineHashScope:
         node.run()
 
         col_name = SystemConstant().NODE_CONTENT_HASH_COL
-        pipeline_table = node._pipeline_database.get_all_records(node._versioned_pipeline_path)
+        pipeline_table = node._pipeline_database.get_all_records(
+            node._versioned_pipeline_path
+        )
         assert pipeline_table is not None
         assert col_name in pipeline_table.column_names
 
@@ -142,8 +154,12 @@ class TestFunctionNodePipelineHashScope:
         # Different source_ids → different content_hash → different _node_content_hash rows
         src_a = _make_source([{"x": 1, "y": 10}], source_id="source_a")
         src_b = _make_source([{"x": 2, "y": 20}], source_id="source_b")
-        node_a = FunctionJobNode(function_pod=pod, input_stream=src_a, pipeline_database=db)
-        node_b = FunctionJobNode(function_pod=pod, input_stream=src_b, pipeline_database=db)
+        node_a = FunctionJobNode(
+            function_pod=pod, input_stream=src_a, pipeline_database=db
+        )
+        node_b = FunctionJobNode(
+            function_pod=pod, input_stream=src_b, pipeline_database=db
+        )
 
         node_a.run()
         node_b.run()
@@ -173,7 +189,10 @@ class TestFunctionNodeContentHashScope:
         pod = _make_pod()
         src = _make_source([{"x": 1, "y": 2}])
         node = FunctionJobNode(
-            function_pod=pod, input_stream=src, pipeline_database=db, table_scope="content_hash"
+            function_pod=pod,
+            input_stream=src,
+            pipeline_database=db,
+            table_scope="content_hash",
         )
         assert node._table_scope == "content_hash"
 
@@ -182,13 +201,19 @@ class TestFunctionNodeContentHashScope:
         pod = _make_pod()
         src = _make_source([{"x": 1, "y": 2}])
         node = FunctionJobNode(
-            function_pod=pod, input_stream=src, pipeline_database=db, table_scope="content_hash"
+            function_pod=pod,
+            input_stream=src,
+            pipeline_database=db,
+            table_scope="content_hash",
         )
         path = node.node_identity_path
         assert path[-2].startswith("schema:"), f"Expected schema:... got {path[-2]!r}"
-        assert path[-1].startswith("instance:"), f"Expected instance:... got {path[-1]!r}"
-        assert node.pipeline_hash().to_string() in path[-2]
-        assert node.content_hash().to_string() in path[-1]
+        assert path[-1].startswith("instance:"), (
+            f"Expected instance:... got {path[-1]!r}"
+        )
+        # Whole components: a labelled hash ("schema:semantic_v1:...") must fail.
+        assert path[-2] == f"schema:{node.pipeline_hash().to_hex()}"
+        assert path[-1] == f"instance:{node.content_hash().to_hex()}"
 
     def test_two_nodes_different_source_id_have_different_paths(self):
         """Different source_id → different content_hash → different node_identity_path."""
@@ -197,10 +222,16 @@ class TestFunctionNodeContentHashScope:
         src_a = _make_source([{"x": 1, "y": 10}], source_id="source_a")
         src_b = _make_source([{"x": 2, "y": 20}], source_id="source_b")
         node_a = FunctionJobNode(
-            function_pod=pod, input_stream=src_a, pipeline_database=db, table_scope="content_hash"
+            function_pod=pod,
+            input_stream=src_a,
+            pipeline_database=db,
+            table_scope="content_hash",
         )
         node_b = FunctionJobNode(
-            function_pod=pod, input_stream=src_b, pipeline_database=db, table_scope="content_hash"
+            function_pod=pod,
+            input_stream=src_b,
+            pipeline_database=db,
+            table_scope="content_hash",
         )
         assert node_a.content_hash() != node_b.content_hash()
         assert node_a.node_identity_path != node_b.node_identity_path
@@ -213,10 +244,16 @@ class TestFunctionNodeContentHashScope:
         src_a = _make_source([{"x": 1, "y": 10}], source_id="src")
         src_b = _make_source([{"x": 2, "y": 20}], source_id="src")
         node_a = FunctionJobNode(
-            function_pod=pod, input_stream=src_a, pipeline_database=db, table_scope="content_hash"
+            function_pod=pod,
+            input_stream=src_a,
+            pipeline_database=db,
+            table_scope="content_hash",
         )
         node_b = FunctionJobNode(
-            function_pod=pod, input_stream=src_b, pipeline_database=db, table_scope="content_hash"
+            function_pod=pod,
+            input_stream=src_b,
+            pipeline_database=db,
+            table_scope="content_hash",
         )
         # pipeline_hash same → same schema: segment
         assert node_a.pipeline_hash() == node_b.pipeline_hash()
@@ -287,7 +324,10 @@ class TestFunctionNodeDescriptorTableScope:
         src = _make_source([{"x": 1, "y": 2}])
         db = InMemoryArrowDatabase()
         node = FunctionJobNode(
-            function_pod=pod, input_stream=src, pipeline_database=db, table_scope="content_hash"
+            function_pod=pod,
+            input_stream=src,
+            pipeline_database=db,
+            table_scope="content_hash",
         )
         tag_schema, data_schema = node.output_schema()
         descriptor = {
@@ -430,9 +470,12 @@ class TestOperatorNodeContentHashScope:
         )
         path = node.node_identity_path
         assert path[-2].startswith("schema:"), f"Expected schema:... got {path[-2]!r}"
-        assert path[-1].startswith("instance:"), f"Expected instance:... got {path[-1]!r}"
-        assert node.pipeline_hash().to_string() in path[-2]
-        assert node.content_hash().to_string() in path[-1]
+        assert path[-1].startswith("instance:"), (
+            f"Expected instance:... got {path[-1]!r}"
+        )
+        # Whole components: a labelled hash ("schema:semantic_v1:...") must fail.
+        assert path[-2] == f"schema:{node.pipeline_hash().to_hex()}"
+        assert path[-1] == f"instance:{node.content_hash().to_hex()}"
 
     def test_two_nodes_different_source_ids_have_different_paths(self):
         db = InMemoryArrowDatabase()
@@ -492,7 +535,7 @@ class TestOperatorNodeDescriptorTableScope:
             "label": None,
             "content_hash": "fake_hash",
             "pipeline_hash": "fake_pipeline_hash",
-            "data_context_key": "std:v0.1:default",
+            "data_context_key": "std:v1:default",
             # "table_scope" intentionally omitted
             "output_schema": {"tag": {"key": "large_string"}, "data": {"val": "int64"}},
             "operator": {
@@ -519,7 +562,7 @@ class TestOperatorNodeDescriptorTableScope:
             "label": None,
             "content_hash": "fake_hash",
             "pipeline_hash": "fake_pipeline_hash",
-            "data_context_key": "std:v0.1:default",
+            "data_context_key": "std:v1:default",
             "table_scope": "pipeline_hash",
             "output_schema": {"tag": {"key": "large_string"}, "data": {"val": "int64"}},
             "operator": {
@@ -546,7 +589,7 @@ class TestOperatorNodeDescriptorTableScope:
             "label": None,
             "content_hash": "fake_hash",
             "pipeline_hash": "fake_pipeline_hash",
-            "data_context_key": "std:v0.1:default",
+            "data_context_key": "std:v1:default",
             "table_scope": "content_hash",
             "output_schema": {"tag": {"key": "large_string"}, "data": {"val": "int64"}},
             "operator": {

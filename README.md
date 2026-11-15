@@ -3,19 +3,62 @@ Orcapod's Python library for developing reproducible scientific pipelines.
 
 User documentation lives in [`docs/`](docs/index.md) (start with
 [Getting Started](docs/getting-started.md)) and is built with `uv run mkdocs build --strict`.
-Every Python sample in the docs is executed by `tests/test_docs/`.
+`tests/test_docs/` executes the Python samples in this README, `docs/index.md`,
+`docs/getting-started.md`, `docs/concepts/` and `docs/reference/`, except the two samples in
+`docs/concepts/file-hash-caching.md` that need a PostgreSQL server.
+
+## Installation
+
+Orcapod supports Python 3.11, 3.12 and 3.13 and is published on PyPI as `orcapod`, under the
+MIT License:
+
+```bash
+pip install orcapod
+# or, in a uv project
+uv add orcapod
+```
+
+`0.2.0` is not on PyPI, where the latest release is `0.1.4`; `0.2.0` is the tag `v0.2.0` of
+the repository.
+
+Optional features are installed as extras:
+
+| Extra | Adds |
+|-------|------|
+| `orcapod[ray]` | Distributed execution with `RayExecutor` |
+| `orcapod[redis]` | Redis-backed caching |
+| `orcapod[postgresql]` | PostgreSQL connector and hash cache |
+| `orcapod[spiraldb]` | SpiralDB database backend |
+| `orcapod[all]` | All of the above |
+
+SpikeInterface support lives in a separate package,
+[`orcapod-extension-spikeinterface`](https://github.com/nauticalab/orcapod-extension-spikeinterface).
+It is not published on PyPI; install it from its repository.
+
+See [CHANGELOG.md](https://github.com/nauticalab/orcapod-python/blob/main/CHANGELOG.md)
+for release notes, including the migration steps for databases written by an earlier
+release.
 
 ## Releasing
 
-To cut a release, tag a commit on `main` — `hatch-vcs` derives the version
-automatically and CI publishes to PyPI. See [RELEASING.md](RELEASING.md) for the
-full workflow.
+Releases are cut by running the GitHub Actions **Release** workflow by hand. It runs the
+tests and the license check, creates and pushes the version tag, builds the wheel and
+sdist, and publishes them to TestPyPI and then PyPI through trusted publishing. The version
+comes from the tag via `hatch-vcs`, so there is no version number to bump in the source
+tree. See [RELEASING.md](https://github.com/nauticalab/orcapod-python/blob/main/RELEASING.md)
+for the full workflow.
+
+## License
+
+Orcapod is released under the
+[MIT License](https://github.com/nauticalab/orcapod-python/blob/main/LICENSE).
 
 ## Continuous Integration
 
 This project uses GitHub Actions for continuous integration:
 
-- **Run Tests**: Runs the full unit test suite on Ubuntu with Python 3.11 and 3.12. PostgreSQL integration tests are excluded.
+- **Run Tests**: Runs the full unit test suite on Ubuntu with Python 3.11, 3.12 and 3.13. PostgreSQL integration tests are excluded.
+- **Python — Required CI** (set by the organization): `ruff` lint and format, `basedpyright`, and `pytest` on Python 3.11, 3.12 and 3.13.
 - **Run PostgreSQL Tests**: Runs only the `@pytest.mark.postgres` integration tests against a PostgreSQL 16 service container.
 
 ### Running Tests Locally
@@ -32,6 +75,10 @@ uv run pytest -m "not postgres"
 # Run with coverage
 uv run pytest -m "not postgres" --cov=src --cov-report=term-missing
 ```
+
+No Graphviz development headers are needed. The Graphviz `dot` binary is an optional
+runtime requirement, used only to render pipeline graphs (e.g. `brew install graphviz` or
+`apt-get install graphviz`).
 
 ### Running PostgreSQL Integration Tests Locally
 
@@ -191,7 +238,10 @@ While the following is subject to change based on future development, it represe
       │   on success:
       │       ctx_observer.on_data_end(node_label, tag, data, result, cached=False)
       │       emit (tag_out, result) downstream
-      │   on exception:
+      │   on StoreError (the store could not be read or written):
+      │       ctx_observer.on_data_crash(node_label, tag, data, exc)
+      │       raise, whatever error_policy is — the run stops (ITL-878, ITL-884)
+      │   on any other exception (the function failed):
       │       ctx_observer.on_data_crash(node_label, tag, data, exc)
       │       if error_policy == "fail_fast": raise
       │       otherwise: skip this data, continue

@@ -16,6 +16,7 @@ Python-type-level compatibility
     property that prevents silent data corruption when two unrelated dataclasses
     happen to share the same fields.
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -27,8 +28,20 @@ from orcapod.types import Schema
 from orcapod.utils.schema_utils import check_schema_compatibility
 
 
+def _identity(cls: type) -> str:
+    """Return the identity string (logical type name) of a user class (ITL-881)."""
+    from orcapod.contexts import get_default_context
+
+    converter = get_default_context().type_converter
+    converter.ensure_types_registered_for_schemas(Schema({"value": cls}))
+    lt = converter.get_logical_type(cls)
+    assert lt is not None
+    return lt.logical_type_name
+
+
 # Module-level dataclasses — DataclassLogicalTypeFactory rejects local classes
 # because they have no stable fully-qualified class name for reconstruction.
+
 
 @dataclasses.dataclass
 class _PointA:
@@ -39,6 +52,7 @@ class _PointA:
 @dataclasses.dataclass
 class _PointB:
     """Same struct shape as _PointA but a different class name."""
+
     x: int
     y: int
 
@@ -61,10 +75,10 @@ def test_arrow_schema_distinct_extension_names_for_same_shape():
     assert isinstance(type_a, pa.ExtensionType)
     assert isinstance(type_b, pa.ExtensionType)
 
-    fqcn_a = f"{_PointA.__module__}.{_PointA.__qualname__}"
-    fqcn_b = f"{_PointB.__module__}.{_PointB.__qualname__}"
-    assert type_a.extension_name == fqcn_a
-    assert type_b.extension_name == fqcn_b
+    type_name_a = _identity(_PointA)
+    type_name_b = _identity(_PointB)
+    assert type_a.extension_name == type_name_a
+    assert type_b.extension_name == type_name_b
     assert type_a.extension_name != type_b.extension_name
 
 

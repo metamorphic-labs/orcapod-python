@@ -28,6 +28,7 @@ from orcapod.semantic_types.universal_converter import UniversalTypeConverter
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+
 def _make_test_context(registry: LogicalTypeRegistry) -> DataContext:
     """Create a DataContext with a fresh converter bound to the given registry.
 
@@ -50,22 +51,38 @@ def _make_test_context(registry: LogicalTypeRegistry) -> DataContext:
 
 def _make_logical_type(py_type: type) -> LogicalTypeProtocol:
     """Synthesize a minimal LogicalType for py_type."""
-    arrow_name = f"{py_type.__module__}.{py_type.__qualname__}.{_uuid_module.uuid4().hex[:6]}"
+    arrow_name = (
+        f"{py_type.__module__}.{py_type.__qualname__}.{_uuid_module.uuid4().hex[:6]}"
+    )
     ArrowExt = make_arrow_extension_type(arrow_name, pa.large_string())
     PolarsExt = make_polars_extension_type(arrow_name, pa.large_string())
 
     class _LT:
         logical_type_name = arrow_name
         python_type = py_type
-        def get_arrow_extension_type(self): return ArrowExt()
-        def get_polars_extension_type(self): return PolarsExt()
-        def python_to_storage(self, v, converter=None): return str(v)
-        def storage_to_python(self, v, converter=None): return v
+
+        def readable_extension_metadata(self):
+            """Read only the metadata the type's own Arrow extension type writes."""
+            return (self.get_arrow_extension_type().__arrow_ext_serialize__(),)
+
+        def get_arrow_extension_type(self):
+            return ArrowExt()
+
+        def get_polars_extension_type(self):
+            return PolarsExt()
+
+        def python_to_storage(self, v, converter=None):
+            return str(v)
+
+        def storage_to_python(self, v, converter=None):
+            return v
 
     return _LT()
 
 
-def _make_registry_with_factory(*target_bases: type) -> tuple[LogicalTypeRegistry, list[type]]:
+def _make_registry_with_factory(
+    *target_bases: type,
+) -> tuple[LogicalTypeRegistry, list[type]]:
     """Return a registry with a factory covering all target_bases and a call log."""
     call_log: list[type] = []
 
@@ -86,6 +103,7 @@ def _make_registry_with_factory(*target_bases: type) -> tuple[LogicalTypeRegistr
 
 
 # ── Custom classes used in tests ─────────────────────────────────────────────
+
 
 class _MyBase:
     pass
@@ -112,6 +130,7 @@ class _ThirdChild(_ThirdBase):
 
 
 # ── Basic triggering tests ────────────────────────────────────────────────────
+
 
 def test_pod_declaration_triggers_factory_for_input_type():
     """Declaring a FunctionPod with a custom input type causes factory synthesis."""
@@ -147,6 +166,7 @@ def test_pod_declaration_triggers_factory_for_output_type():
 
 # ── Complex / nested type tests ───────────────────────────────────────────────
 
+
 def test_pod_declaration_with_nested_list_input():
     """list[_MyChild] in a function input causes factory synthesis for _MyChild."""
     registry, call_log = _make_registry_with_factory(_MyBase)
@@ -163,7 +183,7 @@ def test_pod_declaration_with_nested_list_input():
 
 
 @pytest.mark.xfail(
-    reason="list[T] / dict[K, list[T]] where T is a logical type not yet supported (PLT-1732)",
+    reason="list[T] / dict[K, list[T]] where T is a logical type not yet supported (ITL-1077)",
     raises=ValueError,
     strict=True,
 )
@@ -213,7 +233,7 @@ def test_pod_declaration_with_complex_output():
 
 
 @pytest.mark.xfail(
-    reason="list[T] / dict[K, list[T]] where T is a logical type not yet supported (PLT-1732)",
+    reason="list[T] / dict[K, list[T]] where T is a logical type not yet supported (ITL-1077)",
     raises=ValueError,
     strict=True,
 )
@@ -233,6 +253,7 @@ def test_pod_declaration_with_doubly_nested_output():
 
 
 # ── Multi-class tests ─────────────────────────────────────────────────────────
+
 
 def test_pod_declaration_two_classes_one_in_input_one_in_output():
     """Two different custom classes — one in input, one in output — each gets synthesized."""
@@ -321,12 +342,14 @@ def test_pod_declaration_three_classes_all_in_input():
 
 # ── Skip / guard tests ────────────────────────────────────────────────────────
 
+
 def test_pod_declaration_native_types_no_factory_call():
     """Pods using only native types (int, str, etc.) never trigger factory lookup."""
 
     class _NeverCalledFactory:
         def supports_class(self, python_type):
             return True
+
         def reconstruct_from_arrow(self, name, storage, meta, converter): ...
         def create_for_python_type(self, pt, converter):
             raise AssertionError(f"factory called for {pt!r}")

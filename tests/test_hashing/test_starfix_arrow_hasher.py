@@ -16,20 +16,18 @@ Coverage
 - Empty table: hash_table handles a table with zero rows
 - Schema-only vs data hash: hash_schema and hash_table differ for the same schema
 - versioned_hashers factory: get_versioned_semantic_arrow_hasher returns a
-  StarfixArrowHasher with hasher_id == _CURRENT_ARROW_HASHER_ID
-- Context integration: the v0.1 context wires up StarfixArrowHasher
+  StarfixArrowHasher with hasher_id == ARROW_HASH_LABEL
+- Context integration: the v1 context wires up StarfixArrowHasher
 - Stability (golden values): fully-pinned 35-byte digests catch accidental
   algorithm changes in both schema and table hashing
 """
 
 from __future__ import annotations
 
-import pytest
 import pyarrow as pa
 
-from orcapod.hashing.arrow_hashers import StarfixArrowHasher
+from orcapod.hashing.arrow_hashers import ARROW_HASH_LABEL, StarfixArrowHasher
 from orcapod.hashing.versioned_hashers import (
-    _CURRENT_ARROW_HASHER_ID,
     get_versioned_semantic_arrow_hasher,
 )
 from orcapod.types import ContentHash
@@ -39,13 +37,14 @@ from orcapod.types import ContentHash
 # Helpers
 # ---------------------------------------------------------------------------
 
-HASHER_ID = "arrow_v0.1"
+HASHER_ID = "arrow_v1"
 
 _DIGEST_LEN = 35  # 3 version bytes + 32 SHA-256 bytes
 
 
 def _make_hasher() -> StarfixArrowHasher:
     from orcapod.contexts import get_default_context
+
     ctx = get_default_context()
     return StarfixArrowHasher(
         type_converter=ctx.type_converter,
@@ -105,28 +104,31 @@ class TestHashSchema:
             ]
         )
         h = _make_hasher().hash_schema(schema)
-        assert h.digest.hex() == "000001d676ef0263a8e0e7500b1c97033993dbe445172ca0f9e7577b3994bfa6224b4c", (
+        assert (
+            h.digest.hex()
+            == "000002e9eb1c825a8a882b565ef45a2ec832c10e31ad067736d2a6cb8a9403ff91c33f"
+        ), (
             f"Schema golden digest changed — was the starfix algorithm updated? "
             f"Got: {h.digest.hex()}"
         )
 
     def test_nullability_affects_schema_hash(self):
         """nullable=True and nullable=False must produce different schema hashes."""
-        s_nullable     = pa.schema([pa.field("x", pa.int32(), nullable=True)])
+        s_nullable = pa.schema([pa.field("x", pa.int32(), nullable=True)])
         s_non_nullable = pa.schema([pa.field("x", pa.int32(), nullable=False)])
-        h_nullable     = _make_hasher().hash_schema(s_nullable)
+        h_nullable = _make_hasher().hash_schema(s_nullable)
         h_non_nullable = _make_hasher().hash_schema(s_non_nullable)
         assert h_nullable.digest != h_non_nullable.digest
 
     def test_nullability_golden_values(self):
         """Pin nullable and non-nullable schema digests independently."""
-        s_nullable     = pa.schema([pa.field("x", pa.int32(), nullable=True)])
+        s_nullable = pa.schema([pa.field("x", pa.int32(), nullable=True)])
         s_non_nullable = pa.schema([pa.field("x", pa.int32(), nullable=False)])
         assert _make_hasher().hash_schema(s_nullable).digest.hex() == (
-            "000001b8005339e69df64cda60f9ff9c98caa264092a7b666c3f7f85a2bfed20bae3db"
+            "000002fa30e1a356fea8d3a5602a6fa1d49a43349a840f65ead55463f5ead55ea64e9a"
         )
         assert _make_hasher().hash_schema(s_non_nullable).digest.hex() == (
-            "00000179353568a71430411e8108ee02d425800f6d5054d9b2baa871cad90f3e06422a"
+            "0000022571a7dcd462c26761f5b5353ccbd0c8d80655b462c3bb622560ec0d590a5662"
         )
 
 
@@ -168,7 +170,9 @@ class TestHashTable:
     def test_different_data_differs(self):
         t1 = pa.table({"x": [1, 2, 3]})
         t2 = pa.table({"x": [1, 2, 4]})
-        assert _make_hasher().hash_table(t1).digest != _make_hasher().hash_table(t2).digest
+        assert (
+            _make_hasher().hash_table(t1).digest != _make_hasher().hash_table(t2).digest
+        )
 
     def test_empty_table(self):
         """Zero-row tables should be hashable without error."""
@@ -187,52 +191,70 @@ class TestHashTable:
     def test_utf8_largeutf8_normalised(self):
         """Utf8 and LargeUtf8 columns should hash identically (starfix normalises)."""
         t_utf8 = pa.table({"s": pa.array(["hello", "world"], type=pa.utf8())})
-        t_large = pa.table(
-            {"s": pa.array(["hello", "world"], type=pa.large_utf8())}
-        )
+        t_large = pa.table({"s": pa.array(["hello", "world"], type=pa.large_utf8())})
         h1 = _make_hasher().hash_table(t_utf8)
         h2 = _make_hasher().hash_table(t_large)
         assert h1.digest == h2.digest
 
     def test_binary_largebinary_normalised(self):
         """Binary and LargeBinary columns should hash identically (starfix normalises)."""
-        t_bin  = pa.table({"b": pa.array([b"hello", b"world"], type=pa.binary())})
+        t_bin = pa.table({"b": pa.array([b"hello", b"world"], type=pa.binary())})
         t_lbin = pa.table({"b": pa.array([b"hello", b"world"], type=pa.large_binary())})
-        assert _make_hasher().hash_table(t_bin).digest == _make_hasher().hash_table(t_lbin).digest
+        assert (
+            _make_hasher().hash_table(t_bin).digest
+            == _make_hasher().hash_table(t_lbin).digest
+        )
 
     def test_row_order_matters(self):
         """Reordering rows must produce a different hash (rows carry positional semantics)."""
-        t_orig     = pa.table({"x": pa.array([1, 2, 3], type=pa.int64())})
+        t_orig = pa.table({"x": pa.array([1, 2, 3], type=pa.int64())})
         t_reversed = pa.table({"x": pa.array([3, 2, 1], type=pa.int64())})
-        assert _make_hasher().hash_table(t_orig).digest != _make_hasher().hash_table(t_reversed).digest
+        assert (
+            _make_hasher().hash_table(t_orig).digest
+            != _make_hasher().hash_table(t_reversed).digest
+        )
 
     def test_null_position_matters(self):
         """A null in a different row position must produce a different hash."""
-        t_null_first  = pa.table({"x": pa.array([None, 2, 3], type=pa.int32())})
+        t_null_first = pa.table({"x": pa.array([None, 2, 3], type=pa.int32())})
         t_null_second = pa.table({"x": pa.array([1, None, 3], type=pa.int32())})
-        assert _make_hasher().hash_table(t_null_first).digest != _make_hasher().hash_table(t_null_second).digest
+        assert (
+            _make_hasher().hash_table(t_null_first).digest
+            != _make_hasher().hash_table(t_null_second).digest
+        )
 
     def test_null_differs_from_no_null(self):
         """A table with a null value must hash differently from one without."""
         t_with_null = pa.table({"x": pa.array([1, None, 3], type=pa.int32())})
-        t_no_null   = pa.table({"x": pa.array([1, 2, 3],    type=pa.int32())})
-        assert _make_hasher().hash_table(t_with_null).digest != _make_hasher().hash_table(t_no_null).digest
+        t_no_null = pa.table({"x": pa.array([1, 2, 3], type=pa.int32())})
+        assert (
+            _make_hasher().hash_table(t_with_null).digest
+            != _make_hasher().hash_table(t_no_null).digest
+        )
 
     def test_int32_differs_from_int64(self):
         """Same values stored as int32 and int64 must hash differently."""
         t_i32 = pa.table({"x": pa.array([1, 2, 3], type=pa.int32())})
         t_i64 = pa.table({"x": pa.array([1, 2, 3], type=pa.int64())})
-        assert _make_hasher().hash_table(t_i32).digest != _make_hasher().hash_table(t_i64).digest
+        assert (
+            _make_hasher().hash_table(t_i32).digest
+            != _make_hasher().hash_table(t_i64).digest
+        )
 
     def test_golden_value_table(self):
         """Pin the full 35-byte table digest so any algorithm change is caught."""
-        table = pa.table({
-            "id":    pa.array([1, 2, 3], type=pa.int32()),
-            "score": pa.array([0.1, 0.2, 0.3], type=pa.float64()),
-            "label": pa.array(["a", "b", "c"], type=pa.utf8()),
-        })
+        table = pa.table(
+            {
+                "id": pa.array([1, 2, 3], type=pa.int32()),
+                "score": pa.array([0.1, 0.2, 0.3], type=pa.float64()),
+                "label": pa.array(["a", "b", "c"], type=pa.utf8()),
+            }
+        )
         h = _make_hasher().hash_table(table)
-        assert h.digest.hex() == "0000010cd7fe5462420b84f03a06925374e528817a3b72319e679a17e7380964878791", (
+        assert (
+            h.digest.hex()
+            == "00000277215cd88b3019240dec61d8c4bed8bf6fd05e48d5684e1e7d3acc957f54102c"
+        ), (
             f"Table golden digest changed — was the starfix algorithm updated? "
             f"Got: {h.digest.hex()}"
         )
@@ -262,9 +284,9 @@ class TestHashRecordBatch:
         an equivalent single-batch Table (chunked arrays are transparent)."""
         b1 = pa.record_batch({"x": pa.array([1, 2], type=pa.int64())})
         b2 = pa.record_batch({"x": pa.array([3, 4], type=pa.int64())})
-        t_multi  = pa.Table.from_batches([b1, b2])
+        t_multi = pa.Table.from_batches([b1, b2])
         t_single = pa.table({"x": pa.array([1, 2, 3, 4], type=pa.int64())})
-        h_multi  = _make_hasher().hash_table(t_multi)
+        h_multi = _make_hasher().hash_table(t_multi)
         h_single = _make_hasher().hash_table(t_single)
         assert h_multi.digest == h_single.digest
 
@@ -281,11 +303,11 @@ class TestVersionedHashersFactory:
 
     def test_hasher_id_matches_current_constant(self):
         hasher = get_versioned_semantic_arrow_hasher()
-        assert hasher.hasher_id == _CURRENT_ARROW_HASHER_ID
+        assert hasher.hasher_id == ARROW_HASH_LABEL
 
-    def test_current_hasher_id_is_arrow_v0_1(self):
+    def test_current_hasher_id_is_arrow_v0_2(self):
         """Pin the current version constant to detect accidental version drifts."""
-        assert _CURRENT_ARROW_HASHER_ID == "arrow_v0.1"
+        assert ARROW_HASH_LABEL == "arrow_v1"
 
 
 # ---------------------------------------------------------------------------
@@ -297,19 +319,19 @@ class TestContextIntegration:
     def test_v01_context_uses_starfix_hasher(self):
         from orcapod.contexts import resolve_context
 
-        ctx = resolve_context("v0.1")
+        ctx = resolve_context("v1")
         assert isinstance(ctx.arrow_hasher, StarfixArrowHasher)
 
     def test_v01_context_hasher_id(self):
         from orcapod.contexts import resolve_context
 
-        ctx = resolve_context("v0.1")
-        assert ctx.arrow_hasher.hasher_id == "arrow_v0.1"
+        ctx = resolve_context("v1")
+        assert ctx.arrow_hasher.hasher_id == "arrow_v1"
 
     def test_context_hash_table_functional(self):
         from orcapod.contexts import resolve_context
 
-        ctx = resolve_context("v0.1")
+        ctx = resolve_context("v1")
         table = pa.table({"key": [1, 2, 3], "val": [0.1, 0.2, 0.3]})
         h = ctx.arrow_hasher.hash_table(table)
         assert isinstance(h, ContentHash)
@@ -327,7 +349,7 @@ _COMMENT_KEY = b"comment"
 class TestHashSchemaExtensionAware:
     def test_extension_free_golden_value_unchanged(self):
         """Stability invariant: extension-free schema hash is byte-identical to
-        the pre-v0.3.0 golden value (include_metadata=False is the default)."""
+        the starfix format-2 (arrow_v1) golden value (include_metadata=False is the default)."""
         schema = pa.schema(
             [
                 pa.field("id", pa.int32(), nullable=False),
@@ -335,85 +357,284 @@ class TestHashSchemaExtensionAware:
             ]
         )
         h = _make_hasher().hash_schema(schema)
-        assert h.digest.hex() == "000001d676ef0263a8e0e7500b1c97033993dbe445172ca0f9e7577b3994bfa6224b4c", (
+        assert (
+            h.digest.hex()
+            == "000002e9eb1c825a8a882b565ef45a2ec832c10e31ad067736d2a6cb8a9403ff91c33f"
+        ), (
             f"Stability invariant broken — extension-free golden digest changed. Got: {h.digest.hex()}"
         )
 
     def test_mixed_metadata_hash_equals_extension_only_hash(self):
         """Key property: a schema with ARROW:extension:name plus unrelated metadata
         hashes identically to the same schema with only the extension key."""
-        ext_only_schema = pa.schema([
-            pa.field("t", pa.binary(), metadata={_EXT_NAME_KEY: b"my.Type"}),
-        ])
-        mixed_schema = pa.schema([
-            pa.field("t", pa.binary(), metadata={
-                _EXT_NAME_KEY: b"my.Type",
-                _COMMENT_KEY:  b"ignored",
-            }),
-        ])
-        h_ext   = _make_hasher().hash_schema(ext_only_schema)
+        ext_only_schema = pa.schema(
+            [
+                pa.field("t", pa.binary(), metadata={_EXT_NAME_KEY: b"my.Type"}),
+            ]
+        )
+        mixed_schema = pa.schema(
+            [
+                pa.field(
+                    "t",
+                    pa.binary(),
+                    metadata={
+                        _EXT_NAME_KEY: b"my.Type",
+                        _COMMENT_KEY: b"ignored",
+                    },
+                ),
+            ]
+        )
+        h_ext = _make_hasher().hash_schema(ext_only_schema)
         h_mixed = _make_hasher().hash_schema(mixed_schema)
         assert h_ext.digest == h_mixed.digest
 
     def test_metadata_key_ordering_does_not_affect_hash(self):
         """Reordering metadata keys in the input does not change the hash."""
-        s1 = pa.schema([pa.field("t", pa.binary(), metadata={
-            _EXT_NAME_KEY: b"my.Type",
-            b"ARROW:extension:metadata": b"{}",
-        })])
-        s2 = pa.schema([pa.field("t", pa.binary(), metadata={
-            b"ARROW:extension:metadata": b"{}",
-            _EXT_NAME_KEY: b"my.Type",
-        })])
-        assert _make_hasher().hash_schema(s1).digest == _make_hasher().hash_schema(s2).digest
+        s1 = pa.schema(
+            [
+                pa.field(
+                    "t",
+                    pa.binary(),
+                    metadata={
+                        _EXT_NAME_KEY: b"my.Type",
+                        b"ARROW:extension:metadata": b"{}",
+                    },
+                )
+            ]
+        )
+        s2 = pa.schema(
+            [
+                pa.field(
+                    "t",
+                    pa.binary(),
+                    metadata={
+                        b"ARROW:extension:metadata": b"{}",
+                        _EXT_NAME_KEY: b"my.Type",
+                    },
+                )
+            ]
+        )
+        assert (
+            _make_hasher().hash_schema(s1).digest
+            == _make_hasher().hash_schema(s2).digest
+        )
 
     def test_extension_metadata_affects_hash(self):
         """Changing an ARROW:extension:name value changes the hash."""
         s1 = pa.schema([pa.field("t", pa.binary(), metadata={_EXT_NAME_KEY: b"TypeA"})])
         s2 = pa.schema([pa.field("t", pa.binary(), metadata={_EXT_NAME_KEY: b"TypeB"})])
-        assert _make_hasher().hash_schema(s1).digest != _make_hasher().hash_schema(s2).digest
+        assert (
+            _make_hasher().hash_schema(s1).digest
+            != _make_hasher().hash_schema(s2).digest
+        )
 
     def test_unrelated_metadata_does_not_affect_hash(self):
         """Adding only unrelated metadata keys does not change the hash."""
         s_clean = pa.schema([pa.field("x", pa.int32())])
         s_noise = pa.schema([pa.field("x", pa.int32(), metadata={_COMMENT_KEY: b"hi"})])
-        assert _make_hasher().hash_schema(s_clean).digest == _make_hasher().hash_schema(s_noise).digest
+        assert (
+            _make_hasher().hash_schema(s_clean).digest
+            == _make_hasher().hash_schema(s_noise).digest
+        )
 
 
 class TestHashTableExtensionAware:
     def test_extension_free_table_golden_value_unchanged(self):
         """Stability invariant: extension-free table hash is byte-identical to
-        the pre-v0.3.0 golden value."""
-        table = pa.table({
-            "id":    pa.array([1, 2, 3], type=pa.int32()),
-            "score": pa.array([0.1, 0.2, 0.3], type=pa.float64()),
-            "label": pa.array(["a", "b", "c"], type=pa.utf8()),
-        })
+        the starfix format-2 (arrow_v1) golden value."""
+        table = pa.table(
+            {
+                "id": pa.array([1, 2, 3], type=pa.int32()),
+                "score": pa.array([0.1, 0.2, 0.3], type=pa.float64()),
+                "label": pa.array(["a", "b", "c"], type=pa.utf8()),
+            }
+        )
         h = _make_hasher().hash_table(table)
-        assert h.digest.hex() == "0000010cd7fe5462420b84f03a06925374e528817a3b72319e679a17e7380964878791", (
+        assert (
+            h.digest.hex()
+            == "00000277215cd88b3019240dec61d8c4bed8bf6fd05e48d5684e1e7d3acc957f54102c"
+        ), (
             f"Stability invariant broken — extension-free table golden digest changed. Got: {h.digest.hex()}"
         )
 
     def test_table_mixed_schema_metadata_equals_extension_only(self):
         """Table schema with mixed metadata hashes identically to same table
         schema with only the extension key (unrelated keys are stripped)."""
-        schema_ext_only = pa.schema([
-            pa.field("x", pa.int32(), metadata={_EXT_NAME_KEY: b"my.Type"}),
-        ])
-        schema_mixed = pa.schema([
-            pa.field("x", pa.int32(), metadata={
-                _EXT_NAME_KEY: b"my.Type",
-                _COMMENT_KEY:  b"ignored",
-            }),
-        ])
+        schema_ext_only = pa.schema(
+            [
+                pa.field("x", pa.int32(), metadata={_EXT_NAME_KEY: b"my.Type"}),
+            ]
+        )
+        schema_mixed = pa.schema(
+            [
+                pa.field(
+                    "x",
+                    pa.int32(),
+                    metadata={
+                        _EXT_NAME_KEY: b"my.Type",
+                        _COMMENT_KEY: b"ignored",
+                    },
+                ),
+            ]
+        )
         data = [pa.array([1, 2, 3], type=pa.int32())]
-        t_ext   = pa.table(data, schema=schema_ext_only)
+        t_ext = pa.table(data, schema=schema_ext_only)
         t_mixed = pa.table(data, schema=schema_mixed)
-        assert _make_hasher().hash_table(t_ext).digest == _make_hasher().hash_table(t_mixed).digest
+        assert (
+            _make_hasher().hash_table(t_ext).digest
+            == _make_hasher().hash_table(t_mixed).digest
+        )
 
     def test_table_unrelated_schema_metadata_does_not_affect_hash(self):
         """Adding only unrelated schema metadata does not change the table hash."""
         t_clean = pa.table({"x": pa.array([1, 2], type=pa.int32())})
-        schema_noise = pa.schema([pa.field("x", pa.int32(), metadata={_COMMENT_KEY: b"hi"})])
+        schema_noise = pa.schema(
+            [pa.field("x", pa.int32(), metadata={_COMMENT_KEY: b"hi"})]
+        )
         t_noise = pa.table([pa.array([1, 2], type=pa.int32())], schema=schema_noise)
-        assert _make_hasher().hash_table(t_clean).digest == _make_hasher().hash_table(t_noise).digest
+        assert (
+            _make_hasher().hash_table(t_clean).digest
+            == _make_hasher().hash_table(t_noise).digest
+        )
+
+
+# ---------------------------------------------------------------------------
+# hash_table_ordered (ITL-897): a table hashed as a value
+# ---------------------------------------------------------------------------
+
+_UV = pa.struct([("u", pa.int64()), ("v", pa.large_string())])
+_VU = pa.struct([("v", pa.large_string()), ("u", pa.int64())])
+
+
+def _file_table(ctx, path) -> pa.Table:
+    """One-row table whose ``f`` column is the logical ``File`` type."""
+    from orcapod.logical_types.file_type import File
+
+    arrow_type = ctx.type_converter.register_python_class(File)
+    storage = ctx.type_converter.python_to_storage(File(path), File)
+    column = pa.ExtensionArray.from_storage(
+        arrow_type, pa.array([storage], arrow_type.storage_type)
+    )
+    return pa.Table.from_arrays([column], names=["f"])
+
+
+class TestHashTableOrdered:
+    """``hash_table_ordered`` = ``hash_table`` with column and struct field order included."""
+
+    def test_column_order_is_part_of_the_hash(self):
+        """Reordered columns: equal under ``hash_table``, different under ``hash_table_ordered``."""
+        table = pa.table({"a": [1, 2], "b": ["x", "y"]})
+        reordered = table.select(["b", "a"])
+        hasher = _make_hasher()
+        assert hasher.hash_table(table) == hasher.hash_table(reordered)
+        assert hasher.hash_table_ordered(table) != hasher.hash_table_ordered(reordered)
+
+    def test_struct_field_order_is_part_of_the_hash(self):
+        """Reordered struct fields differ under ``hash_table_ordered`` only."""
+        first = pa.table({"s": pa.array([{"u": 1, "v": "x"}], _UV)})
+        second = pa.table({"s": pa.array([{"v": "x", "u": 1}], _VU)})
+        hasher = _make_hasher()
+        assert hasher.hash_table(first) == hasher.hash_table(second)
+        assert hasher.hash_table_ordered(first) != hasher.hash_table_ordered(second)
+
+    def test_nested_struct_field_order_is_part_of_the_hash(self):
+        """Struct field order counts inside a list too."""
+        first = pa.table({"s": pa.array([[{"u": 1, "v": "x"}]], pa.large_list(_UV))})
+        second = pa.table({"s": pa.array([[{"v": "x", "u": 1}]], pa.large_list(_VU))})
+        hasher = _make_hasher()
+        assert hasher.hash_table_ordered(first) != hasher.hash_table_ordered(second)
+
+    def test_chunking_is_not_part_of_the_hash(self):
+        """A table and the same table in two chunks hash equal."""
+        table = pa.table({"a": [1, 2], "b": ["x", "y"]})
+        rechunked = pa.concat_tables([table.slice(0, 1), table.slice(1, 1)])
+        hasher = _make_hasher()
+        assert hasher.hash_table_ordered(table) == hasher.hash_table_ordered(rechunked)
+
+    def test_ordered_and_unordered_hashes_never_coincide(self):
+        """The two modes give different hashes for one table."""
+        table = pa.table({"a": [1, 2]})
+        hasher = _make_hasher()
+        assert hasher.hash_table_ordered(table) != hasher.hash_table(table)
+
+    def test_record_batch_hashes_like_its_table(self):
+        """A record batch hashes like the table it came from."""
+        table = pa.table({"a": [1, 2], "b": ["x", "y"]})
+        hasher = _make_hasher()
+        assert hasher.hash_table_ordered(
+            table.to_batches()[0]
+        ) == hasher.hash_table_ordered(table)
+
+    def test_logical_column_hashed_by_content_in_both_modes(self, tmp_path):
+        """Semantic preprocessing (a ``File`` by its content) applies to both modes."""
+        from orcapod.contexts import get_default_context
+
+        ctx = get_default_context()
+        same_a, same_b, other = (tmp_path / n for n in ("a.txt", "b.txt", "c.txt"))
+        same_a.write_text("same")
+        same_b.write_text("same")
+        other.write_text("other")
+        hasher = _make_hasher()
+        for digest in (hasher.hash_table, hasher.hash_table_ordered):
+            assert digest(_file_table(ctx, same_a)) == digest(_file_table(ctx, same_b))
+            assert digest(_file_table(ctx, same_a)) != digest(_file_table(ctx, other))
+
+
+class TestSchemaHashFieldRule:
+    """``hash_schema`` hashes a field under the same rule as ``hash_table`` (ITL-981)."""
+
+    @staticmethod
+    def _identified(storage: pa.DataType, extension: pa.ExtensionType) -> pa.Schema:
+        """A plain ``storage`` field that carries the identifier of ``extension``."""
+        return pa.schema(
+            [
+                pa.field(
+                    "c",
+                    storage,
+                    metadata={
+                        "ARROW:extension:name": extension.extension_name,
+                        "ARROW:extension:metadata": extension.__arrow_ext_serialize__(),
+                    },
+                )
+            ]
+        )
+
+    def test_value_hashed_type_does_not_depend_on_its_storage_type(self):
+        """A type hashed by a value handler is a ``large_binary`` field with its identifier."""
+        import numpy as np
+
+        import orcapod as op
+        from orcapod.contexts import get_default_context
+
+        context = get_default_context()
+        hasher = context.arrow_hasher
+        assert isinstance(hasher, StarfixArrowHasher)
+        for python_type in (op.File, np.ndarray):
+            extension = context.type_converter.python_type_to_arrow_type(python_type)
+            assert isinstance(extension, pa.ExtensionType)
+            schema_hash = hasher.hash_schema(pa.schema([pa.field("c", extension)]))
+            assert schema_hash == hasher.hash_schema(
+                self._identified(pa.large_binary(), extension)
+            )
+        # ``File`` is stored as a string; that storage type is not in its schema hash.
+        file_type = context.type_converter.python_type_to_arrow_type(op.File)
+        assert isinstance(file_type, pa.ExtensionType)
+        assert file_type.storage_type == pa.large_string()
+        assert hasher.hash_schema(
+            pa.schema([pa.field("c", file_type)])
+        ) != hasher.hash_schema(self._identified(pa.large_string(), file_type))
+
+    def test_type_without_value_handler_keeps_its_storage_type(self):
+        """A type whose stored values are hashed keeps its storage type in the schema hash."""
+        from pathlib import Path
+
+        from orcapod.contexts import get_default_context
+
+        context = get_default_context()
+        hasher = context.arrow_hasher
+        assert isinstance(hasher, StarfixArrowHasher)
+        extension = context.type_converter.python_type_to_arrow_type(Path)
+        assert isinstance(extension, pa.ExtensionType)
+        assert hasher.hash_schema(
+            pa.schema([pa.field("c", extension)])
+        ) == hasher.hash_schema(self._identified(extension.storage_type, extension))

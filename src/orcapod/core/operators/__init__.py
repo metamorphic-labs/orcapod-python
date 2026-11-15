@@ -1,10 +1,13 @@
 from .batch import Batch
 from .column_selection import (
+    DropColumns,
     DropDataColumns,
     DropTagColumns,
+    SelectColumns,
     SelectDataColumns,
     SelectTagColumns,
 )
+from .drop_nulls import DropNulls
 from .filters import PolarsFilter
 from .group_by import GroupBy
 from .index import Index
@@ -26,7 +29,10 @@ __all__ = [
     "SelectDataColumns",
     "DropTagColumns",
     "DropDataColumns",
+    "SelectColumns",
+    "DropColumns",
     "PolarsFilter",
+    "DropNulls",
     "Pick",
     "Index",
 ]

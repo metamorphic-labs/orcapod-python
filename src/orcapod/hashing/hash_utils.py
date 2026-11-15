@@ -11,7 +11,9 @@ from typing import TYPE_CHECKING
 import xxhash
 from upath import UPath
 
+from orcapod.logical_types.identifier import logical_type_identifier
 from orcapod.types import ContentHash, PathLike
+from orcapod.utils.canonical_type_names import stabilize_type_names
 
 if TYPE_CHECKING:
     from orcapod.protocols.semantic_types_protocols import TypeConverterProtocol
@@ -42,10 +44,16 @@ def canonical_annotation_str(
 ) -> str:
     """Return a stable, canonical string for a type annotation.
 
-    Resolves types registered in *type_converter* (e.g. ``orcapod.File``) to
-    their stable ``logical_type_name`` (e.g. ``"orcapod.file"``) via
-    ``type_converter.get_logical_type()``, so that internal module relocations
-    do not change the string representation.
+    Resolves a type that has a logical type in *type_converter* (e.g.
+    ``orcapod.File``) to its logical type identifier text
+    (``LogicalTypeIdentifier.text``: the Arrow extension name, ``;``, then the
+    extension metadata in hex, e.g. ``"orcapod.file;7b2276657273696f6e223a317d"``)
+    via ``type_converter.get_logical_type_for_python_type()``, which registers a
+    class a factory covers (a dataclass, an ``orcapod.dataclass``, a pydantic
+    model) that nothing has registered yet. So an annotation gives the same string
+    before and after its class is registered (ITL-1137), as ``TypeObjectHandler``
+    does for a type hashed as a value. Internal module relocations do not change
+    the string; a change of the type's identifier does.
 
     For union types (both PEP 604 ``X | Y`` and ``typing.Union[X, Y]``),
     members are sorted byte-wise so that ``str | Path`` and ``Path | str``
@@ -55,22 +63,27 @@ def canonical_annotation_str(
     the same converter so nested orcapod types are also canonicalized.
 
     Non-union, non-generic types not found in the converter fall through to
-    ``inspect.formatannotation``, preserving existing behaviour exactly.
+    ``inspect.formatannotation``. Standard-library types defined in a private
+    submodule are named by the public module that exports them
+    (``pathlib.Path``, not ``pathlib._local.Path``), so the string is the same
+    on every Python version.
 
     Args:
         annotation: A type annotation object.
-        type_converter: Optional ``TypeConverterProtocol``. When provided,
-            registered logical types resolve to their stable
-            ``logical_type_name`` via ``get_logical_type()``.
+        type_converter: Optional ``TypeConverterProtocol``. When provided, a
+            type with a logical type resolves to its identifier text via
+            ``get_logical_type_for_python_type()``, registering it if needed.
 
     Returns:
         A canonical string representation.
     """
-    # Registered logical type: use stable canonical name (e.g. "orcapod.file")
+    # A type with a logical type: its identifier (extension name and metadata).
+    # Registers a class a factory covers, so the string never depends on whether
+    # something registered it first (ITL-1137).
     if type_converter is not None and isinstance(annotation, type):
-        lt = type_converter.get_logical_type(annotation)
+        lt = type_converter.get_logical_type_for_python_type(annotation)
         if lt is not None:
-            return lt.logical_type_name
+            return logical_type_identifier(lt).text
 
     # Union types (PEP 604 X | Y and typing.Union): sort members for order-independence
     if is_union_annotation(annotation):
@@ -84,42 +97,13 @@ def canonical_annotation_str(
         args = getattr(annotation, "__args__", None) or ()
         origin_str = canonical_annotation_str(origin, type_converter)
         if args:
-            args_str = ", ".join(canonical_annotation_str(a, type_converter) for a in args)
+            args_str = ", ".join(
+                canonical_annotation_str(a, type_converter) for a in args
+            )
             return f"{origin_str}[{args_str}]"
         return origin_str
 
-    return inspect.formatannotation(annotation)
-
-
-def combine_hashes(
-    *hashes: str,
-    order: bool = False,
-    prefix_hasher_id: bool = False,
-    hex_char_count: int | None = None,
-) -> str:
-    """
-    Combine multiple hash strings into a single SHA-256 hash string.
-
-    Args:
-        *hashes: Hash strings to combine.
-        order: If True, sort inputs before combining so the result is
-               order-independent.  If False (default), insertion order
-               is preserved.
-        prefix_hasher_id: If True, prefix the result with ``"sha256@"``.
-        hex_char_count: Number of hex characters to return.  None (default)
-                        returns the full 64-character SHA-256 hex digest.
-
-    Returns:
-        A hex string (optionally truncated / prefixed).
-    """
-    prepared_hashes = sorted(hashes) if order else list(hashes)
-    combined = "".join(prepared_hashes)
-    combined_hash = hashlib.sha256(combined.encode()).hexdigest()
-    if hex_char_count is not None:
-        combined_hash = combined_hash[:hex_char_count]
-    if prefix_hasher_id:
-        return "sha256@" + combined_hash
-    return combined_hash
+    return stabilize_type_names(inspect.formatannotation(annotation), annotation)
 
 
 def _to_path(file_path: PathLike) -> Path | UPath:
@@ -138,7 +122,9 @@ def _to_path(file_path: PathLike) -> Path | UPath:
     return Path(file_path)
 
 
-def hash_file(file_path: PathLike, algorithm="sha256", buffer_size=65536) -> ContentHash:
+def hash_file(
+    file_path: PathLike, algorithm="sha256", buffer_size=65536
+) -> ContentHash:
     """Calculate the hash of a file using the specified algorithm.
 
     Supports both local ``pathlib.Path`` and remote ``UPath`` objects.
@@ -218,7 +204,7 @@ def _is_in_string(line: str, pos: int) -> bool:
 
 
 def get_function_signature(
-    func: Callable,
+    func: Callable[..., object],
     name_override: str | None = None,
     include_defaults: bool = True,
     include_module: bool = True,
@@ -256,16 +242,22 @@ def get_function_signature(
 
     param_strs = []
     for name, param in sig.parameters.items():
-        param_str = str(param)
-        annotation = param.annotation
-        if annotation is not inspect.Parameter.empty and is_union_annotation(annotation):
-            old_ann = inspect.formatannotation(annotation)
+        if not include_defaults:
+            # Drop the default from the parameter itself; cutting the formatted text
+            # at "=" would truncate an annotation such as Literal["a=b"].
+            param = param.replace(default=inspect.Parameter.empty)
+        annotation = typing.cast(object, param.annotation)
+        param_str = stabilize_type_names(str(param), annotation)
+        if annotation is not inspect.Parameter.empty and is_union_annotation(
+            annotation
+        ):
+            old_ann = stabilize_type_names(
+                inspect.formatannotation(annotation), annotation
+            )
             new_ann = canonical_annotation_str(annotation)
             # Replace ": <old_ann>" with ": <new_ann>" (first occurrence only).
             # The ": " prefix distinguishes the annotation from the default value.
             param_str = param_str.replace(f": {old_ann}", f": {new_ann}", 1)
-        if not include_defaults and "=" in param_str:
-            param_str = param_str.split("=")[0].strip()
         param_strs.append(param_str)
 
     parts["params"] = f"({', '.join(param_strs)})"
@@ -282,12 +274,12 @@ def get_function_signature(
         if is_union_annotation(ret):
             fn_string += f"-> {canonical_annotation_str(ret)}"
         else:
-            fn_string += f"-> {ret}"
+            fn_string += f"-> {stabilize_type_names(str(ret), ret)}"
     return fn_string
 
 
 def get_function_components(
-    func: Callable,
+    func: Callable[..., object],
     name_override: str | None = None,
     include_name: bool = True,
     include_module: bool = True,
@@ -297,7 +289,7 @@ def get_function_components(
     preserve_whitespace: bool = True,
     include_annotations: bool = True,
     include_code_properties: bool = True,
-) -> list:
+) -> list[str]:
     """
     Extract the components of a function that determine its identity for hashing.
 
@@ -316,7 +308,7 @@ def get_function_components(
     Returns:
         A list of string components.
     """
-    components = []
+    components: list[str] = []
 
     if include_name:
         components.append(f"name:{name_override or func.__name__}")
@@ -370,7 +362,10 @@ def get_function_components(
         and func.__annotations__
     ):
         sorted_annotations = sorted(func.__annotations__.items())
-        annotations_str = ";".join(f"{k}:{v}" for k, v in sorted_annotations)
+        annotations_str = ";".join(
+            f"{k}:{stabilize_type_names(str(v), v)}"
+            for k, v in typing.cast("list[tuple[str, object]]", sorted_annotations)
+        )
         components.append(f"annotations:{annotations_str}")
 
     if include_code_properties:

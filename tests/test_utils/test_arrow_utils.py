@@ -3,16 +3,19 @@
 import pyarrow as pa
 import pytest
 
-from orcapod.types import ColumnConfig
+from orcapod.types import ColumnConfig, SourceInfoValue
 from orcapod.utils.arrow_utils import (
     add_source_info,
     apply_column_config,
+    column_arrow_type,
+    concat_tables_by_name,
     infer_schema_nullable,
     make_schema_non_nullable,
     normalize_extension_columns,
     normalize_table_view_types,
     normalize_view_types,
     prepare_prefixed_columns,
+    source_info_arrow_type,
 )
 
 
@@ -141,7 +144,12 @@ class TestMakeSchemaNotNullable:
     def _schema_with_metadata(self) -> "pa.Schema":
         return pa.schema(
             [
-                pa.field("id", pa.int64(), nullable=True, metadata={b"field_key": b"field_val"}),
+                pa.field(
+                    "id",
+                    pa.int64(),
+                    nullable=True,
+                    metadata={b"field_key": b"field_val"},
+                ),
                 pa.field("name", pa.large_string(), nullable=True),
             ],
             metadata={b"schema_key": b"schema_val"},
@@ -185,7 +193,9 @@ class TestInferSchemaNullable:
     def _table_with_metadata(self) -> "pa.Table":
         schema = pa.schema(
             [
-                pa.field("id", pa.int64(), nullable=True, metadata={b"field_key": b"fv"}),
+                pa.field(
+                    "id", pa.int64(), nullable=True, metadata={b"field_key": b"fv"}
+                ),
                 pa.field("val", pa.int64(), nullable=True),
                 pa.field("opt", pa.int64(), nullable=True),
             ],
@@ -193,9 +203,11 @@ class TestInferSchemaNullable:
         )
         return pa.table(
             {
-                "id": pa.array([1, 2], type=pa.int64()),      # no nulls → nullable=False
-                "val": pa.array([10, 20], type=pa.int64()),   # no nulls → nullable=False
-                "opt": pa.array([None, 1], type=pa.int64()),  # has nulls → nullable=True
+                "id": pa.array([1, 2], type=pa.int64()),  # no nulls → nullable=False
+                "val": pa.array([10, 20], type=pa.int64()),  # no nulls → nullable=False
+                "opt": pa.array(
+                    [None, 1], type=pa.int64()
+                ),  # has nulls → nullable=True
             },
             schema=schema,
         )
@@ -248,11 +260,13 @@ class TestAddSourceInfo:
 
     def test_multi_column_each_source_column_uses_its_own_name(self):
         """Each _source_<col> value is '<src>::<col>' — columns are independent."""
-        table = pa.table({
-            "x": pa.array([1, 2], type=pa.int64()),
-            "y": pa.array([3, 4], type=pa.int64()),
-            "z": pa.array([5, 6], type=pa.int64()),
-        })
+        table = pa.table(
+            {
+                "x": pa.array([1, 2], type=pa.int64()),
+                "y": pa.array([3, 4], type=pa.int64()),
+                "z": pa.array([5, 6], type=pa.int64()),
+            }
+        )
         result = add_source_info(table, "base")
 
         assert result.column("_source_x").to_pylist() == ["base::x", "base::x"]
@@ -261,10 +275,12 @@ class TestAddSourceInfo:
 
     def test_per_row_source_tokens_combined_with_column_name(self):
         """With a per-row source list, each row's token is '<row_src>::<col>'."""
-        table = pa.table({
-            "a": pa.array([10, 20], type=pa.int64()),
-            "b": pa.array([30, 40], type=pa.int64()),
-        })
+        table = pa.table(
+            {
+                "a": pa.array([10, 20], type=pa.int64()),
+                "b": pa.array([30, 40], type=pa.int64()),
+            }
+        )
         result = add_source_info(table, ["src0", "src1"])
 
         assert result.column("_source_a").to_pylist() == ["src0::a", "src1::a"]
@@ -272,11 +288,13 @@ class TestAddSourceInfo:
 
     def test_correct_number_of_source_columns_added(self):
         """Exactly one _source_<col> column is added per non-excluded data column."""
-        table = pa.table({
-            "p": pa.array([1], type=pa.int64()),
-            "q": pa.array([2], type=pa.int64()),
-            "r": pa.array([3], type=pa.int64()),
-        })
+        table = pa.table(
+            {
+                "p": pa.array([1], type=pa.int64()),
+                "q": pa.array([2], type=pa.int64()),
+                "r": pa.array([3], type=pa.int64()),
+            }
+        )
         result = add_source_info(table, "s")
 
         assert result.num_columns == 6  # 3 data + 3 source
@@ -329,7 +347,10 @@ class TestSystemTagColumnNames:
         import uuid
 
         import pyarrow as pa
-        from orcapod.utils.arrow_utils import add_system_tag_columns, system_tag_column_names
+        from orcapod.utils.arrow_utils import (
+            add_system_tag_columns,
+            system_tag_column_names,
+        )
 
         schema_hash = "testhash"
         table = pa.table({"id": pa.array([1]), "v": pa.array([1.0])})
@@ -428,9 +449,9 @@ class TestNormalizeViewTypes:
         )
 
     def test_fixed_size_list_of_string_view(self):
-        assert normalize_view_types(
-            pa.list_(pa.string_view(), 3)
-        ) == pa.list_(pa.large_string(), 3)
+        assert normalize_view_types(pa.list_(pa.string_view(), 3)) == pa.list_(
+            pa.large_string(), 3
+        )
 
     def test_struct_with_string_view_field(self):
         src = pa.struct([pa.field("a", pa.string_view()), pa.field("b", pa.int64())])
@@ -487,7 +508,9 @@ class TestNormalizeTableViewTypes:
         assert result.column("s").to_pylist() == ["x", "y"]
 
     def test_no_view_types_returns_same_table(self):
-        tbl = pa.table({"s": ["x"], "n": [1]})  # string -> large_string by default? plain string
+        tbl = pa.table(
+            {"s": ["x"], "n": [1]}
+        )  # string -> large_string by default? plain string
         result = normalize_table_view_types(tbl)
         # No view types present -> object returned unchanged (identity).
         assert result is tbl
@@ -743,6 +766,7 @@ class TestMakeEmptyTable:
 
     def _converter(self):
         from orcapod.contexts import get_default_type_converter
+
         return get_default_type_converter()
 
     def test_required_fields_are_non_nullable(self):
@@ -792,6 +816,8 @@ class TestMakeEmptyTable:
         _, data_schema = stream.output_schema()
 
         assert data_schema["score"] == (int | None)
+
+
 # fold_system_tag_values
 # ---------------------------------------------------------------------------
 
@@ -812,9 +838,8 @@ class TestFoldSystemTagValues:
         bytes.fromhex("1112131415161718191a1b1c1d1e1f20"),
     ]
     EXPECTED_RID = bytes.fromhex("853be16a3f38565f8ced039f84fdbea6")
-    EXPECTED_SID = (
-        "7916442d59841140bedf6c1f5dcc1304ae9fce0ba885765c06e511086b85da2e"
-    )
+    # sha256 of the canonical JSON member list (ITL-942 H; was the bare concatenation 7916442d...)
+    EXPECTED_SID = "45a8bc201b275f241aeba79d5225d475d91d80e12a58adffb2e46393eb8c5482"
 
     def test_record_id_folds_to_16_bytes(self):
         from orcapod.utils.arrow_utils import fold_system_tag_values
@@ -856,9 +881,7 @@ class TestFoldSystemTagValues:
         assert isinstance(
             fold_system_tag_values(self.RECORD_COL, [None, self.RIDS[0]]), bytes
         )
-        assert isinstance(
-            fold_system_tag_values(self.SOURCE_COL, [None, "src_a"]), str
-        )
+        assert isinstance(fold_system_tag_values(self.SOURCE_COL, [None, "src_a"]), str)
 
     def test_digest_is_stable_across_processes(self):
         """Fresh interpreter, therefore fresh PYTHONHASHSEED.
@@ -885,7 +908,9 @@ class TestFoldSystemTagValues:
         src_dir = Path(__file__).resolve().parents[2] / "src"
         env = dict(os.environ)
         env["PYTHONPATH"] = os.pathsep.join(
-            [str(src_dir), env["PYTHONPATH"]] if env.get("PYTHONPATH") else [str(src_dir)]
+            [str(src_dir), env["PYTHONPATH"]]
+            if env.get("PYTHONPATH")
+            else [str(src_dir)]
         )
         out = subprocess.run(
             [sys.executable, "-c", script],
@@ -896,3 +921,163 @@ class TestFoldSystemTagValues:
         ).stdout.split()
         assert out[0] == self.EXPECTED_RID.hex()
         assert out[1] == self.EXPECTED_SID
+
+
+class TestColumnArrowType:
+    """``column_arrow_type`` returns a column's declared Arrow type verbatim."""
+
+    def test_returns_exact_declared_type(self) -> None:
+        """Narrow, layout-specific and nested types come back unchanged."""
+        schema = pa.schema(
+            [
+                pa.field("i8", pa.int8()),
+                pa.field("s", pa.string()),
+                pa.field("l8", pa.list_(pa.int8())),
+            ]
+        )
+        assert column_arrow_type(schema, "i8") == pa.int8()
+        assert column_arrow_type(schema, "s") == pa.string()
+        assert column_arrow_type(schema, "l8") == pa.list_(pa.int8())
+
+    def test_missing_column_raises_key_error(self) -> None:
+        """An absent column raises ``KeyError``, as ``Schema.field`` does."""
+        with pytest.raises(KeyError):
+            _ = column_arrow_type(pa.schema([pa.field("a", pa.int8())]), "b")
+
+    def test_duplicate_column_raises_key_error(self) -> None:
+        """An ambiguous (duplicated) column name raises ``KeyError``."""
+        schema = pa.schema([pa.field("a", pa.int8()), pa.field("a", pa.int16())])
+        with pytest.raises(KeyError):
+            _ = column_arrow_type(schema, "a")
+
+
+class TestConcatTablesByName:
+    """``concat_tables_by_name`` reconciles column order only."""
+
+    def test_aligns_reordered_columns_to_first_table(self) -> None:
+        """A table listing the same columns in another order takes the first table's order."""
+        first = pa.table({"a": [1], "b": [2]})
+        second = pa.table({"b": [4], "a": [3]})
+        result = concat_tables_by_name([first, second])
+        assert result.column_names == ["a", "b"]
+        assert result.to_pylist() == [{"a": 1, "b": 2}, {"a": 3, "b": 4}]
+
+    def test_empty_input_raises_value_error(self) -> None:
+        """An empty sequence raises ``ValueError`` instead of reaching ``pa.concat_tables``."""
+        with pytest.raises(ValueError, match="empty sequence of tables"):
+            concat_tables_by_name([])
+
+
+class TestPreparePrefixedColumnsSourceInfoTokens:
+    """Python-supplied source-info tokens are typed by ``source_info_arrow_type`` (ITL-849).
+
+    A token is a string, ``None``, or -- after a many->one operator -- a list of
+    tokens, which a second aggregation nests again. Before ITL-849 every list
+    token was typed ``list<large_string>``, so a nested token raised
+    ``ArrowTypeError: Expected bytes, got a 'list' object``.
+    """
+
+    @staticmethod
+    def _source_column(token: SourceInfoValue) -> tuple[pa.DataType, bool]:
+        """Broadcast ``token`` and return the ``_source_v`` type and nullability."""
+        table = pa.table({"v": pa.array([1, 2], type=pa.int64())})
+        _, prefixed = prepare_prefixed_columns(table, {"_source_": {"v": token}})
+        result = prefixed["_source_"]
+        assert result.column("_source_v").to_pylist() == [token, token]
+        field = result.schema.field("_source_v")
+        return field.type, field.nullable
+
+    def test_string_token_is_large_string(self) -> None:
+        assert self._source_column("tok") == (pa.large_string(), False)
+
+    def test_none_token_is_nullable_large_string(self) -> None:
+        assert self._source_column(None) == (pa.large_string(), True)
+
+    def test_list_token_is_large_list_of_large_string(self) -> None:
+        assert self._source_column(["a", "b"]) == (
+            pa.large_list(pa.large_string()),
+            False,
+        )
+
+    def test_nested_list_token_nests_the_list_type(self) -> None:
+        assert self._source_column([["a"], ["b", "c"]]) == (
+            pa.large_list(pa.large_list(pa.large_string())),
+            False,
+        )
+
+    def test_stream_with_nested_source_info_iterates(self) -> None:
+        """``ArrowTableStream(source_info=...)`` accepts a nested token."""
+        from orcapod.core.streams import ArrowTableStream
+
+        token: SourceInfoValue = [["a", None], ["b"]]
+        stream = ArrowTableStream(
+            pa.table({"id": [1, 2], "v": [10, 20]}),
+            tag_columns=["id"],
+            source_info={"v": token},
+        )
+        assert [d.source_info()["v"] for _, d in stream.iter_data()] == [token, token]
+        schema = stream.as_table(columns={"source": True}).schema
+        assert schema.field("_source_v").type == pa.large_list(
+            pa.large_list(pa.large_string())
+        )
+
+
+class TestSourceInfoArrowType:
+    """``source_info_arrow_type`` types a token at its full nesting depth (ITL-849).
+
+    An empty list or ``None`` says nothing about the levels below it, so each
+    list level takes its element type from the first element that does.
+    """
+
+    @pytest.mark.parametrize(
+        ("token", "expected"),
+        [
+            ("tok", pa.large_string()),
+            (None, pa.large_string()),
+            ([], pa.large_list(pa.large_string())),
+            (["a", "b"], pa.large_list(pa.large_string())),
+            ([None, "a"], pa.large_list(pa.large_string())),
+            ([None, None], pa.large_list(pa.large_string())),
+            ([[], []], pa.large_list(pa.large_list(pa.large_string()))),
+            ([[], ["a"]], pa.large_list(pa.large_list(pa.large_string()))),
+            ([None, ["a"]], pa.large_list(pa.large_list(pa.large_string()))),
+            (
+                [[], [["a"]]],
+                pa.large_list(pa.large_list(pa.large_list(pa.large_string()))),
+            ),
+            (
+                [[None], [["a"]]],
+                pa.large_list(pa.large_list(pa.large_list(pa.large_string()))),
+            ),
+        ],
+        ids=repr,
+    )
+    def test_type_has_the_full_depth(
+        self, token: SourceInfoValue, expected: pa.DataType
+    ) -> None:
+        assert source_info_arrow_type(token) == expected
+        # The type must hold the token itself.
+        held = pa.Table.from_arrays([pa.array([token], type=expected)], names=["t"])
+        assert held.column("t").to_pylist() == [token]
+
+    @pytest.mark.parametrize("token", [[[], [["a"]]], [None, ["a"]]], ids=repr)
+    def test_data_serializes_a_token_with_an_uninformative_first_element(
+        self, token: SourceInfoValue
+    ) -> None:
+        """``Data.as_table`` no longer raises when the first element is empty or None."""
+        from orcapod.core.datagrams import Data
+
+        data = Data({"x": 1}, source_info={"x": token})
+        field = data.as_table(columns={"source": True}).schema.field("_source_x")
+        assert field.type == source_info_arrow_type(token)
+        assert data.as_table(columns={"source": True}).column(
+            "_source_x"
+        ).to_pylist() == [token]
+
+    def test_data_schema_matches_the_serialized_depth(self) -> None:
+        """``Data.schema`` reports the same depth as the Arrow type it serializes."""
+        from orcapod.core.datagrams import Data
+
+        data = Data({"x": 1}, source_info={"x": [[], [["a"]]]})
+        schema = data.schema(columns={"source": True})
+        assert schema["_source_x"] == list[list[list[str]]]

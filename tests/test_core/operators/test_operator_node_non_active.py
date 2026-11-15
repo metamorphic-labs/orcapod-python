@@ -13,6 +13,7 @@ from orcapod.core.operators import MapData
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.types import CacheMode
+from orcapod.system_constants import OPERATOR_DB_SCHEMA_VERSION
 
 
 # ---------------------------------------------------------------------------
@@ -159,10 +160,11 @@ class TestCacheModeNonActive:
         result = list(node.iter_data())
         assert result == []
 
-    def test_iter_data_replay_mode_returns_db_contents(
+    def test_iter_data_replay_mode_returns_db_contents_after_its_run(
         self, simple_source, map_op
     ):
-        """REPLAY + prior LOG run → iter_data returns DB records without run()."""
+        """REPLAY + prior LOG run → iter_data returns nothing before the REPLAY node's
+        run (ITL-1095) and the DB records after it."""
         db = InMemoryArrowDatabase()
         # Populate DB via LOG run
         node_log = _node(map_op, (simple_source,), db=db, cache_mode=CacheMode.LOG)
@@ -172,14 +174,14 @@ class TestCacheModeNonActive:
         node_replay = _node(
             map_op, (simple_source,), db=db, cache_mode=CacheMode.REPLAY
         )
+        assert list(node_replay.iter_data()) == []
+        node_replay.run()
         result = list(node_replay.iter_data())
         assert len(result) == 3
         for _, data in result:
             assert "renamed_x" in data.keys()
 
-    def test_iter_data_log_mode_no_run_returns_empty(
-        self, simple_source, map_op
-    ):
+    def test_iter_data_log_mode_no_run_returns_empty(self, simple_source, map_op):
         """LOG mode: DB has prior records but iter_data() without run() returns empty.
 
         This verifies the CacheMode guard in _load_cached_stream_from_db.
@@ -189,11 +191,14 @@ class TestCacheModeNonActive:
         node_log = _node(map_op, (simple_source,), db=db, cache_mode=CacheMode.LOG)
         node_log.run()
         # Confirm records exist so we know the guard, not an empty DB, returns empty
-        assert db.get_all_records(node_log.node_identity_path) is not None
+        assert (
+            db.get_all_records(
+                node_log.node_identity_path + (OPERATOR_DB_SCHEMA_VERSION,)
+            )
+            is not None
+        )
 
         # Fresh LOG node (same DB, no in-memory cache)
-        node_fresh = _node(
-            map_op, (simple_source,), db=db, cache_mode=CacheMode.LOG
-        )
+        node_fresh = _node(map_op, (simple_source,), db=db, cache_mode=CacheMode.LOG)
         result = list(node_fresh.iter_data())
         assert result == []

@@ -2,13 +2,16 @@
 
 from orcapod.core.operators import (
     Batch,
+    DropColumns,
     DropDataColumns,
+    DropNulls,
     DropTagColumns,
     Join,
     MapData,
     MapTags,
     MergeJoin,
     PolarsFilter,
+    SelectColumns,
     SelectDataColumns,
     SelectTagColumns,
     SemiJoin,
@@ -93,6 +96,21 @@ class TestSelectTagColumnsConfig:
         assert isinstance(restored, SelectTagColumns)
 
 
+class TestTagAndDataColumnsConfig:
+    """``DropColumns`` and ``SelectColumns`` (ITL-1084) round-trip like the four."""
+
+    def test_round_trip(self):
+        for op_cls in (DropColumns, SelectColumns):
+            op = op_cls(columns=["b", "a", "a"], strict=False)
+            config = op.to_config()
+            assert config["class_name"] == op_cls.__name__
+            assert config["module_path"] == "orcapod.core.operators.column_selection"
+            assert config["config"] == {"columns": ["a", "b"], "strict": False}
+            restored = op_cls.from_config(config)
+            assert isinstance(restored, op_cls)
+            assert restored.identity_structure() == op.identity_structure()
+
+
 class TestDropTagColumnsConfig:
     def test_round_trip(self):
         op = DropTagColumns(columns=["x"])
@@ -161,3 +179,46 @@ class TestPolarsFilterConfig:
         config = op.to_config()
         # Should either serialize the expression or mark as non-reconstructable
         assert "config" in config
+
+
+class TestDropNullsConfig:
+    def test_to_config(self):
+        """The config holds the sorted unique names."""
+        config = DropNulls(["y", "x", "y"]).to_config()
+        assert config["class_name"] == "DropNulls"
+        assert config["config"] == {"columns": ["x", "y"]}
+
+    def test_round_trip(self):
+        """``from_config(to_config())`` gives an operator with the same hashes."""
+        op = DropNulls(["y", "x"])
+        restored = DropNulls.from_config(op.to_config())
+        assert isinstance(restored, DropNulls)
+        assert restored.columns == ("x", "y")
+        assert restored.content_hash() == op.content_hash()
+        assert restored.pipeline_hash() == op.pipeline_hash()
+
+    def test_registered_for_pipeline_loading(self):
+        """Pipeline loading resolves the operator by its class name."""
+        from orcapod.pipeline.serialization import resolve_operator_from_config
+
+        op = DropNulls(["y", "x"])
+        restored = resolve_operator_from_config(op.to_config())
+        assert isinstance(restored, DropNulls)
+        assert restored.content_hash() == op.content_hash()
+
+    def test_no_argument_round_trip(self):
+        """The no-argument form serializes ``columns`` as ``None`` and round-trips."""
+        from orcapod.pipeline.serialization import resolve_operator_from_config
+
+        op = DropNulls()
+        config = op.to_config()
+        assert config["config"] == {"columns": None}
+        for restored in (
+            DropNulls.from_config(config),
+            resolve_operator_from_config(config),
+        ):
+            assert isinstance(restored, DropNulls)
+            assert restored.columns is None
+            assert restored.content_hash() == op.content_hash()
+            assert restored.pipeline_hash() == op.pipeline_hash()
+        assert op.content_hash() != DropNulls(["x", "y"]).content_hash()

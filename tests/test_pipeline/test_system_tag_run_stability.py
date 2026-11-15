@@ -17,6 +17,8 @@ from typing import Any
 import pyarrow as pa
 import pytest
 
+from orcapod import contexts
+
 import orcapod as op
 from orcapod import side_effects
 from orcapod.core.datagrams import Data, Tag
@@ -26,7 +28,7 @@ from orcapod.core.sources.arrow_table_source import ArrowTableSource
 from orcapod.databases import DeltaTableDatabase
 from orcapod.pipeline.job import PipelineJob
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
-from orcapod.side_effects import sink_pod
+from orcapod.side_effects import SideEffectPod, sink_pod
 
 Key = tuple[tuple[str, Any], ...]
 
@@ -96,7 +98,7 @@ def _run_once(
         delivered.append(metric)
 
     method_tags = ["probe", "method"] if shared_key else ["method"]
-    with PipelineJob(name="itl817", store=DeltaTableDatabase(db_path)) as job:
+    with PipelineJob(name="itl817", database=DeltaTableDatabase(db_path)) as job:
         probe_source = ArrowTableSource(
             _table(probes),
             tag_columns=["probe"],
@@ -109,7 +111,9 @@ def _run_once(
             source_id="methods",
             record_id_column="w",
         )
-        sink_pod(deliver).process(scale.pod(Join()(probe_source, method_source)))
+        sink = sink_pod(deliver)
+        assert isinstance(sink, SideEffectPod)
+        sink.process(scale.pod(Join()(probe_source, method_source)))
     job.run()
     return delivered
 
@@ -120,6 +124,7 @@ def _run_once(
 
 
 def _rows_with_swapped_tag_order() -> list[tuple[Tag, Data]]:
+    """Return two rows whose tags list the same columns in opposite order."""
     return [
         (Tag({"a": 1, "b": 2}), Data({"v": 10})),
         (Tag({"b": 4, "a": 3}), Data({"v": 20})),
@@ -134,6 +139,7 @@ class TestMaterializationAlignsColumnsByName:
     """
 
     def test_operator_materialize_to_stream(self) -> None:
+        """The operator materializer emits rows in the first row's column order."""
         stream = StaticOutputOperatorPod._materialize_to_stream(
             _rows_with_swapped_tag_order()
         )
@@ -141,14 +147,25 @@ class TestMaterializationAlignsColumnsByName:
         assert rows == [{"a": 1, "b": 2, "v": 10}, {"a": 3, "b": 4, "v": 20}]
 
     def test_orchestrator_materialize_as_stream(self) -> None:
-        upstream = SimpleNamespace(producer=None, upstreams=())
-        stream = SyncPipelineOrchestrator._materialize_as_stream(
-            _rows_with_swapped_tag_order(), upstream
+        """The orchestrator materializer emits rows in the first row's column order."""
+        rows = _rows_with_swapped_tag_order()
+        # The rebuilt stream takes the upstream's data context (ITL-1080) and, for an
+        # upstream with no producer, its pipeline hash (ITL-1094): here a plain
+        # stream's.
+        upstream = SimpleNamespace(
+            producer=None,
+            upstreams=(),
+            data_context_key=contexts.get_default_context_key(),
+            pipeline_hash=StaticOutputOperatorPod._materialize_to_stream(
+                rows
+            ).pipeline_hash,
         )
+        stream = SyncPipelineOrchestrator._materialize_as_stream(rows, upstream)
         rows = stream.as_table().to_pylist()
         assert rows == [{"a": 1, "b": 2, "v": 10}, {"a": 3, "b": 4, "v": 20}]
 
     def test_different_column_sets_still_raise(self) -> None:
+        """Rows whose column names differ still raise ``ArrowInvalid``."""
         rows = [
             (Tag({"a": 1}), Data({"v": 10})),
             (Tag({"b": 2}), Data({"v": 20})),
@@ -162,11 +179,16 @@ class TestMaterializationAlignsColumnsByName:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("shared_key", [False, True], ids=["cross_product", "shared_key"])
+@pytest.mark.parametrize(
+    "shared_key", [False, True], ids=["cross_product", "shared_key"]
+)
 class TestSinkCompletionIsRunStable:
+    """A ``sink_pod`` fed by a two-source join skips rows it already delivered."""
+
     def test_second_run_delivers_nothing(
         self, tmp_path: Any, sink_rows: dict[Key, dict[str, Any]], shared_key: bool
     ) -> None:
+        """Repeating the run with identical inputs delivers nothing and keeps system tags."""
         probes, methods = _inputs(3, 3, shared_key)
 
         assert len(_run_once(str(tmp_path), probes, methods, shared_key)) == 9

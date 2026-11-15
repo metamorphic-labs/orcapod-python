@@ -1,4 +1,5 @@
 """Tests for FunctionJobNode ephemeral result store — ITL-507."""
+
 from __future__ import annotations
 
 import asyncio
@@ -23,6 +24,7 @@ from orcapod.types import NodeConfig
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def double(x: int) -> int:
     return x * 2
 
@@ -32,7 +34,9 @@ def _make_pod():
     return FunctionPod(pf)
 
 
-def _make_stream(rows: list[dict], tag_columns: list[str] | None = None) -> ArrowTableStream:
+def _make_stream(
+    rows: list[dict], tag_columns: list[str] | None = None
+) -> ArrowTableStream:
     if tag_columns is None:
         tag_columns = ["id"]
     keys = list(rows[0].keys())
@@ -44,17 +48,23 @@ def _make_stream(rows: list[dict], tag_columns: list[str] | None = None) -> Arro
     return ArrowTableStream(table, tag_columns=tag_columns)
 
 
-def _make_source_stream(rows: list[dict], tag_columns: list[str] | None = None) -> ArrowTableSource:
+def _make_source_stream(
+    rows: list[dict], tag_columns: list[str] | None = None
+) -> ArrowTableSource:
     if tag_columns is None:
         tag_columns = ["id"]
     table = pa.table(
         {k: pa.array([r[k] for r in rows], type=pa.int64()) for k in rows[0]}
     )
-    source = ArrowTableSource(table, tag_columns=tag_columns, source_id="test_src", infer_nullable=True)
+    source = ArrowTableSource(
+        table, tag_columns=tag_columns, source_id="test_src", infer_nullable=True
+    )
     return source
 
 
-def _make_node(stream, pipeline_db=None, result_db=None, is_result_ephemeral: bool = False):
+def _make_node(
+    stream, pipeline_db=None, result_db=None, is_result_ephemeral: bool = False
+):
     """Create a FunctionJobNode with given DB configuration."""
     pod = _make_pod()
     if pipeline_db is None:
@@ -73,6 +83,7 @@ def _make_node(stream, pipeline_db=None, result_db=None, is_result_ephemeral: bo
 # ---------------------------------------------------------------------------
 # Task 4 test: no-op set_ephemeral_store on blueprint node classes
 # ---------------------------------------------------------------------------
+
 
 class TestNoOpSetEphemeralStore:
     def test_function_node_has_set_ephemeral_store(self):
@@ -105,6 +116,7 @@ class TestNoOpSetEphemeralStore:
 # Task 5 test: FunctionJobNode set_ephemeral_store real override
 # ---------------------------------------------------------------------------
 
+
 class TestSetEphemeralStore:
     def test_set_ephemeral_store_assigns_store(self):
         """set_ephemeral_store(store) assigns the ephemeral_result_store attribute."""
@@ -127,6 +139,7 @@ class TestSetEphemeralStore:
 # ---------------------------------------------------------------------------
 # Task 6 test: IS_EPHEMERAL_COL written to pipeline DB
 # ---------------------------------------------------------------------------
+
 
 class TestAddPipelineRecord:
     def test_is_ephemeral_false_written_to_pipeline_db(self):
@@ -168,6 +181,7 @@ class TestAddPipelineRecord:
 # Task 7 tests: two-store join
 # ---------------------------------------------------------------------------
 
+
 class TestBulkResolution:
     def test_ephemeral_false_unchanged(self):
         """is_result_ephemeral=False: execute() behaves identically to current implementation."""
@@ -201,7 +215,9 @@ class TestBulkResolution:
         # Persistent result DB must be empty (no writes there)
         eph_cache = node._ephemeral_cached_pod
         assert eph_cache is not None
-        assert eph_cache.result_database.get_all_records(eph_cache.record_path) is not None
+        assert (
+            eph_cache.result_database.get_all_records(eph_cache.record_path) is not None
+        )
         assert result_db.get_all_records(node._cached_function_pod.record_path) is None
 
     def test_within_session_ephemeral_hit(self):
@@ -312,7 +328,9 @@ class TestBulkResolution:
         pipeline_db = InMemoryArrowDatabase()
 
         # id=0 → persistent
-        node_p, _ = _make_node(stream_a, pipeline_db=pipeline_db, is_result_ephemeral=False)
+        node_p, _ = _make_node(
+            stream_a, pipeline_db=pipeline_db, is_result_ephemeral=False
+        )
         node_p.execute(stream_a)
 
         # id=1 → ephemeral, reusing same pipeline_db
@@ -337,7 +355,9 @@ class TestBulkResolution:
         # Verify id=1 result is in ephemeral_store (not persistent)
         eph_cache = node_e._ephemeral_cached_pod
         assert eph_cache is not None
-        assert eph_cache.result_database.get_all_records(eph_cache.record_path) is not None
+        assert (
+            eph_cache.result_database.get_all_records(eph_cache.record_path) is not None
+        )
 
         # Now load both results via a combined stream
         stream_both = _make_stream([{"id": 0, "x": 10}, {"id": 1, "x": 20}])
@@ -469,6 +489,7 @@ class TestBulkResolution:
 # Task 8 tests: ephemeral write path
 # ---------------------------------------------------------------------------
 
+
 class TestEphemeralWritePath:
     def test_store_not_assigned_raises(self):
         """is_result_ephemeral=True but ephemeral_result_store=None raises RuntimeError."""
@@ -560,8 +581,8 @@ class TestEphemeralWritePath:
         iter_data() serves the fresh result without triggering additional computation.
 
         Verifies that:
-        - after clearing the in-memory cache, iter_data() hot-loads the recomputed
-          result from the pipeline + ephemeral DBs (exercises _load_cached_entries)
+        - after clearing the node, its next run loads the recomputed result from the
+          pipeline + ephemeral DBs (exercises _load_cached_entries)
         - repeated iter_data() calls return the same result without recomputing
         """
         call_count = {"n": 0}
@@ -600,11 +621,12 @@ class TestEphemeralWritePath:
         node2.execute(stream)
         assert call_count["n"] == 2  # recomputed once due to cross-session miss
 
-        # execute() calls _update_modified_time() at the end, so is_stale is False here.
-        # Manually clearing forces the iter_data() hot-load branch (_load_cached_entries →
-        # _fetch_joined_records) without relying on staleness, so this tests the DB join
-        # path explicitly rather than the in-memory dict fast-path.
-        node2._cached_output_datas.clear()
+        # Clearing the node drops its in-memory results; running it again loads the
+        # recomputed result through the DB join path (_load_cached_entries →
+        # _fetch_joined_records) rather than the in-memory dict fast-path. A node shows
+        # rows only after a run (ITL-1095).
+        node2.clear_cache()
+        node2.execute(stream)
 
         # iter_data() must serve the recomputed result — no additional computation
         results = list(node2.iter_data())
@@ -623,17 +645,22 @@ class TestEphemeralWritePath:
 # Task 9 tests: pipeline propagation
 # ---------------------------------------------------------------------------
 
+
 class TestPipelineInjectsStore:
     def test_pipeline_job_set_ephemeral_store_propagates(self):
         """PipelineJob.set_ephemeral_store propagates to all compiled nodes."""
         from orcapod.pipeline.job import PipelineJob
 
-        stream = _make_stream([{"id": 0, "x": 10}, {"id": 1, "x": 20}])
+        # A job's input must be a source (ITL-1126: a raw stream has no system tags).
+        stream = ArrowTableSource(
+            _make_stream([{"id": 0, "x": 10}, {"id": 1, "x": 20}]).as_table(),
+            tag_columns=["id"],
+        )
         pod = _make_pod()
 
         job = PipelineJob(name="test_pipeline")
         with job:
-            output = pod(stream)
+            pod(stream)
 
         ephemeral_store = InMemoryArrowDatabase()
         job.set_ephemeral_store(ephemeral_store)
@@ -648,7 +675,10 @@ class TestPipelineInjectsStore:
         """PipelineJob.set_ephemeral_store(None) detaches the store from all nodes."""
         from orcapod.pipeline.job import PipelineJob
 
-        stream = _make_stream([{"id": 0, "x": 10}])
+        # A job's input must be a source (ITL-1126: a raw stream has no system tags).
+        stream = ArrowTableSource(
+            _make_stream([{"id": 0, "x": 10}]).as_table(), tag_columns=["id"]
+        )
         pod = _make_pod()
 
         job = PipelineJob(name="test_pipeline")
@@ -669,6 +699,7 @@ class TestPipelineInjectsStore:
 # Task 10 tests: persistent miss warning and ephemeral-only node
 # ---------------------------------------------------------------------------
 
+
 class TestPersistentMissWarning:
     def test_persistent_miss_warns_and_recomputes(self, caplog):
         """Tag table has a regular record_id but persistent DB was trimmed: WARNING emitted."""
@@ -679,7 +710,12 @@ class TestPersistentMissWarning:
         result_db = InMemoryArrowDatabase()
 
         # Write a persistent record
-        node, _ = _make_node(stream, pipeline_db=pipeline_db, result_db=result_db, is_result_ephemeral=False)
+        node, _ = _make_node(
+            stream,
+            pipeline_db=pipeline_db,
+            result_db=result_db,
+            is_result_ephemeral=False,
+        )
         node.execute(stream)
 
         # Wipe the result DB to simulate data loss
@@ -687,13 +723,22 @@ class TestPersistentMissWarning:
         result_db._pending_batches.clear()
 
         # Recreate node with same pipeline_db (tag entry still there) but empty result_db
-        node2, _ = _make_node(stream, pipeline_db=pipeline_db, result_db=result_db, is_result_ephemeral=False)
+        node2, _ = _make_node(
+            stream,
+            pipeline_db=pipeline_db,
+            result_db=result_db,
+            is_result_ephemeral=False,
+        )
 
-        with caplog.at_level(logging.WARNING, logger="orcapod.core.nodes.function_node"):
+        with caplog.at_level(
+            logging.WARNING, logger="orcapod.core.nodes.function_node"
+        ):
             results = node2.execute(stream)
 
         assert len(results) == 1  # recomputed
-        assert any("have no match in persistent result DB" in msg for msg in caplog.messages)
+        assert any(
+            "have no match in persistent result DB" in msg for msg in caplog.messages
+        )
 
     def test_recompute_after_persistent_miss_appends_new_pipeline_record(self):
         """After persistent miss and recompute, tag table has two rows; next call hits."""
@@ -847,6 +892,7 @@ class TestAddPipelineRecordIndexed:
     def test_first_call_writes_at_index_zero(self):
         """add_pipeline_record writes recomputation_index=0 on the first call."""
         from orcapod.core.nodes.function_node import _PIPELINE_RECOMPUTATION_INDEX_COL
+
         stream = _make_stream([{"id": 0, "x": 10}])
         pipeline_db = InMemoryArrowDatabase()
         node, _ = _make_node(stream, pipeline_db=pipeline_db)
@@ -863,6 +909,7 @@ class TestAddPipelineRecordIndexed:
     def test_second_call_writes_at_index_one(self):
         """Second add_pipeline_record call for the same base_entry_id writes at index 1."""
         from orcapod.core.nodes.function_node import _PIPELINE_RECOMPUTATION_INDEX_COL
+
         stream = _make_stream([{"id": 0, "x": 10}])
         pipeline_db = InMemoryArrowDatabase()
         node, _ = _make_node(stream, pipeline_db=pipeline_db)
@@ -882,6 +929,7 @@ class TestAddPipelineRecordIndexed:
     def test_base_entry_id_column_written(self):
         """add_pipeline_record writes _PIPELINE_BASE_ENTRY_ID_COL to the pipeline DB row."""
         from orcapod.core.nodes.function_node import _PIPELINE_BASE_ENTRY_ID_COL
+
         stream = _make_stream([{"id": 0, "x": 10}])
         pipeline_db = InMemoryArrowDatabase()
         node, _ = _make_node(stream, pipeline_db=pipeline_db)
@@ -894,7 +942,10 @@ class TestAddPipelineRecordIndexed:
         assert all_records is not None
         assert _PIPELINE_BASE_ENTRY_ID_COL in all_records.column_names
         expected_base_id = node.compute_base_entry_id(tag, data)
-        assert all_records.column(_PIPELINE_BASE_ENTRY_ID_COL)[0].as_py() == expected_base_id
+        assert (
+            all_records.column(_PIPELINE_BASE_ENTRY_ID_COL)[0].as_py()
+            == expected_base_id
+        )
 
     def test_skip_cache_lookup_parameter_removed(self):
         """add_pipeline_record no longer accepts skip_cache_lookup — raises TypeError."""
@@ -903,7 +954,10 @@ class TestAddPipelineRecordIndexed:
         tag, data = next(iter(stream.iter_data()))
         with pytest.raises(TypeError, match="skip_cache_lookup"):
             node.add_pipeline_record(
-                tag, data, data_record_id=uuid.uuid4(), computed=True,
+                tag,
+                data,
+                data_record_id=uuid.uuid4(),
+                computed=True,
                 skip_cache_lookup=False,  # removed parameter
             )
 

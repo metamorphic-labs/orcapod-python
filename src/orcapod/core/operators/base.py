@@ -3,10 +3,15 @@ from __future__ import annotations
 import asyncio
 from abc import abstractmethod
 from collections.abc import Collection, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from orcapod.core.operators.meta_columns import (
+    without_input_meta,
+    without_meta_fields,
+)
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import (
     ArgumentGroup,
     DataProtocol,
@@ -14,6 +19,88 @@ from orcapod.protocols.core_protocols import (
     TagProtocol,
 )
 from orcapod.types import ColumnConfig, ContentHash, Schema
+from orcapod.utils import arrow_utils
+
+if TYPE_CHECKING:
+    import pyarrow as pa
+
+
+def require_shared_arrow_type(
+    operator: str, name: str, left_type: pa.DataType, right_type: pa.DataType
+) -> pa.DataType:
+    """Return the Arrow type a column's two input types share, or raise.
+
+    The rule is ``arrow_utils.shared_arrow_type``; this adds the error an
+    operator raises when there is no shared type. Operators call it as soon as
+    they have the input tables (or datagrams), before the join, because the
+    disagreement cannot be seen at graph-build time: ``output_schema()``
+    returns Python types, under which ``int8`` and ``int64``, or ``string`` and
+    ``large_string``, are the same.
+
+    Args:
+        operator: The operator's name, for the error message.
+        name: The column's name, for the error message.
+        left_type: The column's Arrow type in one input.
+        right_type: The column's Arrow type in the other input.
+
+    Returns:
+        The large-normalized type both inputs share.
+
+    Raises:
+        InputValidationError: If the types still differ after normalization to
+            their large variants. The message names the operator, the column and
+            both input types as given.
+    """
+    shared = arrow_utils.shared_arrow_type(left_type, right_type)
+    if shared is None:
+        raise InputValidationError(
+            f"{operator} inputs disagree on the Arrow type of column {name!r}: "
+            + f"{left_type} in one input and {right_type} in the other. {operator} "
+            + "never widens or promotes a type; cast one input explicitly so both "
+            + "have the same Arrow type."
+        )
+    return shared
+
+
+def require_tag_data_roles_agree(
+    first_tags: Collection[str],
+    first_data: Collection[str],
+    second_tags: Collection[str],
+    second_data: Collection[str],
+) -> None:
+    """Raise if a name is a tag in one input and a data column in the other.
+
+    A name belongs to one of a stream's two column groups, so an operator whose
+    output would hold the name as both a tag and a data column cannot be built.
+    The check reads names only, so it runs at graph-build time (from the
+    schemas) and on the first row of each side of an async join (from the
+    datagrams), with the same result.
+
+    Args:
+        first_tags: The tag column names of one input.
+        first_data: The data column names of that input.
+        second_tags: The tag column names of the other input.
+        second_data: The data column names of that input.
+
+    Raises:
+        InputValidationError: If a name is a tag of one input and a data column
+            of the other. The message names the column, says which input has it
+            in which role (``first`` or ``second`` of the two given) and
+            suggests the remedy.
+    """
+    for name in sorted(set(first_tags) & set(second_data)):
+        raise _tag_data_error(name, "first", "second")
+    for name in sorted(set(second_tags) & set(first_data)):
+        raise _tag_data_error(name, "second", "first")
+
+
+def _tag_data_error(name: str, tag_side: str, data_side: str) -> InputValidationError:
+    return InputValidationError(
+        f"column {name!r} is a tag in the {tag_side} input and a data column in the "
+        + f"{data_side}, and a name cannot be both. Rename it in one input with "
+        + "map_tags or map_data, or declare it a tag at the source that has it as "
+        + "a data column."
+    )
 
 
 class UnaryOperator(StaticOutputOperatorPod):
@@ -53,7 +140,8 @@ class UnaryOperator(StaticOutputOperatorPod):
     def static_process(self, *streams: StreamProtocol) -> StreamProtocol:
         """Forward to ``unary_static_process`` with the single input stream."""
         stream = streams[0]
-        return self.unary_static_process(stream)
+        # No operator carries its input's Data meta columns (ITL-1080).
+        return without_input_meta(self.unary_static_process(stream), streams)
 
     def output_schema(
         self,
@@ -62,7 +150,11 @@ class UnaryOperator(StaticOutputOperatorPod):
         all_info: bool = False,
     ) -> tuple[Schema, Schema]:
         stream = streams[0]
-        return self.unary_output_schema(stream, columns=columns, all_info=all_info)
+        tag_schema, data_schema = self.unary_output_schema(
+            stream, columns=columns, all_info=all_info
+        )
+        # The prediction of ``without_input_meta`` in ``static_process``.
+        return tag_schema, without_meta_fields(data_schema)
 
     def argument_symmetry(self, streams: Collection[StreamProtocol]) -> ArgumentGroup:
         # return single stream as a tuple
@@ -73,12 +165,35 @@ class UnaryOperator(StaticOutputOperatorPod):
         inputs: Sequence[ReadableChannel[tuple[TagProtocol, DataProtocol]]],
         output: WritableChannel[tuple[TagProtocol, DataProtocol]],
         *,
-        input_pipeline_hashes: Sequence[ContentHash] | None = None,
+        input_pipeline_hashes: Sequence[ContentHash],
     ) -> None:
-        """Barrier-mode: collect single input, run unary_static_process, emit."""
+        """Barrier-mode: collect single input, run unary_static_process, emit.
+
+        An input with no rows emits no rows (ITL-865).
+
+        Args:
+            inputs: The one readable input channel.
+            output: Writable channel for downstream consumption.
+            input_pipeline_hashes: The input stream's pipeline hash, as a
+                one-element sequence. The rebuilt input reports it, so
+                system-tag names equal the sync path's (ITL-906).
+
+        Raises:
+            ValueError: If ``input_pipeline_hashes`` does not have one hash per input.
+        """
         try:
+            if len(input_pipeline_hashes) != len(inputs):
+                raise ValueError(
+                    f"input_pipeline_hashes length ({len(input_pipeline_hashes)}) "
+                    f"must match inputs length ({len(inputs)})"
+                )
             rows = await inputs[0].collect()
-            stream = self._materialize_to_stream(rows)
+            if not rows:
+                # No rows in, no rows out: an operator never synthesizes a row.
+                # The typed empty stream the sync path returns needs a schema the
+                # channel does not carry (ITL-858), so nothing is emitted (ITL-865).
+                return
+            stream = self._materialize_input_stream(rows, input_pipeline_hashes[0])
             result = self.static_process(stream)
             for tag, data in result.iter_data():
                 await output.send((tag, data))
@@ -125,7 +240,10 @@ class BinaryOperator(StaticOutputOperatorPod):
     def static_process(self, *streams: StreamProtocol) -> StreamProtocol:
         """Forward to ``binary_static_process`` with two input streams."""
         left_stream, right_stream = streams
-        return self.binary_static_process(left_stream, right_stream)
+        # No operator carries its inputs' Data meta columns (ITL-1080).
+        return without_input_meta(
+            self.binary_static_process(left_stream, right_stream), streams
+        )
 
     def output_schema(
         self,
@@ -134,9 +252,11 @@ class BinaryOperator(StaticOutputOperatorPod):
         all_info: bool = False,
     ) -> tuple[Schema, Schema]:
         left_stream, right_stream = streams
-        return self.binary_output_schema(
+        tag_schema, data_schema = self.binary_output_schema(
             left_stream, right_stream, columns=columns, all_info=all_info
         )
+        # The prediction of ``without_input_meta`` in ``static_process``.
+        return tag_schema, without_meta_fields(data_schema)
 
     def validate_inputs(self, *streams: StreamProtocol) -> None:
         if len(streams) != 2:
@@ -157,15 +277,40 @@ class BinaryOperator(StaticOutputOperatorPod):
         inputs: Sequence[ReadableChannel[tuple[TagProtocol, DataProtocol]]],
         output: WritableChannel[tuple[TagProtocol, DataProtocol]],
         *,
-        input_pipeline_hashes: Sequence[ContentHash] | None = None,
+        input_pipeline_hashes: Sequence[ContentHash],
     ) -> None:
-        """Barrier-mode: collect both inputs concurrently, run binary_static_process, emit."""
+        """Barrier-mode: collect both inputs concurrently, run binary_static_process, emit.
+
+        An input with no rows emits no rows, as an inner join does (ITL-865).
+
+        Args:
+            inputs: The left and right readable input channels.
+            output: Writable channel for downstream consumption.
+            input_pipeline_hashes: The left and right input streams' pipeline
+                hashes. Each rebuilt input reports its own, so system-tag names
+                and canonical input order equal the sync path's (ITL-906).
+
+        Raises:
+            ValueError: If ``input_pipeline_hashes`` does not have one hash per input.
+        """
         try:
+            if len(input_pipeline_hashes) != len(inputs):
+                raise ValueError(
+                    f"input_pipeline_hashes length ({len(input_pipeline_hashes)}) "
+                    f"must match inputs length ({len(inputs)})"
+                )
+            left_hash, right_hash = input_pipeline_hashes
             left_rows, right_rows = await asyncio.gather(
                 inputs[0].collect(), inputs[1].collect()
             )
-            left_stream = self._materialize_to_stream(left_rows)
-            right_stream = self._materialize_to_stream(right_rows)
+            if not left_rows or not right_rows:
+                # The one barrier binary operator, MergeJoin, is an inner join: an
+                # input with no rows gives no rows, as on the sync path. The typed
+                # empty stream needs a schema the channels do not carry (ITL-858),
+                # so nothing is emitted (ITL-865).
+                return
+            left_stream = self._materialize_input_stream(left_rows, left_hash)
+            right_stream = self._materialize_input_stream(right_rows, right_hash)
             result = self.static_process(left_stream, right_stream)
             for tag, data in result.iter_data():
                 await output.send((tag, data))

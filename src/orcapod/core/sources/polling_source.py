@@ -6,6 +6,7 @@ cursor tracking, cache management, error handling, and shutdown; the
 implementation only supplies ``identity``, ``to_config``, ``from_config``,
 ``poll``, ``fetch``, and ``close``.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -17,14 +18,31 @@ from collections.abc import Collection
 from math import floor
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
+from typing_extensions import override
+
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
-from orcapod.errors import CursorInvalidatedError, InputValidationError, SchemaInconsistencyError
+from orcapod.core.streams.view import (
+    ViewStatus,
+    StreamView,
+)
+from orcapod.core.streams.base import (
+    check_head_size,
+    typed_zero_row_table,
+)
+from orcapod.errors import (
+    CursorInvalidatedError,
+    InputValidationError,
+    SchemaInconsistencyError,
+)
 from orcapod.types import ColumnConfig, Cursor, PollingConfig, Schema
 from orcapod.utils import arrow_utils, polars_data_utils
 from orcapod.utils.arrow_utils import system_tag_column_names
 from orcapod.utils.lazy_module import LazyModule
-from orcapod.utils.schema_utils import _normalize_column_list, compute_source_schema_hash
+from orcapod.utils.schema_utils import (
+    _normalize_column_list,
+    compute_source_schema_hash,
+)
 
 if TYPE_CHECKING:
     import polars as pl
@@ -79,9 +97,11 @@ def _run_sync(async_fn, *args, **kwargs):
     except RuntimeError:
         return asyncio.run(async_fn(*args, **kwargs))
     else:
-        return _get_sync_executor().submit(
-            lambda: asyncio.run(async_fn(*args, **kwargs))
-        ).result()
+        return (
+            _get_sync_executor()
+            .submit(lambda: asyncio.run(async_fn(*args, **kwargs)))
+            .result()
+        )
 
 
 def _assert_schema_match(
@@ -386,8 +406,10 @@ class PollingSource(RootSource, Generic[T]):
                 return tag_schema, self._data_schema
         if self._batches:
             return self._batches[0].output_schema(columns=columns, all_info=all_info)
-        self._sync_poll_and_commit()
-        return self._get_combined_stream().output_schema(columns=columns, all_info=all_info)
+        _ = self._sync_poll_and_commit()
+        return self._get_combined_stream().output_schema(
+            columns=columns, all_info=all_info
+        )
 
     def keys(
         self,
@@ -421,12 +443,105 @@ class PollingSource(RootSource, Generic[T]):
                 return tag_keys, tuple(self._data_schema.keys())
         if self._batches:
             return self._batches[0].keys(columns=columns, all_info=all_info)
-        self._sync_poll_and_commit()
+        _ = self._sync_poll_and_commit()
         return self._get_combined_stream().keys(columns=columns, all_info=all_info)
+
+    def _typed_zero_row_table(self) -> pa.Table | None:
+        """The zero-row table of the rows polled so far; ``None`` before a poll.
+
+        See ``typed_zero_row_table``. Never polls. Before the first poll the source
+        knows only the Python schema ``impl.schema()`` declares, which cannot say an
+        Arrow type such as ``int8`` (a known limitation, ITL-912).
+        """
+        from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+
+        batches = list(self._batches)  # snapshot, as in ``_get_combined_stream``
+        if not batches:
+            return None
+        # Each batch with no rows, combined as the batches themselves are (the same
+        # schema check and promotion), so the cost does not grow with the rows polled.
+        result: ArrowTableStream | None = None
+        for batch in batches:
+            table = typed_zero_row_table(batch)
+            if table is None:
+                return None
+            zero_rows = ArrowTableStream(table=table, tag_columns=self._tag_columns)
+            result = zero_rows if result is None else self._combine(result, zero_rows)
+        return typed_zero_row_table(result)
+
+    def _schema_requires_io(self, config: ColumnConfig) -> bool:
+        """Whether reading the schema with ``config`` would poll.
+
+        True while nothing was polled and either no schema was declared, or ``config``
+        asks for a column group known only from rows (source info, meta, context,
+        content hashes): only a poll tells those columns then.
+        """
+        if self._batches:
+            return False
+        if self._tag_schema is None or self._data_schema is None:
+            return True
+        return bool(
+            config.meta or config.source or config.context or config.content_hash
+        )
+
+    def head(
+        self,
+        n: int = 10,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> StreamView:
+        """Return the first rows already polled; never polls.
+
+        Before the first poll there are no rows. The columns are the declared schema's,
+        or none when the source declared no schema (finding it would mean polling).
+        """
+        check_head_size(n)
+        config = ColumnConfig.handle_config(columns, all_info=all_info)
+        batches = list(self._batches)  # snapshot: the list is append-only
+        if batches:
+            # Combine only the batches that hold the first n rows (every batch when
+            # sorting); count the rest.
+            sizes = [batch.head(0).total_rows or 0 for batch in batches]
+            needed, covered = 0, 0
+            # A sorted head orders every polled batch: the first n in tag order can lie
+            # in any of them. The batches are already in memory; nothing is polled.
+            while needed < len(batches) and (
+                covered < n or needed == 0 or config.sort_by_tags
+            ):
+                covered += sizes[needed]
+                needed += 1
+            prefix = batches[0]
+            for batch in batches[1:needed]:
+                prefix = self._combine(prefix, batch)
+            return dataclasses.replace(
+                prefix.head(n, columns=config).for_stream(self),
+                total_rows=sum(sizes),
+            )
+        if self._tag_schema is not None and self._data_schema is not None:
+            # The declared schema answers without a fetch, system tags included; the
+            # column groups that need data (source info, context, ...) are left out.
+            tag_schema, data_schema = self.output_schema(
+                columns=ColumnConfig(system_tags=config.system_tags)
+            )
+            table = arrow_utils.make_empty_table(
+                {**tag_schema, **data_schema}, self.data_context.type_converter
+            )
+            tag_columns = tuple(tag_schema.keys())
+        else:
+            table = pa.table({})
+            tag_columns = ()
+        return StreamView.without_rows(
+            self,
+            ViewStatus.NOT_COMPUTED,
+            table,
+            tag_columns=tag_columns,
+            note="nothing polled yet; run() polls it",
+        )
 
     def iter_data(self):
         """Iterate over (tag, data) pairs from the current snapshot."""
-        self._sync_poll_and_commit()
+        _ = self._sync_poll_and_commit()
         return self._get_combined_stream().iter_data()
 
     def as_table(
@@ -436,7 +551,7 @@ class PollingSource(RootSource, Generic[T]):
         all_info: bool = False,
     ) -> pa.Table:
         """Return the accumulated rows as a PyArrow table."""
-        self._sync_poll_and_commit()
+        _ = self._sync_poll_and_commit()
         return self._get_combined_stream().as_table(columns=columns, all_info=all_info)
 
     # -------------------------------------------------------------------------
@@ -472,7 +587,9 @@ class PollingSource(RootSource, Generic[T]):
         }
 
     @classmethod
-    def from_config(cls, config: dict[str, Any], db_registry: Any = None) -> PollingSource:
+    def from_config(
+        cls, config: dict[str, Any], db_registry: Any = None
+    ) -> PollingSource:
         """Reconstruct a ``PollingSource`` by importing the impl class.
 
         When ``config["impl_config"]`` is non-``None``, the impl is
@@ -518,8 +635,11 @@ class PollingSource(RootSource, Generic[T]):
     # Internal sync helpers
     # -------------------------------------------------------------------------
 
-    def _sync_poll_and_commit(self) -> None:
+    def _sync_poll_and_commit(self) -> bool:
         """Poll for new data and commit a new batch under the optimistic lock.
+
+        Returns whether this call committed a batch with at least one row, which moves
+        the source's modified time (``_mark_new_rows``).
 
         Implements the check-snapshot → I/O → check-and-commit protocol:
         reads the cursor snapshot under a brief lock, performs poll and fetch
@@ -535,7 +655,9 @@ class PollingSource(RootSource, Generic[T]):
 
         if cursor_snapshot is None:
             # First access — no poll needed, fetch unconditionally.
-            logger.debug("PollingSource %r: first sync access — fetching", self._source_id)
+            logger.debug(
+                "PollingSource %r: first sync access — fetching", self._source_id
+            )
             new_cursor, data = _run_sync(self._impl.fetch, cursor=None)
             new_stream = self._try_build_stream(data)
             if new_stream is not None:
@@ -548,13 +670,13 @@ class PollingSource(RootSource, Generic[T]):
                         self._batches.append(new_stream)
                     self._cursor = new_cursor
                     committed = True
-            if committed:
-                self._update_last_modified_from_cursor(new_cursor)
+            return committed and self._mark_new_rows(new_stream)
         else:
             has_new = _run_sync(self._impl.poll, cursor=cursor_snapshot)
             if has_new:
                 logger.debug(
-                    "PollingSource %r: sync poll found new data — fetching", self._source_id
+                    "PollingSource %r: sync poll found new data — fetching",
+                    self._source_id,
                 )
                 new_cursor, data = _run_sync(self._impl.fetch, cursor=cursor_snapshot)
                 new_stream = self._try_build_stream(data)
@@ -570,12 +692,11 @@ class PollingSource(RootSource, Generic[T]):
                             self._batches.append(new_stream)
                         self._cursor = new_cursor
                         committed = True
-                if committed:
-                    self._update_last_modified_from_cursor(new_cursor)
-            else:
-                logger.debug(
-                    "PollingSource %r: sync poll — cache still valid", self._source_id
-                )
+                return committed and self._mark_new_rows(new_stream)
+            logger.debug(
+                "PollingSource %r: sync poll — cache still valid", self._source_id
+            )
+            return False
 
     def _get_combined_stream(self) -> ArrowTableStream:
         """Return all committed batches concatenated as a single stream.
@@ -621,7 +742,6 @@ class PollingSource(RootSource, Generic[T]):
         no canonical schema has been established yet — the frame is silently
         skipped so that a spurious all-non-nullable schema is never recorded.
         """
-        from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 
         # Handle Object-dtype columns (same pattern as DataFrameSource)
         object_columns = [c for c in df.columns if df[c].dtype == pl.Object]
@@ -642,7 +762,9 @@ class PollingSource(RootSource, Generic[T]):
                 # T | None → nullable=True; plain T → nullable=False. No inference.
                 combined = {**dict(self._tag_schema), **dict(self._data_schema)}
                 self._canonical_arrow_schema = (
-                    self.data_context.type_converter.python_schema_to_arrow_schema(combined)
+                    self.data_context.type_converter.python_schema_to_arrow_schema(
+                        combined
+                    )
                 )
             else:
                 # Infer-once path: first non-empty batch establishes canonical nullability.
@@ -655,7 +777,9 @@ class PollingSource(RootSource, Generic[T]):
                         "to avoid schema drift on zero-row polls or null-free batches.",
                         self._source_id,
                     )
-                    self._canonical_arrow_schema = arrow_utils.infer_schema_nullable(arrow_table)
+                    self._canonical_arrow_schema = arrow_utils.infer_schema_nullable(
+                        arrow_table
+                    )
 
         # If _canonical_arrow_schema is still None here, this is a zero-row frame
         # on the infer-once path before any real data has arrived.  Skip it —
@@ -665,10 +789,14 @@ class PollingSource(RootSource, Generic[T]):
 
         # Apply canonical nullability by column name (order-safe).
         canonical_nullable = {f.name: f.nullable for f in self._canonical_arrow_schema}
-        target_schema = pa.schema([
-            pa.field(f.name, f.type, nullable=canonical_nullable.get(f.name, f.nullable))
-            for f in arrow_table.schema
-        ])
+        target_schema = pa.schema(
+            [
+                pa.field(
+                    f.name, f.type, nullable=canonical_nullable.get(f.name, f.nullable)
+                )
+                for f in arrow_table.schema
+            ]
+        )
         arrow_table = arrow_table.cast(target_schema)
 
         builder = SourceStreamBuilder(self.data_context, self.orcapod_config)
@@ -695,9 +823,13 @@ class PollingSource(RootSource, Generic[T]):
         """
         actual_tag_schema, actual_data_schema = stream.output_schema()
         if self._tag_schema is not None:
-            _assert_schema_match("tag", self._tag_schema, actual_tag_schema, self._source_id)
+            _assert_schema_match(
+                "tag", self._tag_schema, actual_tag_schema, self._source_id
+            )
         if self._data_schema is not None:
-            _assert_schema_match("data", self._data_schema, actual_data_schema, self._source_id)
+            _assert_schema_match(
+                "data", self._data_schema, actual_data_schema, self._source_id
+            )
 
     def _validate_combining_schemas(
         self, existing: ArrowTableStream, new_stream: ArrowTableStream
@@ -763,12 +895,39 @@ class PollingSource(RootSource, Generic[T]):
         )
         return ArrowTableStream(table=combined, tag_columns=self._tag_columns)
 
-    def _update_last_modified_from_cursor(self, cursor: Cursor[T]) -> None:
-        """Update ``last_modified`` from cursor or fall back to wall clock."""
-        if cursor.modified_at is not None:
-            self._set_modified_time(cursor.modified_at)
-        else:
-            self._update_modified_time()
+    def _mark_new_rows(self, committed: ArrowTableStream | None) -> bool:
+        """Move the modified time to now if the batch just committed holds rows.
+
+        Developer, November 14, 2026 (ITL-1102): "polling source should update its
+        modified time the moment it finds more data compared to the last time". The
+        time is the moment the rows were found, never the cursor's ``modified_at``: rows
+        written before a downstream node's last run but fetched after it must still
+        make that node stale. A fetch that returned no rows moves nothing.
+
+        Args:
+            committed: The batch this source just committed, or ``None`` for none.
+
+        Returns:
+            Whether the batch held rows (and the time moved).
+        """
+        if committed is None or committed.as_table().num_rows == 0:
+            return False
+        self._update_modified_time()
+        return True
+
+    @override
+    def check_for_new_data(self) -> bool:
+        """Poll once; take in what the poll finds and move the modified time if it has rows.
+
+        The start-of-run check (ITL-1102): one poll, and a fetch when the poll reports
+        new data, as one synchronous read does (the first check fetches unconditionally).
+        A poll or fetch that raises propagates: the run warns and goes on with the rows
+        already polled, and the cursor, rows and modified time stay as they were.
+
+        Returns:
+            ``True`` if a batch with at least one row was committed.
+        """
+        return self._sync_poll_and_commit()
 
     # -------------------------------------------------------------------------
     # Async mode — full polling loop
@@ -838,11 +997,16 @@ class PollingSource(RootSource, Generic[T]):
                             self._source_id,
                         )
                         # Fetch — no lock held across await.
-                        new_cursor, data = await self._impl.fetch(cursor=cursor_snapshot)
+                        new_cursor, data = await self._impl.fetch(
+                            cursor=cursor_snapshot
+                        )
                         new_stream = self._try_build_stream(data)
 
                         if new_stream is not None:
-                            if self._tag_schema is not None or self._data_schema is not None:
+                            if (
+                                self._tag_schema is not None
+                                or self._data_schema is not None
+                            ):
                                 self._validate_against_declared_schemas(new_stream)
                             if self._batches:
                                 self._validate_combining_schemas(
@@ -862,7 +1026,7 @@ class PollingSource(RootSource, Generic[T]):
                             # will yield it at the top of the next iteration.
 
                         if committed:
-                            self._update_last_modified_from_cursor(new_cursor)
+                            _ = self._mark_new_rows(new_stream)
                             if logger.isEnabledFor(logging.DEBUG):
                                 emitted_count = (
                                     new_stream.as_table().num_rows

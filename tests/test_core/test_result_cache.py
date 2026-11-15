@@ -10,11 +10,12 @@ Covers:
 
 from __future__ import annotations
 
-from typing import Any
 
 import pyarrow as pa
+
 import pytest
 
+from orcapod.contexts import get_default_context
 from orcapod.core.datagrams import Datagram, Data
 from orcapod.core.datagrams.tag_data import EmptyData
 from orcapod.core.data_function import PythonDataFunction
@@ -22,6 +23,9 @@ from orcapod.core.result_cache import ResultCache
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.system_constants import constants
 from orcapod.types import ContentHash
+
+# The data context key the caches in this module read and write under.
+CONTEXT_KEY = get_default_context().context_key
 
 
 # ---------------------------------------------------------------------------
@@ -46,9 +50,7 @@ def _make_cache(
     return cache, db
 
 
-def _compute_and_store(
-    cache: ResultCache, pf: PythonDataFunction, input_data: Data
-):
+def _compute_and_store(cache: ResultCache, pf: PythonDataFunction, input_data: Data):
     """Helper: compute output and store in cache."""
     output = pf.direct_call(input_data)
     assert output is not None
@@ -67,6 +69,7 @@ def _compute_and_store(
         output,
         variation_datagram=variation_datagram,
         execution_datagram=execution_datagram,
+        data_context_key=CONTEXT_KEY,
     )
     return output
 
@@ -80,13 +83,13 @@ class TestLookupMiss:
     def test_empty_db_returns_none(self):
         cache, _ = _make_cache()
         data = Data({"x": 10})
-        assert cache.lookup(data) is None
+        assert cache.lookup(data, data_context_key=CONTEXT_KEY) is None
 
     def test_different_data_returns_none(self):
         cache, _ = _make_cache()
         pf = _make_pf()
         _compute_and_store(cache, pf, Data({"x": 10}))
-        assert cache.lookup(Data({"x": 99})) is None
+        assert cache.lookup(Data({"x": 99}), data_context_key=CONTEXT_KEY) is None
 
 
 class TestLookupHit:
@@ -96,7 +99,7 @@ class TestLookupHit:
         input_pkt = Data({"x": 10})
         _compute_and_store(cache, pf, input_pkt)
 
-        cached = cache.lookup(input_pkt)
+        cached = cache.lookup(input_pkt, data_context_key=CONTEXT_KEY)
         assert cached is not None
         assert cached.as_dict()["result"] == 20
 
@@ -106,7 +109,7 @@ class TestLookupHit:
         input_pkt = Data({"x": 10})
         _compute_and_store(cache, pf, input_pkt)
 
-        cached = cache.lookup(input_pkt)
+        cached = cache.lookup(input_pkt, data_context_key=CONTEXT_KEY)
         assert cached is not None
         assert cached.get_meta_value(ResultCache.RESULT_COMPUTED_FLAG) is False
 
@@ -118,6 +121,7 @@ class TestLookupHit:
         input_pkt = Data({"x": 10})
 
         output = pf.direct_call(input_pkt)
+        assert output is not None
         variation_datagram = Datagram(
             pf.get_function_variation_data(),
             python_schema=pf.get_function_variation_data_schema(),
@@ -128,10 +132,16 @@ class TestLookupHit:
             python_schema=pf.get_execution_data_schema(),
             data_context=pf.data_context,
         )
-        cache_a.store(input_pkt, output, variation_datagram, execution_datagram)
+        cache_a.store(
+            input_pkt,
+            output,
+            variation_datagram,
+            execution_datagram,
+            data_context_key=CONTEXT_KEY,
+        )
 
-        assert cache_a.lookup(input_pkt) is not None
-        assert cache_b.lookup(input_pkt) is None
+        assert cache_a.lookup(input_pkt, data_context_key=CONTEXT_KEY) is not None
+        assert cache_b.lookup(input_pkt, data_context_key=CONTEXT_KEY) is None
 
 
 class TestConflictResolution:
@@ -163,10 +173,11 @@ class TestConflictResolution:
             output2,
             variation_datagram,
             execution_datagram,
+            data_context_key=CONTEXT_KEY,
         )
 
         # Lookup should return the most recent
-        cached = cache.lookup(input_pkt)
+        cached = cache.lookup(input_pkt, data_context_key=CONTEXT_KEY)
         assert cached is not None
         assert cached.datagram_uuid == output2.datagram_uuid
 
@@ -189,8 +200,20 @@ class TestAdditionalConstraints:
             additional_constraints={
                 f"{constants.PF_VARIATION_PREFIX}function_name": "nonexistent"
             },
+            data_context_key=CONTEXT_KEY,
         )
         assert result is None
+
+    def test_additional_constraints_cannot_replace_the_data_context(self):
+        """A caller's constraint on ``__data_context`` must not widen the lookup."""
+        cache, _ = _make_cache()
+        input_pkt = Data({"x": 10})
+        with pytest.raises(ValueError, match="__data_context"):
+            _ = cache.lookup(
+                input_pkt,
+                additional_constraints={constants.DATA_CONTEXT_COL: "std:v0.9:other"},
+                data_context_key=CONTEXT_KEY,
+            )
 
     def test_matching_constraint_returns_result(self):
         cache, _ = _make_cache()
@@ -204,6 +227,7 @@ class TestAdditionalConstraints:
             additional_constraints={
                 f"{constants.PF_VARIATION_PREFIX}function_name": "double"
             },
+            data_context_key=CONTEXT_KEY,
         )
         assert result is not None
         assert result.as_dict()["result"] == 20
@@ -302,7 +326,7 @@ class TestAutoFlush:
 class TestGetAllRecords:
     def test_empty_returns_none(self):
         cache, _ = _make_cache()
-        assert cache.get_all_records() is None
+        assert cache.get_all_records(CONTEXT_KEY) is None
 
     def test_returns_stored_records(self):
         cache, _ = _make_cache()
@@ -310,7 +334,7 @@ class TestGetAllRecords:
         _compute_and_store(cache, pf, Data({"x": 10}))
         _compute_and_store(cache, pf, Data({"x": 20}))
 
-        records = cache.get_all_records()
+        records = cache.get_all_records(CONTEXT_KEY)
         assert records is not None
         assert records.num_rows == 2
 
@@ -319,7 +343,7 @@ class TestGetAllRecords:
         pf = _make_pf()
         _compute_and_store(cache, pf, Data({"x": 10}))
 
-        records = cache.get_all_records(include_system_columns=True)
+        records = cache.get_all_records(CONTEXT_KEY, include_system_columns=True)
         assert records is not None
         assert constants.DATA_RECORD_ID in records.column_names
 
@@ -328,7 +352,7 @@ class TestGetAllRecords:
         pf = _make_pf()
         _compute_and_store(cache, pf, Data({"x": 10}))
 
-        records = cache.get_all_records(include_system_columns=False)
+        records = cache.get_all_records(CONTEXT_KEY, include_system_columns=False)
         assert records is not None
         assert constants.DATA_RECORD_ID not in records.column_names
 
@@ -350,7 +374,9 @@ class TestStoreDictColumns:
         assert exec_info_col in records.column_names
         # dict[str, str] should be stored as an Arrow map (list of key-value structs)
         field_type = records.schema.field(exec_info_col).type
-        assert pa.types.is_large_list(field_type), f"Expected large_list (map), got {field_type}"
+        assert pa.types.is_large_list(field_type), (
+            f"Expected large_list (map), got {field_type}"
+        )
 
     def test_extra_info_column_stored_as_map(self):
         cache, db = _make_cache()
@@ -363,7 +389,9 @@ class TestStoreDictColumns:
         assert extra_info_col in records.column_names
         # dict[str, str] should be stored as an Arrow map (list of key-value structs)
         field_type = records.schema.field(extra_info_col).type
-        assert pa.types.is_large_list(field_type), f"Expected large_list (map), got {field_type}"
+        assert pa.types.is_large_list(field_type), (
+            f"Expected large_list (map), got {field_type}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -380,7 +408,7 @@ class TestLookupViaEmptyData:
         _compute_and_store(cache, pf, input_data)
 
         empty_data = EmptyData(cached_content_hash=input_data.content_hash())
-        cached = cache.lookup(empty_data)
+        cached = cache.lookup(empty_data, data_context_key=CONTEXT_KEY)
 
         assert cached is not None
         assert cached.as_dict()["result"] == 20
@@ -394,7 +422,7 @@ class TestLookupViaEmptyData:
 
         unknown_hash = ContentHash(method="arrow_v2.1", digest=bytes(32))
         empty_data = EmptyData(cached_content_hash=unknown_hash)
-        result = cache.lookup(empty_data)
+        result = cache.lookup(empty_data, data_context_key=CONTEXT_KEY)
 
         assert result is None
 

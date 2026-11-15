@@ -490,7 +490,12 @@ class TestPipelineDagProperty:
         from orcapod.pipeline.graph import Pipeline
 
         src = ArrowTableSource(
-            pa.table({"id": pa.array(["a"], type=pa.large_string()), "v": pa.array([1], type=pa.int64())}),
+            pa.table(
+                {
+                    "id": pa.array(["a"], type=pa.large_string()),
+                    "v": pa.array([1], type=pa.int64()),
+                }
+            ),
             tag_columns=["id"],
             source_id="src",
             infer_nullable=True,
@@ -533,6 +538,7 @@ class TestPipelineDagProperty:
     def test_dag_predecessors_and_successors(self):
         """Source node has no predecessors; function node is its successor."""
         from orcapod.core.nodes import SourceNode, FunctionNode
+
         pipeline = self._make_simple_pipeline()
         source = next(n for n in pipeline.dag.nodes() if isinstance(n, SourceNode))
         fn_node = next(n for n in pipeline.dag.nodes() if isinstance(n, FunctionNode))
@@ -542,6 +548,7 @@ class TestPipelineDagProperty:
     def test_dag_raises_before_compile(self):
         """Accessing dag before compile() raises RuntimeError."""
         from orcapod.pipeline.graph import Pipeline
+
         pipeline = Pipeline(name="uncompiled", auto_compile=False)
         with pytest.raises(RuntimeError, match="not been compiled"):
             _ = pipeline.dag
@@ -572,7 +579,7 @@ class TestPipelineProtocolConformance:
         from orcapod.pipeline.job import PipelineJob
         from orcapod.protocols.pipeline_protocols import PipelineProtocol
 
-        job = PipelineJob(store=InMemoryArrowDatabase())
+        job = PipelineJob(database=InMemoryArrowDatabase())
         with job:
             pass
 
@@ -620,6 +627,7 @@ class TestPipelineJobDagOnLoadedJob:
             source_id="src",
             infer_nullable=True,
         )
+
         def double_v(v: int) -> int:
             return v * 2
 
@@ -631,7 +639,7 @@ class TestPipelineJobDagOnLoadedJob:
         with pipeline:
             pod(src)
         job = PipelineJob.from_pipeline(
-            pipeline, sources={"src": src}, store=InMemoryArrowDatabase()
+            pipeline, sources={"src": src}, database=InMemoryArrowDatabase()
         )
         job.run()
         save_path = tmp_path / "job.json"

@@ -7,17 +7,21 @@ content-addressable, and reproducible by design.
 
 ## Installation
 
-Install from [PyPI](https://pypi.org/project/orcapod/) using [uv](https://docs.astral.sh/uv/):
+Orcapod supports Python 3.11, 3.12 and 3.13 and is published on PyPI as `orcapod`, under the
+MIT License:
 
 ```bash
+pip install orcapod
+# or, in a uv project
 uv add orcapod
 ```
 
-For the latest development version, install directly from GitHub:
+`0.2.0` is not on PyPI, where the latest release is `0.1.4`; `0.2.0` is the tag `v0.2.0` of
+the repository.
 
-```bash
-uv add git+https://github.com/metamorphic-labs/orcapod-python.git
-```
+Rendering pipeline graphs additionally requires the [Graphviz](https://graphviz.org/download/)
+`dot` binary on your `PATH`. It is optional: everything else works without it, and no
+Graphviz development headers are needed.
 
 ## Quick example
 

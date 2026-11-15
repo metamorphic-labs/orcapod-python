@@ -27,7 +27,7 @@ import asyncio
 import pyarrow as pa
 import pytest
 
-from orcapod.channels import Channel
+from orcapod.channels import Channel, ChannelClosed
 from orcapod.core.operators import (
     Batch,
     DropDataColumns,
@@ -40,7 +40,9 @@ from orcapod.core.operators import (
     SemiJoin,
 )
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
 from orcapod.system_constants import constants
+from orcapod.types import ContentHash
 
 
 # ---------------------------------------------------------------------------
@@ -59,9 +61,11 @@ def make_simple_stream() -> ArrowTableStream:
         ("animal", pa.large_string()), ("weight", pa.float64()), ("legs", pa.int64())
     )
     table = pa.table(
-        {"animal": pa.array(["cat", "dog", "bird"], type=pa.large_string()),
-         "weight": pa.array([4.0, 12.0, 0.5], type=pa.float64()),
-         "legs": pa.array([4, 4, 2], type=pa.int64())},
+        {
+            "animal": pa.array(["cat", "dog", "bird"], type=pa.large_string()),
+            "weight": pa.array([4.0, 12.0, 0.5], type=pa.float64()),
+            "legs": pa.array([4, 4, 2], type=pa.int64()),
+        },
         schema=schema,
     )
     return ArrowTableStream(table, tag_columns=["animal"])
@@ -70,12 +74,16 @@ def make_simple_stream() -> ArrowTableStream:
 def make_two_tag_stream() -> ArrowTableStream:
     """Stream with 2 tags (region, animal) and 1 data column (count). Uses nullable=False schema."""
     schema = _make_non_nullable_schema(
-        ("region", pa.large_string()), ("animal", pa.large_string()), ("count", pa.int64())
+        ("region", pa.large_string()),
+        ("animal", pa.large_string()),
+        ("count", pa.int64()),
     )
     table = pa.table(
-        {"region": pa.array(["east", "east", "west"], type=pa.large_string()),
-         "animal": pa.array(["cat", "dog", "cat"], type=pa.large_string()),
-         "count": pa.array([10, 5, 8], type=pa.int64())},
+        {
+            "region": pa.array(["east", "east", "west"], type=pa.large_string()),
+            "animal": pa.array(["cat", "dog", "cat"], type=pa.large_string()),
+            "count": pa.array([10, 5, 8], type=pa.int64()),
+        },
         schema=schema,
     )
     return ArrowTableStream(table, tag_columns=["region", "animal"])
@@ -85,7 +93,10 @@ def make_int_stream(n: int = 3) -> ArrowTableStream:
     """Stream with tag=id, data=x (ints). Uses nullable=False schema."""
     schema = _make_non_nullable_schema(("id", pa.int64()), ("x", pa.int64()))
     table = pa.table(
-        {"id": pa.array(list(range(n)), type=pa.int64()), "x": pa.array(list(range(n)), type=pa.int64())},
+        {
+            "id": pa.array(list(range(n)), type=pa.int64()),
+            "x": pa.array(list(range(n)), type=pa.int64()),
+        },
         schema=schema,
     )
     return ArrowTableStream(table, tag_columns=["id"])
@@ -93,11 +104,15 @@ def make_int_stream(n: int = 3) -> ArrowTableStream:
 
 def make_two_col_stream(n: int = 3) -> ArrowTableStream:
     """Stream with tag=id, data={x, y}. Uses nullable=False schema."""
-    schema = _make_non_nullable_schema(("id", pa.int64()), ("x", pa.int64()), ("y", pa.int64()))
+    schema = _make_non_nullable_schema(
+        ("id", pa.int64()), ("x", pa.int64()), ("y", pa.int64())
+    )
     table = pa.table(
-        {"id": pa.array(list(range(n)), type=pa.int64()),
-         "x": pa.array(list(range(n)), type=pa.int64()),
-         "y": pa.array([i * 10 for i in range(n)], type=pa.int64())},
+        {
+            "id": pa.array(list(range(n)), type=pa.int64()),
+            "x": pa.array(list(range(n)), type=pa.int64()),
+            "y": pa.array([i * 10 for i in range(n)], type=pa.int64()),
+        },
         schema=schema,
     )
     return ArrowTableStream(table, tag_columns=["id"])
@@ -106,7 +121,10 @@ def make_two_col_stream(n: int = 3) -> ArrowTableStream:
 def make_left_stream() -> ArrowTableStream:
     schema = _make_non_nullable_schema(("id", pa.int64()), ("value_a", pa.int64()))
     table = pa.table(
-        {"id": pa.array([1, 2, 3], type=pa.int64()), "value_a": pa.array([10, 20, 30], type=pa.int64())},
+        {
+            "id": pa.array([1, 2, 3], type=pa.int64()),
+            "value_a": pa.array([10, 20, 30], type=pa.int64()),
+        },
         schema=schema,
     )
     return ArrowTableStream(table, tag_columns=["id"])
@@ -115,7 +133,10 @@ def make_left_stream() -> ArrowTableStream:
 def make_right_stream() -> ArrowTableStream:
     schema = _make_non_nullable_schema(("id", pa.int64()), ("value_b", pa.int64()))
     table = pa.table(
-        {"id": pa.array([2, 3, 4], type=pa.int64()), "value_b": pa.array([200, 300, 400], type=pa.int64())},
+        {
+            "id": pa.array([2, 3, 4], type=pa.int64()),
+            "value_b": pa.array([200, 300, 400], type=pa.int64()),
+        },
         schema=schema,
     )
     return ArrowTableStream(table, tag_columns=["id"])
@@ -123,13 +144,32 @@ def make_right_stream() -> ArrowTableStream:
 
 def make_disjoint_stream() -> ArrowTableStream:
     """Stream with same tags as simple_stream but different data columns. Uses nullable=False schema."""
-    schema = _make_non_nullable_schema(("animal", pa.large_string()), ("speed", pa.float64()))
+    schema = _make_non_nullable_schema(
+        ("animal", pa.large_string()), ("speed", pa.float64())
+    )
     table = pa.table(
-        {"animal": pa.array(["cat", "dog", "bird"], type=pa.large_string()),
-         "speed": pa.array([30.0, 45.0, 80.0], type=pa.float64())},
+        {
+            "animal": pa.array(["cat", "dog", "bird"], type=pa.large_string()),
+            "speed": pa.array([30.0, 45.0, 80.0], type=pa.float64()),
+        },
         schema=schema,
     )
     return ArrowTableStream(table, tag_columns=["animal"])
+
+
+def hashes(*streams: StreamProtocol) -> list[ContentHash]:
+    """The pipeline hash of each input stream, as the operator node passes them."""
+    return [stream.pipeline_hash() for stream in streams]
+
+
+def root_hash(tag: str, data: str) -> ContentHash:
+    """The pipeline hash of a root stream with one int64 tag and one int64 data column.
+
+    For an input channel fed by hand, or one that delivers no rows: the operator
+    node passes every input's pipeline hash, so the tests do too.
+    """
+    table = pa.table({tag: pa.array([0], pa.int64()), data: pa.array([0], pa.int64())})
+    return ArrowTableStream(table, tag_columns=[tag]).pipeline_hash()
 
 
 async def feed(stream: ArrowTableStream, ch: Channel) -> None:
@@ -144,7 +184,9 @@ async def run_unary(op, stream: ArrowTableStream) -> list[tuple]:
     input_ch = Channel(buffer_size=1024)
     output_ch = Channel(buffer_size=1024)
     await feed(stream, input_ch)
-    await op.async_execute([input_ch.reader], output_ch.writer)
+    await op.async_execute(
+        [input_ch.reader], output_ch.writer, input_pipeline_hashes=hashes(stream)
+    )
     return await output_ch.reader.collect()
 
 
@@ -157,7 +199,11 @@ async def run_binary(
     output_ch = Channel(buffer_size=1024)
     await feed(left, left_ch)
     await feed(right, right_ch)
-    await op.async_execute([left_ch.reader, right_ch.reader], output_ch.writer)
+    await op.async_execute(
+        [left_ch.reader, right_ch.reader],
+        output_ch.writer,
+        input_pipeline_hashes=hashes(left, right),
+    )
     return await output_ch.reader.collect()
 
 
@@ -214,7 +260,11 @@ class TestSelectTagColumnsStreaming:
         output_ch = Channel(buffer_size=4)
         await input_ch.writer.close()
         op = SelectTagColumns(columns=["region"])
-        await op.async_execute([input_ch.reader], output_ch.writer)
+        await op.async_execute(
+            [input_ch.reader],
+            output_ch.writer,
+            input_pipeline_hashes=[root_hash("id", "value")],
+        )
         results = await output_ch.reader.collect()
         assert results == []
 
@@ -303,7 +353,11 @@ class TestSelectDataColumnsStreaming:
         output_ch = Channel(buffer_size=4)
         await input_ch.writer.close()
         op = SelectDataColumns(columns=["weight"])
-        await op.async_execute([input_ch.reader], output_ch.writer)
+        await op.async_execute(
+            [input_ch.reader],
+            output_ch.writer,
+            input_pipeline_hashes=[root_hash("id", "value")],
+        )
         results = await output_ch.reader.collect()
         assert results == []
 
@@ -388,7 +442,11 @@ class TestDropTagColumnsStreaming:
         output_ch = Channel(buffer_size=4)
         await input_ch.writer.close()
         op = DropTagColumns(columns=["region"])
-        await op.async_execute([input_ch.reader], output_ch.writer)
+        await op.async_execute(
+            [input_ch.reader],
+            output_ch.writer,
+            input_pipeline_hashes=[root_hash("id", "value")],
+        )
         results = await output_ch.reader.collect()
         assert results == []
 
@@ -450,7 +508,11 @@ class TestDropDataColumnsStreaming:
         output_ch = Channel(buffer_size=4)
         await input_ch.writer.close()
         op = DropDataColumns(columns=["legs"])
-        await op.async_execute([input_ch.reader], output_ch.writer)
+        await op.async_execute(
+            [input_ch.reader],
+            output_ch.writer,
+            input_pipeline_hashes=[root_hash("id", "value")],
+        )
         results = await output_ch.reader.collect()
         assert results == []
 
@@ -546,7 +608,11 @@ class TestMapTagsStreaming:
         output_ch = Channel(buffer_size=4)
         await input_ch.writer.close()
         op = MapTags(name_map={"region": "area"})
-        await op.async_execute([input_ch.reader], output_ch.writer)
+        await op.async_execute(
+            [input_ch.reader],
+            output_ch.writer,
+            input_pipeline_hashes=[root_hash("id", "value")],
+        )
         results = await output_ch.reader.collect()
         assert results == []
 
@@ -659,7 +725,11 @@ class TestMapDataStreaming:
         output_ch = Channel(buffer_size=4)
         await input_ch.writer.close()
         op = MapData(name_map={"weight": "mass"})
-        await op.async_execute([input_ch.reader], output_ch.writer)
+        await op.async_execute(
+            [input_ch.reader],
+            output_ch.writer,
+            input_pipeline_hashes=[root_hash("id", "value")],
+        )
         results = await output_ch.reader.collect()
         assert results == []
 
@@ -750,7 +820,11 @@ class TestBatchStreaming:
         output_ch = Channel(buffer_size=4)
         await input_ch.writer.close()
         op = Batch(batch_size=2)
-        await op.async_execute([input_ch.reader], output_ch.writer)
+        await op.async_execute(
+            [input_ch.reader],
+            output_ch.writer,
+            input_pipeline_hashes=[root_hash("id", "value")],
+        )
         results = await output_ch.reader.collect()
         assert results == []
 
@@ -896,7 +970,11 @@ class TestSemiJoinBuildProbe:
         await feed(right, right_ch)
 
         op = SemiJoin()
-        await op.async_execute([left_ch.reader, right_ch.reader], output_ch.writer)
+        await op.async_execute(
+            [left_ch.reader, right_ch.reader],
+            output_ch.writer,
+            input_pipeline_hashes=[root_hash("id", "value"), right.pipeline_hash()],
+        )
         results = await output_ch.reader.collect()
         assert results == []
 
@@ -914,7 +992,11 @@ class TestSemiJoinBuildProbe:
         await right_ch.writer.close()
 
         op = SemiJoin()
-        await op.async_execute([left_ch.reader, right_ch.reader], output_ch.writer)
+        await op.async_execute(
+            [left_ch.reader, right_ch.reader],
+            output_ch.writer,
+            input_pipeline_hashes=[left.pipeline_hash(), root_hash("id", "value")],
+        )
         results = await output_ch.reader.collect()
         # With empty right and no schema information available,
         # the implementation falls back to passing left through
@@ -960,6 +1042,177 @@ class TestSemiJoinBuildProbe:
 
 
 # ===================================================================
+# SemiJoin — the right input ends while the left one is still open (ITL-1075)
+# ===================================================================
+
+
+def _id_stream(ids: list[int], column: str) -> ArrowTableStream:
+    """Stream with an ``id`` tag and one int64 data column named ``column``."""
+    table = pa.table(
+        {
+            "id": pa.array(ids, type=pa.int64()),
+            column: pa.array([i * 10 for i in ids], type=pa.int64()),
+        }
+    )
+    return ArrowTableStream(table, tag_columns=["id"])
+
+
+_Row = tuple[TagProtocol, DataProtocol]
+
+
+class _FailingChannel:
+    """A readable channel whose reading fails: it stands for a failed right input.
+
+    A read fails once ``after`` is set.
+    """
+
+    def __init__(self, after: asyncio.Event) -> None:
+        self._after = after
+
+    async def receive(self) -> _Row:
+        _ = await self._after.wait()
+        raise RuntimeError("right input failed")
+
+    def __aiter__(self) -> "_FailingChannel":
+        return self
+
+    async def __anext__(self) -> _Row:
+        return await self.receive()
+
+    async def collect(self) -> list[_Row]:
+        return [await self.receive()]
+
+
+class _SignallingReader:
+    """Reads a channel and sets ``waiting`` when the given receive call starts."""
+
+    def __init__(self, channel: Channel[_Row], signal_on_call: int) -> None:
+        self._reader = channel.reader
+        self._signal_on_call = signal_on_call
+        self._calls = 0
+        self.waiting = asyncio.Event()
+
+    async def receive(self) -> _Row:
+        self._calls += 1
+        if self._calls == self._signal_on_call:
+            self.waiting.set()
+        return await self._reader.receive()
+
+    def __aiter__(self) -> "_SignallingReader":
+        return self
+
+    async def __anext__(self) -> _Row:
+        try:
+            return await self.receive()
+        except ChannelClosed:
+            raise StopAsyncIteration
+
+    async def collect(self) -> list[_Row]:
+        return [row async for row in self]
+
+
+# Guards a wait that must end at once; a timeout means the operator hung.
+_HANG_GUARD_SECONDS = 10
+
+
+class TestSemiJoinRightEndsWhileLeftOpen:
+    """The end of the right input is acted on at once, not at the next left row.
+
+    Every step waits on a channel event; ``asyncio.wait_for`` only guards against a hang.
+    """
+
+    @pytest.mark.asyncio
+    async def test_kept_matching_row_is_emitted_while_left_is_open(self):
+        left = _id_stream([2, 7], "a")
+        right = _id_stream([2, 3], "b")
+        left_rows = list(left.iter_data())
+        left_ch, right_ch, output_ch = (
+            Channel[_Row](4),
+            Channel[_Row](4),
+            Channel[_Row](4),
+        )
+        await left_ch.writer.send(left_rows[0])
+        await feed(right, right_ch)
+
+        task = asyncio.create_task(
+            SemiJoin().async_execute(
+                [left_ch.reader, right_ch.reader],
+                output_ch.writer,
+                input_pipeline_hashes=hashes(left, right),
+            )
+        )
+        tag, _ = await asyncio.wait_for(output_ch.reader.receive(), _HANG_GUARD_SECONDS)
+        assert tag.as_dict()["id"] == 2
+        assert not task.done()  # the left input is still open
+
+        await left_ch.writer.send(left_rows[1])
+        await left_ch.writer.close()
+        await asyncio.wait_for(task, _HANG_GUARD_SECONDS)
+        assert await output_ch.reader.collect() == []
+
+    @pytest.mark.asyncio
+    async def test_right_input_error_surfaces_while_left_is_open(self):
+        left = _id_stream([2], "a")
+        left_ch, output_ch = Channel[_Row](4), Channel[_Row](4)
+        left_reader = _SignallingReader(left_ch, signal_on_call=2)
+        await left_ch.writer.send(next(iter(left.iter_data())))
+
+        # The right input fails once the second left receive waits on the open,
+        # empty left channel. ``asyncio.timeout``, unlike ``asyncio.wait_for`` on
+        # 3.11, adds no task.
+        with pytest.raises(RuntimeError, match="right input failed"):
+            async with asyncio.timeout(_HANG_GUARD_SECONDS):
+                await SemiJoin().async_execute(
+                    [left_reader, _FailingChannel(after=left_reader.waiting)],
+                    output_ch.writer,
+                    input_pipeline_hashes=hashes(left, left),
+                )
+        assert await output_ch.reader.collect() == []  # the output is closed
+        # Nothing is left reading the left input.
+        assert asyncio.all_tasks() == {asyncio.current_task()}
+
+    @pytest.mark.asyncio
+    async def test_left_row_in_flight_when_right_ends_is_kept_once_in_order(self):
+        # The right input ends while a receive on the empty left channel is pending.
+        # The row that receive then gets is emitted once, after the kept row and
+        # before the rows that follow it.
+        left = _id_stream([2, 3, 9, 4], "a")
+        right = _id_stream([2, 3, 4], "b")
+        left_rows = list(left.iter_data())
+        left_ch, right_ch, output_ch = (
+            Channel[_Row](4),
+            Channel[_Row](4),
+            Channel[_Row](4),
+        )
+        left_reader = _SignallingReader(left_ch, signal_on_call=2)
+        await left_ch.writer.send(left_rows[0])
+        for row in right.iter_data():
+            await right_ch.writer.send(row)  # the right input stays open for now
+
+        task = asyncio.create_task(
+            SemiJoin().async_execute(
+                [left_reader, right_ch.reader],
+                output_ch.writer,
+                input_pipeline_hashes=hashes(left, right),
+            )
+        )
+        # The first left row is kept; the second receive waits on an empty channel.
+        _ = await asyncio.wait_for(left_reader.waiting.wait(), _HANG_GUARD_SECONDS)
+        await right_ch.writer.close()
+        first, _ = await asyncio.wait_for(
+            output_ch.reader.receive(), _HANG_GUARD_SECONDS
+        )
+        for row in left_rows[1:]:
+            await left_ch.writer.send(row)
+        await left_ch.writer.close()
+        await asyncio.wait_for(task, _HANG_GUARD_SECONDS)
+
+        rest = await output_ch.reader.collect()
+        ids = [first.as_dict()["id"]] + [tag.as_dict()["id"] for tag, _ in rest]
+        assert ids == [2, 3, 4]
+
+
+# ===================================================================
 # Join — native async
 # ===================================================================
 
@@ -975,7 +1228,9 @@ class TestJoinNativeAsync:
         input_ch = Channel(buffer_size=64)
         output_ch = Channel(buffer_size=64)
         await feed(stream, input_ch)
-        await op.async_execute([input_ch.reader], output_ch.writer)
+        await op.async_execute(
+            [input_ch.reader], output_ch.writer, input_pipeline_hashes=hashes(stream)
+        )
         results = await output_ch.reader.collect()
 
         assert len(results) == 3
@@ -1054,7 +1309,11 @@ class TestJoinNativeAsync:
         await feed(s1, ch1)
         await feed(s2, ch2)
         await feed(s3, ch3)
-        await op.async_execute([ch1.reader, ch2.reader, ch3.reader], out.writer)
+        await op.async_execute(
+            [ch1.reader, ch2.reader, ch3.reader],
+            out.writer,
+            input_pipeline_hashes=hashes(s1, s2, s3),
+        )
         results = await out.reader.collect()
 
         assert len(results) == 2
@@ -1091,7 +1350,11 @@ class TestJoinNativeAsync:
         output_ch = Channel(buffer_size=4)
         await input_ch.writer.close()
         op = Join()
-        await op.async_execute([input_ch.reader], output_ch.writer)
+        await op.async_execute(
+            [input_ch.reader],
+            output_ch.writer,
+            input_pipeline_hashes=[root_hash("id", "value")],
+        )
         results = await output_ch.reader.collect()
         assert results == []
 
@@ -1117,13 +1380,22 @@ class TestJoinNativeAsync:
     async def test_matches_sync_three_way(self):
         """Three-way Staggered join must produce the same data as sync static_process."""
         t1 = pa.table(
-            {"id": pa.array([1, 2, 3], type=pa.int64()), "a": pa.array([10, 20, 30], type=pa.int64())}
+            {
+                "id": pa.array([1, 2, 3], type=pa.int64()),
+                "a": pa.array([10, 20, 30], type=pa.int64()),
+            }
         )
         t2 = pa.table(
-            {"id": pa.array([1, 2, 3], type=pa.int64()), "b": pa.array([100, 200, 300], type=pa.int64())}
+            {
+                "id": pa.array([1, 2, 3], type=pa.int64()),
+                "b": pa.array([100, 200, 300], type=pa.int64()),
+            }
         )
         t3 = pa.table(
-            {"id": pa.array([1, 2, 3], type=pa.int64()), "c": pa.array([1000, 2000, 3000], type=pa.int64())}
+            {
+                "id": pa.array([1, 2, 3], type=pa.int64()),
+                "c": pa.array([1000, 2000, 3000], type=pa.int64()),
+            }
         )
         s1 = ArrowTableStream(t1, tag_columns=["id"])
         s2 = ArrowTableStream(t2, tag_columns=["id"])
@@ -1139,16 +1411,16 @@ class TestJoinNativeAsync:
         await feed(s1, ch1)
         await feed(s2, ch2)
         await feed(s3, ch3)
-        await op.async_execute([ch1.reader, ch2.reader, ch3.reader], out.writer)
+        await op.async_execute(
+            [ch1.reader, ch2.reader, ch3.reader],
+            out.writer,
+            input_pipeline_hashes=hashes(s1, s2, s3),
+        )
         async_results = await out.reader.collect()
 
         assert len(async_results) == len(sync_results)
-        async_data = sorted(
-            (t.as_dict()["id"], p.as_dict()) for t, p in async_results
-        )
-        sync_data = sorted(
-            (t.as_dict()["id"], p.as_dict()) for t, p in sync_results
-        )
+        async_data = sorted((t.as_dict()["id"], p.as_dict()) for t, p in async_results)
+        sync_data = sorted((t.as_dict()["id"], p.as_dict()) for t, p in sync_results)
         assert async_data == sync_data
 
     @pytest.mark.asyncio
@@ -1169,7 +1441,15 @@ class TestJoinNativeAsync:
 
         # Start the join in the background
         join_task = asyncio.create_task(
-            op.async_execute([ch1.reader, ch2.reader, ch3.reader], out.writer)
+            op.async_execute(
+                [ch1.reader, ch2.reader, ch3.reader],
+                out.writer,
+                input_pipeline_hashes=[
+                    root_hash("id", "a"),
+                    root_hash("id", "b"),
+                    root_hash("id", "c"),
+                ],
+            )
         )
 
         # Send one matching row from each side
@@ -1192,7 +1472,12 @@ class TestJoinNativeAsync:
     async def test_four_way_join(self):
         """Four-input Staggered join produces correct results."""
         tables = [
-            pa.table({"id": pa.array([1, 2], type=pa.int64()), f"v{i}": pa.array([i * 10, i * 20], type=pa.int64())})
+            pa.table(
+                {
+                    "id": pa.array([1, 2], type=pa.int64()),
+                    f"v{i}": pa.array([i * 10, i * 20], type=pa.int64()),
+                }
+            )
             for i in range(4)
         ]
         streams = [ArrowTableStream(t, tag_columns=["id"]) for t in tables]
@@ -1203,7 +1488,9 @@ class TestJoinNativeAsync:
         for s, ch in zip(streams, channels):
             await feed(s, ch)
         await op.async_execute(
-            [ch.reader for ch in channels], out.writer
+            [ch.reader for ch in channels],
+            out.writer,
+            input_pipeline_hashes=hashes(*streams),
         )
         results = await out.reader.collect()
 
@@ -1224,7 +1511,15 @@ class TestJoinNativeAsync:
         from orcapod.core.datagrams import Data, Tag
 
         join_task = asyncio.create_task(
-            op.async_execute([ch1.reader, ch2.reader, ch3.reader], out.writer)
+            op.async_execute(
+                [ch1.reader, ch2.reader, ch3.reader],
+                out.writer,
+                input_pipeline_hashes=[
+                    root_hash("id", "a"),
+                    root_hash("id", "b"),
+                    root_hash("id", "c"),
+                ],
+            )
         )
 
         # Send matching rows from only 2 of 3 sides
@@ -1248,8 +1543,15 @@ class TestJoinNativeAsync:
     @pytest.mark.asyncio
     async def test_three_way_empty_side_produces_nothing(self):
         """If any input channel is empty, join produces no output."""
-        t1 = pa.table({"id": pa.array([1], type=pa.int64()), "a": pa.array([10], type=pa.int64())})
-        t2 = pa.table({"id": pa.array([1], type=pa.int64()), "b": pa.array([100], type=pa.int64())})
+        t1 = pa.table(
+            {"id": pa.array([1], type=pa.int64()), "a": pa.array([10], type=pa.int64())}
+        )
+        t2 = pa.table(
+            {
+                "id": pa.array([1], type=pa.int64()),
+                "b": pa.array([100], type=pa.int64()),
+            }
+        )
         s1 = ArrowTableStream(t1, tag_columns=["id"])
         s2 = ArrowTableStream(t2, tag_columns=["id"])
 
@@ -1261,16 +1563,32 @@ class TestJoinNativeAsync:
         await feed(s1, ch1)
         await feed(s2, ch2)
         await ch3.writer.close()  # empty third input
-        await op.async_execute([ch1.reader, ch2.reader, ch3.reader], out.writer)
+        await op.async_execute(
+            [ch1.reader, ch2.reader, ch3.reader],
+            out.writer,
+            input_pipeline_hashes=[*hashes(s1, s2), root_hash("id", "c")],
+        )
         results = await out.reader.collect()
         assert results == []
 
     @pytest.mark.asyncio
     async def test_three_way_no_shared_tags_cartesian(self):
         """Three-way join with disjoint tag keys produces cartesian product."""
-        t1 = pa.table({"a": pa.array([1, 2], type=pa.int64()), "x": pa.array([10, 20], type=pa.int64())})
-        t2 = pa.table({"b": pa.array([3], type=pa.int64()), "y": pa.array([30], type=pa.int64())})
-        t3 = pa.table({"c": pa.array([5, 6], type=pa.int64()), "z": pa.array([50, 60], type=pa.int64())})
+        t1 = pa.table(
+            {
+                "a": pa.array([1, 2], type=pa.int64()),
+                "x": pa.array([10, 20], type=pa.int64()),
+            }
+        )
+        t2 = pa.table(
+            {"b": pa.array([3], type=pa.int64()), "y": pa.array([30], type=pa.int64())}
+        )
+        t3 = pa.table(
+            {
+                "c": pa.array([5, 6], type=pa.int64()),
+                "z": pa.array([50, 60], type=pa.int64()),
+            }
+        )
         s1 = ArrowTableStream(t1, tag_columns=["a"])
         s2 = ArrowTableStream(t2, tag_columns=["b"])
         s3 = ArrowTableStream(t3, tag_columns=["c"])
@@ -1283,7 +1601,11 @@ class TestJoinNativeAsync:
         await feed(s1, ch1)
         await feed(s2, ch2)
         await feed(s3, ch3)
-        await op.async_execute([ch1.reader, ch2.reader, ch3.reader], out_ch.writer)
+        await op.async_execute(
+            [ch1.reader, ch2.reader, ch3.reader],
+            out_ch.writer,
+            input_pipeline_hashes=hashes(s1, s2, s3),
+        )
         results = await out_ch.reader.collect()
 
         # 2 × 1 × 2 = 4 cartesian product
@@ -1322,7 +1644,9 @@ class TestJoinNativeAsync:
         out = Channel(buffer_size=64)
         await feed(s1, ch1)
         await feed(s2, ch2)
-        await op.async_execute([ch1.reader, ch2.reader], out.writer)
+        await op.async_execute(
+            [ch1.reader, ch2.reader], out.writer, input_pipeline_hashes=hashes(s1, s2)
+        )
         async_results = await out.reader.collect()
 
         assert len(async_results) == 6
@@ -1374,7 +1698,11 @@ class TestJoinNativeAsync:
         await feed(s1, ch1)
         await feed(s2, ch2)
         await feed(s3, ch3)
-        await op.async_execute([ch1.reader, ch2.reader, ch3.reader], out.writer)
+        await op.async_execute(
+            [ch1.reader, ch2.reader, ch3.reader],
+            out.writer,
+            input_pipeline_hashes=hashes(s1, s2, s3),
+        )
         async_results = await out.reader.collect()
 
         assert len(async_results) == 4
@@ -1443,19 +1771,19 @@ class TestJoinNativeAsync:
         assert len(sync_results) == 2
         assert len(async_results) == len(sync_results)
 
-        async_data = sorted(
-            (t.as_dict()["a"], p.as_dict()) for t, p in async_results
-        )
-        sync_data = sorted(
-            (t.as_dict()["a"], p.as_dict()) for t, p in sync_results
-        )
+        async_data = sorted((t.as_dict()["a"], p.as_dict()) for t, p in async_results)
+        sync_data = sorted((t.as_dict()["a"], p.as_dict()) for t, p in sync_results)
         assert async_data == sync_data
 
     @pytest.mark.asyncio
     async def test_input_pipeline_hashes_length_mismatch(self):
         """async_execute raises ValueError if input_pipeline_hashes length != inputs."""
-        t1 = pa.table({"id": pa.array([1], type=pa.int64()), "a": pa.array([10], type=pa.int64())})
-        t2 = pa.table({"id": pa.array([1], type=pa.int64()), "b": pa.array([20], type=pa.int64())})
+        t1 = pa.table(
+            {"id": pa.array([1], type=pa.int64()), "a": pa.array([10], type=pa.int64())}
+        )
+        t2 = pa.table(
+            {"id": pa.array([1], type=pa.int64()), "b": pa.array([20], type=pa.int64())}
+        )
         s1 = ArrowTableStream(t1, tag_columns=["id"])
         s2 = ArrowTableStream(t2, tag_columns=["id"])
 
@@ -1487,7 +1815,11 @@ class TestJoinNativeAsync:
         from orcapod.core.datagrams import Data, Tag
 
         join_task = asyncio.create_task(
-            op.async_execute([ch1.reader, ch2.reader], out.writer)
+            op.async_execute(
+                [ch1.reader, ch2.reader],
+                out.writer,
+                input_pipeline_hashes=[root_hash("id", "a"), root_hash("id", "b")],
+            )
         )
 
         # Buffer 2 rows on side 0 before side 1 sends anything
@@ -1538,8 +1870,18 @@ class TestStreamingPipelineIntegration:
 
         async with asyncio.TaskGroup() as tg:
             tg.create_task(source())
-            tg.create_task(select_op.async_execute([ch1.reader], ch2.writer))
-            tg.create_task(map_op.async_execute([ch2.reader], ch3.writer))
+            tg.create_task(
+                select_op.async_execute(
+                    [ch1.reader], ch2.writer, input_pipeline_hashes=hashes(stream)
+                )
+            )
+            tg.create_task(
+                map_op.async_execute(
+                    [ch2.reader],
+                    ch3.writer,
+                    input_pipeline_hashes=hashes(select_op(stream)),
+                )
+            )
 
         results = await ch3.reader.collect()
         assert len(results) == 3
@@ -1583,9 +1925,19 @@ class TestStreamingPipelineIntegration:
             tg.create_task(push(left, ch_l))
             tg.create_task(push(right, ch_r))
             tg.create_task(
-                join_op.async_execute([ch_l.reader, ch_r.reader], ch_joined.writer)
+                join_op.async_execute(
+                    [ch_l.reader, ch_r.reader],
+                    ch_joined.writer,
+                    input_pipeline_hashes=hashes(left, right),
+                )
             )
-            tg.create_task(select_op.async_execute([ch_joined.reader], ch_out.writer))
+            tg.create_task(
+                select_op.async_execute(
+                    [ch_joined.reader],
+                    ch_out.writer,
+                    input_pipeline_hashes=hashes(join_op(left, right)),
+                )
+            )
 
         results = await ch_out.reader.collect()
         assert len(results) == 3
@@ -1616,9 +1968,19 @@ class TestStreamingPipelineIntegration:
             tg.create_task(push(left, ch_l))
             tg.create_task(push(right, ch_r))
             tg.create_task(
-                semi_op.async_execute([ch_l.reader, ch_r.reader], ch_semi.writer)
+                semi_op.async_execute(
+                    [ch_l.reader, ch_r.reader],
+                    ch_semi.writer,
+                    input_pipeline_hashes=hashes(left, right),
+                )
             )
-            tg.create_task(batch_op.async_execute([ch_semi.reader], ch_out.writer))
+            tg.create_task(
+                batch_op.async_execute(
+                    [ch_semi.reader],
+                    ch_out.writer,
+                    input_pipeline_hashes=hashes(semi_op(left, right)),
+                )
+            )
 
         results = await ch_out.reader.collect()
         # SemiJoin produces 2 rows (id=[2,3]), Batch(2) → 1 batch
@@ -1649,9 +2011,25 @@ class TestStreamingPipelineIntegration:
 
         async with asyncio.TaskGroup() as tg:
             tg.create_task(source())
-            tg.create_task(drop_op.async_execute([ch1.reader], ch2.writer))
-            tg.create_task(map_op.async_execute([ch2.reader], ch3.writer))
-            tg.create_task(select_op.async_execute([ch3.reader], ch4.writer))
+            tg.create_task(
+                drop_op.async_execute(
+                    [ch1.reader], ch2.writer, input_pipeline_hashes=hashes(stream)
+                )
+            )
+            tg.create_task(
+                map_op.async_execute(
+                    [ch2.reader],
+                    ch3.writer,
+                    input_pipeline_hashes=hashes(drop_op(stream)),
+                )
+            )
+            tg.create_task(
+                select_op.async_execute(
+                    [ch3.reader],
+                    ch4.writer,
+                    input_pipeline_hashes=hashes(map_op(drop_op(stream))),
+                )
+            )
 
         results = await ch4.reader.collect()
         assert len(results) == 3

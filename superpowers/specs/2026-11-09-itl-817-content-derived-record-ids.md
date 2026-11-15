@@ -13,12 +13,18 @@ A source row's record ID system tag is `uuid5(source_id :: token)`
 caller names a `record_id_column`, and `"row_{index}"` otherwise.
 
 The default is positional. If the same rows arrive in a different order under the same
-`source_id`, record IDs move between rows while user tags and data stay with the right row.
-Everything keyed on system tags then changes:
+`source_id`, a moved row gets a different record ID while its user tags and data stay with
+it. Everything keyed on the system tags of a moved row then changes, and because those keys
+also include a hash of the row's own data, the moved row is treated as a new entry rather
+than matched to another row's:
 
-- a `sink_pod` re-delivers every row on every run (measured: 9/9/9 instead of 9/0/0);
-- `FunctionJobNode` pipeline entries miss, so rows are re-recorded each run;
-- an invocation record carries another row's lineage.
+- a `sink_pod` re-delivers every moved row on every run (measured with all rows moved:
+  9/9/9 instead of 9/0/0);
+- `FunctionJobNode` pipeline entries miss for those rows, so they are recorded again: the
+  stored table shows two entries with identical tag values but distinct record IDs (the
+  function's stored result for that data is reused, not recomputed).
+
+No result is ever paired with the wrong row.
 
 This is the signature reported in ITL-817. `DictSource`, `ListSource`, `DataFrameSource` and
 `DerivedSource` do not accept `record_id_column` at all, so they can only be positional.

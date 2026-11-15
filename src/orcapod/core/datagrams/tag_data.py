@@ -22,7 +22,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Self
 
 from orcapod import contexts
-from orcapod.core.datagrams.datagram import Datagram
+from orcapod.core.datagrams.datagram import Datagram, context_key_field
 from orcapod.semantic_types import infer_python_schema_from_pylist_data
 from orcapod.system_constants import constants
 from orcapod.types import (
@@ -48,6 +48,13 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Tag
 # ---------------------------------------------------------------------------
+
+
+def _source_info_field(name: str, token: SourceInfoValue) -> pa.Field[Any]:
+    """The field of source-info column ``name`` holding ``token``, as a row's table has it."""
+    import pyarrow as _pa
+
+    return _pa.field(name, arrow_utils.source_info_arrow_type(token))
 
 
 class Tag(Datagram):
@@ -245,51 +252,30 @@ class Tag(Datagram):
 # ---------------------------------------------------------------------------
 
 
-# TODO(NPIPE-204): these two helpers only understand scalars and ``list[T]``.
-# Structured source-info values (a struct/dataclass token, or a mapping) will need
-# their own branches, and the recursion should dispatch on a logical type rather
-# than on ``isinstance(value, list)``. Deriving the type from the first element is
-# also a shortcut: it is correct for the homogeneous lists many->one operators
-# produce, but not in general. Raised in review on PR #250.
-def _source_info_arrow_type(value: "SourceInfoValue") -> "pa.DataType":
-    """Derive the Arrow type for a single source-info value.
-
-    Scalars and unknowns map to ``large_string``; lists map to ``large_list``
-    of their element type, recursively.  An empty list defaults to
-    ``large_list(large_string)``.
-
-    Args:
-        value: The stored provenance token.
-
-    Returns:
-        The Arrow type to declare for this value.
-    """
-    import pyarrow as _pa
-
-    if isinstance(value, list):
-        if not value:
-            return _pa.large_list(_pa.large_string())
-        return _pa.large_list(_source_info_arrow_type(value[0]))
-    return _pa.large_string()
-
-
 def _source_info_python_type(value: "SourceInfoValue") -> DataType:
     """Derive the Python type for a single source-info value.
 
-    Mirrors ``_source_info_arrow_type`` for the ``Schema`` representation, and
-    shares its list-only limitation -- see the TODO above that function.
+    Read off ``arrow_utils.source_info_arrow_type``, the one source-info type
+    rule, so the ``Schema`` and the Arrow table always agree on a token's depth.
 
     Args:
         value: The stored provenance token.
 
     Returns:
-        ``str`` for scalars and unknowns, ``list[...]`` for lists.
+        ``str`` for scalars and unknowns, ``list[...]`` nested to the token's
+        depth for lists.
     """
-    if isinstance(value, list):
-        if not value:
-            return list[str]
-        return list[_source_info_python_type(value[0])]  # type: ignore[misc]
-    return str
+    import pyarrow as _pa
+
+    arrow_type = arrow_utils.source_info_arrow_type(value)
+    depth = 0
+    while _pa.types.is_large_list(arrow_type):
+        arrow_type = arrow_type.value_type
+        depth += 1
+    python_type: DataType = str
+    for _ in range(depth):
+        python_type = list[python_type]  # type: ignore[valid-type]
+    return python_type
 
 
 class Data(Datagram):
@@ -388,16 +374,19 @@ class Data(Datagram):
         if self._source_info_table is None:
             import pyarrow as _pa
 
-            if self._source_info:
+            # Only the source info of the data columns this Data holds, in the order of
+            # those columns, as every other view gives it (ITL-1040).
+            current = {
+                k: self._source_info[k]
+                for k in super().keys()
+                if k in self._source_info
+            }
+            if current:
                 prefixed = {
-                    f"{constants.SOURCE_PREFIX}{k}": v
-                    for k, v in self._source_info.items()
+                    f"{constants.SOURCE_PREFIX}{k}": v for k, v in current.items()
                 }
                 schema = _pa.schema(
-                    [
-                        _pa.field(k, _source_info_arrow_type(v))
-                        for k, v in prefixed.items()
-                    ]
+                    [_source_info_field(k, v) for k, v in prefixed.items()]
                 )
                 self._source_info_table = _pa.Table.from_pylist(
                     [prefixed], schema=schema
@@ -405,6 +394,55 @@ class Data(Datagram):
             else:
                 self._source_info_table = _pa.table({})
         return self._source_info_table
+
+    @staticmethod
+    def function_output_zero_row_table(
+        python_schema: Schema,
+        data_context: contexts.DataContext,
+        meta_python_schema: Schema | None = None,
+    ) -> pa.Table:
+        """The table a function's output rows give, with no row.
+
+        The zero-row form of ``Data.as_table(columns={"context": True, "source":
+        True})`` for the ``Data`` a data function returns: built with
+        ``python_schema=`` its declared output schema and a string source-info
+        token for every column. Each part comes from the code that types a
+        computed row: the data fields from the converter's
+        ``python_schema_to_arrow_schema`` (``Datagram._ensure_arrow_schema``), the
+        context field from ``context_key_field``, the meta fields from the same
+        conversion of their Python types (``Datagram._ensure_meta_table``) and the
+        source-info fields from ``_source_info_field`` with a string token
+        (ITL-912). The columns are in the order ``Data.arrow_schema`` gives them.
+
+        Args:
+            python_schema: The function's declared output schema.
+            data_context: The data context the rows are typed in.
+            meta_python_schema: The meta columns every output row carries (a
+                cached pod's ``__computed`` flag), if any.
+
+        Returns:
+            A zero-row table: data columns, ``_context_key``, meta columns,
+            source-info columns.
+        """
+        import pyarrow as _pa
+
+        fields = list(
+            data_context.type_converter.python_schema_to_arrow_schema(python_schema)
+        )
+        fields.append(context_key_field())
+        if meta_python_schema:
+            fields.extend(
+                data_context.type_converter.python_schema_to_arrow_schema(
+                    meta_python_schema
+                )
+            )
+        # A data function's source-info token is always a string (see
+        # ``PythonDataFunction``): the type is the one a string token gives.
+        fields.extend(
+            _source_info_field(f"{constants.SOURCE_PREFIX}{name}", "")
+            for name in python_schema
+        )
+        return _pa.schema(fields).empty_table()
 
     # ------------------------------------------------------------------
     # Source-info API
@@ -497,6 +535,30 @@ class Data(Datagram):
                 table = arrow_utils.hstack_tables(table, si_table)
         return table
 
+    def select(self, *column_names: str) -> Self:
+        """Return a copy holding only the given data columns and their source info.
+
+        The source info is in the order of the columns the copy holds.
+        """
+        new_p = super().select(*column_names)
+        # Datagram.keys: the data columns, also for an EmptyData, whose keys() raises.
+        new_p._source_info = {
+            k: self._source_info[k]
+            for k in Datagram.keys(new_p)
+            if k in self._source_info
+        }
+        new_p._source_info_table = None
+        return new_p
+
+    def drop(self, *column_names: str, ignore_missing: bool = False) -> Self:
+        """Return a copy without the given data columns and their source info."""
+        new_p = super().drop(*column_names, ignore_missing=ignore_missing)
+        new_p._source_info = {
+            k: v for k, v in self._source_info.items() if k not in column_names
+        }
+        new_p._source_info_table = None
+        return new_p
+
     def rename(self, column_mapping: "Mapping[str, str]") -> Self:
         new_p = super().rename(column_mapping)
         new_p._source_info = {
@@ -507,9 +569,21 @@ class Data(Datagram):
 
     def with_columns(
         self,
-        column_types: "Mapping[str, type] | None" = None,
+        column_types: Mapping[str, DataType | pa.DataType | pa.Field[Any]]  # pyright: ignore[reportExplicitAny]  # Field is invariant; Any admits every Arrow type
+        | None = None,
         **updates: DataValue,
     ) -> Self:
+        """Return a copy with new data columns, each with empty source info.
+
+        Args:
+            column_types: Optional types for some or all new columns; see
+                ``Datagram.with_columns``.
+            **updates: New column names mapped to their values.
+
+        Returns:
+            A new ``Data`` with the added columns and their source info set
+            to ``None``.
+        """
         new_p = super().with_columns(column_types=column_types, **updates)
         new_source_info = dict(self._source_info)
         for col in updates:

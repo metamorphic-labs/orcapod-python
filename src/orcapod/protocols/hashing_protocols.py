@@ -42,7 +42,9 @@ class ContentIdentifiableProtocol(Protocol):
         """Return a structure that represents the semantic identity of this object."""
         ...
 
-    def content_hash(self, hasher: "SemanticHasherProtocol | None" = None) -> ContentHash:
+    def content_hash(
+        self, hasher: "SemanticHasherProtocol | None" = None
+    ) -> ContentHash:
         """Returns the content hash."""
         ...
 
@@ -98,7 +100,9 @@ class HandlerRegistryProtocol(Protocol):
         """Look up the handler for *obj* using MRO-aware resolution."""
         ...
 
-    def get_handler_for_type(self, target_type: type) -> "PythonTypeHandlerProtocol | None":
+    def get_handler_for_type(
+        self, target_type: type
+    ) -> "PythonTypeHandlerProtocol | None":
         """Look up the handler for a type object (rather than an instance)."""
         ...
 
@@ -156,7 +160,17 @@ class ArrowHasherProtocol(Protocol):
     @property
     def hasher_id(self) -> str: ...
 
-    def hash_table(self, table: "pa.Table | pa.RecordBatch") -> ContentHash: ...
+    def hash_table(self, table: "pa.Table | pa.RecordBatch") -> ContentHash:
+        """Hash a table ignoring column order and struct field order (streams, rows)."""
+        ...
+
+    def hash_table_ordered(
+        self, table: "pa.Table | pa.RecordBatch", *, struct_field_order: bool = True
+    ) -> ContentHash:
+        """Hash a table as a value: column order is part of it, and struct field order
+        too unless ``struct_field_order`` is false.
+        """
+        ...
 
 
 K = TypeVar("K")
@@ -203,7 +217,26 @@ class FunctionInfoExtractorProtocol(Protocol):
         output_typespec: Schema | None = None,
         exclude_function_signature: bool = False,
         exclude_function_body: bool = False,
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any]:
+        """Describe a function as a structure the semantic hasher can hash.
+
+        An extractor that reports parameters returns them under ``"parameters"``
+        as a list of entries, one per parameter. An entry's ``"default"`` that is a
+        ``ParameterDefault`` is replaced by ``FunctionHandler`` with the semantic
+        hasher's hash of the default value; the extractor itself has no hasher.
+
+        Args:
+            func: The function to describe.
+            function_name: Name to use in place of the function's own name.
+            input_typespec: Input schema of the function, when known.
+            output_typespec: Output schema of the function, when known.
+            exclude_function_signature: Whether to leave the signature out.
+            exclude_function_body: Whether to leave the body out.
+
+        Returns:
+            The function's description.
+        """
+        ...
 
 
 class SemanticTypeHasherProtocol(Protocol):

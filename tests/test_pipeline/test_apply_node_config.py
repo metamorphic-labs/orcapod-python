@@ -30,7 +30,7 @@ def _make_job() -> PipelineJob:
         }
     )
     source = ArrowTableSource(table, tag_columns=["id"], infer_nullable=True)
-    job = PipelineJob(name="test_job", store=db)
+    job = PipelineJob(name="test_job", database=db)
     with job:
         out1 = pod1(source)
         pod2(out1)
@@ -55,7 +55,9 @@ class TestApplyNodeConfig:
         # Pre-set one node to ephemeral=True
         nodes[0].node_config = NodeConfig(is_result_ephemeral=True)
         # Apply a new config wholesale — replaces whatever each node had
-        job.apply_node_config(NodeConfig(is_result_ephemeral=False), replace_existing=False)
+        job.apply_node_config(
+            NodeConfig(is_result_ephemeral=False), replace_existing=False
+        )
         for node in job._iter_function_job_nodes():
             assert node.node_config.is_result_ephemeral is False
 
@@ -73,12 +75,15 @@ class TestApplyNodeConfig:
         job = _make_job()
         nodes = list(job._iter_function_job_nodes())
         nodes[0].node_config = NodeConfig(is_result_ephemeral=True)
-        job.apply_node_config(NodeConfig(is_result_ephemeral=False), replace_existing=True)
+        job.apply_node_config(
+            NodeConfig(is_result_ephemeral=False), replace_existing=True
+        )
         assert nodes[0].node_config.is_result_ephemeral is False
 
     def test_iter_function_job_nodes_yields_only_function_nodes(self):
         """_iter_function_job_nodes does not yield source or operator nodes."""
         from orcapod.core.nodes.function_node import FunctionJobNode
+
         job = _make_job()
         nodes = list(job._iter_function_job_nodes())
         assert all(isinstance(n, FunctionJobNode) for n in nodes)
@@ -86,6 +91,6 @@ class TestApplyNodeConfig:
     def test_apply_before_compilation_raises(self):
         """apply_node_config raises RuntimeError if the job is not compiled yet."""
         db = InMemoryArrowDatabase()
-        job = PipelineJob(name="uncompiled_job", store=db)
+        job = PipelineJob(name="uncompiled_job", database=db)
         with pytest.raises(RuntimeError, match="No compiled pipeline"):
             job.apply_node_config(NodeConfig(is_result_ephemeral=True))

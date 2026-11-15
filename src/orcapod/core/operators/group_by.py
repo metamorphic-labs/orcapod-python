@@ -20,8 +20,29 @@ else:
     pa = LazyModule("pyarrow")
 
 
+def _null_last_key(value: Any) -> tuple[Any, ...]:
+    """Build an order key that sorts nulls last, at any list depth.
+
+    The leading integer keeps a null comparable against a real value of any
+    type.  A list is keyed element by element, so a list-valued non-key tag
+    that holds a null (a list-typed tag column of a source) still compares.
+
+    Args:
+        value: A tag or system-tag value: a scalar, ``None``, or a list of
+            these nested to any depth.
+
+    Returns:
+        A tuple that orders values ascending, with nulls after every value.
+    """
+    if value is None:
+        return (1,)
+    if isinstance(value, list):
+        return (0, tuple(_null_last_key(v) for v in value))
+    return (0, value)
+
+
 class GroupBy(UnaryOperator):
-    """Reduce rows sharing a tag tuple into one packet with list-valued members.
+    """Reduce rows sharing a key into one row with list-valued data members.
 
     This is the only many->one operator.  Every other operator preserves one
     row per tag; ``GroupBy`` collapses N rows into one, which is what lets a
@@ -31,18 +52,25 @@ class GroupBy(UnaryOperator):
     Given tags ``(subject, date, probe)`` and data ``(path)``, grouping by
     ``["subject", "date"]`` emits one row per distinct ``(subject, date)``:
 
-    * ``subject`` and ``date`` stay scalar and remain the output's tag columns
-    * ``probe`` becomes a list-valued **data** column, so a consumer can tell
-      which member each list element came from
+    * ``subject`` and ``date`` stay scalar tag columns, in the input's tag
+      order; they are the only tag columns of the output
+    * ``probe`` is **dropped** (ITL-1070): a list of the members' values is not
+      a key for the group, as SQL drops a non-key, non-aggregated column after
+      ``GROUP BY``
     * ``path`` becomes list-valued
-    * the ``_source_*`` column of each original data column becomes
-      list-valued, one element per member.  A promoted tag column such as
-      ``probe`` had no provenance token to begin with, so its ``_source_probe``
-      is the scalar null the stream fills in, not a list.
+    * the ``_source_*`` column of each data column becomes list-valued, one
+      element per member
     * system-tag columns fold to a scalar digest and gain a
       ``::{pipeline_hash}`` name suffix
 
-    Members are sorted by their non-group-key tag values, with ``record_id``
+    No data element ever comes from a tag value: ``GroupBy`` uses tags to form
+    groups, but the data columns of the output are exactly the data columns of
+    the input.  The members' values of a dropped tag are not carried anywhere.
+    If a downstream step needs to know which member each element came from,
+    make that value a data column before grouping: declare it as data at the
+    source, or use ``DerivedSource(origin, tags_as_data={...})``.
+
+    Members are sorted by the input's non-group-key tag values, with ``record_id``
     appended as a final tiebreaker, so the emitted lists are stable across
     runs.  This matters because orcapod hashes those lists to build the cache
     key -- an unsorted list would make an identical member set hash differently
@@ -56,8 +84,17 @@ class GroupBy(UnaryOperator):
     is materialized -- so their order is stable for a given source table, but
     undefined if the source table itself is permuted.
 
-    Contrast with ``Batch``, which partitions by row count for throughput and
-    keeps its tag columns as list-valued tags.
+    A grouped stream can be grouped again on a coarser key: its data lists nest
+    one level deeper (``list[list[T]]``), as source info does.  The members of
+    the second grouping are ordered by the first grouping's keys that are not
+    in the coarser key (scalar tags of the grouped stream), then by
+    ``record_id``; a tag the first grouping dropped no longer takes part.  A
+    list-valued tag of the input can order members but cannot be a grouping
+    key.
+
+    Contrast with ``Batch``, which partitions by row count for throughput.  It
+    has no key, so it keeps every tag column, list-valued: those lists are
+    what tells a batch's members apart.
 
     Args:
         by: Tag column names to group on.  Must be non-empty, free of
@@ -144,7 +181,8 @@ class GroupBy(UnaryOperator):
             stream: The upstream stream.
 
         Returns:
-            A stream with one row per distinct group-key tuple.
+            A stream with one row per distinct group-key tuple, whose tag
+            columns are the group keys, scalar, in the input's tag order.
         """
         table = stream.as_table(columns={"source": True, "system_tags": True})
         tag_columns, _ = stream.keys()
@@ -152,10 +190,15 @@ class GroupBy(UnaryOperator):
         system_tag_columns = tuple(
             c for c in table.column_names if c.startswith(constants.SYSTEM_TAG_PREFIX)
         )
+        # A tag that is not a key is dropped from the output (ITL-1070), but it
+        # still orders the members below, so the data lists keep their order.
+        dropped_tags = tuple(c for c in tag_columns if c not in self.by)
         member_columns = tuple(
             c
             for c in table.column_names
-            if c not in self.by and c not in system_tag_columns
+            if c not in self.by
+            and c not in system_tag_columns
+            and c not in dropped_tags
         )
         # Non-key user tags order the members of a group.  The `record_id`
         # columns are appended as a final tiebreaker: tag tuples are supposed
@@ -171,7 +214,7 @@ class GroupBy(UnaryOperator):
         # consulting only the first would tie on exactly the fan-out rows the
         # tiebreaker exists for.  They are sorted by name so the key order is
         # itself independent of column order in the input table.
-        sort_columns = tuple(c for c in tag_columns if c not in self.by)
+        sort_columns = dropped_tags
         sort_columns += tuple(
             sorted(
                 c
@@ -188,27 +231,31 @@ class GroupBy(UnaryOperator):
         # Emit groups in key order rather than first-appearance order, so a
         # reordered input produces a byte-identical output table.
         for key, members in sorted(
-            groups.items(), key=lambda kv: tuple((v is None, v) for v in kv[0])
+            groups.items(), key=lambda kv: tuple(_null_last_key(v) for v in kv[0])
         ):
             if sort_columns:
-                # The leading bool keeps a null comparable against a real
-                # value of any type, and sorts nulls last.
                 members.sort(
-                    key=lambda r: tuple((r[c] is None, r[c]) for c in sort_columns)
+                    key=lambda r: tuple(_null_last_key(r[c]) for c in sort_columns)
                 )
 
-            grouped_rows.append({
-                **dict(zip(self.by, key)),
-                **{c: [m[c] for m in members] for c in member_columns},
-                **{
-                    c: arrow_utils.fold_system_tag_values(c, [m[c] for m in members])
-                    for c in system_tag_columns
-                },
-            })
+            grouped_rows.append(
+                {
+                    **dict(zip(self.by, key)),
+                    **{c: [m[c] for m in members] for c in member_columns},
+                    **{
+                        c: arrow_utils.fold_system_tag_values(
+                            c, [m[c] for m in members]
+                        )
+                        for c in system_tag_columns
+                    },
+                }
+            )
 
+        # The schema handed over must not name the dropped tags: the builder
+        # emits every column of it, and would bring them back as nulls.
         grouped_table = arrow_utils.build_aggregated_table(
             grouped_rows,
-            table.schema,
+            table.drop_columns(list(dropped_tags)).schema,
             member_columns,
             stream.data_context.type_converter,
         )
@@ -218,9 +265,10 @@ class GroupBy(UnaryOperator):
             grouped_table, stream.pipeline_hash().to_hex(n_char)
         )
 
+        # The keys, in the input's tag order rather than the order of `by`.
         return ArrowTableStream(
             grouped_table,
-            tag_columns=self.by,
+            tag_columns=[c for c in tag_columns if c in self.by],
             data_context=stream.data_context,
         )
 
@@ -243,30 +291,24 @@ class GroupBy(UnaryOperator):
             all_info: Include all info columns.
 
         Returns:
-            A ``(tag_schema, data_schema)`` tuple.  Group keys stay scalar in
-            the tag schema; promoted non-key tags and list-wrapped data columns
-            land in the data schema.
+            A ``(tag_schema, data_schema)`` tuple.  The tag schema holds the
+            group keys, scalar, in the input's tag order, and the system tags,
+            scalar under their suffixed names; every other user tag is
+            dropped.  The data schema holds the input's data columns as
+            ``list[T]``.
         """
         tag_types, data_types = stream.output_schema(columns=columns, all_info=all_info)
         n_char = self.orcapod_config.hashing.system_tag_n_char
         suffix = stream.pipeline_hash().to_hex(n_char)
 
         out_tag_types: dict[str, Any] = {}
-        out_data_types: dict[str, Any] = {}
-
         for name, col_type in tag_types.items():
             if name.startswith(constants.SYSTEM_TAG_PREFIX):
                 out_tag_types[f"{name}{constants.BLOCK_SEPARATOR}{suffix}"] = col_type
             elif name in self.by:
                 out_tag_types[name] = col_type
-            else:
-                # Promoted to a list-valued data column.  No `_source_*` entry
-                # is emitted: `ArrowTableStream.output_schema` returns the data
-                # schema unconditionally, so `columns.source` is a no-op at the
-                # schema level even though `as_table` does add those columns.
-                out_data_types[name] = list[col_type]
+            # Any other user tag is dropped (ITL-1070).
 
-        for name, col_type in data_types.items():
-            out_data_types[name] = list[col_type]
+        out_data_types = {name: list[t] for name, t in data_types.items()}
 
         return Schema(out_tag_types), Schema(out_data_types)

@@ -20,28 +20,50 @@ from orcapod.logical_types.pydantic_logical_type_factory import (
 from orcapod.logical_types.registry import LogicalTypeRegistry
 
 
+def _identity(cls: type) -> str:
+    """Return the identity string (logical type name) of a user class (ITL-881)."""
+    from orcapod.contexts import get_default_context
+    from orcapod.types import Schema
+
+    converter = get_default_context().type_converter
+    converter.ensure_types_registered_for_schemas(Schema({"value": cls}))
+    lt = converter.get_logical_type(cls)
+    assert lt is not None
+    return lt.logical_type_name
+
+
 # ── Module-level dataclasses (local classes cannot be registered) ────────────
+
 
 @dataclasses.dataclass
 class _SimplePoint:
     """Minimal dataclass used as a test fixture."""
+
     x: int
     y: int
 
 
 class _SimpleModel(BaseModel):
     """Minimal pydantic model used as a test fixture."""
+
     name: str
     score: float
 
 
 # ── Registry constructor unit tests ─────────────────────────────────────────
 
+
 def test_registry_factories_param_registers_category():
     """factories param registers the factory under the given category."""
     factory = DataclassLogicalTypeFactory()
     registry = LogicalTypeRegistry(
-        factories=[{"factory": factory, "category": DATACLASS_CATEGORY, "python_bases": [object]}]
+        factories=[
+            {
+                "factory": factory,
+                "category": DATACLASS_CATEGORY,
+                "python_bases": [object],
+            }
+        ]
     )
     assert registry._category_factories.get(DATACLASS_CATEGORY) is factory
 
@@ -50,7 +72,13 @@ def test_registry_factories_param_registers_python_base():
     """factories param registers the factory under each python_base."""
     factory = DataclassLogicalTypeFactory()
     registry = LogicalTypeRegistry(
-        factories=[{"factory": factory, "category": DATACLASS_CATEGORY, "python_bases": [object]}]
+        factories=[
+            {
+                "factory": factory,
+                "category": DATACLASS_CATEGORY,
+                "python_bases": [object],
+            }
+        ]
     )
     assert registry._python_class_factories.get(object) is factory
 
@@ -99,8 +127,8 @@ def test_default_context_dataclass_auto_registered_on_use():
     converter = create_registry().get_context().type_converter
     arrow_type = converter.register_python_class(_SimplePoint)
     assert isinstance(arrow_type, pa.ExtensionType)
-    fqcn = f"{_SimplePoint.__module__}.{_SimplePoint.__qualname__}"
-    assert arrow_type.extension_name == fqcn
+    type_name = _identity(_SimplePoint)
+    assert arrow_type.extension_name == type_name
 
 
 def test_default_context_pydantic_auto_registered_on_use():
@@ -108,8 +136,8 @@ def test_default_context_pydantic_auto_registered_on_use():
     converter = create_registry().get_context().type_converter
     arrow_type = converter.register_python_class(_SimpleModel)
     assert isinstance(arrow_type, pa.ExtensionType)
-    fqcn = f"{_SimpleModel.__module__}.{_SimpleModel.__qualname__}"
-    assert arrow_type.extension_name == fqcn
+    type_name = _identity(_SimpleModel)
+    assert arrow_type.extension_name == type_name
 
 
 # ── Parquet round-trip tests ─────────────────────────────────────────────────
@@ -120,7 +148,9 @@ def test_default_context_dataclass_parquet_roundtrip(tmp_path):
     # Write path — fresh context, no manual factory setup
     write_converter = create_registry().get_context().type_converter
     write_converter.register_python_class(_SimplePoint)
-    arrow_schema = write_converter.python_schema_to_arrow_schema({"point": _SimplePoint})
+    arrow_schema = write_converter.python_schema_to_arrow_schema(
+        {"point": _SimplePoint}
+    )
     rows = [{"point": _SimplePoint(x=3, y=7)}]
     table = write_converter.python_dicts_to_arrow_table(rows, arrow_schema=arrow_schema)
 
@@ -144,7 +174,9 @@ def test_default_context_pydantic_parquet_roundtrip(tmp_path):
     # Write path — fresh context, no manual factory setup
     write_converter = create_registry().get_context().type_converter
     write_converter.register_python_class(_SimpleModel)
-    arrow_schema = write_converter.python_schema_to_arrow_schema({"model": _SimpleModel})
+    arrow_schema = write_converter.python_schema_to_arrow_schema(
+        {"model": _SimpleModel}
+    )
     rows = [{"model": _SimpleModel(name="alice", score=9.5)}]
     table = write_converter.python_dicts_to_arrow_table(rows, arrow_schema=arrow_schema)
 

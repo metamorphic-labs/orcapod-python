@@ -9,6 +9,11 @@ from orcapod.databases.in_memory_databases import InMemoryArrowDatabase
 from orcapod.errors import UnboundSourceError
 from orcapod.pipeline.serialization import LoadStatus
 from orcapod.types import Schema
+from orcapod.core.nodes.function_node import FunctionNode
+from orcapod.core.function_pod import FunctionPod
+from orcapod.core.data_function import PythonDataFunction
+from orcapod.core.nodes.operator_node import OperatorJobNode
+from orcapod.core.operators import Join
 
 
 class TestSourceNodeFromDescriptor:
@@ -21,7 +26,9 @@ class TestSourceNodeFromDescriptor:
     def _make_source_node(self):
         tag_schema = Schema({"a": int})
         data_schema = Schema({"b": int})
-        node = SourceNode(name="my_source", tag_schema=tag_schema, data_schema=data_schema)
+        node = SourceNode(
+            name="my_source", tag_schema=tag_schema, data_schema=data_schema
+        )
         return node
 
     def test_from_descriptor_with_stream(self):
@@ -40,7 +47,9 @@ class TestSourceNodeFromDescriptor:
         """SourceNode output_schema returns the declared tag and data schemas."""
         tag_schema = Schema({"a": int})
         data_schema = Schema({"b": int})
-        node = SourceNode(name="test_node", tag_schema=tag_schema, data_schema=data_schema)
+        node = SourceNode(
+            name="test_node", tag_schema=tag_schema, data_schema=data_schema
+        )
         t, d = node.output_schema()
         assert set(t.keys()) == {"a"}
         assert set(d.keys()) == {"b"}
@@ -48,6 +57,7 @@ class TestSourceNodeFromDescriptor:
     def test_from_descriptor_full_mode_delegates_to_stream(self):
         """SourceNode with bound concrete (via SourceJobNode) delegates iter_data."""
         from orcapod.core.nodes.source_node import SourceJobNode
+
         tag_schema = Schema({"a": int})
         data_schema = Schema({"b": int})
         source = DictSource(
@@ -92,11 +102,6 @@ class TestSourceNodeFromDescriptor:
         )
         assert node2.content_hash() == ch
         assert node2.pipeline_hash() == ph
-
-
-from orcapod.core.nodes.function_node import FunctionNode
-from orcapod.core.function_pod import FunctionPod
-from orcapod.core.data_function import PythonDataFunction
 
 
 def _sample_func(b: int) -> dict[str, int]:
@@ -165,10 +170,6 @@ class TestFunctionNodeFromDescriptor:
         assert loaded.load_status in (LoadStatus.READ_ONLY, LoadStatus.UNAVAILABLE)
 
 
-from orcapod.core.nodes.operator_node import OperatorJobNode
-from orcapod.core.operators import Join
-
-
 class TestOperatorNodeFromDescriptor:
     def test_from_descriptor_read_only(self):
         db = InMemoryArrowDatabase()
@@ -177,7 +178,7 @@ class TestOperatorNodeFromDescriptor:
             "label": "my_join",
             "content_hash": "fake_hash",
             "pipeline_hash": "fake_pipeline_hash",
-            "data_context_key": "std:v0.1:default",
+            "data_context_key": "std:v1:default",
             "table_scope": "pipeline_hash",
             "output_schema": {
                 "tag": {"a": "int64"},
@@ -189,7 +190,13 @@ class TestOperatorNodeFromDescriptor:
                 "config": {},
             },
             "cache_mode": "OFF",
-            "pipeline_path": ["test", "Join", "hash", "schema:fake_pipeline_hash", "instance:fake_content_hash"],
+            "pipeline_path": [
+                "test",
+                "Join",
+                "hash",
+                "schema:fake_pipeline_hash",
+                "instance:fake_content_hash",
+            ],
         }
         loaded = OperatorJobNode.from_descriptor(
             descriptor=descriptor,
@@ -199,6 +206,33 @@ class TestOperatorNodeFromDescriptor:
         )
         assert loaded.load_status in (LoadStatus.READ_ONLY, LoadStatus.UNAVAILABLE)
         assert loaded.label == "my_join"
+        assert loaded.data_context_key == "std:v1:default"
+
+    def test_from_descriptor_saved_before_v03_loads_under_the_current_context(self):
+        """A descriptor saved with ``std:v0.1:default`` falls back to the current context."""
+        descriptor = {
+            "node_type": "operator",
+            "label": "my_join",
+            "content_hash": "fake_hash",
+            "pipeline_hash": "fake_pipeline_hash",
+            "data_context_key": "std:v0.1:default",
+            "table_scope": "pipeline_hash",
+            "output_schema": {"tag": {"a": "int64"}, "data": {"b": "int64"}},
+            "operator": {
+                "class_name": "Join",
+                "module_path": "orcapod.core.operators.join",
+                "config": {},
+            },
+            "cache_mode": "OFF",
+        }
+        loaded = OperatorJobNode.from_descriptor(
+            descriptor=descriptor,
+            operator=None,
+            input_streams=(),
+            databases={"pipeline": InMemoryArrowDatabase()},
+        )
+        assert loaded.load_status in (LoadStatus.READ_ONLY, LoadStatus.UNAVAILABLE)
+        assert loaded.data_context_key == "std:v1:default"
 
     def test_from_descriptor_full_mode(self):
         db = InMemoryArrowDatabase()

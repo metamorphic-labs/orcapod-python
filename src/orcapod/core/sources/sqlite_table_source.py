@@ -18,11 +18,15 @@ Note:
     each new ``SQLiteConnector(":memory:")`` opens a fresh empty database.
     File-backed sources (including ROWID-only tables) round-trip correctly.
 """
+
 from __future__ import annotations
 
 import os
-from collections.abc import Collection
+from collections.abc import Collection, Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
+
+from typing_extensions import override
 
 from orcapod.core.sources.db_table_source import DBTableSource
 from orcapod.databases.sqlite_connector import SQLiteConnector
@@ -31,6 +35,17 @@ from orcapod.utils.schema_utils import _normalize_column_list
 if TYPE_CHECKING:
     from orcapod import contexts
     from orcapod.config import OrcapodConfig
+
+
+def _access_path(db_path: str | os.PathLike[str]) -> str | os.PathLike[str]:
+    """The path a later read opens: a file path made absolute, a special name as given.
+
+    ``":memory:"`` and ``file:`` URIs are not file system paths.
+    """
+    text = os.fspath(db_path)
+    if text == ":memory:" or text.startswith("file:"):
+        return db_path
+    return os.path.abspath(text)
 
 
 class SQLiteTableSource(DBTableSource):
@@ -84,6 +99,9 @@ class SQLiteTableSource(DBTableSource):
         config: "OrcapodConfig | None" = None,
     ) -> None:
         self._db_path = db_path
+        # A check (ITL-1102) reopens the database found now, whatever the working
+        # directory is then; an in-memory database or a URI is kept as given.
+        self._access_path: str | os.PathLike[str] = _access_path(db_path)
         connector = SQLiteConnector(db_path)
 
         try:
@@ -123,6 +141,19 @@ class SQLiteTableSource(DBTableSource):
                 # Suppress connector close errors to avoid masking __init__ failures.
                 pass
 
+    @contextmanager
+    @override
+    def _open_connector(self) -> Iterator[SQLiteConnector]:
+        """Open a new connector for a check and close it afterwards.
+
+        The connector the source was built with was closed once the table was read.
+        """
+        connector = SQLiteConnector(self._access_path)
+        try:
+            yield connector
+        finally:
+            connector.close()
+
     def to_config(self, db_registry=None) -> dict[str, Any]:
         """Serialize source configuration to a JSON-compatible dict."""
         base = super().to_config()
@@ -130,7 +161,9 @@ class SQLiteTableSource(DBTableSource):
         return {**base, "source_type": "sqlite_table", "db_path": str(self._db_path)}
 
     @classmethod
-    def from_config(cls, config: dict[str, Any], db_registry=None) -> "SQLiteTableSource":
+    def from_config(
+        cls, config: dict[str, Any], db_registry=None
+    ) -> "SQLiteTableSource":
         """Reconstruct a SQLiteTableSource from a config dict.
 
         Args:

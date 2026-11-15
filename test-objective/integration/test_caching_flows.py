@@ -7,19 +7,13 @@ as documented in the design specification.
 from __future__ import annotations
 
 import pyarrow as pa
-import pytest
 
 from orcapod.core.function_pod import FunctionPod
-from orcapod.core.nodes import (
-    FunctionNode,
-    OperatorNode,
-)
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.nodes.operator_node import OperatorJobNode
 from orcapod.core.operators import Join
 from orcapod.core.data_function import CachedDataFunction, PythonDataFunction
 from orcapod.core.sources import ArrowTableSource, DerivedSource
-from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.types import CacheMode
 
@@ -29,7 +23,11 @@ from orcapod.types import CacheMode
 # ---------------------------------------------------------------------------
 
 
+_DOUBLE_CALLS: list[int] = []
+
+
 def _double(x: int) -> int:
+    _DOUBLE_CALLS.append(x)
     return x * 2
 
 
@@ -91,8 +89,12 @@ class TestFunctionNodeCaching:
             pipeline_database=pipeline_db,
             result_database=result_db,
         )
+        # A node shows rows only after a run (ITL-1095); this run reads them all.
+        _DOUBLE_CALLS.clear()
+        node2.run()
         data = list(node2.iter_data())
         assert len(data) == 3
+        assert _DOUBLE_CALLS == []  # every result came from the store
 
 
 class TestDerivedSourceReingestion:

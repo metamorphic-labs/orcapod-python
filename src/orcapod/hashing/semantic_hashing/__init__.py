@@ -5,12 +5,14 @@ orcapod.hashing.semantic_hashing
   PythonTypeHandlerRegistry    -- MRO-aware registry mapping types → PythonTypeHandlerProtocol
   BuiltinPythonTypeHandlerRegistry  -- pre-populated registry with built-in hashers
   ContentIdentifiableMixin            -- convenience mixin for content-identifiable objects
+  Encoded                             -- tagged value a type handler returns for a
+                                         {"__type__": tag, ...} JSON object
 
 Built-in PythonTypeHandlerProtocol implementations:
   UUIDHandler          -- uuid.UUID     → canonical bytes
   BytesHandler         -- bytes/bytearray → hex string
   FunctionHandler      -- callable      → via FunctionInfoExtractorProtocol
-  TypeObjectHandler    -- type objects  → "type:<module>.<qualname>"
+  TypeObjectHandler    -- type objects  → logical type identifier, else "type:<module>.<qualname>"
   FileHandler          -- orcapod.File  → file content hash
   DirectoryHandler     -- orcapod.Directory → recursive Merkle tree hash
   register_builtin_python_type_handlers -- populate a registry with all of the above
@@ -30,6 +32,7 @@ from orcapod.hashing.semantic_hashing.builtin_handlers import (
     UUIDHandler,
     register_builtin_python_type_handlers,
 )
+from orcapod.hashing.semantic_hashing.encoded import Encoded
 from orcapod.hashing.semantic_hashing.content_identifiable_mixin import (
     ContentIdentifiableMixin,
 )
@@ -45,6 +48,7 @@ from orcapod.hashing.semantic_hashing.type_handler_registry import (
 )
 
 __all__ = [
+    "Encoded",
     "SemanticAwarePythonHasher",
     "PythonTypeHandlerRegistry",
     "BuiltinPythonTypeHandlerRegistry",

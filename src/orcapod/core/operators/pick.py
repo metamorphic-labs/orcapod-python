@@ -1,17 +1,27 @@
 """Pick operator — keyed projection into dict/struct-typed columns."""
+
 from __future__ import annotations
 
 import logging
 import typing
 from collections.abc import Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
+from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import UnaryOperator
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.errors import InputValidationError
+from orcapod.system_constants import constants
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
 from orcapod.types import ColumnConfig, ContentHash, Schema
+from orcapod.utils import arrow_utils, schema_utils
+from orcapod.utils.lazy_module import LazyModule
+
+if TYPE_CHECKING:
+    import pyarrow as pa
+else:
+    pa = LazyModule("pyarrow")
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +34,12 @@ class Pick(UnaryOperator):
 
     For extension-type struct columns (Pydantic, dataclass) the field
     existence is validated at build time and guaranteed at runtime.
+
+    The extracted column keeps the value's Arrow type (``dict[str, int16]``
+    yields ``int16``). Its nullability follows the predicted output type, which
+    is not Optional for dict values, so the column is ``NOT NULL``. A value that
+    is ``None`` therefore raises ``ValueError`` (whatever ``fail_on_miss`` is),
+    naming the operator, the column and the row's tag.
 
     Args:
         column: Name of the data column to project into.
@@ -46,16 +62,73 @@ class Pick(UnaryOperator):
     ) -> None:
         self.column = column
         self.key = key
+        # A data column never gets a meta column's name (ITL-1080): refused here,
+        # as ``MapData`` refuses it, so no path can produce one and drop it.
+        if out is not None:
+            schema_utils.require_names_not_meta([out])
         self.out = out
         self.fail_on_miss = fail_on_miss
         self._output_type: type = None  # type: ignore[assignment]
         self._mode: str = ""
+        # Fallback Arrow type of the value, resolved at validation from the
+        # stream's context (``async_execute`` has no stream). ``None`` with a
+        # reason when the stream's converter cannot map the value type.
+        self._value_arrow_type_fallback: pa.DataType | None = None
+        self._value_arrow_type_error: str = ""
         super().__init__(**kwargs)
 
     def identity_structure(self) -> Any:
         # fail_on_miss intentionally excluded — it controls error behaviour,
         # not the functional transformation.
         return (self.__class__.__name__, self.column, self.key, self.out)
+
+    def _output_nullable(self) -> bool:
+        """Return whether the projected column is nullable.
+
+        Nullability follows the predicted output type: the column is nullable
+        only when that type is Optional. The rule is the same for every row and
+        for the all-skipped result, so the materialized schema always equals
+        the predicted ``output_schema``.
+
+        Returns:
+            True when the predicted output type admits ``None``.
+        """
+        return type(None) in typing.get_args(self._output_type)
+
+    def _value_arrow_type(self, column_type: pa.DataType) -> pa.DataType:
+        """Return the Arrow type of the value picked from a ``column_type`` column.
+
+        The value type is read from the input column's Arrow type: a ``map``
+        yields its item type, and the ``list<struct<key, value>>`` encoding of
+        ``dict[K, V]`` yields the ``value`` field's type. Only when no Arrow
+        type is available that way (e.g. a logical struct type) is the fallback
+        used: the Arrow type of the resolved Python output type, resolved at
+        validation from the stream's context.
+
+        Args:
+            column_type: Arrow type of the picked column.
+
+        Returns:
+            The Arrow type of the extracted value.
+
+        Raises:
+            ValueError: If the fallback is needed but the stream's context
+                could not map the output type to an Arrow type.
+        """
+        if isinstance(column_type, pa.MapType):
+            return cast("pa.DataType", column_type.item_type)
+        if isinstance(column_type, (pa.ListType, pa.LargeListType)):
+            entry = cast("pa.DataType", column_type.value_type)
+            if isinstance(entry, pa.StructType) and entry.get_field_index("value") >= 0:
+                return cast("pa.DataType", entry.field("value").type)  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
+        if self._value_arrow_type_fallback is None:
+            raise ValueError(
+                f"Pick: cannot derive the Arrow type of key {self.key!r} of column"
+                + f" {self.column!r}: output type {self._output_type!r} has no"
+                + " Arrow type in the stream's context"
+                + f" ({self._value_arrow_type_error or 'not validated'})."
+            )
+        return self._value_arrow_type_fallback
 
     # ------------------------------------------------------------------
     # Validation
@@ -70,11 +143,10 @@ class Pick(UnaryOperator):
         Raises:
             InputValidationError: If ``column`` is missing, ``out`` collides
                 with an existing column, or the column type does not support
-                pick.
-            NotImplementedError: If the column holds an extension type whose
-                ``pick_field`` implementation is not yet available.
+                pick (including a logical type without ``pick_field``, such as
+                ``numpy.ndarray``).
         """
-        _, data_schema = stream.output_schema()
+        tag_schema, data_schema = stream.output_schema()
         data_columns = list(data_schema.keys())
 
         if self.column not in data_columns:
@@ -83,12 +155,22 @@ class Pick(UnaryOperator):
                 f"Available data columns: {data_columns}"
             )
 
+        if self.out is not None and self.out in tag_schema:
+            raise InputValidationError(
+                f"Pick: out column {self.out!r} is a tag column of the input, "
+                f"and a name cannot be both a tag and a data column. Choose a "
+                f"different name, or rename the tag with map_tags."
+            )
+
         if self.out is not None and self.out in data_columns:
             raise InputValidationError(
                 f"Pick: out column {self.out!r} already exists in data schema. "
                 f"Choose a different name to avoid clobbering existing data."
             )
 
+        # StreamProtocol omits data_context, which every concrete stream (StreamBase)
+        # provides; the same debt is baselined in Batch and GroupBy (ITL-844).
+        converter = stream.data_context.type_converter  # pyright: ignore[reportAttributeAccessIssue]
         col_type = data_schema[self.column]
         origin = typing.get_origin(col_type)
 
@@ -100,7 +182,6 @@ class Pick(UnaryOperator):
         else:
             # Extension type — delegate to logical type's pick_field via the
             # stream's own type converter (not a global default).
-            converter = stream.data_context.type_converter
             lt = converter.get_logical_type(col_type)
             if lt is None:
                 raise InputValidationError(
@@ -108,9 +189,28 @@ class Pick(UnaryOperator):
                     f"not a supported pick target (not dict[K,V] and no registered "
                     f"logical type)."
                 )
-            # May raise NotImplementedError for types not yet implemented
-            self._output_type = lt.pick_field(self.key)
+            try:
+                self._output_type = lt.pick_field(self.key)
+            except NotImplementedError as exc:
+                # A logical type without keyed access is an invalid pick target,
+                # reported like every other invalid operator input (ITL-883).
+                raise InputValidationError(
+                    f"Pick: column {self.column!r} has type {col_type!r}, whose "
+                    f"logical type {lt.logical_type_name!r} does not support pick "
+                    f"(keyed field access): {exc}"
+                ) from exc
             self._mode = "struct"
+
+        # Resolved now because the streaming path has no stream. A failure is
+        # deferred to the point of use: most columns never need the fallback.
+        try:
+            self._value_arrow_type_fallback = converter.python_type_to_arrow_type(
+                self._output_type
+            )
+            self._value_arrow_type_error = ""
+        except (ValueError, TypeError, NotImplementedError) as exc:
+            self._value_arrow_type_fallback = None
+            self._value_arrow_type_error = str(exc)
 
     # ------------------------------------------------------------------
     # Schema prediction
@@ -133,7 +233,9 @@ class Pick(UnaryOperator):
         Returns:
             A ``(tag_schema, data_schema)`` tuple.
         """
-        tag_schema, data_schema = stream.output_schema(columns=columns, all_info=all_info)
+        tag_schema, data_schema = stream.output_schema(
+            columns=columns, all_info=all_info
+        )
         data_dict = dict(data_schema)
 
         if self.out is None:
@@ -174,6 +276,8 @@ class Pick(UnaryOperator):
 
         Raises:
             RuntimeError: If the key is absent and ``fail_on_miss=True``.
+            ValueError: If the extracted value is ``None`` but the predicted
+                output type is not Optional.
         """
         col_val = data[self.column]
 
@@ -195,28 +299,44 @@ class Pick(UnaryOperator):
                 return None
             extracted = col_val[self.key]
 
+        nullable = self._output_nullable()
+        if extracted is None and not nullable:
+            raise ValueError(
+                f"Pick: value of key {self.key!r} in column {self.column!r} is"
+                + f" None in the row with tag {tag}, but the output type"
+                + f" {self._output_type} is not Optional."
+            )
+
         old_src = data.source_info().get(self.column)
         new_src = f"{old_src}[{self.key!r}]" if old_src else None
 
+        value_field = pa.field(
+            self.out or self.column,
+            self._value_arrow_type(
+                arrow_utils.column_arrow_type(data.arrow_schema(), self.column)
+            ),
+            nullable=nullable,
+        )
         if self.out is None:
-            # Replace column in-place: drop the old (with its stale type),
-            # then re-add under the same name with the resolved output type.
+            # Replace column in place: drop the old (with its stale type), re-add
+            # it under the same name with the value's Arrow type, and restore the
+            # original column order.
+            column_order = list(data.keys())
             new_data = (
                 data.drop(self.column)
-                    .with_columns(
-                        column_types={self.column: self._output_type},
-                        **{self.column: extracted},
-                    )
-                    .with_source_info(**{self.column: new_src})
+                .with_columns(
+                    column_types={self.column: value_field},
+                    **{self.column: extracted},
+                )
+                .select(*column_order)
+                .with_source_info(**{self.column: new_src})
             )
         else:
             # Add new column; original stays unchanged.
-            new_data = (
-                data.with_columns(
-                    column_types={self.out: self._output_type},
-                    **{self.out: extracted},
-                ).with_source_info(**{self.out: new_src})
-            )
+            new_data = data.with_columns(
+                column_types={self.out: value_field},
+                **{self.out: extracted},
+            ).with_source_info(**{self.out: new_src})
 
         return tag, new_data
 
@@ -251,14 +371,38 @@ class Pick(UnaryOperator):
         if not out_rows:
             # All packets were skipped (fail_on_miss=False).  Return an empty
             # stream with the correct output schema — this is not an error.
+            # The schema is the input's Arrow schema (large-normalized, as for
+            # a non-empty result) with only the projected column changed.
             tag_columns, _ = stream.keys()
-            tag_schema, data_schema = self.unary_output_schema(stream)
-            combined_schema = {**dict(tag_schema), **dict(data_schema)}
-            empty_table = stream.data_context.type_converter.python_dicts_to_arrow_table(
-                [], python_schema=combined_schema
+            # The system tags and source info are part of it: a result with rows keeps
+            # each row's (ITL-1131).
+            input_schema = arrow_utils.normalize_schema_to_large_types(
+                stream.as_table(columns={"source": True, "system_tags": True}).schema
             )
+            value_field = pa.field(
+                self.out or self.column,
+                self._value_arrow_type(
+                    arrow_utils.column_arrow_type(input_schema, self.column)
+                ),
+                nullable=self._output_nullable(),
+            )
+            # A picked value's token is a string (``_process_one``), typed by the
+            # source-info type rule.
+            token_name = f"{constants.SOURCE_PREFIX}{self.out or self.column}"
+            token_field = pa.field(
+                token_name, arrow_utils.source_info_arrow_type(token_name)
+            )
+            if self.out is None:
+                position = input_schema.get_field_index(self.column)
+                output_schema = input_schema.set(position, value_field)  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
+                output_schema = output_schema.set(
+                    output_schema.get_field_index(token_name), token_field
+                )  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
+            else:
+                output_schema = input_schema.append(value_field)  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
+                output_schema = output_schema.append(token_field)  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
             return ArrowTableStream(
-                empty_table,
+                self._as_row_built_table(output_schema.empty_table(), tag_columns),
                 tag_columns=tag_columns,
                 data_context=stream.data_context,
             )
@@ -274,7 +418,7 @@ class Pick(UnaryOperator):
         inputs: Sequence[ReadableChannel[tuple[TagProtocol, DataProtocol]]],
         output: WritableChannel[tuple[TagProtocol, DataProtocol]],
         *,
-        input_pipeline_hashes: Sequence[ContentHash] | None = None,
+        input_pipeline_hashes: Sequence[ContentHash],
     ) -> None:
         """Process packets one at a time as they arrive (true streaming).
 
@@ -284,9 +428,12 @@ class Pick(UnaryOperator):
         Args:
             inputs: Single-element sequence of readable channels.
             output: Channel to send transformed packets to.
-            input_pipeline_hashes: Ignored; present for protocol compliance.
+            input_pipeline_hashes: Not used: this operator keeps system-tag
+                names as they are, so no column is named after an input's
+                pipeline hash.
         """
         try:
+            output = WithoutMetaWriter(output)
             async for tag, data in inputs[0]:
                 result = self._process_one(tag, data)
                 if result is not None:

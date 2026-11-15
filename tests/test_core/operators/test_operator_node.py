@@ -17,7 +17,7 @@ from __future__ import annotations
 import pyarrow as pa
 import pytest
 
-from orcapod.core.nodes.operator_node import OperatorJobNode, OperatorNode
+from orcapod.core.nodes.operator_node import OperatorJobNode
 from orcapod.core.operators import (
     DropDataColumns,
     Join,
@@ -29,6 +29,7 @@ from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.protocols.hashing_protocols import PipelineElementProtocol
 from orcapod.system_constants import constants
 from orcapod.types import CacheMode
+from orcapod.system_constants import OPERATOR_DB_SCHEMA_VERSION
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +327,7 @@ class TestOperatorNodeRunAndStorage:
     def test_iter_data(self, simple_stream, db):
         op = MapData({"x": "renamed_x"})
         node = _make_node(op, (simple_stream,), db=db)
-        node.run()                          # <-- add this line
+        node.run()  # <-- add this line
         data = list(node.iter_data())
         assert len(data) == 3
         for tag, data in data:
@@ -335,7 +336,7 @@ class TestOperatorNodeRunAndStorage:
     def test_as_table(self, simple_stream, db):
         op = MapData({"x": "renamed_x"})
         node = _make_node(op, (simple_stream,), db=db)
-        node.run()                          # <-- add this line
+        node.run()  # <-- add this line
         table = node.as_table()
         assert table.num_rows == 3
         assert "renamed_x" in table.column_names
@@ -374,6 +375,9 @@ class TestOperatorNodeRunAndStorage:
         node_replay = _make_node(
             op, (simple_stream,), db=db, cache_mode=CacheMode.REPLAY
         )
+        # A node shows rows only after a run (ITL-1095); REPLAY's run reads the cache.
+        assert node_replay.as_table().num_rows == 0
+        node_replay.run()
         table = node_replay.as_table()
         assert table.num_rows == 3
         assert "renamed_x" in table.column_names
@@ -464,7 +468,9 @@ class TestOperatorNodeHashColumnType:
         )
         node.run()
 
-        all_records = db.get_all_records(node.node_identity_path)
+        all_records = db.get_all_records(
+            node.node_identity_path + (OPERATOR_DB_SCHEMA_VERSION,)
+        )
         assert all_records is not None
         col_name = constants.NODE_CONTENT_HASH_COL
         assert col_name in all_records.column_names

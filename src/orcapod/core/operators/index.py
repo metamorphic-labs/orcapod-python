@@ -1,17 +1,27 @@
 """Index operator — positional projection into list-typed columns."""
+
 from __future__ import annotations
 
 import logging
 import typing
 from collections.abc import Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
+from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import UnaryOperator
+from orcapod.system_constants import constants
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
-from orcapod.types import ColumnConfig, ContentHash, Schema
+from orcapod.types import ColumnConfig, ContentHash, Schema, SourceInfoValue
+from orcapod.utils import arrow_utils, schema_utils
+from orcapod.utils.lazy_module import LazyModule
+
+if TYPE_CHECKING:
+    import pyarrow as pa
+else:
+    pa = LazyModule("pyarrow")
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +33,12 @@ class Index(UnaryOperator):
     time.  Out-of-bounds access causes the packet to be skipped (or an error
     when ``fail_on_miss=True``).  Negative indices follow Python semantics
     (``-1`` is the last element).
+
+    The extracted column keeps the list's element Arrow type (``list<int8>``
+    yields ``int8``). Its nullability follows the predicted output type, which
+    is not Optional for list elements, so the column is ``NOT NULL``. An
+    element that is ``None`` therefore raises ``ValueError`` (whatever
+    ``fail_on_miss`` is), naming the operator, the column and the row's tag.
 
     Args:
         column: Name of the data column to project into.
@@ -44,14 +60,68 @@ class Index(UnaryOperator):
     ) -> None:
         self.column = column
         self.i = i
+        # A data column never gets a meta column's name (ITL-1080): refused here,
+        # as ``MapData`` refuses it, so no path can produce one and drop it.
+        if out is not None:
+            schema_utils.require_names_not_meta([out])
         self.out = out
         self.fail_on_miss = fail_on_miss
         self._output_type: type = None  # type: ignore[assignment]
         self._mode: str = ""
+        # Fallback Arrow type of the element, resolved at validation from the
+        # stream's context (``async_execute`` has no stream). ``None`` with a
+        # reason when the stream's converter cannot map the element type.
+        self._element_arrow_type_fallback: pa.DataType | None = None
+        self._element_arrow_type_error: str = ""
         super().__init__(**kwargs)
 
     def identity_structure(self) -> Any:
         return (self.__class__.__name__, self.column, self.i, self.out)
+
+    def _output_nullable(self) -> bool:
+        """Return whether the projected column is nullable.
+
+        Nullability follows the predicted output type: the column is nullable
+        only when that type is Optional. The rule is the same for every row and
+        for the all-skipped result, so the materialized schema always equals
+        the predicted ``output_schema``.
+
+        Returns:
+            True when the predicted output type admits ``None``.
+        """
+        return type(None) in typing.get_args(self._output_type)
+
+    def _element_arrow_type(self, column_type: pa.DataType) -> pa.DataType:
+        """Return the Arrow type of one element of a column of ``column_type``.
+
+        The element type is read from the input column's Arrow type, so a
+        ``list<int8>`` column yields ``int8``. Only when the column is a
+        logical (extension) type, whose storage drops the element's logical
+        identity, is the fallback used: the Arrow type of the resolved Python
+        element type, resolved at validation from the stream's context.
+
+        Args:
+            column_type: Arrow type of the indexed column.
+
+        Returns:
+            The Arrow type of the extracted element.
+
+        Raises:
+            ValueError: If the fallback is needed but the stream's context
+                could not map the element type to an Arrow type.
+        """
+        if isinstance(
+            column_type, (pa.ListType, pa.LargeListType, pa.FixedSizeListType)
+        ):
+            return cast("pa.DataType", column_type.value_type)
+        if self._element_arrow_type_fallback is None:
+            raise ValueError(
+                "Index: cannot derive the Arrow type of the element of column"
+                + f" {self.column!r}: output type {self._output_type!r} has no"
+                + " Arrow type in the stream's context"
+                + f" ({self._element_arrow_type_error or 'not validated'})."
+            )
+        return self._element_arrow_type_fallback
 
     # ------------------------------------------------------------------
     # Validation
@@ -69,7 +139,7 @@ class Index(UnaryOperator):
             NotImplementedError: If the column holds an extension type whose
                 ``index_element`` is not yet implemented.
         """
-        _, data_schema = stream.output_schema()
+        tag_schema, data_schema = stream.output_schema()
         data_columns = list(data_schema.keys())
 
         if self.column not in data_columns:
@@ -78,12 +148,22 @@ class Index(UnaryOperator):
                 f"Available data columns: {data_columns}"
             )
 
+        if self.out is not None and self.out in tag_schema:
+            raise InputValidationError(
+                f"Index: out column {self.out!r} is a tag column of the input, "
+                f"and a name cannot be both a tag and a data column. Choose a "
+                f"different name, or rename the tag with map_tags."
+            )
+
         if self.out is not None and self.out in data_columns:
             raise InputValidationError(
                 f"Index: out column {self.out!r} already exists in data schema. "
                 f"Choose a different name to avoid clobbering existing data."
             )
 
+        # StreamProtocol omits data_context, which every concrete stream (StreamBase)
+        # provides; the same debt is baselined in Batch and GroupBy (ITL-844).
+        converter = stream.data_context.type_converter  # pyright: ignore[reportAttributeAccessIssue]
         col_type = data_schema[self.column]
         origin = typing.get_origin(col_type)
 
@@ -94,7 +174,6 @@ class Index(UnaryOperator):
         else:
             # Extension type — delegate to logical type's index_element via the
             # stream's own type converter (not a global default).
-            converter = stream.data_context.type_converter
             lt = converter.get_logical_type(col_type)
             if lt is None:
                 raise InputValidationError(
@@ -105,6 +184,17 @@ class Index(UnaryOperator):
             # May raise NotImplementedError for types not yet implemented
             self._output_type = lt.index_element()
             self._mode = "extension"
+
+        # Resolved now because the streaming path has no stream. A failure is
+        # deferred to the point of use: most columns never need the fallback.
+        try:
+            self._element_arrow_type_fallback = converter.python_type_to_arrow_type(
+                self._output_type
+            )
+            self._element_arrow_type_error = ""
+        except (ValueError, TypeError, NotImplementedError) as exc:
+            self._element_arrow_type_fallback = None
+            self._element_arrow_type_error = str(exc)
 
     # ------------------------------------------------------------------
     # Schema prediction
@@ -127,7 +217,9 @@ class Index(UnaryOperator):
         Returns:
             A ``(tag_schema, data_schema)`` tuple.
         """
-        tag_schema, data_schema = stream.output_schema(columns=columns, all_info=all_info)
+        tag_schema, data_schema = stream.output_schema(
+            columns=columns, all_info=all_info
+        )
         data_dict = dict(data_schema)
 
         if self.out is None:
@@ -167,6 +259,8 @@ class Index(UnaryOperator):
 
         Raises:
             RuntimeError: If the index is out of bounds and ``fail_on_miss=True``.
+            ValueError: If the extracted element is ``None`` but the predicted
+                output type is not Optional.
         """
         col_val = data[self.column]
         length = len(col_val)
@@ -189,29 +283,52 @@ class Index(UnaryOperator):
             return None
 
         extracted = col_val[self.i]
+        nullable = self._output_nullable()
+        if extracted is None and not nullable:
+            raise ValueError(
+                f"Index: element {self.i} of column {self.column!r} is None in"
+                + f" the row with tag {tag}, but the output type"
+                + f" {self._output_type} is not Optional."
+            )
 
         old_src = data.source_info().get(self.column)
-        new_src = f"{old_src}[{self.i}]" if old_src else None
+        new_src: SourceInfoValue
+        if isinstance(old_src, list):
+            # A many->one operator (Batch, GroupBy) left one token per member: the
+            # element's provenance is its own token, one list level removed (the
+            # inner list after two aggregations). ``effective_i`` is in range for
+            # the value, and a token list holds one entry per member.
+            new_src = old_src[effective_i] if effective_i < len(old_src) else None
+        else:
+            new_src = f"{old_src}[{self.i}]" if old_src else None
 
+        element_field = pa.field(
+            self.out or self.column,
+            self._element_arrow_type(
+                arrow_utils.column_arrow_type(data.arrow_schema(), self.column)
+            ),
+            nullable=nullable,
+        )
         if self.out is None:
-            # Replace column in-place: drop the old (with its stale type),
-            # then re-add under the same name with the resolved output type.
+            # Replace column in place: drop the old (with its stale type), re-add
+            # it under the same name with the element's Arrow type, and restore
+            # the original column order.
+            column_order = list(data.keys())
             new_data = (
                 data.drop(self.column)
-                    .with_columns(
-                        column_types={self.column: self._output_type},
-                        **{self.column: extracted},
-                    )
-                    .with_source_info(**{self.column: new_src})
+                .with_columns(
+                    column_types={self.column: element_field},
+                    **{self.column: extracted},
+                )
+                .select(*column_order)
+                .with_source_info(**{self.column: new_src})
             )
         else:
             # Add new column; original stays unchanged.
-            new_data = (
-                data.with_columns(
-                    column_types={self.out: self._output_type},
-                    **{self.out: extracted},
-                ).with_source_info(**{self.out: new_src})
-            )
+            new_data = data.with_columns(
+                column_types={self.out: element_field},
+                **{self.out: extracted},
+            ).with_source_info(**{self.out: new_src})
 
         return tag, new_data
 
@@ -236,6 +353,8 @@ class Index(UnaryOperator):
         Raises:
             RuntimeError: If ``fail_on_miss=True`` and any packet is
                 out-of-bounds.
+            ValueError: If an extracted element is ``None`` but the predicted
+                output type is not Optional.
         """
         out_rows = []
         for tag, data in stream.iter_data():
@@ -246,14 +365,48 @@ class Index(UnaryOperator):
         if not out_rows:
             # All packets were skipped (fail_on_miss=False).  Return an empty
             # stream with the correct output schema — this is not an error.
+            # The schema is the input's Arrow schema (large-normalized, as for
+            # a non-empty result) with only the projected column changed.
             tag_columns, _ = stream.keys()
-            tag_schema, data_schema = self.unary_output_schema(stream)
-            combined_schema = {**dict(tag_schema), **dict(data_schema)}
-            empty_table = stream.data_context.type_converter.python_dicts_to_arrow_table(
-                [], python_schema=combined_schema
+            # The source-info columns are part of it: the projected column's token
+            # type is the input's with one list level removed, as for a non-empty
+            # result (ITL-1046), and every other token column keeps its input type.
+            # The system tags are part of it too: a result with rows keeps each row's
+            # (ITL-1131).
+            input_schema = arrow_utils.normalize_schema_to_large_types(
+                stream.as_table(columns={"source": True, "system_tags": True}).schema
             )
+            element_field = pa.field(
+                self.out or self.column,
+                self._element_arrow_type(
+                    arrow_utils.column_arrow_type(input_schema, self.column)
+                ),
+                nullable=self._output_nullable(),
+            )
+            token_name = f"{constants.SOURCE_PREFIX}{self.column}"
+            input_token = input_schema.field(token_name)
+            input_token_type = input_token.type
+            token_type = (
+                input_token_type.value_type
+                if pa.types.is_large_list(input_token_type)
+                else input_token_type
+            )
+            token_field = pa.field(
+                f"{constants.SOURCE_PREFIX}{self.out or self.column}",
+                token_type,
+                nullable=input_token.nullable,
+            )
+            if self.out is None:
+                position = input_schema.get_field_index(self.column)
+                output_schema = input_schema.set(position, element_field)  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
+                output_schema = output_schema.set(
+                    output_schema.get_field_index(token_name), token_field
+                )  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
+            else:
+                output_schema = input_schema.append(element_field)  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
+                output_schema = output_schema.append(token_field)  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
             return ArrowTableStream(
-                empty_table,
+                self._as_row_built_table(output_schema.empty_table(), tag_columns),
                 tag_columns=tag_columns,
                 data_context=stream.data_context,
             )
@@ -269,7 +422,7 @@ class Index(UnaryOperator):
         inputs: Sequence[ReadableChannel[tuple[TagProtocol, DataProtocol]]],
         output: WritableChannel[tuple[TagProtocol, DataProtocol]],
         *,
-        input_pipeline_hashes: Sequence[ContentHash] | None = None,
+        input_pipeline_hashes: Sequence[ContentHash],
     ) -> None:
         """Process packets one at a time as they arrive (true streaming).
 
@@ -279,9 +432,12 @@ class Index(UnaryOperator):
         Args:
             inputs: Single-element sequence of readable channels.
             output: Channel to send transformed packets to.
-            input_pipeline_hashes: Ignored; present for protocol compliance.
+            input_pipeline_hashes: Not used: this operator keeps system-tag
+                names as they are, so no column is named after an input's
+                pipeline hash.
         """
         try:
+            output = WithoutMetaWriter(output)
             async for tag, data in inputs[0]:
                 result = self._process_one(tag, data)
                 if result is not None:

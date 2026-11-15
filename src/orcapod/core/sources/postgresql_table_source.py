@@ -9,10 +9,14 @@ Example::
         "postgresql://user:pass@localhost:5432/mydb", "measurements"
     )
 """
+
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Collection, Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
+
+from typing_extensions import override
 
 from orcapod.core.sources.db_table_source import DBTableSource
 from orcapod.databases.postgresql_connector import PostgreSQLConnector
@@ -73,7 +77,9 @@ class PostgreSQLTableSource(DBTableSource):
         config: OrcapodConfig | None = None,
     ) -> None:
         self._dsn = dsn  # store before try — needed by to_config even if super() raises
-        connector = PostgreSQLConnector(dsn)  # outside try — if this raises, finally never runs
+        connector = PostgreSQLConnector(
+            dsn
+        )  # outside try — if this raises, finally never runs
         try:
             super().__init__(
                 connector,
@@ -92,6 +98,19 @@ class PostgreSQLTableSource(DBTableSource):
             except Exception:
                 pass  # suppress close errors; don't mask original __init__ failure
 
+    @contextmanager
+    @override
+    def _open_connector(self) -> Iterator[PostgreSQLConnector]:
+        """Open a new connector for a check and close it afterwards.
+
+        The connector the source was built with was closed once the table was read.
+        """
+        connector = PostgreSQLConnector(self._dsn)
+        try:
+            yield connector
+        finally:
+            connector.close()
+
     def to_config(self, db_registry=None) -> dict[str, Any]:
         """Serialize source configuration to a JSON-compatible dict."""
         # super().to_config() calls self._connector.to_config(), which reads only
@@ -102,7 +121,9 @@ class PostgreSQLTableSource(DBTableSource):
         return {**base, "source_type": "postgresql_table", "dsn": self._dsn}
 
     @classmethod
-    def from_config(cls, config: dict[str, Any], db_registry=None) -> PostgreSQLTableSource:
+    def from_config(
+        cls, config: dict[str, Any], db_registry=None
+    ) -> PostgreSQLTableSource:
         """Reconstruct a PostgreSQLTableSource from a config dict.
 
         Args:

@@ -40,8 +40,9 @@ with identical schemas and the same computational graph have the same pipeline h
 they are fed by completely different sources.
 
 **Used for:** database scoping. Pipeline hash determines the database table path where results
-are stored. This means that two pipeline nodes with the same function and the same
-input schema share the same database table -- regardless of which source produced the data.
+are stored. This means that two pipeline nodes with the same function, the same input schema
+and the same upstream steps share the same database table -- regardless of which source
+produced the data.
 This is a powerful feature: it means that running the same function on new data automatically
 benefits from results already cached for previous data with the same schema.
 
@@ -115,14 +116,20 @@ ways:
 This means that adding new data to a source only triggers computation for the new rows --
 previously computed results are served from the cache. The node's own stream
 (`iter_data()`, `as_table()`) contains the results for its current inputs only;
-`get_all_records()` returns everything stored in the shared table, including rows from
-earlier runs over other inputs.
+`get_all_records()` also returns rows stored by earlier runs of the same node -- same job
+name, same source -- over inputs that are no longer present. It does not return rows that
+other nodes wrote to the same shared table, such as the same function run over a source with
+a different `source_id`.
 
 ### DB path scoping
 
 The pipeline hash determines the database table path. Two nodes that apply the same function
-to sources with the same schema will write to and read from the same table. This is
-intentional: it maximizes cache reuse across pipeline runs.
+to sources with the same schema, through the same upstream steps, will write to and read from
+the same table. This is intentional: it maximizes cache reuse across pipeline runs. A
+schema-preserving step added upstream (a filter, say) changes the pipeline hash and so the
+table. This is the default `table_scope="pipeline_hash"` of a node; a node built with
+`table_scope="content_hash"` also adds its content hash to the path, giving each source its
+own table.
 
 ### Change detection
 
@@ -164,6 +171,29 @@ print(step.pod(source).pipeline_hash() == original)
 When you change what a function computes, bump its major version (or rename it) so that
 stale results are not reused.
 
+## Your own classes in the identity
+
+A class enters both chains through its **identity**: its kind, its name and the names and
+types of its fields, in declared order. The identity is part of every schema hash, so it
+reaches the pipeline hash of each source, pod and node that uses the class, and with it
+the database table paths. Each stored value is hashed together with it, so it also
+reaches the content hash.
+
+The name depends on the kind of class:
+
+- A class made with `@op.dataclass` is named by its class name (or the `name=` you give).
+  Two such classes with the same name and fields share results, wherever each is
+  defined.
+- An ordinary `@dataclass` or a pydantic model is named by its module path and class
+  name. Moving it to another module makes a new type.
+
+In both kinds a class whose fields change or are reordered is a new type: its pods get
+new pipeline hashes and new tables, and the results stored with the old definition stay
+where they are.
+
+[Your Own Data Types](your-own-data-types.md) describes the two kinds and when to use
+each.
+
 ## How it connects to other concepts
 
 - [Sources](sources.md) form the base case of the Merkle chain (schema-only for pipeline hash,
@@ -172,3 +202,5 @@ stale results are not reused.
 - [Operators](operators.md) contribute their own identity to the chain
 - [Function Pods](function-pods.md) run inside a `PipelineJob` use content hashes for
   memoization and pipeline hashes for DB scoping
+- [Your Own Data Types](your-own-data-types.md) explains the identity of dataclasses and
+  pydantic models

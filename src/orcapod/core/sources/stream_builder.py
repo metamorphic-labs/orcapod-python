@@ -9,14 +9,15 @@ tag columns, and wrapping the result in an ``ArrowTableStream``.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from orcapod.core.sources.source_ids import hash_source_id
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.system_constants import constants
 from orcapod.types import ContentHash
-from orcapod.utils import arrow_utils
+from orcapod.utils import arrow_utils, schema_utils
 from orcapod.utils.schema_utils import compute_source_schema_hash
 from orcapod.utils.lazy_module import LazyModule
 
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
 
     from orcapod.config import OrcapodConfig
     from orcapod.contexts import DataContext
+    from orcapod.protocols.hashing_protocols import ArrowHasherProtocol
 else:
     pa = LazyModule("pyarrow")
 
@@ -40,7 +42,9 @@ _SOURCE_RECORD_ID_NAMESPACE = uuid.uuid5(
 )
 
 
-def _make_provenance_token(record_id_column: str | None, row_index: int, row: dict) -> str:
+def _make_provenance_token(
+    record_id_column: str | None, row_index: int, value: object
+) -> str:
     """Build the human-readable provenance token for a single row.
 
     When *record_id_column* is given the token is ``"{column}={value}"``,
@@ -49,16 +53,45 @@ def _make_provenance_token(record_id_column: str | None, row_index: int, row: di
 
     The fallback is positional: the token names a row position, not a row.
     If the same rows are supplied in a different order under the same
-    ``source_id``, each row inherits the record ID of whichever row used to
-    occupy its position. Downstream record identities (``FunctionJobNode``
-    pipeline entries, ``SideEffectPod`` completion records) are derived from
-    the record ID, so they stop matching and lineage is attributed to the
-    wrong row. Pass ``record_id_column`` whenever row order is not guaranteed
-    to be identical between runs.
+    ``source_id``, a moved row gets a different record ID. Downstream record
+    identities (``FunctionJobNode`` pipeline entries, ``SideEffectPod``
+    completion records) are derived from the system tags plus the row's data
+    hash, so the moved row is treated as a new entry: it is recorded again,
+    giving two entries with identical tag values but distinct record IDs, and
+    a ``SideEffectPod`` delivers it again. Because every identity includes the
+    row's own data hash, no result is ever paired with the wrong row. Pass
+    ``record_id_column`` (with a stable ``source_id``) whenever row order is
+    not guaranteed to be identical between runs.
     """
     if record_id_column is not None:
-        return f"{record_id_column}={row[record_id_column]}"
+        return f"{record_id_column}={value}"
     return f"row_{row_index}"
+
+
+def _unhashable_columns(
+    hasher: ArrowHasherProtocol, table: pa.Table
+) -> list[tuple[str, pa.DataType]]:
+    """Return the columns of ``table`` that ``hasher`` cannot hash, with their types.
+
+    Each column is hashed on its own. A zero-row slice is not enough, because the hasher
+    rejects a type only when it visits a value, so the whole column is probed. This runs
+    only after hashing the whole table has failed.
+
+    Args:
+        hasher: The data context's Arrow hasher.
+        table: The table whose hash failed.
+
+    Returns:
+        ``(column name, Arrow type)`` for every column whose hash raises
+        ``ValueError``, in column order.
+    """
+    failing: list[tuple[str, pa.DataType]] = []
+    for name in table.column_names:
+        try:
+            hasher.hash_table(table.select([name]))
+        except ValueError:
+            failing.append((name, table.schema.field(name).type))
+    return failing
 
 
 def _make_record_id(source_id: str, provenance_token: str) -> uuid.UUID:
@@ -114,6 +147,7 @@ class SourceStreamBuilder:
         source_id: str | None = None,
         record_id_column: str | None = None,
         system_tag_columns: Collection[str] = (),
+        source_kind: str | None = None,
     ) -> SourceStreamResult:
         """Run the full enrichment pipeline.
 
@@ -127,26 +161,47 @@ class SourceStreamBuilder:
         Args:
             table: Arrow table with nullable flags already set correctly.
             tag_columns: Column names forming the tag for each row.
-            source_id: Canonical source name. Defaults to table hash.
+            source_id: Canonical source name. When not given, the default is
+                ``<source_kind>:<algorithm label>:<hex>`` of the table hash
+                (``hash_source_id``), which changes when rows are reordered;
+                pass an explicit value when record IDs must survive reordering.
             record_id_column: Column whose value identifies a row, giving
-                record IDs that follow the row regardless of its position.
-                When ``None`` the record ID is derived from the row's position
-                (``row_{index}``), so it is stable only while row order is.
+                record IDs that follow the row regardless of its position
+                (given a stable ``source_id``). When ``None`` the record ID is
+                derived from the row's position (``row_{index}``), so it is
+                stable only while row order is.
             system_tag_columns: Additional system-level tag columns.
+            source_kind: Kind prefix of the default source id, for example
+                ``dict``. Required when ``source_id`` is not given; not used
+                otherwise.
 
         Returns:
             SourceStreamResult with enriched stream and metadata.
 
         Raises:
-            ValueError: If tag_columns or record_id_column are not in table.
+            ValueError: If the table has no columns ("Table is empty"), if
+                tag_columns or record_id_column are not in the table, or if
+                neither ``source_id`` nor ``source_kind`` is given.
         """
         tag_columns_tuple = tuple(tag_columns)
         system_tag_columns_tuple = tuple(system_tag_columns)
 
+        # A tag never has a meta column's name; the meta columns are dropped next,
+        # so say so here rather than report the tag as missing (ITL-1080).
+        schema_utils.require_names_not_meta(tag_columns_tuple)
+
         # 1. Drop system columns from raw input.
         table = arrow_utils.drop_system_columns(table)
 
-        # 2. Validate tag_columns.
+        # 2. Validate tag_columns. A table with no columns at all (e.g. a
+        # DictSource built from no rows and no schema) gets its own error, since
+        # "tag column not found" would point at the wrong problem.
+        if not table.column_names:
+            raise ValueError(
+                "Table is empty: the input has no columns, so its tag and data "
+                "columns cannot be found. To build a source with no rows, give it "
+                "an explicit schema (for example data_schema= on DictSource)."
+            )
         missing_tags = set(tag_columns_tuple) - set(table.column_names)
         if missing_tags:
             raise ValueError(
@@ -181,48 +236,57 @@ class SourceStreamBuilder:
         )
 
         # 5. Compute table hash for data identity.
-        table_hash = self._data_context.arrow_hasher.hash_table(table)
+        hasher = self._data_context.arrow_hasher
+        try:
+            table_hash = hasher.hash_table(table)
+        except ValueError as exc:
+            # The hasher (starfix 0.5) raises ValueError for a type it does not hash
+            # and names the first such column only; name every column it refuses.
+            unhashable = _unhashable_columns(hasher, table)
+            if not unhashable:
+                raise
+            described = ", ".join(
+                f"{name!r} of type {kind}" for name, kind in unhashable
+            )
+            noun = "column" if len(unhashable) == 1 else "columns"
+            raise ValueError(
+                f"cannot hash {noun} {described}: the Arrow hasher refused "
+                f"({exc}). Drop or convert before building the source."
+            ) from exc
 
-        # 6. Default source_id to table hash.
+        # 6. Default source_id: the source kind and the labelled table hash. A
+        # source id is the source's name, so a default built from a hash says
+        # what kind of source it is and which algorithm made the hash. Only the
+        # hex is shortened by ``hashing.path_n_char``.
         if source_id is None:
-            source_id = table_hash.to_hex(char_count=self._config.hashing.path_n_char)
+            if source_kind is None:
+                raise ValueError(
+                    "build() needs a source_id or a source_kind to make a default "
+                    "source id from."
+                )
+            source_id = hash_source_id(
+                source_kind, table_hash, hexdigits=self._config.hashing.path_n_char
+            )
 
         # 7. Build per-row source-info strings and deterministic UUID record IDs.
-        rows_as_dicts = table.to_pylist()
+        # Only the record-ID column's values are needed (none for positional
+        # tokens), so convert that one column to Python, never the whole table.
+        record_values: Sequence[object] = (
+            table.column(record_id_column).to_pylist()
+            if record_id_column is not None
+            else [None] * table.num_rows
+        )
         provenance_tokens = [
-            _make_provenance_token(record_id_column, i, row)
-            for i, row in enumerate(rows_as_dicts)
+            _make_provenance_token(record_id_column, i, value)
+            for i, value in enumerate(record_values)
         ]
-        source_info = [
-            f"{source_id}{constants.BLOCK_SEPARATOR}{token}"
-            for token in provenance_tokens
-        ]
-        # Record IDs stored in the system tag column are stable UUID v5 bytes —
-        # deterministically derived from source_id and per-row provenance token.
-        # Same source_id + same row position/content → same record_id bytes.
-        record_id_values = [
-            _make_record_id(source_id, token).bytes for token in provenance_tokens
-        ]
-
-        # 8. Add source-info provenance columns.
-        table = arrow_utils.add_source_info(
-            table, source_info, exclude_columns=tag_columns_tuple
-        )
-
-        # 9. Add system tag columns.
-        table = arrow_utils.add_system_tag_columns(
+        stream = self.attach_provenance(
             table,
-            schema_hash,
-            source_id,
-            record_id_values,
-        )
-
-        # 10. Wrap in ArrowTableStream. Nullable flags are already correct —
-        # the caller set them before calling build().
-        stream = ArrowTableStream(
-            table=table,
             tag_columns=tag_columns_tuple,
             system_tag_columns=system_tag_columns_tuple,
+            schema_hash=schema_hash,
+            source_id=source_id,
+            provenance_tokens=provenance_tokens,
         )
 
         return SourceStreamResult(
@@ -232,4 +296,59 @@ class SourceStreamBuilder:
             source_id=source_id,
             tag_columns=tag_columns_tuple,
             system_tag_columns=system_tag_columns_tuple,
+        )
+
+    def attach_provenance(
+        self,
+        table: pa.Table,
+        *,
+        tag_columns: Sequence[str],
+        system_tag_columns: Sequence[str],
+        schema_hash: str,
+        source_id: str,
+        provenance_tokens: Sequence[str],
+    ) -> ArrowTableStream:
+        """Add source-info and system-tag columns to ``table`` and wrap it as a stream.
+
+        Each row's source-info prefix is ``<source_id>::<token>``: the value in a
+        source-info column is that prefix followed by ``::<column>`` (for example
+        ``_source_amplitude`` holds ``<source_id>::<token>::amplitude``). The row's
+        record ID is the UUID v5 of ``source_id`` and ``token``, so a row keeps its
+        record ID wherever and however often it is read, as long as its token is the
+        same.
+
+        Args:
+            table: The rows, with nullable flags already set correctly.
+            tag_columns: Column names forming the tag for each row.
+            system_tag_columns: Additional system-level tag columns.
+            schema_hash: The source's schema hash, which names its system-tag columns.
+            source_id: The canonical source name.
+            provenance_tokens: One token per row, identifying the row within the source.
+
+        Returns:
+            The stream over the enriched table.
+        """
+        source_info = [
+            f"{source_id}{constants.BLOCK_SEPARATOR}{token}"
+            for token in provenance_tokens
+        ]
+        # Record IDs stored in the system tag column are stable UUID v5 bytes —
+        # deterministically derived from source_id and per-row provenance token.
+        record_id_values = [
+            _make_record_id(source_id, token).bytes for token in provenance_tokens
+        ]
+        table = arrow_utils.add_source_info(
+            table, source_info, exclude_columns=tag_columns
+        )
+        table = arrow_utils.add_system_tag_columns(
+            table,
+            schema_hash,
+            source_id,
+            record_id_values,
+        )
+        # Nullable flags are already correct — the caller set them.
+        return ArrowTableStream(
+            table=table,
+            tag_columns=tag_columns,
+            system_tag_columns=system_tag_columns,
         )

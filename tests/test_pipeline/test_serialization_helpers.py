@@ -20,8 +20,31 @@ from orcapod.pipeline.serialization import (
     serialize_schema,
 )
 from orcapod.databases.in_memory_databases import InMemoryArrowDatabase
+from orcapod.hashing.semantic_hashing.semantic_hasher import SEMANTIC_HASH_LABEL
 from orcapod.core.operators import Join, Batch
 from orcapod.types import Schema
+
+
+@pytest.mark.parametrize("container", ["list", "struct", "map", "fixed_list"])
+def test_nested_logical_identifiers_round_trip(container: str) -> None:
+    """Schema text preserves logical identifiers inside Arrow containers."""
+    from pathlib import Path
+    from orcapod.contexts import get_default_context
+    from orcapod.logical_types.identifier import arrow_type_identifier
+
+    converter = get_default_context().type_converter
+    extension = converter.python_type_to_arrow_type(Path)
+    assert isinstance(extension, pa.ExtensionType)
+    field = pa.field("value", extension, nullable=False)
+    nested = {
+        "list": pa.large_list(field),
+        "struct": pa.struct([field]),
+        "map": pa.map_(pa.large_string(), extension),
+        "fixed_list": pa.list_(field, 2),
+    }[container]
+    text = serialize_schema({"payload": nested})["payload"]
+    assert arrow_type_identifier(extension).text in text
+    assert parse_arrow_type_string(text, converter) == nested
 
 
 def test_database_registry_register_returns_key():
@@ -196,7 +219,18 @@ class TestResolveOperatorFromConfig:
 class TestPipelineFormatVersion:
     def test_version_is_string(self):
         assert isinstance(PIPELINE_FORMAT_VERSION, str)
-        assert PIPELINE_FORMAT_VERSION == "0.1.0"
+        assert PIPELINE_FORMAT_VERSION == "0.2.0"
+
+    def test_supported_versions_hold_current_and_previous(self):
+        from orcapod.pipeline.serialization import (
+            PIPELINE_JOB_FORMAT_VERSION,
+            SUPPORTED_FORMAT_VERSIONS,
+            SUPPORTED_JOB_FORMAT_VERSIONS,
+        )
+
+        assert PIPELINE_JOB_FORMAT_VERSION == "0.2.0"
+        assert SUPPORTED_FORMAT_VERSIONS == frozenset({"0.1.0", "0.2.0"})
+        assert SUPPORTED_JOB_FORMAT_VERSIONS == frozenset({"0.1.0", "0.2.0"})
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +278,44 @@ class TestParseArrowTypeStringPrimitives:
 
     def test_strips_whitespace(self):
         assert parse_arrow_type_string("  int64  ") == pa.int64()
+
+
+class TestParseArrowTypeStringParameterized:
+    """parse_arrow_type_string for parameterized types written as ``str(pa.DataType)``."""
+
+    @pytest.mark.parametrize(
+        "arrow_type",
+        [
+            pa.timestamp("s"),
+            pa.timestamp("us"),
+            pa.timestamp("us", tz="UTC"),
+            pa.timestamp("ns", tz="Europe/Berlin"),
+            pa.duration("ms"),
+            pa.time32("s"),
+            pa.time64("us"),
+            pa.date32(),
+            pa.date64(),
+            pa.decimal128(10, 2),
+            pa.decimal256(40, -3),
+        ],
+    )
+    def test_round_trips_its_canonical_string(self, arrow_type):
+        """Each type parses back from its own ``str()``."""
+        assert parse_arrow_type_string(str(arrow_type)) == arrow_type
+
+    @pytest.mark.parametrize(
+        "arrow_type",
+        [
+            pa.struct(
+                [("a", pa.timestamp("us", tz="UTC")), ("b", pa.decimal128(5, 1))]
+            ),
+            pa.large_list(pa.timestamp("us", tz="UTC")),
+            pa.map_(pa.large_string(), pa.decimal256(40, 2)),
+        ],
+    )
+    def test_commas_inside_parameters_do_not_split_fields(self, arrow_type):
+        """A comma inside ``[...]`` or ``(...)`` is not a field separator."""
+        assert parse_arrow_type_string(str(arrow_type)) == arrow_type
 
 
 class TestParseArrowTypeStringNested:
@@ -584,7 +656,9 @@ def test_cached_source_to_config_no_identity_fields():
     src = CachedSource(source=inner, cache_database=db, cache_path_prefix=("cache",))
     config = src.to_config()
     for field in ("content_hash", "pipeline_hash", "tag_schema", "data_schema"):
-        assert field not in config, f"Identity field {field!r} must not be in source_config"
+        assert field not in config, (
+            f"Identity field {field!r} must not be in source_config"
+        )
 
 
 def test_cached_source_from_config_with_registry_resolves_key():
@@ -637,7 +711,9 @@ def test_cached_source_to_config_forwards_db_registry_to_inner_source():
     registry = DatabaseRegistry()
     config = outer_cached.to_config(db_registry=registry)
 
-    assert isinstance(config["cache_database"], str), "outer cache_database should be a key"
+    assert isinstance(config["cache_database"], str), (
+        "outer cache_database should be a key"
+    )
     # Inner source's cache_database must also use the registry key, not inline dict
     assert isinstance(config["inner_source"]["cache_database"], str), (
         "inner cache_database should be a registry key when db_registry is forwarded"
@@ -691,15 +767,15 @@ def test_source_proxy_from_node_descriptor_fields():
 
     source_config = {"source_type": "dict", "source_id": "my_src"}
     node_descriptor = {
-        "content_hash": "semantic_v0.1:abc123",
-        "pipeline_hash": "semantic_v0.1:def456",
+        "content_hash": f"{SEMANTIC_HASH_LABEL}:abc123",
+        "pipeline_hash": f"{SEMANTIC_HASH_LABEL}:def456",
         "output_schema": {
             "tag": {"x": "int64"},
             "data": {"result": "int64"},
         },
     }
     proxy = _source_proxy_from_config(source_config, node_descriptor=node_descriptor)
-    assert proxy.content_hash().to_string() == "semantic_v0.1:abc123"
+    assert proxy.content_hash().to_string() == f"{SEMANTIC_HASH_LABEL}:abc123"
 
 
 def test_source_proxy_from_config_backward_compat():
@@ -709,13 +785,13 @@ def test_source_proxy_from_config_backward_compat():
     source_config = {
         "source_type": "dict",
         "source_id": "my_src",
-        "content_hash": "semantic_v0.1:abc123",
-        "pipeline_hash": "semantic_v0.1:def456",
+        "content_hash": f"{SEMANTIC_HASH_LABEL}:abc123",
+        "pipeline_hash": f"{SEMANTIC_HASH_LABEL}:def456",
         "tag_schema": {"x": "int64"},
         "data_schema": {"result": "int64"},
     }
     proxy = _source_proxy_from_config(source_config)
-    assert proxy.content_hash().to_string() == "semantic_v0.1:abc123"
+    assert proxy.content_hash().to_string() == f"{SEMANTIC_HASH_LABEL}:abc123"
 
 
 # ---------------------------------------------------------------------------
@@ -733,7 +809,9 @@ def test_function_node_has_node_uri():
     def add_one(x: int) -> int:
         return x + 1
 
-    source = SourceNode("source", tag_schema=Schema({"id": str}), data_schema=Schema({"x": int}))
+    source = SourceNode(
+        "source", tag_schema=Schema({"id": str}), data_schema=Schema({"x": int})
+    )
     pf = PythonDataFunction(add_one, output_keys="result")
     pod = FunctionPod(data_function=pf)
 
@@ -756,14 +834,16 @@ def test_function_node_stored_node_uri_from_descriptor():
     descriptor = {
         "node_type": "function",
         "label": "fn",
-        "content_hash": "semantic_v0.1:abc",
-        "pipeline_hash": "semantic_v0.1:def",
+        "content_hash": f"{SEMANTIC_HASH_LABEL}:abc",
+        "pipeline_hash": f"{SEMANTIC_HASH_LABEL}:def",
         "table_scope": "pipeline_hash",
         "node_uri": ["add_one", "v0", "python.function.v0", "schema_repr"],
         "output_schema": {"tag": {"x": "int64"}, "data": {"result": "int64"}},
-        "data_context_key": "std:v0.1:default",
+        "data_context_key": "std:v1:default",
     }
-    node = FunctionNode.from_descriptor(descriptor, function_pod=None, input_stream=None, databases={})
+    node = FunctionNode.from_descriptor(
+        descriptor, function_pod=None, input_stream=None, databases={}
+    )
     assert node.node_uri == ("add_one", "v0", "python.function.v0", "schema_repr")
 
 
@@ -773,8 +853,12 @@ def test_operator_node_has_node_uri():
     from orcapod.pipeline import Pipeline
     from orcapod.types import Schema
 
-    src_a = SourceNode("src_a", tag_schema=Schema({"key": str}), data_schema=Schema({"val_a": int}))
-    src_b = SourceNode("src_b", tag_schema=Schema({"key": str}), data_schema=Schema({"val_b": int}))
+    src_a = SourceNode(
+        "src_a", tag_schema=Schema({"key": str}), data_schema=Schema({"val_a": int})
+    )
+    src_b = SourceNode(
+        "src_b", tag_schema=Schema({"key": str}), data_schema=Schema({"val_b": int})
+    )
 
     pipeline = Pipeline(name="test")
     with pipeline:

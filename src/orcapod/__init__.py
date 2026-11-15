@@ -1,3 +1,13 @@
+try:
+    from ._version import __version__
+except ImportError:  # source tree without the hatch-vcs generated _version.py
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        __version__ = version("orcapod")
+    except PackageNotFoundError:
+        __version__ = "0.0.0+unknown"
+
 from .config import (
     DEFAULT_CONFIG,
     DisplayConfig,
@@ -5,6 +15,7 @@ from .config import (
     OrcapodConfig,
     load_config,
 )
+from .contexts import enable_file_hash_caching
 from .core.function_pod import (
     FunctionPod,
     function_pod,
@@ -23,6 +34,7 @@ from .side_effects import (
 )
 from .core.nodes.source_node import SourceNode
 from .pipeline import Pipeline, PipelineJob
+
 # Subpackage re-exports for clean public API
 from . import databases  # noqa: F401
 from . import nodes  # noqa: F401
@@ -49,6 +61,9 @@ from orcapod.logical_types.directory_type import Directory
 # Extension registration API (ITL-473)
 from .extensions import OrcapodExtension, register_extension
 
+# Your own data types: a dataclass identified by its name and fields (ITL-972)
+from .structural import dataclass
+
 # Post-run hook types (ITL-523)
 from .hooks import (
     HookConfig,
@@ -61,11 +76,13 @@ from .hooks import (
 )
 
 __all__ = [
+    "__version__",
     "DEFAULT_CONFIG",
     "DisplayConfig",
     "HashingConfig",
     "OrcapodConfig",
     "load_config",
+    "enable_file_hash_caching",
     "FunctionPod",
     "function_pod",
     "InvocationContext",
@@ -94,6 +111,8 @@ __all__ = [
     # Extension registration API (ITL-473)
     "OrcapodExtension",
     "register_extension",
+    # Your own data types (ITL-972)
+    "dataclass",
     # Post-run hook types (ITL-523)
     "HookConfig",
     "InvocationStatus",
@@ -103,5 +122,3 @@ __all__ = [
     "PostRunPayload",
     "RunStats",
 ]
-
-

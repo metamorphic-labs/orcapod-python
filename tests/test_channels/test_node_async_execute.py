@@ -20,10 +20,6 @@ import pytest
 from orcapod.channels import Channel
 from orcapod.core.datagrams import Data
 from orcapod.core.function_pod import FunctionPod
-from orcapod.core.nodes import (
-    FunctionNode,
-    OperatorNode,
-)
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.nodes.operator_node import OperatorJobNode
 from orcapod.core.operators import SelectDataColumns
@@ -32,7 +28,7 @@ from orcapod.core.operators.semijoin import SemiJoin
 from orcapod.core.data_function import CachedDataFunction, PythonDataFunction
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
-from orcapod.types import CacheMode, NodeConfig, PodConfig
+from orcapod.types import CacheMode, PodConfig
 
 
 # ---------------------------------------------------------------------------
@@ -42,10 +38,16 @@ from orcapod.types import CacheMode, NodeConfig, PodConfig
 
 def make_stream(n: int = 5) -> ArrowTableStream:
     schema = pa.schema(
-        [pa.field("id", pa.int64(), nullable=False), pa.field("x", pa.int64(), nullable=False)]
+        [
+            pa.field("id", pa.int64(), nullable=False),
+            pa.field("x", pa.int64(), nullable=False),
+        ]
     )
     table = pa.table(
-        {"id": pa.array(list(range(n)), type=pa.int64()), "x": pa.array(list(range(n)), type=pa.int64())},
+        {
+            "id": pa.array(list(range(n)), type=pa.int64()),
+            "x": pa.array(list(range(n)), type=pa.int64()),
+        },
         schema=schema,
     )
     return ArrowTableStream(table, tag_columns=["id"])
@@ -565,7 +567,7 @@ class TestOperatorNodeAsyncExecute:
 # ---------------------------------------------------------------------------
 
 
-class TestOperatorNodeAsyncExecute:
+class TestOperatorNodeAsyncExecuteCacheModes:
     @pytest.mark.asyncio
     async def test_off_mode_no_db_write(self):
         stream = make_two_col_stream(3)
@@ -683,9 +685,9 @@ class TestExecuteDataRouting:
         # Monkey-patch to verify routing through internal path
         original = node._process_data_internal
 
-        def patched(tag, data, *, logger=None, run_id=None):
+        def patched(tag, data, **kwargs):
             call_log.append("_process_data_internal")
-            return original(tag, data, logger=logger, run_id=run_id)
+            return original(tag, data, **kwargs)
 
         node._process_data_internal = patched
 

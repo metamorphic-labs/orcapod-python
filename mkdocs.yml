@@ -1,6 +1,5 @@
 site_name: Orcapod
 site_description: Intuitive and powerful library for highly reproducible scientific data pipelines
-repo_url: https://github.com/metamorphic-labs/orcapod-python
 
 theme:
   name: material
@@ -53,10 +52,12 @@ nav:
     - Operators: concepts/operators.md
     - Function Pods: concepts/function-pods.md
     - Pipelines and Jobs: concepts/pipeline-job.md
+    - Your Own Data Types: concepts/your-own-data-types.md
+    - Arrays and Tensors: concepts/arrays.md
+    - Logical Type Identifiers: concepts/logical-type-identifiers.md
     - Identity & Hashing: concepts/identity.md
     - File and Path Types: concepts/file-types.md
     - File Hash Caching: concepts/file-hash-caching.md
-  - Troubleshooting: troubleshooting.md
   - API Reference:
     - Overview: api/index.md
     - Sources: api/sources.md
@@ -69,3 +70,4 @@ nav:
     - Types: api/types.md
   - Reference:
     - Hashing: reference/hashing.md
+  - Troubleshooting: troubleshooting.md

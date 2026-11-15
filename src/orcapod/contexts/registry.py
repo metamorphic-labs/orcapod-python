@@ -13,12 +13,14 @@ import logging
 from pathlib import Path
 from typing import Any
 
-_JSONSCHEMA_AVAILABLE = importlib.util.find_spec("jsonschema") is not None
-
 from orcapod.contexts.core import (
     ContextResolutionError,
     ContextValidationError,
     DataContext,
+)
+from orcapod.system_constants import (
+    PRE_V1_DATA_CONTEXT_KEY,
+    PRE_V1_DATA_CONTEXT_VERSION,
 )
 from orcapod.utils.object_spec import parse_objectspec
 
@@ -31,6 +33,53 @@ if not _JSONSCHEMA_AVAILABLE:
     logger.info("jsonschema not available, skipping schema validation")
 
 
+def _object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Build one JSON object, refusing a key that occurs twice.
+
+    ``json.load`` alone keeps the last of two equal keys and drops the others. A merge of
+    two branches that each add the same object to a data context file can produce such a
+    file without a conflict, so the entries of one branch would vanish silently.
+
+    Args:
+        pairs: The object's members in file order, as ``json`` passes them to an
+            ``object_pairs_hook``.
+
+    Returns:
+        The object as a ``dict``.
+
+    Raises:
+        ValueError: If a key occurs more than once; the message names the key.
+    """
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"a JSON object repeats the key {key!r}")
+        result[key] = value
+    return result
+
+
+def _read_json_file(path: Path) -> Any:
+    """Read a data context JSON file, refusing duplicate keys at any depth.
+
+    Args:
+        path: The file to read.
+
+    Returns:
+        The parsed document.
+
+    Raises:
+        ContextValidationError: If an object in the file repeats a key; the message
+            names the file and the key.
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        try:
+            return json.load(f, object_pairs_hook=_object_without_duplicate_keys)
+        except ValueError as error:
+            if isinstance(error, json.JSONDecodeError):
+                raise
+            raise ContextValidationError(f"{path}: {error}") from error
+
+
 class JSONDataContextRegistry:
     """
     Registry that loads data contexts from JSON files with validation.
@@ -40,14 +89,15 @@ class JSONDataContextRegistry:
     - Validates JSON structure against schema
     - Lazy loading with caching
     - Robust error handling and logging
-    - Context string resolution (e.g., "v0.1", "std:v0.1:default")
+    - Context string resolution (e.g., "v1", "std:v1:default")
     """
 
     def __init__(
         self,
         contexts_dir: Path | str | None = None,
         schema_file: Path | str | None = None,
-        default_version: str = "v0.1",
+        default_version: str = "v1",
+        logical_types_file: Path | str | None = None,
     ):
         """
         Initialize the context registry.
@@ -56,6 +106,11 @@ class JSONDataContextRegistry:
             contexts_dir: Directory containing JSON context files
             schema_file: JSON schema file for validation (optional)
             default_version: Default context version to use
+            logical_types_file: The logical type registration: the registered logical
+                types and the value handlers that hash their Python values. Defaults
+                to ``logical_types.json`` of the ``orcapod.contexts`` package. It is
+                kept outside the context files because a data context file is frozen
+                once released, while logical types are added independently.
         """
         # Set up paths
         if contexts_dir is None:
@@ -65,6 +120,10 @@ class JSONDataContextRegistry:
         if schema_file is None:
             schema_file = self.contexts_dir / "schemas" / "context_schema.json"
         self.schema_file = Path(schema_file) if schema_file else None
+
+        if logical_types_file is None:
+            logical_types_file = Path(__file__).parent / "logical_types.json"
+        self.logical_types_file = Path(logical_types_file)
 
         # Internal state
         self._specs: dict[str, dict[str, Any]] = {}
@@ -93,9 +152,11 @@ class JSONDataContextRegistry:
         """Load JSON schema for validation if available."""
         if self.schema_file and self.schema_file.exists():
             try:
-                with open(self.schema_file, "r") as f:
-                    self._schema = json.load(f)
+                self._schema = _read_json_file(self.schema_file)
                 logger.info(f"Loaded validation schema from {self.schema_file}")
+            except ContextValidationError:
+                # A schema file that repeats a key is refused like any other context file.
+                raise
             except Exception as e:
                 logger.warning(f"Failed to load schema from {self.schema_file}: {e}")
                 self._schema = None
@@ -125,11 +186,10 @@ class JSONDataContextRegistry:
 
     def _load_spec_file(self, json_file: Path) -> None:
         """Load and validate a single context specification file."""
-        version = json_file.stem  # e.g., "v0.1" from "v0.1.json"
+        version = json_file.stem  # e.g., "v1" from "v1.json"
 
         # Load JSON
-        with open(json_file, "r") as f:
-            spec = json.load(f)
+        spec = _read_json_file(json_file)
 
         # Validate basic structure
         if not isinstance(spec, dict):
@@ -159,6 +219,7 @@ class JSONDataContextRegistry:
         # Validate against JSON schema if available
         if self._schema and _JSONSCHEMA_AVAILABLE:
             import jsonschema  # noqa: PLC0415 – deferred to keep startup fast
+
             try:
                 jsonschema.validate(spec, self._schema)
             except jsonschema.ValidationError as e:
@@ -194,8 +255,8 @@ class JSONDataContextRegistry:
 
         Supports various formats:
         - None -> default version
-        - "v0.1" -> "v0.1"
-        - "std:v0.1:default" -> "v0.1" (extract version from full key)
+        - "v1" -> "v1"
+        - "std:v1:default" -> "v1" (extract version from full key)
         - "latest" -> highest version number
         """
         if context_string is None:
@@ -206,11 +267,11 @@ class JSONDataContextRegistry:
             versions = self.get_available_versions()
             return versions[-1] if versions else self._default_version
 
-        # If it looks like a simple version (v0.1), use directly
+        # If it looks like a simple version (v1), use directly
         if context_string.startswith("v") and ":" not in context_string:
             return context_string
 
-        # If it looks like a full context key (std:v0.1:default), extract version
+        # If it looks like a full context key (std:v1:default), extract version
         if ":" in context_string:
             parts = context_string.split(":")
             if len(parts) >= 2 and parts[1].startswith("v"):
@@ -236,12 +297,34 @@ class JSONDataContextRegistry:
             # Resolve to version
             version = self.resolve_context_string(context_string)
 
+            # A full key selects its manifest by the version part only, so the
+            # whole key must be the one that manifest defines.
+            if (
+                context_string is not None
+                and ":" in context_string
+                and version in self._specs
+                and context_string != self._specs[version]["context_key"]
+            ):
+                raise ContextResolutionError(
+                    f"Unknown data context {context_string!r}: version "
+                    f"{version!r} is the data context "
+                    f"{self._specs[version]['context_key']!r}."
+                )
+
             # Return cached context if available
             if version in self._contexts:
                 logger.debug(f"Returning cached context for version {version}")
                 return self._contexts[version]
 
             # Validate version exists
+            if version not in self._specs and version == PRE_V1_DATA_CONTEXT_VERSION:
+                raise ContextResolutionError(
+                    f"The data context {PRE_V1_DATA_CONTEXT_KEY!r} is the one of "
+                    "Orcapod before v0.3. This version of Orcapod does not ship its "
+                    "manifest and cannot hash under it; the old manifest and its "
+                    "code are to be kept in orcapod-sanctuary. Use an Orcapod "
+                    "version before v0.3 for stores and jobs written under it."
+                )
             if version not in self._specs:
                 available = ", ".join(self.get_available_versions())
                 raise ContextResolutionError(
@@ -267,7 +350,59 @@ class JSONDataContextRegistry:
                 )
 
     # Top-level keys that are metadata, not instantiable components.
-    _METADATA_KEYS = frozenset({"context_key", "version", "description", "metadata"})
+    _METADATA_KEYS = frozenset(
+        {
+            "context_key",
+            "version",
+            "description",
+            "metadata",
+            "released_in",
+            "previous",
+            "definitions",
+            "libraries",
+            "golden",
+            "changes",
+        }
+    )
+
+    # A context file that takes its logical types from the registration file refers
+    # to them by this name, as ``{"_ref": "logical_type_registry"}``.
+    _LOGICAL_TYPE_REGISTRY_REF = "logical_type_registry"
+
+    # The ignore list declared for an extension name in the registration file's
+    # ``hash_ignore`` object is referred to as ``hash_ignore:<extension name>``.
+    _HASH_IGNORE_REF_PREFIX = "hash_ignore:"
+
+    # The registration file's ``provisional`` list (extension names of the types
+    # whose value hash is provisional, ITL-1068) is referred to by this name.
+    _PROVISIONAL_REF = "provisional"
+
+    def _uses_logical_type_registration(self, spec: dict[str, Any]) -> bool:
+        """Whether ``spec`` takes its logical types from the registration file.
+
+        True when its type converter is configured with
+        ``{"_ref": "logical_type_registry"}`` and the spec defines no component of
+        that name itself. A spec that lists its logical types inline is built as is.
+        """
+        if self._LOGICAL_TYPE_REGISTRY_REF in spec:
+            return False
+        converter_config = spec["type_converter"].get("_config", {})
+        return converter_config.get("logical_type_registry") == {
+            "_ref": self._LOGICAL_TYPE_REGISTRY_REF
+        }
+
+    def _load_logical_type_registration(self) -> dict[str, Any]:
+        """Read the logical type registration file.
+
+        Returns:
+            Its ``logical_type_registry`` object spec, its ``value_handlers`` list
+            of ``[type, handler]`` object-spec pairs and, when present, its
+            ``deferred_value_handlers`` list of handlers loaded on first use and
+            its ``hash_ignore`` object: per extension name, the property names the
+            value hash of that type ignores; and its ``provisional`` list: the
+            extension names of the types whose value hash is provisional.
+        """
+        return _read_json_file(self.logical_types_file)
 
     def _create_context_from_spec(self, spec: dict[str, Any]) -> DataContext:
         """Create DataContext instance from validated specification.
@@ -285,12 +420,67 @@ class JSONDataContextRegistry:
             description = spec.get("description", "")
             ref_lut: dict[str, Any] = {}
 
+            # The registered logical types live outside the (frozen) context file.
+            registration: dict[str, Any] | None = None
+            if self._uses_logical_type_registration(spec):
+                registration = self._load_logical_type_registration()
+                # The ignore list of each library value type is declared once, by
+                # extension name; its logical type and its value handler both take
+                # it as ``{"_ref": "hash_ignore:<extension name>"}`` (ITL-981).
+                for name, ignore in registration.get("hash_ignore", {}).items():
+                    # A JSON object or string would iterate as names; only a list
+                    # of names is a list of names.
+                    if not isinstance(ignore, list) or not all(
+                        isinstance(item, str) for item in ignore
+                    ):
+                        raise ValueError(
+                            f"hash_ignore[{name!r}] must be a list of property "
+                            f"names, got {ignore!r}"
+                        )
+                    ref_lut[f"{self._HASH_IGNORE_REF_PREFIX}{name}"] = list(ignore)
+                # The types whose value hash is provisional are declared once, by
+                # extension name; the logical type registry takes the list as
+                # ``{"_ref": "provisional"}`` and the value handler registry below
+                # is given it. It never enters an identifier or a hash (ITL-1068).
+                provisional = registration.get(self._PROVISIONAL_REF, [])
+                if not isinstance(provisional, list) or not all(
+                    isinstance(item, str) for item in provisional
+                ):
+                    raise ValueError(
+                        f"provisional must be a list of extension names, got "
+                        f"{provisional!r}"
+                    )
+                ref_lut[self._PROVISIONAL_REF] = list(provisional)
+                ref_lut[self._LOGICAL_TYPE_REGISTRY_REF] = parse_objectspec(
+                    registration["logical_type_registry"], ref_lut=ref_lut
+                )
+
             for key, value in spec.items():
                 if key in self._METADATA_KEYS:
                     continue
                 if isinstance(value, dict) and "_class" in value:
                     logger.debug(f"Creating {key} for context {version}")
                     ref_lut[key] = parse_objectspec(value, ref_lut=ref_lut)
+
+            # The value handlers of the logical types join the core handlers of the
+            # context file; they may refer to its components (``file_hasher`` ...).
+            if registration is not None:
+                handler_registry = ref_lut["python_type_handler_registry"]
+                for pair_spec in registration["value_handlers"]:
+                    # As for the handlers of the context file: a pair whose type or
+                    # handler is optional and not installed is skipped.
+                    pair = parse_objectspec(pair_spec, ref_lut=ref_lut)
+                    if pair and len(pair) == 2 and all(x is not None for x in pair):
+                        handler_registry.register(pair[0], pair[1])
+                # Handlers of optional value types are named, not built: the
+                # library is imported when a value of the type is first hashed.
+                for entry in registration.get("deferred_value_handlers", []):
+                    handler_registry.register_deferred(
+                        entry["python_type"],
+                        entry["handler"],
+                        parse_objectspec(entry.get("_config", {}), ref_lut=ref_lut),
+                    )
+                handler_registry.declare_provisional(ref_lut[self._PROVISIONAL_REF])
 
             return DataContext(
                 context_key=context_key,

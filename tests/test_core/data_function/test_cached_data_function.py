@@ -85,19 +85,24 @@ class TestConstruction:
 
     def test_record_path_ends_with_schema_version(self, cached_pf):
         from orcapod.system_constants import RESULT_DB_SCHEMA_VERSION
+
         assert cached_pf.record_path[-1] == RESULT_DB_SCHEMA_VERSION
 
     def test_record_path_contains_inner_uri(self, cached_pf, inner_pf):
         """record_path is inner_pf.uri + (RESULT_DB_SCHEMA_VERSION,)."""
         from orcapod.system_constants import RESULT_DB_SCHEMA_VERSION
+
         assert cached_pf.record_path == inner_pf.uri + (RESULT_DB_SCHEMA_VERSION,)
 
     def test_record_path_prefix_prepended(self, inner_pf, db):
         from orcapod.system_constants import RESULT_DB_SCHEMA_VERSION
+
         cpf = CachedDataFunction(
             inner_pf, result_database=db, record_path_prefix=("org", "project")
         )
-        assert cpf.record_path == ("org", "project") + inner_pf.uri + (RESULT_DB_SCHEMA_VERSION,)
+        assert cpf.record_path == ("org", "project") + inner_pf.uri + (
+            RESULT_DB_SCHEMA_VERSION,
+        )
 
     def test_auto_flush_true_by_default(self, cached_pf):
         assert cached_pf._cache._auto_flush is True
@@ -470,17 +475,13 @@ class TestRecordDataColumns:
 
 
 class TestGetAllCachedOutputsSystemColumns:
-    def test_include_system_columns_true_exposes_record_id(
-        self, cached_pf, input_data
-    ):
+    def test_include_system_columns_true_exposes_record_id(self, cached_pf, input_data):
         cached_pf.call(input_data)
         table = cached_pf.get_all_cached_outputs(include_system_columns=True)
         assert table is not None
         assert constants.DATA_RECORD_ID in table.column_names
 
-    def test_include_system_columns_false_hides_record_id(
-        self, cached_pf, input_data
-    ):
+    def test_include_system_columns_false_hides_record_id(self, cached_pf, input_data):
         cached_pf.call(input_data)
         table = cached_pf.get_all_cached_outputs(include_system_columns=False)
         assert table is not None
@@ -564,3 +565,41 @@ class TestResultComputedFlag:
         assert result is not None
         flag = result.get_meta_value(CachedDataFunction.RESULT_COMPUTED_FLAG)
         assert flag is True
+
+
+class TestWrapperDataContext:
+    """A wrapper works under the data context of the function it wraps (ITL-967)."""
+
+    def test_wrapper_inherits_the_wrapped_functions_data_context(self):
+        """Without a ``data_context`` of its own, the wrapper takes the function's."""
+        from orcapod.contexts import create_registry, get_default_context
+
+        def add(x: int, y: int) -> int:
+            """Add two integers."""
+            return x + y
+
+        other = create_registry().get_context()
+        assert other is not get_default_context()
+        inner = PythonDataFunction(add, output_keys="result", data_context=other)
+        wrapper = CachedDataFunction(
+            inner,  # pyright: ignore[reportArgumentType]  # PythonDataFunction does not match DataFunctionProtocol for the checker
+            result_database=InMemoryArrowDatabase(),
+        )
+        assert wrapper.data_context is other
+
+    def test_an_explicit_data_context_wins(self):
+        """A ``data_context`` given to the wrapper is kept."""
+        from orcapod.contexts import create_registry, get_default_context
+
+        def add(x: int, y: int) -> int:
+            """Add two integers."""
+            return x + y
+
+        other = create_registry().get_context()
+        inner = PythonDataFunction(add, output_keys="result", data_context=other)
+        wrapper = CachedDataFunction(
+            inner,  # pyright: ignore[reportArgumentType]  # PythonDataFunction does not match DataFunctionProtocol for the checker
+            result_database=InMemoryArrowDatabase(),
+            data_context=get_default_context(),
+        )
+        assert wrapper.data_context is get_default_context()

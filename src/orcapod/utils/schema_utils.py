@@ -4,8 +4,10 @@ import inspect
 import logging
 import sys
 from collections.abc import Callable, Collection, Mapping, Sequence
-from typing import Any, get_args, get_origin, get_type_hints
+from types import UnionType
+from typing import Any, Union, get_args, get_origin, get_type_hints
 
+from orcapod.errors import InputValidationError
 from orcapod.types import Schema, SchemaLike
 
 logger = logging.getLogger(__name__)
@@ -39,25 +41,97 @@ def verify_data_schema(data: dict, schema: SchemaLike) -> bool:
 def check_schema_compatibility(
     incoming_types: SchemaLike, receiving_types: Schema
 ) -> bool:
+    """Return whether ``incoming_types`` can be passed to ``receiving_types``.
+
+    See ``schema_incompatibility`` for the rules and for the reason when the
+    answer is no.
+
+    Args:
+        incoming_types: Schema of the data offered (e.g. a stream's data schema).
+        receiving_types: Schema of the parameters that receive it.
+
+    Returns:
+        True if every incoming column is a parameter of a compatible type and
+        every required parameter has a column.
+    """
+    return schema_incompatibility(incoming_types, receiving_types) is None
+
+
+def _type_label(type_info: Any) -> str:
+    """Return a short, readable label for a type in an error message."""
+    if isinstance(type_info, type) and not get_args(type_info):
+        return type_info.__name__
+    return str(type_info)
+
+
+def _union_members(hint: Any) -> tuple[Any, ...] | None:
+    """Return the members of a union hint, or ``None`` if ``hint`` is not a union."""
+    if get_origin(hint) in (Union, UnionType):
+        return get_args(hint)
+    return None
+
+
+def _accepts(incoming: Any, receiving: Any) -> bool:
+    """Return True if a value typed ``incoming`` can be passed where ``receiving`` is expected.
+
+    ``incoming`` must be a subhint of ``receiving``, or the same type up to user-class
+    identity (a class and its re-definition are one type). A receiving union accepts
+    what one of its members accepts; an incoming union needs every member accepted.
+
+    Args:
+        incoming: The type hint of the value offered.
+        receiving: The type hint of the parameter.
+
+    Returns:
+        Whether the value can be passed.
+    """
     from beartype.door import is_subhint
 
+    from orcapod.logical_types.user_class_identity import equivalent_hints
+
+    if is_subhint(incoming, receiving) or equivalent_hints(incoming, receiving):
+        return True
+    incoming_members = _union_members(incoming)
+    if incoming_members is not None:
+        return all(_accepts(member, receiving) for member in incoming_members)
+    receiving_members = _union_members(receiving)
+    if receiving_members is not None:
+        return any(_accepts(incoming, member) for member in receiving_members)
+    return False
+
+
+def schema_incompatibility(
+    incoming_types: SchemaLike, receiving_types: Schema
+) -> str | None:
+    """Explain why ``incoming_types`` cannot be passed to ``receiving_types``.
+
+    Every incoming column must be a parameter, its type must be a subhint of
+    the parameter's type, and every parameter without a default must have a
+    column. Nothing is logged: the caller decides how to report the reason.
+
+    Args:
+        incoming_types: Schema of the data offered (e.g. a stream's data schema).
+        receiving_types: Schema of the parameters that receive it.
+
+    Returns:
+        ``None`` when the schemas are compatible, otherwise a one-line reason
+        naming the first offending column or parameter.
+    """
     for key, type_info in incoming_types.items():
         if key not in receiving_types:
-            logger.warning(f"Key '{key}' not found in parameter types.")
-            return False
-        if not is_subhint(type_info, receiving_types[key]):
-            logger.warning(
-                f"Type mismatch for key '{key}': expected {receiving_types[key]}, got {type_info}."
+            return f"column '{key}' is not a parameter of the function"
+        if not _accepts(type_info, receiving_types[key]):
+            return (
+                f"column '{key}' has type {_type_label(type_info)}, "
+                f"the function expects {_type_label(receiving_types[key])}"
             )
-            return False
 
     # Every receiving key must be present in incoming OR be optional (has a default)
     for key in receiving_types:
         if key not in incoming_types and key not in receiving_types.optional_fields:
-            logger.warning(f"Required key '{key}' missing from incoming types.")
-            return False
+            return f"required parameter '{key}' has no matching column"
 
-    return True
+    return None
 
 
 def extract_function_schemas(
@@ -408,9 +482,9 @@ def compute_schema_hash(
         Hex string — full digest length when ``char_count`` is ``None``,
         otherwise truncated to ``char_count`` characters.
     """
-    return semantic_hasher.hash_object(
-        (tag_schema, data_schema)
-    ).to_hex(char_count=char_count)
+    return semantic_hasher.hash_object((tag_schema, data_schema)).to_hex(
+        char_count=char_count
+    )
 
 
 def compute_source_schema_hash(
@@ -479,3 +553,53 @@ def _normalize_column_list(value: Any) -> list[str]:
             f"got {[type(x).__name__ for x in bad]!r}"
         )
     return result
+
+
+def require_output_keys_not_tags(
+    tag_names: Collection[str], output_keys: Collection[str]
+) -> None:
+    """Raise if a function's output key is also a tag column of its input.
+
+    A name is a tag or a data column, never both, and a function pod keeps its
+    input's tags next to the data it produces.
+
+    Args:
+        tag_names: The tag column names of the pod's input.
+        output_keys: The names of the function's output data columns.
+
+    Raises:
+        InputValidationError: If a name is in both. The message names the output
+            key and the remedy.
+    """
+    for name in sorted(set(tag_names) & set(output_keys)):
+        raise InputValidationError(
+            f"function output key {name!r} is also a tag column of the input, and a "
+            + "name cannot be both a tag and a data column. Rename the output "
+            + "(the function's output key), or rename the tag with map_tags."
+        )
+
+
+def require_names_not_meta(names: Collection[str]) -> None:
+    """Raise if a tag or data column name starts with the reserved meta prefix.
+
+    Names starting with the meta prefix (``__``) are meta columns: a datagram
+    keeps them apart from its tags and data, and no operator carries them
+    (ITL-1080). A tag or data column given such a name would silently stop being
+    one on every path that rebuilds rows, so no stream, source or operator may
+    produce one.
+
+    Args:
+        names: Tag or data column names.
+
+    Raises:
+        InputValidationError: If a name starts with the meta prefix. The message
+            names the column.
+    """
+    from orcapod.system_constants import constants
+
+    for name in sorted(names):
+        if name.startswith(constants.META_PREFIX):
+            raise InputValidationError(
+                f"column name {name!r} starts with {constants.META_PREFIX!r}, which is "
+                "reserved for meta columns; a tag or data column needs another name."
+            )

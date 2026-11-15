@@ -2,9 +2,7 @@
 Tests for the new sources package.
 
 Covers:
-- RootSource: source_id, resolve_field default raises NotImplementedError
-- ArrowTableSource: resolve_field raises NotImplementedError (no longer supported)
-- DictSource / ListSource: inherit default resolve_field (not overridden)
+- RootSource: source_id
 - SourceRegistry: register, get, replace, collision behaviour, list_ids
 - source_info provenance token format in produced tables
 """
@@ -16,8 +14,6 @@ import pyarrow as pa
 
 from orcapod.core.sources import (
     ArrowTableSource,
-    DictSource,
-    ListSource,
     SourceRegistry,
     GLOBAL_SOURCE_REGISTRY,
 )
@@ -75,56 +71,6 @@ class TestSourceId:
 
 
 # ---------------------------------------------------------------------------
-# RootSource: default resolve_field raises NotImplementedError
-# ---------------------------------------------------------------------------
-
-
-class TestDefaultResolveField:
-    def test_dict_source_raises_not_implemented(self):
-        src = DictSource(
-            data=[{"id": 1, "val": "a"}, {"id": 2, "val": "b"}],
-            tag_columns=["id"],
-        )
-        with pytest.raises(NotImplementedError):
-            src.resolve_field("row_0", "val")
-
-    def test_list_source_raises_not_implemented(self):
-        src = ListSource(name="item", data=["x", "y", "z"])
-        with pytest.raises(NotImplementedError):
-            src.resolve_field("row_0", "item")
-
-    def test_error_message_contains_class_name_and_field(self):
-        src = DictSource(
-            data=[{"id": 1, "val": "a"}],
-            tag_columns=["id"],
-            source_id="test_source",
-        )
-        with pytest.raises(NotImplementedError, match="DictSource"):
-            src.resolve_field("row_0", "val")
-
-
-# ---------------------------------------------------------------------------
-# ArrowTableSource: resolve_field raises NotImplementedError
-# ---------------------------------------------------------------------------
-
-
-class TestArrowTableSourceResolveFieldNotSupported:
-    """ArrowTableSource no longer implements resolve_field; all calls raise."""
-
-    def setup_method(self):
-        self.src = _make_arrow_source()
-
-    def test_resolve_field_raises_not_implemented(self):
-        with pytest.raises(NotImplementedError):
-            self.src.resolve_field("row_0", "score")
-
-    def test_resolve_field_with_record_id_column_raises(self):
-        src = _make_arrow_source(record_id_column="user_id")
-        with pytest.raises(NotImplementedError):
-            src.resolve_field("user_id=u1", "score")
-
-
-# ---------------------------------------------------------------------------
 # ArrowTableSource: record_id_column validation
 # ---------------------------------------------------------------------------
 
@@ -133,7 +79,9 @@ class TestArrowTableSourceRecordIdColumnValidation:
     def test_nonexistent_record_id_column_raises_at_construction(self):
         table = pa.table({"x": pa.array([1, 2, 3], type=pa.int64())})
         with pytest.raises(ValueError, match="record_id_column"):
-            ArrowTableSource(table=table, record_id_column="nonexistent", infer_nullable=True)
+            ArrowTableSource(
+                table=table, record_id_column="nonexistent", infer_nullable=True
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -251,16 +199,7 @@ class TestSourceRegistry:
 
 
 class TestSourceRegistryRoundTrip:
-    """Registry + resolve_field end-to-end (now raises NotImplementedError)."""
-
-    def test_resolve_field_raises_not_implemented(self):
-        src = _make_arrow_source(source_id="sales", record_id_column="user_id")
-        registry = SourceRegistry()
-        registry.register("sales", src)
-
-        resolved_src = registry.get("sales")
-        with pytest.raises(NotImplementedError):
-            resolved_src.resolve_field("user_id=u2", "score")
+    """Registry round trip."""
 
     def test_global_registry_is_a_source_registry_instance(self):
         assert isinstance(GLOBAL_SOURCE_REGISTRY, SourceRegistry)

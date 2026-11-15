@@ -1,10 +1,10 @@
 # tests/test_core/nodes/test_function_node_empty_data.py
 """Tests for EmptyData integration in FunctionJobNode."""
+
 from __future__ import annotations
 
 import pyarrow as pa
 import pytest
-import asyncio
 
 from orcapod.core.data_function import PythonDataFunction
 from orcapod.core.datagrams import Data
@@ -13,8 +13,10 @@ from orcapod.core.function_pod import FunctionPod
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.sources import ArrowTableSource
 from orcapod.databases import InMemoryArrowDatabase
+from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
 from orcapod.system_constants import constants
 from orcapod.types import NodeConfig
+from orcapod.errors import EphemeralResultMissingError
 
 
 def double_value(value: int) -> int:
@@ -24,14 +26,17 @@ def double_value(value: int) -> int:
 @pytest.fixture
 def persistent_node():
     """FunctionJobNode with persistent databases, two input rows."""
-    table = pa.table({
-        "key": pa.array(["a", "b"], type=pa.large_string()),
-        "value": pa.array([1, 2], type=pa.int64()),
-    })
+    table = pa.table(
+        {
+            "key": pa.array(["a", "b"], type=pa.large_string()),
+            "value": pa.array([1, 2], type=pa.int64()),
+        }
+    )
     src = ArrowTableSource(table, tag_columns=["key"], infer_nullable=True)
     pod = FunctionPod(PythonDataFunction(double_value, output_keys="result"))
     return FunctionJobNode(
-        pod, src,
+        pod,
+        src,
         pipeline_database=InMemoryArrowDatabase(),
         result_database=InMemoryArrowDatabase(),
     )
@@ -44,7 +49,9 @@ class TestAddPipelineRecordStoresInputHash:
         for tag, data in node._input_stream.iter_data():
             node.execute_data(tag, data)
 
-        all_records = node._pipeline_database.get_all_records(node._versioned_pipeline_path)
+        all_records = node._pipeline_database.get_all_records(
+            node._versioned_pipeline_path
+        )
         assert all_records is not None
         assert constants.INPUT_DATA_HASH_COL in all_records.column_names
 
@@ -55,7 +62,9 @@ class TestAddPipelineRecordStoresInputHash:
         tag0, data0 = input_pairs[0]
         node.execute_data(tag0, data0)
 
-        all_records = node._pipeline_database.get_all_records(node._versioned_pipeline_path)
+        all_records = node._pipeline_database.get_all_records(
+            node._versioned_pipeline_path
+        )
         assert all_records is not None
         # v1 schema: INPUT_DATA_HASH_COL is binary (to_prefixed_digest())
         stored_hashes = all_records.column(constants.INPUT_DATA_HASH_COL).to_pylist()
@@ -65,14 +74,17 @@ class TestAddPipelineRecordStoresInputHash:
 @pytest.fixture
 def ephemeral_node():
     """FunctionJobNode with is_result_ephemeral=True and an ephemeral store."""
-    table = pa.table({
-        "key": pa.array(["a"], type=pa.large_string()),
-        "value": pa.array([1], type=pa.int64()),
-    })
+    table = pa.table(
+        {
+            "key": pa.array(["a"], type=pa.large_string()),
+            "value": pa.array([1], type=pa.int64()),
+        }
+    )
     src = ArrowTableSource(table, tag_columns=["key"], infer_nullable=True)
     pod = FunctionPod(PythonDataFunction(double_value, output_keys="result"))
     node = FunctionJobNode(
-        pod, src,
+        pod,
+        src,
         pipeline_database=InMemoryArrowDatabase(),
         result_database=None,
     )
@@ -129,7 +141,9 @@ class TestFetchJoinedRecordsEmptyData:
         assert result is not None
         token = next(iter(result.empty_data_tokens.values()))
         assert output0 is not None
-        assert token.cached_content_hash.to_string() == output0.content_hash().to_string()
+        assert (
+            token.cached_content_hash.to_string() == output0.content_hash().to_string()
+        )
 
 
 class TestLoadCachedEntriesEmptyData:
@@ -161,7 +175,18 @@ class TestLoadCachedEntriesEmptyData:
             assert isinstance(data, Data)
 
 
-from orcapod.errors import EphemeralResultMissingError
+def _entries(node: FunctionJobNode) -> list[tuple[TagProtocol, DataProtocol]]:
+    """The node's entries for its input rows, as its cache façade returns them.
+
+    These tests drive ``execute_data`` (one row, not a run), so the node shows no rows
+    of a run (ITL-1095); ``get_cached_results`` gives the entries it holds or has
+    stored, an ``EmptyData`` placeholder for a result whose ephemeral store is gone.
+    """
+    entry_ids = [
+        node.compute_base_entry_id(tag, data)
+        for tag, data in node._input_stream.iter_data()
+    ]
+    return list(node.get_cached_results(entry_ids).values())
 
 
 class TestProcessDataInternalEmptyData:
@@ -173,24 +198,27 @@ class TestProcessDataInternalEmptyData:
             node.execute_data(tag, data)
 
         # Step 2: Build a downstream node over the ephemeral node
-        table = pa.table({
-            "key": pa.array(["a"], type=pa.large_string()),
-            "value": pa.array([1], type=pa.int64()),
-        })
-        src = ArrowTableSource(table, tag_columns=["key"], infer_nullable=True)
+        table = pa.table(
+            {
+                "key": pa.array(["a"], type=pa.large_string()),
+                "value": pa.array([1], type=pa.int64()),
+            }
+        )
+        ArrowTableSource(table, tag_columns=["key"], infer_nullable=True)
 
         def triple_value(result: int) -> int:
             return result * 3
 
         pod = FunctionPod(PythonDataFunction(triple_value, output_keys="final"))
         downstream = FunctionJobNode(
-            pod, node,
+            pod,
+            node,
             pipeline_database=InMemoryArrowDatabase(),
             result_database=InMemoryArrowDatabase(),
         )
 
         # Step 3: Run downstream with real data to populate its result cache
-        for tag, data in node.iter_data():
+        for tag, data in _entries(node):
             downstream.execute_data(tag, data)
 
         # Step 4: Simulate upstream ephemeral expiry
@@ -198,7 +226,7 @@ class TestProcessDataInternalEmptyData:
         node._cached_output_datas.clear()
 
         # Step 5: Upstream now emits EmptyData
-        upstream_items = list(node.iter_data())
+        upstream_items = _entries(node)
         assert len(upstream_items) == 1
         tag_in, data_in = upstream_items[0]
         assert isinstance(data_in, EmptyData)
@@ -220,23 +248,26 @@ class TestProcessDataInternalEmptyData:
         node._cached_output_datas.clear()
 
         # Build a downstream node that has NEVER run before
-        table = pa.table({
-            "key": pa.array(["a"], type=pa.large_string()),
-            "value": pa.array([1], type=pa.int64()),
-        })
-        src = ArrowTableSource(table, tag_columns=["key"], infer_nullable=True)
+        table = pa.table(
+            {
+                "key": pa.array(["a"], type=pa.large_string()),
+                "value": pa.array([1], type=pa.int64()),
+            }
+        )
+        ArrowTableSource(table, tag_columns=["key"], infer_nullable=True)
 
         def triple_value(result: int) -> int:
             return result * 3
 
         pod = FunctionPod(PythonDataFunction(triple_value, output_keys="final"))
         downstream = FunctionJobNode(
-            pod, node,
+            pod,
+            node,
             pipeline_database=InMemoryArrowDatabase(),
             result_database=InMemoryArrowDatabase(),
         )
 
-        upstream_items = list(node.iter_data())
+        upstream_items = _entries(node)
         tag_in, data_in = upstream_items[0]
         assert isinstance(data_in, EmptyData)
 
@@ -254,7 +285,9 @@ class TestProcessDataInternalEmptyData:
 
 class TestAsyncProcessDataInternalEmptyData:
     @pytest.mark.asyncio
-    async def test_async_empty_data_cache_hit_returns_cached_result(self, ephemeral_node):
+    async def test_async_empty_data_cache_hit_returns_cached_result(
+        self, ephemeral_node
+    ):
         """Async path: downstream cache hit on EmptyData input returns the cached result.
 
         Covers ``_async_process_data_internal`` lines where the EmptyData guard
@@ -271,13 +304,14 @@ class TestAsyncProcessDataInternalEmptyData:
 
         pod = FunctionPod(PythonDataFunction(triple_value, output_keys="final"))
         downstream = FunctionJobNode(
-            pod, node,
+            pod,
+            node,
             pipeline_database=InMemoryArrowDatabase(),
             result_database=InMemoryArrowDatabase(),
         )
 
         # Populate downstream result cache with real data (sync)
-        for tag, data in node.iter_data():
+        for tag, data in _entries(node):
             downstream.execute_data(tag, data)
 
         # Simulate ephemeral expiry
@@ -285,7 +319,7 @@ class TestAsyncProcessDataInternalEmptyData:
         node._cached_output_datas.clear()
 
         # Upstream now emits EmptyData
-        upstream_items = list(node.iter_data())
+        upstream_items = _entries(node)
         assert len(upstream_items) == 1
         tag_in, data_in = upstream_items[0]
         assert isinstance(data_in, EmptyData)
@@ -316,12 +350,13 @@ class TestAsyncProcessDataInternalEmptyData:
 
         pod = FunctionPod(PythonDataFunction(triple_value, output_keys="final"))
         downstream = FunctionJobNode(
-            pod, node,
+            pod,
+            node,
             pipeline_database=InMemoryArrowDatabase(),
             result_database=InMemoryArrowDatabase(),
         )
 
-        upstream_items = list(node.iter_data())
+        upstream_items = _entries(node)
         tag_in, data_in = upstream_items[0]
         assert isinstance(data_in, EmptyData)
 
@@ -347,7 +382,9 @@ class TestAsyncProcessDataInternalEphemeralWrite:
         tag_out, output = await node._async_process_data_internal(tag, data)
 
         assert output is not None
-        all_records = node._pipeline_database.get_all_records(node._versioned_pipeline_path)
+        all_records = node._pipeline_database.get_all_records(
+            node._versioned_pipeline_path
+        )
         assert all_records is not None
         vals = all_records.column(constants.IS_EPHEMERAL_COL).to_pylist()
         assert all(v is True for v in vals)
@@ -361,7 +398,9 @@ class TestAsyncProcessDataInternalEphemeralWrite:
         _, output = await node._async_process_data_internal(tag, data)
 
         assert output is not None
-        all_records = node._pipeline_database.get_all_records(node._versioned_pipeline_path)
+        all_records = node._pipeline_database.get_all_records(
+            node._versioned_pipeline_path
+        )
         assert all_records is not None
         assert constants.OUTPUT_DATA_HASH_COL in all_records.column_names
         # v1 schema: OUTPUT_DATA_HASH_COL is binary (to_prefixed_digest())

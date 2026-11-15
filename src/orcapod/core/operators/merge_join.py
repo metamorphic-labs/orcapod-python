@@ -1,6 +1,15 @@
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from orcapod.core.operators.base import BinaryOperator
+from orcapod.core.operators.base import (
+    BinaryOperator,
+    require_shared_arrow_type,
+    require_tag_data_roles_agree,
+)
+from orcapod.core.operators.key_nullability import (
+    key_nullable,
+    reconcile_key_nullability,
+)
 from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import StreamProtocol
@@ -17,6 +26,103 @@ else:
     pl = LazyModule("polars")
 
 
+def _output_types(
+    left_types: "dict[str, pa.DataType]", right_types: "dict[str, pa.DataType]"
+) -> "dict[str, pa.DataType]":
+    """Return the Arrow type each input column takes in the output.
+
+    Every type is the large-normalized form of the input type
+    (``arrow_utils.normalize_to_large_types``); width, nullability and logical
+    types are never changed. A column in both inputs goes through
+    ``require_shared_arrow_type``, which either finds the shared normalized
+    type or raises.
+
+    Args:
+        left_types: Column name to Arrow type for one input table.
+        right_types: Column name to Arrow type for the other input table.
+
+    Returns:
+        Column name to its output Arrow type, for every column of either input.
+    """
+    resolved: dict[str, pa.DataType] = {}
+    for name in left_types.keys() | right_types.keys():
+        left_type, right_type = left_types.get(name), right_types.get(name)
+        if left_type is not None and right_type is not None:
+            resolved[name] = require_shared_arrow_type(
+                "MergeJoin", name, left_type, right_type
+            )
+        else:
+            known = left_type if left_type is not None else right_type
+            assert known is not None
+            resolved[name] = arrow_utils.normalize_to_large_types(known, keep_null=True)
+    return resolved
+
+
+def _identity_key(value: Any) -> Any:
+    """Order stored values as themselves (the default MergeJoin ordering)."""
+    return value
+
+
+def _storage_sort_key(
+    type_converter: Any, arrow_type: "pa.DataType"
+) -> Callable[[Any], Any]:
+    """Return the ordering key MergeJoin uses for a column's stored values.
+
+    The array logical type defines ``storage_sort_key`` (the value digest of the
+    stored array). A list of such values, at any depth (an array column after
+    ``GroupBy`` or ``Batch``), is ordered by the tuple of its elements' keys, with
+    ``None`` first. Every other type is ordered by its stored value as before.
+    General struct ordering is ITL-839.
+    """
+    if isinstance(arrow_type, pa.ExtensionType):
+        lt = type_converter.get_logical_type_by_arrow_extension_name(
+            arrow_type.extension_name
+        )
+        key = _logical_sort_key(lt)
+        if key is not None:
+            return key
+    return _identity_key
+
+
+def _logical_sort_key(logical_type: Any) -> Callable[[Any], Any] | None:
+    """Return a logical type's own ordering key for stored values, if it has one.
+
+    Args:
+        logical_type: A logical type, or ``None``.
+
+    Returns:
+        The type's ``storage_sort_key``; for a list logical type whose elements
+        have a key, a key ordering lists by their elements' keys; otherwise
+        ``None``.
+    """
+    key = getattr(logical_type, "storage_sort_key", None)
+    if callable(key):
+        return key
+    element = getattr(logical_type, "element_logical_type", None)
+    element_key = _logical_sort_key(element) if element is not None else None
+    if element_key is None:
+        return None
+
+    def list_key(storage_value: Any) -> tuple[Any, ...]:
+        """Return the ordering key of one stored list value.
+
+        A null list sorts before every non-null list. Non-null lists compare by
+        the tuple of their elements' keys, element by element in list order, so
+        a list that is a prefix of another sorts first.
+
+        Args:
+            storage_value: The stored list, or ``None`` for a null list.
+
+        Returns:
+            ``(0,)`` for a null list, otherwise ``(1, element keys...)``.
+        """
+        if storage_value is None:
+            return (0,)
+        return (1, tuple(element_key(v) for v in storage_value))
+
+    return list_key
+
+
 class MergeJoin(BinaryOperator):
     """
     Binary operator that joins two streams, merging colliding data columns
@@ -30,6 +136,24 @@ class MergeJoin(BinaryOperator):
     For non-colliding columns, values are kept as scalars (same as regular Join).
 
     Tag columns use inner join on shared tags, with union of tag schemas.
+
+    Arrow types: every output column takes the large-normalized form of its
+    input Arrow type (``string`` becomes ``large_string``, ``list`` becomes
+    ``large_list``, recursively; the Arrow hasher treats the two variants as
+    identical), and nothing is inferred from Python values. Integer and float
+    width, nullability and logical (extension) types are kept. A merged column
+    is ``large_list<T>`` where ``T`` is the normalized input element type,
+    built by ``arrow_utils.aggregated_list_type`` (the construction ``Batch``
+    and ``GroupBy`` use), with or without rows; a logical ``T`` yields the
+    logical list type of ``T``. Its source-info column is
+    ``large_list<large_string>``.
+
+    When the two inputs' Arrow types for the same column differ, both are
+    normalized to their large variants; if they are then equal the join
+    proceeds, otherwise it raises ``InputValidationError`` naming the column
+    and both types (``require_shared_arrow_type``). Validation cannot detect
+    such a disagreement, because streams expose only Python schemas; it is
+    detected in ``binary_static_process`` before the join.
 
     MergeJoin is commutative: MergeJoin(A, B) produces the same result as
     MergeJoin(B, A), achieved by sorting merged values and system tag values.
@@ -50,9 +174,7 @@ class MergeJoin(BinaryOperator):
 
         # Colliding data columns must have identical types since they are
         # merged into list[T] — both sides must contribute the same T.
-        colliding_keys = set(left_data_schema.keys()) & set(
-            right_data_schema.keys()
-        )
+        colliding_keys = set(left_data_schema.keys()) & set(right_data_schema.keys())
         for key in colliding_keys:
             left_type = left_data_schema[key]
             right_type = right_data_schema[key]
@@ -82,13 +204,27 @@ class MergeJoin(BinaryOperator):
     ) -> tuple[Schema, Schema]:
         columns_config = ColumnConfig.handle_config(columns, all_info=all_info)
 
+        # MergeJoin is commutative, so its column order must not depend on
+        # operand order: tag and data columns are listed by first appearance
+        # across the inputs in canonical ``pipeline_hash`` order. This is the
+        # single definition of the order; ``binary_static_process`` reads it
+        # back from here.
+        #
+        self._require_tag_data_roles_agree(left_stream, right_stream)
+
         # Always get input schemas WITHOUT system tags for the base computation.
         # System tags are computed separately because the join renames them.
-        left_tag_schema, left_data_schema = left_stream.output_schema()
-        right_tag_schema, right_data_schema = right_stream.output_schema()
+        (first_stream, _), (second_stream, _) = self._canonical_order(
+            left_stream, right_stream
+        )
+        left_tag_schema, left_data_schema = first_stream.output_schema()
+        right_tag_schema, right_data_schema = second_stream.output_schema()
 
-        # Tag schema: union of both tag schemas
-        tag_schema = schema_utils.union_schemas(left_tag_schema, right_tag_schema)
+        # Tag schema: union of both tag schemas. A shared tag key that differs in
+        # nullability only is non-nullable (ITL-829): a null key matches nothing.
+        tag_schema = schema_utils.union_schemas(
+            *reconcile_key_nullability(left_tag_schema, right_tag_schema)
+        )
 
         # Data schema: colliding columns become list[T], non-colliding stay scalar
         colliding_schema = schema_utils.intersection_schemas(
@@ -96,9 +232,9 @@ class MergeJoin(BinaryOperator):
         )
 
         merged_data_schema = {}
-        all_data_keys = set(left_data_schema.keys()) | set(
-            right_data_schema.keys()
-        )
+        all_data_keys = [*left_data_schema] + [
+            key for key in right_data_schema if key not in left_data_schema
+        ]
         for key in all_data_keys:
             if key in colliding_schema:
                 merged_data_schema[key] = list[colliding_schema[key]]
@@ -115,6 +251,23 @@ class MergeJoin(BinaryOperator):
             tag_schema = schema_utils.union_schemas(tag_schema, system_tag_schema)
 
         return tag_schema, Schema(merged_data_schema)
+
+    @staticmethod
+    def _require_tag_data_roles_agree(
+        left_stream: StreamProtocol, right_stream: StreamProtocol
+    ) -> None:
+        """Raise if a name is a tag in one input and a data column in the other.
+
+        Called by the schema prediction (so by input validation) and at the start
+        of ``binary_static_process`` (the async path calls it directly).
+
+        Raises:
+            InputValidationError: Naming the column, the roles and the remedy.
+        """
+        try:
+            require_tag_data_roles_agree(*left_stream.keys(), *right_stream.keys())
+        except InputValidationError as exc:
+            raise InputValidationError(f"MergeJoin: {exc}") from exc
 
     def _canonical_order(
         self, left_stream: StreamProtocol, right_stream: StreamProtocol
@@ -156,6 +309,22 @@ class MergeJoin(BinaryOperator):
     def binary_static_process(
         self, left_stream: StreamProtocol, right_stream: StreamProtocol
     ) -> StreamProtocol:
+        """Inner-join two streams on their shared tags, merging colliding data columns.
+
+        A data column present in both streams becomes a sorted two-element
+        list per row, with its source-info column reordered to match. System
+        tag columns are renamed with each stream's pipeline hash and canonical
+        position. A zero-row input yields a zero-row result with the same
+        column types as a non-empty one.
+
+        Args:
+            left_stream: The left input stream.
+            right_stream: The right input stream.
+
+        Returns:
+            The joined stream, with tag columns first.
+        """
+        self._require_tag_data_roles_agree(left_stream, right_stream)
         n_char = self.orcapod_config.hashing.system_tag_n_char
 
         # Determine canonical ordering for system tag positions
@@ -171,25 +340,30 @@ class MergeJoin(BinaryOperator):
             )
             tables[orig_idx] = table
 
-        left_table = tables[0]
-        right_table = tables[1]
+        # Join in canonical order, so "left" and "right" below are the
+        # canonically first and second inputs and the physical columns come
+        # out the same for MergeJoin(a, b) and MergeJoin(b, a).
+        (first_stream, first_idx), (second_stream, second_idx) = canonical
+        left_table = tables[first_idx]
+        right_table = tables[second_idx]
 
         # Determine shared tag keys for inner join
-        left_tag_keys, left_data_keys = left_stream.keys()
-        right_tag_keys, right_data_keys = right_stream.keys()
+        left_tag_keys, left_data_keys = first_stream.keys()
+        right_tag_keys, right_data_keys = second_stream.keys()
         shared_tag_keys = set(left_tag_keys) & set(right_tag_keys)
 
         # Find colliding data columns
         colliding_keys = set(left_data_keys) & set(right_data_keys)
 
-        # Snapshot Arrow types of colliding columns BEFORE the Polars round-trip.
-        # The round-trip may strip or alter extension metadata; we need the original
-        # element type to reconstruct the correct list extension type after merging.
-        colliding_col_types: dict[str, "pa.DataType"] = {
-            col: left_table.schema.field(col).type
-            for col in colliding_keys
-            if col in left_table.schema.names
-        }
+        # Snapshot the inputs' Arrow types BEFORE the Polars round-trip, which
+        # stores strings, binaries and lists in their large layouts, drops
+        # fixed_size_binary and may strip extension metadata. Every output
+        # column is typed from these, never from what Arrow infers for the
+        # Python values. Inputs whose types differ beyond layout are rejected
+        # here, before the join (require_shared_arrow_type).
+        left_types = {f.name: f.type for f in left_table.schema}
+        right_types = {f.name: f.type for f in right_table.schema}
+        output_types = _output_types(left_types, right_types)
 
         # Capture nullable flags from input schemas BEFORE Polars conversion.
         # Polars' join discards nullable info (defaults all to True); we derive
@@ -197,15 +371,30 @@ class MergeJoin(BinaryOperator):
         # Only capture tag and data columns — system tag and source columns
         # are internally created with Arrow's all-nullable default; those fall
         # through to null-count inference below.
-        captured_cols = set(left_tag_keys) | set(left_data_keys) | set(right_tag_keys) | set(right_data_keys)
-        left_nullable = {f.name: f.nullable for f in left_table.schema if f.name in captured_cols}
-        right_nullable = {f.name: f.nullable for f in right_table.schema if f.name in captured_cols}
+        captured_cols = (
+            set(left_tag_keys)
+            | set(left_data_keys)
+            | set(right_tag_keys)
+            | set(right_data_keys)
+        )
+        left_nullable = {
+            f.name: f.nullable for f in left_table.schema if f.name in captured_cols
+        }
+        right_nullable = {
+            f.name: f.nullable for f in right_table.schema if f.name in captured_cols
+        }
         # Build expected output nullable map
         output_nullable: dict[str, bool] = {}
         output_nullable.update(left_nullable)
         for name, nullable in right_nullable.items():
             if name not in output_nullable:
                 output_nullable[name] = nullable
+        # A shared tag key is nullable only when nullable in both inputs: a null
+        # key matches nothing (ITL-829). Equal flags give the flag as before.
+        for name in shared_tag_keys:
+            output_nullable[name] = key_nullable(
+                left_nullable[name], right_nullable[name]
+            )
         # Merged (colliding) data columns become 2-element lists — always non-null
         for col in colliding_keys:
             output_nullable[col] = False
@@ -218,11 +407,13 @@ class MergeJoin(BinaryOperator):
         COMMON_JOIN_KEY = "_common"
         # COMMON_JOIN_KEY is a temporary column that gets dropped after the join
         output_nullable.pop(COMMON_JOIN_KEY, None)
+        # Use int8 explicitly so a zero-row table doesn't produce a null-typed
+        # column that Polars rejects as a join key (same as Join).
         left_table = left_table.add_column(
-            0, COMMON_JOIN_KEY, pa.array([0] * len(left_table))
+            0, COMMON_JOIN_KEY, pa.array([0] * len(left_table), type=pa.int8())
         )
         right_table = right_table.add_column(
-            0, COMMON_JOIN_KEY, pa.array([0] * len(right_table))
+            0, COMMON_JOIN_KEY, pa.array([0] * len(right_table), type=pa.int8())
         )
 
         join_keys = list(shared_tag_keys | {COMMON_JOIN_KEY})
@@ -269,6 +460,10 @@ class MergeJoin(BinaryOperator):
                 left_sources = joined.column(left_source_col).to_pylist()
                 right_sources = joined.column(right_source_col).to_pylist()
 
+            # A logical type whose stored values are not orderable as Python values
+            # (struct storage comes back as dicts) supplies its own ordering key.
+            sort_key = _storage_sort_key(tc, output_types[col])
+
             merged_vals = []
             merged_sources = [] if has_source else None
             for i in range(len(left_vals)):
@@ -276,37 +471,40 @@ class MergeJoin(BinaryOperator):
                 if has_source:
                     ls, rs = left_sources[i], right_sources[i]
                     # Sort by data value, carry source along
-                    pairs = sorted(zip([lv, rv], [ls, rs]), key=lambda p: p[0])
+                    pairs = sorted(
+                        zip([lv, rv], [ls, rs]), key=lambda p: sort_key(p[0])
+                    )
                     merged_vals.append([p[0] for p in pairs])
                     merged_sources.append([p[1] for p in pairs])
                 else:
-                    merged_vals.append(sorted([lv, rv]))
+                    merged_vals.append(sorted([lv, rv], key=sort_key))
 
             # Replace the left column with merged list, drop right column
             col_idx = joined.column_names.index(left_col_name)
             joined = joined.drop(left_col_name)
             joined = joined.drop(right_col_name)
 
-            elem_arrow_type = colliding_col_types.get(col)
-            if elem_arrow_type is not None and isinstance(elem_arrow_type, pa.ExtensionType):
-                elem_python_type = tc.arrow_type_to_python_type(elem_arrow_type)
-                list_logical_type = tc.get_logical_type_for_python_type(list[elem_python_type])
-                if list_logical_type is not None:
-                    list_ext_type = list_logical_type.get_arrow_extension_type()
-                    storage_array = pa.array(merged_vals, type=list_ext_type.storage_type)
-                    merged_array = pa.ExtensionArray.from_storage(list_ext_type, storage_array)
-                else:
-                    merged_array = pa.array(merged_vals)
-            else:
-                merged_array = pa.array(merged_vals)
-            joined = joined.add_column(col_idx, left_col_name, merged_array)
+            list_type = arrow_utils.aggregated_list_type(
+                output_types[col], tc, column=col
+            )
+            joined = joined.add_column(
+                col_idx, left_col_name, arrow_utils.list_array(merged_vals, list_type)
+            )
+            output_types[col] = list_type
 
             if has_source:
                 source_idx = joined.column_names.index(left_source_col)
                 joined = joined.drop(left_source_col)
                 joined = joined.drop(right_source_col)
-                source_array = pa.array(merged_sources)
-                joined = joined.add_column(source_idx, left_source_col, source_array)
+                source_list_type = arrow_utils.aggregated_list_type(
+                    output_types[left_source_col], tc, column=left_source_col
+                )
+                joined = joined.add_column(
+                    source_idx,
+                    left_source_col,
+                    arrow_utils.list_array(merged_sources or [], source_list_type),
+                )
+                output_types[left_source_col] = source_list_type
 
         # Handle remaining Polars-generated _right suffixed columns
         # (only from columns we know Polars auto-suffixed, not original names)
@@ -327,35 +525,39 @@ class MergeJoin(BinaryOperator):
         # Sort system tag values for same-pipeline-hash streams to ensure commutativity
         joined = arrow_utils.sort_system_tag_values(joined)
 
-        # Reorder: tag columns first, then data columns
-        all_tag_keys = set(left_tag_keys) | set(right_tag_keys)
-        tag_cols = [c for c in joined.column_names if c in all_tag_keys]
-        other_cols = [c for c in joined.column_names if c not in all_tag_keys]
-        joined = joined.select(tag_cols + other_cols)
+        # Lay the columns out in the order ``binary_output_schema`` defines:
+        # tags, then data, then the hidden columns. ``ArrowTableStream`` reads
+        # its schema from the physical order and its keys from ``tag_columns``,
+        # so both must follow it. No hash or record ID depends on column order.
+        tag_schema, data_schema = self.binary_output_schema(left_stream, right_stream)
+        tag_cols = list(tag_schema.keys())
+        data_cols = list(data_schema.keys())
+        listed = {*tag_cols, *data_cols}
+        other_cols = [c for c in joined.column_names if c not in listed]
+        joined = joined.select(tag_cols + data_cols + other_cols)
 
-        # Reconstruct schema from captured input nullable flags.
-        # Fall back to null-count inference for any unexpected columns.
-        result_schema = pa.schema([
-            pa.field(
-                col_name,
-                joined.schema.field(col_name).type,
-                nullable=output_nullable.get(col_name, joined.column(i).null_count > 0),
-            )
-            for i, col_name in enumerate(joined.column_names)
-        ])
-        joined = pa.Table.from_arrays(
-            [joined.column(i) for i in range(joined.num_columns)],
-            schema=result_schema,
+        # Reconstruct the schema: every column takes the type decided above
+        # from the inputs (the large-normalized input type for pass-through
+        # columns, undoing Polars' other changes such as fixed_size_binary to
+        # large_binary; the list type built above for merged columns), and
+        # nullability comes from the captured input flags, falling back to
+        # null-count inference for system tag and source-info columns.
+        result_schema = pa.schema(
+            [
+                pa.field(
+                    col_name,
+                    output_types[col_name],
+                    nullable=output_nullable.get(
+                        col_name, joined.column(i).null_count > 0
+                    ),
+                )
+                for i, col_name in enumerate(joined.column_names)
+            ]
         )
-        # ``all_tag_keys`` is a set, so its iteration order depends on
-        # PYTHONHASHSEED. Emit the tag columns in the order ``output_schema``
-        # predicts (left tags, then tags only the right stream has).
-        ordered_tag_keys = tuple(left_tag_keys) + tuple(
-            k for k in right_tag_keys if k not in left_tag_keys
-        )
+        joined = joined.cast(result_schema)
         return ArrowTableStream(
             joined,
-            tag_columns=ordered_tag_keys,
+            tag_columns=tuple(tag_cols),
         )
 
     def identity_structure(self) -> Any:

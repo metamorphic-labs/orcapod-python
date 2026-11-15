@@ -89,7 +89,7 @@ for s in streams:
 
 ### Task 4: Documentation, proposal, design log
 
-- [ ] Docstrings: `stream_builder._make_provenance_token`, `SourceStreamBuilder.build`, `ArrowTableSource` — state that without `record_id_column` the record id is positional, so reordering rows moves lineage and invalidates downstream completion and pipeline records; pass `record_id_column` for order-independent identity.
+- [ ] Docstrings: `stream_builder._make_provenance_token`, `SourceStreamBuilder.build`, `ArrowTableSource` — state that without `record_id_column` the record id is positional, so a reordered row gets a new record id and is treated as a new downstream entry (recorded and delivered again); pass `record_id_column` for order-independent identity.
 - [ ] If `docs/` has a user-facing sources page mentioning `record_id_column`, add one paragraph only.
 - [ ] Write `superpowers/specs/2026-11-09-itl-817-content-derived-record-ids.md` (blast radius, duplicate-row rule, migration option).
 - [ ] Append one `DESIGN_ISSUES.md` entry for ITL-817.

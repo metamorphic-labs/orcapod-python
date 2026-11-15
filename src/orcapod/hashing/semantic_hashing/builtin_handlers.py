@@ -4,7 +4,7 @@ Built-in PythonTypeHandlerProtocol implementations.
   UUIDHandler           -- uuid.UUID: 16-byte binary representation
   BytesHandler          -- bytes/bytearray: hex string representation
   FunctionHandler       -- callable with __code__: via FunctionInfoExtractorProtocol
-  TypeObjectHandler     -- type objects: stable "type:<module>.<qualname>" string
+  TypeObjectHandler     -- type objects: logical type identifier, else "type:<module>.<qualname>"
   SpecialFormHandler    -- typing._SpecialForm
   GenericAliasHandler   -- generic alias type annotations
   UnionTypeHandler      -- types.UnionType (Python 3.10+ X | Y syntax)
@@ -12,9 +12,10 @@ Built-in PythonTypeHandlerProtocol implementations.
   SchemaHandler         -- Schema objects
   FileHandler           -- orcapod.File: file content hash
   DirectoryHandler      -- orcapod.Directory: recursive Merkle tree hash
-  NumpyArrayHandler     -- numpy.ndarray: SHA-256 ContentHash of .npy bytes
-  PandasDataFrameHandler -- pd.DataFrame: Arrow Table via Arrow hasher (lazy default-context fallback)
-  PandasSeriesHandler   -- pd.Series: Arrow Table via Arrow hasher (lazy default-context fallback)
+  NumpyArrayHandler     -- numpy.ndarray: ndarray_v1 value digest (array_digest_v1)
+  PandasDataFrameHandler -- pd.DataFrame: pandas_dataframe_v1 (descriptor + ordered Arrow digest)
+  PandasSeriesHandler   -- pd.Series: pandas_series_v1 (descriptor + ordered Arrow digest)
+  PolarsExprHandler     -- pl.Expr: polars_expr_v1 canonical expression tree (ITL-828)
 
 ``register_builtin_python_type_handlers(registry)`` populates a registry
 with all of the above handlers.
@@ -23,10 +24,33 @@ with all of the above handlers.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from typing_extensions import override
+
+from orcapod.hashing.pandas_value_hash import (
+    PANDAS_DATAFRAME_HASH_LABEL,
+    PANDAS_DATAFRAME_OPTIONS,
+    PANDAS_SERIES_HASH_LABEL,
+    PANDAS_SERIES_OPTIONS,
+)
+from orcapod.hashing.semantic_hashing.encoded import Encoded
+from orcapod.hashing.semantic_hashing.function_info_extractors import ParameterDefault
+from orcapod.logical_types.array_format import NDARRAY_EXTENSION_NAME, NDARRAY_OPTIONS
+from orcapod.logical_types.identifier import logical_type_identifier
+from orcapod.logical_types.ignore_list import IgnoreListHandler
+from orcapod.logical_types.pandas_type import (
+    LogicalPandasDataFrame,
+    LogicalPandasSeries,
+)
+from orcapod.logical_types.polars_type import (
+    POLARS_DATAFRAME_EXTENSION_NAME,
+    POLARS_SERIES_EXTENSION_NAME,
+)
 from orcapod.types import ContentHash, Schema
+from orcapod.utils.canonical_type_names import canonical_type_name
 
 if TYPE_CHECKING:
     from orcapod.protocols.hashing_protocols import (
@@ -54,9 +78,26 @@ class BytesHandler:
     def handle(self, obj: Any, hasher: "SemanticHasherProtocol") -> Any:
         if isinstance(obj, (bytes, bytearray)):
             return obj.hex()
-        raise TypeError(
-            f"BytesHandler: expected bytes or bytearray, got {type(obj)!r}"
-        )
+        raise TypeError(f"BytesHandler: expected bytes or bytearray, got {type(obj)!r}")
+
+
+def hash_default_value(value: Any, hasher: "SemanticHasherProtocol") -> ContentHash:
+    """Hash one parameter default.
+
+    The single place that decides how a default value is hashed: like every other
+    hashed value, by the semantic hasher, never by its ``repr()``.
+
+    Args:
+        value: The default value.
+        hasher: The semantic hasher hashing the function.
+
+    Returns:
+        The hash of the value.
+
+    Raises:
+        TypeError: If the hasher has no way to hash the value.
+    """
+    return hasher.hash_object(value)
 
 
 class FunctionHandler:
@@ -78,24 +119,84 @@ class FunctionHandler:
         func_name = getattr(obj, "__name__", repr(obj))
         logger.debug("FunctionHandler: extracting info for function %r", func_name)
         info: dict[str, Any] = self.function_info_extractor.extract_function_info(obj)
-        return info
+        parameters = info.get("parameters")
+        if not parameters:
+            return info
+        return {
+            **info,
+            "parameters": [
+                self._with_hashed_default(entry, obj, hasher) for entry in parameters
+            ],
+        }
+
+    @staticmethod
+    def _with_hashed_default(
+        entry: dict[str, Any], func: Any, hasher: "SemanticHasherProtocol"
+    ) -> dict[str, Any]:
+        """Return a parameter entry with its default replaced by the default's hash.
+
+        Args:
+            entry: One parameter entry of the extracted function description.
+            func: The function the parameter belongs to.
+            hasher: The semantic hasher hashing the function.
+
+        Returns:
+            ``entry`` unchanged when it has no ``ParameterDefault``; otherwise a
+            copy whose ``"default"`` is the hash of the default value.
+
+        Raises:
+            TypeError: If the default value cannot be hashed. The message names the
+                parameter and the function; the hasher's error is its cause.
+        """
+        default = entry.get("default")
+        if not isinstance(default, ParameterDefault):
+            return entry
+        try:
+            default_hash = hash_default_value(default.value, hasher)
+        except TypeError as exc:
+            module = getattr(func, "__module__", None)
+            qualname = getattr(func, "__qualname__", None) or repr(func)
+            function_name = f"{module}.{qualname}" if module else qualname
+            raise TypeError(
+                f"Cannot hash the default value of parameter {entry['name']!r} of "
+                f"function {function_name}: {exc} A default value is part of the "
+                "function's hash: use a default the hasher can hash, or remove the "
+                "default and supply the value as an input."
+            ) from exc
+        return {**entry, "default": default_hash}
 
 
 class TypeObjectHandler:
     """Hasher for type objects (classes passed as values).
 
-    Resolves types registered in the ``LogicalTypeRegistry`` exposed by
-    *type_converter* to their stable ``logical_type_name``
-    (e.g. ``"type:orcapod.file"`` for ``op.File``).
-    Falls back to ``"type:<module>.<qualname>"`` for unregistered types or
-    when no ``type_converter`` is provided.
+    Resolves a type to its logical type in the ``LogicalTypeRegistry`` exposed by
+    *type_converter* and hashes its logical type identifier, the Arrow extension
+    name and extension metadata, written as ``LogicalTypeIdentifier.text``
+    (``"type:orcapod.file;7b2276657273696f6e223a317d"`` for ``op.File``:
+    the name, ``;``, then the metadata ``{"version":1}`` in hex). A change of
+    either part of the identifier therefore changes every type, schema,
+    function and pipeline hash the type takes part in.
+
+    A class not registered yet that a registered factory covers (a dataclass,
+    an ``orcapod.dataclass``, a pydantic model) is registered first, through
+    ``type_converter.get_logical_type_for_python_type``. So a type hashes the
+    same before and after anything else registers it (ITL-1137): hashing a
+    schema before the source or function pod that registers its class gives
+    the registered value, the one every stored path and golden value holds.
+
+    Falls back to ``"type:<module>.<qualname>"`` for a type with no logical
+    type (``int``, a class no factory covers) or when no ``type_converter`` is
+    provided. The module is the canonical one from ``canonical_type_name``, so
+    standard-library types that moved into a private submodule
+    (``pathlib._local`` on Python 3.13) hash identically on every Python
+    version.
 
     Args:
         type_converter: Optional ``TypeConverterProtocol``.  When provided,
-            ``type_converter.get_logical_type(obj)`` is called to resolve
-            registered logical types to their stable canonical name.  When
-            ``None`` (the default), the fallback ``"type:<module>.<qualname>"``
-            serialisation is always used.
+            ``type_converter.get_logical_type_for_python_type(obj)`` resolves the
+            type to its logical type, registering it when a factory covers it.
+            When ``None`` (the default), the fallback
+            ``"type:<module>.<qualname>"`` serialisation is always used.
     """
 
     def __init__(self, type_converter: "TypeConverterProtocol | None" = None) -> None:
@@ -107,12 +208,10 @@ class TypeObjectHandler:
                 f"TypeObjectHandler: expected a type/class, got {type(obj)!r}"
             )
         if self._type_converter is not None:
-            lt = self._type_converter.get_logical_type(obj)
+            lt = self._type_converter.get_logical_type_for_python_type(obj)
             if lt is not None:
-                return f"type:{lt.logical_type_name}"
-        module: str = obj.__module__ or "<unknown>"
-        qualname: str = obj.__qualname__
-        return f"type:{module}.{qualname}"
+                return f"type:{logical_type_identifier(lt).text}"
+        return f"type:{canonical_type_name(obj)}"
 
 
 class SpecialFormHandler:
@@ -121,6 +220,24 @@ class SpecialFormHandler:
     def handle(self, obj: Any, hasher: "SemanticHasherProtocol") -> Any:
         name = getattr(obj, "_name", None) or repr(obj)
         return f"special_form:typing.{name}"
+
+
+def _sorted_hashes(
+    hasher: "SemanticHasherProtocol", args: tuple[Any, ...]
+) -> list[ContentHash]:
+    """Hash each of ``args`` and return the hashes ordered by digest.
+
+    The hashes are returned as ``ContentHash`` objects: the structure hasher feeds only
+    their digests into the enclosing hash, never their labels.
+
+    Args:
+        hasher: The structure hasher in use.
+        args: The members of a union.
+
+    Returns:
+        One hash per member, sorted by hex digest so that member order does not matter.
+    """
+    return sorted((hasher.hash_object(arg) for arg in args), key=ContentHash.to_hex)
 
 
 class GenericAliasHandler:
@@ -134,13 +251,14 @@ class GenericAliasHandler:
         if origin is None:
             return f"generic_alias:{obj!r}"
         if origin is typing.Union:
-            hashed_args = sorted(hasher.hash_object(arg).to_string() for arg in args)
-            return {"__type__": "union", "args": hashed_args}
-        return {
-            "__type__": "generic_alias",
-            "origin": hasher.hash_object(origin).to_string(),
-            "args": [hasher.hash_object(arg).to_string() for arg in args],
-        }
+            return Encoded("union", {"args": _sorted_hashes(hasher, args)})
+        return Encoded(
+            "generic_alias",
+            {
+                "origin": hasher.hash_object(origin),
+                "args": [hasher.hash_object(arg) for arg in args],
+            },
+        )
 
 
 class UnionTypeHandler:
@@ -148,8 +266,7 @@ class UnionTypeHandler:
 
     def handle(self, obj: Any, hasher: "SemanticHasherProtocol") -> Any:
         args = getattr(obj, "__args__", None) or ()
-        hashed_args = sorted(hasher.hash_object(arg).to_string() for arg in args)
-        return {"__type__": "union", "args": hashed_args}
+        return Encoded("union", {"args": _sorted_hashes(hasher, args)})
 
 
 class ArrowTableHandler:
@@ -169,6 +286,7 @@ class ArrowTableHandler:
         if self._arrow_hasher is not None:
             return self._arrow_hasher
         from orcapod.contexts import get_default_context
+
         return get_default_context().arrow_hasher  # type: ignore[return-value]
 
     def handle(self, obj: Any, hasher: "SemanticHasherProtocol") -> ContentHash:
@@ -188,8 +306,8 @@ class SchemaHandler:
 
     Canonical, explicit path for schema hashing. For each field, hashes the Python
     type via ``hasher.hash_object`` (which dispatches to ``TypeObjectHandler``, using
-    the stable ``logical_type_name`` / Arrow extension name for registered types and the
-    stable ``builtins.*`` / stdlib path for native types). Field names are sorted so the
+    the logical type identifier, Arrow extension name and metadata, for registered types
+    and the stable ``builtins.*`` / stdlib path for native types). Field names are sorted so the
     hash is deterministic regardless of insertion order.
 
     This produces the same hash as the previous accidental path through ``_expand_mapping``
@@ -201,9 +319,11 @@ class SchemaHandler:
     not part of the structural identity used for caching or pipeline routing.
 
     When ``type_converter`` is provided, every field type is verified to be
-    Arrow-translatable before hashing. A type that cannot be converted raises
-    ``TypeError`` with a diagnostic message, catching unregistered types at hash time
-    rather than silently falling back to a potentially unstable Python module path.
+    Arrow-translatable. A type that cannot be converted raises ``TypeError`` with a
+    diagnostic message, catching unsupported types at hash time rather than silently
+    falling back to a Python module path. The check runs after the field type is
+    hashed, because hashing a type registers a class a factory covers
+    (``TypeObjectHandler``), and the check reads only registered types.
 
     Args:
         type_converter: Optional ``TypeConverterProtocol``. When provided, validates
@@ -223,19 +343,20 @@ class SchemaHandler:
                 Python type.
 
         Returns:
-            A ``dict[str, str]`` mapping field name to the ``to_string()`` of each
-            field type's hash, sorted by field name for determinism.
+            A ``dict[str, ContentHash]`` mapping field name to the hash of the field's
+            type, sorted by field name for determinism. The structure hasher feeds
+            only the digests into the schema hash.
 
         Raises:
             TypeError: If ``obj`` is not a ``Schema``, or if ``type_converter`` is
                 provided and a field type is not Arrow-translatable.
         """
         if not isinstance(obj, Schema):
-            raise TypeError(
-                f"SchemaHandler: expected a Schema, got {type(obj)!r}"
-            )
-        result: dict[str, str] = {}
+            raise TypeError(f"SchemaHandler: expected a Schema, got {type(obj)!r}")
+        result: dict[str, ContentHash] = {}
         for field_name, python_type in obj.items():
+            # Hashing the type registers a class a factory covers, so it comes first.
+            type_hash = hasher.hash_object(python_type)
             if self._type_converter is not None:
                 try:
                     self._type_converter.python_type_to_arrow_type(python_type)
@@ -248,7 +369,7 @@ class SchemaHandler:
                         f"supported native type (int, str, float, bool, bytes, "
                         f"datetime, date)."
                     ) from exc
-            result[field_name] = hasher.hash_object(python_type).to_string()
+            result[field_name] = type_hash
         # Sort by field name for determinism — matches _expand_mapping's sort_keys.
         return dict(sorted(result.items()))
 
@@ -272,10 +393,9 @@ class FileHandler:
         # Deferred import breaks the circular dependency between this module and
         # file_type.py — the same pattern used by ArrowTableHandler.
         from orcapod.logical_types.file_type import File
+
         if not isinstance(obj, File):
-            raise TypeError(
-                f"FileHandler: expected an orcapod.File, got {type(obj)!r}"
-            )
+            raise TypeError(f"FileHandler: expected an orcapod.File, got {type(obj)!r}")
         wrapped = getattr(obj, "__wrapped__")
         logger.debug("FileHandler: hashing file content at %s", wrapped)
         return self.file_hasher.hash_file(wrapped)
@@ -302,6 +422,7 @@ class DirectoryHandler:
         # Deferred import breaks the circular dependency between this module and
         # directory_type.py — the same pattern used by FileHandler.
         from orcapod.logical_types.directory_type import Directory
+
         if not isinstance(obj, Directory):
             raise TypeError(
                 f"DirectoryHandler: expected an orcapod.Directory, got {type(obj)!r}"
@@ -312,182 +433,307 @@ class DirectoryHandler:
         return self.directory_hasher.hash_directory(wrapped, ignore=ignore)
 
 
-class NumpyArrayHandler:
-    """Hasher for ``numpy.ndarray`` — content hash via SHA-256 of numpy's ``.npy`` bytes.
+class NumpyArrayHandler(IgnoreListHandler):
+    """Hasher for ``numpy.ndarray``: the strict value digest under ``ndarray_v1``.
 
-    Serialises the array to numpy's ``.npy`` binary format (which encodes dtype,
-    including structured/record field names, shape, byte order, and data), then
-    returns a ``ContentHash`` produced by SHA-256 of those bytes. This is identical
-    to what ``LogicalNumpyArray`` stores in Arrow, so the hash input and storage
-    representation are always consistent.
+    The digest is ``numpy_type.array_value_digest``: the element digest of the
+    array (dtype, shape and element bits) and, on top of it, memory order, byte
+    order and structured layout, each of which the configured ignore list can
+    take out. What storage does not keep (strides beyond C or Fortran
+    contiguity, subclass, flags) never changes the hash.
 
-    Returning ``ContentHash`` directly (rather than the raw ``.npy`` bytes) avoids
-    the hex-expansion and JSON-serialisation overhead that the semantic hasher would
-    apply to ``bytes`` returns — important for large arrays.
+    The label ``ndarray_v1`` names this algorithm; the ignore list is part of
+    the logical type identifier, not of the label or the preimage.
 
-    Object-dtype arrays are rejected with ``ValueError`` immediately (before
-    ``np.save`` is called). Structured dtypes containing object-typed fields
-    are caught by ``allow_pickle=False`` in ``np.save``.
+    Args:
+        ignore: Names from ``array_format.NDARRAY_OPTIONS`` ignored when a bare
+            array is hashed (the data context's list for the type).
     """
 
-    def handle(self, obj: Any, hasher: "SemanticHasherProtocol") -> ContentHash:
-        """Return a SHA-256 ``ContentHash`` of the ``.npy`` bytes for ``obj``.
+    EXTENSION_NAME = NDARRAY_EXTENSION_NAME
+    OPTIONS = NDARRAY_OPTIONS
+    HASH_LABEL = "ndarray_v1"
+    """``ContentHash.method`` of an ndarray hash."""
+
+    def digest(self, obj: Any, ignore: frozenset[str]) -> bytes:
+        """Return the value digest of ``obj``, ignoring the named properties.
 
         Args:
-            obj: A ``numpy.ndarray`` instance.
-            hasher: Ignored. Present for protocol conformance.
+            obj: A ``numpy.ndarray`` instance (subclasses are hashed as plain arrays).
+            ignore: Names from ``OPTIONS`` to ignore.
 
         Returns:
-            A ``ContentHash`` with ``method="sha256"`` and digest equal to the
-            SHA-256 of the array's ``.npy`` binary representation.
+            ``numpy_type.array_value_digest(obj, ignore)``.
 
         Raises:
             TypeError: If ``obj`` is not a ``numpy.ndarray``.
-            ValueError: If ``obj`` has ``dtype.kind == "O"`` (object dtype).
+            ValueError: If the array cannot be stored (masked, object,
+                ``StringDType``, ``longdouble``, ...).
         """
-        import hashlib
-        import io
-        import numpy as np
-        if not isinstance(obj, np.ndarray):
-            raise TypeError(
-                f"NumpyArrayHandler: expected numpy.ndarray, got {type(obj)!r}"
-            )
-        if obj.dtype.kind == "O":
-            raise ValueError(
-                f"NumpyArrayHandler does not support object-dtype arrays "
-                f"(dtype={obj.dtype!r}). Object arrays require pickling, "
-                "which is disabled for security."
-            )
-        buf = io.BytesIO()
-        np.save(buf, obj, allow_pickle=False)
-        return ContentHash(method="sha256", digest=hashlib.sha256(buf.getvalue()).digest())
+        from orcapod.logical_types.numpy_type import array_value_digest
+
+        return array_value_digest(obj, ignore)
 
 
-class PandasDataFrameHandler:
-    """Hasher for ``pd.DataFrame`` — converts to Arrow Table and hashes via an Arrow hasher.
+class PandasDataFrameHandler(IgnoreListHandler):
+    """Hasher for ``pd.DataFrame``: Orcapod's pandas descriptor plus an ordered Arrow digest.
 
-    Converts the DataFrame to a ``pa.Table`` (with ``preserve_index=True``) and
-    delegates to the Arrow hasher. This keeps ``pd.DataFrame`` hashing consistent
-    with ``pa.Table`` hashing throughout orcapod — a DataFrame with identical
-    content and index produces the same hash as the equivalent Arrow table.
-
-    When ``arrow_hasher`` is ``None``, the default data context's ``arrow_hasher``
-    is resolved lazily at call time (breaking the circular dependency that would
-    arise if the registry were constructed before the arrow hasher).
+    Delegates to ``pandas_frame_content_hash`` in ``orcapod.hashing.pandas_value_hash``, whose
+    module docstring defines the ``pandas_dataframe_v1`` scheme. The hash is strict: column
+    order, index levels and their order, label types, ``columns.names``, pandas dtypes,
+    categorical categories, ``attrs`` and the values are all part of it. Only what storage
+    does not restore (``flags``, for example) is left out. A data context may configure
+    the hash to ignore the properties named in ``OPTIONS``.
 
     Args:
-        arrow_hasher: An object satisfying ``ArrowHasherProtocol``. When ``None``,
-            lazy resolution via the default context is used.
+        ignore: The property names ignored when a bare frame is hashed.
+        arrow_hasher: An object satisfying ``ArrowHasherProtocol``; its ``hash_table_ordered``
+            digests the values. When ``None``, the default data context's ``arrow_hasher`` is
+            resolved lazily at call time (breaking the circular dependency that would arise if
+            the registry were constructed before the arrow hasher).
     """
 
-    def __init__(self, arrow_hasher: "ArrowHasherProtocol | None" = None) -> None:
+    EXTENSION_NAME = LogicalPandasDataFrame.EXTENSION_NAME
+    OPTIONS = PANDAS_DATAFRAME_OPTIONS
+    HASH_LABEL = PANDAS_DATAFRAME_HASH_LABEL
+
+    def __init__(
+        self,
+        ignore: Iterable[str] = (),
+        arrow_hasher: "ArrowHasherProtocol | None" = None,
+    ) -> None:
+        """Create the handler.
+
+        Args:
+            ignore: The property names the hash ignores; must be options of the type.
+            arrow_hasher: The Arrow hasher that digests the values table; the default
+                data context's when ``None``.
+        """
+        super().__init__(ignore)
         self._arrow_hasher = arrow_hasher
 
     def _get_arrow_hasher(self) -> "ArrowHasherProtocol":
+        """Return the Arrow hasher given at construction, or the default data context's."""
         if self._arrow_hasher is not None:
             return self._arrow_hasher
         from orcapod.contexts import get_default_context
+
         return get_default_context().arrow_hasher  # type: ignore[return-value]
 
-    def handle(self, obj: Any, hasher: "SemanticHasherProtocol") -> ContentHash:
-        """Return a ``ContentHash`` of ``obj`` via the Arrow hasher.
+    @override
+    def digest(self, obj: Any, ignore: frozenset[str]) -> bytes:
+        """Return the ``pandas_dataframe_v1`` digest of ``obj``.
 
         Args:
             obj: A ``pd.DataFrame`` instance.
-            hasher: Ignored. Present for protocol conformance.
+            ignore: The property names to ignore; a subset of ``OPTIONS``.
 
         Returns:
-            A ``ContentHash`` produced by the configured Arrow hasher over
-            the Arrow Table representation of ``obj``.
+            The 32-byte digest.
 
         Raises:
             TypeError: If ``obj`` is not a ``pd.DataFrame``.
-            ValueError: If any column cannot be converted to an Arrow type.
+            ValueError: If a label or dtype is outside the descriptor grammar, or a column
+                cannot be converted to Arrow.
         """
         import pandas as _pd
-        import pyarrow as _pa
+
+        from orcapod.hashing.pandas_value_hash import pandas_frame_content_hash
 
         if not isinstance(obj, _pd.DataFrame):
             raise TypeError(
                 f"PandasDataFrameHandler: expected pd.DataFrame, got {type(obj)!r}"
             )
-        try:
-            table = _pa.Table.from_pandas(obj, preserve_index=True)
-        except _pa.lib.ArrowInvalid as exc:
-            raise ValueError(
-                f"PandasDataFrameHandler: cannot convert DataFrame to Arrow. "
-                f"Check for columns with mixed or non-Arrow-serialisable types. "
-                f"Original error: {exc}"
-            ) from exc
-        return self._get_arrow_hasher().hash_table(table)
+        return pandas_frame_content_hash(obj, self._get_arrow_hasher(), ignore).digest
 
 
-class PandasSeriesHandler:
-    """Hasher for ``pd.Series`` — converts to Arrow Table and hashes via an Arrow hasher.
+class PandasSeriesHandler(IgnoreListHandler):
+    """Hasher for ``pd.Series``: Orcapod's pandas descriptor plus an ordered Arrow digest.
 
-    Wraps the Series as a single-column DataFrame (using the sentinel column name
-    ``"__pandas_series_unnamed__"`` for an unnamed Series, matching
-    ``LogicalPandasSeries.python_to_storage``) then delegates to the Arrow hasher.
-
-    When ``arrow_hasher`` is ``None``, the default data context's ``arrow_hasher``
-    is resolved lazily at call time (breaking the circular dependency that would
-    arise if the registry were constructed before the arrow hasher).
+    Delegates to ``pandas_series_content_hash`` in ``orcapod.hashing.pandas_value_hash``
+    (``pandas_series_v1``). The name is part of the hash, typed (``0`` and ``"0"`` differ).
+    A data context may configure the hash to ignore the properties named in ``OPTIONS``.
 
     Args:
-        arrow_hasher: An object satisfying ``ArrowHasherProtocol``. When ``None``,
-            lazy resolution via the default context is used.
+        ignore: The property names ignored when a bare Series is hashed.
+        arrow_hasher: An object satisfying ``ArrowHasherProtocol``; its ``hash_table_ordered``
+            digests the values. When ``None``, the default data context's ``arrow_hasher`` is
+            resolved lazily at call time (breaking the circular dependency that would arise if
+            the registry were constructed before the arrow hasher).
     """
 
-    _UNNAMED_SENTINEL = "__pandas_series_unnamed__"
+    EXTENSION_NAME = LogicalPandasSeries.EXTENSION_NAME
+    OPTIONS = PANDAS_SERIES_OPTIONS
+    HASH_LABEL = PANDAS_SERIES_HASH_LABEL
 
-    def __init__(self, arrow_hasher: "ArrowHasherProtocol | None" = None) -> None:
+    def __init__(
+        self,
+        ignore: Iterable[str] = (),
+        arrow_hasher: "ArrowHasherProtocol | None" = None,
+    ) -> None:
+        """Create the handler.
+
+        Args:
+            ignore: The property names the hash ignores; must be options of the type.
+            arrow_hasher: The Arrow hasher that digests the values table; the default
+                data context's when ``None``.
+        """
+        super().__init__(ignore)
         self._arrow_hasher = arrow_hasher
 
     def _get_arrow_hasher(self) -> "ArrowHasherProtocol":
+        """Return the Arrow hasher given at construction, or the default data context's."""
         if self._arrow_hasher is not None:
             return self._arrow_hasher
         from orcapod.contexts import get_default_context
+
         return get_default_context().arrow_hasher  # type: ignore[return-value]
 
-    def handle(self, obj: Any, hasher: "SemanticHasherProtocol") -> ContentHash:
-        """Return a ``ContentHash`` of ``obj`` via the Arrow hasher.
+    @override
+    def digest(self, obj: Any, ignore: frozenset[str]) -> bytes:
+        """Return the ``pandas_series_v1`` digest of ``obj``.
 
         Args:
             obj: A ``pd.Series`` instance.
-            hasher: Ignored. Present for protocol conformance.
+            ignore: The property names to ignore; a subset of ``OPTIONS``.
 
         Returns:
-            A ``ContentHash`` produced by the configured Arrow hasher over
-            the Arrow Table representation of ``obj``.
+            The 32-byte digest.
 
         Raises:
             TypeError: If ``obj`` is not a ``pd.Series``.
-            ValueError: If the Series values cannot be converted to an Arrow type.
+            ValueError: If a label or the dtype is outside the descriptor grammar, or the values
+                cannot be converted to Arrow.
         """
         import pandas as _pd
-        import pyarrow as _pa
+
+        from orcapod.hashing.pandas_value_hash import pandas_series_content_hash
 
         if not isinstance(obj, _pd.Series):
             raise TypeError(
                 f"PandasSeriesHandler: expected pd.Series, got {type(obj)!r}"
             )
-        if obj.name == self._UNNAMED_SENTINEL:
-            raise ValueError(
-                f"PandasSeriesHandler: Series name {self._UNNAMED_SENTINEL!r} is "
-                "reserved by orcapod for unnamed Series storage. "
-                "Rename the Series before hashing it."
+        return pandas_series_content_hash(obj, self._get_arrow_hasher(), ignore).digest
+
+
+class PolarsExprHandler:
+    """Hasher for ``pl.Expr``: the ``polars_expr_v1`` canonical expression tree.
+
+    Delegates to ``polars_expr_content_hash`` in
+    ``orcapod.hashing.semantic_hashing.polars_expr``, whose module docstring defines the
+    grammar. Expressions outside the grammar raise ``ValueError`` naming the expression.
+    """
+
+    def handle(self, obj: Any, hasher: "SemanticHasherProtocol") -> ContentHash:
+        """Return the content hash of ``obj``.
+
+        Args:
+            obj: A ``pl.Expr`` instance.
+            hasher: Ignored. Present for protocol conformance.
+
+        Returns:
+            A ``ContentHash`` with method ``"polars_expr_v1"``.
+
+        Raises:
+            TypeError: If ``obj`` is not a ``pl.Expr``.
+            ValueError: If the expression is outside the ``polars_expr_v1`` grammar.
+        """
+        import polars as _pl
+
+        from orcapod.hashing.semantic_hashing.polars_expr import (
+            polars_expr_content_hash,
+        )
+
+        if not isinstance(obj, _pl.Expr):
+            raise TypeError(f"PolarsExprHandler: expected pl.Expr, got {type(obj)!r}")
+        return polars_expr_content_hash(obj)
+
+
+class PolarsDataFrameHandler(IgnoreListHandler):
+    """Hasher for ``pl.DataFrame``: the ``polars_dataframe_v1`` value digest.
+
+    The algorithm is ``polars_frame_digest`` in ``orcapod.logical_types.polars_type``,
+    whose module docstring defines it. By default the hash is strict: it ignores chunking,
+    slice offsets and the bytes under null slots, which are not properties of the value,
+    and distinguishes column order, struct field order, a null struct from a struct of
+    nulls, and every dtype parameter. The ignore list can leave out ``column_order`` and
+    ``struct_field_order``.
+    """
+
+    EXTENSION_NAME = POLARS_DATAFRAME_EXTENSION_NAME
+    OPTIONS = frozenset({"column_order", "struct_field_order"})
+    HASH_LABEL = "polars_dataframe_v1"
+    """``ContentHash.method`` of a ``pl.DataFrame`` hash."""
+
+    def digest(self, obj: Any, ignore: frozenset[str]) -> bytes:
+        """Return the value digest of ``obj``, ignoring the named properties.
+
+        Args:
+            obj: A ``pl.DataFrame`` instance.
+            ignore: A subset of ``OPTIONS``.
+
+        Returns:
+            The 32 digest bytes.
+
+        Raises:
+            TypeError: If ``obj`` is not a ``pl.DataFrame``.
+            ValueError: If a column's dtype is outside the descriptor grammar.
+        """
+        import polars as _pl
+
+        from orcapod.logical_types.polars_type import polars_frame_digest
+
+        if not isinstance(obj, _pl.DataFrame):
+            raise TypeError(
+                f"PolarsDataFrameHandler: expected pl.DataFrame, got {type(obj)!r}"
             )
-        col_name = obj.name if obj.name is not None else self._UNNAMED_SENTINEL
-        df = obj.to_frame(name=col_name)
-        try:
-            table = _pa.Table.from_pandas(df, preserve_index=True)
-        except _pa.lib.ArrowInvalid as exc:
-            raise ValueError(
-                f"PandasSeriesHandler: cannot convert Series to Arrow. "
-                f"Check for non-Arrow-serialisable values. "
-                f"Original error: {exc}"
-            ) from exc
-        return self._get_arrow_hasher().hash_table(table)
+        return polars_frame_digest(
+            obj,
+            ignore_column_order="column_order" in ignore,
+            ignore_struct_field_order="struct_field_order" in ignore,
+        )
+
+
+class PolarsSeriesHandler(IgnoreListHandler):
+    """Hasher for ``pl.Series``: the ``polars_series_v1`` value digest.
+
+    The algorithm is ``polars_series_digest`` in ``orcapod.logical_types.polars_type``:
+    the Series' name, dtype and values. The ignore list can leave out ``series_name`` and
+    ``struct_field_order``.
+    """
+
+    EXTENSION_NAME = POLARS_SERIES_EXTENSION_NAME
+    OPTIONS = frozenset({"series_name", "struct_field_order"})
+    HASH_LABEL = "polars_series_v1"
+    """``ContentHash.method`` of a ``pl.Series`` hash."""
+
+    def digest(self, obj: Any, ignore: frozenset[str]) -> bytes:
+        """Return the value digest of ``obj``, ignoring the named properties.
+
+        Args:
+            obj: A ``pl.Series`` instance.
+            ignore: A subset of ``OPTIONS``.
+
+        Returns:
+            The 32 digest bytes.
+
+        Raises:
+            TypeError: If ``obj`` is not a ``pl.Series``.
+            ValueError: If the dtype is outside the descriptor grammar.
+        """
+        import polars as _pl
+
+        from orcapod.logical_types.polars_type import polars_series_digest
+
+        if not isinstance(obj, _pl.Series):
+            raise TypeError(
+                f"PolarsSeriesHandler: expected pl.Series, got {type(obj)!r}"
+            )
+        return polars_series_digest(
+            obj,
+            ignore_name="series_name" in ignore,
+            ignore_struct_field_order="struct_field_order" in ignore,
+        )
 
 
 def register_builtin_python_type_handlers(
@@ -502,10 +748,11 @@ def register_builtin_python_type_handlers(
 
     ``pa.Table`` and ``pa.RecordBatch`` are registered via ``ArrowTableHandler``.
     ``pd.DataFrame`` and ``pd.Series`` are registered via ``PandasDataFrameHandler``
-    and ``PandasSeriesHandler``. When ``arrow_hasher`` is provided it is passed
-    through for immediate use; when ``None``, these handlers resolve the active arrow
-    hasher lazily via ``get_default_context()`` at hash time, breaking the
-    construction-time circular dependency.
+    and ``PandasSeriesHandler`` (``pandas_dataframe_v1`` / ``pandas_series_v1``, values
+    digested by the Arrow hasher's ``hash_table_ordered``). When ``arrow_hasher`` is
+    provided it is passed through for immediate use; when ``None``, these handlers
+    resolve the active arrow hasher lazily via ``get_default_context()`` at hash time,
+    breaking the construction-time circular dependency.
 
     ``orcapod.File`` is registered via ``FileHandler`` for content-based file
     hashing. ``orcapod.Directory`` is registered via ``DirectoryHandler`` for
@@ -530,16 +777,19 @@ def register_builtin_python_type_handlers(
         type_converter: Optional ``TypeConverterProtocol`` forwarded to
             ``TypeObjectHandler``, ``FunctionSignatureExtractor``, and
             ``SchemaHandler`` for stable canonical type-name resolution via
-            ``get_logical_type()`` and Arrow-translatability validation.
+            ``get_logical_type_for_python_type()`` and Arrow-translatability
+            validation.
             When ``None`` (the default), all three handlers fall back to the raw
             ``"type:<module>.<qualname>"`` serialisation and skip Arrow validation.
     """
     if file_hasher is None:
         from orcapod.hashing.file_hashers import FileHasher
+
         file_hasher = FileHasher(algorithm="sha256")
 
     if directory_hasher is None:
         from orcapod.hashing.directory_hashers import BasicDirectoryHasher
+
         directory_hasher = BasicDirectoryHasher(
             file_hasher=file_hasher,
             algorithm="sha256",
@@ -549,6 +799,7 @@ def register_builtin_python_type_handlers(
         from orcapod.hashing.semantic_hashing.function_info_extractors import (
             FunctionSignatureExtractor,
         )
+
         function_info_extractor = FunctionSignatureExtractor(
             include_module=True,
             include_defaults=True,
@@ -562,9 +813,11 @@ def register_builtin_python_type_handlers(
     registry.register(UUID, UUIDHandler())
 
     from orcapod.logical_types.file_type import File
+
     registry.register(File, FileHandler(file_hasher))
 
     from orcapod.logical_types.directory_type import Directory
+
     registry.register(Directory, DirectoryHandler(directory_hasher))
 
     import types as _types
@@ -581,6 +834,7 @@ def register_builtin_python_type_handlers(
     registry.register(_types.GenericAlias, generic_alias_hasher)
     try:
         import typing as _typing
+
         registry.register(_typing._GenericAlias, generic_alias_hasher)  # type: ignore[attr-defined]
         registry.register(_typing._SpecialForm, SpecialFormHandler())  # type: ignore[attr-defined]
     except AttributeError:
@@ -589,16 +843,25 @@ def register_builtin_python_type_handlers(
     registry.register(Schema, SchemaHandler(type_converter=type_converter))
 
     import pyarrow as _pa
+
     arrow_table_hasher = ArrowTableHandler(arrow_hasher)
     registry.register(_pa.Table, arrow_table_hasher)
     registry.register(_pa.RecordBatch, arrow_table_hasher)
 
     import numpy as _np
+
     registry.register(_np.ndarray, NumpyArrayHandler())
 
     import pandas as _pd
-    registry.register(_pd.DataFrame, PandasDataFrameHandler(arrow_hasher))
-    registry.register(_pd.Series, PandasSeriesHandler(arrow_hasher))
+
+    registry.register(_pd.DataFrame, PandasDataFrameHandler(arrow_hasher=arrow_hasher))
+    registry.register(_pd.Series, PandasSeriesHandler(arrow_hasher=arrow_hasher))
+
+    import polars as _pl
+
+    registry.register(_pl.Expr, PolarsExprHandler())
+    registry.register(_pl.DataFrame, PolarsDataFrameHandler())
+    registry.register(_pl.Series, PolarsSeriesHandler())
 
     logger.debug(
         "register_builtin_python_type_handlers: registered %d hashers",

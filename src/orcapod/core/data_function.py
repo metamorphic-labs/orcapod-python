@@ -14,27 +14,37 @@ from uuid_utils import uuid7
 
 from orcapod.config import OrcapodConfig
 from orcapod.contexts import DataContext
+from orcapod.contexts.stored import require_same_data_context
 from orcapod.core.base import TraceableBase
 from orcapod.core.datagrams import Datagram, Data
 from orcapod.hashing.hash_utils import (
     get_function_components,
-    get_function_signature,
 )
 from orcapod.core.result_cache import ResultCache
+from orcapod.errors import OutputTypeError
 from orcapod.protocols.core_protocols import DataFunctionProtocol, DataProtocol
 from orcapod.protocols.core_protocols.executor import (
     DataFunctionExecutorProtocol,
     PythonFunctionExecutorProtocol,
 )
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
+from orcapod.semantic_types.output_conformance import (
+    check_conformance,
+    normalize_output_numbers,
+)
 from orcapod.types import DataValue, Schema, SchemaLike
 from orcapod.utils import schema_utils
+from orcapod.utils.canonical_type_names import stabilize_type_names
 from orcapod.utils.git_utils import get_git_info_for_python_object
 from orcapod.utils.lazy_module import LazyModule
+from orcapod.utils.tensor_conversions import describe, tensor_conversions, warn_once
 
 from orcapod.protocols.observability_protocols import DataExecutionLoggerProtocol
 
 if TYPE_CHECKING:
+    from orcapod.logical_types.protocols import (
+        TypeConverterProtocol as LogicalTypeConverterProtocol,
+    )
     import pyarrow as pa
     import pyarrow.compute as pc
 else:
@@ -170,18 +180,20 @@ class DataFunctionBase(TraceableBase, Generic[E]):
 
     @property
     def output_data_schema_hash(self) -> str:
-        """Return the hash of the output data schema as a string.
+        """Return the hash of the output data schema as a bare hex digest.
 
-        The hash is computed lazily on first access and cached for subsequent calls.
+        The digest is part of the function ``uri`` and so of table paths and source-info
+        tokens: a hash inside a name carries no label. It is computed lazily on first
+        access and cached for subsequent calls.
 
         Returns:
-            The hash string of the output data schema.
+            The hex digest of the output data schema hash, without a label.
         """
         if self._output_data_schema_hash is None:
             self._output_data_schema_hash = (
                 self.data_context.semantic_hasher.hash_object(
                     self.output_data_schema
-                ).to_string()
+                ).to_hex()
             )
         return self._output_data_schema_hash
 
@@ -225,6 +237,17 @@ class DataFunctionBase(TraceableBase, Generic[E]):
     def input_data_schema(self) -> Schema:
         """Schema describing the input data this function accepts."""
         ...
+
+    @property
+    def accepts_arbitrary_keywords(self) -> bool:
+        """Whether the function takes input columns beyond ``input_data_schema``.
+
+        ``False`` for every data function kind today: the parameters are a fixed
+        set (``PythonDataFunction`` rejects ``**kwargs``). A kind that passes every
+        input column to its function overrides this to return ``True``; a function
+        pod then never drops a column for it (ITL-807).
+        """
+        return False
 
     @property
     @abstractmethod
@@ -350,9 +373,7 @@ class DataFunctionBase(TraceableBase, Generic[E]):
         return await self.direct_async_call(data, **kwargs)
 
     @abstractmethod
-    def direct_call(
-        self, data: DataProtocol, **kwargs: Any
-    ) -> DataProtocol | None:
+    def direct_call(self, data: DataProtocol, **kwargs: Any) -> DataProtocol | None:
         """Execute the function's native computation on *data*.
 
         This is the method executors invoke.  It bypasses executor routing
@@ -395,11 +416,11 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
         # default to the basic PythonFunctionExecutor
         if executor is None:
             from orcapod.core.executors.local import LocalPythonFunctionExecutor
+
             executor = LocalPythonFunctionExecutor()
-        
+
         self._function = function
         self._is_async = inspect.iscoroutinefunction(function)
-
         # Reject functions with variadic parameters -- PythonDataFunction maps
         # data keys to named parameters, so the full parameter set must be fixed.
         _sig = inspect.signature(function)
@@ -434,8 +455,16 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
 
         assert function_name is not None
         self._function_name = function_name
+        # (output key, conversion) pairs already reported with ValueConversionWarning.
+        self._reported_conversions: set[tuple[str, str]] = set()
 
-        super().__init__(label=label, version=version, data_context=data_context, config=config, executor=executor)
+        super().__init__(
+            label=label,
+            version=version,
+            data_context=data_context,
+            config=config,
+            executor=executor,
+        )
 
         # extract input and output schema from the function signature
         self._input_schema, self._output_schema = schema_utils.extract_function_schemas(
@@ -456,13 +485,19 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
                 git_hash += "-dirty"
             if env_info.get("has_untracked_files") == "true":
                 git_hash += "-untracked"
-            if (git_source := env_info.get("git_source")) is not None and git_source != "function":
+            if (
+                git_source := env_info.get("git_source")
+            ) is not None and git_source != "function":
                 git_hash += f"-{git_source}"
         self._git_hash = git_hash
 
         semantic_hasher = self.data_context.semantic_hasher
+        # The signature hash is the hash of the function used as a value: one
+        # structured description of the signature (module, name, each parameter's
+        # name, kind, annotation and default, return annotation), with every default
+        # hashed by the semantic hasher (ITL-953).
         self._function_signature_hash = semantic_hasher.hash_object(
-            get_function_signature(function)
+            function
         ).to_prefixed_digest()
         self._function_content_hash = semantic_hasher.hash_object(
             get_function_components(self._function)
@@ -474,9 +509,14 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
         return self._function_name
 
     def get_function_variation_data(self) -> dict[str, Any]:
-        """Raw data defining function variation - system computes hash"""
+        """Raw data defining function variation, stored with every result row.
+
+        ``function_version`` is the full version string the function was declared
+        with (``"v3.7"``); only its major part is in the table path.
+        """
         return {
             "function_name": self._function_name,
+            "function_version": self._version,
             "function_signature_hash": self._function_signature_hash,
             "function_content_hash": self._function_content_hash,
             "git_hash": self._git_hash,
@@ -484,12 +524,15 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
 
     def get_function_variation_data_schema(self) -> Schema:
         """Schema for the data returned by ``get_function_variation_data``."""
-        return Schema({
-            "function_name": str,
-            "function_signature_hash": bytes,
-            "function_content_hash": bytes,
-            "git_hash": str,
-        })
+        return Schema(
+            {
+                "function_name": str,
+                "function_version": str,
+                "function_signature_hash": bytes,
+                "function_content_hash": bytes,
+                "git_hash": str,
+            }
+        )
 
     def get_execution_data(self) -> dict[str, Any]:
         """Raw data defining execution context."""
@@ -498,9 +541,15 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
         executor = self._executor
         if executor is not None:
             executor_data = executor.get_executor_data()
-            executor_type = str(executor_data.pop("executor_type", executor.executor_type_id))
+            executor_type = str(
+                executor_data.pop("executor_type", executor.executor_type_id)
+            )
             executor_info = {
-                k: v if isinstance(v, str) else json.dumps(v) if isinstance(v, (dict, list)) else str(v)
+                k: v
+                if isinstance(v, str)
+                else json.dumps(v)
+                if isinstance(v, (dict, list))
+                else str(v)
                 for k, v in executor_data.items()
             }
         else:
@@ -518,12 +567,14 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
 
     def get_execution_data_schema(self) -> Schema:
         """Schema for the data returned by ``get_execution_data``."""
-        return Schema({
-            "executor_type": str,
-            "executor_info": dict[str, str],
-            "python_version": str,
-            "extra_info": dict[str, str],
-        })
+        return Schema(
+            {
+                "executor_type": str,
+                "executor_info": dict[str, str],
+                "python_version": str,
+                "extra_info": dict[str, str],
+            }
+        )
 
     @property
     def input_data_schema(self) -> Schema:
@@ -551,28 +602,128 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
     def _build_output_data(self, values: Any) -> DataProtocol:
         """Build an output Data from raw function return values.
 
+        Every returned value is checked against its declared output type and validated
+        against Arrow storage eagerly. Numeric exceptions are normalized; compatible
+        subclass and structural objects pass unchanged in memory. The declared logical
+        type controls their stored representation (ITL-895).
+        Without the check pyarrow would coerce some mismatches silently, for example
+        truncating ``1.5`` returned for ``-> int``. The shared conformance policy
+        permits only value-preserving numeric exceptions.
+
         Args:
             values: Raw return value from the wrapped function.
 
         Returns:
             A Data containing the parsed outputs with source info.
+
+        Raises:
+            OutputTypeError: If a returned value does not conform to its declared type,
+                or cannot be converted to it.
         """
         output_data = parse_function_outputs(self._output_keys, values)
+        output_schema = self.output_data_schema
+        for key, value in output_data.items():
+            mismatch = check_conformance(
+                value,
+                output_schema[key],
+                # DataContext's legacy protocol omits the logical-type operations.
+                typing.cast(
+                    "LogicalTypeConverterProtocol",
+                    typing.cast(object, self.data_context.type_converter),
+                ),
+            )
+            if mismatch is not None:
+                raise OutputTypeError(
+                    self.canonical_function_name,
+                    key,
+                    output_schema[key],
+                    value,
+                    mismatch.describe(),
+                    mismatch.hint,
+                )
+            conversions = tensor_conversions(value)
+            if conversions:
+                warn_once(
+                    self._reported_conversions,
+                    key,
+                    conversions,
+                    f"Function {self._function_name!r} output {key!r} returned a "
+                    f"torch tensor {describe(conversions)}; Orcapod stored a CPU "
+                    "tensor without autograd history, and the returned tensor is "
+                    "unchanged. Return value.detach().cpu() to avoid this warning.",
+                )
 
         def combine(*components: tuple[str, ...]) -> str:
             inner_parsed = [":".join(component) for component in components]
             return "::".join(inner_parsed)
 
         new_record_uuid = uuid.UUID(bytes=uuid7().bytes)
-        source_info = {k: combine(self.uri, (new_record_uuid.hex,), (k,)) for k in output_data}
+        source_info = {
+            k: combine(self.uri, (new_record_uuid.hex,), (k,)) for k in output_data
+        }
 
+        if not output_data:
+            return Data(
+                output_data,
+                source_info=source_info,
+                record_uuid=new_record_uuid,
+                python_schema=output_schema,
+                data_context=self.data_context,
+            )
+        # Validate storage eagerly, but retain compatible user-class instances. Reading
+        # the table back here would rebind structural objects to the registry's class.
+        self._convert_outputs(output_data, output_schema)
+        normalized = {
+            key: typing.cast(
+                DataValue, normalize_output_numbers(value, output_schema[key])
+            )
+            for key, value in output_data.items()
+        }
         return Data(
-            output_data,
+            normalized,
+            python_schema=output_schema,
             source_info=source_info,
             record_uuid=new_record_uuid,
-            python_schema=self.output_data_schema,
             data_context=self.data_context,
         )
+
+    def _convert_outputs(
+        self, output_data: dict[str, DataValue], output_schema: Schema
+    ) -> pa.Table:
+        """Convert checked outputs to a one-row Arrow table with the declared types.
+
+        Args:
+            output_data: The parsed outputs, already checked against ``output_schema``.
+            output_schema: The declared output types.
+
+        Returns:
+            The one-row table, typed by the declared schema.
+
+        Raises:
+            OutputTypeError: If an output cannot be converted, for example an integer
+                out of range for its declared width; it names that output.
+        """
+        converter = self.data_context.type_converter
+        try:
+            return converter.python_dicts_to_arrow_table(
+                [output_data], python_schema=output_schema
+            )
+        except Exception as exc:
+            # Find the output that fails on its own, so the error can name it.
+            for key, value in output_data.items():
+                try:
+                    _ = converter.python_dicts_to_arrow_table(
+                        [{key: value}], python_schema={key: output_schema[key]}
+                    )
+                except Exception:
+                    raise OutputTypeError(
+                        self.canonical_function_name,
+                        key,
+                        output_schema[key],
+                        value,
+                        type(exc).__name__,
+                    ) from None
+            raise
 
     def _call_async_function_sync(self, data: DataProtocol, **kwargs: Any) -> Any:
         """Run the wrapped async function synchronously.
@@ -607,7 +758,9 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
             # The lambda ensures the coroutine is created inside the executor
             # thread, avoiding unawaited-coroutine warnings on submission failure.
             return (
-                _get_sync_executor().submit(lambda: asyncio.run(fn(**call_dict))).result()
+                _get_sync_executor()
+                .submit(lambda: asyncio.run(fn(**call_dict)))
+                .result()
             )
 
     def call(
@@ -673,9 +826,7 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
             )
         return await self.direct_async_call(data, **kwargs)
 
-    def direct_call(
-        self, data: DataProtocol, **kwargs: Any
-    ) -> DataProtocol | None:
+    def direct_call(self, data: DataProtocol, **kwargs: Any) -> DataProtocol | None:
         """Execute the function on *data* synchronously (no executor path).
 
         On user-function failure the exception is re-raised.
@@ -750,10 +901,12 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
                 "callable_name": self._function_name,
                 "version": self._version,
                 "input_data_schema": {
-                    k: str(v) for k, v in self.input_data_schema.items()
+                    k: stabilize_type_names(str(v), v)
+                    for k, v in self.input_data_schema.items()
                 },
                 "output_data_schema": {
-                    k: str(v) for k, v in self.output_data_schema.items()
+                    k: stabilize_type_names(str(v), v)
+                    for k, v in self.output_data_schema.items()
                 },
                 "output_keys": list(self._output_keys) if self._output_keys else None,
             },
@@ -794,11 +947,26 @@ class DataFunctionWrapper(DataFunctionBase[E]):
     """
 
     def __init__(self, data_function: DataFunctionProtocol, **kwargs) -> None:
+        """Wrap ``data_function``.
+
+        Args:
+            data_function: The data function to wrap.
+            **kwargs: Passed on to ``DataFunctionBase``. Without a ``data_context``
+                the wrapper works under the wrapped function's data context, so
+                that what it hashes and stores agrees with the function's data.
+        """
         self._data_function = data_function
+        if kwargs.get("data_context") is None:
+            kwargs["data_context"] = getattr(data_function, "data_context", None)
         super().__init__(**kwargs)
 
     def computed_label(self) -> str | None:
         return self._data_function.label
+
+    @property
+    def is_async(self) -> bool:
+        """Whether the wrapped function is an async coroutine function."""
+        return getattr(self._data_function, "is_async", False) is True
 
     @property
     def major_version(self) -> int:
@@ -819,6 +987,10 @@ class DataFunctionWrapper(DataFunctionBase[E]):
     @property
     def input_data_schema(self) -> Schema:
         return self._data_function.input_data_schema
+
+    @property
+    def accepts_arbitrary_keywords(self) -> bool:
+        return self._data_function.accepts_arbitrary_keywords
 
     @property
     def output_data_schema(self) -> Schema:
@@ -906,9 +1078,7 @@ class DataFunctionWrapper(DataFunctionBase[E]):
     ) -> DataProtocol | None:
         return await self._data_function.async_call(data, logger=logger, **kwargs)
 
-    def direct_call(
-        self, data: DataProtocol, **kwargs: Any
-    ) -> DataProtocol | None:
+    def direct_call(self, data: DataProtocol, **kwargs: Any) -> DataProtocol | None:
         return self._data_function.direct_call(data, **kwargs)
 
     async def direct_async_call(
@@ -941,6 +1111,8 @@ class CachedDataFunction(DataFunctionWrapper):
             result_database=result_database,
             record_path=record_path_prefix + self.uri,
             auto_flush=True,
+            # The first uri component is the function's name; no hash before it.
+            name_path=record_path_prefix + self.uri[:1],
         )
 
     def _build_metadata_datagrams(self) -> tuple[Datagram, Datagram]:
@@ -982,11 +1154,21 @@ class CachedDataFunction(DataFunctionWrapper):
         the underlying function.  They are intentionally excluded from the
         cache key — such arguments are deterministic per row and pod, so the
         same input data always produces the same output.
+
+        Raises:
+            InputValidationError: If ``data`` is of another data context than this
+                function's; the wrapped function has not been called then, whatever
+                ``skip_cache_lookup`` and ``skip_cache_insert`` are.
         """
+        # Checked before anything else: with ``skip_cache_lookup`` the lookup, which
+        # checks it too, does not run, and the function must not be called.
+        require_same_data_context(data.data_context_key, self.data_context_key)
         output_data = None
         if not skip_cache_lookup:
             module_logger.info("Checking for cache...")
-            output_data = self._cache.lookup(data)
+            output_data = self._cache.lookup(
+                data, data_context_key=self.data_context_key
+            )
             if output_data is not None:
                 module_logger.info(f"Cache hit for {data}!")
                 return output_data
@@ -994,7 +1176,13 @@ class CachedDataFunction(DataFunctionWrapper):
         if output_data is not None:
             if not skip_cache_insert:
                 var_dg, exec_dg = self._build_metadata_datagrams()
-                self._cache.store(data, output_data, var_dg, exec_dg)
+                self._cache.store(
+                    data,
+                    output_data,
+                    var_dg,
+                    exec_dg,
+                    data_context_key=self.data_context_key,
+                )
             output_data = output_data.with_meta_columns(
                 **{self.RESULT_COMPUTED_FLAG: True}
             )
@@ -1009,19 +1197,37 @@ class CachedDataFunction(DataFunctionWrapper):
         skip_cache_insert: bool = False,
         **kwargs: Any,
     ) -> DataProtocol | None:
-        """Async counterpart of ``call`` with cache check and recording."""
+        """Async counterpart of ``call`` with cache check and recording.
+
+        Raises:
+            InputValidationError: If ``data`` is of another data context than this
+                function's; the wrapped function has not been called then.
+        """
+        # Checked before anything else: with ``skip_cache_lookup`` the lookup, which
+        # checks it too, does not run, and the function must not be called.
+        require_same_data_context(data.data_context_key, self.data_context_key)
         output_data = None
         if not skip_cache_lookup:
             module_logger.info("Checking for cache...")
-            output_data = self._cache.lookup(data)
+            output_data = self._cache.lookup(
+                data, data_context_key=self.data_context_key
+            )
             if output_data is not None:
                 module_logger.info(f"Cache hit for {data}!")
                 return output_data
-        output_data = await self._data_function.async_call(data, logger=logger, **kwargs)
+        output_data = await self._data_function.async_call(
+            data, logger=logger, **kwargs
+        )
         if output_data is not None:
             if not skip_cache_insert:
                 var_dg, exec_dg = self._build_metadata_datagrams()
-                self._cache.store(data, output_data, var_dg, exec_dg)
+                self._cache.store(
+                    data,
+                    output_data,
+                    var_dg,
+                    exec_dg,
+                    data_context_key=self.data_context_key,
+                )
             output_data = output_data.with_meta_columns(
                 **{self.RESULT_COMPUTED_FLAG: True}
             )
@@ -1037,7 +1243,7 @@ class CachedDataFunction(DataFunctionWrapper):
         Returns:
             The cached output data, or ``None`` if no entry was found.
         """
-        return self._cache.lookup(input_data)
+        return self._cache.lookup(input_data, data_context_key=self.data_context_key)
 
     def record_data(
         self,
@@ -1053,6 +1259,7 @@ class CachedDataFunction(DataFunctionWrapper):
             var_dg,
             exec_dg,
             skip_duplicates=skip_duplicates,
+            data_context_key=self.data_context_key,
         )
         return output_data
 
@@ -1069,5 +1276,6 @@ class CachedDataFunction(DataFunctionWrapper):
             A PyArrow table of cached results, or ``None`` if empty.
         """
         return self._cache.get_all_records(
-            include_system_columns=include_system_columns
+            self.data_context_key,
+            include_system_columns=include_system_columns,
         )

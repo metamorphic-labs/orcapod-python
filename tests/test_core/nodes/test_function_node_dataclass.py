@@ -4,6 +4,7 @@ Fixtures are defined at module level so that get_type_hints() can resolve
 annotations (local-scope classes are not reachable via __globals__) and so
 DataclassLogicalTypeFactory can build a stable FQCN for registration.
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -40,7 +41,7 @@ def take_sum(a: int, b: int) -> _SumResult:
 def test_as_df_dataclass_column_populated():
     """FunctionNode with a dataclass return type produces a correct Polars DataFrame."""
     store = InMemoryArrowDatabase()
-    job = PipelineJob(store=store)
+    job = PipelineJob(database=store)
     source = DictSource([{"id": 0, "a": 5, "b": 3}], tag_columns=["id"])
 
     with job:
@@ -65,7 +66,7 @@ def test_as_df_dataclass_column_populated():
 
 def test_as_df_dataclass_column_empty_node():
     """Unrun FunctionNode returns a zero-row DataFrame with the dataclass column present."""
-    job = PipelineJob(store=InMemoryArrowDatabase())
+    job = PipelineJob(database=InMemoryArrowDatabase())
     source = DictSource([{"id": 0, "a": 5, "b": 3}], tag_columns=["id"])
 
     with job:
@@ -74,9 +75,9 @@ def test_as_df_dataclass_column_empty_node():
     # Deliberately do NOT call job.run() — node has no computed results yet.
     df = job.nodes["take_sum"].as_df()
 
-    assert df.shape[0] == 0          # zero rows
-    assert "id" in df.columns        # tag column present
-    assert "result" in df.columns    # data column present even with no data
+    assert df.shape[0] == 0  # zero rows
+    assert "id" in df.columns  # tag column present
+    assert "result" in df.columns  # data column present even with no data
     assert df["result"].dtype != pl.Null
 
 
@@ -84,7 +85,7 @@ def test_as_df_empty_schema_matches_nonempty_schema():
     """Empty and populated as_df() for the same node type share identical schemas."""
     # Populated node
     source_full = DictSource([{"id": 0, "a": 5, "b": 3}], tag_columns=["id"])
-    job_full = PipelineJob(store=InMemoryArrowDatabase())
+    job_full = PipelineJob(database=InMemoryArrowDatabase())
     with job_full:
         take_sum.pod(source_full)
     job_full.run()
@@ -92,7 +93,7 @@ def test_as_df_empty_schema_matches_nonempty_schema():
 
     # Unrun node — same pod, fresh job
     source_empty = DictSource([{"id": 0, "a": 5, "b": 3}], tag_columns=["id"])
-    job_empty = PipelineJob(store=InMemoryArrowDatabase())
+    job_empty = PipelineJob(database=InMemoryArrowDatabase())
     with job_empty:
         take_sum.pod(source_empty)
     empty_df = job_empty.nodes["take_sum"].as_df()
