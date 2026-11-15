@@ -20,7 +20,8 @@ uv add orcapod
 
 `0.3.0` is the first release on PyPI since `0.1.4`; `0.2.0` was never published to PyPI.
 Tables written by `0.2.0` or earlier are not read by `0.3.0`: see
-[`CHANGELOG.md`](CHANGELOG.md), *Upgrading from 0.2.0*.
+[`CHANGELOG.md`](CHANGELOG.md#upgrading-from-020), *Upgrading from 0.2.0*
+(it also covers `0.1.4`).
 
 Optional features are installed as extras:
 
