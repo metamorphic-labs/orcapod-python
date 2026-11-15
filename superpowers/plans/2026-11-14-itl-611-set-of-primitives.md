@@ -152,3 +152,15 @@ movement are waiting on the developer. **No library code until the coordinator's
 - 4576307078 (None in `list[set[int] | None]`) — DECLINE as pre-existing: main reads the same
   column as `[[], [1], []]`; `list[set[UUID] | None]` reads `[set(), ...]` on main;
   `list[UUID | None]` crashes on read on main. Report out of scope.
+
+### CodeRabbit round 2 (review 5908180501 on 8b75ccea): thread 4576412950, widths collide
+
+- Reproduced. HEAD: set[np.int8] then set[int] -> set[int] gets the int8 container and a
+  set[int] source raises "python_type 'set' is already bound to 'set[int8]'"; reverse order:
+  set[np.int8] raises. b22cb6ff: same failure via a job loaded in a fresh process (reconstruct
+  reads int8 as int and binds set[int]). main: plain lists, no collision.
+- Root cause: the registry binds each Python type to one logical type; many element Arrow
+  types read as one Python type (int8/int64, float/double, timestamp units/tz, date32/64).
+- Proposed (A): plain-element set containers are registered by identifier only, never bound
+  to a Python type; set[T] -> Arrow goes through T's Arrow type, as list[T] does. Pending
+  coordinator decision.
