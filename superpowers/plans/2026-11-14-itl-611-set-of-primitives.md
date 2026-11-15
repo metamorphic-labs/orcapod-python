@@ -164,3 +164,28 @@ movement are waiting on the developer. **No library code until the coordinator's
 - Proposed (A): plain-element set containers are registered by identifier only, never bound
   to a Python type; set[T] -> Arrow goes through T's Arrow type, as list[T] does. Pending
   coordinator decision. APPROVED (A) and implemented.
+
+### Metadata format change (developer decision, November 15, 2026), task_261a2b5ec576
+
+Decision: "make the logical extension name contain the element as is, but remove redundancy
+for arrow type by simply using element_kind arrow". A set of a primitive keeps its name
+(`set[int64]`); metadata becomes exactly `{"category": "set", "element_kind": "arrow"}`.
+Containers of logical elements unchanged.
+
+- [ ] Tests first (test_set_of_primitives.py): identifier/metadata for set[int], set[str],
+  set[bytes], set[datetime]; list[set[int]] element_ext_metadata is the new inner metadata;
+  fresh-process read rebuilds set[int]/set[str] from storage (existing fresh test covers it,
+  with the new metadata); a stored column `set[...]` with `element_kind: arrow` over a
+  non-list storage, and over a list whose element is not the one the name names, is refused
+  with LogicalTypeIdentifierError (fresh process, so the name is not already registered).
+- [ ] Writer `_init_arrow_element`: metadata `{"category": "set", "element_kind": "arrow"}`;
+  constant `ELEMENT_KIND_KEY = "element_kind"`, `ARROW_ELEMENT_KIND = "arrow"`.
+- [ ] Reader `reconstruct_from_arrow`: `element_kind == "arrow"` -> element from storage
+  (`large_list<T>`, list accepted as before and normalized), rebuilt name must equal the
+  stored name; otherwise LogicalTypeIdentifierError. Other element_kind values refused.
+- [ ] Saved-schema rebuild (`serialization._native_container_storage`): element text comes
+  from the extension name `set[<text>]` when element_kind is arrow (needs the name).
+- [ ] Docs: logical-type-identifiers.md, CLAUDE.md + .zed/rules, changelog fragment,
+  design_issues/ITL-611-NC1.md, spec table, PR description.
+- [ ] Golden: regenerate only; diff vs origin/main must remain additions only.
+- [ ] Targeted suites, push, CI, one signed `@coderabbitai review`.
