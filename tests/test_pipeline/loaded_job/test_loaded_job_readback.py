@@ -565,11 +565,11 @@ def test_loaded_function_node_warns_once_on_a_store_without_its_runs_records(
     assert len(messages) == 1
     assert messages[0].startswith(
         "FunctionJobNode 'dbl': the job file records 2 rows for its run, but the "
-        "in_memory store (table 'loaded_demo/double/"
+        "in_memory database (table 'loaded_demo/double/"
     )
     assert messages[0].endswith(
         "holds 0 under the run's key. The read returns what the database holds; the "
-        "store may not be the one the run wrote, or it may have changed since."
+        "database may not be the one the run wrote, or it may have changed since."
     )
 
 
