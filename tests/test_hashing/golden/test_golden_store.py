@@ -7,6 +7,7 @@ repository itself.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,18 @@ from tests.test_hashing.golden import cases, store
 from tests.test_hashing.golden.generate_golden_hashes import dump, main
 
 VERSION = get_default_context().version
+
+
+# The trial trees copy the repository's golden folder, so the newest file of a group and the
+# next counter come from that inventory, never from fixed names.
+_REPOSITORY_FILES = store.group_files(
+    store.golden_folder(
+        store.PROJECT_ROOT,
+        store.read_json(store.manifest_path(store.PROJECT_ROOT, VERSION)),
+    )
+)
+NEWEST_SCHEMA = _REPOSITORY_FILES["schema"][-1].name
+NEXT_SCHEMA = store.next_file_name(NEWEST_SCHEMA)
 
 
 def _write(folder: Path, name: str, values: dict[str, Any]) -> None:
@@ -249,15 +262,15 @@ def test_the_repository_pin_is_consistent() -> None:
 
 def test_add_writes_new_entries_into_the_open_file_of_their_group(tree: Path) -> None:
     """A group's newest file that no release lists takes the new entries."""
-    dropped = _drop_entries(tree, "schema-01.json", 3)
+    dropped = _drop_entries(tree, NEWEST_SCHEMA, 3)
     before = _snapshot(_folder(tree))
     main(["--root", str(tree), "--group", "schema"])
     after = _snapshot(_folder(tree))
     assert set(after) == set(before)
-    schema = json.loads(after["schema-01.json"])
+    schema = json.loads(after[NEWEST_SCHEMA])
     assert dropped.items() <= schema.items()
-    assert {n: b for n, b in after.items() if n != "schema-01.json"} == {
-        n: b for n, b in before.items() if n != "schema-01.json"
+    assert {n: b for n, b in after.items() if n != NEWEST_SCHEMA} == {
+        n: b for n, b in before.items() if n != NEWEST_SCHEMA
     }
     assert len(_history(tree)) == 1
     assert store.tree_problems(tree, VERSION) == []
@@ -265,18 +278,18 @@ def test_add_writes_new_entries_into_the_open_file_of_their_group(tree: Path) ->
 
 def test_add_after_a_release_writes_a_new_file_and_a_new_revision(tree: Path) -> None:
     """A released file never changes: new entries go to the next ``<group>-NN.json``."""
-    dropped = _drop_entries(tree, "schema-01.json", 2)
+    dropped = _drop_entries(tree, NEWEST_SCHEMA, 2)
     main(["--root", str(tree), "--release", "0.3.0"])
     before = _snapshot(_folder(tree))
     main(["--root", str(tree), "--group", "schema"])
     after = _snapshot(_folder(tree))
     assert {n: after[n] for n in before} == before
-    assert set(after) - set(before) == {"schema-02.json"}
-    assert json.loads(after["schema-02.json"]) == dropped
+    assert set(after) - set(before) == {NEXT_SCHEMA}
+    assert json.loads(after[NEXT_SCHEMA]) == dropped
     history = _history(tree)
     assert [r["release"] for r in history] == [None, "0.3.0", None]
     assert history[2]["previous"] == history[1]["digest"]
-    assert list(history[2]["added"]) == ["schema-02.json"]
+    assert list(history[2]["added"]) == [NEXT_SCHEMA]
     assert store.tree_problems(tree, VERSION) == []
 
 
@@ -284,7 +297,7 @@ def test_add_changes_nothing_when_a_later_group_fails(
     tree: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Every group is computed before anything is written: files and history stay in step."""
-    _ = _drop_entries(tree, "schema-01.json", 1)
+    _ = _drop_entries(tree, NEWEST_SCHEMA, 1)
     before = _snapshot(_folder(tree)), store.manifest_path(tree, VERSION).read_bytes()
     compute = cases.compute_group
 
@@ -328,7 +341,7 @@ def test_add_writes_nothing_when_every_entry_is_pinned(tree: Path) -> None:
 
 
 def test_add_refuses_a_tree_that_breaks_the_rules(tree: Path) -> None:
-    path = _folder(tree) / "schema-01.json"
+    path = _folder(tree) / NEWEST_SCHEMA
     _ = path.write_text(path.read_text() + " ")
     manifest = store.manifest_path(tree, VERSION).read_bytes()
     with pytest.raises(SystemExit, match="nothing written"):
@@ -338,7 +351,7 @@ def test_add_refuses_a_tree_that_breaks_the_rules(tree: Path) -> None:
 
 def test_remove_then_add_changes_an_unreleased_value(tree: Path) -> None:
     """The approved-change procedure: ``--remove`` the entry, then ``--add`` writes it."""
-    name = "schema-01.json"
+    name = NEWEST_SCHEMA
     values = store.read_json(_folder(tree) / name)
     entry = next(iter(values))
     _record(tree, name, {**values, entry: "old value"})
@@ -353,7 +366,7 @@ def test_remove_then_add_changes_an_unreleased_value(tree: Path) -> None:
 
 def test_remove_refuses_an_entry_a_release_lists(tree: Path) -> None:
     main(["--root", str(tree), "--release", "0.3.0"])
-    entry = next(iter(store.read_json(_folder(tree) / "schema-01.json")))
+    entry = next(iter(store.read_json(_folder(tree) / NEWEST_SCHEMA)))
     before = _snapshot(_folder(tree)), _snapshot(tree / store.CONTEXTS_DIR / "data")
     with pytest.raises(SystemExit, match="released"):
         main(["--root", str(tree), "--remove", entry])
@@ -362,7 +375,7 @@ def test_remove_refuses_an_entry_a_release_lists(tree: Path) -> None:
 
 
 def test_remove_refuses_an_unknown_entry_and_writes_nothing(tree: Path) -> None:
-    entry = next(iter(store.read_json(_folder(tree) / "schema-01.json")))
+    entry = next(iter(store.read_json(_folder(tree) / NEWEST_SCHEMA)))
     before = _snapshot(_folder(tree)), _snapshot(tree / store.CONTEXTS_DIR / "data")
     with pytest.raises(SystemExit, match="no.such.entry"):
         main(["--root", str(tree), "--remove", entry, "--remove", "no.such.entry"])
@@ -371,20 +384,20 @@ def test_remove_refuses_an_unknown_entry_and_writes_nothing(tree: Path) -> None:
 
 
 def test_check_reports_a_moved_value_and_writes_nothing(tree: Path) -> None:
-    name = "schema-01.json"
+    name = NEWEST_SCHEMA
     values = store.read_json(_folder(tree) / name)
     entry = next(iter(values))
     _record(tree, name, {**values, entry: "moved"})
     before = _snapshot(_folder(tree)), store.manifest_path(tree, VERSION).read_bytes()
-    with pytest.raises(SystemExit, match=f"schema:{entry} moved"):
+    with pytest.raises(SystemExit, match=re.escape(f"schema:{entry} moved")):
         main(["--root", str(tree), "--check", "--group", "schema"])
     after = _snapshot(_folder(tree)), store.manifest_path(tree, VERSION).read_bytes()
     assert after == before
 
 
 def test_check_reports_an_unpinned_entry(tree: Path) -> None:
-    dropped = _drop_entries(tree, "schema-01.json", 1)
-    with pytest.raises(SystemExit, match=f"schema:{next(iter(dropped))} is computed"):
+    dropped = _drop_entries(tree, NEWEST_SCHEMA, 1)
+    with pytest.raises(SystemExit, match=re.escape(f"schema:{next(iter(dropped))} is computed")):
         main(["--root", str(tree), "--check", "--group", "schema"])
 
 

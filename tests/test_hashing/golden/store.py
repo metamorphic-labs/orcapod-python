@@ -235,6 +235,24 @@ def group_files(folder: Path) -> dict[str, list[Path]]:
     return files
 
 
+def next_file_name(name: str) -> str:
+    """The name of a group's next golden file, e.g. ``schema-02.json`` after ``schema-01.json``.
+
+    Args:
+        name: A golden file name, ``<group>-NN.json``.
+
+    Returns:
+        The same group with the counter one higher.
+
+    Raises:
+        GoldenLayoutError: ``name`` is not a golden file name.
+    """
+    match = FILE_NAME.match(name)
+    if match is None:
+        raise GoldenLayoutError(f"{name} is not a golden file name")
+    return f"{match['group']}-{int(match['number']) + 1:02d}.json"
+
+
 def load_folder(folder: Path) -> dict[str, dict[str, Any]]:
     """Read every golden file of a folder.
 

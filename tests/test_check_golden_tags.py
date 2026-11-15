@@ -106,16 +106,17 @@ def test_a_tag_that_released_nothing_is_not_checked(tmp_path: Path) -> None:
 
 def test_a_golden_file_added_after_the_release_passes(repo: Path) -> None:
     folder = _folder(repo)
-    _ = (folder / "schema-02.json").write_text(dump({"new.entry": "x"}))
+    name = store.next_file_name(store.group_files(folder)["schema"][-1].name)
+    _ = (folder / name).write_text(dump({"new.entry": "x"}))
     manifest = store.read_json(store.manifest_path(repo, VERSION))
     manifest["golden"]["history"] = store.with_file(
         manifest["golden"]["history"],
-        "schema-02.json",
-        store.file_digest(folder / "schema-02.json"),
+        name,
+        store.file_digest(folder / name),
         "2026-11-20",
     )
     store.write_json(store.manifest_path(repo, VERSION), manifest)
-    _commit(repo, "add schema-02")
+    _commit(repo, f"add {name}")
     assert store.tree_problems(repo, VERSION) == []
     result = _check(repo, ci=True)
     assert result.returncode == 0, result.stderr
