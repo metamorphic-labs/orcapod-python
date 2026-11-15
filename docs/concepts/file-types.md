@@ -141,9 +141,12 @@ for tag, data in result.iter_data():
 ```
 
 Rows whose `op.File` inputs have the same content share one stored result, so they get the
-same output path. And if an input file changes, its new result overwrites the old output
+same output path; since the output was computed from that content, it is the right file
+for each of them. If an input file changes, though, its new result overwrites the old output
 file under the same name, while the stored result of the old content still points there.
-When either matters, put a digest of the input's content into the output name.
+To keep both, put a digest of the input's content into the output name. A digest cannot
+give same-content rows separate files; if each row needs its own, pass the value that
+should name it (a row id, say) to the function as an input.
 
 When such a function runs inside a [`PipelineJob`](pipeline-job.md):
 
@@ -152,7 +155,7 @@ When such a function runs inside a [`PipelineJob`](pipeline-job.md):
   files together with the database that refers to them.
 - **Derive the output name from the inputs**, so that rows with different inputs write
   different files. Rows whose inputs have the same content share one result and one output
-  path (see above); put a digest of the content into the name when that matters.
+  path (see above).
 - **Prefer absolute output paths** for results you keep. A relative path is stored as
   written and only resolves from the directory the job was run in.
 

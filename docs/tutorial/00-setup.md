@@ -145,6 +145,8 @@ with `pandas.read_csv`. Which column or columns identify a row in each file?
 
 ??? success "Solution"
     ```python
+    import pandas as pd
+
     spikes = pd.read_csv(data_dir / "sessions" / "mouse_01_s1" / "spikes_imec0.csv")
     print(len(spikes))
     # 1736
