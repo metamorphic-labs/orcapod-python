@@ -357,3 +357,26 @@ def test_a_null_dict_entry_raises_at_read() -> None:
     source = ArrowTableSource(table, tag_columns=["id"], source_id="v")
     with pytest.raises(ValueError, match=r"(?s)Column 'v'.*ITL-1144"):
         _read_v(source)
+
+
+class TestConverterWithoutRegistry:
+    """A converter with no logical type registry refuses the same declarations."""
+
+    # Only element types a registry-free converter can derive; a logical type there
+    # is already unsupported without a registry.
+    @pytest.mark.parametrize(
+        "annotation",
+        [
+            list[list[int] | None],
+            set[list[int] | None],
+            list[dict[str, int] | None],
+            dict[str, list[int] | None],
+        ],
+        ids=str,
+    )
+    def test_the_type_is_refused(self, annotation: Any) -> None:
+        from orcapod.semantic_types.universal_converter import UniversalTypeConverter
+
+        converter = UniversalTypeConverter()
+        with pytest.raises(ValueError, match="ITL-1144"):
+            converter.python_type_to_arrow_type(annotation)

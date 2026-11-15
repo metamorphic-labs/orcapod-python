@@ -1343,6 +1343,9 @@ class UniversalTypeConverter:
                     f"list type must have exactly one type argument, got: {args}"
                 )
             element_type = self.python_type_to_arrow_type(args[0])
+            require_restorable_none(
+                args[0], element_type, self._is_user_class_extension
+            )
             if self._logical_type_registry is not None and hasattr(
                 element_type, "extension_name"
             ):
@@ -1392,6 +1395,7 @@ class UniversalTypeConverter:
                 )
             key_type = self.python_type_to_arrow_type(args[0])
             value_type = self.python_type_to_arrow_type(args[1])
+            require_restorable_none(args[1], value_type, self._is_user_class_extension)
             key_value_struct = pa.struct([("key", key_type), ("value", value_type)])
             return pa.large_list(key_value_struct)
 
@@ -1434,6 +1438,9 @@ class UniversalTypeConverter:
                     f"set type must have exactly one type argument, got: {args}"
                 )
             element_type = self.python_type_to_arrow_type(args[0])
+            require_restorable_none(
+                args[0], element_type, self._is_user_class_extension
+            )
             if self._logical_type_registry is not None and hasattr(
                 element_type, "extension_name"
             ):
