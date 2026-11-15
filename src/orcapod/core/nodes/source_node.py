@@ -393,6 +393,8 @@ class SourceNodeBase(TraceableBase, ABC):
             with contextlib.suppress(AttributeError):  # not computed yet
                 del self._schema_hash_str
             self._invalidate_content_hash_cache()
+            # A slot without a saved pipeline hash computed one from the type text.
+            self._invalidate_pipeline_hash_cache()
         return {
             name: _saved_type_description(pending.text)
             for name, pending in still_pending.items()
@@ -924,9 +926,11 @@ class SourceNode(SourceNodeBase):
             data_schema=data_schema,
         )
         if isinstance(stream, SourceNodeBase):
-            # A loaded job's slot keeps its pending types (ITL-1138); its saved
-            # hashes stay behind, since the new slot has another name.
+            # A loaded job's slot keeps its pending types and its saved pipeline hash,
+            # which does not depend on the name (ITL-1138); its saved content hash
+            # covers the name, and the new slot has another name.
             node._pending_types = dict(stream._pending_types)
+            node._saved_pipeline_hash = stream._saved_pipeline_hash
         return node
 
 

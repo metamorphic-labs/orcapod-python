@@ -309,6 +309,24 @@ _NULLABLE_SCRIPT = textwrap.dedent(
         _ = source(Exact)  # registers the class before the load
         job = PipelineJob.load(work + "/" + sys.argv[4])
         print(json.dumps(slot_view(job)))
+    elif mode == "legacy_validate":
+        # A file without the slots' saved hashes: the slot hashes the type text until
+        # the type is restored, here by validate() without a bind.
+        with open(work + "/saved.json") as f:
+            data = json.load(f)
+        for descriptor in data["pipeline"]["nodes"].values():
+            if descriptor["node_type"] == "source":
+                descriptor.pop("pipeline_hash", None)
+                descriptor.pop("content_hash", None)
+        with open(work + "/legacy.json", "w") as f:
+            json.dump(data, f)
+        job = PipelineJob.load(work + "/legacy.json")
+        slot = job.nodes["s"]
+        _ = slot.pipeline_hash()  # computed, and kept, from the type text
+        from classes import Exact
+
+        slot.validate(source(Exact))
+        print(json.dumps({"pipeline_hash": slot.pipeline_hash().to_string()}))
     else:  # copies of a loaded slot whose class is not registered
         job = PipelineJob.load(work + "/saved.json")
         slot = job.nodes["s"]
@@ -324,6 +342,7 @@ _NULLABLE_SCRIPT = textwrap.dedent(
             "renamed_keeps_content_hash": renamed.content_hash() == slot.content_hash(),
             "same_name_keeps_content_hash": same_name.content_hash() == slot.content_hash(),
             "renamed_keeps_pipeline_hash": renamed.pipeline_hash() == slot.pipeline_hash(),
+            "wrapped_keeps_pipeline_hash": wrapped.pipeline_hash() == slot.pipeline_hash(),
             "wrapped_then_bound_schema": str(bound.output_schema()[1]["p"]),
         }))
     """
@@ -377,5 +396,14 @@ def test_copies_of_a_loaded_slot_keep_its_pending_types_and_name_bound_hashes(
         "renamed_keeps_content_hash": False,
         "same_name_keeps_content_hash": True,
         "renamed_keeps_pipeline_hash": True,
+        "wrapped_keeps_pipeline_hash": True,
         "wrapped_then_bound_schema": "classes.Exact | None",
     }
+
+
+def test_restoring_a_type_by_validation_rehashes_a_slot_without_saved_hashes(
+    nullable_job,
+) -> None:
+    """A slot that hashed its type text hashes the restored class after validate()."""
+    saved, run = nullable_job
+    assert run("legacy_validate") == {"pipeline_hash": saved["pipeline_hash"]}
