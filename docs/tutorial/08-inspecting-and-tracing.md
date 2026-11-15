@@ -18,7 +18,7 @@ from orcapod.databases import InMemoryArrowDatabase
 from orcapod.sources import CSVSource
 
 data_dir = make_dataset()
-store = InMemoryArrowDatabase()
+database = InMemoryArrowDatabase()
 
 
 @function_pod(output_keys="rate_hz")
@@ -31,7 +31,7 @@ def mean_rate(rate_hz: list[float]) -> float:
     return sum(rate_hz) / len(rate_hz)
 
 
-job = PipelineJob(name="workshop", store=store)
+job = PipelineJob(name="workshop", database=database)
 with job:
     units = CSVSource(
         str(data_dir / "units.csv"),
@@ -72,18 +72,20 @@ def print_lineage(node, depth=0):
 
 print_lineage(job.nodes["session_means"])
 # session_means
-#   SelectDataColumns_3
+#   SelectDataColumns_2
 #     GroupBy
 #       rates
 #         Join
-#           SelectDataColumns_2
-#             units
 #           SelectDataColumns_1
+#             units
+#           SelectDataColumns_3
 #             sessions
 ```
 
 Read from the bottom up, this is the pipeline as you wrote it, including the join that the
-two-stream call to `firing_rate` added for you.
+two-stream call to `firing_rate` added for you. When a job has several steps of the same
+kind, it numbers them (`SelectDataColumns_1`, ...); the numbers tell the steps apart but do
+not follow the order you wrote them in.
 
 If you have Graphviz installed (the `dot` program), the job's pipeline can draw the same
 graph as a picture:
@@ -143,22 +145,23 @@ meant to be read by eye.
 !!! note "After `group_by`"
     A grouped row comes from many source rows. Its system tags are folded into a single
     digest per column, so they still distinguish one group from another but no longer name
-    the individual rows. To see which rows went into a group, look at the grouped stream
-    itself (`job.nodes["GroupBy"]`): its list-valued `probe` and `unit` columns say exactly
-    which units each list element belongs to, as you saw in Part 4.
+    the individual rows. To see which rows went into a group, look at the stream before the
+    grouping (`job.nodes["rates"]`): every row there with the group's `subject_id` and
+    `session` is a member, and the list elements are in the order of their `probe` and
+    `unit`, as you saw in Part 4.
 
 `as_table(all_info=True)` shows every hidden column at once.
 
 ## How was it computed?
 
-For each function, the store holds one record per computed result, with details of the
+For each function, the database holds one record per computed result, with details of the
 call. `get_all_records` returns them; ask for the `meta` columns to see the details:
 
 ```python
 records = pl.from_arrow(job.nodes["rates"].get_all_records(columns={"meta": True}))
 meta = [c for c in records.columns if c.startswith("__")]
 print(meta)
-# ['__data_id', '__input_data_hash', '__output_data_hash', '__input_data_context_key', '__computed', '__is_ephemeral', '__input_data_hash_right', '__pf_var_function_name', '__pf_var_function_signature_hash', '__pf_var_function_content_hash', '__pf_var_git_hash', '__pf_exec_executor_type', '__pf_exec_executor_info', '__pf_exec_python_version', '__pf_exec_extra_info', '__pod_ts']
+# ['__data_id', '__input_data_hash', '__output_data_hash', '__data_context', '__computed', '__is_ephemeral', '__input_data_hash_right', '__pf_var_function_name', '__pf_var_function_version', '__pf_var_function_signature_hash', '__pf_var_function_content_hash', '__pf_var_git_hash', '__pf_exec_executor_type', '__pf_exec_executor_info', '__pf_exec_python_version', '__pf_exec_extra_info', '__pod_ts']
 ```
 
 The ones you are most likely to want:
@@ -188,12 +191,15 @@ result of another row with the same inputs.
 
 They answer different questions.
 
-- `node.as_table()` is the node's output **for the inputs of this job**: 64 rows here.
+- `node.as_table()` is the node's output **for the inputs of this job's run**: 64 rows here.
+  Before the job has run in this Python session it has no rows at all, even when the
+  database already holds results.
 - `node.get_all_records()` is **everything stored** for this function in this job's part of
-  the store, including results from earlier runs over other inputs.
+  the database, including results from earlier runs over other inputs. It does not need a
+  run.
 
-After the "two more units" run of Part 6, `as_table()` of a job over the original file
-still had 64 rows, while `get_all_records()` had 66.
+After the "two more units" run of Part 6, a job over the original file, once run, has 64
+rows in `as_table()`, while `get_all_records()` has 66.
 
 ## Starting a second pipeline from stored results
 
@@ -209,7 +215,7 @@ print(session_means.keys())
 ```
 
 A `DerivedSource` is a source like those of Part 1, so it can be joined, filtered and fed to
-pods. Here a second job flags sessions with a low mean rate:
+pods. Here the next stage flags sessions with a low mean rate:
 
 ```python
 @function_pod(output_keys="is_low")
@@ -217,12 +223,7 @@ def is_low(mean_rate_hz: float) -> bool:
     return mean_rate_hz < 5.5
 
 
-second = PipelineJob(name="quality", store=store)
-with second:
-    is_low.pod(job.nodes["session_means"].as_source(), label="low_rate")
-second.run()
-
-flags = second.nodes["low_rate"].as_pandas_df()
+flags = is_low.pod(session_means).as_pandas_df()
 print(flags.sort_values(["subject_id", "session"], ignore_index=True))
 #   subject_id session  is_low
 # 0   mouse_01      s1   False
@@ -235,10 +236,17 @@ print(flags.sort_values(["subject_id", "session"], ignore_index=True))
 # 7   mouse_04      s2    True
 ```
 
-The second job does not re-run the first. It reads what the first one stored. This is how
+The next stage does not re-run the first. It reads what the first one stored. This is how
 you split a large analysis into stages that different people, or different days, can own.
-Call `as_source()` only on a node of a job that has been run; before that there is nothing
-stored to read.
+`as_source()` reads what the database holds, whether or not the node has run in this Python
+session; for a node whose results were never stored, it has no rows.
+
+!!! warning "Not yet: a stored joined result as the source of a new job"
+    The stage above runs in memory, so its own results are not stored. Recording it in a new
+    `PipelineJob` does not work yet for `session_means`, or for any node downstream of a
+    join: its rows still carry the provenance of both joined sources, and a job refuses such
+    a source with `SourceSpecMismatchError` when it is bound. Support is planned (ITL-1127).
+    Until then, to store a later stage, add it to the first job.
 
 ## What to remember
 
@@ -246,7 +254,7 @@ stored to read.
 - `as_table(columns={"source": True})` and `columns={"system_tags": True}` reveal where
   values and rows came from; `all_info=True` shows everything.
 - `get_all_records(columns={"meta": True})` shows how and when each result was computed.
-- `as_table()` is this job's output; `get_all_records()` is everything stored.
+- `as_table()` is the output of this job's run; `get_all_records()` is everything stored.
 - `node.as_source()` starts a new pipeline from stored results.
 
 ## Exercises
@@ -258,9 +266,9 @@ stored to read.
     print_lineage(job.nodes["rates"])
     # rates
     #   Join
-    #     SelectDataColumns_2
-    #       units
     #     SelectDataColumns_1
+    #       units
+    #     SelectDataColumns_3
     #       sessions
     ```
 
@@ -279,12 +287,11 @@ Use the source-info column of the `sessions` node.
 
     Row 5, counting data rows from 0: the sixth line after the header.
 
-    Note the plain Polars filter on a table you have already taken out of Orcapod. That is
-    always fine. The restriction on expression filters in Part 3 applies to
-    `stream.polars_filter(...)` inside a pipeline.
+    Note the plain Polars filter on a table you have already taken out of Orcapod. Inside a
+    pipeline you would write the same test as `stream.polars_filter(...)` (Part 3).
 
-**3.** Using `as_source()`, compute in a new job the mean of the session means per animal
-(one row per `subject_id`). Reuse `group_by` from Part 4.
+**3.** Using `as_source()`, compute the mean of the session means per animal (one row per
+`subject_id`). Reuse `group_by` from Part 4.
 
 ??? success "Solution"
     ```python
@@ -293,16 +300,8 @@ Use the source-info column of the `sessions` node.
         return sum(mean_rate_hz) / len(mean_rate_hz)
 
 
-    third = PipelineJob(name="per_animal", store=store)
-    with third:
-        means = job.nodes["session_means"].as_source()
-        mean_of_means.pod(
-            means.group_by(["subject_id"]).select_data_columns(["mean_rate_hz"]),
-            label="animal_means",
-        )
-    third.run()
-
-    result = third.nodes["animal_means"].as_pandas_df()
+    means = job.nodes["session_means"].as_source()
+    result = mean_of_means.pod(means.group_by(["subject_id"])).as_pandas_df()
     print(result.sort_values("subject_id", ignore_index=True))
     #   subject_id  animal_mean_hz
     # 0   mouse_01        6.413542

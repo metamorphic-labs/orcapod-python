@@ -753,7 +753,8 @@ A node from a job that has run also provides:
   function produced in a job with a different name, or from a source with a different
   `source_id`, are not included
 - **`as_source()`** -- a `DerivedSource` backed by those stored records, usable as the input
-  of another pipeline
+  of another pipeline (not yet as a source of a new `PipelineJob` when the node is
+  downstream of a join; see [`DerivedSource`](sources.md#derivedsource))
 
 An operator node (a `Join`, `Batch`, column selection and so on, applied inside the job) is
 read the same way: after `job.run()` its `as_table()` and `iter_data()` return the rows it

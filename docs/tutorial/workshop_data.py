@@ -100,7 +100,15 @@ def make_dataset(root: str | Path = "workshop_data") -> Path:
                     n_spikes = max(1, round(rate_hz * duration_s))
                     depth_um = rng.randrange(100, 3800, 20)
                     unit_rows.append(
-                        [subject_id, session, probe, unit, REGIONS[probe], depth_um, n_spikes]
+                        [
+                            subject_id,
+                            session,
+                            probe,
+                            unit,
+                            REGIONS[probe],
+                            depth_um,
+                            n_spikes,
+                        ]
                     )
                     spikes.extend(
                         (round(rng.uniform(0.0, duration_s), 4), unit)
