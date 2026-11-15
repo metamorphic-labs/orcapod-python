@@ -296,4 +296,5 @@ def test_a_null_map_element_still_reads_as_none() -> None:
         }
     )
     [(_, data)] = list(ArrowTableStream(table, tag_columns=["id"]).iter_data())
-    assert data.as_dict()["v"][0] is None
+    value: Any = data.as_dict()["v"]
+    assert value[0] is None
