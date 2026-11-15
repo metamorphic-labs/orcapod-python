@@ -130,39 +130,33 @@ def test_stored_arrow_type_is_the_set_container(element: str) -> None:
     assert arrow_type.extension_name == f"set[{element_text}]"
     assert json.loads(arrow_type.__arrow_ext_serialize__()) == {
         "category": "set",
-        "element_arrow_type": element_text,
+        "element_kind": "arrow",
     }
     assert pa.types.is_large_list(arrow_type.storage_type)
 
 
+SET_METADATA = b'{"category": "set", "element_kind": "arrow"}'
+"""The extension metadata of every set of a primitive: the element is the storage's."""
+
+
 @pytest.mark.parametrize(
-    ("declared", "value", "name", "metadata"),
+    ("declared", "value", "name"),
     [
+        (set[int], {2, 1}, "set[int64]"),
+        (set[str], {"x"}, "set[large_string]"),
+        (set[bytes], {b"x"}, "set[large_binary]"),
         (
-            set[int],
-            {2, 1},
-            "set[int64]",
-            b'{"category": "set", "element_arrow_type": "int64"}',
-        ),
-        (
-            set[str],
-            {"x"},
-            "set[large_string]",
-            b'{"category": "set", "element_arrow_type": "large_string"}',
-        ),
-        (
-            set[bytes],
-            {b"x"},
-            "set[large_binary]",
-            b'{"category": "set", "element_arrow_type": "large_binary"}',
+            set[dt.datetime],
+            {dt.datetime(2026, 1, 2, tzinfo=UTC)},
+            "set[timestamp[us, tz=UTC]]",
         ),
     ],
-    ids=["int", "str", "bytes"],
+    ids=["int", "str", "bytes", "datetime"],
 )
-def test_identifier_bytes(
-    declared: Any, value: Any, name: str, metadata: bytes
-) -> None:
-    """The identifier of a set of a primitive: exact name and metadata, no version key."""
+def test_identifier_bytes(declared: Any, value: Any, name: str) -> None:
+    """The identifier of a set of a primitive: the name holds the element Arrow type,
+    the metadata only says the element is a plain Arrow type; no version key.
+    """
     source = DictSource(
         [{"k": 0, "s": value}],
         tag_columns=["k"],
@@ -170,7 +164,24 @@ def test_identifier_bytes(
     )
     arrow_type = source.as_table().schema.field("s").type
     assert arrow_type.extension_name == name
-    assert arrow_type.__arrow_ext_serialize__() == metadata
+    assert arrow_type.__arrow_ext_serialize__() == SET_METADATA
+    assert pa.types.is_large_list(arrow_type.storage_type)
+
+
+def test_a_list_of_sets_embeds_the_inner_set_identifier() -> None:
+    """``list[set[int]]`` names the inner set by its name and its new metadata."""
+    source = DictSource(
+        [{"k": 0, "s": [{2, 1}]}],
+        tag_columns=["k"],
+        data_schema={"k": int, "s": list[set[int]]},
+    )
+    arrow_type = source.as_table().schema.field("s").type
+    assert arrow_type.extension_name == "list[set[int64]]"
+    assert json.loads(arrow_type.__arrow_ext_serialize__()) == {
+        "category": "list",
+        "element_ext_name": "set[int64]",
+        "element_ext_metadata": SET_METADATA.decode(),
+    }
 
 
 @pytest.mark.parametrize(
@@ -472,3 +483,134 @@ def test_a_loaded_set_of_one_width_leaves_other_widths_declarable(
         "declared_arrow_type": "extension<set[int64]<_ArrowExt_set_int64_>>",
         "declared": [1, 300],
     }
+
+
+_READ_STORED_COLUMN = textwrap.dedent(
+    """
+    import json, sys
+    import pyarrow as pa
+    from orcapod.contexts import get_default_context
+    from orcapod.logical_types.identifier import LogicalTypeIdentifierError
+    from orcapod.sources import ArrowTableSource
+
+    name, metadata, storage = sys.argv[1], sys.argv[2].encode(), sys.argv[3]
+    columns = {
+        "large_list<int64>": pa.array([[1, 2, 3]], pa.large_list(pa.int64())),
+        "large_list<int8>": pa.array([[1, 2]], pa.large_list(pa.int8())),
+        "large_list<large_string>": pa.array(
+            [["a", "b"]], pa.large_list(pa.large_string())
+        ),
+        "large_string": pa.array(["a"], pa.large_string()),
+        "int64": pa.array([1], pa.int64()),
+    }
+    column = columns[storage]
+    field_metadata = {
+        b"ARROW:extension:name": name.encode(),
+        b"ARROW:extension:metadata": metadata,
+    }
+    table = pa.table(
+        [pa.array([0], pa.int64()), column],
+        schema=pa.schema(
+            [
+                pa.field("k", pa.int64(), nullable=False),
+                pa.field("c", column.type, nullable=False, metadata=field_metadata),
+            ]
+        ),
+    )
+    try:
+        table = get_default_context().type_converter.load_logical_types(table)
+    except LogicalTypeIdentifierError as exc:
+        print(json.dumps({
+            "refused": type(exc).__name__,
+            "message": str(exc),
+            "notes": getattr(exc, "__notes__", []),
+        }))
+        sys.exit(0)
+    source = ArrowTableSource(table, tag_columns=["k"], source_id="stored")
+    _, data = next(iter(source.iter_data()))
+    value = data.as_dict()["c"]
+    print(json.dumps({
+        "arrow_type": str(table.schema.field("c").type),
+        "metadata": table.schema.field("c").type.__arrow_ext_serialize__().decode(),
+        "schema": str(source.output_schema()[1]["c"]),
+        "python_type": type(value).__name__,
+        "elements": sorted(value),
+    }))
+    """
+)
+
+
+def _read_stored_column_in_fresh_process(
+    name: str, metadata: bytes, storage: str
+) -> dict[str, Any]:
+    """Read a stored column (field-metadata channel) in a fresh process; report it."""
+    result = subprocess.run(
+        [sys.executable, "-c", _READ_STORED_COLUMN, name, metadata.decode(), storage],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.parametrize(
+    ("name", "storage", "schema", "elements"),
+    [
+        ("set[int64]", "large_list<int64>", "set[int]", [1, 2, 3]),
+        ("set[large_string]", "large_list<large_string>", "set[str]", ["a", "b"]),
+    ],
+    ids=["int", "str"],
+)
+def test_a_fresh_process_rebuilds_a_set_from_its_storage(
+    name: str, storage: str, schema: str, elements: list[Any]
+) -> None:
+    """A stored set column is rebuilt from its name, its metadata and its storage alone."""
+    report = _read_stored_column_in_fresh_process(name, SET_METADATA, storage)
+    assert report["metadata"] == SET_METADATA.decode()
+    assert report["arrow_type"].startswith(f"extension<{name}<")
+    assert report["schema"] == schema
+    assert report["python_type"] == "set"
+    assert report["elements"] == elements
+
+
+@pytest.mark.parametrize(
+    ("name", "storage", "reason"),
+    [
+        ("set[int64]", "large_string", "is not a list"),
+        ("set[int64]", "int64", "is not a list"),
+        ("set[int64]", "large_list<int8>", "holds the elements of 'set[int8]'"),
+    ],
+    ids=["string_storage", "int_storage", "other_element_width"],
+)
+def test_a_set_whose_storage_does_not_hold_its_element_is_refused(
+    name: str, storage: str, reason: str
+) -> None:
+    """``element_kind: arrow`` over a storage that is not a list of the named element is
+    refused: the element comes from the storage, so the two must agree.
+    """
+    report = _read_stored_column_in_fresh_process(name, SET_METADATA, storage)
+    assert report.get("refused") == "LogicalTypeIdentifierError", report
+    assert "'c'" in report["message"]
+    assert any(reason in note for note in report["notes"]), report
+
+
+def test_a_set_with_the_unreleased_element_arrow_type_metadata_is_refused() -> None:
+    """Only ``{"category": "set", "element_kind": "arrow"}`` is read for a set of a
+    primitive; the form this pull request first wrote was never released.
+    """
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _READ_STORED_COLUMN,
+            "set[int64]",
+            '{"category": "set", "element_arrow_type": "int64"}',
+            "large_list<int64>",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "ValueError" in result.stderr

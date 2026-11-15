@@ -1020,16 +1020,20 @@ def parse_arrow_type_string(type_str: str, type_converter: Any | None = None) ->
     raise ValueError(f"Unknown nested Arrow type: {type_str!r}")
 
 
-def _native_container_storage(metadata: bytes, type_converter: Any) -> Any | None:
+def _native_container_storage(
+    name: str, metadata: bytes, type_converter: Any
+) -> Any | None:
     """Return the storage type a native container's identifier describes.
 
-    A native container's metadata names its element: a plain Arrow type
-    (``element_arrow_type``, a set of a primitive) or a logical type
+    A native container's element is a plain Arrow type (a set of a primitive,
+    ``"element_kind": "arrow"``: the element type is the text inside the extension
+    name, ``set[<element>]``) or a logical type its metadata names
     (``element_ext_name`` and ``element_ext_metadata``). The storage is a
     ``large_list`` of the element's storage. A logical element must be registered
     in this process, or be a native container itself.
 
     Args:
+        name: The container's extension name.
         metadata: The container's extension metadata.
         type_converter: The converter that resolves a logical element.
 
@@ -1040,7 +1044,8 @@ def _native_container_storage(metadata: bytes, type_converter: Any) -> Any | Non
     import pyarrow as pa
 
     from orcapod.logical_types.list_logical_type_factory import (
-        ELEMENT_ARROW_TYPE_KEY,
+        ARROW_ELEMENT_KIND,
+        ELEMENT_KIND_KEY,
         LIST_CATEGORY,
         SET_CATEGORY,
     )
@@ -1054,8 +1059,11 @@ def _native_container_storage(metadata: bytes, type_converter: Any) -> Any | Non
     fields = cast("dict[str, object]", description)
     if fields.get("category") not in (LIST_CATEGORY, SET_CATEGORY):
         return None
-    element_text = fields.get(ELEMENT_ARROW_TYPE_KEY)
-    if isinstance(element_text, str):
+    if fields.get(ELEMENT_KIND_KEY) == ARROW_ELEMENT_KIND:
+        prefix = f"{SET_CATEGORY}["
+        if not (name.startswith(prefix) and name.endswith("]")):
+            return None
+        element_text = name[len(prefix) : -1]
         return pa.large_list(parse_arrow_type_string(element_text, type_converter))
     element_name = fields.get("element_ext_name")
     if not isinstance(element_name, str):
@@ -1069,7 +1077,9 @@ def _native_container_storage(metadata: bytes, type_converter: Any) -> Any | Non
     element = type_converter.get_logical_type_by_arrow_extension_name(element_name)
     if element is not None:
         return pa.large_list(element.get_arrow_extension_type().storage_type)
-    element_storage = _native_container_storage(element_metadata, type_converter)
+    element_storage = _native_container_storage(
+        element_name, element_metadata, type_converter
+    )
     if element_storage is None:
         return None
     return pa.large_list(element_storage)
@@ -1088,7 +1098,7 @@ def _register_native_container(name: str, metadata: bytes, type_converter: Any) 
         metadata: The extension metadata.
         type_converter: The converter to register the container with.
     """
-    storage = _native_container_storage(metadata, type_converter)
+    storage = _native_container_storage(name, metadata, type_converter)
     if storage is not None:
         type_converter.register_logical_type_from_arrow_metadata(
             name, metadata, storage
