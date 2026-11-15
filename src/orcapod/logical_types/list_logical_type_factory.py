@@ -539,7 +539,8 @@ class ListLogicalTypeFactory:
         Raises:
             LogicalTypeIdentifierError: If the metadata names a plain Arrow element
                 and the storage is not a list of the element the extension name
-                names, or ``"element_kind"`` is not ``"arrow"``.
+                names, ``"element_kind"`` is not ``"arrow"``, or a set's metadata
+                names no element at all.
             ValueError: If ``storage_type`` is not a list type, or required metadata
                 keys are missing.
         """
@@ -555,6 +556,12 @@ class ListLogicalTypeFactory:
             )
 
         element_ext_name = metadata.get("element_ext_name")
+        if not element_ext_name and metadata.get("category") == SET_CATEGORY:
+            # A set's metadata that names no element is not a form this version
+            # reads (a set of a primitive writes ``element_kind``).
+            return self._reconstruct_arrow_element_set(
+                arrow_extension_name, storage_type, metadata, converter
+            )
         if not element_ext_name:
             raise ValueError(
                 f"ListLogicalTypeFactory.reconstruct_from_arrow: missing 'element_ext_name' "

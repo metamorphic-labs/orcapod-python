@@ -599,21 +599,12 @@ def test_a_set_with_the_unreleased_element_arrow_type_metadata_is_refused() -> N
     """Only ``{"category": "set", "element_kind": "arrow"}`` is read for a set of a
     primitive; the form this pull request first wrote was never released.
     """
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            _READ_STORED_COLUMN,
-            "set[int64]",
-            '{"category": "set", "element_arrow_type": "int64"}',
-            "large_list<int64>",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
+    report = _read_stored_column_in_fresh_process(
+        "set[int64]",
+        b'{"category": "set", "element_arrow_type": "int64"}',
+        "large_list<int64>",
     )
-    assert result.returncode != 0
-    assert "ValueError" in result.stderr
+    assert report.get("refused") == "LogicalTypeIdentifierError", report
 
 
 @pytest.mark.parametrize(
