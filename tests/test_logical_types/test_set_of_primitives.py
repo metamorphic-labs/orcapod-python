@@ -727,3 +727,22 @@ def test_a_list_of_sets_inside_a_dict_value_keeps_plain_storage() -> None:
             ]
         )
     )
+
+
+def test_the_factory_reads_a_set_element_as_its_arrow_type_does() -> None:
+    """``ListLogicalTypeFactory.create_for_python_type`` gives a set of a plain element
+    the Python type of its element Arrow type, as reconstruction from Arrow does.
+    """
+    from typing import Literal
+
+    from orcapod.contexts import get_default_context
+    from orcapod.logical_types.list_logical_type_factory import ListLogicalTypeFactory
+
+    converter = get_default_context().type_converter
+    # The factory's write path is what this test is about, so it is called directly.
+    created = ListLogicalTypeFactory().create_for_python_type(
+        set[Literal[1, 2]],
+        converter,  # pyright: ignore[reportArgumentType]
+    )
+    assert created.logical_type_name == "set[int64]"
+    assert created.python_type == set[int]

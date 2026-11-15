@@ -487,11 +487,14 @@ class ListLogicalTypeFactory:
         # Directly look up (and register if needed) the LogicalType for the element.
         element_lt = converter.get_logical_type_for_python_type(element_annotation)
         if element_lt is None and is_set:
-            # A set of a plain Arrow type is a native container too (ITL-611).
+            # A set of a plain Arrow type is a native container too (ITL-611). Its
+            # element Python type is that of the element Arrow type, as on the read
+            # path, never the annotation (``Literal[1, 2]`` reads as ``int``).
+            element_arrow_type = converter.register_python_class(element_annotation)
             return ListLogicalType(
                 ArrowElement(
-                    element_annotation,
-                    converter.register_python_class(element_annotation),
+                    converter.arrow_type_to_python_type(element_arrow_type),
+                    element_arrow_type,
                 ),
                 is_set=True,
             )

@@ -209,3 +209,11 @@ Containers of logical elements unchanged.
 - major universal_converter.py:572 — dict[str, list[set[int]]] raised (extension in struct);
   main: plain storage. Fix: `_plain_set_storage` lowers a container whose innermost element is
   a plain set. Tuple part declined: tuple[int, list[int]] is unsupported on main too.
+
+### Merged main 118b0379 (typecheck hotfix #396). CodeRabbit CLI on the merge (pre-push gate)
+
+- Run 1: 0 findings, but 11 files `review_failed` (nothing reviewed); retried once.
+- Run 2: 1 minor finding, list_logical_type_factory.py:493: the factory's write path for a
+  set of a plain element kept the annotation (`Literal[1, 2]`) as the element Python type.
+  Not reachable from the public converter path (generic sets take the converter's own set
+  branch), but fixed for consistency with the read path; test calls the factory directly.
