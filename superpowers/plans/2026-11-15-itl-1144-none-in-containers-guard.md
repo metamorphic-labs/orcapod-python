@@ -94,6 +94,98 @@ polars) crashes. A top-level None is always restored.
   position raises instead of returning an empty value or a `TypeError`.
 - Not (b): writes are faithful.
 
+## Coordinator decision (November 15, 2026)
+
+Approve (a) + (c), not (b). (a) refuses exactly the LOST/CRASH nested positions; every OK
+cell stays accepted (`list[int | None]`, GroupBy/Batch over a nullable int column: run PR
+#346's `tests/test_core/alignment` against this branch and report). State and test what
+happens to GroupBy/Batch over a nullable list, set, Path or UUID column. The error names
+the type, the column or `Class.field` (added by the caller), ITL-1144 as the follow-up, and
+what to do. Changelog under "Breaking changes and migration", saying plainly that an
+in-memory pod-to-pod chain that worked is refused too. MergeJoin None crash: give a 5-line
+repro, not ours. No hash, golden or stored-table change. Draft PR, "Refs ITL-1144".
+
 ## Plan
 
-(after the coordinator's reply)
+> **For agentic workers:** executed inline (sensei:executing-plans), TDD.
+
+**Goal:** no Python value read from a stored or Arrow column is a wrong value because of a
+None at a nested position: refuse the declaration (a), and raise at read (c).
+
+**Architecture:** one new module, `src/orcapod/semantic_types/nested_none.py`, holds the
+rule (`none_is_restorable(arrow_type, lookup)`), the error
+(`NestedNoneNotRestorableError(ValueError)`) and the refusal
+(`require_restorable_none(annotation, arrow_type, lookup)`). It is used by
+(a) `UniversalTypeConverter._register_python_class_impl` (list and set element, dict value)
+and `UserClassLogicalType` field registration; (c) the Arrow-to-Python converter's nested
+decoders (`storage_to_python`, list element, dict value, struct field). Callers that know
+the column (`ensure_types_registered_for_schemas`, `arrow_table_to_python_dicts`) or the
+field (`UserClassLogicalType`) re-raise with its name.
+
+The rule, on the Arrow type of the nested position: an extension type is restorable only
+when its logical type is a `UserClassLogicalType` (dataclass, `orcapod.dataclass`,
+pydantic); a list, large list, fixed-size list, struct or map is not; anything else
+(primitive, timestamp, date, decimal) is.
+
+### Task 1: failing tests (public interface)
+
+File: `tests/test_semantic_types/test_nested_none_guard.py`.
+- Refused at definition, parametrized: `DictSource(data_schema={"v": T})` and a function pod
+  output `-> T` and input `v: T` raise `ValueError` matching `'v'`, `ITL-1144`, for T in
+  `list[set[int] | None]`, `list[list[int] | None]`, `list[dict[str, int] | None]`,
+  `dict[str, list[int] | None]`, `list[UUID | None]`, `set[UUID | None]`,
+  `list[Path | None]`, `list[list[UUID] | None]`, `list[np.ndarray | None]`; a dataclass
+  with field `x: list[int] | None`, `x: UUID | None`, `x: Path | None`, used as a column,
+  raises naming `<Class>.x`.
+- Accepted and round-tripping through `DictSource` (read value == written, row hash of the
+  read value == row hash of the written value): `list[int | None]`, `list[str | None]`,
+  `list[list[int | None]]`, `dict[str, int | None]`, `set[int] | None` (None),
+  `list[UUID] | None` (None), `UUID | None` (None), `list[Pt | None]`,
+  `list[SPt | None]` (orcapod.dataclass), dataclass fields `x: int | None`,
+  `xs: list[int | None]`, `p: Pt | None`.
+- Raised at read (c): `ArrowTableSource` of `large_list<large_list<int64>>` holding
+  `[None, [1]]`; `DictSource` declared `list[list[int]]` given `[None, [1]]`; GroupBy and
+  Batch over a nullable `list[int]`, `Path`, `UUID` column: reading the rows raises
+  `ValueError` naming the column and ITL-1144. GroupBy and Batch over a nullable int column
+  read `[None, 2]` (accepted).
+- Run: `uv run pytest tests/test_semantic_types/test_nested_none_guard.py` -> refused and
+  read cases FAIL, accepted cases PASS.
+
+### Task 2: the rule module and (a)
+
+- `nested_none.py` as above. `lookup` is the converter's
+  `get_logical_type_by_arrow_extension_name`.
+- In `_register_python_class_impl`: after `inner = self.register_python_class(args[0])` in
+  the list and set branches, and after `val_arrow` in the dict branch, call
+  `require_restorable_none(args[i], inner, self.get_logical_type_by_arrow_extension_name)`.
+- `ensure_types_registered_for_schemas` iterates `schema.items()` and re-raises
+  `NestedNoneNotRestorableError(f"Column {name!r} ({annotation}): {exc}")`.
+- `UserClassLogicalType` field loop: call the check on each field annotation and its arrow
+  type before stripping the extension, re-raise `f"{cls.__qualname__}.{field}: {exc}"`.
+
+### Task 3: (c) read backstop
+
+- `UniversalTypeConverter.storage_to_python`: a None value with a non-restorable Arrow type
+  raises `NestedNoneNotRestorableError` (it serves ListLogicalType elements and user-class
+  fields; a top-level null never reaches it: `arrow_table_to_python_dicts` and the hashing
+  visitor handle it first).
+- `_create_arrow_to_python_converter`: list element, dict value and struct field decoders
+  wrap the element converter so a None at a non-restorable position raises.
+- `arrow_table_to_python_dicts` re-raises with the column name.
+
+### Task 4: docs, changelog, design issue
+
+- `docs/concepts/function-pods.md` "Value types": a paragraph on refused nested optionals
+  (which, why, what to do, ITL-1144). Doc samples run, so a sample shows the refusal.
+- `changelog.d/ITL-1144.md`: Breaking changes and migration.
+- `design_issues/ITL-1144-NN1.md` (`## src/orcapod/semantic_types/`), status in progress
+  (guard in; the full fix open).
+
+### Task 5: verification
+
+- Targeted: the new test file, `tests/test_semantic_types`, `tests/test_user_types`,
+  `tests/test_logical_types`, `tests/test_hashing` (golden unchanged), `tests/test_docs`.
+- PR #346's alignment suite against this branch (checked out into a scratch copy of the
+  tests, not committed).
+- Full `uv run pytest tests/`, ruff, basedpyright. Merge origin/main, push, draft PR
+  "Refs ITL-1144".
