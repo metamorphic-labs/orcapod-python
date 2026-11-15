@@ -34,9 +34,10 @@ units = CSVSource(
 )
 ```
 
-Every operator is available as a method on a stream, and that is the form used here. The
-same operators exist as classes in `orcapod.operators` (`Join`, `PolarsFilter`, ...); see
-[Operators](../concepts/operators.md).
+Most operators are available as methods on a stream, and that is the form used here. All of
+them exist as classes in `orcapod.operators` (`Join`, `PolarsFilter`, ...); see
+[Operators](../concepts/operators.md). `MergeJoin`, at the end of this page, is used as a
+class.
 
 ## Join: combine tables on their shared tags
 
@@ -47,12 +48,12 @@ and puts their data columns side by side:
 unit_info = units.join(sessions)
 
 print(unit_info.keys())
-# (('subject_id', 'session', 'probe', 'unit'), ('region', 'depth_um', 'n_spikes', 'date', 'duration_s'))
+# (('subject_id', 'session', 'probe', 'unit'), ('date', 'duration_s', 'region', 'depth_um', 'n_spikes'))
 print(unit_info.select_data_columns(["n_spikes", "duration_s"]).as_pandas_df().head(3))
-#   subject_id session  probe  unit  n_spikes  duration_s
-# 0   mouse_01      s1  imec0     0       149        60.0
-# 1   mouse_01      s1  imec0     1       326        60.0
-# 2   mouse_01      s1  imec0     2       662        60.0
+#   subject_id session  probe  unit  duration_s  n_spikes
+# 0   mouse_01      s1  imec0     0        60.0       149
+# 1   mouse_01      s1  imec0     1        60.0       326
+# 2   mouse_01      s1  imec0     2        60.0       662
 ```
 
 You do not say what to join on. `units` has tags `subject_id, session, probe, unit`;
@@ -60,11 +61,14 @@ You do not say what to join on. `units` has tags `subject_id, session, probe, un
 the tags and all data columns of both. This is the step the two-stream function pod in Part 2
 did for you.
 
+The column order is chosen by Orcapod, not by the order you wrote the streams in: here the
+columns of `sessions` come first. Refer to columns by name, never by position.
+
 Three things to know:
 
 - It is an **inner** join: a row with no partner in the other stream is dropped.
 - The order does not matter. `units.join(sessions)` and `sessions.join(units)` give the same
-  rows.
+  rows and the same columns.
 - If the streams share **no** tag column, every row is paired with every row.
 
 Joins chain. This attaches both the session and the animal to every unit:
@@ -72,7 +76,7 @@ Joins chain. This attaches both the session and the animal to every unit:
 ```python
 everything = units.join(sessions).join(subjects)
 print(everything.keys()[1])
-# ('region', 'depth_um', 'n_spikes', 'date', 'duration_s', 'sex', 'age_weeks', 'genotype')
+# ('sex', 'age_weeks', 'genotype', 'date', 'duration_s', 'region', 'depth_um', 'n_spikes')
 print(everything.as_table().num_rows)
 # 64
 ```
@@ -112,30 +116,26 @@ print(busy.as_pandas_df())
 # 2   mouse_02      s2  imec1     3    CA1      2360      1233
 ```
 
-!!! warning "Known bug: expression filters only work as the last step"
-    A filter built from a Polars expression (`pl.col(...) > ...`) works when you look at its
-    result directly, as above. It currently **fails** as soon as anything needs to identify
-    the filtered stream: joining it with another stream, or using it anywhere inside a
-    `PipelineJob` (Part 5). The error is:
-
-    ```
-    TypeError: SemanticAwarePythonHasher (strict): no implementation of
-    PythonTypeHandlerProtocol registered for type 'polars.expr.expr.Expr' ...
-    ```
-
-    Equality filters (`polars_filter(genotype="knockout")`) do not have this problem and work
-    everywhere. Until this is fixed, use equality filters inside pipelines, and keep
-    expression filters for looking at results at the end.
-
-Here is that failure, so that you recognise it:
+The expression becomes part of the filtered stream's identity, so an expression filter can
+be used anywhere an equality filter can: in a join, before a function pod, or inside a
+`PipelineJob` (Part 5).
 
 ```python
-try:
-    busy.join(subjects)
-except TypeError as err:
-    print(str(err)[:60])
-# SemanticAwarePythonHasher (strict): no implementation of Pyt
+print(busy.join(subjects).as_table().num_rows)
+# 3
 ```
+
+Orcapod has to be able to hash the expression, and it knows the common building blocks:
+comparisons, arithmetic, `&`, `|`, `~`, `is_in`, `is_between`, `is_null` and a few string
+tests. An expression that calls your own Python code (`map_elements`, `map_batches`) is
+refused as soon as Orcapod needs to hash it (in a join, a pod or a job), with an error that
+names the expression and lists what can be hashed; compute such a test in a function pod
+instead. The
+full list is in [PolarsFilter](../concepts/operators.md#polarsfilter).
+
+One more filter, `drop_nulls`, keeps the rows that have a value in the columns you name. The
+workshop data has no missing values, so it is not needed here; see
+[DropNulls](../concepts/operators.md#dropnulls) for when it is.
 
 ## Semi-join: keep the rows that appear in another table
 
@@ -168,33 +168,28 @@ print(good_units.as_table().num_rows)
 Three sessions, eight units each. The columns are those of `units`; `checked_by` was used
 for nothing. Unlike `join`, the order matters: the first stream is the one being filtered.
 
-!!! warning "Known bug: `semi_join` between a CSV source and other streams"
-    `semi_join` currently works when both sides are CSV sources, as above. It **fails** when
-    one side comes from a `CSVSource` and the other from a `DictSource` or from a stream that
-    went through `polars_filter`:
+Rows are matched only on the tag columns the two streams share, here `subject_id` and
+`session`. Data columns of the second stream are never read. (If the two streams happen to
+share a data column name, that column is not used for matching either, and Orcapod warns
+about it with a `SemiJoinIgnoredColumnWarning`.)
 
-    ```
-    ArrowInvalid: Incompatible data types for corresponding join field keys:
-    FieldRef.Name(subject_id) of type string and FieldRef.Name(subject_id) of type large_string
-    ```
-
-    The two kinds of stream store text in slightly different formats and `semi_join` does not
-    reconcile them yet. `join` does, so until this is fixed, use `join` followed by a filter
-    when your streams are of mixed origin.
+The second stream can be any stream, for example the filtered `knockouts` from above. It
+shares only `subject_id` with `units`:
 
 ```python
-try:
-    units.semi_join(knockouts).as_table()
-except Exception as err:
-    print(type(err).__name__)
-# ArrowInvalid
+units_of_knockouts = units.semi_join(knockouts)
+print(units_of_knockouts.keys())
+# (('subject_id', 'session', 'probe', 'unit'), ('region', 'depth_um', 'n_spikes'))
+print(units_of_knockouts.as_table().num_rows)
+# 32
 ```
 
-The same selection with `join` and an equality filter works:
+A `join` followed by an equality filter selects the same 32 rows, but also carries the
+columns of `subjects` along:
 
 ```python
-print(units.join(subjects).polars_filter(genotype="knockout").as_table().num_rows)
-# 32
+print(units.join(subjects).polars_filter(genotype="knockout").keys()[1])
+# ('sex', 'age_weeks', 'genotype', 'region', 'depth_um', 'n_spikes')
 ```
 
 ## Rename and select
@@ -206,15 +201,18 @@ print(units.join(subjects).polars_filter(genotype="knockout").as_table().num_row
 old name to new name:
 
 ```python
-renamed = subjects.map_data({"age_weeks": "age"}, drop_unmapped=False)
+renamed = subjects.map_data({"age_weeks": "age"})
 print(renamed.keys())
 # (('subject_id',), ('sex', 'age', 'genotype'))
 ```
 
-!!! note "Always pass `drop_unmapped`"
-    Without `drop_unmapped=False`, the `map_data` and `map_tags` methods **drop** every
-    column you did not rename: `subjects.map_data({"age_weeks": "age"})` leaves only `age`.
-    Pass `drop_unmapped` explicitly so that the call says what you mean.
+Columns you do not rename are kept. Pass `drop_unmapped=True` to keep only the renamed
+ones:
+
+```python
+print(subjects.map_data({"age_weeks": "age"}, drop_unmapped=True).keys())
+# (('subject_id',), ('age',))
+```
 
 ## When two tables have the same data column
 
@@ -248,14 +246,14 @@ There are two ways out, and they mean different things.
 **Rename**, when the two columns are different quantities that happen to share a name:
 
 ```python
-side_by_side = imec0.map_data({"n_spikes": "n_imec0"}, drop_unmapped=False).join(
-    imec1.map_data({"n_spikes": "n_imec1"}, drop_unmapped=False)
+side_by_side = imec0.map_data({"n_spikes": "n_imec0"}).join(
+    imec1.map_data({"n_spikes": "n_imec1"})
 )
 print(side_by_side.as_pandas_df().head(3))
-#   subject_id session  unit  n_imec0  n_imec1
-# 0   mouse_01      s1     0      149      215
-# 1   mouse_01      s1     1      326      299
-# 2   mouse_01      s1     2      662      135
+#   subject_id session  unit  n_imec1  n_imec0
+# 0   mouse_01      s1     0      215      149
+# 1   mouse_01      s1     1      299      326
+# 2   mouse_01      s1     2      135      662
 ```
 
 **`MergeJoin`**, when they are repeated measurements of the same quantity and you want them
@@ -282,11 +280,11 @@ That is the point: `MergeJoin` is for values that are interchangeable.
 - Operators rearrange streams; they never compute new values.
 - `join` matches on shared tags, keeps only matching rows, and needs distinct data column
   names.
-- `polars_filter(column=value)` works everywhere. Expression filters work only as a final
-  step (known bug).
-- `semi_join` filters one stream by another; mixed CSV and non-CSV inputs fail (known bug),
-  so use `join` plus a filter.
-- Pass `drop_unmapped` explicitly to `map_data` and `map_tags`.
+- `polars_filter` keeps rows by equality (`column=value`) or by a Polars expression; both
+  work anywhere in a pipeline.
+- `semi_join` filters one stream by the shared tags of another and adds no columns.
+- `map_data` and `map_tags` rename columns and keep the rest unless you pass
+  `drop_unmapped=True`.
 
 ## Exercises
 
@@ -303,11 +301,11 @@ with exactly two data columns: `n_spikes` and `age_weeks`. How many rows does it
         .select_data_columns(["n_spikes", "age_weeks"])
     )
     print(answer.as_pandas_df().head(4))
-    #   subject_id session  probe  unit  n_spikes  age_weeks
-    # 0   mouse_03      s1  imec1     0       399         11
-    # 1   mouse_03      s1  imec1     1       483         11
-    # 2   mouse_03      s1  imec1     2       357         11
-    # 3   mouse_03      s1  imec1     3       457         11
+    #   subject_id session  probe  unit  age_weeks  n_spikes
+    # 0   mouse_03      s1  imec1     0         11       399
+    # 1   mouse_03      s1  imec1     1         11       483
+    # 2   mouse_03      s1  imec1     2         11       357
+    # 3   mouse_03      s1  imec1     3         11       457
     print(answer.as_table().num_rows)
     # 16
     ```
@@ -316,7 +314,7 @@ with exactly two data columns: `n_spikes` and `age_weeks`. How many rows does it
 
 ??? success "Solution"
     ```python
-    print(sessions.map_data({"date": "recorded_on"}, drop_unmapped=False).keys()[1])
+    print(sessions.map_data({"date": "recorded_on"}).keys()[1])
     # ('recorded_on', 'duration_s')
     ```
 
@@ -324,8 +322,9 @@ with exactly two data columns: `n_spikes` and `age_weeks`. How many rows does it
 listed in `passed_qc.csv`. Use `semi_join` and a single-stream call to the pod.
 
 ??? success "Solution"
-    Filter the units first, then join the durations, then narrow to the function's two
-    parameters.
+    Filter the units first, then join the durations. Narrowing to the function's two
+    parameters is optional, since the pod would drop the other columns itself, but it shows
+    at a glance what the function receives.
 
     ```python
     from orcapod import function_pod

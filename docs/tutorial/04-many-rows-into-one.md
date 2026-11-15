@@ -57,7 +57,7 @@ become one row:
 per_session = rates.group_by(["subject_id", "session"])
 
 print(per_session.output_schema())
-# (Schema({'subject_id': str, 'session': str}), Schema({'probe': list[str], 'unit': list[int], 'rate_hz': list[float]}))
+# (Schema({'subject_id': str, 'session': str}), Schema({'rate_hz': list[float]}))
 print(per_session.as_table().num_rows)
 # 8
 ```
@@ -66,9 +66,10 @@ print(per_session.as_table().num_rows)
 
 - The columns you grouped by, `subject_id` and `session`, are the tags of the result. One
   row per session.
-- The other tags, `probe` and `unit`, can no longer be tags, because a session row covers
-  many of them. They became data columns holding a list.
-- Every data column became a list: `rate_hz` is now `list[float]`.
+- The other tags, `probe` and `unit`, are gone. A session row covers many probes and units,
+  so no single value of them describes the row, and `group_by` drops them.
+- Every data column became a list: `rate_hz` is now `list[float]`, one element per unit of
+  the session.
 
 Here is the first row:
 
@@ -76,17 +77,16 @@ Here is the first row:
 tag, data = next(iter(per_session.iter_data()))
 print(tag.as_dict())
 # {'subject_id': 'mouse_01', 'session': 's1'}
-print(data.as_dict()["probe"])
-# ['imec0', 'imec0', 'imec0', 'imec0', 'imec1', 'imec1', 'imec1', 'imec1']
-print(data.as_dict()["unit"])
-# [0, 1, 2, 3, 0, 1, 2, 3]
 print([round(r, 2) for r in data.as_dict()["rate_hz"]])
 # [2.48, 5.43, 11.03, 9.98, 3.58, 4.98, 2.25, 8.52]
 ```
 
-The lists line up: the third rate belongs to the third probe and unit entry. The members of
-a group are always in the same order (sorted by the tags that were folded in), whatever
-order the input rows arrived in.
+These are the eight rates of `mouse_01`'s first session, in the order of the tags that were
+dropped: probe `imec0` units 0 to 3, then probe `imec1` units 0 to 3 (compare the first rows
+of `rates` in Part 2). The members of a group are always in this order, whatever order the
+input rows arrived in, but the list itself no longer says which probe or unit each rate
+came from. If a later step needs that, it has to be a data column before you group; see
+[GroupBy](../concepts/operators.md#groupby).
 
 `group_by` is an operator, so it computed nothing. Every number in those lists was already
 in `rates`.
@@ -102,7 +102,7 @@ def mean_rate(rate_hz: list[float]) -> float:
     return sum(rate_hz) / len(rate_hz)
 
 
-session_means = mean_rate.pod(per_session.select_data_columns(["rate_hz"]))
+session_means = mean_rate.pod(per_session)
 print(session_means.as_pandas_df())
 #   subject_id session  mean_rate_hz
 # 0   mouse_01      s1      6.033333
@@ -118,8 +118,8 @@ print(session_means.as_pandas_df())
 That is the result this tutorial set out to compute: the mean firing rate of every session.
 The knockout animals, `mouse_03` and `mouse_04`, fire less, as the generator intended.
 
-Rule 2 from Part 2 still holds. The grouped stream has three data columns, `probe`, `unit`
-and `rate_hz`, and `mean_rate` takes one, so the stream is narrowed first.
+The grouped stream has one data column, `rate_hz`, and that is exactly the parameter of
+`mean_rate`, so it goes straight into the pod.
 
 The whole analysis so far, written as one chain:
 
@@ -130,7 +130,6 @@ session_means = mean_rate.pod(
         sessions.select_data_columns(["duration_s"]),
     )
     .group_by(["subject_id", "session"])
-    .select_data_columns(["rate_hz"])
 )
 print(session_means.as_table().num_rows)
 # 8
@@ -194,7 +193,8 @@ and `group_by` cannot use those.
   `batch()` does the same by count.
 - Neither computes anything. A function pod with `list[...]` parameters does the computing.
 - You can only group by tag columns.
-- Group, narrow to the function's parameters, apply the pod.
+- `group_by` keeps only the tags you group by; the other tags are dropped. `batch` keeps
+  every tag, as a list.
 
 ## Exercises
 
@@ -206,7 +206,7 @@ and `group_by` cannot use those.
 
     ```python
     per_probe = mean_rate.pod(
-        rates.group_by(["subject_id", "session", "probe"]).select_data_columns(["rate_hz"])
+        rates.group_by(["subject_id", "session", "probe"])
     )
     print(per_probe.as_pandas_df().head(4))
     #   subject_id session  probe  mean_rate_hz
@@ -228,7 +228,7 @@ values: the number of units, the mean rate, and the highest rate. Apply it per s
         return len(rate_hz), sum(rate_hz) / len(rate_hz), max(rate_hz)
 
 
-    summary = summarize.pod(per_session.select_data_columns(["rate_hz"]))
+    summary = summarize.pod(per_session)
     print(summary.as_pandas_df().head(3))
     #   subject_id session  n_units  mean_rate_hz  max_rate_hz
     # 0   mouse_01      s1        8      6.033333    11.033333
