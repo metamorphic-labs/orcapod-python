@@ -126,14 +126,14 @@ explicit; the pod would drop `depth_um` without them.)
 
 ## An edited function: nothing is recomputed
 
-Now the surprise. Suppose you decide rates should be reported in spikes per minute, and
+Now the surprise. Suppose you decide rates should be reported to one decimal place, and
 edit the function:
 
 ```python
 @function_pod(output_keys="rate_hz")
 def firing_rate(n_spikes: int, duration_s: float) -> float:
     calls.append("firing_rate")
-    return 60 * n_spikes / duration_s  # changed: spikes per minute
+    return round(n_spikes / duration_s, 1)  # changed: rounded to 0.1 Hz
 
 
 rates = run(firing_rate.pod)
@@ -162,7 +162,7 @@ dot is the major version. When you change what a function computes, raise it:
 @function_pod(output_keys="rate_hz", version="v1.0")
 def firing_rate(n_spikes: int, duration_s: float) -> float:
     calls.append("firing_rate")
-    return 60 * n_spikes / duration_s
+    return round(n_spikes / duration_s, 1)
 
 
 rates = run(firing_rate.pod)
@@ -170,8 +170,8 @@ print(len(calls))
 # 129
 print(rates.head(2))
 #   subject_id session  probe  unit  rate_hz
-# 0   mouse_01      s1  imec0     0    149.0
-# 1   mouse_01      s1  imec0     1    326.0
+# 0   mouse_01      s1  imec0     0      2.5
+# 1   mouse_01      s1  imec0     1      5.4
 ```
 
 63 new calls and new values. The results of version 0 are still in the database, untouched;
