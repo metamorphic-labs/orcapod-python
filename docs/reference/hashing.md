@@ -729,7 +729,7 @@ topology suffix, encoding the full join lineage into each column name.
 | **Known exclusions** | When `record_id_column` is not specified, the row index is used as the provenance token; `record_id` changes if rows are **reordered** within the source table |
 
 The recipe recomputes a record id from the source id and the token alone. The value below is
-the one pinned for this row in the golden hash file (`pipeline.json`):
+the one pinned for this row in the golden hash file (`v1/pipeline-01.json`):
 
 ```python
 import uuid

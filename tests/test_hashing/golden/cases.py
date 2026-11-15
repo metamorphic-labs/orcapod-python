@@ -2,8 +2,9 @@
 
 Each case computes a flat ``{entry: value}`` map. ``compute_group`` prefixes each entry with
 its case name, so a golden file entry reads ``<case>.<entry>``. The values are pinned in
-``data/<group>.json`` by ``generate_golden_hashes.py`` and checked by
-``test_golden_hashes.py``.
+the golden folder of the current data context, ``data/<folder>/<group>-NN.json``, by
+``generate_golden_hashes.py`` and checked by ``test_golden_hashes.py`` (ITL-946; see
+``README.md``).
 
 DO NOT MOVE OR RENAME anything defined in this module. Function pods, dataclasses and
 pydantic models hash together with their defining module and qualified name, so moving them
@@ -46,8 +47,8 @@ GROUPS = ("semantic", "schema", "arrow", "datagram", "pipeline", "torch")
 OPTIONAL_GROUPS: dict[str, str] = {"torch": "torch"}
 """Groups that need an optional dependency, mapped to the module they need (ITL-871).
 
-Such a group is computed, generated and checked only where the module is installed; its
-golden file is never rewritten without it.
+Such a group is computed, added to and checked only where the module is installed; a
+golden file is never rewritten, with the module or without it (ITL-946).
 """
 
 
@@ -78,7 +79,8 @@ def case(group: str, name: str) -> Callable[[CaseFn], CaseFn]:
     """Register a golden case under ``group``.
 
     Args:
-        group: One of ``GROUPS``; selects the golden file the entries are written to.
+        group: One of ``GROUPS``; selects the golden files (``<group>-NN.json``) that
+            pin the entries.
         name: Case name, used as the prefix of every entry the case returns.
 
     Returns:
