@@ -112,7 +112,9 @@ Any Orcapod database can hold a job's results. Two are used most:
 On disk the layout is `<directory>/<job name>/<function name>/...` for each function, plus
 `<directory>/<job name>/_result/...`. The job's `name` is the top level, so jobs with
 different names over one directory do not see each other's results. Deleting the directory,
-or a job's subdirectory, is safe: the next run recomputes what is missing.
+or a job's subdirectory, is safe: the next run of a newly built job, for example in a new
+Python session, recomputes what is missing. A job object that has already run holds its
+run and computes nothing on a second `run()`.
 
 A job created without a database can be recorded but not run. Give it one later with
 `job.bind(database=...)`; `run()` without a database raises `ValueError`.

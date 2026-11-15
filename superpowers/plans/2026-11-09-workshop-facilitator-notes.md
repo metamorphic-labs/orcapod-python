@@ -24,7 +24,8 @@ while there is still time. It is the content of `docs/tutorial/00-setup.md`.
    pip install orcapod
    ```
 
-   (`uv init && uv add orcapod` works as well.)
+   (`uv init && uv add orcapod` works as well; then run every `python` command below as
+   `uv run python`.)
 3. The dataset generator, in that directory:
 
    ```bash

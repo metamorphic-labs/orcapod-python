@@ -239,7 +239,9 @@ print(flags.sort_values(["subject_id", "session"], ignore_index=True))
 The next stage does not re-run the first. It reads what the first one stored. This is how
 you split a large analysis into stages that different people, or different days, can own.
 `as_source()` reads what the database holds, whether or not the node has run in this Python
-session; for a node whose results were never stored, it has no rows.
+session; for a node whose results were never stored, it has no rows. It reads every stored
+result of the node, including those of earlier runs over other inputs, like
+`get_all_records()` above; when you want only this run's output, use `as_table()`.
 
 !!! warning "Not yet: a stored joined result as the source of a new job"
     The stage above runs in memory, so its own results are not stored. Recording it in a new

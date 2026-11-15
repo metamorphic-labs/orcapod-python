@@ -211,8 +211,9 @@ Check, in this order:
   run from.
 - **The function's identity.** A renamed function, a renamed output column or a different
   major version starts from nothing.
-- **The pipeline's structure.** Adding, removing or reordering a step upstream of a function
-  gives that function a new place in the database.
+- **The input values.** Results are filed by function and by the values the function
+  receives, not by the steps upstream of it. Adding or reordering an upstream step does not
+  recompute a function by itself; only rows whose input values changed are computed again.
 
 ### A function ran fewer times than there are rows
 

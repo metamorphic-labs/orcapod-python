@@ -102,6 +102,7 @@ def minutes(duration_s: float) -> float:
     return duration_s / 60
 
 
+database = InMemoryArrowDatabase()
 job = PipelineJob(name="durations", database=database)
 with job:
     minutes.pod(sessions, label="minutes")
