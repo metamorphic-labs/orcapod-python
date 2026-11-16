@@ -630,3 +630,16 @@ class TestWriteChecksOrder:
         spiral_database.add_record(("t",), b"2", text_table)
         with pytest.raises(ValueError, match="Schema mismatch"):
             spiral_database.flush()
+
+    def test_buffered_text_reads_with_committed_text(self, tmp_path: pathlib.Path):
+        """Buffered ``string`` rows read together with committed ``large_string`` rows."""
+        database = _sqlite_database(tmp_path)
+        table = pa.table({"v": pa.array(["a"], type=pa.string())})
+        database.add_record(("t",), b"1", table, flush=True)
+        database.add_record(("t",), b"2", table)
+
+        stored = database.get_all_records(("t",))
+
+        assert stored is not None
+        assert stored.schema.field("v").type == pa.large_string()
+        assert stored["v"].to_pylist() == ["a", "a"]
