@@ -158,7 +158,8 @@ def double_or_fail(x: int) -> int:
 
 @function_pod(output_keys="where")
 def to_path(x: int) -> pathlib.Path:
-    """Return a ``pathlib.Path`` output, a logical type SQLite cannot store."""
+    """Return a ``pathlib.Path`` output, a logical type SQLite cannot store; record the call."""
+    calls.append(x)
     return pathlib.Path(f"/data/{x}.txt")
 
 
