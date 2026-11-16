@@ -271,7 +271,7 @@ def _referential_role_hint(
     *,
     source_roles: frozenset[str],
     slot_roles: frozenset[str],
-    tag_only_with_name: list[str],
+    source_plain_tags: list[str],
 ) -> str | None:
     """Explain a role difference that a referential tag on one side causes, with the remedy.
 
@@ -284,9 +284,9 @@ def _referential_role_hint(
         name: The column name.
         source_roles: The roles the column has in the source (see ``_roles``).
         slot_roles: The roles the column has in the slot.
-        tag_only_with_name: The source's plain tags with ``name`` among them, in tag
-            order: the ``tag_only_columns`` that keep ``name`` plain and change no other
-            tag.
+        source_plain_tags: The source's plain tags, in tag order. ``tag_only_columns``
+            lists every plain tag, so the remedy names the exact list that changes
+            ``name`` only.
 
     Returns:
         The explanation, or ``None`` when the roles agree, when neither side holds the
@@ -297,7 +297,8 @@ def _referential_role_hint(
     if source_roles == _BOTH_ROLES:
         if slot_roles == _TAG_ROLE:
             remedy = (
-                f"build the source with tag_only_columns={tag_only_with_name} to keep "
+                f"build the source with tag_only_columns={[*source_plain_tags, name]} "
+                "to keep "
                 f"it a plain tag, or declare the slot with {name!r} as both a tag and "
                 "a data column"
             )
@@ -313,18 +314,20 @@ def _referential_role_hint(
             f"one name) but {slot_role} of the slot: {remedy}"
         )
     if slot_roles == _BOTH_ROLES:
+        # A declared tag is referential unless ``tag_only_columns`` names it.
+        others = [tag for tag in source_plain_tags if tag != name]
+        tag_only = f"tag_only_columns={others}" if others else "no tag_only_columns"
         if source_roles == _TAG_ROLE:
             source_role = "a plain tag"
             remedy = (
-                f"build the source without {name!r} in tag_only_columns (a declared "
-                f"tag is referential by default), or declare the slot with {name!r} "
-                "as a plain tag"
+                f"build the source with {tag_only} (a declared tag is referential "
+                f"unless named there), or declare the slot with {name!r} as a plain tag"
             )
         else:
             source_role = "a data column only"
             remedy = (
-                f"build the source with {name!r} in tag_columns, or declare the slot "
-                f"with {name!r} as a data column only"
+                f"build the source with {name!r} in tag_columns and {tag_only}, or "
+                f"declare the slot with {name!r} as a data column only"
             )
         return (
             f"{name!r} is {source_role} of the source but a referential tag of the "
@@ -752,11 +755,9 @@ class SourceNodeBase(TraceableBase, ABC):
                 name,
                 source_roles=_roles(name, source_tag, source_data),
                 slot_roles=_roles(name, self._tag_schema, self._data_schema),
-                # ``tag_only_columns`` lists every plain tag, so the remedy keeps the
-                # source's plain tags plain.
-                tag_only_with_name=[
-                    tag for tag in source_tag if tag not in source_data or tag == name
-                ],
+                # ``tag_only_columns`` lists every plain tag, so a remedy keeps the
+                # source's other plain tags plain.
+                source_plain_tags=[tag for tag in source_tag if tag not in source_data],
             )
             if hint is not None:
                 issues.append(hint)

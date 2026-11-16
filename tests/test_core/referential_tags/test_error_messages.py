@@ -82,7 +82,8 @@ def test_a_referential_source_fits_a_referential_slot() -> None:
             "missing data columns: ['x']",
             [
                 "'x' is a plain tag of the source but a referential tag of the slot",
-                "without 'x' in tag_only_columns",
+                # ``k`` stays plain: the exact ``tag_only_columns`` is named.
+                "build the source with tag_only_columns=['k']",
                 "declare the slot with 'x' as a plain tag",
             ],
         ),
@@ -92,7 +93,7 @@ def test_a_referential_source_fits_a_referential_slot() -> None:
             "missing tag columns: ['x']",
             [
                 "'x' is a data column only of the source but a referential tag",
-                "with 'x' in tag_columns",
+                "with 'x' in tag_columns and tag_only_columns=['k']",
             ],
         ),
     ],
@@ -113,10 +114,21 @@ def test_a_role_difference_is_refused_and_explained(
         assert text in message
 
 
-def test_the_named_remedy_binds() -> None:
-    """Following the first remedy of the plain-slot refusal binds the source."""
-    job = _job(*PLAIN_SLOT)
-    job.bind(sources={"src": _source(["k", "x"], tag_only_columns=["k", "x"])})
+@pytest.mark.parametrize(
+    ("slot", "remedy"),
+    [
+        (PLAIN_SLOT, lambda: _source(["k", "x"], tag_only_columns=["k", "x"])),
+        (REFERENTIAL_SLOT, lambda: _source(["k", "x"], tag_only_columns=["k"])),
+    ],
+    ids=["ref_into_plain", "plain_or_data_into_ref"],
+)
+def test_the_named_remedy_binds(
+    slot: tuple[dict[str, type], dict[str, type]],
+    remedy: Callable[[], op.sources.DictSource],
+) -> None:
+    """Following the first remedy a refusal names binds the source."""
+    job = _job(*slot)
+    job.bind(sources={"src": remedy()})
 
 
 def test_a_plain_mismatch_says_nothing_about_referential_tags() -> None:
@@ -162,6 +174,12 @@ def test_a_pod_without_fall_through_does_not_promise_it() -> None:
     message = str(excinfo.value)
     assert "pass through as referential tags" not in message
     assert "pod(stream), which keeps them as plain tags" in message
+    # The wrapper's other entry points, which delegate to the inner pod, say the same.
+    for check in (cached.validate_inputs, cached.output_schema):
+        with pytest.raises(ValueError) as delegated:
+            _ = check(source)
+        assert "pod(stream), which keeps them as plain tags" in str(delegated.value)
+        assert "pass through as referential tags" not in str(delegated.value)
     # And that is what the call does.
     assert cached(source).keys() == (("k", "x"), ("half",))
 

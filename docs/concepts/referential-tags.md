@@ -172,10 +172,15 @@ source with `tag_only_columns=True` to keep every tag plain, as in v0.3.
 - `pod.process(stream)` and `pod(stream, strict=True)` are exact: they hand every data
   column to the function, so a referential tag the function does not read is refused like
   any extra column. The error names the referential tags and the two ways out: call the
-  pod, `pod(stream)`, which lets them pass through, or keep them plain with
-  `tag_only_columns`.
+  pod, `pod(stream)`, which for a plain `FunctionPod` lets them pass through as
+  referential tags (a wrapper pod such as `CachedFunctionPod` has no fall-through: its
+  call keeps them as plain tags), or keep them plain with `tag_only_columns`.
 - Binding a source to a job's input slot is strict: a column that is a referential tag on
   one side and a plain tag or a data column on the other is refused (it is listed as a
   missing or unexpected column). The error says which side holds it as a referential tag,
-  and how to make the two agree: `tag_only_columns` on the source, or a slot declared with
-  the column in both roles.
+  and how to make the two agree, in either direction. A referential source tag for a
+  plain slot tag: keep it plain with `tag_only_columns`, or declare the slot with the
+  column in both roles. A plain source tag (or a data column) for a referential slot
+  tag: make it a declared tag that `tag_only_columns` does not name, or declare the slot
+  with it plain. `tag_only_columns` lists every plain tag of the source, so the error
+  names the exact list.

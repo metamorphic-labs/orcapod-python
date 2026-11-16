@@ -1901,7 +1901,24 @@ class WrappedFunctionPod(_FunctionPodBase):
         return self._function_pod.uri
 
     def validate_inputs(self, *streams: StreamProtocol) -> None:
-        self._function_pod.validate_inputs(*streams)
+        try:
+            self._function_pod.validate_inputs(*streams)
+        except ValueError:
+            self._refuse_as_this_pod(*streams)
+            raise
+
+    def _refuse_as_this_pod(self, *streams: StreamProtocol) -> None:
+        """Validate ``streams`` as this pod, so a refusal names this pod's call.
+
+        The inner pod words a referential-tag refusal for its own call, which may let
+        references fall through where this pod's does not (ITL-1022). Called only when
+        the inner pod refused; when this check passes, the caller re-raises the inner
+        pod's error.
+
+        Raises:
+            ValueError: If the input does not fit this pod, with this pod's advice.
+        """
+        self._validate_input(*self.handle_input_streams(*streams).output_schema())
 
     def argument_symmetry(self, streams: Collection[StreamProtocol]) -> ArgumentGroup:
         return self._function_pod.argument_symmetry(streams)
@@ -1912,9 +1929,13 @@ class WrappedFunctionPod(_FunctionPodBase):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> tuple[Schema, Schema]:
-        return self._function_pod.output_schema(
-            *streams, columns=columns, all_info=all_info
-        )
+        try:
+            return self._function_pod.output_schema(
+                *streams, columns=columns, all_info=all_info
+            )
+        except ValueError:
+            self._refuse_as_this_pod(*streams)
+            raise
 
     # TODO: reconsider whether to return FunctionPodStream here in the signature
     def process(
