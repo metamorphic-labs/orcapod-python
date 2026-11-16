@@ -190,7 +190,13 @@ class Join(NonZeroInputOperator):
                 tag_schema, references, other_tag_schema, other_references
             )
             shared_data = set(data_schema) & set(other_data_schema)
-            if shared_data - merged:
+            if unmerged := shared_data - merged:
+                # A shared data column of two types is reported as a type conflict,
+                # as for plain inputs; of one type, as an overlap.
+                _ = schema_utils.intersection_schemas(
+                    {name: data_schema[name] for name in unmerged},
+                    {name: other_data_schema[name] for name in unmerged},
+                )
                 raise InputValidationError(
                     f"Datas should not have overlapping keys, but {sorted(shared_data - merged)} found in {stream} and {other_stream}."
                 )

@@ -293,9 +293,16 @@ class GroupBy(UnaryOperator):
         # The keys, in the input's tag order rather than the order of `by`.  A
         # referential key stays referential: scalar in both roles (specification
         # section 8.1); a referential non-key is now a plain (list) data column.
+        # The keys lead the table, as in a table built from rows (ITL-1131): a
+        # referential non-key declared before them keeps its data column, which
+        # must not come first.
+        keys = [c for c in tag_columns if c in self.by]
+        grouped_table = grouped_table.select(
+            [*keys, *(c for c in grouped_table.column_names if c not in keys)]
+        )
         return ArrowTableStream(
             grouped_table,
-            tag_columns=[c for c in tag_columns if c in self.by],
+            tag_columns=keys,
             data_context=stream.data_context,
             reference_tags=[c for c in references if c in self.by],
         )

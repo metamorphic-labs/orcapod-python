@@ -181,6 +181,18 @@ def test_group_by_referential_non_key_keeps_its_data_as_a_list() -> None:
     assert grouped.as_table().column_names.count("x") == 1
 
 
+def test_group_by_lays_its_keys_out_first() -> None:
+    """The keys lead the table, as in every node table (row order, ITL-1131).
+
+    A referential non-key ``x`` declared before the key keeps its data column, which
+    must not lead the table: a job node keeps the row order, and the operator's own
+    table must equal it.
+    """
+    rows = [{"x": r["x"], "s": r["s"], "y": r["y"]} for r in GROUP_ROWS]
+    grouped = GroupBy(["s"])(_ref(rows, ["x", "s"], "G"))
+    assert grouped.as_table().column_names[:2] == ["s", "x"]
+
+
 def test_group_by_prediction_matches_the_result() -> None:
     source = _ref(GROUP_ROWS, ["s", "x"], "G")
     for by in (["s"], ["x"]):

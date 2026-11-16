@@ -17,6 +17,7 @@ from collections.abc import Collection, Sequence
 from typing import TYPE_CHECKING
 
 from orcapod.channels import WritableChannel
+from orcapod.core.referential_tags import stream_references
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
 from orcapod.system_constants import constants
@@ -112,7 +113,7 @@ def without_input_meta(
     Returns:
         ``stream`` itself when it holds no meta column; otherwise the same rows
         rebuilt without them, with every other column (tags, system tags, data,
-        source info, data context) as it was.
+        source info, data context, referential tags) as it was.
     """
     if not _carries_meta(stream, inputs):
         return stream
@@ -123,6 +124,8 @@ def without_input_meta(
     return ArrowTableStream(
         without_meta_columns(table, tag_columns),
         tag_columns=tag_columns,
+        # A referential tag (ITL-1023) keeps its data role.
+        reference_tags=stream_references(stream),
         data_context=stream.data_context_key,
     )
 
