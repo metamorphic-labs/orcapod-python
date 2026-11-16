@@ -343,6 +343,17 @@ class TestRenamingALabelMovesEveryHashItFeeds:
         # The structure it is fed into moves.
         assert nested_after.digest != nested_before.digest
 
+    def test_directory_entry_takes_the_file_hash_with_its_label(
+        self, tmp_path: Path
+    ) -> None:
+        """A directory's file entry embeds ``b"sha256:" + file digest`` (D2)."""
+        (tmp_path / "a.txt").write_bytes(b"alpha")
+        file_digest = hashlib.sha256(b"alpha").digest()
+        entry = hashlib.sha256(b"file\x00a.txt\x00" + b"sha256:" + file_digest).digest()
+        expected = hashlib.sha256(b"directory\x00" + entry).digest()
+        hasher = get_default_context().semantic_hasher
+        assert hasher.hash_object(op.Directory(tmp_path)).digest == expected
+
     def test_logical_type_cell_moves_with_the_value_label(
         self, request: pytest.FixtureRequest
     ) -> None:
