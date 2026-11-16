@@ -34,7 +34,7 @@ frozenset); **decide** needs a decision (listed at the end).
   `display_name`, `==`, `hash()`). Each event is logged with its library call site. Each read
   is linked back to the site that produced that digest. Runs: `tests/test_hashing` (golden
   included; 2882 passed), `tests/test_core/operators` + `tests/test_core/function_pod`
-  (4502 passed), and the rest of `tests/` except `tests/test_docs`. Every library
+  (4502 passed), and the rest of `tests/` except `tests/test_docs` (16585 passed). Every library
   producer and consumer site the trace saw is in the tables below. The code search found a few
   more sites that no traced test reaches; they are marked *(code only)*.
 
@@ -62,8 +62,8 @@ frozenset); **decide** needs a decision (listed at the end).
 | P18 | `pipeline/job.py` `_prepare_run` (snapshot) | the sorted sink-node content hashes | SHA-256 hex, first 16 digits | `<job>@<snapshot>` run URI | output ok (in a name); input **change** (C10) |
 | P19 | `logical_types/user_class_identity.py` `identity_string` | a user class's identity record | SHA-256 hex prefix | the extension name `name@<fingerprint>` | ok (in a name) |
 | P20 | `semantic_types/universal_converter.py` (synthesized struct class) *(code only)* | the field signature text | MD5 hex, 8 digits | a synthesized Python class name | ok (in a name) |
-| P21 | `pipeline/serialization.py` `DatabaseRegistry._make_key` *(code only)* | a database config, canonical JSON | SHA-256 hex, 8 digits | `db_<hex>` key in a saved job | ok (in a name) |
-| P22 | `databases/spiraldb_nullability.py` `_encode` / decode *(code only)* | the nullability path list | SHA-256 hex | chunk key and checksum of a stored metadata record | ok (in a name, checked on read) |
+| P21 | `pipeline/serialization.py` `DatabaseRegistry._make_key` | a database config, canonical JSON | SHA-256 hex, 8 digits | `db_<hex>` key in a saved job | ok (in a name) |
+| P22 | `databases/spiraldb_nullability.py` `_encode` / `read_nullability_record` | the nullability path list | SHA-256 hex | chunk key and checksum of a stored metadata record | ok (in a name, checked on read) |
 | P23 | random ids: `job.py` `run_id` (`uuid4`), orchestrators' `run_id`, `datagram.py` `uuid7`, `data_function.py` record `uuid7`, observers' `uuid7`, `function_node.py` correlation key `uuid4` | nothing | random | ids | ok (not hashes) |
 | P24 | builtin `hash()`: `pipeline/graph.py` `_sanitize_node_id`, `core/streams/base.py` (config cache key), `ContentIdentifiableBase.__hash__` | Python objects | process-dependent | Graphviz node ids, in-memory keys | ok (display only) |
 | P25 | `hashing/arrow_utils.py` `get_pyarrow_table_hash`, `hashing/arrow_serialization.py` *(code only)* | Arrow tables | SHA-256, SHA3, BLAKE2b hex | **no caller anywhere in the library** | **decide** (D9) |
@@ -99,7 +99,7 @@ frozenset); **decide** needs a decision (listed at the end).
 | C12 | `hashing/directory_hashers.py` `_hash_dir` | each file's hash (P5, `sha256`) | P6 entry digests | raw digest | **decide** (D2) |
 | C13 | `core/sources/list_source.py` `_hash_tag_function` ("content" mode) | the semantic hash of the tag function's source text | `ListSource.identity_structure` | `to_hex()` as a **plain string** | **change** (rule 1: keep the `ContentHash` object; C1 embeds it) |
 | C14 | the source id strings (`source_ids.hash_source_id`, `DerivedSource._default_source_id`) inside identity structures, `source_id` system-tag values and source-info tokens | labelled hash inside a name (rule 5a) | content hashes, record ids, entry ids | `<kind>:<label>:<hex>` | ok |
-| C15 | `core/sources/spiraldb_table_source.py` `_key_tokens` *(code only)* | the Arrow hash of a row's key columns | the row's provenance token: record-id recipe (P15) and source-info token | `arrow_v1:<hex>` (labelled, in a name) | **decide** (D3) |
+| C15 | `core/sources/spiraldb_table_source.py` `_key_tokens` | the Arrow hash of a row's key columns | the row's provenance token: record-id recipe (P15) and source-info token | `arrow_v1:<hex>` (labelled, in a name) | **decide** (D3) |
 | C16 | names that enter a hash: the function `uri` (output-schema digest) in a function pod's identity; system-tag column names (schema, Join, Batch, GroupBy suffixes) inside the entry-id table | bare digests inside a name | pod identity, entry ids | bare hex | ok (in a name) |
 
 ### 3.2 Stored values (labelled)
@@ -144,7 +144,7 @@ P15, P16, P23 (random ids). All ok.
 | X3 | `pipeline/base.py` `compile`, `_record_invocation`; `pipeline/job.py` `compile` | in-memory graph keys and sort keys (labelled strings) |
 | X4 | `join.py` `order_input_streams`, `merge_join.py` `_canonical_order` (sort by `to_hex`) | canonical input order (ordering only) |
 | X5 | `ContentIdentifiableBase` / `ContentIdentifiableMixin` `__hash__`, `__eq__`, `__repr__`; `ContentHash.display_name` | in-memory identity, repr |
-| X6 | `operator_node.py`, `source_proxy.py`, `data_function_proxy.py` | comparing a stored hash with the computed one; error text |
+| X6 | `operator_node.py` (`_read_run_records`), `source_proxy.py` / `data_function_proxy.py` (`bind`), `pipeline/job.py` `bind`, `errors.py` `EphemeralResultMissingError` (repr) | comparing a stored hash with the computed one; error text |
 
 ## 4. Sites that fit no class or need a decision
 
@@ -174,4 +174,4 @@ P15, P16, P23 (random ids). All ok.
 No other into-a-hash site drops a label. The trace shows that every `.digest` read in the library
 is one of C6, C8, C9, C11, C12, the pandas handlers' own `digest` (P12, wrapping their own
 hash), or `invocation._serialize_component` (S10, a stored value with its label). Every `to_hex` read is
-C1, C3's sort key, C10, C13 (not traced: no traced test uses "content" mode), or a name.
+C1, C3's sort key, C10, C13, or a name.
