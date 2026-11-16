@@ -132,6 +132,19 @@ class UnstorableColumnError(ValueError):
         self.node_label = node_label
         super().__init__(database_kind, column, arrow_type, reason)
 
+    def __reduce__(self) -> tuple[Any, ...]:
+        """Rebuild from the keyword fields, so pickling and copying keep them."""
+        return (
+            _rebuild_unstorable_column_error,
+            (
+                self.database_kind,
+                self.column,
+                self.arrow_type,
+                self.reason,
+                self.node_label,
+            ),
+        )
+
     def add_context(self, node_label: str | None = None) -> None:
         """Fill in the node label where the raising site did not know it.
 
@@ -148,6 +161,23 @@ class UnstorableColumnError(ValueError):
             f"{self.column!r} of Arrow type {self.arrow_type}: {self.reason}. "
             "Use an InMemoryArrowDatabase or a DeltaTableDatabase instead."
         )
+
+
+def _rebuild_unstorable_column_error(
+    database_kind: str,
+    column: str,
+    arrow_type: object,
+    reason: str,
+    node_label: str | None,
+) -> UnstorableColumnError:
+    """Rebuild an ``UnstorableColumnError`` from its fields (``__reduce__``)."""
+    return UnstorableColumnError(
+        database_kind=database_kind,
+        column=column,
+        arrow_type=arrow_type,
+        reason=reason,
+        node_label=node_label,
+    )
 
 
 class MissingOptionalDependencyError(ImportError):

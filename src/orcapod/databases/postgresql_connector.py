@@ -129,6 +129,10 @@ def _pg_type_to_arrow(pg_type_name: str, udt_name: str) -> pa.DataType:
 # default build, so a longer column name reads back as another name (ITL-1162).
 _PG_MAX_IDENTIFIER_BYTES = 63
 
+# Every PostgreSQL table has these system columns; a user column of the same name is
+# refused by CREATE TABLE, quoted or not (ITL-1162).
+_PG_SYSTEM_COLUMNS = frozenset({"tableoid", "xmin", "cmin", "xmax", "cmax", "ctid"})
+
 
 def _pg_sql_type(arrow_type: pa.DataType) -> str | None:
     """Return the PostgreSQL column type for an Arrow type, or ``None`` when there is none.
@@ -611,7 +615,8 @@ class PostgreSQLConnector:
         large variants). Other integer widths, and timestamps of another unit or
         time zone, read back as another type, and lists, structs and extension types have no column type here.
         A name longer than 63 bytes (UTF-8) is refused: PostgreSQL truncates it,
-        so it would read back as another name. The key role does not matter.
+        so it would read back as another name. So is a system column name
+        (``xmin``, ``ctid``, ...). The key role does not matter.
 
         Args:
             name: The column's name.
@@ -621,6 +626,8 @@ class PostgreSQLConnector:
         Returns:
             A short reason, or ``None`` when PostgreSQL stores the column.
         """
+        if name in _PG_SYSTEM_COLUMNS:
+            return f"PostgreSQL reserves {name!r} as a system column name"
         size = len(name.encode("utf-8"))
         if size > _PG_MAX_IDENTIFIER_BYTES:
             return (

@@ -114,6 +114,9 @@ class CachedFunctionPod(WrappedFunctionPod):
             ]
         )
         require_storable(self._cache.result_database, schema)
+        # A pod with its own cache database (``pod_cache_database``) stores there too.
+        if isinstance(self._function_pod, CachedFunctionPod):
+            self._function_pod.require_storable_results()
 
     @property
     def result_database(self) -> ArrowDatabaseProtocol:

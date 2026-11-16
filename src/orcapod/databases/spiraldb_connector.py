@@ -377,6 +377,25 @@ def _about_table(table: str) -> Iterator[None]:
 # ---------------------------------------------------------------------------
 
 
+def _holds_zone_aware_timestamp(arrow_type: pa.DataType) -> bool:
+    """Whether ``arrow_type`` is or nests a timestamp with a time zone (ITL-1162).
+
+    Args:
+        arrow_type: The column's Arrow type.
+
+    Returns:
+        ``True`` for a zone-aware timestamp at any depth of lists, structs and maps.
+    """
+    if pa.types.is_timestamp(arrow_type):
+        return arrow_type.tz is not None
+    if isinstance(arrow_type, pa.ExtensionType):
+        return _holds_zone_aware_timestamp(arrow_type.storage_type)
+    return any(
+        _holds_zone_aware_timestamp(arrow_type.field(i).type)
+        for i in range(arrow_type.num_fields)
+    )
+
+
 class SpiralDBConnector:
     """DBConnectorProtocol implementation backed by SpiralDB (pyspiral).
 
@@ -975,6 +994,11 @@ class SpiralDBConnector:
             return (
                 "SpiralDB drops a timestamp's time zone, so it reads back as "
                 f"timestamp[{arrow_type.unit}]"
+            )
+        if _holds_zone_aware_timestamp(arrow_type):
+            return (
+                "SpiralDB drops the time zone of a timestamp nested in it, so it "
+                "reads back as another type"
             )
         return None
 

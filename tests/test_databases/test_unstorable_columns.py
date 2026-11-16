@@ -771,3 +771,94 @@ class TestPipelineRecordsAndEphemeralResults:
         assert sorted(node.as_table()["double"].to_pylist()) == [2, 4]
         assert node.ephemeral_result_database is None
         assert CALLS == []
+
+
+# ---------------------------------------------------------------------------
+# In-PR CodeRabbit review on 807166aa
+# ---------------------------------------------------------------------------
+
+
+class TestReviewFollowUps:
+    def test_error_survives_pickling(self):
+        import copy
+        import pickle
+
+        err = UnstorableColumnError(
+            database_kind="SQLiteConnector",
+            column="v",
+            arrow_type=pa.int32(),
+            reason="r",
+            node_label="dbl",
+        )
+        for again in (pickle.loads(pickle.dumps(err)), copy.copy(err)):
+            assert isinstance(again, UnstorableColumnError)
+            assert (again.column, again.arrow_type, again.node_label) == (
+                "v",
+                pa.int32(),
+                "dbl",
+            )
+            assert str(again) == str(err)
+
+    @pytest.mark.parametrize(
+        "name", ["xmin", "xmax", "cmin", "cmax", "ctid", "tableoid"]
+    )
+    def test_postgresql_refuses_system_column_names(self, name):
+        connector, _ = _mocked_postgresql()
+        try:
+            reason = connector.unstorable_column_reason(
+                name, pa.int64(), primary_key=False
+            )
+        finally:
+            connector._conn = None
+        assert reason is not None and "system column" in reason
+
+    @pytest.mark.parametrize(
+        "arrow_type",
+        [
+            pa.large_list(pa.timestamp("us", tz="UTC")),
+            pa.struct([("t", pa.timestamp("us", tz="UTC"))]),
+            pa.map_(pa.large_string(), pa.timestamp("ms", tz="UTC")),
+        ],
+    )
+    def test_spiraldb_refuses_nested_time_zone_aware_timestamp(
+        self, spiral_database, arrow_type
+    ):
+        table = pa.table({"v": pa.array([None], type=arrow_type)})
+
+        with pytest.raises(UnstorableColumnError) as exc_info:
+            spiral_database.add_record(("t",), b"1", table)
+
+        assert "time zone" in exc_info.value.reason
+
+    def test_union_refused_before_any_cast(self, tmp_path: pathlib.Path):
+        """A refused column raises the refusal, not an Arrow cast error."""
+        database = _sqlite_database(tmp_path)
+        union = pa.UnionArray.from_dense(
+            pa.array([0], type=pa.int8()),
+            pa.array([0], type=pa.int32()),
+            [pa.array(["a"], type=pa.string())],
+        )
+        table = pa.table({"u": union})
+
+        with pytest.raises(UnstorableColumnError) as exc_info:
+            database.add_record(("t",), b"1", table)
+
+        assert exc_info.value.column == "u"
+
+    def test_nested_cached_pod_checked(self, tmp_path: pathlib.Path):
+        """A pod with its own cache database is checked with the job's (ITL-1162)."""
+        sqlite = _sqlite_database(tmp_path)
+
+        @function_pod(output_keys="double", pod_cache_database=sqlite)
+        def cached_double(x: int) -> int:
+            CALLS.append(x)
+            return 2 * x
+
+        job = PipelineJob(name="p", database=InMemoryArrowDatabase())
+        with pytest.raises(UnstorableColumnError) as exc_info:
+            with job:
+                _ = cached_double.pod(_source(), label="dbl")
+
+        assert exc_info.value.node_label == "dbl"
+        assert exc_info.value.database_kind == "SQLiteConnector"
+        assert CALLS == []

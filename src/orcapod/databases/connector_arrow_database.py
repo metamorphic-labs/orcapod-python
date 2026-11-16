@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, cast
 from orcapod.databases.utils import coerce_record_id
 from orcapod.errors import UnstorableColumnError
 from orcapod.utils.arrow_utils import (
+    normalize_schema_to_large_types,
     normalize_table_to_large_types,
     normalize_to_large_types,
 )
@@ -347,8 +348,10 @@ class ConnectorArrowDatabase:
         # Checked and buffered in the large variants every connector reads back
         # (view types included), so a read that joins buffered and committed rows
         # sees one layout (ITL-1122, ITL-1162).
+        self.require_storable(
+            normalize_schema_to_large_types(records.schema, keep_null=True)
+        )
         records = normalize_table_to_large_types(records, keep_null=True)
-        self.require_storable(records.schema)
         self._connector.validate_records(records)
 
         records = self._deduplicate_within_table(records)
