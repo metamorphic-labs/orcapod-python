@@ -14,6 +14,8 @@ import pytest
 
 import orcapod as op
 from orcapod import PipelineJob
+from orcapod.core.cached_function_pod import CachedFunctionPod
+from orcapod.core.function_pod import FunctionPod
 from orcapod.core.nodes.source_node import SourceNode
 from orcapod.core.operators import Batch, DropNulls, MergeJoin
 from orcapod.databases import InMemoryArrowDatabase
@@ -59,7 +61,8 @@ def test_a_referential_source_fits_a_referential_slot() -> None:
             [
                 "'x' is a referential tag of the source",
                 "a plain tag of the slot",
-                "tag_only_columns=['x']",
+                # ``tag_only_columns`` lists every plain tag: ``k`` stays plain.
+                "tag_only_columns=['k', 'x']",
                 "declare the slot with 'x' as both a tag and a data column",
             ],
         ),
@@ -110,6 +113,12 @@ def test_a_role_difference_is_refused_and_explained(
         assert text in message
 
 
+def test_the_named_remedy_binds() -> None:
+    """Following the first remedy of the plain-slot refusal binds the source."""
+    job = _job(*PLAIN_SLOT)
+    job.bind(sources={"src": _source(["k", "x"], tag_only_columns=["k", "x"])})
+
+
 def test_a_plain_mismatch_says_nothing_about_referential_tags() -> None:
     job = _job({"k": int}, {"y": int})
     with pytest.raises(SourceSpecMismatchError) as excinfo:
@@ -138,8 +147,23 @@ def test_the_exact_form_names_unread_references_and_the_ways_out(
         _ = call(source)
     message = str(excinfo.value)
     assert "['x'] are referential tags of the input" in message
-    assert "pod(stream)" in message
-    assert "tag_only_columns=['x']" in message
+    assert "pod(stream) to let them pass through as referential tags" in message
+    assert "add ['x'] to the tag_only_columns of the source" in message
+
+
+def test_a_pod_without_fall_through_does_not_promise_it() -> None:
+    """A ``CachedFunctionPod`` called directly keeps its plain call (no fall-through)."""
+    pod = half.pod
+    assert isinstance(pod, FunctionPod)
+    cached = CachedFunctionPod(pod, result_database=InMemoryArrowDatabase())
+    source = _source(["k", "x"], tag_only_columns=["k"])
+    with pytest.raises(ValueError, match="column 'x' is not a parameter") as excinfo:
+        _ = cached.process(source)
+    message = str(excinfo.value)
+    assert "pass through as referential tags" not in message
+    assert "pod(stream), which keeps them as plain tags" in message
+    # And that is what the call does.
+    assert cached(source).keys() == (("k", "x"), ("half",))
 
 
 def test_the_exact_form_on_plain_tags_says_nothing_about_referential_tags() -> None:

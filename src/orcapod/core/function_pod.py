@@ -283,14 +283,20 @@ class _FunctionPodBase(TraceableBase):
             ]
             if not unread:
                 raise
+            # Only a plain ``FunctionPod``'s call lets references fall through
+            # (``__call__``); a wrapper pod's call drops their data columns.
+            call = (
+                "pod(stream) to let them pass through as referential tags"
+                if isinstance(self, FunctionPod)
+                else "pod(stream), which keeps them as plain tags"
+            )
             raise ValueError(
                 f"{error}. {unread} are referential tags of the input (each a tag "
                 "and a data column of one name) that the function does not read, and "
                 "the exact form, pod.process(stream) or pod(stream, strict=True), "
-                "hands every data column to the function. Call the pod as "
-                "pod(stream) to let them pass through as referential tags, or build "
-                f"the source with tag_only_columns={unread} (or True) to keep them "
-                "plain tags"
+                f"hands every data column to the function. Call the pod as {call}, "
+                f"or add {unread} to the tag_only_columns of the source that declares "
+                "them (tag_only_columns=True keeps every tag plain)"
             ) from error
         self._validate_output_keys(tag_schema.keys())
 

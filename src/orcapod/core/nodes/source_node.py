@@ -267,7 +267,11 @@ def _roles(
 
 
 def _referential_role_hint(
-    name: str, *, source_roles: frozenset[str], slot_roles: frozenset[str]
+    name: str,
+    *,
+    source_roles: frozenset[str],
+    slot_roles: frozenset[str],
+    tag_only_with_name: list[str],
 ) -> str | None:
     """Explain a role difference that a referential tag on one side causes, with the remedy.
 
@@ -280,6 +284,9 @@ def _referential_role_hint(
         name: The column name.
         source_roles: The roles the column has in the source (see ``_roles``).
         slot_roles: The roles the column has in the slot.
+        tag_only_with_name: The source's plain tags with ``name`` among them, in tag
+            order: the ``tag_only_columns`` that keep ``name`` plain and change no other
+            tag.
 
     Returns:
         The explanation, or ``None`` when the roles agree, when neither side holds the
@@ -290,7 +297,7 @@ def _referential_role_hint(
     if source_roles == _BOTH_ROLES:
         if slot_roles == _TAG_ROLE:
             remedy = (
-                f"build the source with tag_only_columns=[{name!r}] (or True) to keep "
+                f"build the source with tag_only_columns={tag_only_with_name} to keep "
                 f"it a plain tag, or declare the slot with {name!r} as both a tag and "
                 "a data column"
             )
@@ -745,6 +752,11 @@ class SourceNodeBase(TraceableBase, ABC):
                 name,
                 source_roles=_roles(name, source_tag, source_data),
                 slot_roles=_roles(name, self._tag_schema, self._data_schema),
+                # ``tag_only_columns`` lists every plain tag, so the remedy keeps the
+                # source's plain tags plain.
+                tag_only_with_name=[
+                    tag for tag in source_tag if tag not in source_data or tag == name
+                ],
             )
             if hint is not None:
                 issues.append(hint)
