@@ -17,8 +17,8 @@ from orcapod.core.function_pod import (
 from orcapod.core.streams.view import StreamView
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
-from orcapod.contexts.stored import StaleTables
-from orcapod.core.result_cache import ResultCache
+from orcapod.contexts.stored import StaleTables, require_storable
+from orcapod.core.result_cache import ResultCache, pod_timestamp_type
 from orcapod.hooks import InvocationStatus
 from orcapod.protocols.core_protocols import (
     FunctionPodProtocol,
@@ -70,6 +70,37 @@ class CachedFunctionPod(WrappedFunctionPod):
             # "side_effect_function" for a pod that takes the invocation context.
             name_path=self.uri[: 2 if function_pod.ctx_arg_name is not None else 1],
         )
+
+    def require_storable_results(self) -> None:
+        """Refuse a result database that cannot store this pod's result table (ITL-1162).
+
+        The result table holds the function's variation and execution columns
+        (``__pf_var_*``, ``__pf_exec_*``), its output columns and the ``__pod_ts``
+        timestamp, typed from their declared schemas; nothing is computed. A
+        database that states which columns it stores (``ConnectorArrowDatabase``)
+        refuses here, before the function runs; any other database accepts.
+
+        Raises:
+            UnstorableColumnError: If the result database cannot store a column.
+        """
+        import pyarrow as pa
+
+        pf = self._function_pod.data_function
+        python_schema = {
+            **{
+                f"{constants.PF_VARIATION_PREFIX}{name}": hint
+                for name, hint in pf.get_function_variation_data_schema().items()
+            },
+            **{
+                f"{constants.PF_EXECUTION_PREFIX}{name}": hint
+                for name, hint in pf.get_execution_data_schema().items()
+            },
+            **pf.output_data_schema,
+        }
+        schema = self.data_context.type_converter.python_schema_to_arrow_schema(
+            python_schema
+        ).append(pa.field(constants.POD_TIMESTAMP, pod_timestamp_type()))
+        require_storable(self._cache.result_database, schema)
 
     @property
     def result_database(self) -> ArrowDatabaseProtocol:

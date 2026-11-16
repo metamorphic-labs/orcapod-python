@@ -77,6 +77,11 @@ class MockDBConnector:
     def upsert_records(self, *args: Any, **kwargs: Any) -> None:
         pass  # not used by DBTableSource
 
+    def unstorable_column_reason(
+        self, name: str, arrow_type: Any, *, primary_key: bool
+    ) -> str | None:
+        return None  # not used by DBTableSource
+
     def validate_records(self, records: Any) -> None:
         pass  # not used by DBTableSource
 

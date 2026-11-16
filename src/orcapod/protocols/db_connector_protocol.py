@@ -118,6 +118,28 @@ class DBConnectorProtocol(Protocol):
         """
         ...
 
+    def unstorable_column_reason(
+        self, name: str, arrow_type: pa.DataType, *, primary_key: bool
+    ) -> str | None:
+        """Say why this connector cannot store a column, or ``None`` when it can.
+
+        The one place a connector states which columns it stores (ITL-1162). A
+        connector stores a column only when it reads it back as written: the same
+        Arrow type, in its large variant (``large_string``, ``large_binary``). A
+        type the backend would widen, turn into text or fail to bind is refused.
+        ``ConnectorArrowDatabase.require_storable`` asks this for every column of
+        a table before anything of it is written.
+
+        Args:
+            name: The column's name.
+            arrow_type: The column's Arrow type.
+            primary_key: Whether the column is the table's primary key.
+
+        Returns:
+            A short reason, or ``None`` when the connector stores the column.
+        """
+        ...
+
     def validate_records(self, records: pa.Table) -> None:
         """Validate that ``records`` are safe to write through this connector.
 

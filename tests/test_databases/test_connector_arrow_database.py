@@ -155,6 +155,12 @@ class MockDBConnector:
             kept = existing.filter(mask)
             self._tables[table_name] = pa.concat_tables([kept, records])
 
+    def unstorable_column_reason(
+        self, name: str, arrow_type: pa.DataType, *, primary_key: bool
+    ) -> str | None:
+        """Store every column: this in-memory mock keeps Arrow tables as they are."""
+        return None
+
     def validate_records(self, records: pa.Table) -> None:
         """Reject any Arrow field or schema metadata — mirrors real SQL connectors."""
         problem_fields = [f.name for f in records.schema if _field_has_metadata(f)]

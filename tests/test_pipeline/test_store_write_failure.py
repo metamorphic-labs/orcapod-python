@@ -20,7 +20,7 @@ import pytest
 from orcapod import PipelineJob, function_pod
 from orcapod.channels import Channel
 from orcapod.core.operators import SelectDataColumns
-from orcapod.errors import OrcapodDatabaseWriteError
+from orcapod.errors import OrcapodDatabaseWriteError, UnstorableColumnError
 from orcapod.databases import (
     ConnectorArrowDatabase,
     InMemoryArrowDatabase,
@@ -460,24 +460,24 @@ class TestOperatorNodeWriteFailure:
 
 
 # ---------------------------------------------------------------------------
-# The reported trigger: a logical-type output on SQLite (ITL-877 is the limit itself)
+# The reported trigger: a logical-type output on SQLite (ITL-877 is the limit itself).
+# Since ITL-1162 a SQLite database refuses every function node when the job is built.
 # ---------------------------------------------------------------------------
 
 
 class TestSQLiteTrigger:
-    """The reported trigger: a logical-type output on SQLite."""
+    """The reported trigger: a function node on SQLite, refused before it runs."""
 
-    def test_logical_type_output_on_sqlite_raises(self, orchestrator_cls, tmp_path):
-        """A ``pathlib.Path`` output on SQLite raises, naming the node."""
+    def test_function_node_on_sqlite_refused_naming_the_node(self, tmp_path):
+        """The result table's executor columns cannot be stored; the node is named."""
         store = ConnectorArrowDatabase(SQLiteConnector(str(tmp_path / "store.db")))
-        job = build_job(store, ROWS, pod=to_path)
 
-        with pytest.raises(OrcapodDatabaseWriteError) as exc_info:
-            job.run(orchestrator=orchestrator_cls())
+        with pytest.raises(UnstorableColumnError) as exc_info:
+            build_job(store, ROWS, pod=to_path)
 
         assert exc_info.value.node_label == "dbl"
         assert "node 'dbl'" in str(exc_info.value)
-        assert "does not preserve Arrow metadata" in str(exc_info.value)
+        assert calls == []
 
 
 # ---------------------------------------------------------------------------

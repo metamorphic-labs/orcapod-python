@@ -947,6 +947,25 @@ class SpiralDBConnector:
         if len(novel) > 0:
             write_rows(novel)
 
+    def unstorable_column_reason(
+        self, name: str, arrow_type: pa.DataType, *, primary_key: bool
+    ) -> str | None:
+        """Say why SpiralDB cannot store a column, or ``None`` when it can (ITL-1162).
+
+        SpiralDB stores Arrow tables natively, so no column is refused here yet.
+        Its column-name rules (a reserved ``__`` prefix on non-key columns,
+        ITL-1164) are not stated here yet.
+
+        Args:
+            name: The column's name.
+            arrow_type: The column's Arrow type.
+            primary_key: Whether the column is the table's primary key.
+
+        Returns:
+            Always ``None``.
+        """
+        return None
+
     def validate_records(self, records: pa.Table) -> None:
         """No-op: ``SpiralDBConnector`` preserves Arrow field metadata via the native KV store."""
 

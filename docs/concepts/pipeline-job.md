@@ -120,6 +120,39 @@ run and computes nothing on a second `run()`.
 A job created without a database can be recorded but not run. Give it one later with
 `job.bind(database=...)`; `run()` without a database raises `ValueError`.
 
+### SQL connector databases
+
+A `ConnectorArrowDatabase` over a `SQLiteConnector` or a `PostgreSQLConnector` stores a
+column only when the connector reads it back as written, with the same Arrow type (text and
+binary columns come back as `large_string` and `large_binary`, the types Orcapod uses):
+
+| Connector | Column types it stores |
+|---|---|
+| `SQLiteConnector` | `bool`, `int64`, `double`, `large_string`, `large_binary` |
+| `PostgreSQLConnector` | `bool`, `int32`, `int64`, `float`, `double`, `large_string`, `large_binary`, `date32`, `timestamp[us]`, `timestamp[us, tz=UTC]` |
+
+Any other column type (lists, structs, dates or timestamps on SQLite, narrower integers and
+floats, logical types) is refused with `UnstorableColumnError` before anything of the table is
+written. A function node's result table always holds list-valued executor columns, and a
+side-effect node's log a UTC timestamp, so a job refuses every function node on either
+connector, and every side-effect node on SQLite, when the job is built, before anything runs. Use `InMemoryArrowDatabase` or
+`DeltaTableDatabase` for those jobs. Storing list and struct columns on a SQL connector is
+planned for a later release.
+
+```python
+from orcapod.databases import ConnectorArrowDatabase, SQLiteConnector
+from orcapod.errors import UnstorableColumnError
+
+sqlite_database = ConnectorArrowDatabase(SQLiteConnector(":memory:"))
+sql_job = PipelineJob(name="bmi", database=sqlite_database)
+try:
+    with sql_job:
+        compute_bmi.pod(mice(cohort_a), label="bmi")
+except UnstorableColumnError as exc:
+    print(exc)
+# node 'bmi': a SQLiteConnector database cannot store column '__pf_exec_executor_info' of Arrow type large_list<...>: SQLite has no column type for it. Use an InMemoryArrowDatabase or a DeltaTableDatabase instead.
+```
+
 ## What a re-run computes
 
 A stored result is reused when the function's identity (its name, its output schema and its

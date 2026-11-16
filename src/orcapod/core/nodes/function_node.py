@@ -56,6 +56,7 @@ from orcapod.errors import (
     TypeIdentityError,
     OrcapodDatabaseReadError,
     OrcapodDatabaseWriteError,
+    UnstorableColumnError,
 )
 from orcapod.contexts.stored import (
     StaleTables,
@@ -1413,10 +1414,18 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
 
             if self._function_pod is not None:
                 # Normal path: wrap in CachedFunctionPod for compute + cache.
-                self._cached_function_pod = CachedFunctionPod(
+                cached_function_pod = CachedFunctionPod(
                     self._function_pod,
                     result_database=result_database,
                 )
+                # A database that cannot store the result table refuses it now,
+                # before anything runs (ITL-1162).
+                try:
+                    cached_function_pod.require_storable_results()
+                except UnstorableColumnError as exc:
+                    exc.add_context(node_label=self.label)
+                    raise
+                self._cached_function_pod = cached_function_pod
             else:
                 # Read-only stub path (loaded job without a live function pod).
                 # Use the record path stored from the descriptor so that

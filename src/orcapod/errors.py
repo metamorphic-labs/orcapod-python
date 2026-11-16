@@ -76,6 +76,66 @@ class UnsupportedValueError(ValueError):
     """
 
 
+class UnstorableColumnError(ValueError):
+    """A database cannot store a column of a table it is asked to hold (ITL-1162).
+
+    Raised by a database whose backend states which columns it stores faithfully (a
+    ``ConnectorArrowDatabase``: the SQLite and PostgreSQL connectors), before
+    anything of the table is written. A job raises it when the database is attached
+    to a node whose stored tables hold such a column, before anything runs.
+
+    Attributes:
+        database_kind: The kind of database that refused, e.g. ``"SQLiteConnector"``.
+        column: Name of the column.
+        arrow_type: The column's Arrow type.
+        reason: Why the database cannot store it.
+        node_label: Label of the node whose table holds the column, or ``None`` when
+            the refusal is not tied to one node.
+    """
+
+    def __init__(
+        self,
+        *,
+        database_kind: str,
+        column: str,
+        arrow_type: object,
+        reason: str,
+        node_label: str | None = None,
+    ) -> None:
+        """Create the error.
+
+        Args:
+            database_kind: The kind of database that refused.
+            column: Name of the column.
+            arrow_type: The column's Arrow type.
+            reason: Why the database cannot store it.
+            node_label: Label of the node whose table holds the column, if known.
+        """
+        self.database_kind = database_kind
+        self.column = column
+        self.arrow_type = arrow_type
+        self.reason = reason
+        self.node_label = node_label
+        super().__init__(database_kind, column, arrow_type, reason)
+
+    def add_context(self, node_label: str | None = None) -> None:
+        """Fill in the node label where the raising site did not know it.
+
+        Args:
+            node_label: Label of the node whose table holds the column.
+        """
+        if self.node_label is None:
+            self.node_label = node_label
+
+    def __str__(self) -> str:
+        node = f"node {self.node_label!r}: " if self.node_label is not None else ""
+        return (
+            f"{node}a {self.database_kind} database cannot store column "
+            f"{self.column!r} of Arrow type {self.arrow_type}: {self.reason}. "
+            "Use an InMemoryArrowDatabase or a DeltaTableDatabase instead."
+        )
+
+
 class MissingOptionalDependencyError(ImportError):
     """A stored value needs an optional dependency that is not installed.
 
