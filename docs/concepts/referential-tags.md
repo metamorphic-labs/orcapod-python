@@ -180,7 +180,7 @@ source with `tag_only_columns=True` to keep every tag plain, as in v0.3.
   missing or unexpected column). The error says which side holds it as a referential tag,
   and how to make the two agree, in either direction. A referential source tag for a
   plain slot tag: keep it plain with `tag_only_columns`, or declare the slot with the
-  column in both roles. A plain source tag (or a data column) for a referential slot
-  tag: make it a declared tag that `tag_only_columns` does not name, or declare the slot
-  with it plain. `tag_only_columns` lists every plain tag of the source, so the error
+  column in both roles. A plain source tag (or a data-only source column) for a
+  referential slot tag: make it a declared tag that `tag_only_columns` does not name, or
+  declare the slot with it as the source has it (a plain tag, or a data column only). `tag_only_columns` lists every plain tag of the source, so the error
   names the exact list.
