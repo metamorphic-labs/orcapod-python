@@ -22,6 +22,7 @@ pinned value, new value, the change(s) that move it), is
 | D1 + D6: pandas takes `arrow_ordered_v1:` + digest | `4086d0e9` | 12 | pandas DataFrame and Series values; row data hashes of a pandas column |
 | D2: directory entries take `sha256:` + digest | `1a6d608e` | 0 | no golden case hashes a directory's content (covered by a unit test that rebuilds the digest) |
 | Generic alias with no `__origin__` refused | `7fb983e3` | 0 | unreachable for every `typing` / `collections.abc` alias on 3.11 to 3.13 |
+| Every source's default id names its kind (`csv:`, `delta_table:`, `sqlite_table:`, `postgresql_table:`, `db_table:`, `spiraldb_table:`, `polling_source:semantic_v1:`) | `a6c3158e` | 0 | no golden case reads a CSV, Delta, database, SpiralDB or polling source without a `source_id`; the defaults are pinned by unit tests (`test_default_source_ids.py`). Proposed: add golden cases for these defaults and their record ids, as additions |
 | All together | | 848 | exactly the union of the rows above: no entry moves only through an interaction |
 
 Overlaps: 31 entries are moved by both rule 1 and frozenset, 5 by rule 1 and rules 2+3, 4

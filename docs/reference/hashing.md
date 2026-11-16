@@ -146,6 +146,48 @@ renaming a label moves every hash it feeds, and with it the paths and keys built
 
 ---
 
+### Default source ids and row identifiers
+
+A source id is the source's name (rule 7). A `source_id` the user gives is used exactly as
+given, by every source. With none, a source builds a default that names its kind first: the
+class's `SOURCE_KIND`, which is also its config type key (one vocabulary). Every default is
+built in `core/sources/source_ids.py`: `hash_source_id` for a default built from a hash,
+`location_source_id` for one built from where the data lives. A default never contains
+`::`, the separator of a source-info value: a location that holds `::` has no default, and
+the source refuses it until a `source_id` is given (developer, November 15, 2026: "every
+source ought to have some default naming convention for the source id that reflects the
+category, but we should make it totally overridable").
+
+| Source | Kind | Default source id |
+|---|---|---|
+| `ArrowTableSource` | `arrow_table` | `arrow_table:arrow_v1:<hex>` of the table |
+| `DictSource` | `dict` | `dict:arrow_v1:<hex>` of the table |
+| `ListSource` | `list` | `list:arrow_v1:<hex>` of the table |
+| `DataFrameSource` | `data_frame` | `data_frame:arrow_v1:<hex>` of the table |
+| `DerivedSource` (a node's records; `node.as_source()`) | `derived` | `derived:semantic_v1:<hex>` of the node's content hash |
+| `DerivedSource` with `tags_as_data` | `tags_as_data` (an operation) | `tags_as_data:semantic_v1:<hex>` of the derivation |
+| `CSVSource` | `csv` | `csv:<file path as passed>` |
+| `DeltaTableSource` | `delta_table` | `delta_table:<directory name>` |
+| `SQLiteTableSource` | `sqlite_table` | `sqlite_table:<table name>` |
+| `PostgreSQLTableSource` | `postgresql_table` | `postgresql_table:<table name>` |
+| `DBTableSource` (any other connector) | `db_table` | `db_table:<table name>` |
+| `SpiralDBTableSource` | `spiraldb_table` | `spiraldb_table:<project>/<dataset>.<table>@<table id>` |
+| `PollingSource` | `polling_source` | `polling_source:semantic_v1:<hex>` of `impl.identity()` (never its `repr`) |
+| `CachedSource` | `cached` | the wrapped source's id |
+| folded source id of `Batch` / `GroupBy` (a system-tag value, not a source) | | `batch_v1:<hex>` / `group_v1:<hex>` |
+
+Two sources of one kind can share a default (two Delta folders with one name, two
+databases with a table `trials`); a pipeline that reads both gives each a `source_id`.
+
+A row's record id is `uuid5(namespace, "<source_id>::<row identifier>")` (site 5). The row
+identifier is one of:
+
+| Row identifier | When |
+|---|---|
+| `row_<n>` | no `record_id_column`: the row's position |
+| `<column>=<value>` | a `record_id_column` is given |
+| `arrow_v1:<hex>` | a SpiralDB table: the Arrow hash of the row's key columns, with its label (rule 8) |
+
 ## Hash site inventory
 
 Every place Orcapod produces a digest, and every place it reads one, with its class

@@ -958,15 +958,21 @@ data. The rules:
   binds each leaf through `SourceJobNode.from_stream`, so a pipeline built directly over a
   raw `ArrowTableStream` is refused (developer, November 14, 2026; wrap the table as a
   source). Never pass a bound stream's own system tags through.
-- A source id is the source's name (developer, November 11, 2026; ITL-957). A default id
-  built from a hash is `<source kind>:<algorithm label>:<hex>` and is built only by
-  `core/sources/source_ids.hash_source_id`: never format one by hand, and never write a label
-  as a literal. The kind is the class's `SOURCE_KIND` (its config type key: `arrow_table`,
-  `dict`, `list`, `data_frame`, `derived`), or names the operation that derives the source
-  (`tags_as_data`). `node.as_source()` gives no id of its own; it takes the `DerivedSource`
-  default. The origin's source id is never written into a default id, and a `source_id` given
-  by the user is never changed. `SourceStreamBuilder.build` has no bare-hash default: it
-  needs a `source_id` or a `source_kind`.
+- A source id is the source's name (developer, November 11, 2026; ITL-957; every source,
+  November 15, 2026, ITL-1154). A `source_id` the user gives is used exactly as given, by
+  every source. Every default names its kind first: the class's `SOURCE_KIND`, which is also
+  its config type key (`arrow_table`, `dict`, `list`, `data_frame`, `derived`, `csv`,
+  `delta_table`, `sqlite_table`, `postgresql_table`, `db_table`, `spiraldb_table`,
+  `polling_source`, `cached`), or names the operation that derives the source
+  (`tags_as_data`). A default built from a hash is `<kind>:<algorithm label>:<hex>`, built
+  only by `core/sources/source_ids.hash_source_id`; one built from where the data lives is
+  `<kind>:<location>` (`csv:<path>`, `sqlite_table:<table>`), built only by
+  `location_source_id`, which refuses a location holding `::`. Never format one by hand, and
+  never write a label as a literal; a new root source declares `SOURCE_KIND` and builds its
+  default with one of the two. `PollingSource` hashes `impl.identity()`, never its `repr`.
+  `node.as_source()` gives no id of its own; it takes the `DerivedSource` default. The
+  origin's source id is never written into a default id. `SourceStreamBuilder.build` has no
+  bare-hash default: it needs a `source_id` or a `source_kind`.
 - `ArrowTableStream` requires at least one data column; raises `ValueError` otherwise.
 - A job node shows its current run; `node.as_source()` shows everything stored for it
   (developer, November 13, 2026, ITL-1095). After a run, a `FunctionJobNode` returns exactly
