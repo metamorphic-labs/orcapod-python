@@ -385,6 +385,7 @@ class TestRenamingALabelMovesEveryHashItFeeds:
             data=[{"id": "a", "arr": np.arange(3)}],
             tag_columns=["id"],
             source_id="label_rule_arrays",
+            tag_only_columns=True,
         )
         table = stream.as_table()
         before = context.arrow_hasher.hash_table(table)
@@ -672,6 +673,7 @@ class TestStoredHashValuesCarryTheirLabel:
             ],
             tag_columns=["id", "cohort"],
             source_id="label_rule_fold",
+            tag_only_columns=True,
         )
         table = operator(source).as_table(columns={"system_tags": True})
         (source_column,) = [

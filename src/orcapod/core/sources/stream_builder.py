@@ -97,12 +97,17 @@ def _timestamp_text(value: int, unit: str, *, utc: bool) -> str:
         utc: Whether the column has a time zone.
 
     Returns:
-        ``YYYY-MM-DDTHH:MM:SS[.fraction][Z]``.
+        ``YYYY-MM-DDTHH:MM:SS[.fraction][Z]``, the year always four digits.
+
+    Raises:
+        OverflowError: If the moment lies outside years 1 to 9999.
     """
     digits = _FRACTION_DIGITS[unit]
     seconds, fraction = divmod(value, 10**digits)
     moment = datetime.datetime(1970, 1, 1) + datetime.timedelta(seconds=seconds)
-    text = moment.strftime("%Y-%m-%dT%H:%M:%S")
+    # ``isoformat`` always writes four year digits; ``strftime("%Y")`` does not on
+    # every platform.
+    text = moment.isoformat(timespec="seconds")
     if digits:
         text += "." + str(fraction).zfill(digits)
     return text + ("Z" if utc else "")
@@ -120,6 +125,10 @@ def _key_values(column: "pa.ChunkedArray[Any]") -> list[object]:
 
     Returns:
         One value per row.
+
+    Raises:
+        OverflowError: If a timestamp or date lies outside years 1 to 9999, which
+            Arrow can store and ISO-8601 text here cannot write.
     """
     arrow_type = column.type
     if pa.types.is_timestamp(arrow_type):
@@ -200,8 +209,8 @@ def row_identifiers(table: pa.Table, record_id_columns: Sequence[str]) -> list[s
 
     Raises:
         RowIdentifierError: If a key column is missing or of a type that is not allowed, a
-            key value is null, or two rows have the same key. The message names the
-            column or the key.
+            key value is null, a timestamp or date key lies outside years 1 to 9999,
+            or two rows have the same key. The message names the column or the key.
     """
     if not record_id_columns:
         return [positional_row_identifier(i) for i in range(table.num_rows)]
@@ -221,7 +230,15 @@ def row_identifiers(table: pa.Table, record_id_columns: Sequence[str]) -> list[s
                 "record_id_columns, or pass record_id_columns=() to identify rows by "
                 "position."
             )
-    columns = {c: _key_values(table.column(c)) for c in record_id_columns}
+    columns: dict[str, list[object]] = {}
+    for column in record_id_columns:
+        try:
+            columns[column] = _key_values(table.column(column))
+        except OverflowError as exc:
+            raise RowIdentifierError(
+                f"key column {column!r} holds a {table.schema.field(column).type} "
+                "value outside years 1 to 9999, which a row identifier cannot write"
+            ) from exc
     identifiers: list[str] = []
     seen: dict[str, int] = {}
     for i in range(table.num_rows):

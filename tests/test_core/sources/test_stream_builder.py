@@ -9,6 +9,7 @@ import pytest
 
 from orcapod.core.sources.stream_builder import SourceStreamBuilder, SourceStreamResult
 from orcapod.core.sources.arrow_table_source import ArrowTableSource
+from orcapod.errors import RowIdentifierError
 
 
 class TestSourceStreamBuilder:
@@ -313,6 +314,7 @@ class TestKeyRowIdentifiers:
                 tag_columns=["v"],
                 record_id_columns="k",
                 source_id="s",
+                tag_only_columns=True,
             )
             table = source.as_table(columns={"system_tags": True})
             (name,) = [n for n in table.column_names if n.startswith("_tag_record_id")]
@@ -337,7 +339,40 @@ class TestKeyRowIdentifiers:
         """A disallowed type, a null key and a repeated key are refused when built."""
         table = pa.table({"k": values, "v": [1.0, 2.0]})
         with pytest.raises(ValueError, match=match):
-            ArrowTableSource(table, tag_columns=["v"], record_id_columns="k")
+            ArrowTableSource(
+                table, tag_columns=["v"], record_id_columns="k", tag_only_columns=True
+            )
+
+    def test_year_one_is_written_with_four_digits(self) -> None:
+        """The year always has four digits, on every platform."""
+        table = pa.table(
+            {
+                "k": pa.array([-62135596800], pa.timestamp("s")),
+                "v": [1.0],
+            }
+        )
+        source = ArrowTableSource(
+            table, tag_columns=["v"], record_id_columns="k", tag_only_columns=True
+        )
+        stored = source.as_table(columns={"system_tags": True})
+        (name,) = [n for n in stored.column_names if n.startswith("_tag_record_id")]
+        assert stored.column(name).to_pylist() == ['{"k":"0001-01-01T00:00:00"}']
+
+    @pytest.mark.parametrize(
+        "values",
+        [
+            pa.array([253402300800], pa.timestamp("s")),
+            pa.array([3_000_000], pa.date32()),
+        ],
+        ids=["timestamp", "date"],
+    )
+    def test_a_key_past_year_9999_is_refused(self, values: pa.Array[Any]) -> None:
+        """Arrow stores moments a row identifier cannot write; they are refused."""
+        table = pa.table({"k": values, "v": [1.0]})
+        with pytest.raises(RowIdentifierError, match="outside years 1 to 9999"):
+            ArrowTableSource(
+                table, tag_columns=["v"], record_id_columns="k", tag_only_columns=True
+            )
 
 
 class TestUnhashableColumnTypes:
