@@ -77,6 +77,7 @@ class MapData(UnaryOperator):
         # so no path (sync, async or the prediction) can produce one.
         schema_utils.require_names_not_meta(name_map.values())
         schema_utils.require_names_not_system(name_map.values())
+        schema_utils.require_names_without_separator(name_map.values())
         self.name_map = dict(name_map)
         self.drop_unmapped = drop_unmapped
         self.strict = strict
@@ -304,6 +305,7 @@ class MapTags(UnaryOperator):
         # path (sync, async or the prediction) can produce one.
         schema_utils.require_names_not_meta(name_map.values())
         schema_utils.require_names_not_system(name_map.values())
+        schema_utils.require_names_without_separator(name_map.values())
         self.name_map = dict(name_map)
         self.drop_unmapped = drop_unmapped
         self.strict = strict
@@ -533,6 +535,7 @@ class MapColumns(UnaryOperator):
         # path (sync, async or the prediction) can produce one.
         schema_utils.require_names_not_meta(name_map.values())
         schema_utils.require_names_not_system(name_map.values())
+        schema_utils.require_names_without_separator(name_map.values())
         self.name_map = dict(name_map)
         self.drop_unmapped = drop_unmapped
         self.strict = strict

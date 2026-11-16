@@ -503,3 +503,22 @@ def test_other_underscore_names_stay_usable_as_new_names(new_name: str) -> None:
         assert stream.as_table().column_names[2] == new_name
         rows = async_rows(async_op, source)
         assert all(data.keys() == (new_name, "weight") for _, data in rows)
+
+
+@pytest.mark.parametrize(
+    ("op_cls", "old_name"),
+    [
+        (MapTags, "subject"),
+        (MapData, "age"),
+        (MapColumns, "subject"),
+        (MapColumns, "age"),
+    ],
+    ids=["map_tags", "map_data", "map_columns_tag", "map_columns_data"],
+)
+@pytest.mark.parametrize("new_name", ["a::b", ":a"], ids=["separator", "leading_colon"])
+def test_a_new_name_with_the_token_separator_is_refused(
+    op_cls: type, old_name: str, new_name: str
+) -> None:
+    """A source-info token splits on ``::`` (ITL-1154): no column name may blur it."""
+    with pytest.raises(InputValidationError, match="separator"):
+        op_cls({old_name: new_name})
