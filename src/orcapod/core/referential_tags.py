@@ -262,9 +262,11 @@ def require_database_keeps_marker(database: object, references: Iterable[str]) -
     """Refuse, before anything is written, a database that cannot store the marker.
 
     A stored table must state what it stores (developer, November 16, 2026, ITL-1019),
-    so a referential tag is never stored unmarked. A database that can check rows
-    before writing them (``RecordValidatingDatabaseProtocol``) is asked whether it
-    keeps the marker; one that cannot is refused.
+    so a referential tag is never stored unmarked. A database that checks rows before
+    writing them (``RecordValidatingDatabaseProtocol``, the connector-backed databases)
+    is asked whether it keeps the marker and refused if it does not. Any other database
+    is accepted without a check: the in-memory and Delta databases keep Arrow field
+    metadata.
 
     Args:
         database: The database a node will store its referential tags in.

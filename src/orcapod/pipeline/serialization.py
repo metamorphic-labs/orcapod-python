@@ -1487,6 +1487,9 @@ def check_source_config_binding(
     # ``None``: a database source takes its tags from the table's keys when read.
     if tag_columns is None or "tag_only_columns" not in config:
         return
+    # A source takes one tag name as a bare string: that name, never its characters.
+    if isinstance(tag_columns, str):
+        tag_columns = [tag_columns]
     configured = source_reference_tags(tag_columns, config["tag_only_columns"])
     declared = reference_names(tag_names, data_names)
     if set(configured) != set(declared):

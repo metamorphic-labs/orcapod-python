@@ -286,3 +286,34 @@ def test_the_table_is_checked_against_the_saved_job(tmp_path: Path) -> None:
     loaded = PipelineJob.load(tmp_path / "job.json", database=tampered)
     with pytest.raises(InputValidationError, match="saved job declares \\['unit'\\]"):
         loaded.nodes["double"].get_all_records()
+
+
+@pytest.mark.parametrize(
+    ("tag_only", "saved_tag_only"),
+    [((), []), (True, "unit")],
+    ids=["referential", "plain"],
+)
+def test_a_source_config_with_a_bare_string_tag_column_loads(
+    tmp_path: Path, tag_only: object, saved_tag_only: object
+) -> None:
+    # A source takes one tag name as a bare string; the binding check reads it as that
+    # one name, never as its characters.
+    source = op.sources.CSVSource(
+        _csv(tmp_path),
+        tag_columns=["unit"],
+        tag_only_columns=tag_only,  # pyright: ignore[reportArgumentType]  # the test varies it
+        source_id="spikes",
+    )
+    job = PipelineJob(database=DeltaTableDatabase(tmp_path / "store"))
+    with job:
+        double.pod(source, label="double")
+    job.save(tmp_path / "job.json")
+    data = _saved(tmp_path / "job.json")
+    data["bindings"]["sources"]["spikes"].update(
+        {"tag_columns": "unit", "tag_only_columns": saved_tag_only}
+    )
+    path = tmp_path / "edited.json"
+    path.write_text(json.dumps(data))
+
+    loaded = PipelineJob.load(path)
+    assert _hashes(loaded) == _hashes(job)
