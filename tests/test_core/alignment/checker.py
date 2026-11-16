@@ -35,7 +35,7 @@ import pyarrow as pa
 
 from orcapod.system_constants import constants
 
-from .oracle import Oracle, Origin, fold_record_ids, fold_values
+from .oracle import FOLD_LABELS, Oracle, Origin, fold_record_ids, fold_values
 
 MAX_REPORTED = 12
 
@@ -497,7 +497,9 @@ class _RowChecker:
         sources = {s for member in self.state.members for s in member}
         for source in sorted(sources):
             origins = [member.get(source) for member in self.state.members]
-            if fold_values([source] * len(origins)) != source_value:
+            if source_value not in {
+                fold_values([source] * len(origins), label) for label in FOLD_LABELS
+            }:
                 continue
             if not self._check_lineage(name, source, lineage):
                 return None

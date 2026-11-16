@@ -1369,7 +1369,20 @@ _AGGREGATED_RECORD_ID_NAMESPACE = uuid.uuid5(
 )
 
 
-def fold_system_tag_values(column_name: str, values: Sequence[Any]) -> str | bytes:
+GROUP_BY_FOLD_LABEL = "group_v1"
+"""Label of the source-id fold of ``GroupBy``: ``"group_v1:<hex>"`` (ITL-1154).
+
+The fold's digest procedure is ``fold_system_tag_values``; the label names the operation
+that applied it, as a dedicated algorithm's label does (``<algorithm>_v<N>:<hex>``).
+"""
+
+BATCH_FOLD_LABEL = "batch_v1"
+"""Label of the source-id fold of ``Batch``: ``"batch_v1:<hex>"`` (ITL-1154)."""
+
+
+def fold_system_tag_values(
+    column_name: str, values: Sequence[Any], *, label: str
+) -> str | bytes:
     """Fold a group's system-tag values into one scalar of the same type.
 
     Many->one operators must emit scalar system tags, because
@@ -1393,10 +1406,13 @@ def fold_system_tag_values(column_name: str, values: Sequence[Any]) -> str | byt
             to 16 bytes (stored as ``large_binary``); everything else folds to a
             hex string.
         values: The group's member values, in emission order.
+        label: The fold's label, ``GROUP_BY_FOLD_LABEL`` or ``BATCH_FOLD_LABEL``. It
+            prefixes a folded source id; a folded record id is an id built by a recipe
+            and carries no label.
 
     Returns:
-        16 raw bytes for a record_id column, a 64-character hex string
-        otherwise.
+        16 raw bytes for a record_id column, otherwise ``"<label>:<hex>"``: the label
+        and the 64 hex digits of the SHA-256 of the canonical JSON member list.
     """
     if column_name.startswith(constants.SYSTEM_TAG_RECORD_ID_PREFIX):
         # Hex never contains the separator or "null", so the joined name decodes
@@ -1412,7 +1428,8 @@ def fold_system_tag_values(column_name: str, values: Sequence[Any]) -> str | byt
         separators=(",", ":"),
         ensure_ascii=False,
     )
-    return hashlib.sha256(members.encode("utf-8")).hexdigest()
+    # The folded source id is a hash stored as a value: it carries its label.
+    return f"{label}:{hashlib.sha256(members.encode('utf-8')).hexdigest()}"
 
 
 def aggregated_list_type(

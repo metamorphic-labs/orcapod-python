@@ -86,7 +86,11 @@ class Batch(UnaryOperator):
             {
                 **{c: [m[c] for m in members] for c in member_columns},
                 **{
-                    c: arrow_utils.fold_system_tag_values(c, [m[c] for m in members])
+                    c: arrow_utils.fold_system_tag_values(
+                        c,
+                        [m[c] for m in members],
+                        label=arrow_utils.BATCH_FOLD_LABEL,
+                    )
                     for c in system_tag_columns
                 },
             }

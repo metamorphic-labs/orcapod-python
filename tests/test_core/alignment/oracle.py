@@ -44,14 +44,22 @@ def fold_record_ids(record_ids: Sequence[bytes | None]) -> bytes:
     return uuid.uuid5(AGGREGATED_RECORD_ID_NAMESPACE, name).bytes
 
 
-def fold_values(values: Sequence[Any]) -> str:
-    """The folded value of any other system tag of an ordered member list (site 6b)."""
+FOLD_LABELS = ("batch_v1", "group_v1")
+"""The labels of the source-id folds of ``Batch`` and ``GroupBy`` (site 6b)."""
+
+
+def fold_values(values: Sequence[Any], label: str) -> str:
+    """The folded value of any other system tag of an ordered member list (site 6b).
+
+    ``"<label>:<hex>"``: the fold's label (``FOLD_LABELS``), then the SHA-256 of the
+    canonical JSON member list.
+    """
     members = json.dumps(
         [None if v is None else str(v) for v in values],
         separators=(",", ":"),
         ensure_ascii=False,
     )
-    return hashlib.sha256(members.encode("utf-8")).hexdigest()
+    return f"{label}:{hashlib.sha256(members.encode('utf-8')).hexdigest()}"
 
 
 @dataclass(frozen=True)

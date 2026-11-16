@@ -47,7 +47,7 @@ from orcapod.hashing.semantic_hashing.builtin_handlers import (
     PolarsDataFrameHandler,
     PolarsSeriesHandler,
 )
-from orcapod.operators import Join
+from orcapod.operators import Batch, GroupBy, Join
 from orcapod.pipeline.observer import NoOpObserver
 from orcapod.sources import DictSource
 from orcapod.types import CacheMode, ContentHash
@@ -601,6 +601,36 @@ def _stored_row_keys() -> list[bytes]:
 class TestStoredHashValuesCarryTheirLabel:
     """Rule 4: a hash stored as a value carries its label."""
 
+    @pytest.mark.parametrize(
+        ("operator", "label"),
+        [(Batch(batch_size=2), "batch_v1"), (GroupBy(by=["cohort"]), "group_v1")],
+        ids=["batch", "group_by"],
+    )
+    def test_folded_source_id_carries_the_fold_label(
+        self, operator: Batch | GroupBy, label: str
+    ) -> None:
+        """A folded source id is ``"<fold label>:<hex>"``; a folded record id has none."""
+        source = DictSource(
+            data=[
+                {"id": "a", "cohort": "x", "v": 1},
+                {"id": "b", "cohort": "x", "v": 2},
+            ],
+            tag_columns=["id", "cohort"],
+            source_id="label_rule_fold",
+        )
+        table = operator(source).as_table(columns={"system_tags": True})
+        (source_column,) = [
+            n for n in table.column_names if n.startswith("_tag_source_id")
+        ]
+        (record_column,) = [
+            n for n in table.column_names if n.startswith("_tag_record_id")
+        ]
+        (folded,) = cast("list[str]", table.column(source_column).to_pylist())
+        assert folded.startswith(f"{label}:")
+        assert BARE_SHA256.fullmatch(folded.removeprefix(f"{label}:"))
+        (record_id,) = cast("list[bytes]", table.column(record_column).to_pylist())
+        assert len(record_id) == 16
+
     def test_operator_cache_and_cached_source_row_keys_are_labelled(self) -> None:
         """The row keys of the two cache tables are ``b"arrow_v1:" + digest``."""
         keys = _stored_row_keys()
@@ -716,6 +746,8 @@ LABEL_DEFINITIONS = {
     "polars_expr_v1": "hashing/semantic_hashing/polars_expr.py",
     "polars_dataframe_v1": "hashing/semantic_hashing/builtin_handlers.py",
     "polars_series_v1": "hashing/semantic_hashing/builtin_handlers.py",
+    "group_v1": "utils/arrow_utils.py",
+    "batch_v1": "utils/arrow_utils.py",
 }
 
 
