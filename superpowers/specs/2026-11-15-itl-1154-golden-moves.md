@@ -7,6 +7,11 @@ Measured on November 15, 2026, before any regeneration. Base: `b21467d8` (`origi
 hold a digest (system-tag column names, table paths) are compared with the digest replaced
 by `<H>`, so a moved name and its value are one entry.
 
+Additions (`2026-11-15-itl-1154-golden-additions.tsv`, 94 entries, no pinned entry changed by
+them): the new cases `schema:row_identifiers` (position, string, composite, timestamp, date and
+boolean keys: 54) and `schema:location_default_source_ids` (CSV, Delta and SQLite defaults with
+their record ids, and the polling default: 40).
+
 The full list, one row per moved entry (group, pinned name, new name when the name moved,
 pinned value, new value, the change(s) that move it), is
 `2026-11-15-itl-1154-golden-moves.tsv` in this folder: **848 entries**.
@@ -23,6 +28,7 @@ pinned value, new value, the change(s) that move it), is
 | D2: directory entries take `sha256:` + digest | `1a6d608e` | 0 | no golden case hashes a directory's content (covered by a unit test that rebuilds the digest) |
 | Generic alias with no `__origin__` refused | `7fb983e3` | 0 | unreachable for every `typing` / `collections.abc` alias on 3.11 to 3.13 |
 | Every source's default id names its kind (`csv:`, `delta_table:`, `sqlite_table:`, `postgresql_table:`, `db_table:`, `spiraldb_table:`, `polling_source:semantic_v1:`) | `a6c3158e` | 0 | no golden case reads a CSV, Delta, database, SpiralDB or polling source without a `source_id`; the defaults are pinned by unit tests (`test_default_source_ids.py`). Proposed: add golden cases for these defaults and their record ids, as additions |
+| System tags (phase 3): the record id is the row identifier (`row_<n>` or the key's JSON), folded ids `<label>:<hex>`, `record_id_columns`, location defaults | `b5eb554b`, `856de423` | 226 (measured as the increment over every switch above: `10f1c4a8` against HEAD, each computed fresh) | 215 record-id system-tag values (row identifier text; `batch_v1:` / `group_v1:` folded ids); 3 stored entry-id lists of function tables (the system tags are in the entry-id preimage); the `tags_as_data` derived source with a key column: its default source id (the derivation hash now holds `("record_id_columns", (...))`) on 4 entries and its content hash; the 3 `source_stream_builder` stream content hashes (a producer-less stream's identity covers its whole table, system tags included). Every one of the 226 is also moved by an earlier switch (by its name, which holds a moved schema digest), so the total stays 848. No row data hash and no plain table hash moves |
 | All together | | 848 | exactly the union of the rows above: no entry moves only through an interaction |
 
 Overlaps: 31 entries are moved by both rule 1 and frozenset, 5 by rule 1 and rules 2+3, 4
