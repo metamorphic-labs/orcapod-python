@@ -352,3 +352,38 @@ def test_every_write_path_keeps_the_marker(
         reopened = DeltaTableDatabase(tmp_path / "store")
         table = reopened.get_all_records(path)
         assert table is not None and stored_references(table.schema) == ("unit",)
+
+
+# ---------------------------------------------------------------------------
+# A database that cannot keep the marker is refused before anything is written
+# ---------------------------------------------------------------------------
+
+
+def test_a_database_without_field_metadata_is_refused_before_any_write() -> None:
+    from orcapod.databases.connector_arrow_database import ConnectorArrowDatabase
+    from orcapod.databases.sqlite_connector import SQLiteConnector
+
+    connector = SQLiteConnector(":memory:")
+    database = ConnectorArrowDatabase(connector)
+    CALLS.clear()
+    with pytest.raises(InputValidationError) as raised:
+        _run(database, ROWS, SyncPipelineOrchestrator)
+    message = str(raised.value)
+    # The database kind and both ways out are named.
+    assert "SQLiteConnector does not preserve Arrow metadata" in message
+    assert "keeps field metadata" in message and "tag_only_columns" in message
+    assert CALLS == []
+    assert database.list_table_paths() == []
+
+
+def test_plain_tags_ask_nothing_of_the_database() -> None:
+    from orcapod.core.referential_tags import require_database_keeps_marker
+    from orcapod.databases.connector_arrow_database import ConnectorArrowDatabase
+    from orcapod.databases.sqlite_connector import SQLiteConnector
+
+    database = ConnectorArrowDatabase(SQLiteConnector(":memory:"))
+    require_database_keeps_marker(database, ())
+    with pytest.raises(InputValidationError, match="cannot store the referential"):
+        require_database_keeps_marker(database, ["unit"])
+    # A database that keeps field metadata is accepted.
+    require_database_keeps_marker(InMemoryArrowDatabase(), ["unit"])

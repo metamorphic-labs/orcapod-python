@@ -143,7 +143,9 @@ marker. The function's result table never records referential status, so plain a
 referential runs of the same function share their results. The marker moves no hash, and
 the stores keep it on every write (first write, append, merge, schema evolution; in
 memory and on Delta). The SQLite and PostgreSQL databases keep no Arrow
-metadata at all and refuse such a table, as they refuse logical types.
+metadata at all: a function node that would store a referential tag there is refused when
+its database is attached, before anything is written. Use a database that keeps field
+metadata, or keep those tags plain with `tag_only_columns`.
 
 ```python
 from orcapod.core.referential_tags import stored_references

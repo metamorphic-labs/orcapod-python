@@ -38,6 +38,7 @@ from orcapod.core.function_pod import (
 )
 from orcapod.core.referential_tags import (
     mark_references,
+    require_database_keeps_marker,
     stored_references,
     without_reference_marks,
 )
@@ -1461,6 +1462,11 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 result_database = pipeline_database.at("_result")
 
             if self._function_pod is not None:
+                # A table must state its referential tags: refuse a database that
+                # cannot, before anything is written (ITL-1019).
+                require_database_keeps_marker(
+                    pipeline_database, fall_through_references(self._function_pod)
+                )
                 # Normal path: wrap in CachedFunctionPod for compute + cache.
                 # A fall-through pod's results are its plain pod's (ITL-1023).
                 self._cached_function_pod = CachedFunctionPod(

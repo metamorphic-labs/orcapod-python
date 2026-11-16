@@ -258,6 +258,44 @@ def stored_references(schema: "pa.Schema") -> tuple[str, ...]:
     return tuple(names)
 
 
+def require_database_keeps_marker(database: object, references: Iterable[str]) -> None:
+    """Refuse, before anything is written, a database that cannot store the marker.
+
+    A stored table must state what it stores (developer, November 16, 2026, ITL-1019),
+    so a referential tag is never stored unmarked. A database that can check rows
+    before writing them (``RecordValidatingDatabaseProtocol``) is asked whether it
+    keeps the marker; one that cannot is refused.
+
+    Args:
+        database: The database a node will store its referential tags in.
+        references: The referential tags it will store; nothing is checked when empty.
+
+    Raises:
+        InputValidationError: If the database cannot keep the marker, naming the
+            database kind and the two ways out.
+    """
+    from orcapod.protocols.database_protocols import RecordValidatingDatabaseProtocol
+
+    references = tuple(references)
+    if not references or not isinstance(database, RecordValidatingDatabaseProtocol):
+        return
+    probe = mark_references(
+        pa.table({name: pa.array([], type=pa.null()) for name in references}),
+        references,
+    )
+    try:
+        database.validate_records(probe)
+    except ValueError as exc:
+        raise InputValidationError(
+            f"{type(database).__name__} cannot store the referential tags "
+            f"{list(references)}: a stored referential tag carries Arrow field "
+            f"metadata, and this database keeps none ({exc}). Use a database that "
+            "keeps field metadata (DeltaTableDatabase, InMemoryArrowDatabase, the "
+            "SpiralDB database), or keep these tags plain with tag_only_columns on "
+            "the source. Nothing was written."
+        ) from exc
+
+
 def without_reference_marks(table: "pa.Table") -> "pa.Table":
     """Return ``table`` with no referential tag marker on any column.
 
