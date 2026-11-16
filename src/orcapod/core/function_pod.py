@@ -1018,7 +1018,8 @@ def function_zero_row_table(
     (``Data.function_output_zero_row_table``): the declared output types, the data
     context column and the source-info columns. Nothing is computed and the function
     is not called (ITL-912). This is the zero-row form of the table the function pod's
-    stream and node build from computed rows.
+    stream and node build from computed rows. A referential tag that falls through
+    the pod (ITL-1023) is one column, the tag's.
 
     Args:
         input_stream: The function pod's input.
@@ -1040,13 +1041,16 @@ def function_zero_row_table(
         for name in input_table.column_names
         if name.startswith(constants.SYSTEM_TAG_PREFIX)
     ]
-    tags = input_table.select([*input_stream.keys()[0], *system_tags])
-    return arrow_utils.hstack_tables(
-        tags,
-        Data.function_output_zero_row_table(
-            output_schema, data_context, meta_python_schema
-        ),
+    tag_keys = input_stream.keys()[0]
+    tags = input_table.select([*tag_keys, *system_tags])
+    data = Data.function_output_zero_row_table(
+        output_schema, data_context, meta_python_schema
     )
+    # A referential tag that falls through the pod is one column, laid out from the
+    # tags with its source info in the data, as rows lay it out (ITL-1023).
+    if fall_through := [name for name in tag_keys if name in data.column_names]:
+        data = data.drop_columns(fall_through)
+    return arrow_utils.hstack_tables(tags, data)
 
 
 def _no_content_hashes() -> pa.Array[Any]:

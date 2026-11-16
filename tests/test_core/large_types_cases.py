@@ -131,6 +131,16 @@ def _arrow_table_source(n_rows: int, tmp: Path) -> StreamProtocol:
     return ArrowTableSource(_table(n_rows), tag_columns=TAGS, source_id="arrow")
 
 
+def plain_arrow_table_source(n_rows: int, tmp: Path) -> StreamProtocol:
+    """The ``ArrowTableSource`` case with plain tags, for a step that needs them.
+
+    A derived source over a referential stream is not supported yet (ITL-1019).
+    """
+    return ArrowTableSource(
+        _table(n_rows), tag_columns=TAGS, tag_only_columns=True, source_id="arrow"
+    )
+
+
 def _arrow_table_stream(n_rows: int, tmp: Path) -> StreamProtocol:
     return ArrowTableStream(_table(n_rows), tag_columns=TAGS)
 

@@ -43,6 +43,22 @@ def test_function_reads_a_referenced_column_by_name() -> None:
     assert sorted(r["scaled"] for r in out.as_table().to_pylist()) == [5.0, 5.0]
 
 
+def test_a_fall_through_with_no_rows_has_the_columns_of_one_with_rows() -> None:
+    """The zero-row table (ITL-912) lays a referential tag out once, as rows do."""
+
+    @op.function_pod(output_keys=["half"])
+    def half(amp: float) -> float:
+        return amp / 2
+
+    with_rows = half.pod(_source()).as_table(all_info=True)
+    no_rows = half.pod(
+        op.operators.PolarsFilter(constraints={"amp": -1.0})(_source())
+    ).as_table(all_info=True)
+    assert no_rows.num_rows == 0
+    assert no_rows.column_names.count("t") == 1
+    assert no_rows.schema == with_rows.schema
+
+
 def test_process_makes_references_plain_at_the_pod() -> None:
     @op.function_pod(output_keys=["double"])
     def double(t: int) -> int:

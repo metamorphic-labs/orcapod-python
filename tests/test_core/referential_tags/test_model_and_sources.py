@@ -121,3 +121,19 @@ def test_to_config_writes_tag_only_columns_only_for_referential_sources(
         op.sources.CSVSource.from_config(referential.to_config()).keys()
         == referential.keys()
     )
+
+
+@pytest.mark.parametrize("tag_only", [(), ("k",)], ids=["referential", "plain"])
+def test_a_reload_keeps_the_tag_only_choice(tmp_path: Any, tag_only: Any) -> None:
+    """A source that takes in new rows (ITL-1102) keeps its referential tags."""
+    path = tmp_path / "rows.csv"
+    path.write_text("k,v\n1,10\n2,20\n")
+    source = op.sources.CSVSource(
+        str(path), tag_columns=["k"], record_id_column="k", tag_only_columns=tag_only
+    )
+    expected = () if tag_only else ("k",)
+    assert stream_references(source) == expected
+    path.write_text("k,v\n1,10\n2,20\n3,30\n")
+    assert source.check_for_new_data() is True
+    assert stream_references(source) == expected
+    assert sorted(r["k"] for r in source.as_table().to_pylist()) == [1, 2, 3]

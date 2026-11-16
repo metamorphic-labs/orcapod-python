@@ -107,8 +107,8 @@ def delta_path(tmp_path: Path) -> Path:
     return path
 
 
-def _delta(path: Path) -> DeltaTableSource:
-    return DeltaTableSource(path, tag_columns="k", record_id_column="k")
+def _delta(path: Path, **kwargs: Any) -> DeltaTableSource:
+    return DeltaTableSource(path, tag_columns="k", record_id_column="k", **kwargs)
 
 
 def test_delta_unchanged_finds_nothing(delta_path: Path) -> None:
@@ -329,8 +329,8 @@ def csv_path(tmp_path: Path) -> Path:
     return path
 
 
-def _csv(path: Path) -> CSVSource:
-    return CSVSource(str(path), tag_columns="k", record_id_column="k")
+def _csv(path: Path, **kwargs: Any) -> CSVSource:
+    return CSVSource(str(path), tag_columns="k", record_id_column="k", **kwargs)
 
 
 def test_csv_unchanged_finds_nothing(csv_path: Path) -> None:
@@ -518,7 +518,9 @@ def test_cached_source_job_runs_only_the_new_rows(
 
 
 def test_derived_source_follows_its_source_origin(delta_path: Path) -> None:
-    source = DerivedSource(_delta(delta_path), tags_as_data={"k": "k_value"})
+    source = DerivedSource(
+        _delta(delta_path, tag_only_columns=True), tags_as_data={"k": "k_value"}
+    )
     assert _values(source, "k_value") == [0, 1, 2]
     assert source.check_for_new_data() is False
     deltalake.write_deltalake(str(delta_path), _rows([3]), mode="append")
@@ -527,7 +529,7 @@ def test_derived_source_follows_its_source_origin(delta_path: Path) -> None:
 
 
 def test_derived_source_follows_its_job_node(csv_path: Path) -> None:
-    job = _job(_csv(csv_path))
+    job = _job(_csv(csv_path, tag_only_columns=True))
     stored = job.nodes["rowwise"].as_source()
     assert stored.as_table().num_rows == 0  # nothing stored before the first run
     before = stored.last_modified
@@ -633,7 +635,7 @@ def test_sqlite_a_change_in_a_system_tag_column_only_is_taken_in(
 def test_two_derived_sources_over_one_source_both_take_in_its_change(
     delta_path: Path,
 ) -> None:
-    origin = _delta(delta_path)
+    origin = _delta(delta_path, tag_only_columns=True)
     first = DerivedSource(origin, tags_as_data={"k": "k_value"})
     second = DerivedSource(origin, tags_as_data={"k": "k_value"})
     assert _values(first, "k_value") == _values(second, "k_value") == [0, 1, 2]
@@ -644,7 +646,7 @@ def test_two_derived_sources_over_one_source_both_take_in_its_change(
 
 
 def test_a_derived_source_retries_a_read_that_raised(csv_path: Path) -> None:
-    job = _job(_csv(csv_path))
+    job = _job(_csv(csv_path, tag_only_columns=True))
     _run(job, "sync")
     stored = job.nodes["rowwise"].as_source()
     assert _values(stored, "y") == [1, 11, 21]
@@ -751,7 +753,7 @@ def twice(y: int) -> int:
 def test_a_derived_source_that_held_no_rows_moves_when_its_origin_runs(
     csv_path: Path,
 ) -> None:
-    upstream = _job(_csv(csv_path))
+    upstream = _job(_csv(csv_path, tag_only_columns=True))
     derived = DerivedSource(upstream.nodes["rowwise"], tags_as_data={"k": "k_value"})
     downstream = PipelineJob(name="down", database=InMemoryArrowDatabase())
     with downstream:

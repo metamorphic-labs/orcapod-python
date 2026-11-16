@@ -45,6 +45,7 @@ from tests.test_core.large_types_cases import (
     TAGS,
     build_source,
     non_large_columns,
+    plain_arrow_table_source,
 )
 
 ORCHESTRATORS = {
@@ -204,7 +205,7 @@ def test_function_nodes_and_derived_sources_are_large(
     """A function node passing a ``string`` tag through, and derived sources."""
     job = PipelineJob(name="itl1122", database=InMemoryArrowDatabase())
     with job:
-        source = build_source("ArrowTableSource", n_rows, tmp_path)
+        source = plain_arrow_table_source(n_rows, tmp_path)
         _ = _upper.pod(source, label="upper")
         _ = SelectTagColumns(["t"])(source, label="selected")
     _ = job.run(orchestrator=ORCHESTRATORS[orchestrator]())

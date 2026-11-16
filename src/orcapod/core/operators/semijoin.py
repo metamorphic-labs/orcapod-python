@@ -75,7 +75,9 @@ class SemiJoin(BinaryOperator):
         """Return the shared names that are not match keys, with each side's role.
 
         The decision is by name only: no value or type is read. Meta (``__``)
-        columns are not user columns and never count.
+        columns are not user columns and never count. A match key is never
+        reported, in either role: a referential tag (ITL-1023) is a tag and a data
+        column of one name, one column, so its data role is the key's column.
 
         Args:
             left_tag_keys: The left input's tag column names.
@@ -94,12 +96,13 @@ class SemiJoin(BinaryOperator):
         left_roles = [(name, "tag") for name in left_tag_keys] + [
             (name, "data") for name in left_data_keys
         ]
+        keys = set(left_tag_keys) & set(right_tag_keys)
         return tuple(
             (name, left_role, right_roles[name])
             for name, left_role in left_roles
             if name in right_roles
+            and name not in keys
             and not name.startswith(constants.META_PREFIX)
-            and (left_role, right_roles[name]) != ("tag", "tag")
         )
 
     def _warn_once_per_application(

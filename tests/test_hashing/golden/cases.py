@@ -1238,7 +1238,9 @@ def _keyed(source_id: str, value: str, nullable_key: bool) -> Any:
             ]
         ),
     )
-    return ArrowTableSource(table, tag_columns=["subject"], source_id=source_id)
+    return ArrowTableSource(
+        table, tag_columns=["subject"], tag_only_columns=True, source_id=source_id
+    )
 
 
 @case("pipeline", "join_key_nullability")
@@ -1377,6 +1379,7 @@ def pipeline_tag_and_data_columns() -> dict[str, Any]:
             {"cohort": "b", "subject": "s3", "age": 5, "weight": 19.0},
         ],
         tag_columns=["cohort", "subject"],
+        tag_only_columns=True,
         source_id="cohort_subjects",
     )
     streams = {

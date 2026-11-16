@@ -40,7 +40,7 @@ from orcapod.core.referential_tags import (
     ReferenceMaterializationWarning,
     stream_references,
 )
-from orcapod.errors import InputValidationError
+from orcapod.errors import InputValidationError, SemiJoinIgnoredColumnWarning
 from orcapod.utils import arrow_utils
 
 
@@ -279,6 +279,36 @@ def test_semijoin_keeps_the_left_references() -> None:
     result = SemiJoin()(_a(), _b())
     assert stream_references(result) == ("x",)
     assert [r["x"] for r in result.as_table().to_pylist()] == [1]
+
+
+@pytest.mark.parametrize(
+    ("left_plain", "right_plain"),
+    [(False, False), (True, False), (False, True)],
+    ids=["ref_ref", "plain_ref", "ref_plain"],
+)
+def test_semijoin_on_a_referential_key_warns_about_nothing(
+    left_plain: bool, right_plain: bool
+) -> None:
+    """A referential tag shared as a tag is a match key, used in both its roles.
+
+    Its data role is the same column, so ``SemiJoinIgnoredColumnWarning`` (ITL-1088)
+    has nothing to report, on the sync and the async path.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SemiJoinIgnoredColumnWarning)
+        result = SemiJoin()(
+            _a(tag_only_columns=left_plain), _b(tag_only_columns=right_plain)
+        )
+        assert [r["x"] for r in result.as_table().to_pylist()] == [1]
+
+
+def test_semijoin_still_warns_about_a_referential_tag_that_is_data_on_the_right() -> (
+    None
+):
+    """A left referential tag that is only data on the right is not a key."""
+    right = _ref([{"y": 1, "x": 1}], ["y"], "B", tag_only_columns=True)
+    with pytest.warns(SemiJoinIgnoredColumnWarning, match="'x'"):
+        _ = SemiJoin()(_a(), right)
 
 
 @pytest.mark.parametrize("make_op", [lambda: Index("x", 0), lambda: Pick("x", "q")])
