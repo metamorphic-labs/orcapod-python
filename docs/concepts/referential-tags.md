@@ -85,7 +85,8 @@ does not make it compute again.
 | `MapTags` / `map_tags` | Renames the column in both roles; `tag_only=True` renames the tag only and leaves a plain tag. |
 | `MapData` / `map_data` | Always a data-only move: the data column is renamed and `x` stays a plain tag. |
 | Filters, `DropNulls`, `SemiJoin`, `Pick`, `Index` | Keep the reference. |
-| `Batch`, `MergeJoin`, `SelectColumns`, `DropColumns` | Not supported with referential tags yet: they raise. |
+| `Batch` | Keeps every tag, list-valued, as for plain tags: `x` becomes the same list in both roles and stays referential. Its source info is one token per member, like any data column: nothing is merged. |
+| `MergeJoin`, `SelectColumns`, `DropColumns` | Not supported with referential tags yet: they raise. |
 
 ```python
 units = op.sources.DictSource(
@@ -96,6 +97,18 @@ units = op.sources.DictSource(
 joined = spikes.join(units)
 print(joined.keys())
 # (('unit', 'time'), ('unit', 'area', 'time', 'amp'))
+```
+
+`Batch` lists every column, a referential tag included, so the tag and its data stay one
+column:
+
+```python
+batched = spikes.batch()
+print(batched.keys())
+# (('unit', 'time'), ('unit', 'time', 'amp'))
+for tag, data in batched.iter_data():
+    print(tag["time"], data["time"])
+# [10, 20] [10, 20]
 ```
 
 ### Source info of a merged value
@@ -180,7 +193,7 @@ the file is checked against the stored tables when a node reads them.
 ## Not supported yet
 
 These raise "not supported with referential tags yet" when a referential tag reaches them:
-`Batch`, `MergeJoin`, `SelectColumns`, `DropColumns`, storing an operator node's results (`LOG` and `REPLAY` cache modes),
+`MergeJoin`, `SelectColumns`, `DropColumns`, storing an operator node's results (`LOG` and `REPLAY` cache modes),
 and `DerivedSource` over a stream with referential tags (so `node.as_source()` of a node
 with referential tags).
 `PollingSource` keeps its tags plain.
