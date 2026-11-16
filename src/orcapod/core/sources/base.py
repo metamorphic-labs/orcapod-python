@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from orcapod import contexts
 from orcapod.config import OrcapodConfig
@@ -14,6 +14,29 @@ if TYPE_CHECKING:
 
     from orcapod.core.sources.cached_source import CachedSource
     from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
+
+
+def saved_tag_only_columns(config: dict[str, Any]) -> bool | list[str]:
+    """Return the ``tag_only_columns`` of a saved source config (ITL-1019).
+
+    A config of format 0.3.0 always holds it; the loader of an older file, whose tags
+    are all plain, puts ``True`` in first (``serialization.source_config_at_version``).
+
+    Args:
+        config: A saved source config.
+
+    Returns:
+        ``True`` (every tag plain) or the names of the plain tags.
+
+    Raises:
+        ValueError: If the config does not hold ``tag_only_columns``.
+    """
+    if "tag_only_columns" not in config:
+        raise ValueError(
+            f"source config {config.get('source_type')!r} has no tag_only_columns: "
+            "a saved source config states its plain tags (format 0.3.0)"
+        )
+    return config["tag_only_columns"]
 
 
 class RootSource(StreamBase):
@@ -48,6 +71,10 @@ class RootSource(StreamBase):
     the default stream delegation behavior. They may also override
     ``identity_structure()``.
     """
+
+    # Whether the source takes ``tag_only_columns`` and saves it in its config
+    # (ITL-1019): from format 0.3.0 on such a config always holds it.
+    TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -111,16 +138,16 @@ class RootSource(StreamBase):
         }
 
     def _tag_only_config(self) -> dict[str, Any]:
-        """Return ``tag_only_columns`` for ``to_config``, when any tag is referential.
+        """Return ``tag_only_columns`` for ``to_config``: always written (ITL-1019).
 
-        A source whose tags are all plain writes nothing, so its config is the one
-        v0.3 wrote; a config without the key reads back with every tag plain
-        (``tag_only_columns=True``), as v0.3 configs mean.
+        The format version decides what a saved file means, never a missing key: a
+        config of format 0.3.0 states its plain tags, ``True`` when every tag is plain
+        and the names otherwise (``saved_tag_only_columns`` reads it back).
         """
         tag_columns = tuple(getattr(self, "_tag_columns", ()))
         tag_only = tuple(getattr(self, "_tag_only_columns", tag_columns))
         if tag_only == tag_columns:
-            return {}
+            return {"tag_only_columns": True}
         return {"tag_only_columns": list(tag_only)}
 
     def pipeline_identity_structure(self) -> Any:

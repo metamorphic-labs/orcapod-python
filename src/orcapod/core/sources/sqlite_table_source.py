@@ -30,6 +30,7 @@ from orcapod.core.referential_tags import TagOnlyColumns
 from typing_extensions import override
 
 from orcapod.core.sources.db_table_source import DBTableSource
+from orcapod.core.sources.base import saved_tag_only_columns
 from orcapod.databases.sqlite_connector import SQLiteConnector
 from orcapod.utils.schema_utils import _normalize_column_list
 
@@ -186,7 +187,7 @@ class SQLiteTableSource(DBTableSource):
             db_path=config["db_path"],
             table_name=config["table_name"],
             tag_columns=config.get("tag_columns"),
-            tag_only_columns=config.get("tag_only_columns", True),
+            tag_only_columns=saved_tag_only_columns(config),
             system_tag_columns=config.get("system_tag_columns", ()),
             record_id_column=config.get("record_id_column"),
             source_id=config.get("source_id"),

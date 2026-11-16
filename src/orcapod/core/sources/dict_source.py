@@ -26,6 +26,8 @@ class DictSource(RootSource):
     enriched by ``SourceStreamBuilder`` (source-info, schema-hash, system tags).
     """
 
+    TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = True
+
     # The config type key; also the kind prefix of the default source id.
     SOURCE_KIND: ClassVar[str] = "dict"
 

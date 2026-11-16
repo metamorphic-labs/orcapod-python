@@ -172,11 +172,56 @@ referential_tags.reference_materialization = "silent"
 referential_tags.reference_materialization = "warn"  # the default
 ```
 
+## Stored tables and saved jobs
+
+A stored table states which of its tags are referential. A function node stores each
+row's tags in its pipeline table, and a referential tag is stored there once, as a tag
+column that carries Arrow field metadata: the key `orcapod:tag_kind` with the value
+`referential` (`referential_tags.REFERENTIAL_TAG_METADATA_KEY`). A plain tag carries no
+marker. The function's result table never records referential status, so plain and
+referential runs of the same function share their results. The marker moves no hash, and
+the stores keep it on every write (first write, append, merge, schema evolution; in
+memory and on Delta). The SQLite and PostgreSQL databases keep no Arrow
+metadata at all: a function node that would store a referential tag there is refused when
+its database is attached, before anything is written. Use a database that keeps field
+metadata, or keep those tags plain with `tag_only_columns`.
+
+```python
+from orcapod.core.referential_tags import stored_references
+from orcapod.databases import InMemoryArrowDatabase
+from orcapod.pipeline import PipelineJob
+
+database = InMemoryArrowDatabase()
+job = PipelineJob(database=database)
+with job:
+    scale.pod(spikes, label="scale")
+job.run()
+pipeline_table = next(
+    database.get_all_records(path)
+    for path in database.list_table_paths()
+    if "_result" not in path
+)
+print(stored_references(pipeline_table.schema))
+# ('unit', 'time')
+```
+
+A node reads the binding back from its table, and refuses a table whose marker disagrees
+with what the node declares (its pod's fall-through tags, or for a loaded job the saved
+file's).
+
+A saved job or pipeline (format `0.3.0`) states every binding: each source config writes
+`tag_only_columns` (`True` when every tag is plain), and each function node writes
+`fall_through_references` (empty for a plain pod). The format version, never a missing
+key, decides what a file means: a file at `0.1.0` or `0.2.0` holds only plain tags, and a
+`0.3.0` file without these keys is refused. A loaded job keeps its hashes and bindings, and
+the file is checked against the stored tables when a node reads them.
+
 ## Not supported yet
 
 These raise "not supported with referential tags yet" when a referential tag reaches them:
 `MergeJoin`, storing an operator node's results (`LOG` and `REPLAY` cache modes),
-`DerivedSource` over a stream with referential tags, and saving a pipeline or job.
+and `DerivedSource` over a stream with referential tags (so `node.as_source()` of a node
+with referential tags).
 `PollingSource` keeps its tags plain. Each error names its issue and the way out: build the
 source with `tag_only_columns=True` to keep every tag plain, as in v0.3. A plain tag is not
 data, so a function that reads a tag's value (as `scale` above reads `time`) can no longer

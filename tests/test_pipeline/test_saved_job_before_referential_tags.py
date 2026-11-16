@@ -23,6 +23,7 @@ from orcapod.pipeline.serialization import (
     SUPPORTED_FORMAT_VERSIONS,
     SUPPORTED_JOB_FORMAT_VERSIONS,
     resolve_database_from_config,
+    source_config_at_version,
 )
 from orcapod.sources import CSVSource
 
@@ -70,7 +71,10 @@ def test_a_v03_job_loads_with_unchanged_hashes(saved: dict[str, Any]) -> None:
 def test_a_v03_source_config_rebuilds_the_v03_source(saved: dict[str, Any]) -> None:
     config = saved["bindings"]["sources"]["subjects"]
     assert "tag_only_columns" not in config
-    source = CSVSource.from_config(config)
+    # The file's version (0.1.0) states that every tag is plain (ITL-1019).
+    upgraded = source_config_at_version(config, saved["orcapod_pipeline_job_version"])
+    assert upgraded["tag_only_columns"] is True
+    source = CSVSource.from_config(upgraded)
     assert source.keys() == (("subject",), ("age",))
     assert source.content_hash().to_string() == config["content_hash"]
     assert source.pipeline_hash().to_string() == config["pipeline_hash"]

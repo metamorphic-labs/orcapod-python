@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import os
 from collections.abc import Collection
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from typing_extensions import override
 
-from orcapod.core.sources.base import RootSource
+from orcapod.core.sources.base import RootSource, saved_tag_only_columns
 from orcapod.core.referential_tags import TagOnlyColumns, source_reference_tags
 from orcapod.core.sources.reload import keep_nullable_columns, same_rows
 from orcapod.core.sources.stream_builder import (
@@ -43,6 +43,8 @@ class CSVSource(RootSource):
     moves its modified time. Record ids keep their rule: the ``record_id_column``
     value, or the row's position.
     """
+
+    TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -171,7 +173,7 @@ class CSVSource(RootSource):
         return cls(
             file_path=config["file_path"],
             tag_columns=config.get("tag_columns", ()),
-            tag_only_columns=config.get("tag_only_columns", True),
+            tag_only_columns=saved_tag_only_columns(config),
             system_tag_columns=config.get("system_tag_columns", ()),
             record_id_column=config.get("record_id_column"),
             source_id=config.get("source_id"),

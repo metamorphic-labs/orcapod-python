@@ -38,11 +38,11 @@ import dataclasses
 import datetime
 from collections.abc import AsyncIterator, Collection, Generator, Iterator, Mapping
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, ClassVar
 
 from typing_extensions import override
 
-from orcapod.core.sources.base import RootSource
+from orcapod.core.sources.base import RootSource, saved_tag_only_columns
 from orcapod.core.referential_tags import TagOnlyColumns, source_reference_tags
 from orcapod.core.sources.derived_source import validate_tags_as_data
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
@@ -237,6 +237,8 @@ class SpiralDBTableSource(RootSource):
             column or not a key column, or a new name that is already a column, is
             given twice, or is reserved for system columns.
     """
+
+    TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = True
 
     # Whether a notebook display reads the first rows. False shows the schema and the
     # table's recorded row count only, with no scan (kept for the ITL-991 ruling on what
@@ -862,7 +864,7 @@ class SpiralDBTableSource(RootSource):
             table_name=config["table_name"],
             dataset=config.get("dataset", "default"),
             tag_columns=config.get("tag_columns"),
-            tag_only_columns=config.get("tag_only_columns", True),
+            tag_only_columns=saved_tag_only_columns(config),
             system_tag_columns=config.get("system_tag_columns", ()),
             where=_locationfrom_config(config.get("where") or {}),
             limit=config.get("limit"),

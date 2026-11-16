@@ -269,6 +269,16 @@ class ConnectorArrowDatabase:
             flush=flush,
         )
 
+    def validate_records(self, records: pa.Table) -> None:
+        """Raise ``ValueError`` if the connector could not store ``records`` as given.
+
+        The check ``add_records`` applies, without writing anything.
+
+        Args:
+            records: The rows (any number, none included) to check.
+        """
+        self._connector.validate_records(records)
+
     def add_records(
         self,
         record_path: tuple[str, ...],
