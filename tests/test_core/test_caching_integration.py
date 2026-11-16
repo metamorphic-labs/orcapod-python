@@ -142,12 +142,12 @@ def pod():
 
 
 class TestSourcePodCaching:
-    def test_delta_source_id_defaults_to_dir_name(self, clinic_a):
+    def test_delta_source_id_defaults_to_path_as_passed(self, clinic_a):
         patients_path, labs_path = clinic_a
         ps = DeltaTableSource(patients_path, tag_columns=["patient_id"])
         ls = DeltaTableSource(labs_path, tag_columns=["patient_id"])
-        assert ps.source_id == patients_path.name
-        assert ls.source_id == labs_path.name
+        assert ps.source_id == f"delta_table:{patients_path}"
+        assert ls.source_id == f"delta_table:{labs_path}"
 
     def test_different_sources_get_different_cache_paths(self, clinic_a, source_db):
         patients_path, labs_path = clinic_a

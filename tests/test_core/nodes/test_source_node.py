@@ -353,7 +353,7 @@ class TestSourceNodeColumnConfig:
     def test_unbound_output_schema_system_tags_adds_typed_entries(
         self, tag_schema, data_schema
     ):
-        """output_schema(system_tags=True) adds the source id (str) and record id (bytes).
+        """output_schema(system_tags=True) adds the source id and the record id (both str).
 
         The types a source's rows have (ITL-1112): ``large_string`` and ``large_binary``.
         """
@@ -380,7 +380,7 @@ class TestSourceNodeColumnConfig:
         }
         assert types == {
             constants.SYSTEM_TAG_SOURCE_ID_PREFIX: str,
-            constants.SYSTEM_TAG_RECORD_ID_PREFIX: bytes,
+            constants.SYSTEM_TAG_RECORD_ID_PREFIX: str,
         }
 
     def test_unbound_output_schema_default_unchanged(self, tag_schema, data_schema):

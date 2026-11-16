@@ -649,7 +649,7 @@ def schema_source_stream_builder() -> dict[str, Any]:
         "named_source_id": {"source_id": "golden_source"},
         "record_id_column": {
             "source_id": "golden_source",
-            "record_id_column": "subject",
+            "record_id_columns": "subject",
         },
     }.items():
         result = builder.build(_builder_table(), tag_columns=["subject"], **kwargs)
@@ -744,7 +744,9 @@ def schema_location_default_source_ids() -> dict[str, Any]:
                 out.update(_prefixed(kind, stream_summary(source)))
         finally:
             os.chdir(previous)
-    polling = PollingSource(GoldenPollingImpl(), tag_columns="subject")
+    polling = PollingSource(
+        GoldenPollingImpl(), tag_columns="subject", record_id_columns="subject"
+    )
     out["polling_source.source_id"] = polling.source_id
     return out
 
@@ -772,7 +774,7 @@ def schema_derived_source_tags_as_data() -> dict[str, Any]:
     for variant, kwargs in {
         "default_source_id": {},
         "named_source_id": {"source_id": "golden_derived"},
-        "record_id_column": {"record_id_column": "subject"},
+        "record_id_column": {"record_id_columns": "subject"},
     }.items():
         derived = DerivedSource(
             origin, tags_as_data={"subject": "subject_value"}, **kwargs

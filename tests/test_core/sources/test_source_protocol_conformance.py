@@ -57,7 +57,7 @@ def arrow_src_with_record_id():
     return ArrowTableSource(
         table=table,
         tag_columns=["id"],
-        record_id_column="id",
+        record_id_columns="id",
         source_id="arrow_with_rid",
         infer_nullable=True,
     )

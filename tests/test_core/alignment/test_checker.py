@@ -7,6 +7,7 @@ and the checker must name that column.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 from typing import Any, cast
@@ -443,7 +444,10 @@ def test_exchanged_tokens_of_a_repeated_derived_value_are_named() -> None:
     oracle.derive("p", "A", lambda o: o.values["x"] % 2)
     origins = [o for o in oracle.origins if o.source_id == "A"]
     sep = constants.BLOCK_SEPARATOR
-    tokens = {o.record_id: f"fn{sep}{o.record_id.hex()}{sep}p" for o in origins}
+    tokens = {
+        o.record_id: f"fn{sep}{hashlib.md5(o.record_id.encode()).hexdigest()}{sep}p"
+        for o in origins
+    }
     table = pa.table(
         {
             "g": [o.values["g"] for o in origins],
@@ -478,7 +482,10 @@ def test_a_derived_token_is_checked_against_an_origin_known_from_another_column(
     oracle.derive("p", "A", lambda o: o.values["x"] % 2)
     origins = [o for o in oracle.origins if o.source_id == "A"]
     sep = constants.BLOCK_SEPARATOR
-    tokens = {o.record_id: f"fn{sep}{o.record_id.hex()}{sep}p" for o in origins}
+    tokens = {
+        o.record_id: f"fn{sep}{hashlib.md5(o.record_id.encode()).hexdigest()}{sep}p"
+        for o in origins
+    }
     table = pa.table(
         {
             "g": [o.values["g"] for o in origins],

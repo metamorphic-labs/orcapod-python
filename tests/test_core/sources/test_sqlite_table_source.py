@@ -213,7 +213,7 @@ class TestPKAsDefaultTags:
         from orcapod.core.sources import SQLiteTableSource
 
         src = SQLiteTableSource(pk_db, "measurements")
-        assert src.source_id == "sqlite_table:measurements"
+        assert src.source_id == f"sqlite_table:{pk_db}:main.measurements"
 
     def test_explicit_source_id_overrides_default(self, pk_db):
         from orcapod.core.sources import SQLiteTableSource
@@ -255,24 +255,31 @@ class TestExplicitTagOverride:
 
 
 class TestRowidFallback:
+    def test_rowid_only_table_has_no_default_row_identifier(self, rowid_db):
+        """A table without a primary key needs record_id_columns (ITL-1154)."""
+        from orcapod.core.sources import SQLiteTableSource
+
+        with pytest.raises(ValueError, match="no primary key"):
+            SQLiteTableSource(rowid_db, "logs")
+
     def test_rowid_only_table_uses_rowid_as_tag(self, rowid_db):
         from orcapod.core.sources import SQLiteTableSource
 
-        src = SQLiteTableSource(rowid_db, "logs")
+        src = SQLiteTableSource(rowid_db, "logs", record_id_columns="rowid")
         tag_schema, _ = src.output_schema()
         assert "rowid" in tag_schema
 
     def test_rowid_is_not_in_data_schema(self, rowid_db):
         from orcapod.core.sources import SQLiteTableSource
 
-        src = SQLiteTableSource(rowid_db, "logs")
+        src = SQLiteTableSource(rowid_db, "logs", record_id_columns="rowid")
         _, data_schema = src.output_schema()
         assert "rowid" not in data_schema
 
     def test_rowid_values_are_positive_integers(self, rowid_db):
         from orcapod.core.sources import SQLiteTableSource
 
-        src = SQLiteTableSource(rowid_db, "logs")
+        src = SQLiteTableSource(rowid_db, "logs", record_id_columns="rowid")
         for tags, _ in src.iter_data():
             assert isinstance(tags["rowid"], int)
             assert tags["rowid"] > 0
@@ -281,7 +288,7 @@ class TestRowidFallback:
         """Verify rowid is actually typed as int64, not large_string."""
         from orcapod.core.sources import SQLiteTableSource
 
-        src = SQLiteTableSource(rowid_db, "logs")
+        src = SQLiteTableSource(rowid_db, "logs", record_id_columns="rowid")
         # The raw stream table (before tag/data split) holds all columns.
         # We can verify the Arrow type via the internal stream table.
         raw = src._stream._table  # ArrowTableStream stores the enriched table
@@ -291,7 +298,7 @@ class TestRowidFallback:
     def test_all_rows_returned_for_rowid_table(self, rowid_db):
         from orcapod.core.sources import SQLiteTableSource
 
-        src = SQLiteTableSource(rowid_db, "logs")
+        src = SQLiteTableSource(rowid_db, "logs", record_id_columns="rowid")
         data = list(src.iter_data())
         assert len(data) == 3
 
@@ -514,13 +521,13 @@ class TestConfigRoundTripRowidTable:
     def test_to_config_has_rowid_as_tag_column(self, rowid_file_db_path):
         from orcapod.core.sources import SQLiteTableSource
 
-        src = SQLiteTableSource(rowid_file_db_path, "logs")
+        src = SQLiteTableSource(rowid_file_db_path, "logs", record_id_columns="rowid")
         assert src.to_config()["tag_columns"] == ["rowid"]
 
     def test_from_config_reconstructs_rowid_table(self, rowid_file_db_path):
         from orcapod.core.sources import SQLiteTableSource
 
-        src = SQLiteTableSource(rowid_file_db_path, "logs")
+        src = SQLiteTableSource(rowid_file_db_path, "logs", record_id_columns="rowid")
         config = src.to_config()
         src2 = SQLiteTableSource.from_config(config)
         tag_schema, _ = src2.output_schema()
@@ -529,7 +536,7 @@ class TestConfigRoundTripRowidTable:
     def test_from_config_rowid_hashes_match(self, rowid_file_db_path):
         from orcapod.core.sources import SQLiteTableSource
 
-        src = SQLiteTableSource(rowid_file_db_path, "logs")
+        src = SQLiteTableSource(rowid_file_db_path, "logs", record_id_columns="rowid")
         config = src.to_config()
         src2 = SQLiteTableSource.from_config(config)
         assert src2.content_hash() == src.content_hash()

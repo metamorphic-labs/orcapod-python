@@ -254,15 +254,18 @@ class TestGroupByOrdering:
     def test_falls_back_to_record_id_when_key_covers_all_tags(self):
         """by covering every tag leaves no non-key tag to sort on.
 
-        record_id is a uuid5 of source content, so the order it imposes is not
-        human-predictable but IS stable across processes.  Asserted exactly --
-        sorting the result before comparing would make this blind to the very
-        ordering it exists to pin down.  The default source_id is an Arrow table
-        hash, so this order moved with starfix hash format 2 (ITL-910), and again
-        when the default became ``arrow_table:<label>:<hex>`` (ITL-957).
+        The record id is the row identifier (ITL-1154): here the key ``path``, so
+        the members follow ``{"path":"a"}`` < ``{"path":"b"}``, against emission
+        order. Asserted exactly -- sorting the result before comparing would make
+        this blind to the very ordering it exists to pin down.
         """
         table = pa.table({"subject": ["G", "G"], "path": ["b", "a"]})
-        src = ArrowTableSource(table, tag_columns=["subject"], infer_nullable=True)
+        src = ArrowTableSource(
+            table,
+            tag_columns=["subject"],
+            record_id_columns="path",
+            infer_nullable=True,
+        )
         out = GroupBy(by=["subject"]).process(src)
         assert len(out.as_table()) == 1
         assert out.as_table().column("path").to_pylist()[0] == ["a", "b"]
@@ -270,7 +273,9 @@ class TestGroupByOrdering:
     def test_record_id_breaks_ties_between_duplicate_tags(self):
         """Duplicate tag tuples must not fall back to raw emission order."""
         table = pa.table({"s": ["G", "G"], "p": [1, 1], "path": ["z", "a"]})
-        src = ArrowTableSource(table, tag_columns=["s", "p"], infer_nullable=True)
+        src = ArrowTableSource(
+            table, tag_columns=["s", "p"], record_id_columns="path", infer_nullable=True
+        )
         out = GroupBy(by=["s"]).process(src)
         # Emission order would give ["z", "a"]; record_id imposes ["a", "z"].
         assert out.as_table().column("path").to_pylist()[0] == ["a", "z"]
@@ -293,8 +298,9 @@ class TestGroupByOrdering:
         make the test blind to the ordering it exists to pin down.
         """
         left = ArrowTableSource(
-            pa.table({"k": ["t", "t"], "a": [10, 20]}),
+            pa.table({"k": ["t", "t"], "a": [10, 20], "id": ["y", "x"]}),
             tag_columns=["k"],
+            record_id_columns="id",
             infer_nullable=True,
         )
         right = ArrowTableSource(

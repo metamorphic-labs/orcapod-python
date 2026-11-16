@@ -109,6 +109,17 @@ class DBTableSource(RootSource):
         if table_name not in connector.get_table_names():
             raise ValueError(f"Table {table_name!r} not found in database.")
 
+        # Step 2: Resolve tag columns — default to PK columns
+        if tag_columns is None:
+            resolved_tag_columns: list[str] = connector.get_pk_columns(table_name)
+            if not resolved_tag_columns:
+                raise ValueError(
+                    f"Table {table_name!r} has no primary key columns. "
+                    "Provide explicit tag_columns."
+                )
+        else:
+            resolved_tag_columns = _normalize_column_list(tag_columns)
+
         # A row is identified by its primary key unless key columns are named, or
         # () asks for the position (ITL-1154). No silent fallback to position.
         if self._record_id_columns is None:
@@ -123,17 +134,6 @@ class DBTableSource(RootSource):
                 )
         else:
             self._key_columns = self._record_id_columns
-
-        # Step 2: Resolve tag columns — default to PK columns
-        if tag_columns is None:
-            resolved_tag_columns: list[str] = connector.get_pk_columns(table_name)
-            if not resolved_tag_columns:
-                raise ValueError(
-                    f"Table {table_name!r} has no primary key columns. "
-                    "Provide explicit tag_columns."
-                )
-        else:
-            resolved_tag_columns = _normalize_column_list(tag_columns)
 
         # Step 3: Fetch the full table as Arrow.
         # _query allows subclasses (e.g. SQLiteTableSource) to inject a custom

@@ -165,8 +165,8 @@ class TestCSVSource:
         assert isinstance(src.as_table(), pa.Table)
 
     def test_nonexistent_record_id_column_raises(self, csv_path):
-        with pytest.raises(ValueError, match="record_id_column"):
-            CSVSource(file_path=csv_path, record_id_column="no_such_col")
+        with pytest.raises(ValueError, match="record_id_columns"):
+            CSVSource(file_path=csv_path, record_id_columns="no_such_col")
 
 
 # ---------------------------------------------------------------------------
@@ -185,9 +185,9 @@ class TestDeltaTableSource:
         assert "id" in tag_keys
         assert "value" in data_keys
 
-    def test_source_id_defaults_to_directory_name(self, delta_path):
+    def test_source_id_defaults_to_path_as_passed(self, delta_path):
         src = DeltaTableSource(delta_table_path=delta_path)
-        assert src.source_id == f"delta_table:{delta_path.name}"
+        assert src.source_id == f"delta_table:{delta_path}"
 
     def test_source_id_explicit_overrides_default(self, delta_path):
         src = DeltaTableSource(delta_table_path=delta_path, source_id="my_delta")
@@ -214,8 +214,8 @@ class TestDeltaTableSource:
         assert src.source_id == "delta_id"
 
     def test_nonexistent_record_id_column_raises(self, delta_path):
-        with pytest.raises(ValueError, match="record_id_column"):
-            DeltaTableSource(delta_table_path=delta_path, record_id_column="no_col")
+        with pytest.raises(ValueError, match="record_id_columns"):
+            DeltaTableSource(delta_table_path=delta_path, record_id_columns="no_col")
 
 
 @pytest.fixture

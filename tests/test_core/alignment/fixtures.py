@@ -9,7 +9,7 @@ tag-sorted. The tie scenarios:
 * ``null``: tags are null in some rows, and repeat.
 
 Every data value is unique within its column and across sources sharing the column, so a
-value names its origin row. Source ``A`` identifies rows by ``record_id_column="x"``; source
+value names its origin row. Source ``A`` identifies rows by ``record_id_columns="x"``; source
 ``C`` by position (``row_<i>`` tokens), so both provenance token forms are covered.
 """
 
@@ -216,14 +216,14 @@ def make_sources(scenario: str, input_order: str = "shuffled") -> Sources:
             table,
             tag_columns=list(TAG_COLUMNS),
             source_id=name,
-            record_id_column=record_id_column,
+            record_id_columns=record_id_column,
         )
         oracle.add_source(
             name,
             table,
             tag_columns=TAG_COLUMNS,
             schema_hash=schema_hash_of(built[name]),
-            record_id_column=record_id_column,
+            record_id_columns=record_id_column,
         )
         tables[name] = table
     return Sources(

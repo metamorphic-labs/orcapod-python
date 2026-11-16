@@ -36,7 +36,7 @@ from orcapod.core.sources.spiraldb_table_source import SpiralDBTableSource
 from orcapod.pipeline.serialization import SOURCE_REGISTRY
 from tests.test_channels.test_polling_source import FakeDynamicSource
 
-GIVEN = "a given id: kept as it is, even with :: and spaces"
+GIVEN = "a given id: kept as it is, with : and spaces"
 
 
 # ---------------------------------------------------------------------------
@@ -147,30 +147,37 @@ def test_csv_path_with_double_colon_needs_a_source_id(tmp_path: Path) -> None:
 
 
 def test_delta_default_and_given(delta_path: Path) -> None:
-    """``delta_table:<directory name>``; a given id is used as it is."""
+    """``delta_table:<path as passed>``; a given id is used as it is."""
     assert DeltaTableSource(delta_path, tag_columns="k").source_id == (
-        "delta_table:events"
+        f"delta_table:{delta_path}"
     )
     given = DeltaTableSource(delta_path, tag_columns="k", source_id=GIVEN)
     assert given.source_id == GIVEN
 
 
 def test_sqlite_default_and_given(sqlite_path: Path) -> None:
-    """``sqlite_table:<table name>``; a given id is used as it is."""
-    assert SQLiteTableSource(sqlite_path, "trials").source_id == "sqlite_table:trials"
+    """``sqlite_table:<db path as passed>:main.<table>``; a given id is used as is."""
+    assert SQLiteTableSource(sqlite_path, "trials").source_id == (
+        f"sqlite_table:{sqlite_path}:main.trials"
+    )
     given = SQLiteTableSource(sqlite_path, "trials", source_id=GIVEN)
     assert given.source_id == GIVEN
 
 
 def test_polling_default_is_the_hash_of_the_impl_identity() -> None:
     """``polling_source:<label>:<hex>`` of ``impl.identity()``, never its repr."""
-    source = PollingSource(FakeDynamicSource(batches=[]), tag_columns="id")
+    source = PollingSource(
+        FakeDynamicSource(batches=[]), tag_columns="id", record_id_columns="id"
+    )
     identity_hash = get_default_context().semantic_hasher.hash_object(
         "FakeDynamicSource"
     )
     assert source.source_id == hash_source_id("polling_source", identity_hash)
     given = PollingSource(
-        FakeDynamicSource(batches=[]), tag_columns="id", source_id=GIVEN
+        FakeDynamicSource(batches=[]),
+        tag_columns="id",
+        record_id_columns="id",
+        source_id=GIVEN,
     )
     assert given.source_id == GIVEN
 
@@ -191,3 +198,40 @@ def test_polling_default_is_the_hash_of_the_impl_identity() -> None:
 def test_in_memory_sources_keep_a_given_id(make: Any) -> None:
     """A given id is used as it is by the in-memory sources too."""
     assert make().source_id == GIVEN
+
+
+def test_a_given_source_id_with_the_separator_is_refused() -> None:
+    """A given source id holding ``::`` is refused (ITL-1154)."""
+    with pytest.raises(ValueError, match="'::'"):
+        DictSource(data=[{"k": "a", "v": 1}], tag_columns=["k"], source_id="a::b")
+
+
+def test_a_column_name_with_the_separator_is_refused() -> None:
+    """A column name holding ``::`` is refused (ITL-1154)."""
+    from orcapod.errors import InputValidationError
+
+    with pytest.raises(InputValidationError, match="'::'"):
+        DictSource(data=[{"k": "a", "x::y": 1}], tag_columns=["k"], source_id="s")
+
+
+def test_a_polling_source_needs_key_columns() -> None:
+    """A polled row is identified by its key: no key columns, no source (ITL-1158)."""
+    with pytest.raises(ValueError, match="record_id_columns"):
+        PollingSource(FakeDynamicSource(batches=[]), tag_columns="id")
+    with pytest.raises(ValueError, match="record_id_columns"):
+        PollingSource(
+            FakeDynamicSource(batches=[]), tag_columns="id", record_id_columns=()
+        )
+
+
+def test_polled_batches_give_each_row_its_own_record_id() -> None:
+    """Rows of different batches no longer share a record id (ITL-1158)."""
+    from tests.test_channels.test_polling_source import _batch
+
+    fake = FakeDynamicSource(batches=[_batch(1, 10), _batch(2, 20)])
+    source = PollingSource(fake, tag_columns="id", record_id_columns="id")
+    list(source.iter_data())
+    source.check_for_new_data()
+    table = source.as_table(columns={"system_tags": True, "source": True})
+    (record_id,) = [n for n in table.column_names if n.startswith("_tag_record_id")]
+    assert sorted(table.column(record_id).to_pylist()) == ['{"id":1}', '{"id":2}']

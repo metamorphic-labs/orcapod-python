@@ -286,7 +286,7 @@ class SourceStreamBuilder:
         table: pa.Table,
         tag_columns: Collection[str],
         source_id: str | None = None,
-        record_id_columns: Sequence[str] = (),
+        record_id_columns: str | Collection[str] | None = (),
         system_tag_columns: Collection[str] = (),
         source_kind: str | None = None,
     ) -> SourceStreamResult:
@@ -352,7 +352,9 @@ class SourceStreamBuilder:
             )
 
         # 3. The row identifiers (validates the key columns).
-        identifiers = row_identifiers(table, tuple(record_id_columns))
+        identifiers = row_identifiers(
+            table, normalize_record_id_columns(record_id_columns) or ()
+        )
 
         # 4. Compute schema hash from tag/data python schemas.
         # Nullable flags in the incoming table are trusted as-is — callers must

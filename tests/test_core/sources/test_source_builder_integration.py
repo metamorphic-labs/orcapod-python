@@ -93,7 +93,7 @@ class TestCSVSourceBuilder:
         csv_file = tmp_path / "test.csv"
         csv_file.write_text("id,x\n1,10\n2,20\n")
         src = CSVSource(
-            file_path=str(csv_file), tag_columns=["id"], record_id_column="id"
+            file_path=str(csv_file), tag_columns=["id"], record_id_columns="id"
         )
         config = src.to_config()
         assert config["source_type"] == "csv"

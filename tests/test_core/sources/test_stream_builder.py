@@ -69,8 +69,8 @@ class TestSourceStreamBuilder:
 
     def test_build_validates_missing_record_id_column(self, builder):
         table = pa.table({"id": pa.array([1]), "x": pa.array([10])})
-        with pytest.raises(ValueError, match="record_id_column"):
-            builder.build(table, tag_columns=["id"], record_id_column="bad")
+        with pytest.raises(ValueError, match="record_id_columns"):
+            builder.build(table, tag_columns=["id"], record_id_columns="bad")
 
     def test_build_output_schema_has_tag_and_data(self, builder):
         table = pa.table({"id": pa.array([1]), "x": pa.array([10])})
@@ -82,7 +82,7 @@ class TestSourceStreamBuilder:
     def test_build_with_record_id_column(self, builder):
         table = pa.table({"id": pa.array([1, 2]), "x": pa.array([10, 20])})
         result = builder.build(
-            table, tag_columns=["id"], record_id_column="id", source_kind="arrow_table"
+            table, tag_columns=["id"], record_id_columns="id", source_kind="arrow_table"
         )
         assert result.stream.as_table().num_rows == 2
 
@@ -178,80 +178,142 @@ class TestArrowTableSourceUsesBuilder:
         assert identity[0] == "ArrowTableSource"
 
 
-class TestProvenanceTokensMatchRowValues:
-    """Provenance tokens are built from one column, never the whole table (ITL-926 C3b).
+class TestKeyRowIdentifiers:
+    """A row named by key columns: the canonical JSON of its key (ITL-1154).
 
-    The expected tokens are computed the way the builder used to build them, from
-    ``table.to_pylist()`` rows, so the test fails if the per-column path changes any token
-    (and therefore any record id, which is derived from the token).
+    The expected identifiers are written out by hand, so the test fails if the form
+    of any allowed key type changes (which would move every record id built on it).
     """
 
     @staticmethod
-    def _table():
+    def _table() -> pa.Table:
         import datetime as dt
-        import decimal
 
-        import pyarrow as pa
-
-        utc = dt.timezone.utc
         return pa.table(
             {
-                "k_str": pa.array(["b", "a", None, "c"], pa.string()),
-                "k_int": pa.array([3, 1, 2, None], pa.int64()),
-                "k_u64": pa.array([2**63 + 5, 1, 2, 3], pa.uint64()),
+                "k_str": pa.array(["b", "a", "c"], pa.string()),
+                "k_int": pa.array([3, 1, 2], pa.int64()),
+                "k_u64": pa.array([2**63 + 5, 1, 2], pa.uint64()),
+                "k_bool": pa.array([True, False, None]),
                 "k_ts": pa.array(
-                    [dt.datetime(2026, 1, 1, 9, 0, 0, 123456)] * 3 + [None],
+                    [
+                        dt.datetime(2026, 1, 1, 9, 0, 0, 123456),
+                        dt.datetime(1969, 12, 31, 23, 59, 59, 500000),
+                        dt.datetime(2026, 1, 1),
+                    ],
                     pa.timestamp("us"),
                 ),
-                "k_tstz": pa.array(
-                    [dt.datetime(2026, 1, 1, 9, tzinfo=utc)] * 4,
-                    pa.timestamp("us", "UTC"),
+                "k_tstz": pa.array([0, 1500, 2000], pa.timestamp("ms", "UTC")),
+                "k_date": pa.array(
+                    [dt.date(2026, 1, 1), dt.date(1960, 1, 1), dt.date(2000, 2, 29)],
+                    pa.date32(),
                 ),
-                "k_date": pa.array([dt.date(2026, 1, 1)] * 4, pa.date32()),
-                "k_float": pa.array([1.5, float("nan"), -0.0, 1e300], pa.float64()),
-                "k_bool": pa.array([True, False, None, True]),
-                "k_bin": pa.array([b"\x00\xff", b"a", None, b""], pa.binary()),
-                "k_dec": pa.array(
-                    [decimal.Decimal("1.10"), None, decimal.Decimal("0"), None],
-                    pa.decimal128(5, 2),
-                ),
-                "v": pa.array([1.0, 2.0, 3.0, 4.0]),
+                "v": pa.array([1.0, 2.0, 3.0]),
             }
         )
 
     @pytest.mark.parametrize(
-        "column",
+        ("columns", "expected"),
         [
-            "k_str",
-            "k_int",
-            "k_u64",
-            "k_ts",
-            "k_tstz",
-            "k_date",
-            "k_float",
-            "k_bool",
-            "k_bin",
-            "k_dec",
-            None,
+            ("k_str", ['{"k_str":"b"}', '{"k_str":"a"}', '{"k_str":"c"}']),
+            ("k_int", ['{"k_int":3}', '{"k_int":1}', '{"k_int":2}']),
+            (
+                "k_u64",
+                ['{"k_u64":9223372036854775813}', '{"k_u64":1}', '{"k_u64":2}'],
+            ),
+            (
+                "k_ts",
+                [
+                    '{"k_ts":"2026-01-01T09:00:00.123456"}',
+                    '{"k_ts":"1969-12-31T23:59:59.500000"}',
+                    '{"k_ts":"2026-01-01T00:00:00.000000"}',
+                ],
+            ),
+            (
+                "k_tstz",
+                [
+                    '{"k_tstz":"1970-01-01T00:00:00.000Z"}',
+                    '{"k_tstz":"1970-01-01T00:00:01.500Z"}',
+                    '{"k_tstz":"1970-01-01T00:00:02.000Z"}',
+                ],
+            ),
+            (
+                "k_date",
+                [
+                    '{"k_date":"2026-01-01"}',
+                    '{"k_date":"1960-01-01"}',
+                    '{"k_date":"2000-02-29"}',
+                ],
+            ),
+            (
+                ["k_int", "k_str"],
+                [
+                    '{"k_int":3,"k_str":"b"}',
+                    '{"k_int":1,"k_str":"a"}',
+                    '{"k_int":2,"k_str":"c"}',
+                ],
+            ),
+            (None, ["row_0", "row_1", "row_2"]),
+            ((), ["row_0", "row_1", "row_2"]),
+        ],
+        ids=[
+            "str",
+            "int",
+            "u64",
+            "ts",
+            "tstz",
+            "date",
+            "composite",
+            "none",
+            "position",
         ],
     )
-    def test_tokens_equal_row_based_tokens(self, column):
-        from orcapod.sources import ArrowTableSource
-
-        table = self._table()
-        tag = column or "k_str"
+    def test_record_id_and_token(self, columns: Any, expected: list[str]) -> None:
+        """The record id is the identifier; the token is ``<source>::<id>::<column>``."""
         source = ArrowTableSource(
-            table, tag_columns=[tag], record_id_column=column, source_id="s"
+            self._table(),
+            tag_columns=["k_str"],
+            record_id_columns=columns,
+            source_id="s",
         )
-        tokens = (
-            source.as_table(columns={"source": True}).column("_source_v").to_pylist()
-        )
-        rows = table.to_pylist()
-        expected = [
-            f"s::{column}={row[column]}::v" if column else f"s::row_{i}::v"
-            for i, row in enumerate(rows)
+        table = source.as_table(columns={"source": True, "system_tags": True})
+        (record_id,) = [n for n in table.column_names if n.startswith("_tag_record_id")]
+        assert table.column(record_id).type == pa.large_string()
+        assert table.column(record_id).to_pylist() == expected
+        assert table.column("_source_v").to_pylist() == [
+            f"s::{identifier}::v" for identifier in expected
         ]
-        assert tokens == expected
+
+    def test_int_and_str_keys_differ(self) -> None:
+        """``17`` and ``"17"`` are different keys."""
+        ints = ArrowTableSource(
+            pa.table({"k": [17], "v": [1.0]}), tag_columns=["k"], record_id_columns="k"
+        )
+        strs = ArrowTableSource(
+            pa.table({"k": ["17"], "v": [1.0]}),
+            tag_columns=["k"],
+            record_id_columns="k",
+        )
+        assert (
+            ints.as_table(columns={"system_tags": True}).to_pylist()[0]
+            != (strs.as_table(columns={"system_tags": True}).to_pylist()[0])
+        )
+
+    @pytest.mark.parametrize(
+        ("values", "match"),
+        [
+            (pa.array([1.5, 2.5]), "type double"),
+            (pa.array([b"a", b"b"]), "type binary"),
+            (pa.array(["a", None]), "is null"),
+            (pa.array(["a", "a"]), "appears in rows 0 and 1"),
+        ],
+        ids=["float", "bytes", "null", "duplicate"],
+    )
+    def test_refused_keys(self, values: pa.Array[Any], match: str) -> None:
+        """A disallowed type, a null key and a repeated key are refused when built."""
+        table = pa.table({"k": values, "v": [1.0, 2.0]})
+        with pytest.raises(ValueError, match=match):
+            ArrowTableSource(table, tag_columns=["v"], record_id_columns="k")
 
 
 class TestUnhashableColumnTypes:

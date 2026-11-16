@@ -35,7 +35,7 @@ import pyarrow as pa
 
 from orcapod.system_constants import constants
 
-from .oracle import Oracle, Origin, fold_record_ids, fold_values
+from .oracle import Oracle, Origin, fold_values
 
 MAX_REPORTED = 12
 
@@ -100,7 +100,7 @@ class _RowChecker:
         row: dict[str, Any],
         layout: Layout,
         oracle: Oracle,
-        function_tokens: Mapping[tuple[str, bytes], str] | None,
+        function_tokens: Mapping[tuple[str, str], str] | None,
     ) -> None:
         """Prepare to check row ``index`` (its values ``row``) against ``oracle``."""
         self.index = index
@@ -462,9 +462,11 @@ class _RowChecker:
         Returns:
             The pair's source when the pair is valid, else ``None``.
         """
-        origin = self.oracle.by_record_id.get(record_value)
+        origin = self.oracle.by_record_id.get((source_value, record_value))
         if origin is None:
-            self.fail(name, f"record id {record_value!r} is no source row's")
+            self.fail(
+                name, f"record id {record_value!r} is no row of source {source_value!r}"
+            )
             return None
         if origin.source_id != source_value:
             self.fail(
@@ -512,7 +514,9 @@ class _RowChecker:
             if any(o is None for o in origins):
                 self.fail(name, f"members of {source!r} not all known; cannot fold")
                 return None
-            expected = fold_record_ids([o.record_id for o in origins if o is not None])
+            expected = fold_values(
+                [o.record_id for o in origins if o is not None], label
+            )
             if expected != record_value:
                 self.fail(
                     record_name,
@@ -599,7 +603,7 @@ def assert_rows_aligned(
     oracle: Oracle,
     data_context: Any,
     *,
-    function_tokens: Mapping[tuple[str, bytes], str] | None = None,
+    function_tokens: Mapping[tuple[str, str], str] | None = None,
     require_rows: bool = True,
     expected_rows: Collection[RowIdentity] | None = None,
 ) -> set[str]:
