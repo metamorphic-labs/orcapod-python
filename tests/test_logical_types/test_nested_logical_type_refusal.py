@@ -129,9 +129,9 @@ class TestRefused:
             DictSource(
                 [{"k": 0, "v": value}],
                 tag_columns=["k"],
-                tag_only_columns=True,
                 data_schema={"k": int, "v": declared},
                 source_id="one_row",
+                tag_only_columns=True,
             )
 
 
@@ -141,8 +141,8 @@ def test_a_source_schema_inferred_from_rows_is_refused() -> None:
         DictSource(
             [{"k": 0, "v": {"a": {1, 2}}}],
             tag_columns=["k"],
-            tag_only_columns=True,
             source_id="x",
+            tag_only_columns=True,
         )
 
 
@@ -236,8 +236,8 @@ def test_an_accepted_type_reads_back_as_declared(case: str) -> None:
     source = DictSource(
         [{"k": 0, "i": 0}],
         tag_columns=["k"],
-        tag_only_columns=True,
         source_id="one_row",
+        tag_only_columns=True,
     )
     job = op.PipelineJob(name="accepted", database=InMemoryArrowDatabase())
     with job:

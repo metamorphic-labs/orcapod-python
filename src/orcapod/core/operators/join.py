@@ -80,12 +80,29 @@ def _merge_pending(left: Any, right: Any) -> Any:
     return merge_source_info([left, right], combine=_pending)
 
 
+JOIN_FOLD_LABEL = "join_v1"
+"""Label of the fold of ``Join``: the one source-info token of a column referential on
+several inputs is ``"join_v1:<hex>"`` (ITL-1017, ITL-1154). It names the operation;
+the procedure is the members' tokens sorted (a missing token last), then
+``arrow_utils.fold_system_tag_values``. The sort is part of it: the join meets the
+members in the order of its chain, which is not canonical, and the provenance of N
+equal values is a multiset. Change it only when this fold would give an existing
+member list a different value.
+"""
+
+
+def _fold_members(tokens: Sequence[str | None]) -> str:
+    """Fold the members' tokens of one merged value into its one token (``join_v1``)."""
+    ordered = sorted(tokens, key=lambda token: (token is None, token or ""))
+    return arrow_utils.fold_system_tag_values(ordered, label=JOIN_FOLD_LABEL)
+
+
 def _fold_pending(value: Any) -> Any:
     """Replace every pending token position of ``value`` by its merged token."""
     if isinstance(value, list):
         return [_fold_pending(item) for item in value]
     if isinstance(value, str) and value.startswith(_PENDING_MEMBERS):
-        return arrow_utils.fold_source_info_tokens(_members(value))
+        return _fold_members(_members(value))
     return value
 
 

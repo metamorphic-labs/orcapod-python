@@ -7,6 +7,9 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from orcapod.core.sources.base import RootSource
 from orcapod.core.referential_tags import TagOnlyColumns, source_reference_tags
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
+from orcapod.core.sources.stream_builder import (
+    normalize_record_id_columns,
+)
 from orcapod.utils import arrow_utils, polars_data_utils
 from orcapod.utils.schema_utils import _normalize_column_list
 from orcapod.utils.lazy_module import LazyModule
@@ -27,6 +30,11 @@ class DataFrameSource(RootSource):
 
     The DataFrame is converted to an Arrow table and enriched by
     ``SourceStreamBuilder`` (source-info, schema-hash, system tags).
+
+    Plain tags: ``tag_only_columns`` (keyword-only) is ``True``, the default, and keeps
+    every tag column a tag only, not data, as every source does in v0.3. Any other value
+    is refused: referential tags arrive in v0.4, where tags become referential by default
+    and ``tag_only_columns`` names the tags kept plain.
     """
 
     # The config type key; also the kind prefix of the default source id.
@@ -39,7 +47,9 @@ class DataFrameSource(RootSource):
         system_tag_columns: Collection[str] = (),
         source_id: str | None = None,
         schema: pa.Schema | None = None,
+        *,
         tag_only_columns: TagOnlyColumns = (),
+        record_id_columns: str | Collection[str] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(source_id=source_id, **kwargs)
@@ -75,6 +85,7 @@ class DataFrameSource(RootSource):
                 arrow_utils.infer_schema_nullable(arrow_table)
             )
 
+        self._key_columns = normalize_record_id_columns(record_id_columns) or ()
         builder = SourceStreamBuilder(self.data_context, self.orcapod_config)
         result = builder.build(
             arrow_table,
@@ -82,6 +93,7 @@ class DataFrameSource(RootSource):
             reference_tags=source_reference_tags(tag_columns, tag_only_columns),
             source_id=self._source_id,
             source_kind=self.SOURCE_KIND,
+            record_id_columns=self._key_columns,
             system_tag_columns=system_tag_columns,
         )
 

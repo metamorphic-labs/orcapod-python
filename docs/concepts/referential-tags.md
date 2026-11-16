@@ -143,11 +143,19 @@ A source-info column belongs to its data column and has its shape: a scalar valu
 token, a list one token per element. When a value is the merge of several equal elements
 that are different entries (the key of a `GroupBy`, or the key a `Join` merges from
 several referential inputs), no single member's token is true for it. Its source info is
-then one **merged token**, `merged:source_fold_v1:<hex>`: the SHA-256 digest of the
-members' tokens, sorted, so it does not depend on row or input order. It is a merged
-token for a group of one member too, and a merged token can itself be a member of a
-later merge. No content hash, pipeline hash, record id or function result identity reads
-source info, so these tokens move no stored result.
+then one **merged token**, the fold of the members' tokens by the operation that merged
+them (the SHA-256 of their canonical JSON list, after the operation's label), as the
+system tags of a group are folded:
+
+- `GroupBy`: `group_v1:<hex>` over the members' tokens in member order (the order of the
+  group's data lists, which does not depend on row order);
+- `Join`: `join_v1:<hex>` over the members' tokens sorted, so it does not depend on the
+  order of the inputs.
+
+It is a merged token for a group of one member too, and a merged token can itself be a
+member of a later merge. A merged token holds no `::`, so it never reads as a row's
+`<source id>::<record id>::<column>`. No content hash, pipeline hash, record id or
+function result identity reads source info, so these tokens move no stored result.
 
 ```python
 sessions = op.sources.DictSource(
@@ -157,7 +165,7 @@ sessions = op.sources.DictSource(
 )
 grouped = sessions.group_by(["subject"]).as_table(columns={"source": True})
 print(grouped.column("_source_subject").to_pylist())
-# ['merged:source_fold_v1:...']
+# ['group_v1:...']
 print(grouped.column("_source_v").to_pylist())
 # [['sessions::row_0::v', 'sessions::row_1::v']]
 ```

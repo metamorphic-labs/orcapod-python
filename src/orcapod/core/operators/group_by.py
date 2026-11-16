@@ -42,6 +42,15 @@ def _null_last_key(value: Any) -> tuple[Any, ...]:
     return (0, value)
 
 
+GROUP_BY_FOLD_LABEL = "group_v1"
+"""Label of the folds of ``GroupBy``: the folded source id and record id are
+``"group_v1:<hex>"`` (ITL-1154), and so is the one source-info token of a referential
+group key (ITL-1017). It names the operation; the procedure is
+``arrow_utils.fold_system_tag_values``. Change it only when this operation's fold
+would give an existing member list a different value.
+"""
+
+
 class GroupBy(UnaryOperator):
     """Reduce rows sharing a key into one row with list-valued data members.
 
@@ -62,8 +71,8 @@ class GroupBy(UnaryOperator):
     * ``path`` becomes list-valued
     * the ``_source_*`` column of each data column becomes list-valued, one
       element per member, except that of a referential group key: its value is
-      the merge of the members' equal values, so its source info is one merged
-      token (``arrow_utils.fold_source_info_tokens``, ITL-1017)
+      the merge of the members' equal values, so its source info is one token,
+      the ``group_v1`` fold of the members' tokens in member order (ITL-1017)
     * system-tag columns fold to a scalar digest and gain a
       ``::{pipeline_hash}`` name suffix
 
@@ -200,7 +209,8 @@ class GroupBy(UnaryOperator):
             c for c in table.column_names if c.startswith(constants.SYSTEM_TAG_PREFIX)
         )
         # The source info of a referential key: the key's value is the merge of its
-        # members' equal values, so its source info is one merged token (ITL-1017).
+        # members' equal values, so its source info is one token, the fold of the
+        # members' tokens in member order, as the system tags fold (ITL-1017).
         key_source_columns = tuple(
             name
             for name in (f"{constants.SOURCE_PREFIX}{c}" for c in self.by)
@@ -234,15 +244,18 @@ class GroupBy(UnaryOperator):
         # was joined into.  So *every* record_id column has to take part --
         # consulting only the first would tie on exactly the fan-out rows the
         # tiebreaker exists for.  They are sorted by name so the key order is
-        # itself independent of column order in the input table.
+        # itself independent of column order in the input table. A record id
+        # names a row within its source only (ITL-1154), so the source-id columns
+        # come last: two members with equal record ids from different sources still
+        # have one order.
         sort_columns = non_key_tags
-        sort_columns += tuple(
-            sorted(
-                c
-                for c in system_tag_columns
-                if c.startswith(constants.SYSTEM_TAG_RECORD_ID_PREFIX)
+        for prefix in (
+            constants.SYSTEM_TAG_RECORD_ID_PREFIX,
+            constants.SYSTEM_TAG_SOURCE_ID_PREFIX,
+        ):
+            sort_columns += tuple(
+                sorted(c for c in system_tag_columns if c.startswith(prefix))
             )
-        )
 
         groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
         for row in table.to_pylist():
@@ -264,12 +277,14 @@ class GroupBy(UnaryOperator):
                     **dict(zip(self.by, key)),
                     **{c: [m[c] for m in members] for c in member_columns},
                     **{
-                        c: arrow_utils.fold_source_info_tokens([m[c] for m in members])
+                        c: arrow_utils.fold_system_tag_values(
+                            [m[c] for m in members], label=GROUP_BY_FOLD_LABEL
+                        )
                         for c in key_source_columns
                     },
                     **{
                         c: arrow_utils.fold_system_tag_values(
-                            c, [m[c] for m in members]
+                            [m[c] for m in members], label=GROUP_BY_FOLD_LABEL
                         )
                         for c in system_tag_columns
                     },

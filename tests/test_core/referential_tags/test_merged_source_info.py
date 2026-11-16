@@ -5,7 +5,9 @@ elements, its source-info value is one scalar token, a deterministic digest of t
 tokens: the scalar key of a ``GroupBy`` on a referential tag, and the shared key of a
 ``Join`` that is referential on more than one input. Provenance belongs to the data column
 and keeps its shape: a scalar data column has a scalar token, a list column a list of
-tokens, nested as deep as the data.
+tokens, nested as deep as the data. The token is the operation's fold (ITL-1154):
+``group_v1:<hex>`` over the members' tokens in member order for a ``GroupBy`` key, and
+``join_v1:<hex>`` over the members' tokens sorted for a ``Join`` key.
 
 Every operator is driven through its public call and read through the stream's public
 methods.
@@ -39,13 +41,25 @@ from orcapod.core.operators import (
     SelectTagColumns,
     SemiJoin,
 )
+from orcapod.core.operators.group_by import GROUP_BY_FOLD_LABEL
+from orcapod.core.operators.join import JOIN_FOLD_LABEL
 from orcapod.core.referential_tags import merge_source_info
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.utils import arrow_utils
 
-TOKEN = re.compile(
-    rf"^{arrow_utils.MERGED_SOURCE_INFO_KIND}:{arrow_utils.SOURCE_FOLD_LABEL}:[0-9a-f]{{64}}$"
-)
+GROUP_TOKEN = re.compile(rf"^{GROUP_BY_FOLD_LABEL}:[0-9a-f]{{64}}$")
+JOIN_TOKEN = re.compile(rf"^{JOIN_FOLD_LABEL}:[0-9a-f]{{64}}$")
+
+
+def group_fold(tokens: Sequence[str | None]) -> str:
+    """The token of a ``GroupBy`` key: its members' tokens folded in member order."""
+    return arrow_utils.fold_system_tag_values(tokens, label=GROUP_BY_FOLD_LABEL)
+
+
+def join_fold(tokens: Sequence[str | None]) -> str:
+    """The token of a ``Join`` key: its members' tokens sorted, then folded."""
+    ordered = sorted(tokens, key=lambda token: (token is None, token or ""))
+    return arrow_utils.fold_system_tag_values(ordered, label=JOIN_FOLD_LABEL)
 
 
 def _ref(rows: Sequence[Mapping[str, Any]], tags: list[str], sid: str, **kw: Any):
@@ -173,18 +187,16 @@ def test_source_info_has_the_shape_of_its_data_column(
 def test_group_by_key_has_one_merged_token() -> None:
     grouped = _grouped()
     tokens = _by(grouped, "s", "s")
-    assert all(TOKEN.match(t) for t in tokens.values())
+    assert all(GROUP_TOKEN.match(t) for t in tokens.values())
     # The digest of the members' own tokens; the non-key keeps every member's token.
     members = _by(GroupBy(["s"])(_ref(GROUP_ROWS, ["s", "t", "x"], "G")), "s", "y")
-    assert tokens["s1"] == arrow_utils.fold_source_info_tokens(
-        [t.replace("::y", "::s") for t in members["s1"]]
-    )
+    assert tokens["s1"] == group_fold([t.replace("::y", "::s") for t in members["s1"]])
     assert len(members["s1"]) == 2
 
 
 def test_a_group_of_one_member_still_has_a_merged_token() -> None:
     tokens = _by(_grouped(), "s", "s")
-    assert tokens["s2"] == arrow_utils.fold_source_info_tokens(["G::row_2::s"])
+    assert tokens["s2"] == group_fold(["G::row_2::s"])
     assert tokens["s2"] != "G::row_2::s"
 
 
@@ -193,8 +205,8 @@ def test_grouping_a_grouped_stream_folds_the_digests() -> None:
     once = GroupBy(["s", "t"])(source)
     twice = GroupBy(["s"])(once)
     first = [token for (s, _), token in _pairs(once, ("s", "t"), "s") if s == "s1"]
-    assert len(first) == 2 and all(TOKEN.match(t) for t in first)
-    assert _by(twice, "s", "s")["s1"] == arrow_utils.fold_source_info_tokens(first)
+    assert len(first) == 2 and all(GROUP_TOKEN.match(t) for t in first)
+    assert _by(twice, "s", "s")["s1"] == group_fold(first)
 
 
 def _pairs(
@@ -214,7 +226,7 @@ def test_the_group_token_does_not_depend_on_row_order() -> None:
             pa.Table.from_pylist(list(ordered)),
             tag_columns=["s", "t", "x"],
             source_id="G",
-            record_id_column="rid",
+            record_id_columns="rid",
         )
         return _by(GroupBy(["s"])(source), "s", "s")["s1"]
 
@@ -256,8 +268,8 @@ def test_the_group_token_is_the_same_in_another_process() -> None:
 
 def test_join_of_two_referential_inputs_merges_their_tokens() -> None:
     (token,) = _source_column(Join()(_a(), _b()), "x")
-    assert TOKEN.match(token)
-    assert token == arrow_utils.fold_source_info_tokens(["A::row_0::x", "B::row_0::x"])
+    assert JOIN_TOKEN.match(token)
+    assert token == join_fold(["A::row_0::x", "B::row_0::x"])
 
 
 def test_join_with_a_plain_input_keeps_the_referential_token() -> None:
@@ -268,9 +280,7 @@ def test_join_with_a_plain_input_keeps_the_referential_token() -> None:
 
 def test_three_way_join_folds_all_inputs_once() -> None:
     (token,) = _source_column(Join()(_a(), _b(), _c()), "x")
-    assert token == arrow_utils.fold_source_info_tokens(
-        ["A::row_0::x", "B::row_0::x", "C::row_0::x"]
-    )
+    assert token == join_fold(["A::row_0::x", "B::row_0::x", "C::row_0::x"])
 
 
 def _tied(sid: str):
@@ -286,38 +296,45 @@ def test_join_token_does_not_depend_on_input_order() -> None:
         for order in itertools.permutations(inputs)
     }
     assert len(tokens) == 1
-    assert tokens.pop() == arrow_utils.fold_source_info_tokens(
-        ["A::row_0::x", "P::row_0::x", "Q::row_0::x"]
-    )
+    assert tokens.pop() == join_fold(["Q::row_0::x", "A::row_0::x", "P::row_0::x"])
 
 
 def test_join_after_group_by_folds_the_group_digest() -> None:
     other = _ref([{"s": "s1", "z": 1}], ["s"], "Z")
     group_token = _by(_grouped(), "s", "s")["s1"]
     (token,) = _source_column(Join()(_grouped(), other), "s")
-    assert token == arrow_utils.fold_source_info_tokens([group_token, "Z::row_0::s"])
+    assert token == join_fold([group_token, "Z::row_0::s"])
 
 
 # ── the helpers ─────────────────────────────────────────────────────────────
 
 
-def test_fold_sorts_its_members_and_keeps_nulls_apart() -> None:
-    fold = arrow_utils.fold_source_info_tokens
-    assert fold(["b", "a"]) == fold(["a", "b"])
-    assert fold(["a"]) != fold(["a", "a"])
-    assert fold([None]) != fold([""])
-    assert fold(["a", None]) == fold([None, "a"])
-    assert fold(["a,b"]) != fold(["a", "b"])
+def test_a_merged_token_never_reads_as_a_row_token() -> None:
+    # A row's token is <source id>::<record id>::<column>; a source id never holds
+    # "::" (ITL-1154), and a folded token holds none, so the two forms never meet.
+    for token in (group_fold(["G::row_0::s"]), join_fold(["A::row_0::x"])):
+        assert "::" not in token
+
+
+def test_the_two_folds_keep_their_own_member_rules() -> None:
+    # GroupBy folds in member order; Join sorts first. Both keep nulls apart.
+    assert group_fold(["b", "a"]) != group_fold(["a", "b"])
+    assert join_fold(["b", "a"]) == join_fold(["a", "b"])
+    for fold in (group_fold, join_fold):
+        assert fold(["a"]) != fold(["a", "a"])
+        assert fold([None]) != fold([""])
+        assert fold(["a,b"]) != fold(["a", "b"])
+    assert join_fold(["a", None]) == join_fold([None, "a"])
 
 
 def test_merge_source_info_keeps_the_shape() -> None:
-    fold = arrow_utils.fold_source_info_tokens
-    assert merge_source_info(["a", "b"]) == fold(["a", "b"])
-    assert merge_source_info([["a", "c"], ["b", "d"]]) == [
+    fold = join_fold
+    assert merge_source_info(["a", "b"], fold) == fold(["a", "b"])
+    assert merge_source_info([["a", "c"], ["b", "d"]], fold) == [
         fold(["a", "b"]),
         fold(["c", "d"]),
     ]
-    assert merge_source_info([[["a"]], [["b"]]]) == [[fold(["a", "b"])]]
+    assert merge_source_info([[["a"]], [["b"]]], fold) == [[fold(["a", "b"])]]
 
 
 @pytest.mark.parametrize(
@@ -327,7 +344,7 @@ def test_merge_source_info_keeps_the_shape() -> None:
 )
 def test_merge_source_info_rejects_unequal_shapes(values: list[Any]) -> None:
     with pytest.raises(ValueError):
-        merge_source_info(values)
+        merge_source_info(values, join_fold)
 
 
 # ── plain tags are unchanged ────────────────────────────────────────────────

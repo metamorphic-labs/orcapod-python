@@ -129,7 +129,7 @@ def test_a_reload_keeps_the_tag_only_choice(tmp_path: Any, tag_only: Any) -> Non
     path = tmp_path / "rows.csv"
     path.write_text("k,v\n1,10\n2,20\n")
     source = op.sources.CSVSource(
-        str(path), tag_columns=["k"], record_id_column="k", tag_only_columns=tag_only
+        str(path), tag_columns=["k"], record_id_columns="k", tag_only_columns=tag_only
     )
     expected = () if tag_only else ("k",)
     assert stream_references(source) == expected

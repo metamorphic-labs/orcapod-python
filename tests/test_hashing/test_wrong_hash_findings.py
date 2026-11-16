@@ -547,6 +547,7 @@ class TestColumnSelectionIdentity:
             data=[{"k": 1, "j": 2, "x": 1, "y": 2, "z": 3}],
             tag_columns=["k", "j"],
             source_id="s",
+            tag_only_columns=True,
         )
         spellings = [["x", "y"], ("x", "y"), {"x", "y"}, ["y", "x"], ["x", "y", "x"]]
         streams = [op_cls(columns=c)(source) for c in spellings]
@@ -644,7 +645,7 @@ def _record_id_types(table: pa.Table) -> set[pa.DataType]:
 
 
 class TestRecordIdType:
-    """Finding G: the record-id system tag is large_binary everywhere."""
+    """Finding G: the record-id system tag has one type everywhere (large_string, ITL-1154)."""
 
     def test_source_stream_and_tag_agree(self) -> None:
         """A source's stream and its Tag objects give record ids one type."""
@@ -657,7 +658,7 @@ class TestRecordIdType:
         stream_types = _record_id_types(source.as_table(columns={"system_tags": True}))
         tag, _ = next(iter(source.iter_data()))
         tag_types = _record_id_types(tag.as_table(columns={"system_tags": True}))
-        assert stream_types == tag_types == {pa.large_binary()}
+        assert stream_types == tag_types == {pa.large_string()}
 
     def test_batch_keeps_the_type(self) -> None:
         """Batch keeps the record-id type."""
@@ -669,7 +670,7 @@ class TestRecordIdType:
         )
         batched = Batch(batch_size=2)(source)
         assert _record_id_types(batched.as_table(columns={"system_tags": True})) == {
-            pa.large_binary()
+            pa.large_string()
         }
 
     def test_operator_cache_keys_match_on_sync_and_async_paths(self) -> None:

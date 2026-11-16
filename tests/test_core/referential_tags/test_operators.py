@@ -20,6 +20,7 @@ import pytest
 
 import orcapod as op
 from orcapod.core import referential_tags
+from orcapod.core.operators.join import JOIN_FOLD_LABEL
 from orcapod.core.operators import (
     Batch,
     DropColumns,
@@ -164,7 +165,8 @@ def test_join_referential_with_referential_merges_one_data_column() -> None:
     # Both inputs' provenance is kept, folded into one merged token: the merged value
     # is scalar, so is its source info (developer decision, November 13, 2026, ITL-1017).
     (token,) = table.column("_source_x").to_pylist()
-    assert token == arrow_utils.fold_source_info_tokens(["A::row_0::x", "B::row_0::x"])
+    members = sorted(["A::row_0::x", "B::row_0::x"])
+    assert token == arrow_utils.fold_system_tag_values(members, label=JOIN_FOLD_LABEL)
 
 
 def test_join_is_commutative_with_references() -> None:

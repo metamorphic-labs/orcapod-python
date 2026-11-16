@@ -108,7 +108,7 @@ def delta_path(tmp_path: Path) -> Path:
 
 
 def _delta(path: Path, **kwargs: Any) -> DeltaTableSource:
-    return DeltaTableSource(path, tag_columns="k", record_id_column="k", **kwargs)
+    return DeltaTableSource(path, tag_columns="k", record_id_columns="k", **kwargs)
 
 
 def test_delta_unchanged_finds_nothing(delta_path: Path) -> None:
@@ -152,7 +152,9 @@ def test_delta_rows_with_nan_read_again_change_nothing(tmp_path: Path) -> None:
     deltalake.write_deltalake(
         str(path), pa.table({"k": [2], "x": [2.5]}, schema=schema), mode="append"
     )
-    source = DeltaTableSource(path, tag_columns="k", record_id_column="k")
+    source = DeltaTableSource(
+        path, tag_columns="k", record_id_columns="k", tag_only_columns=True
+    )
     before = source.last_modified
     deltalake.DeltaTable(str(path)).optimize.compact()  # a new version, the same rows
     assert source.check_for_new_data() is False
@@ -208,7 +210,7 @@ def test_delta_failed_check_warns_and_runs_on_held_rows(
     with pytest.warns(SourceCheckFailedWarning, match="changed its columns"):
         summary = _run(job, orchestrator)
     assert CALLS == []
-    assert summary.unchecked_sources == ("table",)
+    assert summary.unchecked_sources == (f"delta_table:{delta_path}",)
     assert _ys(job) == [1, 11, 21]
 
 
@@ -233,7 +235,9 @@ def spiral(tmp_path: Path):
 
 
 def _spiral(**kwargs: Any) -> SpiralDBTableSource:
-    return SpiralDBTableSource(project_id=_PROJECT, table_name="t", **kwargs)
+    return SpiralDBTableSource(
+        project_id=_PROJECT, table_name="t", tag_only_columns=True, **kwargs
+    )
 
 
 def test_spiral_unchanged_finds_nothing(spiral: Any) -> None:
@@ -330,7 +334,7 @@ def csv_path(tmp_path: Path) -> Path:
 
 
 def _csv(path: Path, **kwargs: Any) -> CSVSource:
-    return CSVSource(str(path), tag_columns="k", record_id_column="k", **kwargs)
+    return CSVSource(str(path), tag_columns="k", record_id_columns="k", **kwargs)
 
 
 def test_csv_unchanged_finds_nothing(csv_path: Path) -> None:
@@ -402,21 +406,27 @@ def _insert(path: Path, k: int) -> None:
 
 
 def test_sqlite_unchanged_finds_nothing(sqlite_path: Path) -> None:
-    source = SQLiteTableSource(sqlite_path, "t", record_id_column="k")
+    source = SQLiteTableSource(
+        sqlite_path, "t", record_id_columns="k", tag_only_columns=True
+    )
     before = source.last_modified
     assert source.check_for_new_data() is False
     assert source.last_modified == before
 
 
 def test_sqlite_new_rows_are_taken_in(sqlite_path: Path) -> None:
-    source = SQLiteTableSource(sqlite_path, "t", record_id_column="k")
+    source = SQLiteTableSource(
+        sqlite_path, "t", record_id_columns="k", tag_only_columns=True
+    )
     _insert(sqlite_path, 3)
     assert source.check_for_new_data() is True
     assert _keys(source) == [0, 1, 2, 3]
 
 
 def test_sqlite_dropped_table_fails_the_check(sqlite_path: Path) -> None:
-    source = SQLiteTableSource(sqlite_path, "t", record_id_column="k")
+    source = SQLiteTableSource(
+        sqlite_path, "t", record_id_columns="k", tag_only_columns=True
+    )
     with sqlite3.connect(sqlite_path) as conn:
         conn.execute("DROP TABLE t")
     with pytest.raises(ValueError, match="not found"):
@@ -432,7 +442,9 @@ def test_db_table_source_reads_again_through_its_connector() -> None:
         pk_column="k",
     )
     connector.upsert_records("t", _rows([0, 1, 2]), id_column="k")
-    source = DBTableSource(connector, "t", record_id_column="k")
+    source = DBTableSource(
+        connector, "t", record_id_columns="k", source_id="lab.db", tag_only_columns=True
+    )
     connector.upsert_records("t", _rows([3]), id_column="k")
     # A DBTableSource reads through the connector it was given, which is still open.
     assert source.check_for_new_data() is True
@@ -443,7 +455,11 @@ def test_db_table_source_reads_again_through_its_connector() -> None:
 def test_sqlite_job_runs_only_the_new_rows(
     sqlite_path: Path, orchestrator: str
 ) -> None:
-    job = _job(SQLiteTableSource(sqlite_path, "t", record_id_column="k"))
+    job = _job(
+        SQLiteTableSource(
+            sqlite_path, "t", record_id_columns="k", tag_only_columns=True
+        )
+    )
     _run(job, orchestrator)
     CALLS.clear()
     assert _run(job, orchestrator).nodes["rowwise"].held == 3
@@ -464,6 +480,7 @@ def _pg_connector(keys: list[int]) -> MagicMock:
     connector = MagicMock()
     connector.get_table_names.return_value = ["t"]
     connector.get_pk_columns.return_value = ["k"]
+    connector.current_location.return_value = ("orcapod", "public")
     connector.get_column_info.return_value = [
         ColumnInfo("k", pa.int64(), False),
         ColumnInfo("x", pa.int64(), False),
@@ -475,7 +492,9 @@ def _pg_connector(keys: list[int]) -> MagicMock:
 def test_postgresql_reads_again_and_compares_in_any_order() -> None:
     with patch(_PG_PATCH) as connector_class:
         connector_class.return_value = _pg_connector([0, 1, 2])
-        source = PostgreSQLTableSource("dsn", "t", record_id_column="k")
+        source = PostgreSQLTableSource(
+            "dsn", "t", record_id_columns="k", tag_only_columns=True
+        )
         before = source.last_modified
         connector_class.return_value = _pg_connector([2, 0, 1])
         assert source.check_for_new_data() is False
@@ -595,7 +614,11 @@ def test_delta_a_change_in_a_system_tag_column_only_is_taken_in(
     path = tmp_path / "rev"
     deltalake.write_deltalake(str(path), _rev_rows("a"))
     source = DeltaTableSource(
-        path, tag_columns="k", record_id_column="k", system_tag_columns=["rev"]
+        path,
+        tag_columns="k",
+        record_id_columns="k",
+        system_tag_columns=["rev"],
+        tag_only_columns=True,
     )
     deltalake.write_deltalake(str(path), _rev_rows("b"), mode="overwrite")
     assert source.check_for_new_data() is True
@@ -606,7 +629,11 @@ def test_csv_a_change_in_a_system_tag_column_only_is_taken_in(tmp_path: Path) ->
     path = tmp_path / "rev.csv"
     path.write_text("k,x,rev\n0,0,a\n1,10,a\n")
     source = CSVSource(
-        str(path), tag_columns="k", record_id_column="k", system_tag_columns=["rev"]
+        str(path),
+        tag_columns="k",
+        record_id_columns="k",
+        system_tag_columns=["rev"],
+        tag_only_columns=True,
     )
     path.write_text("k,x,rev\n0,0,b\n1,10,b\n")
     assert source.check_for_new_data() is True
@@ -624,7 +651,11 @@ def test_sqlite_a_change_in_a_system_tag_column_only_is_taken_in(
         )
         conn.executemany("INSERT INTO t VALUES (?, ?, 'a')", [(0, 0), (1, 10)])
     source = SQLiteTableSource(
-        path, "t", record_id_column="k", system_tag_columns=["rev"]
+        path,
+        "t",
+        record_id_columns="k",
+        system_tag_columns=["rev"],
+        tag_only_columns=True,
     )
     with sqlite3.connect(path) as conn:
         conn.execute("UPDATE t SET rev = 'b'")
@@ -725,6 +756,7 @@ def _connector_without_column_info(x: list[int | None]) -> MagicMock:
     connector = MagicMock()
     connector.get_table_names.return_value = ["t"]
     connector.get_pk_columns.return_value = ["k"]
+    connector.current_location.return_value = ("orcapod", "public")
     connector.get_column_info.return_value = []
     table = pa.table(
         {"k": pa.array(range(len(x)), pa.int64()), "x": pa.array(x, pa.int64())}
@@ -735,7 +767,9 @@ def _connector_without_column_info(x: list[int | None]) -> MagicMock:
 
 def test_db_table_source_inferred_nullability_keeps_a_column_nullable() -> None:
     connector = _connector_without_column_info([None, 10])
-    source = DBTableSource(connector, "t", record_id_column="k")
+    source = DBTableSource(
+        connector, "t", record_id_columns="k", source_id="lab.db", tag_only_columns=True
+    )
     before = source.output_schema()
     filled = _connector_without_column_info([0, 10])
     connector.iter_batches.side_effect = filled.iter_batches.side_effect
@@ -795,7 +829,9 @@ def test_csv_a_relative_path_is_checked_where_it_was_read(
     _write_csv(tmp_path / "a" / "rows.csv", [0, 1, 2])
     _write_csv(tmp_path / "b" / "rows.csv", [5, 6, 7, 8])
     monkeypatch.chdir(tmp_path / "a")
-    source = CSVSource("rows.csv", tag_columns="k", record_id_column="k")
+    source = CSVSource(
+        "rows.csv", tag_columns="k", record_id_columns="k", tag_only_columns=True
+    )
     monkeypatch.chdir(tmp_path / "b")
     assert source.check_for_new_data() is False
     _write_csv(tmp_path / "a" / "rows.csv", [0, 1, 2, 3])
@@ -808,7 +844,9 @@ def test_sqlite_a_relative_path_is_checked_where_it_was_read(
 ) -> None:
     (tmp_path / "elsewhere").mkdir()
     monkeypatch.chdir(sqlite_path.parent)
-    source = SQLiteTableSource(sqlite_path.name, "t", record_id_column="k")
+    source = SQLiteTableSource(
+        sqlite_path.name, "t", record_id_columns="k", tag_only_columns=True
+    )
     monkeypatch.chdir(tmp_path / "elsewhere")
     _insert(sqlite_path, 3)
     assert source.check_for_new_data() is True
@@ -905,7 +943,7 @@ def _record_ids(source: Any) -> dict[int, str]:
 
 
 def test_csv_positional_ids_a_reorder_is_a_change(csv_path: Path) -> None:
-    source = CSVSource(str(csv_path), tag_columns="k")
+    source = CSVSource(str(csv_path), tag_columns="k", tag_only_columns=True)
     before = _record_ids(source)
     _write_csv(csv_path, [2, 0, 1])
     assert source.check_for_new_data() is True
@@ -916,7 +954,7 @@ def test_csv_positional_ids_a_reorder_is_a_change(csv_path: Path) -> None:
 
 
 def test_csv_explicit_record_ids_a_reorder_is_no_change(csv_path: Path) -> None:
-    source = _csv(csv_path)  # record_id_column="k"
+    source = _csv(csv_path)  # record_id_columns="k"
     before = source.last_modified
     _write_csv(csv_path, [2, 0, 1])
     assert source.check_for_new_data() is False
@@ -924,7 +962,7 @@ def test_csv_explicit_record_ids_a_reorder_is_no_change(csv_path: Path) -> None:
 
 
 def _delta_positional(path: Path) -> DeltaTableSource:
-    return DeltaTableSource(path, tag_columns="k")
+    return DeltaTableSource(path, tag_columns="k", tag_only_columns=True)
 
 
 def test_delta_positional_ids_a_reorder_is_a_change(delta_path: Path) -> None:
@@ -936,7 +974,7 @@ def test_delta_positional_ids_a_reorder_is_a_change(delta_path: Path) -> None:
 
 
 def test_delta_explicit_record_ids_a_reorder_is_no_change(delta_path: Path) -> None:
-    source = _delta(delta_path)  # record_id_column="k"
+    source = _delta(delta_path)  # record_id_columns="k"
     before = source.last_modified
     deltalake.write_deltalake(str(delta_path), _rows([2, 0, 1]), mode="overwrite")
     assert source.check_for_new_data() is False
@@ -949,7 +987,7 @@ def test_a_reorder_with_positional_ids_reruns_and_reuses_every_result(
     csv_path: Path, delta_path: Path, kind: str, orchestrator: str
 ) -> None:
     source: Any = (
-        CSVSource(str(csv_path), tag_columns="k")
+        CSVSource(str(csv_path), tag_columns="k", tag_only_columns=True)
         if kind == "csv"
         else _delta_positional(delta_path)
     )

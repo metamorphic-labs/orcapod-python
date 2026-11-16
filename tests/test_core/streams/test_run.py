@@ -71,9 +71,9 @@ def _source(rows: int = ROWS, label: str = "readings") -> ArrowTableSource:
     return ArrowTableSource(
         _table(rows),
         tag_columns=["id"],
-        tag_only_columns=True,
         source_id="readings",
         label=label,
+        tag_only_columns=True,
     )
 
 
@@ -170,15 +170,15 @@ def _join_stream() -> Any:
     other = DictSource(
         [{"id": i, "z": i + 1} for i in range(ROWS)],
         tag_columns=["id"],
-        tag_only_columns=True,
         label="z",
+        tag_only_columns=True,
     )
     return Join()(_source(), other)
 
 
 def _polling_source() -> Any:
     """A ``PollingSource`` over a fake dynamic source of one row."""
-    return PollingSource(_FakeDynamicSource(), tag_columns="id")
+    return PollingSource(_FakeDynamicSource(), tag_columns="id", record_id_columns="id")
 
 
 def _cached_source() -> Any:
@@ -235,8 +235,8 @@ KINDS: dict[str, Callable[[], Any]] = {
     "dict_source": lambda: DictSource(
         [{"id": i, "x": i} for i in range(ROWS)],
         tag_columns=["id"],
-        tag_only_columns=True,
         label="d",
+        tag_only_columns=True,
     ),
     "function_pod_stream": _function_pod_stream,
     "cached_function_pod_stream": _cached_function_pod_stream,
@@ -455,7 +455,7 @@ def test_job_node_run_over_a_pass_through_chain_returns_its_rows() -> None:
 def test_polling_source_run_polls() -> None:
     """A polling source's ``run()`` polls, as ``as_table()`` does; ``head()`` never does."""
     fake = _FakeDynamicSource()
-    source = PollingSource(fake, tag_columns="id")
+    source = PollingSource(fake, tag_columns="id", record_id_columns="id")
     _ = source.head()
     assert (fake.polls, fake.fetches) == (0, 0)
     view = source.run()
