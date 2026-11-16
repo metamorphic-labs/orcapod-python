@@ -885,3 +885,107 @@ class TestReviewFollowUps:
 
         assert _arrow_type_to_pg_sql(pa.string_view()) == "TEXT"
         assert _arrow_type_to_pg_sql(pa.binary_view()) == "BYTEA"
+
+
+# ---------------------------------------------------------------------------
+# PostgreSQL table names over 63 bytes (coordinator ruling, ITL-1162)
+# ---------------------------------------------------------------------------
+
+
+class TestTableNameLength:
+    def test_connector_rules(self, tmp_path: pathlib.Path):
+        connector, _ = _mocked_postgresql()
+        try:
+            assert connector.unstorable_table_name_reason("t" * 63) is None
+            reason = connector.unstorable_table_name_reason("t" * 64)
+            assert reason is not None and "63 bytes" in reason
+        finally:
+            connector._conn = None
+        sqlite = SQLiteConnector(str(tmp_path / "names.db"))
+        try:
+            assert sqlite.unstorable_table_name_reason("t" * 500) is None
+        finally:
+            sqlite.close()
+
+    def test_every_table_entry_refuses_a_long_name(self):
+        """Write, read and check all refuse before anything is sent to the server."""
+        from orcapod.errors import UnstorableTableNameError
+
+        connector, conn = _mocked_postgresql()
+        try:
+            database = ConnectorArrowDatabase(connector)
+            path = ("fn", "x" * 70)
+            table = pa.table({"v": pa.array([1], type=pa.int64())})
+            calls_before = len(conn.mock_calls)
+
+            with pytest.raises(UnstorableTableNameError) as exc_info:
+                database.add_record(path, b"1", table)
+            with pytest.raises(UnstorableTableNameError):
+                database.get_all_records(path)
+            with pytest.raises(UnstorableTableNameError):
+                database.table_exists(path)
+            database.flush()  # nothing was buffered
+
+            assert len(conn.mock_calls) == calls_before
+            err = exc_info.value
+            assert err.database_kind == "PostgreSQLConnector"
+            assert err.table_name == "fn__" + "x" * 70
+            assert "DeltaTableDatabase" in str(err)
+        finally:
+            connector._conn = None
+
+    def test_connector_entries_refuse_a_long_name(self):
+        from orcapod.errors import UnstorableTableNameError
+        from orcapod.types import ColumnInfo
+
+        connector, conn = _mocked_postgresql()
+        name = "t" * 64
+        try:
+            calls_before = len(conn.mock_calls)
+            with pytest.raises(UnstorableTableNameError):
+                connector.create_table_if_not_exists(
+                    name, [ColumnInfo("k", pa.large_string(), False)], pk_column="k"
+                )
+            with pytest.raises(UnstorableTableNameError):
+                connector.get_column_info(name)
+            with pytest.raises(UnstorableTableNameError):
+                connector.get_pk_columns(name)
+            with pytest.raises(UnstorableTableNameError):
+                connector.upsert_records(name, pa.table({"k": ["a"]}), id_column="k")
+            assert len(conn.mock_calls) == calls_before
+        finally:
+            connector._conn = None
+
+    def test_cached_source_on_postgresql_refused(self):
+        """A cached source's table name holds a hash: over 63 bytes on PostgreSQL."""
+        from orcapod.core.sources.cached_source import CachedSource
+        from orcapod.errors import UnstorableTableNameError
+
+        connector, conn = _mocked_postgresql()
+        try:
+            cached = CachedSource(
+                _source(), cache_database=ConnectorArrowDatabase(connector)
+            )
+            calls_before = len(conn.mock_calls)
+            with pytest.raises(Exception) as exc_info:
+                _ = cached.as_table()
+            chain: list[BaseException] = []
+            err: BaseException | None = exc_info.value
+            while err is not None:
+                chain.append(err)
+                err = err.__cause__ or err.__context__
+            assert any(isinstance(e, UnstorableTableNameError) for e in chain), chain
+            assert len(conn.mock_calls) == calls_before
+        finally:
+            connector._conn = None
+
+    def test_pickling(self):
+        import pickle
+
+        from orcapod.errors import UnstorableTableNameError
+
+        err = UnstorableTableNameError(
+            database_kind="PostgreSQLConnector", table_name="t", reason="r"
+        )
+        again = pickle.loads(pickle.dumps(err))
+        assert str(again) == str(err)

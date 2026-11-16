@@ -24,7 +24,7 @@ from collections.abc import Collection, Mapping
 from typing import TYPE_CHECKING, Any, cast
 
 from orcapod.databases.utils import coerce_record_id
-from orcapod.errors import UnstorableColumnError
+from orcapod.errors import UnstorableColumnError, UnstorableTableNameError
 from orcapod.utils.arrow_utils import (
     normalize_schema_to_large_types,
     normalize_table_to_large_types,
@@ -191,6 +191,7 @@ class ConnectorArrowDatabase:
     def _get_committed_table(self, record_path: tuple[str, ...]) -> pa.Table | None:
         """Fetch all committed records for a path from the connector."""
         table_name = self._path_to_table_name(self._path_prefix + record_path)
+        self._require_table_name(table_name)
         if table_name not in self._connector.get_table_names():
             return None
         batches = list(self._connector.iter_batches(f'SELECT * FROM "{table_name}"'))
@@ -250,6 +251,7 @@ class ConnectorArrowDatabase:
             ``True`` if a table exists at the given path, ``False`` otherwise.
         """
         table_name = self._path_to_table_name(self._path_prefix + record_path)
+        self._require_table_name(table_name)
         record_key = self._get_record_key(record_path)
         if record_key in self._pending_batches:
             return True
@@ -287,6 +289,23 @@ class ConnectorArrowDatabase:
                     arrow_type=field.type,
                     reason=reason,
                 )
+
+    def _require_table_name(self, table_name: str) -> None:
+        """Refuse a table name the connector would not keep (ITL-1162).
+
+        Called at every entry that creates, writes, reads or checks a table, so a
+        name the backend would change (truncate) is never sent to it.
+
+        Raises:
+            UnstorableTableNameError: Naming the connector, the name and why.
+        """
+        reason = self._connector.unstorable_table_name_reason(table_name)
+        if reason is not None:
+            raise UnstorableTableNameError(
+                database_kind=type(self._connector).__name__,
+                table_name=table_name,
+                reason=reason,
+            )
 
     # ── Write methods ─────────────────────────────────────────────────────────
 
@@ -350,6 +369,9 @@ class ConnectorArrowDatabase:
         # sees one layout (ITL-1122, ITL-1162).
         self.require_storable(
             normalize_schema_to_large_types(records.schema, keep_null=True)
+        )
+        self._require_table_name(
+            self._path_to_table_name(self._path_prefix + record_path)
         )
         records = normalize_table_to_large_types(records, keep_null=True)
         self._connector.validate_records(records)
@@ -448,6 +470,7 @@ class ConnectorArrowDatabase:
         for record_key in list(self._pending_batches.keys()):
             record_path = tuple(record_key.split("/"))
             table_name = self._path_to_table_name(record_path)
+            self._require_table_name(table_name)
             pending = self._pending_batches.pop(record_key)
             self._pending_record_ids.pop(record_key, None)
             skip_existing = self._pending_skip_existing.pop(record_key, False)

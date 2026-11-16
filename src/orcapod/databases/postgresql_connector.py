@@ -21,6 +21,7 @@ import uuid
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
+from orcapod.errors import UnstorableTableNameError
 from orcapod.types import ColumnInfo
 from orcapod.utils.lazy_module import LazyModule
 
@@ -422,6 +423,7 @@ class PostgreSQLConnector:
 
     def get_pk_columns(self, table_name: str) -> list[str]:
         """Return primary-key column names in key-sequence order."""
+        self._require_table_name(table_name)
         with self._lock:
             conn = self._require_open()
             self._validate_table_name(table_name)
@@ -445,6 +447,7 @@ class PostgreSQLConnector:
 
     def get_column_info(self, table_name: str) -> list[ColumnInfo]:
         """Return column metadata with Arrow-mapped types."""
+        self._require_table_name(table_name)
         with self._lock:
             conn = self._require_open()
             self._validate_table_name(table_name)
@@ -536,6 +539,7 @@ class PostgreSQLConnector:
         pk_column: str,
     ) -> None:
         """Create a table with the given columns if it does not already exist."""
+        self._require_table_name(table_name)
         col_names = [col.name for col in columns]
         if pk_column not in col_names:
             raise ValueError(
@@ -570,6 +574,7 @@ class PostgreSQLConnector:
         skip_existing: bool = False,
     ) -> None:
         """Write records to a table using upsert semantics."""
+        self._require_table_name(table_name)
         with self._lock:
             conn = self._require_open()
             self._validate_table_name(table_name)
@@ -639,6 +644,34 @@ class PostgreSQLConnector:
                 f"bytes, and this name has {size}"
             )
         return _pg_unstorable_reason(arrow_type)
+
+    def unstorable_table_name_reason(self, table_name: str) -> str | None:
+        """Say why PostgreSQL cannot hold a table of this name, or ``None`` (ITL-1162).
+
+        PostgreSQL truncates a name longer than 63 bytes (UTF-8), so two such
+        names with the same first 63 bytes would be one table.
+
+        Args:
+            table_name: The table name.
+
+        Returns:
+            A short reason, or ``None`` when PostgreSQL holds the name.
+        """
+        size = len(table_name.encode("utf-8"))
+        if size > _PG_MAX_IDENTIFIER_BYTES:
+            return (
+                f"PostgreSQL truncates a table name to {_PG_MAX_IDENTIFIER_BYTES} "
+                f"bytes, and this name has {size}"
+            )
+        return None
+
+    def _require_table_name(self, table_name: str) -> None:
+        """Refuse a table name PostgreSQL would truncate, before it is sent."""
+        reason = self.unstorable_table_name_reason(table_name)
+        if reason is not None:
+            raise UnstorableTableNameError(
+                database_kind=type(self).__name__, table_name=table_name, reason=reason
+            )
 
     def validate_records(self, records: pa.Table) -> None:
         """Reject tables carrying any Arrow field or schema metadata.

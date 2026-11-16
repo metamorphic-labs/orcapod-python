@@ -135,8 +135,8 @@ and binary columns come back as `large_string` and `large_binary`, the types Orc
 | `PostgreSQLConnector` | `bool`, `int32`, `int64`, `float`, `double`, `large_string`, `large_binary`, `date32`, `timestamp[us]`, `timestamp[us, tz=UTC]` |
 
 Any other type (lists, structs, dates or timestamps on SQLite, narrower integers and floats,
-logical types) is refused. PostgreSQL also refuses a column name longer than 63 bytes, which it
-would truncate. `SpiralDBConnector` stores other types as written, except a
+logical types) is refused. PostgreSQL also refuses a column name or a table name longer than
+63 bytes, which it would truncate (`UnstorableTableNameError` for a table). `SpiralDBConnector` stores other types as written, except a
 timestamp with a time zone (SpiralDB drops the zone), and SpiralDB reserves the `__` prefix on
 value columns (the `__record_id` key is allowed) and `.` in any column name.
 
@@ -152,7 +152,11 @@ timestamp and `__data_context`, and an operator cache and a cached source hold
 An operator cache or cached source on a SQL connector is refused when it is written, before
 anything is stored, if one of its columns has a type or name the connector does not store. On
 PostgreSQL that is every operator cache with caching on: its system-tag column names
-(`_tag_source_id::` and a 64-character hash) are longer than 63 bytes. Use
+(`_tag_source_id::` and a 64-character hash) are longer than 63 bytes.
+A table's name is its Orcapod path joined by `__`, and every node table and cached source path
+holds a 64-character hash, so on PostgreSQL only tables you write through `ConnectorArrowDatabase`
+yourself under short paths fit; reading an existing table with `PostgreSQLTableSource` is
+unaffected. Use
 `InMemoryArrowDatabase` or `DeltaTableDatabase` for such jobs. Storing these columns on
 connector databases is planned for a later release.
 

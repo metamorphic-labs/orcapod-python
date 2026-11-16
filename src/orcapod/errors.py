@@ -163,6 +163,59 @@ class UnstorableColumnError(ValueError):
         )
 
 
+class UnstorableTableNameError(ValueError):
+    """A database cannot hold a table under the name it is asked to use (ITL-1162).
+
+    PostgreSQL truncates a table name longer than 63 bytes, so two Orcapod tables
+    whose names share their first 63 bytes would silently become one. The
+    connector states which names it holds (``unstorable_table_name_reason``), and
+    a ``ConnectorArrowDatabase`` refuses any other name at every entry that
+    creates, writes, reads or checks a table, so a truncated name is never sent.
+
+    Attributes:
+        database_kind: The kind of database that refused, e.g.
+            ``"PostgreSQLConnector"``.
+        table_name: The table name the database was asked to use.
+        reason: Why the database cannot hold it.
+    """
+
+    def __init__(self, *, database_kind: str, table_name: str, reason: str) -> None:
+        """Create the error.
+
+        Args:
+            database_kind: The kind of database that refused.
+            table_name: The table name the database was asked to use.
+            reason: Why the database cannot hold it.
+        """
+        self.database_kind = database_kind
+        self.table_name = table_name
+        self.reason = reason
+        super().__init__(database_kind, table_name, reason)
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        """Rebuild from the keyword fields, so pickling and copying keep them."""
+        return (
+            _rebuild_unstorable_table_name_error,
+            (self.database_kind, self.table_name, self.reason),
+        )
+
+    def __str__(self) -> str:
+        return (
+            f"a {self.database_kind} database cannot hold a table named "
+            f"{self.table_name!r}: {self.reason}. Use an InMemoryArrowDatabase or a "
+            "DeltaTableDatabase instead."
+        )
+
+
+def _rebuild_unstorable_table_name_error(
+    database_kind: str, table_name: str, reason: str
+) -> UnstorableTableNameError:
+    """Rebuild an ``UnstorableTableNameError`` from its fields (``__reduce__``)."""
+    return UnstorableTableNameError(
+        database_kind=database_kind, table_name=table_name, reason=reason
+    )
+
+
 def _rebuild_unstorable_column_error(
     database_kind: str,
     column: str,

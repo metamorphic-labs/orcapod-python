@@ -573,7 +573,7 @@ def test_operator_cache_refused_at_write_and_nothing_written(
     """An operator cache's system-tag column names exceed 63 bytes (ITL-1162)."""
     from orcapod import PipelineJob
     from orcapod.core.operators import SelectDataColumns
-    from orcapod.errors import OrcapodDatabaseWriteError, UnstorableColumnError
+    from orcapod.errors import UnstorableColumnError, UnstorableTableNameError
     from orcapod.sources import DictSource
     from orcapod.types import CacheMode
 
@@ -590,9 +590,34 @@ def test_operator_cache_refused_at_write_and_nothing_written(
     job.nodes["sel"].attach_databases(
         pipeline_database=db.at("p"), cache_mode=CacheMode.LOG
     )
-    with pytest.raises(OrcapodDatabaseWriteError) as exc_info:
+    with pytest.raises(Exception) as exc_info:
         _ = job.run()
-    cause = exc_info.value.__cause__
-    assert isinstance(cause, UnstorableColumnError)
-    assert cause.column.startswith("_tag_")
+    # The cache's table name (over 63 bytes) or its system-tag column names are
+    # refused, whichever entry comes first; nothing reaches the server.
+    chain: list[BaseException] = []
+    err: BaseException | None = exc_info.value
+    while err is not None:
+        chain.append(err)
+        err = err.__cause__ or err.__context__
+    assert any(
+        isinstance(e, (UnstorableColumnError, UnstorableTableNameError)) for e in chain
+    ), chain
+    assert connector.get_table_names() == []
+
+
+@pytest.mark.postgres
+def test_long_table_name_refused_and_nothing_written(
+    connector: PostgreSQLConnector,
+) -> None:
+    """A table name PostgreSQL would truncate is never sent to it (ITL-1162)."""
+    from orcapod.errors import UnstorableTableNameError
+
+    db = ConnectorArrowDatabase(connector)
+    path = ("fn", "x" * 70)
+    table = pa.table({"v": pa.array([1], type=pa.int64())})
+    with pytest.raises(UnstorableTableNameError):
+        db.add_record(path, b"1", table)
+    with pytest.raises(UnstorableTableNameError):
+        db.get_all_records(path)
+    db.flush()
     assert connector.get_table_names() == []

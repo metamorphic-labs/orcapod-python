@@ -463,6 +463,19 @@ class SQLiteConnector:
         """
         return _sqlite_unstorable_reason(arrow_type)
 
+    def unstorable_table_name_reason(self, table_name: str) -> str | None:
+        """Say why SQLite cannot hold a table of this name: it holds every name.
+
+        SQLite has no identifier length limit.
+
+        Args:
+            table_name: The table name.
+
+        Returns:
+            Always ``None``.
+        """
+        return None
+
     def validate_records(self, records: pa.Table) -> None:
         """Reject tables carrying any Arrow field or schema metadata.
 

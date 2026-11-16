@@ -1002,6 +1002,19 @@ class SpiralDBConnector:
             )
         return None
 
+    def unstorable_table_name_reason(self, table_name: str) -> str | None:
+        """Say why SpiralDB cannot hold a table of this name: it holds every name.
+
+        The database's table names are letters, digits and ``_``.
+
+        Args:
+            table_name: The table name.
+
+        Returns:
+            Always ``None``.
+        """
+        return None
+
     def validate_records(self, records: pa.Table) -> None:
         """No-op: ``SpiralDBConnector`` preserves Arrow field metadata via the native KV store."""
 

@@ -155,6 +155,9 @@ class MockDBConnector:
             kept = existing.filter(mask)
             self._tables[table_name] = pa.concat_tables([kept, records])
 
+    def unstorable_table_name_reason(self, table_name: str) -> str | None:
+        return None  # every name is held
+
     def unstorable_column_reason(
         self, name: str, arrow_type: pa.DataType, *, primary_key: bool
     ) -> str | None:
