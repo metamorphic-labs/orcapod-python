@@ -165,7 +165,11 @@ These raise "not supported with referential tags yet" when a referential tag rea
 `Batch`, `MergeJoin`, storing an operator node's results (`LOG` and `REPLAY` cache modes),
 `DerivedSource` over a stream with referential tags, and saving a pipeline or job.
 `PollingSource` keeps its tags plain. Each error names its issue and the way out: build the
-source with `tag_only_columns=True` to keep every tag plain, as in v0.3.
+source with `tag_only_columns=True` to keep every tag plain, as in v0.3. A plain tag is not
+data, so a function that reads a tag's value (as `scale` above reads `time`) can no longer
+take it from that column: as in v0.3, the value must also be a data column of its own, for
+example a copy in the source's data under another name, or
+`DerivedSource(origin, tags_as_data={...})`.
 
 ## Errors that name a referential tag
 
