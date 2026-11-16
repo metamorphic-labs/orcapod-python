@@ -35,7 +35,10 @@ hashing) and produces the final immutable stream.
 
 `orcapod.sources` also provides database-backed sources (`SQLiteTableSource`,
 `PostgreSQLTableSource`, `SpiralDBTableSource`) and `PollingSource` for data that arrives over
-time; see the [API reference](../api/sources.md).
+time; see the [API reference](../api/sources.md). Their default `source_id` names the table
+where it lives (`sqlite_table:<db path>:main.<table>`). `DBTableSource`, the base they share,
+can also be used directly over any connector; a connector gives no address of its database,
+so it then has no default and needs a `source_id`.
 
 Two construction rules apply to every source and are the most common first errors:
 
@@ -131,13 +134,15 @@ Things to know about Spiral tables:
   timestamps without one) and Orcapod logical types such as `Path` (they come back as their
   storage type).
 - **Source identity.** A Spiral source is identified by where its table is, never by its
-  rows. The default `source_id` is `<project id>/<dataset>.<table>@<Spiral table id>`, for
-  example `edi-tutorial-v1-841226/default.session@table_Jo7J0lpkLcOM`. The table id is
+  rows. The default `source_id` is `spiraldb_table:<project id>.<dataset>.<table>@<Spiral
+  table id>`, for example
+  `spiraldb_table:edi-tutorial-v1-841226.default.session@table_Jo7J0lpkLcOM`. The table id is
   SpiralDB's own, so tables with the same name in different projects stay apart, and a table
   that is dropped and created again under the same name is a different source: nothing
   recorded for the old table is reused. A renamed table also gets a new `source_id`.
-- **Record identity.** A row is identified by its primary key: its record ID is derived from
-  the hash of its key columns. A row keeps its record ID when other rows are added, and has
+- **Record identity.** A row is identified by its primary key: its record ID is the
+  canonical JSON of its key columns (`{"session_id":"s1"}`). A row keeps its record ID when
+  other rows are added, and has
   the same one whichever read returned it.
 
 #### Reading a Spiral table

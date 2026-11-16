@@ -170,16 +170,15 @@ category, but we should make it totally overridable"; November 16, 2026, ITL-115
 | `DeltaTableSource` | `delta_table` | `delta_table:<path or URI of the table folder as passed>` |
 | `SQLiteTableSource` | `sqlite_table` | `sqlite_table:<db path as passed>:main.<table>` (SQLite names a table `<schema>.<table>`; the main database's schema is `main`) |
 | `PostgreSQLTableSource` | `postgresql_table` | `postgresql_table:<database>.<schema>.<table>` (the three-part name, from `current_database()` and `current_schema()`) |
-| `DBTableSource` (any other connector) | `db_table` | `db_table:<table name>`: the connector protocol exposes no database address, so two databases with one table name share this default |
+| `DBTableSource` (any other connector) | `db_table` | none: `source_id` is required. The connector protocol exposes no database address, and the table name alone does not say which database the table is in (developer decision, November 16, 2026) |
 | `SpiralDBTableSource` | `spiraldb_table` | `spiraldb_table:<project>.<dataset>.<table>@<table id>` (Spiral's own table identifier, then SpiralDB's table id; `SPIRALDB_SOURCE_ID_HAS_TABLE_ID`) |
 | `PollingSource` | `polling_source` | `polling_source:semantic_v1:<hex>` of `impl.identity()` (never its `repr`) |
 | `CachedSource` | `cached` | the wrapped source's id |
 | folded source id of `Batch` / `GroupBy` (a system-tag value, not a source) | | `batch_v1:<hex>` / `group_v1:<hex>` |
 
 A location default names the data where it lives, so two sources of one kind share it only
-when they read the same data, with one exception: the generic `DBTableSource` (`db_table:`)
-knows no database, so two of them over same-named tables in different databases share a
-default; a pipeline that reads both gives each a `source_id`. A location whose parts cannot be
+when they read the same data. The generic `DBTableSource` knows no database, so it has no
+default and refuses to be built without a `source_id`. A location whose parts cannot be
 told apart has no default (`joined_location`): a SQLite table name holding `:`, a PostgreSQL or
 SpiralDB name holding `.`, a SpiralDB address or table id holding `@`. Such a source needs a
 `source_id`.

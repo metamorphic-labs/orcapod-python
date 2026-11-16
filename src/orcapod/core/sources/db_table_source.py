@@ -6,8 +6,10 @@ Type mapping (DB-native → Arrow) is fully delegated to the connector.
 Example::
 
     connector = SQLiteConnector(":memory:")   # PLT-1076
-    source = DBTableSource(connector, "measurements")          # PKs → tags
-    source = DBTableSource(connector, "events", tag_columns=["session_id"])
+    source = DBTableSource(connector, "measurements", source_id="lab.measurements")
+    source = DBTableSource(
+        connector, "events", tag_columns=["session_id"], source_id="lab.events"
+    )
 """
 
 from __future__ import annotations
@@ -63,7 +65,11 @@ class DBTableSource(RootSource):
             id), in key order. ``None`` (default): the table's primary key; a table
             without one is refused. ``()``: the row's position, ``row_<n>``.
         source_id: Canonical source name for the registry and provenance tokens.
-            Defaults to ``<kind>:<table address>`` (``_table_address``).
+            Required here: a generic connector exposes no database address, and the
+            table name alone does not say which database the table is in
+            (ITL-1154). A subclass that knows its database's address
+            (``SQLiteTableSource``, ``PostgreSQLTableSource``) defaults it to
+            ``<kind>:<table address>`` (``_table_address``).
         label: Human-readable label for this source node.
         data_context: Data context governing type conversion and hashing.
         config: Orcapod configuration (controls hash character counts, etc.).
@@ -74,8 +80,9 @@ class DBTableSource(RootSource):
             and ``tag_only_columns`` keeps a tag plain).
 
     Raises:
-        ValueError: If the table is not found, has no PK columns and none are
-            provided, or is empty.
+        ValueError: If no ``source_id`` is given and the source knows no address of
+            its table's database, or the table is not found, has no PK columns and
+            none are provided, or is empty.
     """
 
     SOURCE_KIND: ClassVar[str] = "db_table"
@@ -98,9 +105,18 @@ class DBTableSource(RootSource):
     ) -> None:
         check_tag_only_columns(tag_only_columns)
         if source_id is None:
-            source_id = location_source_id(
-                self.SOURCE_KIND, self._table_address(connector, table_name)
-            )
+            address = self._table_address(connector, table_name)
+            if address is None:
+                raise ValueError(
+                    f"{type(self).__name__} over table {table_name!r} needs a "
+                    "source_id: the connector gives no address of its database, so "
+                    "the table name alone does not say which database the table is "
+                    "in, and two databases with a table of that name would share one "
+                    "source id. Pass source_id='<a name for this table>', or use the "
+                    "source of your database (SQLiteTableSource, "
+                    "PostgreSQLTableSource), whose default id holds the address."
+                )
+            source_id = location_source_id(self.SOURCE_KIND, address)
         super().__init__(
             source_id=source_id,
             label=label,
@@ -162,22 +178,25 @@ class DBTableSource(RootSource):
         if self._source_id is None:
             self._source_id = result.source_id
 
-    def _table_address(self, connector: DBConnectorProtocol, table_name: str) -> str:
+    def _table_address(
+        self, connector: DBConnectorProtocol, table_name: str
+    ) -> str | None:
         """Return the table's full address in the database's own convention.
 
         The location part of the default source id (``<kind>:<address>``). A generic
-        connector exposes no database address, so it is the table name; a subclass
-        that knows its database's convention overrides this (ITL-1154).
+        connector exposes no database address, so there is none and the source needs
+        a ``source_id``; a subclass that knows its database's convention overrides
+        this (ITL-1154).
 
         Args:
             connector: The connector the source reads through.
             table_name: The table's name.
 
         Returns:
-            The table's address.
+            The table's address, or ``None`` when the source knows none.
         """
-        del connector
-        return table_name
+        del connector, table_name
+        return None
 
     def _read_table(
         self, connector: DBConnectorProtocol, held: pa.Schema | None = None

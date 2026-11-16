@@ -980,9 +980,11 @@ data. The rules:
   only by `core/sources/source_ids.hash_source_id`; one built from where the data lives is
   `<kind>:<location>`, built only by `location_source_id`: `csv:<path as passed>`,
   `delta_table:<path or URI as passed>`, `sqlite_table:<db path as passed>:main.<table>`,
-  `postgresql_table:<database>.<schema>.<table>`, `db_table:<table>`,
+  `postgresql_table:<database>.<schema>.<table>`,
   `spiraldb_table:<project>.<dataset>.<table>@<table id>` (developer, November 16, 2026); a
-  location whose parts hold their separator has no default (`source_ids.joined_location`). `::`
+  location whose parts hold their separator has no default (`source_ids.joined_location`). A
+  `DBTableSource` used directly (a generic connector, no database address) has no default:
+  it requires a `source_id` (developer, November 16, 2026). `::`
   is refused in every source id, given or default, and in every column name
   (`schema_utils.require_names_without_separator`), as are a source id ending with `:` and a
   column name starting with one, so a source-info token splits at its first and last `::`. Key columns (developer, November 16, 2026, ITL-1154): every source accepts

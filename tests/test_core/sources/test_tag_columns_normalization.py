@@ -393,12 +393,14 @@ class TestDBTableSourceTagColumns:
             connector=_MockConnector(),
             table_name="events",
             tag_columns="session_id",
+            source_id="lab.db",
             tag_only_columns=True,
         )
         src_list = DBTableSource(
             connector=_MockConnector(),
             table_name="events",
             tag_columns=["session_id"],
+            source_id="lab.db",
             tag_only_columns=True,
         )
         tag_keys_str, _ = src_str.keys()
@@ -412,6 +414,7 @@ class TestDBTableSourceTagColumns:
             connector=_MockConnector(),
             table_name="events",
             tag_columns=("session_id",),
+            source_id="lab.db",
             tag_only_columns=True,
         )
         tag_keys, _ = src.keys()
@@ -425,6 +428,7 @@ class TestDBTableSourceTagColumns:
                 connector=_MockConnector(),
                 table_name="events",
                 tag_columns=42,  # pyright: ignore[reportArgumentType]  # an invalid type on purpose
+                source_id="lab.db",
                 tag_only_columns=True,
             )
 

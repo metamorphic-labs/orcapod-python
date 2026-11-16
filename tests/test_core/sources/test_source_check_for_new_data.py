@@ -446,7 +446,9 @@ def test_db_table_source_reads_again_through_its_connector() -> None:
         pk_column="k",
     )
     connector.upsert_records("t", _rows([0, 1, 2]), id_column="k")
-    source = DBTableSource(connector, "t", record_id_columns="k", tag_only_columns=True)
+    source = DBTableSource(
+        connector, "t", record_id_columns="k", source_id="lab.db", tag_only_columns=True
+    )
     connector.upsert_records("t", _rows([3]), id_column="k")
     # A DBTableSource reads through the connector it was given, which is still open.
     assert source.check_for_new_data() is True
@@ -767,7 +769,9 @@ def _connector_without_column_info(x: list[int | None]) -> MagicMock:
 
 def test_db_table_source_inferred_nullability_keeps_a_column_nullable() -> None:
     connector = _connector_without_column_info([None, 10])
-    source = DBTableSource(connector, "t", record_id_columns="k", tag_only_columns=True)
+    source = DBTableSource(
+        connector, "t", record_id_columns="k", source_id="lab.db", tag_only_columns=True
+    )
     before = source.output_schema()
     filled = _connector_without_column_info([0, 10])
     connector.iter_batches.side_effect = filled.iter_batches.side_effect
