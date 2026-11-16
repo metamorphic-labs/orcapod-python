@@ -516,7 +516,7 @@ src/orcapod/
 │       ├── batch.py            # Batch (group rows by count, types become list[T])
 │       ├── group_by.py         # GroupBy (many→one reduction keyed on tag values)
 │       ├── column_selection.py # Select/Drop Tag/Data columns; SelectColumns/DropColumns (tag or data)
-│       ├── mappers.py          # MapTags, MapData (rename columns)
+│       ├── mappers.py          # MapTags, MapData, MapColumns (rename columns; strict by default)
 │       ├── filters.py          # PolarsFilter
 │       └── drop_nulls.py       # DropNulls (drop rows with a null in named or all columns, T | None → T)
 ├── hashing/
@@ -649,7 +649,7 @@ raw `ArrowTableStream`'s `__` columns and for the meta a cached pod's or functio
 carry. The rule is in one place, `core/operators/meta_columns.py` (sync results through the
 operator base classes, async rows through `WithoutMetaWriter`). A carry-forward mode is ITL-867.
 The meta prefix (`__`) is reserved: `ArrowTableStream` and the source builder refuse a tag named
-with it, and `MapTags` / `MapData` (targets) and `Pick` / `Index` (`out`) refuse it as a new name
+with it, and `MapTags` / `MapData` / `MapColumns` (targets) and `Pick` / `Index` (`out`) refuse it as a new name
 (`schema_utils.require_names_not_meta`, at construction).
 
 **Operator or derived source?** (developer, November 11, 2026) The test is: does any data

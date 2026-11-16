@@ -210,8 +210,10 @@ print(renamed.keys())
 # (('subject_id',), ('sex', 'age', 'genotype'))
 ```
 
-Columns you do not rename are kept. Pass `drop_unmapped=True` to keep only the renamed
-ones:
+Columns you do not rename are kept. A name that is not a column of that kind is refused: a
+`map_data` of a tag column raises `InputValidationError` and says to use `map_tags`.
+`map_columns` renames tag and data columns in one call. Pass `drop_unmapped=True` to keep only
+the renamed ones:
 
 ```python
 print(subjects.map_data({"age_weeks": "age"}, drop_unmapped=True).keys())

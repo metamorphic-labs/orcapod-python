@@ -306,29 +306,94 @@ class StreamBase(TraceableBase):
         self,
         name_map: Mapping[str, str],
         drop_unmapped: bool = False,
+        *,
+        strict: bool = True,
         label: str | None = None,
     ) -> StreamBase:
-        """
-        Maps the tags in this stream according to the provided name_map.
-        Tags not in the name_map are kept unless drop_unmapped is True.
+        """Rename tag columns. See ``orcapod.core.operators.MapTags``.
+
+        Args:
+            name_map: Each tag column to rename, mapped to its new name.
+            drop_unmapped: When ``True``, the tags not in ``name_map`` are dropped.
+            strict: When ``True`` (the default), a key of ``name_map`` that is not
+                a tag column raises ``InputValidationError``; when ``False`` it is
+                ignored.
+            label: Optional node label for the pipeline graph.
+
+        Returns:
+            The stream with the tag columns renamed.
+
+        Raises:
+            InputValidationError: When a ``strict`` name is not a tag column, or a
+                new name collides with an existing column.
         """
         from orcapod.core.operators import MapTags
 
-        return MapTags(name_map, drop_unmapped)(self, label=label)
+        return MapTags(name_map, drop_unmapped, strict=strict)(self, label=label)
 
     def map_data(
         self,
         name_map: Mapping[str, str],
         drop_unmapped: bool = False,
+        *,
+        strict: bool = True,
         label: str | None = None,
     ) -> StreamBase:
-        """
-        Maps the data in this stream according to the provided data_map.
-        Data columns not in the name_map are kept unless drop_unmapped is True.
+        """Rename data columns. See ``orcapod.core.operators.MapData``.
+
+        Args:
+            name_map: Each data column to rename, mapped to its new name.
+            drop_unmapped: When ``True``, the data columns not in ``name_map``
+                are dropped.
+            strict: When ``True`` (the default), a key of ``name_map`` that is not
+                a data column raises ``InputValidationError``; when ``False`` it is
+                ignored.
+            label: Optional node label for the pipeline graph.
+
+        Returns:
+            The stream with the data columns renamed.
+
+        Raises:
+            InputValidationError: When a ``strict`` name is not a data column, a
+                new name collides with an existing column, or no data column
+                would remain.
         """
         from orcapod.core.operators import MapData
 
-        return MapData(name_map, drop_unmapped)(self, label=label)
+        return MapData(name_map, drop_unmapped, strict=strict)(self, label=label)
+
+    def map_columns(
+        self,
+        name_map: Mapping[str, str],
+        drop_unmapped: bool = False,
+        *,
+        strict: bool = True,
+        label: str | None = None,
+    ) -> StreamBase:
+        """Rename columns, tag or data, in one step.
+
+        A renamed tag stays a tag and a renamed data column stays data. See
+        ``orcapod.core.operators.MapColumns``.
+
+        Args:
+            name_map: Each column to rename, tag or data, mapped to its new name.
+            drop_unmapped: When ``True``, every tag and data column not in
+                ``name_map`` is dropped; system tags are kept.
+            strict: When ``True`` (the default), a key of ``name_map`` that is
+                neither a tag nor a data column raises ``InputValidationError``;
+                when ``False`` it is ignored.
+            label: Optional node label for the pipeline graph.
+
+        Returns:
+            The stream with the columns renamed.
+
+        Raises:
+            InputValidationError: When a ``strict`` name is missing, a new name
+                collides with another column, or no data column would remain.
+        """
+        from orcapod.core.operators import MapColumns
+
+        return MapColumns(name_map, drop_unmapped, strict=strict)(self, label=label)
 
     def batch(
         self,

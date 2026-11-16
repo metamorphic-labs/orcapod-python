@@ -350,11 +350,14 @@ class StreamWithOperationsProtocol(StreamProtocol, Protocol):
         self,
         name_map: Mapping[str, str],
         drop_unmapped: bool = False,
+        *,
+        strict: bool = True,
         label: str | None = None,
     ) -> "StreamProtocol":
         """
         Map tag names in this stream to new names based on the provided mapping.
-        Tags not in the mapping are kept unless ``drop_unmapped`` is True.
+        Tags not in the mapping are kept unless ``drop_unmapped`` is True. With
+        ``strict`` (the default), a name that is not a tag column is refused.
         """
         ...
 
@@ -362,11 +365,30 @@ class StreamWithOperationsProtocol(StreamProtocol, Protocol):
         self,
         name_map: Mapping[str, str],
         drop_unmapped: bool = False,
+        *,
+        strict: bool = True,
         label: str | None = None,
     ) -> "StreamProtocol":
         """
         Map data names in this stream to new names based on the provided mapping.
         Data columns not in the mapping are kept unless ``drop_unmapped`` is True.
+        With ``strict`` (the default), a name that is not a data column is refused.
+        """
+        ...
+
+    def map_columns(
+        self,
+        name_map: Mapping[str, str],
+        drop_unmapped: bool = False,
+        *,
+        strict: bool = True,
+        label: str | None = None,
+    ) -> "StreamProtocol":
+        """Rename columns, tag or data, in one step; a tag stays a tag.
+
+        Columns not in the mapping are kept unless ``drop_unmapped`` is True. With
+        ``strict`` (the default), a name that is neither a tag nor a data column
+        is refused.
         """
         ...
 
