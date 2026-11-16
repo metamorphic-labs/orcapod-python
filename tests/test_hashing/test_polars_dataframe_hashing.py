@@ -117,7 +117,7 @@ class TestEqualFramesHashEqual:
     def test_value_read_back_from_a_database_hashes_the_same(
         self, tmp_path: Path
     ) -> None:
-        """A frame read back from a Delta store hashes like the original."""
+        """A frame read back from a Delta database hashes like the original."""
         expected = pl.DataFrame(
             {
                 "e": pl.Series(["a", None], dtype=pl.Enum(["b", "a"])),
@@ -131,7 +131,7 @@ class TestEqualFramesHashEqual:
             """Return the first ``n`` rows of the expected frame."""
             return expected.head(n)
 
-        job = PipelineJob(name="h", store=DeltaTableDatabase(tmp_path / "store"))
+        job = PipelineJob(name="h", database=DeltaTableDatabase(tmp_path / "store"))
         with job:
             make.pod(
                 DictSource(

@@ -33,6 +33,9 @@ class PolarsFilter(UnaryOperator):
     # Referential tags (ITL-1023): handled.
     REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = None
 
+    # A filter chooses rows and never changes a column (ITL-912).
+    OUTPUT_SCHEMA_IS_INPUT_SCHEMA = True
+
     def __init__(
         self,
         predicates: Collection[

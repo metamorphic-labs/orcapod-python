@@ -3,7 +3,7 @@
 A job node stamps its modified time when its run completes, after it has read all its inputs
 and before it tells its downstream nodes it is done. So after ``job.run()``, sync or async,
 every node is at least as new as its upstreams: ``head()`` shows the rows ``as_table()`` and
-``iter_data()`` return, and none of them reads the store again.
+``iter_data()`` return, and none of them reads the database again.
 
 The job: source ``A`` (tags ``id``, ``g``; data ``w``, ``x``; rows not in tag order) feeds the
 function pod ``scaled``, which takes only ``x``, so calling it adds an automatic
@@ -34,7 +34,7 @@ from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.job import PipelineJob
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
-from orcapod.streams import HeadStatus
+from orcapod.streams import ViewStatus
 from orcapod.types import CacheMode
 
 # The input order of A's rows (not in tag order), and the order the async rows complete
@@ -47,7 +47,7 @@ ORCHESTRATORS = {
     "async": AsyncPipelineOrchestrator,
 }
 
-# The read methods of the store protocol: a read after a run is counted through them.
+# The read methods of the database protocol: a read after a run is counted through them.
 STORE_READS = (
     "get_all_records",
     "get_records_with_column_value",
@@ -138,14 +138,14 @@ def _table(columns: dict[str, list[int]]) -> pa.Table:
 
 
 def _store(kind: str, tmp_path: Path) -> ArrowDatabaseProtocol:
-    """A fresh store of the given kind."""
+    """A fresh database of the given kind."""
     if kind == "in_memory":
         return InMemoryArrowDatabase()
     return DeltaTableDatabase(base_path=tmp_path / "store")
 
 
 def _job(store: ArrowDatabaseProtocol) -> PipelineJob:
-    """The job of the module docstring, ``joined`` cached in the store (LOG)."""
+    """The job of the module docstring, ``joined`` cached in the database (LOG)."""
     a = ArrowTableSource(
         _table(
             {
@@ -168,7 +168,7 @@ def _job(store: ArrowDatabaseProtocol) -> PipelineJob:
         label="B",
         tag_only_columns=True,
     )
-    job = PipelineJob(name="itl1042", store=store)
+    job = PipelineJob(name="itl1042", database=store)
     with job:
         scaled = scale.pod(a, label="scaled")
         Join()(scaled, b, label="joined")
@@ -260,7 +260,7 @@ def test_heads_show_the_rows_after_the_function_node_is_read(
     for label, node in _computed_nodes(job).items():
         head = node.head(100)
         table = node.as_table()
-        assert head.status is HeadStatus.ROWS, (label, head.header())
+        assert head.status is ViewStatus.ROWS, (label, head.header())
         assert head.table.num_rows == table.num_rows == len(list(node.iter_data()))
         assert head.table.equals(table), label
         assert not node.is_stale, label
@@ -301,7 +301,7 @@ def test_a_second_run_leaves_no_node_stale(
     assert CALLS == []
     for label, node in _computed_nodes(job).items():
         assert not node.is_stale, label
-        assert node.head(100).status is HeadStatus.ROWS, label
+        assert node.head(100).status is ViewStatus.ROWS, label
 
 
 @pytest.mark.parametrize("with_store", [False, True], ids=["no_store", "store"])
@@ -309,7 +309,7 @@ def test_a_function_node_is_stamped_before_its_output_closes(with_store: bool) -
     """A reader that sees the node's output close sees the node already stamped.
 
     A downstream node stamps itself after it has seen that close, so it is then newer than
-    the function node. Without a store the pod closes the writer it is given; the node must
+    the function node. Without a database the pod closes the writer it is given; the node must
     still stamp first.
     """
     source = ArrowTableSource(
@@ -328,8 +328,8 @@ def test_a_function_node_is_stamped_before_its_output_closes(with_store: bool) -
         pipeline_database=store,
         result_database=store,
     )
-    constructed = node.last_modified
-    assert constructed is not None
+    # A node that has not run holds nothing and has no modified time (ITL-1095).
+    assert node.last_modified is None
     seen_at_close: list[Any] = []
 
     async def run() -> None:
@@ -356,4 +356,4 @@ def test_a_function_node_is_stamped_before_its_output_closes(with_store: bool) -
 
     asyncio.run(run())
     (stamp,) = seen_at_close
-    assert stamp is not None and stamp > constructed
+    assert stamp is not None

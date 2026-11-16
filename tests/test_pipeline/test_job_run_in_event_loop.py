@@ -57,7 +57,7 @@ def double(x: int) -> int:
 def make_job(store: Any) -> PipelineJob:
     """A source of five rows feeding ``double``, recorded in a fresh job."""
     rows = [{"k": f"r{i}", "x": i} for i in range(5)]
-    job = PipelineJob(name="loop_demo", store=store)
+    job = PipelineJob(name="loop_demo", database=store)
     with job:
         source = DictSource(
             data=rows, tag_columns=["k"], tag_only_columns=True, source_id="rows"
@@ -114,7 +114,7 @@ def test_rerun_inside_running_loop_reuses_stored_rows(tmp_path: Path) -> None:
 
 def test_store_error_inside_running_loop_reaches_the_caller(tmp_path: Path) -> None:
     """A failure inside the run reaches the cell with its own type, not wrapped."""
-    from orcapod.errors import StoreWriteError
+    from orcapod.errors import OrcapodDatabaseWriteError
 
     class FailingWrites:
         """A store whose every write fails."""
@@ -140,7 +140,7 @@ def test_store_error_inside_running_loop_reaches_the_caller(tmp_path: Path) -> N
             return getattr(self._inner, name)
 
     job = make_job(FailingWrites(InMemoryArrowDatabase()))
-    with pytest.raises(StoreWriteError):
+    with pytest.raises(OrcapodDatabaseWriteError):
         run_inside_running_loop(job)
 
 
@@ -205,7 +205,7 @@ def test_interrupt_while_running_inside_a_loop_stops_the_run() -> None:
     """The notebook's interrupt button stops the run; nothing keeps running after it."""
     slow_calls.clear()
     rows = [{"k": f"r{i:02d}", "x": i} for i in range(N_SLOW_ROWS)]
-    job = PipelineJob(name="interrupt_demo", store=InMemoryArrowDatabase())
+    job = PipelineJob(name="interrupt_demo", database=InMemoryArrowDatabase())
     with job:
         source = DictSource(
             data=rows, tag_columns=["k"], tag_only_columns=True, source_id="rows"
@@ -287,7 +287,7 @@ def after_stuck(y: int) -> int:
 def make_stuck_job(store: Any) -> PipelineJob:
     """Six rows through ``stuck_on_first_row`` and then ``after_stuck``."""
     rows = [{"k": f"r{i}", "x": i} for i in range(6)]
-    job = PipelineJob(name="stuck_demo", store=store)
+    job = PipelineJob(name="stuck_demo", database=store)
     with job:
         source = DictSource(
             data=rows, tag_columns=["k"], tag_only_columns=True, source_id="rows"
@@ -315,7 +315,7 @@ def test_second_interrupt_returns_and_a_late_function_writes_nothing(
     The first interrupt cancels the run, which then waits for row 0's function, still
     running on a thread where it cannot be interrupted. The second interrupt returns
     control with a warning naming the node. When the function returns afterwards, no
-    store write happens and no row reaches the next node, and row 0's result is never
+    database write happens and no row reaches the next node, and row 0's result is never
     stored: a later run computes it.
     """
     stuck_release.clear()
@@ -343,7 +343,7 @@ def test_second_interrupt_returns_and_a_late_function_writes_nothing(
     messages = [str(w.message) for w in caught if w.category is RuntimeWarning]
     assert len(messages) == 1, messages
     assert "but a function in node 'stuck' has not returned yet" in messages[0]
-    assert "Nothing more will be written to the store" in messages[0]
+    assert "Nothing more will be written to the database" in messages[0]
     assert "restart the kernel" in messages[0]
     assert bridge_threads(), "control returned before the stuck function did"
 
@@ -358,7 +358,7 @@ def test_second_interrupt_returns_and_a_late_function_writes_nothing(
     assert writes == writes_when_returned
     assert after_calls == rows_after_when_returned
 
-    # Row 0's result was never stored: a later run on the same store computes it.
+    # Row 0's result was never stored: a later run on the same database computes it.
     inner.flush()
     stuck_calls.clear()
     press_interrupt.clear()
@@ -401,7 +401,7 @@ def test_second_interrupt_names_an_async_function_blocking_the_loop(
         async_stuck_on_first_row
     )
     rows = [{"k": f"r{i}", "x": i} for i in range(6)]
-    job = PipelineJob(name="async_stuck_demo", store=InMemoryArrowDatabase())
+    job = PipelineJob(name="async_stuck_demo", database=InMemoryArrowDatabase())
     with job:
         source = DictSource(
             data=rows, tag_columns=["k"], tag_only_columns=True, source_id="rows"
@@ -458,7 +458,7 @@ def test_tasks_left_pending_by_a_pod_are_cancelled_and_cleaned_up() -> None:
     """Inside a running loop, as with ``asyncio.run``, leftover tasks get their cleanup."""
     pod_task_cleanup.clear()
     rows = [{"k": f"r{i}", "x": i} for i in range(3)]
-    job = PipelineJob(name="leftover_demo", store=InMemoryArrowDatabase())
+    job = PipelineJob(name="leftover_demo", database=InMemoryArrowDatabase())
     with job:
         source = DictSource(
             data=rows, tag_columns=["k"], tag_only_columns=True, source_id="rows"

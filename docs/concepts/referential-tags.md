@@ -59,7 +59,7 @@ print(scaled.keys())
 
 Calling the pod, `pod(stream)`, lets the input's referential tags **fall through**: each
 output row has the function's outputs and the row's own referenced columns, so the tags
-stay referential. The function, its result identity and the store of its results are
+stay referential. The function, its result identity and the database of its results are
 those of the plain pod; only the referenced columns fall through, other input data
 columns do not. `pod.process(stream)` is the exact form: there the output data is the
 function's outputs only, and every tag of the output is plain, with the value it had.

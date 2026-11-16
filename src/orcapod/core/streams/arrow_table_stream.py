@@ -8,15 +8,16 @@ from typing import TYPE_CHECKING, Any
 from orcapod import contexts
 from orcapod.core.datagrams import Data, Tag
 from orcapod.core.streams.base import (
+    ZERO_ROW_INPUT_COLUMNS,
     StreamBase,
     check_head_size,
 )
-from orcapod.core.streams.head import StreamHead
+from orcapod.core.streams.view import StreamView
 from orcapod.protocols.core_protocols import PodProtocol, StreamProtocol, TagProtocol
 from orcapod.protocols.hashing_protocols import PipelineElementProtocol
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema, SourceInfoValue
-from orcapod.utils import arrow_utils
+from orcapod.utils import arrow_utils, schema_utils
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -38,7 +39,18 @@ class ArrowTableStream(StreamBase):
     This is useful for ensuring that the data in the stream remains consistent and unchanging.
 
     The types of the tag and data columns are inferred from the PyArrow Table schema.
+
+    Every column takes the large variant of its Arrow type (developer, November 14,
+    2026, ITL-1122): ``string`` is ``large_string``, ``binary`` is ``large_binary``,
+    ``list`` is ``large_list``, recursively. This is the one place a table becomes a
+    stream, so every source (each builds its stream here, from a user's Arrow table
+    too) and every operator result presents large types. Width, nullability, field
+    metadata and logical types are kept; large and non-large variants hash identically.
     """
+
+    # The table's rows are held, not computed: a run() view says "all N rows", as
+    # head() does.
+    _RUN_ORIGIN: str = "held"
 
     def __init__(
         self,
@@ -74,6 +86,9 @@ class ArrowTableStream(StreamBase):
         self._producer = producer
         self._upstreams = upstreams
 
+        # Every table Orcapod presents is in its large variants (ITL-1122).
+        table = arrow_utils.normalize_table_to_large_types(table, keep_null=True)
+
         data_table, data_context_table = arrow_utils.split_by_column_groups(
             table, [constants.CONTEXT_KEY]
         )
@@ -99,6 +114,8 @@ class ArrowTableStream(StreamBase):
 
         prefix_info = {constants.SOURCE_PREFIX: source_info}
 
+        # A tag never has a meta column's name (ITL-1080).
+        schema_utils.require_names_not_meta(tag_columns)
         # determine tag columns first and then exclude any source info
         self._tag_columns = tuple(c for c in tag_columns if c in table.column_names)
         self._system_tag_columns = tuple(
@@ -289,7 +306,7 @@ class ArrowTableStream(StreamBase):
         *,
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
-    ) -> StreamHead:
+    ) -> StreamView:
         """Return the first ``n`` rows of the table this stream holds.
 
         Without sorting only those rows are assembled: content hashes, when asked for,
@@ -304,12 +321,16 @@ class ArrowTableStream(StreamBase):
             table = self._assemble_table(config, limit=None).slice(0, n)
         else:
             table = self._assemble_table(config, limit=n)
-        return StreamHead.of_rows(
+        return StreamView.of_rows(
             self,
             table,
             tag_columns=self.keys(columns=config)[0],
             total_rows=self._table.num_rows,
         )
+
+    def _typed_zero_row_table(self) -> "pa.Table":
+        """This stream's table cut to no rows: its own Arrow types, no row assembled."""
+        return self._assemble_table(ZERO_ROW_INPUT_COLUMNS, limit=0)
 
     def _assemble_table(
         self, columns_config: ColumnConfig, limit: int | None

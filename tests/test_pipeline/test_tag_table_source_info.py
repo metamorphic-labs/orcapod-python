@@ -11,7 +11,7 @@ handing it to the next node, and that step used to stamp row 0's source-info tok
 on every row, so every tag table written through a sync ``PipelineJob`` attributed
 all inputs to the first one.
 
-The later tests pin what happens to a store written before the fix: nothing is
+The later tests pin what happens to a database written before the fix: nothing is
 rewritten or recomputed (the tag rows are cache hits and keep their old source-info
 tokens), and dropping only the tag tables while keeping the result tables refills
 them with correct source-info tokens without running any function again. Correcting
@@ -99,7 +99,7 @@ def _pod(function: Callable[..., int], output_key: str) -> FunctionPod:
 def _job(store: ArrowDatabaseProtocol) -> PipelineJob:
     """source -> add_xy ("direct") -> times_two ("second"); source -> Select -> add_one."""
     src = _source()
-    job = PipelineJob(name=_JOB, store=store)
+    job = PipelineJob(name=_JOB, database=store)
     with job:
         z = _pod(add_xy, "z")(src, label="direct")
         _ = _pod(times_two, "w")(z, label="second")
@@ -242,7 +242,7 @@ class TestDropOnlyTagTables:
     def _pre_fix_store(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> tuple[DeltaTableDatabase, dict[str, list[dict[str, Any]]]]:
-        """Write a Delta store the pre-fix way and read its tag tables back."""
+        """Write a Delta database the pre-fix way and read its tag tables back."""
         store = DeltaTableDatabase(tmp_path)
         with monkeypatch.context() as patch:
             _broadcast_row_zero(patch)

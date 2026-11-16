@@ -48,6 +48,17 @@ Data with no rows has no columns to read, so `DictSource(data=[], ...)` raises
 `ValueError: Table is empty`. To build a source with no rows, pass `data_schema=` so the
 columns are known.
 
+### Arrow types of a source
+
+Every source gives the large variants of string, binary and list types (`large_string`,
+`large_binary`, `large_list`, recursively), whatever its input: an Arrow table of your own
+(`ArrowTableSource`), an Arrow schema you pass (`schema=` or `data_schema=`), Python values,
+a data frame, a CSV file or a database table. A `string` column you give comes back as
+`large_string`. Only the layout changes: names, nullability, widths (`int8` stays `int8`) and
+logical types are kept, and the two variants hash identically, so no hash depends on which
+one you gave. The Arrow `list_view` and `large_list_view` types are not supported: a source
+refuses a column of either type.
+
 ### SpiralDB tables
 
 `SpiralDBTableSource` exposes a table in a [SpiralDB](https://spiraldb.com) project as a
@@ -137,8 +148,10 @@ print(first.row_count_estimate)  # rows in the whole table, without reading any
 
 - `limit=n` reads the first `n` rows in key order.
 - `where={column: value, ...}` reads the rows in which every named column equals its value.
-- `asof=` reads the table as of an earlier version. Without it, a source reads the version
-  the table had when the source was built, in every read.
+- `asof=` reads the table as of an earlier version, and keeps reading it. Without it, a
+  source reads the version the table had when the source was built, in every read, until a
+  run finds a newer one (see [What a source does at a run](#what-a-source-does-at-a-run)):
+  `head()`, `as_table()` and the preview outside a run never move it.
 
 **The row cap.** One read returns at most `max_rows` rows (default 100,000). A read that
 would return more raises `SourceTooLargeError`, which gives the row count and the ways out:
@@ -167,16 +180,16 @@ names them. To see more rows, use `as_df()` with a `limit=` or `where=` source.
 **Restrictions are not part of identity.** `where`, `limit` and `asof` choose rows of the
 same table, so two sources on one table have the same `source_id` and `content_hash`
 whatever their restrictions, and a row's result is computed once and shared. One
-consequence: with a shared store, reading a job's node back (`get_all_records()`, a loaded
-job, and `as_table()` after an async run) returns every row that any job with the same
+consequence: with a shared store, reading a job node's stored records back
+(`get_all_records()`, `node.as_source()`) returns every row that any job with the same
 pipeline has read from that table, not only the rows of the latest restriction. The rows
 sent downstream during a run are only the rows that run read.
 
-**Running again.** A second run scans the table again and computes nothing for the rows it
-has already seen. A source object keeps reading the version its table had when it was
-built, so rows added to the Spiral table afterwards are seen only by a new source: build
-the source (and the job around it) again, and the added rows are new keys, the only rows
-computed.
+**Running again.** A run first checks the source: when the table has a newer version (rows
+added since the source was built or last checked), the source reads that version from then
+on, and the job's nodes below it run. The added rows are new keys, the only rows computed;
+the rows already seen are reused. With nothing added, a second run computes nothing. A
+source given `asof=` keeps its version: build a new source to read a later one.
 
 **Key columns as data.** A function pod never receives a tag, and in a time-series table the
 time is part of the key, so it is a tag. `tags_as_data` also offers named key columns as data
@@ -331,7 +344,10 @@ source, or a node of a job. It has two uses.
 [`PipelineJob`](function-pods.md#pipelinejob-database-backed-cached-execution) that has run
 and presents them as a new source. You get one by calling `as_source()` on the node, for
 example `job.nodes["bmi"].as_source()`. This is useful for chaining pipeline stages: run a
-job, then use one of its outputs as the input of a new pipeline.
+job, then use one of its outputs as the input of a new pipeline. The `as_source()` of a node
+downstream of a join cannot yet be bound as a source of a new `PipelineJob`: its rows carry
+the system tags of every joined source, and binding refuses it with `SourceSpecMismatchError`
+(support is planned, ITL-1127).
 
 **Using a tag value as an input to a computation.** Tags identify a row and data is what a
 function computes on, so a function pod never receives a tag. Sometimes one value is needed
@@ -415,6 +431,77 @@ print(with_start.source_id)
 Only a source can do this. An operator rearranges rows and columns, and every data value it
 emits was already a data value of its input; turning a tag value into a data value creates
 new data, which is what a source is for.
+
+## What a source does at a run
+
+A job node that has run holds its rows until it is stale, and staleness comes from modified
+times only (see [Running one node](function-pods.md)). So every run (`job.run()`,
+`run_async()`, a job node's `run()`, a load-only run too) first asks each source feeding it,
+once, whether its data changed: `source.check_for_new_data()` (developer, November 14, 2026,
+ITL-1102). A source that finds new data takes it in and moves its modified time to that
+moment, so every node below it runs; a source that finds nothing changes nothing, so a job
+whose sources are unchanged computes nothing. `head()` and the notebook preview never check,
+and neither does a source's own `run()` outside a job (`source.run()` does what
+`source.as_table()` does); call `source.check_for_new_data()` to check a source by hand.
+
+| Source | What the check does |
+|---|---|
+| `ArrowTableSource`, `DictSource`, `ListSource`, `DataFrameSource` | nothing: data held in memory cannot change; build a new source and bind it to run on new data |
+| `PollingSource` | polls once (and fetches when the poll reports new data); its modified time moves only when the fetch returned rows, to the moment it found them (a cursor's `modified_at` is informational) |
+| `DeltaTableSource` | reads the Delta log only; when the table's version moved, reads the table again and, if its rows changed (row order counts only without a `record_id_column`, see below; a version that only compacted files changes nothing), holds the new rows |
+| `SpiralDBTableSource` | holds no rows (every read scans the pinned version); reads the table's current version (metadata only: no row, and `max_rows` does not apply) and pins it when it is newer, so the next read returns the new rows; an `asof` you gave never moves; record ids are the hash of the key, so only new or changed rows are new entries (a version that moves without a change, if SpiralDB moves it on compaction, re-runs the nodes below and reuses every stored result) |
+| `CSVSource` | reads the file's modification time and size; when either changed, reads the file again and holds the new rows if they changed (row order counts only without a `record_id_column`) |
+| `SQLiteTableSource`, `PostgreSQLTableSource`, `DBTableSource` | reads the whole table again and holds the new rows if they changed (with a `record_id_column` in any order, so an unordered `SELECT` is not a change) |
+| `CachedSource` | checks the source it wraps; when that source's modified time moved since the cache last took in its rows (also when another source over it made the check), compares the rows' record hashes with the rows it presents (before its first read, with the cache: a read; nothing is written) and moves only when it will present new rows, (a row removed from the wrapped source stays cached); the check guarantees nothing for two cached sources that share one cache (the same `cache_path` or table): give each its own cache (ITL-1143) |
+| `DerivedSource` | over a source, checks it; reads the origin's rows again when the origin's modified time moved since this source read them (a source that took in new data, a job node that ran again); holds the new rows if they changed; one that holds no rows (over a job node that had not run) moves when its origin's time moves |
+| `SourceProxy` | checks the source bound to it; its modified time follows that source's, and binding or unbinding moves it |
+
+Rows read again are compared with the rows read before, as read from the table or file
+(every column, a `system_tag_columns` column too), value by value, with a
+NaN equal to a NaN (and -0.0 equal to 0.0), so a table holding a NaN is not a change at every
+check. A check that raises part way changes nothing, so the next run checks again.
+
+Row order follows the source's record id rule (developer, November 14, 2026). Without a
+`record_id_column` a row's record id is its position: a change of row order is a change, so
+the source takes the rows in their new order and every row gets the id of its new position
+at once (the nodes below run again and reuse every stored function result, because results
+are stored by the hash of the row's data). With a `record_id_column`, only content counts:
+the same rows in another order are no change. A source that cannot tell which rule applies
+counts order. The model is deliberately simple; a fuller design is ITL-1103 / ITL-1104.
+
+A database table has no cheap and exact sign of a change, so each check of a SQLite or
+PostgreSQL source reads the whole table, one full read per run, as building the source did.
+For a large table, build the source over a narrower table or view, or keep the data in a
+store that records versions: a Delta check whose version did not move reads only the Delta
+log (one whose version moved reads the table again, as above), and a SpiralDB check reads
+only the table's metadata.
+
+A table or file whose columns changed (a CSV file's types are inferred again on each read,
+so a null in a column that had none is a change of type), a table that is gone or empty, or a
+SpiralDB table dropped and created again, fails the check: the source's schema and table are
+part of its identity, so build a new source to read it. A column that loses its nulls keeps
+its nullable type (where nullability is inferred from the rows: a CSV file read without
+`schema=`, a database whose connector gives no column information), so it is not a
+change of columns.
+
+A check that raises does not fail the run. The run issues one `SourceCheckFailedWarning` per
+source, naming the source and the error; the source keeps its data and modified time; the
+run proceeds with the data the source already holds, and its `RunSummary` lists the source
+in `unchecked_sources` ("sources not checked for new data (see the warning): ..."). A job
+node's `run()` that then runs nothing (the node holds a current run) makes no summary and
+keeps its `last_run`: the warning is the report. A later failure to read the source raises
+as it always has. A `PollingSource` reads by polling: a run that has to read it (a node
+below it runs) polls it again, and a poll that fails again raises, as it did before the
+check existed; a run whose nodes are all current proceeds. Reading a polling source's held
+rows after a failed check is ITL-1139.
+
+A source that takes in new data keeps its record id rule. Without `record_id_column`, a
+row's record id comes from its position, so a row that moves (a reorder, rows inserted
+before it, or a polling source's batches, each numbered from `row_0`) gets
+another id and is recorded as a new entry; its function result is still reused, because
+results are stored by the hash of the row's data. Give a source that will take in new data
+a `record_id_column` that is unique per row (ITL-1104). Further revisions of what each kind
+checks are collected in ITL-1103.
 
 ## How sources add provenance columns
 

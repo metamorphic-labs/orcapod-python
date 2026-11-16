@@ -9,10 +9,14 @@ from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
 from orcapod.core.datagrams import Datagram
-from orcapod.core.function_pod import FunctionPodStream, WrappedFunctionPod
-from orcapod.core.streams.head import StreamHead
+from orcapod.core.function_pod import (
+    FunctionPodStream,
+    WrappedFunctionPod,
+    function_zero_row_table,
+)
+from orcapod.core.streams.view import StreamView
 from orcapod.system_constants import constants
-from orcapod.types import ColumnConfig
+from orcapod.types import ColumnConfig, Schema
 from orcapod.contexts.stored import StaleTables
 from orcapod.core.result_cache import ResultCache
 from orcapod.hooks import InvocationStatus
@@ -74,7 +78,7 @@ class CachedFunctionPod(WrappedFunctionPod):
 
     @property
     def record_path(self) -> tuple[str, ...]:
-        """Return the path to the cached records in the result store (versioned)."""
+        """Return the path to the cached records in the result database (versioned)."""
         return self._cache.record_path
 
     def stale_result_tables(self, include_current: bool = True) -> StaleTables:
@@ -398,7 +402,7 @@ class CachedFunctionPod(WrappedFunctionPod):
     def get_all_cached_outputs(
         self, include_system_columns: bool = False
     ) -> "pa.Table | None":
-        """Return all cached records from the result store for this pod."""
+        """Return all cached records from the result database for this pod."""
         return self._cache.get_all_records(
             self.data_context_key,
             include_system_columns=include_system_columns,
@@ -458,6 +462,15 @@ class _CachedFunctionPodStream(FunctionPodStream):
         for tag, data in super().iter_data():
             yield tag, _without_stored_meta(data)
 
+    def _zero_row_output_table(self) -> pa.Table | None:
+        """The table of this stream's rows with no row, ``__computed`` included."""
+        return function_zero_row_table(
+            self._input_stream,
+            self.output_schema()[1],
+            self.data_context,
+            Schema({CachedFunctionPod.RESULT_COMPUTED_FLAG: bool}),
+        )
+
     def _computed_prefix(
         self, limit: int, contiguous: bool = True
     ) -> tuple[list[tuple[TagProtocol, DataProtocol]], int]:
@@ -470,10 +483,10 @@ class _CachedFunctionPodStream(FunctionPodStream):
         *,
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
-    ) -> StreamHead:
+    ) -> StreamView:
         """Return the first computed rows, with the columns ``as_table`` gives.
 
-        The pod's result store is not looked up: that needs the input rows' hashes,
+        The pod's result database is not looked up: that needs the input rows' hashes,
         i.e. reading the input. See ``FunctionPodStream.head``.
         """
         head = super().head(n, columns=columns, all_info=all_info)

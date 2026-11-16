@@ -648,7 +648,7 @@ PRE_FIX_RECORD_IDS = frozenset(
 
 
 class TestStoreWrittenBeforeFix:
-    """What a user sees when a store written by pre-fix ``main`` is re-run.
+    """What a user sees when a database written by pre-fix ``main`` is re-run.
 
     Operator-node tables written by ``main`` from c398e7d4 (ITL-539) up to the fix
     hold row 0's source-info tokens on every row. The fixed code gives the corrected
@@ -697,6 +697,7 @@ class TestStoreWrittenBeforeFix:
         )
 
         replay = self._node(db, CacheMode.REPLAY)
+        _ = replay.run()  # a node shows rows only after a run (ITL-1095)
         assert len(list(replay.iter_data())) == 5
 
     def test_v014_store_is_not_read(self, tmp_path: Path):
@@ -742,6 +743,7 @@ class TestStoreWrittenBeforeFix:
         tokens = _source_info_tokens(list(_pin_source().iter_data()))
         assert _stored_source(new) == tokens
         replay = self._node(db, CacheMode.REPLAY)
+        _ = replay.run()  # a node shows rows only after a run (ITL-1095)
         assert _source_info_tokens(list(replay.iter_data())) == tokens
 
 

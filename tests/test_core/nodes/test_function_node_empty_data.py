@@ -13,6 +13,7 @@ from orcapod.core.function_pod import FunctionPod
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.sources import ArrowTableSource
 from orcapod.databases import InMemoryArrowDatabase
+from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
 from orcapod.system_constants import constants
 from orcapod.types import NodeConfig
 from orcapod.errors import EphemeralResultMissingError
@@ -74,7 +75,7 @@ class TestAddPipelineRecordStoresInputHash:
 
 @pytest.fixture
 def ephemeral_node():
-    """FunctionJobNode with is_result_ephemeral=True and an ephemeral store."""
+    """FunctionJobNode with is_result_ephemeral=True and an ephemeral database."""
     table = pa.table(
         {
             "key": pa.array(["a"], type=pa.large_string()),
@@ -92,7 +93,7 @@ def ephemeral_node():
         result_database=None,
     )
     node.node_config = NodeConfig(is_result_ephemeral=True)
-    node.set_ephemeral_store(InMemoryArrowDatabase())
+    node.set_ephemeral_database(InMemoryArrowDatabase())
     return node
 
 
@@ -109,13 +110,13 @@ class TestFetchJoinedRecordsEmptyData:
         assert hasattr(result, "empty_taginfo_rows")
 
     def test_ephemeral_miss_produces_empty_data_token(self, ephemeral_node):
-        """When the ephemeral store is cleared, _fetch_joined_records emits EmptyData."""
+        """When the ephemeral database is cleared, _fetch_joined_records emits EmptyData."""
         node = ephemeral_node
         for tag, data in node._input_stream.iter_data():
             node.execute_data(tag, data)
 
-        # Simulate ephemeral result expiry by replacing the ephemeral store with empty one
-        node.set_ephemeral_store(InMemoryArrowDatabase())
+        # Simulate ephemeral result expiry by replacing the ephemeral database with empty one
+        node.set_ephemeral_database(InMemoryArrowDatabase())
 
         result = node._fetch_joined_records()
         assert result is not None
@@ -137,8 +138,8 @@ class TestFetchJoinedRecordsEmptyData:
         tag0, data0 = input_pairs[0]
         _, output0 = node.execute_data(tag0, data0)
 
-        # Clear ephemeral store
-        node.set_ephemeral_store(InMemoryArrowDatabase())
+        # Clear ephemeral database
+        node.set_ephemeral_database(InMemoryArrowDatabase())
 
         result = node._fetch_joined_records()
         assert result is not None
@@ -156,8 +157,8 @@ class TestLoadCachedEntriesEmptyData:
         for tag, data in node._input_stream.iter_data():
             node.execute_data(tag, data)
 
-        # Simulate expiry by replacing ephemeral store
-        node.set_ephemeral_store(InMemoryArrowDatabase())
+        # Simulate expiry by replacing ephemeral database
+        node.set_ephemeral_database(InMemoryArrowDatabase())
 
         loaded = node._load_cached_entries()
         assert len(loaded) == 1
@@ -178,11 +179,25 @@ class TestLoadCachedEntriesEmptyData:
             assert isinstance(data, Data)
 
 
+def _entries(node: FunctionJobNode) -> list[tuple[TagProtocol, DataProtocol]]:
+    """The node's entries for its input rows, as its cache façade returns them.
+
+    These tests drive ``execute_data`` (one row, not a run), so the node shows no rows
+    of a run (ITL-1095); ``get_cached_results`` gives the entries it holds or has
+    stored, an ``EmptyData`` placeholder for a result whose ephemeral database is gone.
+    """
+    entry_ids = [
+        node.compute_base_entry_id(tag, data)
+        for tag, data in node._input_stream.iter_data()
+    ]
+    return list(node.get_cached_results(entry_ids).values())
+
+
 class TestProcessDataInternalEmptyData:
     def test_cache_hit_returns_cached_result(self, ephemeral_node):
         """Downstream cache hit on EmptyData input returns the cached result."""
         node = ephemeral_node
-        # Step 1: Run upstream to populate ephemeral store and pipeline DB
+        # Step 1: Run upstream to populate ephemeral database and pipeline DB
         for tag, data in node._input_stream.iter_data():
             node.execute_data(tag, data)
 
@@ -209,15 +224,15 @@ class TestProcessDataInternalEmptyData:
         )
 
         # Step 3: Run downstream with real data to populate its result cache
-        for tag, data in node.iter_data():
+        for tag, data in _entries(node):
             downstream.execute_data(tag, data)
 
         # Step 4: Simulate upstream ephemeral expiry
-        node.set_ephemeral_store(InMemoryArrowDatabase())
+        node.set_ephemeral_database(InMemoryArrowDatabase())
         node._cached_output_datas.clear()
 
         # Step 5: Upstream now emits EmptyData
-        upstream_items = list(node.iter_data())
+        upstream_items = _entries(node)
         assert len(upstream_items) == 1
         tag_in, data_in = upstream_items[0]
         assert isinstance(data_in, EmptyData)
@@ -235,7 +250,7 @@ class TestProcessDataInternalEmptyData:
             node.execute_data(tag, data)
 
         # Simulate expiry
-        node.set_ephemeral_store(InMemoryArrowDatabase())
+        node.set_ephemeral_database(InMemoryArrowDatabase())
         node._cached_output_datas.clear()
 
         # Build a downstream node that has NEVER run before
@@ -260,7 +275,7 @@ class TestProcessDataInternalEmptyData:
             result_database=InMemoryArrowDatabase(),
         )
 
-        upstream_items = list(node.iter_data())
+        upstream_items = _entries(node)
         tag_in, data_in = upstream_items[0]
         assert isinstance(data_in, EmptyData)
 
@@ -287,7 +302,7 @@ class TestAsyncProcessDataInternalEmptyData:
         finds a match in ``_cached_function_pod.lookup_cached_data()``.
         """
         node = ephemeral_node
-        # Run upstream to populate ephemeral store and pipeline DB
+        # Run upstream to populate ephemeral database and pipeline DB
         for tag, data in node._input_stream.iter_data():
             node.execute_data(tag, data)
 
@@ -304,15 +319,15 @@ class TestAsyncProcessDataInternalEmptyData:
         )
 
         # Populate downstream result cache with real data (sync)
-        for tag, data in node.iter_data():
+        for tag, data in _entries(node):
             downstream.execute_data(tag, data)
 
         # Simulate ephemeral expiry
-        node.set_ephemeral_store(InMemoryArrowDatabase())
+        node.set_ephemeral_database(InMemoryArrowDatabase())
         node._cached_output_datas.clear()
 
         # Upstream now emits EmptyData
-        upstream_items = list(node.iter_data())
+        upstream_items = _entries(node)
         assert len(upstream_items) == 1
         tag_in, data_in = upstream_items[0]
         assert isinstance(data_in, EmptyData)
@@ -334,7 +349,7 @@ class TestAsyncProcessDataInternalEmptyData:
             node.execute_data(tag, data)
 
         # Simulate expiry
-        node.set_ephemeral_store(InMemoryArrowDatabase())
+        node.set_ephemeral_database(InMemoryArrowDatabase())
         node._cached_output_datas.clear()
 
         # Build downstream that has NEVER run — empty result cache
@@ -349,7 +364,7 @@ class TestAsyncProcessDataInternalEmptyData:
             result_database=InMemoryArrowDatabase(),
         )
 
-        upstream_items = list(node.iter_data())
+        upstream_items = _entries(node)
         tag_in, data_in = upstream_items[0]
         assert isinstance(data_in, EmptyData)
 

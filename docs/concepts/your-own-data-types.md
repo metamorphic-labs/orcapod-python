@@ -19,7 +19,7 @@ has two kinds of class, and you choose the kind where you define the class.
 | Reading stored values without the class | works: the class is rebuilt from stored metadata | `ImportError` |
 | What a pod is promised | the fields | the class itself, with its methods and validators |
 
-**Use `@op.dataclass`** for data you pass between pods, keep in a store and work on in
+**Use `@op.dataclass`** for data you pass between pods, keep in a database and work on in
 notebooks: records, measurements, parameters. It is the kind to use while a class is
 still being edited.
 
@@ -73,7 +73,7 @@ def run(point_class):
         {"k": "a", "p": point_class(x=3.0, y=4.0)},
         {"k": "b", "p": point_class(x=6.0, y=8.0)},
     ]
-    job = PipelineJob(name="points", store=db)
+    job = PipelineJob(name="points", database=db)
     with job:
         source = DictSource(data=rows, tag_columns=["k"], source_id="pts")
         norm.pod(source, label="norm")

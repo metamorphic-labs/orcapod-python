@@ -2,8 +2,9 @@
 
 Each case computes a flat ``{entry: value}`` map. ``compute_group`` prefixes each entry with
 its case name, so a golden file entry reads ``<case>.<entry>``. The values are pinned in
-``data/<group>.json`` by ``generate_golden_hashes.py`` and checked by
-``test_golden_hashes.py``.
+the golden folder of the current data context, ``data/<folder>/<group>-NN.json``, by
+``generate_golden_hashes.py`` and checked by ``test_golden_hashes.py`` (ITL-946; see
+``README.md``).
 
 DO NOT MOVE OR RENAME anything defined in this module. Function pods, dataclasses and
 pydantic models hash together with their defining module and qualified name, so moving them
@@ -36,6 +37,7 @@ import pandas as pd
 import pyarrow as pa
 import pydantic
 
+import orcapod as op
 from orcapod import dataclass as structural_dataclass
 from orcapod import function_pod
 
@@ -46,8 +48,8 @@ GROUPS = ("semantic", "schema", "arrow", "datagram", "pipeline", "torch")
 OPTIONAL_GROUPS: dict[str, str] = {"torch": "torch"}
 """Groups that need an optional dependency, mapped to the module they need (ITL-871).
 
-Such a group is computed, generated and checked only where the module is installed; its
-golden file is never rewritten without it.
+Such a group is computed, added to and checked only where the module is installed; a
+golden file is never rewritten, with the module or without it (ITL-946).
 """
 
 
@@ -78,7 +80,8 @@ def case(group: str, name: str) -> Callable[[CaseFn], CaseFn]:
     """Register a golden case under ``group``.
 
     Args:
-        group: One of ``GROUPS``; selects the golden file the entries are written to.
+        group: One of ``GROUPS``; selects the golden files (``<group>-NN.json``) that
+            pin the entries.
         name: Case name, used as the prefix of every entry the case returns.
 
     Returns:
@@ -512,6 +515,10 @@ def _semantic_types() -> dict[str, Any]:
         "dataclass_subclass": GoldenChild,
         "dataclass_with_structural": GoldenHolder,
         "list_dataclass": list[GoldenPoint],
+        # Added by ITL-611: a set of a primitive is the native set container.
+        "set_int": set[int],
+        "set_str": set[str],
+        "set_bytes": set[bytes],
     }
 
 
@@ -988,6 +995,10 @@ def _datagram_rows() -> dict[str, list[dict[str, Any]]]:
             {"k": "r1", "c": GoldenHolder(GoldenInner(1), "a")},
             {"k": "r2", "c": GoldenHolder(GoldenInner(2), "b")},
         ],
+        # Added by ITL-611: a set of a primitive is the native set container.
+        "set_int": [{"k": "r1", "c": {10, 2, 1}}, {"k": "r2", "c": {-1}}],
+        "set_str": [{"k": "r1", "c": {"b", "a", "10"}}, {"k": "r2", "c": {"x"}}],
+        "set_bytes": [{"k": "r1", "c": {b"y", b"\x00"}}, {"k": "r2", "c": {b"x"}}],
     }
 
 
@@ -1210,6 +1221,58 @@ def pipeline_semi_join() -> dict[str, Any]:
     return stream_summary(SemiJoin()(_subjects(), _scans()))
 
 
+def _keyed(source_id: str, value: str, nullable_key: bool) -> Any:
+    """A source on tag ``subject`` (``large_string``), nullable with a null if asked."""
+    from orcapod.sources import ArrowTableSource
+
+    subjects = ["s1", None, "s3"] if nullable_key else ["s1", "s2", "s3"]
+    table = pa.table(
+        {
+            "subject": pa.array(subjects, pa.large_string()),
+            value: pa.array([1, 2, 3], pa.int64()),
+        },
+        schema=pa.schema(
+            [
+                pa.field("subject", pa.large_string(), nullable=nullable_key),
+                pa.field(value, pa.int64(), nullable=False),
+            ]
+        ),
+    )
+    return ArrowTableSource(table, tag_columns=["subject"], source_id=source_id)
+
+
+@case("pipeline", "join_key_nullability")
+def pipeline_join_key_nullability() -> dict[str, Any]:
+    """Pin the joins over a tag key that is ``T`` in one input and ``T | None`` in the other.
+
+    Accepted since ITL-829 (it raised before, so nothing was stored): ``Join`` and
+    ``MergeJoin`` give the key ``T``; ``SemiJoin`` keeps the left input's schema.
+    """
+    from orcapod.operators import Join, MergeJoin, SemiJoin
+
+    def nullable() -> Any:
+        return _keyed("golden_nullable_key", "x", nullable_key=True)
+
+    def plain() -> Any:
+        return _keyed("golden_plain_key", "y", nullable_key=False)
+
+    out = _prefixed("join", stream_summary(Join()(nullable(), plain())))
+    out.update(
+        _prefixed("merge_join", stream_summary(MergeJoin()(nullable(), plain())))
+    )
+    out.update(
+        _prefixed(
+            "semi_join_left_nullable", stream_summary(SemiJoin()(nullable(), plain()))
+        )
+    )
+    out.update(
+        _prefixed(
+            "semi_join_right_nullable", stream_summary(SemiJoin()(plain(), nullable()))
+        )
+    )
+    return out
+
+
 @case("pipeline", "batch")
 def pipeline_batch() -> dict[str, Any]:
     from orcapod.operators import Batch
@@ -1297,6 +1360,38 @@ def pipeline_column_selection() -> dict[str, Any]:
     return out
 
 
+@case("pipeline", "tag_and_data_columns")
+def pipeline_tag_and_data_columns() -> dict[str, Any]:
+    """``DropColumns`` and ``SelectColumns`` across tag and data columns (ITL-1084).
+
+    ``stream_summary`` keys rows by user tags, so every stream pinned here keeps a
+    tag whose values are unique per row.
+    """
+    from orcapod.operators import DropColumns, SelectColumns
+    from orcapod.sources import DictSource
+
+    cohort_subjects = DictSource(
+        data=[
+            {"cohort": "a", "subject": "s1", "age": 3, "weight": 20.5},
+            {"cohort": "a", "subject": "s2", "age": 4, "weight": 22.25},
+            {"cohort": "b", "subject": "s3", "age": 5, "weight": 19.0},
+        ],
+        tag_columns=["cohort", "subject"],
+        source_id="cohort_subjects",
+    )
+    streams = {
+        "drop": DropColumns(columns=["cohort", "age"])(cohort_subjects),
+        "select": SelectColumns(columns=["subject", "weight"])(cohort_subjects),
+        "select_tag_and_data": SelectColumns(columns=["subject", "age"])(_subjects()),
+    }
+    out: dict[str, Any] = {}
+    for name, stream in streams.items():
+        row_keys = [_row_key(tag.as_dict()) for tag, _ in stream.iter_data()]
+        assert len(set(row_keys)) == len(row_keys) == 3, (name, row_keys)
+        out.update(_prefixed(name, stream_summary(stream)))
+    return out
+
+
 @case("pipeline", "polars_filter")
 def pipeline_polars_filter() -> dict[str, Any]:
     from orcapod.operators import PolarsFilter
@@ -1311,7 +1406,7 @@ def pipeline_job() -> dict[str, Any]:
     from orcapod.operators import Join
 
     db = InMemoryArrowDatabase()
-    job = PipelineJob(name="golden_job", store=db)
+    job = PipelineJob(name="golden_job", database=db)
     with job:
         joined = Join(label="joined")(_subjects(), _scans())
         golden_adjust.pod(joined, label="adjust")
@@ -1583,7 +1678,7 @@ def pipeline_polars_filter_expr_job() -> dict[str, Any]:
     from orcapod.operators import Join
 
     db = InMemoryArrowDatabase()
-    job = PipelineJob(name="golden_filter_job", store=db)
+    job = PipelineJob(name="golden_filter_job", database=db)
     with job:
         older = _subjects().polars_filter(pl.col("age") > 3, label="older")
         joined = Join(label="joined")(older, _scans())
@@ -1720,7 +1815,7 @@ def pipeline_drop_nulls_job() -> dict[str, Any]:
     from orcapod.databases import InMemoryArrowDatabase
 
     db = InMemoryArrowDatabase()
-    job = PipelineJob(name="golden_drop_null_job", store=db)
+    job = PipelineJob(name="golden_drop_null_job", database=db)
     with job:
         present = (
             _nullable_readings()
@@ -1788,7 +1883,9 @@ def pipeline_default_source_ids() -> dict[str, Any]:
         out[f"{name}.source_id"] = source.source_id
         out[f"{name}.content_hash"] = source.content_hash().to_string()
 
-    job = PipelineJob(name="golden_default_source_ids", store=InMemoryArrowDatabase())
+    job = PipelineJob(
+        name="golden_default_source_ids", database=InMemoryArrowDatabase()
+    )
     with job:
         joined = Join(label="joined")(_subjects(), _scans())
         golden_adjust.pod(joined, label="adjust")
@@ -2002,3 +2099,162 @@ def pipeline_list_tag_producerless_stream() -> dict[str, Any]:
         "as_given": stream([[2], [1]], [20, 10]).content_hash().to_string(),
         "reversed": stream([[1], [2]], [10, 20]).content_hash().to_string(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Cases brought in from tests/test_hashing/hash_samples (ITL-946)
+#
+# The values, annotations, schemas and annotated functions that the older sample files
+# pinned and no case above did. The functions are defined here, so their pins carry this
+# module's path. DO NOT MOVE OR RENAME them.
+# ---------------------------------------------------------------------------
+
+SAMPLE_VALUES: dict[str, Any] = {
+    "int_42": 42,
+    "float_pi": 3.14159,
+    "float_negative_e": -2.71828,
+    "str_hello": "hello",
+    "str_hello_world": "Hello, World!",
+    "str_special_chars": "Special chars: !@#$%^&*()",
+    "str_unicode": "Unicode: 你好, Привет, こんにちは",
+    "bytes_hello": b"hello",
+    "bytes_binary": b"\x00\x01\x02\x03",
+    "bytearray_hello_world": bytearray(b"hello world"),
+    "bytearray_abc": bytearray([65, 66, 67]),
+    "list_strs": ["a", "b", "c"],
+    "list_mixed": [1, "a", True],
+    "set_empty": set(),
+    "set_strs": {"a", "b", "c"},
+    "frozenset_empty": frozenset(),
+    "tuple_empty": (),
+    "dict_one": {"a": 1},
+    "dict_other_order": {"b": 1, "a": 2},
+    "dict_nested": {"nested": {"a": 1, "b": 2}},
+    "nested_lists": [1, [2, [3, [4, [5]]]]],
+    "nested_dicts": {"a": {"b": {"c": {"d": {"e": 42}}}}},
+    "nested_dict_list": {"a": [1, 2, {"b": [3, 4, {"c": 5}]}]},
+    "list_of_dicts": [{"a": 1}, {"b": 2}, {"c": [3, 4, 5]}],
+    "dict_keys_values": {"keys": ["a", "b", "c"], "values": [1, 2, 3]},
+    "list_of_dicts_with_lists": [{"a": 1, "b": [2, 3]}, {"c": 4, "d": [5, 6]}],
+    "dict_users": {"users": [{"name": "Alice", "age": 30}, {"name": "Bob", "age": 25}]},
+    "dict_points_labels": {
+        "data": {"points": [[1, 2], [3, 4], [5, 6]], "labels": ["A", "B", "C"]}
+    },
+    "ordered_dict": collections.OrderedDict([("a", 1), ("b", 2), ("c", 3)]),
+    "lists_and_dict": [[1, 2], [3, 4], {"a": [5, 6], "b": [7, 8]}],
+}
+
+
+@case("semantic", "sample_value")
+def semantic_sample_values() -> dict[str, Any]:
+    """Semantic hashes of the plain Python values of the older hash sample file."""
+    hasher = _ctx().semantic_hasher
+    return {k: hasher.hash_object(v).to_string() for k, v in SAMPLE_VALUES.items()}
+
+
+def _annotations() -> dict[str, Any]:
+    import typing
+
+    import orcapod as op
+
+    return {
+        "file": op.File,
+        "directory": op.Directory,
+        "list_file": list[op.File],
+        "dict_str_file": dict[str, op.File],
+        "int_or_str": int | str,
+        "file_or_none": op.File | None,
+        "optional_file": typing.Optional[op.File],  # noqa: UP045  (the typing form is the case)
+    }
+
+
+@case("semantic", "annotation")
+def semantic_annotations() -> dict[str, Any]:
+    """Semantic hashes of type annotations over Orcapod's logical types (ITL-638)."""
+    hasher = _ctx().semantic_hasher
+    return {k: hasher.hash_object(t).to_string() for k, t in _annotations().items()}
+
+
+@case("schema", "semantic_schema")
+def schema_semantic_hashes() -> dict[str, Any]:
+    """Semantic hashes of ``Schema`` objects with primitive and logical types."""
+    import orcapod as op
+    from orcapod.types import Schema
+
+    schemas = {
+        "x_int": Schema({"x": int}),
+        "x_int_y_str": Schema({"x": int, "y": str}),
+        "f_file": Schema({"f": op.File}),
+        "d_directory": Schema({"d": op.Directory}),
+        "p_path": Schema({"p": op.Path}),
+        "x_int_f_file": Schema({"x": int, "f": op.File}),
+        "f_file_d_directory": Schema({"f": op.File, "d": op.Directory}),
+        "f_optional_file": Schema({"f": op.File | None}),
+    }
+    hasher = _ctx().semantic_hasher
+    return {k: hasher.hash_object(s).to_string() for k, s in schemas.items()}
+
+
+def golden_annotated_none():
+    """Function without annotations (ITL-946). DO NOT MOVE."""
+    return None
+
+
+def golden_annotated_builtin(x: int, y: str) -> float:
+    """Function annotated with builtins (ITL-946). DO NOT MOVE."""
+    return float(x)
+
+
+def golden_annotated_file_param(f: op.File) -> str:
+    """Function taking a ``File`` (ITL-946). DO NOT MOVE."""
+    return str(f)
+
+
+def golden_annotated_file_return(s: str) -> op.File:
+    """Function returning a ``File`` (ITL-946). DO NOT MOVE."""
+    return op.File(s)  # pyright: ignore[reportArgumentType]  (never called; only hashed)
+
+
+def golden_annotated_file_list(files: list[op.File]) -> list[str]:
+    """Function taking a list of ``File`` (ITL-946). DO NOT MOVE."""
+    return []
+
+
+def golden_annotated_optional_file(f: op.File | None) -> op.File | None:
+    """Function taking and returning an optional ``File`` (ITL-946). DO NOT MOVE."""
+    return f
+
+
+def golden_annotated_mixed(f: op.File, n: int) -> op.Directory:
+    """Function mixing ``File``, ``int`` and ``Directory`` (ITL-946). DO NOT MOVE."""
+    return op.Directory(str(f))  # pyright: ignore[reportArgumentType]  (never called)
+
+
+@case("semantic", "annotated_function")
+def semantic_annotated_functions() -> dict[str, Any]:
+    """Hashes of annotated functions: the extracted signature info and the function value."""
+    from orcapod.hashing.semantic_hashing.function_info_extractors import (
+        FunctionSignatureExtractor,
+    )
+
+    functions = {
+        "none": golden_annotated_none,
+        "builtin": golden_annotated_builtin,
+        "file_param": golden_annotated_file_param,
+        "file_return": golden_annotated_file_return,
+        "file_list": golden_annotated_file_list,
+        "optional_file": golden_annotated_optional_file,
+        "mixed": golden_annotated_mixed,
+    }
+    hasher = _ctx().semantic_hasher
+    extractor = FunctionSignatureExtractor(
+        include_module=True,
+        include_defaults=True,
+        type_converter=_ctx().type_converter,
+    )
+    out: dict[str, Any] = {}
+    for name, fn in functions.items():
+        info = extractor.extract_function_info(fn)
+        out[f"{name}.info"] = hasher.hash_object(info).to_string()
+        out[f"{name}.object"] = hasher.hash_object(fn).to_string()
+    return out

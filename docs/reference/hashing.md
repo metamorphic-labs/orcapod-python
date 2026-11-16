@@ -3,6 +3,8 @@
 This document is a developer-facing reference for every hash computation site in the
 orcapod-python framework. For conceptual background on the two identity chains
 (`content_hash` and `pipeline_hash`), see [Identity & Hashing](../concepts/identity.md).
+Every hash listed here that Orcapod stores or embeds in a name is pinned as a golden value;
+how released values are protected is described in [Golden Hashes](golden-hashes.md).
 
 ---
 
@@ -89,7 +91,7 @@ def double(x: int) -> int:
 
 
 rule_store = InMemoryArrowDatabase()
-rule_job = PipelineJob(name="my_pipeline", store=rule_store)
+rule_job = PipelineJob(name="my_pipeline", database=rule_store)
 with rule_job:
     numbers = DictSource(
         data=[{"k": "a", "x": 1}], tag_columns=["k"], tag_only_columns=True, source_id="numbers"
@@ -330,7 +332,7 @@ The table below shows what each class returns from `identity_structure()`.
 | `DerivedSource` with `tags_as_data` | `(class_name, output_schema, source_id, ("tags_as_data", sorted items))`; the default `source_id` is `tags_as_data:<label>:<hex>` of the hash of `(("DerivedSource", sorted tags_as_data items), (origin,))`, the origin entering through its `content_hash`; a `record_id_column`, when set, is appended to the parameters as `("record_id_column", name)` | The rule of every root source plus the mapping, which enters the `content_hash` directly (two mappings can give one schema) and so also with an explicit `source_id`; the origin enters through the default `source_id` only, which is the content hash an operator node doing the derivation would have |
 | Operators (unary) | `(operator_class_name, upstream_stream)` | Stream reference resolved via `content_resolver` |
 | Operators (binary/N-ary) | `(operator_class_name, argument_symmetry(streams))` | `frozenset` for commutative (Join, MergeJoin); `tuple` for ordered (SemiJoin) |
-| `SelectTagColumns`, `SelectDataColumns`, `DropTagColumns`, `DropDataColumns` | `(operator_class_name, sorted unique column names as a list, strict)` | The operators act on a set of names: a list, a tuple, a set, a single string, a repeated or a reordered name list give one hash (ITL-942) |
+| `SelectTagColumns`, `SelectDataColumns`, `DropTagColumns`, `DropDataColumns`, `SelectColumns`, `DropColumns` | `(operator_class_name, sorted unique column names as a list, strict)` | The operators act on a set of names: a list, a tuple, a set, a single string, a repeated or a reordered name list give one hash (ITL-942) |
 
 **Inputs of a commutative operator are a set (kept by decision, ITL-942).** A pipeline hash
 covers the structure of the pipeline, not only its schemas. `MergeJoin()(m1, m1)`, a stream
@@ -424,7 +426,8 @@ definition. Consequences:
   change to the encoding of a supported construct needs a new label (`polars_expr_v2`).
 
 The canonical trees of a corpus of expressions are pinned in
-`tests/test_hashing/test_polars_expr_hashing.py`, and their hashes in the golden suite.
+`tests/test_hashing/test_polars_expr_hashing.py`, and their hashes in the golden suite
+([Golden Hashes](golden-hashes.md)).
 
 ### 1d. Function values and parameter defaults
 
@@ -582,7 +585,9 @@ counts column order. A Polars frame and the equal pandas frame never share a has
 
 A `dict` and a `set` have no order, so equal values must hash equally whatever order they
 were built in. Arrow stores both as lists: `dict[K, V]` as `large_list<struct<key, value>>`
-and a plain `set[T]` as `large_list<T>`. Orcapod puts them in canonical order at the point
+and a `set[T]` of a primitive as the native set container `set[<element Arrow type>]` over
+`large_list<T>` (ITL-611; see [Logical Type Identifiers](../concepts/logical-type-identifiers.md)).
+Orcapod puts them in canonical order at the point
 where a Python value becomes Arrow, so the stored list, and therefore the row hash, does not
 depend on insertion order (dicts) or on `PYTHONHASHSEED` (sets of `str` or `bytes`).
 
@@ -646,7 +651,7 @@ result. Within one dict or set the two compare equal, so they cannot both be pre
 
 **Arrow tables are hashed exactly as stored.** `StarfixArrowHasher` never sorts list
 contents. A `list<struct<key, value>>` column that arrives already in Arrow form (an
-`ArrowTableSource`, a Delta table, rows read back from a store) is read by Python as a
+`ArrowTableSource`, a Delta table, rows read back from a database) is read by Python as a
 `dict`, but at the Arrow level it is an ordered list and its stored order is part of its
 hash. A `list[T]` value is never sorted: its order is part of its identity. (Tables written
 by `0.2.0`, which stored dicts in insertion order, are not read by v0.3 at all.)
@@ -660,6 +665,17 @@ is defined in terms of the other: changing the hasher's order would move semanti
 of affected inputs, and changing storage order would move row hashes and what a pod reads back.
 `set[T]` of a logical type (`set[Path]`, `set[UUID]`) is ordered by `ListLogicalType`, not
 by this rule.
+
+**The set's identity is part of the row hash** (ITL-611). A set of a primitive is stored
+under its native container type, and the Arrow hasher hashes an extension column's
+identifier (extension name and metadata) with its stored values. So `{1, 2, 3}` as
+`set[int]` and `[1, 2, 3]` as `list[int]` are two different rows, although both store the
+list `[1, 2, 3]`. The elements of a set of a primitive are hashed as stored, never replaced
+by their value hashes: only a container whose innermost element is a logical type is (a
+`set[bytes]` hashes like its stored `large_list<large_binary>` plus the identifier, although
+the semantic hasher has a handler for `bytes`). Before ITL-611 a set of a primitive was a
+plain `large_list` and hashed exactly like the list row; such rows were written only by
+development builds of v0.3.
 
 ---
 
@@ -707,10 +723,34 @@ topology suffix, encoding the full join lineage into each column name.
 | Field | Value |
 |---|---|
 | **Inputs** | `source_id` string + provenance token: `"{col}={value}"` when `record_id_column` is specified, otherwise `"row_{index}"` |
-| **Algorithm** | `uuid.uuid5(_SOURCE_RECORD_ID_NAMESPACE, f"{source_id}::{provenance_token}")` where `_SOURCE_RECORD_ID_NAMESPACE = uuid.uuid5(NAMESPACE_URL, "orcapod::record_id")` is a fixed constant |
+| **Algorithm** | `uuid.uuid5(_SOURCE_RECORD_ID_NAMESPACE, f"{source_id}::{provenance_token}")` where `_SOURCE_RECORD_ID_NAMESPACE = uuid.uuid5(NAMESPACE_URL, "https://orcapod.org/namespaces/source-record-id")` is a fixed constant (`core/sources/stream_builder.py`) |
 | **Output format** | `bytes` (16 bytes, UUID v5 bit pattern), stored in a `large_binary` Arrow column; the column keeps that type through tags, operators and stored tables (ITL-942: before v0.3 a source gave it `fixed_size_binary[16]`, so the operator cache key of one row differed between a direct run and the async orchestrator) |
 | **Uniqueness guarantee** | Deterministic per `(source_id, row_identity)`; stable across identical re-runs of the same source |
 | **Known exclusions** | When `record_id_column` is not specified, the row index is used as the provenance token; `record_id` changes if rows are **reordered** within the source table |
+
+The recipe recomputes a record id from the source id and the token alone. The value below is
+the one pinned for this row in the golden hash file (`v1/pipeline-01.json`):
+
+```python
+import uuid
+
+record_id_namespace = uuid.uuid5(
+    uuid.NAMESPACE_URL, "https://orcapod.org/namespaces/source-record-id"
+)
+subjects = DictSource(
+    data=[{"subject": "s1", "age": 3, "weight": 20.5}],
+    tag_columns=["subject"],
+    source_id="subjects",
+)
+first_row = subjects.as_table(columns={"system_tags": True}).to_pylist()[0]
+stored_record_id = next(
+    value for name, value in first_row.items() if name.startswith("_tag_record_id")
+)
+print(stored_record_id == uuid.uuid5(record_id_namespace, "subjects::row_0").bytes)
+# True
+print(stored_record_id.hex())
+# e8e02084627f5e1aad83839e421538e8
+```
 
 ---
 
@@ -723,6 +763,12 @@ topology suffix, encoding the full join lineage into each column name.
 | **Output format** | Column name suffix; no separate value is stored |
 | **Uniqueness guarantee** | Each post-join system tag column name uniquely identifies `(original schema, input topology, canonical join position)`; no collision even when joining streams with identical schemas |
 | **Known exclusions** | `SemiJoin` passes system tags through unchanged. Aggregating operators (`Batch`, `GroupBy`) use the fold described in site 6b instead. |
+
+Every input keeps its own system tag columns, so the count reflects the join depth: a stream
+split into two branches that are joined again carries each of its system tag columns twice,
+and `k` such stages stacked carry each one `2 ** k` times (ITL-1114). The table of no rows that
+`head()` and the notebook preview of a stream that has not run are built from carries the system
+tag columns too, so those calls are as wide as the joins make them (ITL-1132).
 
 ---
 
@@ -1254,7 +1300,9 @@ whenever any existing hash value can change (the hashers, the identity definitio
 record-id recipes, the libraries behind them). Orcapod v0.3 writes `std:v1:default`;
 everything stored before v0.3 is the earlier generation, `std:v0.1:default`. The manifest of
 the current data context is `orcapod/contexts/data/v1.json`. It is frozen at the release of
-the library version that contains it and never edited afterwards. It names the hashers, the
+the library version that contains it and never edited afterwards, except that its `golden`
+history gains revisions as golden values are added and released
+([Golden Hashes](golden-hashes.md)). It names the hashers, the
 definitions that live in code, the libraries the hashes depend on and what changed from the
 previous data context. Logical types are not part of it: they are registered in
 `orcapod/contexts/logical_types.json` and versioned by their own identifier.
@@ -1333,7 +1381,7 @@ result tables. Either raises `SideEffectLogDataContextError`, naming the tables,
 doing anything when it finds a table at an older layout anywhere under its name, or
 completions of another data context in its current tables. Because every older table under
 the name counts, an unrelated pod of the same name in the same job raises the error too;
-the error names every table so that you can tell. When the store cannot list its tables,
+the error names every table so that you can tell. When the database cannot list its tables,
 the node logs one warning saying that it could not look for older completions, and
 proceeds.
 
@@ -1363,7 +1411,7 @@ def double_for_contexts(x: int) -> int:
 
 
 context_store = InMemoryArrowDatabase()
-context_job = PipelineJob(name="contexts_demo", store=context_store)
+context_job = PipelineJob(name="contexts_demo", database=context_store)
 with context_job:
     rows = DictSource(data=[{"k": "a", "x": 1}, {"k": "b", "x": 2}], tag_columns=["k"], tag_only_columns=True)
     _ = double_for_contexts.pod(rows, label="dbl")
@@ -1452,15 +1500,16 @@ series: {"kind": "orcapod.pandas.series", "height": <rows>, "attrs": <attrs>,
          | {"arrow": <Arrow type text>}             pd.ArrowDtype of a non-nested Arrow type:
                                                     str(type), "large_binary", "null",
                                                     "timestamp[ns, tz=UTC]"
-         | "arrow"                                  pd.ArrowDtype of a nested, dictionary or
-                                                    run-end type: the type is in D only
 ```
+
+A nested, dictionary or run-end `pd.ArrowDtype` has no term: storage cannot read such a
+column back, so the value is refused (see "What is refused" below).
 
 `kind` is the name of the value's logical type (its Arrow extension name).
 
 **The hash is strict.** Everything about a value that can be changed is part of its
 identity (developer, November 11 and 12, 2026), with one exception: **a property storage
-does not restore never counts**, so that a value read back from a store hashes exactly like
+does not restore never counts**, so that a value read back from a database hashes exactly like
 the value that was written. `PANDAS_IDENTITY_PROPERTIES` in
 `orcapod/hashing/pandas_value_hash.py` is the one list in code of every property below.
 
@@ -1468,7 +1517,6 @@ the value that was written. `PANDAS_IDENTITY_PROPERTIES` in
 |---|---|---|
 | Column order | yes | `D` (ordered) |
 | MultiIndex level order (frame and Series) | yes | `D` (ordered) |
-| Struct field order in a `pd.ArrowDtype` struct column, at every depth | yes | `D` (ordered) |
 | Values, row order, row count, Arrow type (int width, datetime unit and timezone) | yes | `D` |
 | Index values, index level names (as the text storage writes), index dtype (as storage restores it) | yes | `D`, descriptor |
 | `columns.name` / `columns.names` | yes | descriptor |
@@ -1538,19 +1586,17 @@ More consequences of the same rule:
   decimal column and the all-null or empty `object` column is `{"numpy": "object"}`, so they
   **hash equal**; the height still counts, and a `string`-dtype column of `None` (descriptor
   `"string"`) stays different. Other all-null or empty columns (Arrow string, timestamp,
-  integer, list or struct, `Int64`, `string`, categorical) keep their own types and are
+  integer, `Int64`, `string`, categorical) keep their own types and are
   unchanged.
   A `pd.ArrowDtype` of a non-nested Arrow type is described by its Arrow type text, so
   `pd.ArrowDtype(pa.null())` (`{"arrow": "null"}`) never hashes like a
   `pd.ArrowDtype(pa.large_string())` column of `None`, and `binary` and `large_binary`
   columns (which storage restores as themselves, although D unifies large and non-large
   variants) hash differently. A decimal column is the exception that shows the rule: storage
-  restores it as `object`, so two precisions hash equal. A nested `pd.ArrowDtype` (list,
-  struct, map, union), a dictionary or a run-end type keeps the bare term `"arrow"`; none
-  reads back today, and ITL-1054 decides what identifies one (so a `list` and a `large_list`
-  column hash equal until then).
-  A `pd.ArrowDtype` of a nested type with a `null` child (`list<null>`, `struct<a: null>`)
-  is still refused by the hash, as before.
+  restores it as `object` (each value comes back exactly, digits and scale included; the
+  dtype and its declared precision do not), so two precisions hash equal. A nested
+  `pd.ArrowDtype` (list, struct, map, union), a dictionary or a run-end type is refused:
+  storage cannot read it back (ITL-1054).
 - **A timezone is the text storage writes for it** (`"UTC"`, `"Europe/Berlin"`,
   `"+01:00"`), whatever class holds it: `datetime.timezone(timedelta(hours=1))` is read
   back as another class of the same offset, and both hash equal.
@@ -1568,15 +1614,74 @@ warning, or raise `TypeError`, depending on its version). With `attrs` in the ig
 the hash does not read them (it never copies them either, so `attrs` that cannot be copied
 do not matter then).
 
-Storage refuses a value it would corrupt. Column labels and index names that collide
-once written as text (the index name `1` with a column `"1"`; integer names of MultiIndex
-levels) would be written as two fields of one name, and the value read back would have lost
-its index. Distinct labels that read back equal (the labels `True` and `False` both read
-back `True`) would come back as duplicates. `python_to_storage` raises `ValueError` in both
-cases.
-
 A label or dtype outside the grammar raises `ValueError` naming it (a dtype error names its
-column). A value that cannot be converted to Arrow raises `ValueError`.
+column).
+
+**What is refused.** Storage refuses, when the value is written, a value it would not
+restore, and the hash refuses the same values with the same `ValueError` (one check,
+`require_restorable` in `orcapod/hashing/pandas_value_hash.py`; ITL-1054). The message names
+the column, index level or column-axis level and the reason. Refused, on every supported
+pyarrow version:
+
+- **MultiIndex levels that would be written in another order.** pyarrow fetches index level
+  `i` with `index.get_level_values(i)`, which pandas resolves as a level *name* first. So
+  level names that are also level positions (`names=[1, 0]`; `1.0` and `True` count as `1`)
+  would be written, and read back, with the levels swapped, and nothing would raise.
+- **Values storage cannot read back.** A `pd.ArrowDtype` column (or Series) of a list,
+  large list, fixed-size list, list view, struct, map, dictionary, run-end or union type,
+  of fixed-size binary, or of an Arrow extension type (`uuid`, `json`, `bool8`, a fixed-shape
+  tensor); an index level of a `pd.ArrowDtype` list, large list, fixed-size list, struct,
+  map, dictionary, fixed-size binary or `float16` type; a column axis (any level of it) that
+  is categorical, period, timedelta, interval, `datetime.date` objects, or a `pd.ArrowDtype`
+  timestamp, duration, time, bool, date, decimal or unsigned integer, which includes a
+  Series named with a `pd.Timedelta`, `pd.Period` or `datetime.date`; a categorical column,
+  Series or index whose categories are tuples (they read back as arrays, which cannot be
+  categories; ITL-1115) or intervals.
+- **Index levels whose values cannot be read back.** A `pd.ArrowDtype` `time64[ns]` index
+  level holding a value that is not a whole number of microseconds (ITL-1118), and a
+  MultiIndex level holding tuples or lists, which read back as arrays that cannot be the
+  values of a MultiIndex level (ITL-1120). These failures depend on the values, so each
+  index level is converted once, in full, and a MultiIndex is assembled once, when a value is
+  written or hashed; columns are checked without converting any row.
+- **Index level names that would read back as another name.** pyarrow drops a name of the
+  form `__index_level_<n>__` (its own name for an unnamed level), so such a level reads back
+  unnamed (ITL-1119). Names are compared as the text storage writes for them.
+- **Column labels that would read back as another label.** pyarrow restores a bool label
+  from its text, so the label `False` (a one-column bool axis, a Series named `False`, a
+  `False` in a level of a MultiIndex column axis) reads back `True` (ITL-1116). Labels are
+  compared as text, so mixed-type labels, which storage writes as text, are not a change.
+- **Labels and names that collide once written as text** (the index name `1` with a column
+  `"1"`; integer names of MultiIndex levels): two fields of one name, and the value read
+  back would have lost its index. Distinct labels that read back equal (the labels `True`
+  and `False` both read back `True`) would come back as duplicates.
+- **Values Arrow cannot convert** (mixed or non-Arrow values, `complex128`, sparse columns,
+  a categorical of periods, a `float16` column axis, an index of a type Arrow does not
+  support).
+
+Before v0.3 such values were written: a value of the first kind reads back changed, and one
+of the second kind cannot be read at all.
+
+```python
+import pandas as pd
+from orcapod.contexts import get_default_context
+from orcapod.logical_types.pandas_type import LogicalPandasDataFrame
+
+semantic_hasher = get_default_context().semantic_hasher
+swapped = pd.DataFrame(
+    {"a": [10, 20]},
+    index=pd.MultiIndex.from_tuples([("p", 7), ("q", 8)], names=[1, 0]),
+)
+try:
+    LogicalPandasDataFrame().python_to_storage(swapped)
+except ValueError as error:
+    print(str(error).split(":")[0])
+# index level 0 (name 1)
+try:
+    semantic_hasher.hash_object(swapped)
+except ValueError as error:
+    print(str(error).split(":")[0])
+# index level 0 (name 1)
+```
 
 **What a data context can make the hash ignore.** Nothing is ignored by default. The
 registration file (`orcapod/contexts/logical_types.json`, `hash_ignore`) can name, per type,
@@ -1588,7 +1693,6 @@ The preimage keeps its shape: an ignored property is hashed with a fixed value.
 |---|---|---|
 | `column_order` | DataFrame | the columns are hashed sorted by the canonical JSON of their typed labels |
 | `series_name` | Series | `name` is hashed as `null` |
-| `struct_field_order` | both | starfix's `ordered_struct_fields` option is off for `D` |
 | `attrs` | both | `attrs` is hashed as `{}` |
 
 Every other property always counts, and the properties storage does not restore never do;

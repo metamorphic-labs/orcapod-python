@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from orcapod.channels import ReadableChannel, WritableChannel
+from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.contexts import DataContext
 from orcapod.core.base import TraceableBase
@@ -16,15 +17,20 @@ from orcapod.core.referential_tags import (
     reference_names,
     stream_references,
 )
+from orcapod.core.function_pod import FunctionPodStream
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
+    ZERO_ROW_INPUT_COLUMNS,
     StreamBase,
     check_head_size,
+    short_stream_repr,
+    typed_zero_row_input,
+    typed_zero_row_table,
 )
-from orcapod.core.streams.head import (
+from orcapod.core.streams.view import (
     STALE_NOTE,
-    HeadStatus,
-    StreamHead,
+    ViewStatus,
+    StreamView,
     head_of,
 )
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
@@ -61,6 +67,14 @@ class StaticOutputOperatorPod(TraceableBase):
     # ``None`` when it handles them (ITL-1023). An operator that declares nothing
     # does not handle them yet: it raises instead of giving a wrong answer.
     REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = "ITL-1022"
+
+    OUTPUT_SCHEMA_IS_INPUT_SCHEMA: ClassVar[bool] = False
+    """Whether the output has exactly its single input's columns and Arrow types.
+
+    Declared by an operator that only chooses which rows exist (``PolarsFilter``). Its
+    zero-row table is then its input's (``zero_row_result``), got without evaluating a
+    predicate, so no user code runs to learn the column types (ITL-912).
+    """
 
     def __init__(
         self, tracker_manager: TrackerManagerProtocol | None = None, **kwargs
@@ -177,7 +191,7 @@ class StaticOutputOperatorPod(TraceableBase):
         Returns:
             A ``DynamicPodStream`` wrapping the computation.
         """
-        logger.debug(f"Invoking kernel {self} on streams: {streams}")
+        logger.debug("Invoking kernel %s on streams: %s", self, streams)
 
         # perform input stream validation
         self.check_reference_support(*streams)
@@ -221,7 +235,7 @@ class StaticOutputOperatorPod(TraceableBase):
 
     def __call__(self, *streams: StreamProtocol, **kwargs) -> DynamicPodStream:
         """Convenience alias for ``process``."""
-        logger.debug(f"Invoking pod {self} on streams through __call__: {streams}")
+        logger.debug("Invoking pod %s on streams through __call__: %s", self, streams)
         # perform input stream validation
         return self.process(*streams, **kwargs)
 
@@ -256,7 +270,6 @@ class StaticOutputOperatorPod(TraceableBase):
         Raises:
             ValueError: If ``rows`` is empty.
         """
-        from orcapod.system_constants import constants
         from orcapod.utils import arrow_utils
 
         if not rows:
@@ -274,16 +287,201 @@ class StaticOutputOperatorPod(TraceableBase):
         combined_tags = arrow_utils.concat_tables_by_name(tag_tables)
         combined_data = arrow_utils.concat_tables_by_name(data_tables)
 
-        data_schema = combined_data.schema
-        for i, field in enumerate(data_schema):
-            if field.name.startswith(constants.SOURCE_PREFIX):
-                nullable = combined_data.column(i).null_count > 0
-                data_schema = data_schema.set(i, field.with_nullable(nullable))  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
-        # Same arrays, new field flags: no cast, so no value or type can change.
-        combined_data = pa.Table.from_arrays(combined_data.columns, schema=data_schema)
+        combined_data = StaticOutputOperatorPod._flag_source_info_nullability(
+            combined_data
+        )
 
         full_table = arrow_utils.hstack_tables(combined_tags, combined_data)
         return full_table, tuple(first_tag.keys()), references
+
+    @staticmethod
+    def _in_row_order(table: pa.Table, tag_keys: Sequence[str]) -> pa.Table:
+        """Return ``table`` with its columns in the order of a table built from rows.
+
+        The one statement of that order (ITL-1131): user tags, system tags, data,
+        source info, as ``_rows_to_table`` builds it (each row's tag table with its
+        system tags, then its data table with its source info). Data columns keep their
+        order in ``table``. Every table a node or an operator input holds with no rows
+        takes this order, so it equals the table a run with rows gives.
+
+        Args:
+            table: A table of user tags, system tags, data and source info.
+            tag_keys: The user tag columns, in order.
+
+        Returns:
+            The same columns, reordered; no column is added, dropped or changed.
+        """
+        from orcapod.system_constants import constants
+
+        names = table.column_names
+        system_tags = [n for n in names if n.startswith(constants.SYSTEM_TAG_PREFIX)]
+        source_info = [n for n in names if n.startswith(constants.SOURCE_PREFIX)]
+        placed = {*tag_keys, *system_tags, *source_info}
+        data = [n for n in names if n not in placed]
+        return table.select([*tag_keys, *system_tags, *data, *source_info])
+
+    @staticmethod
+    def _as_row_built_table(table: pa.Table, tag_keys: Sequence[str]) -> pa.Table:
+        """Return ``table`` as ``_rows_to_table`` would build it from the same rows.
+
+        Its columns in row order (``_in_row_order``) and each source-info field flagged
+        nullable only when some row's token is ``None``
+        (``_flag_source_info_nullability``). For a table with no rows: what a result
+        built from rows has, with no row (ITL-1131).
+
+        Args:
+            table: A table of user tags, system tags, data and source info.
+            tag_keys: The user tag columns, in order.
+
+        Returns:
+            The same arrays, reordered, under the new source-info field flags.
+        """
+        return StaticOutputOperatorPod._flag_source_info_nullability(
+            StaticOutputOperatorPod._in_row_order(table, tag_keys)
+        )
+
+    @staticmethod
+    def _zero_rows_in_row_order(result: StreamProtocol) -> StreamProtocol:
+        """Return an operator's result with no rows as a run with rows would keep it.
+
+        The zero-row counterpart of ``_materialize_to_stream``: ``result``'s zero-row
+        table (user tags, system tags, data and source info, with its Arrow types and
+        nullability) in the order of a table built from rows (``_in_row_order``). An
+        operator's own table may order its columns otherwise (a join lists its data
+        before its system tags), so a node that keeps the result of a run with no rows
+        keeps this, and reads with the columns of a run with rows (ITL-1131).
+
+        Args:
+            result: An operator's result that has no rows.
+
+        Returns:
+            A stream over the reordered zero-row table, in ``result``'s data context.
+        """
+        tag_keys = result.keys()[0]
+        table = StaticOutputOperatorPod._in_row_order(
+            result.as_table(columns=ZERO_ROW_INPUT_COLUMNS), tag_keys
+        )
+        return ArrowTableStream(
+            table,
+            tag_columns=tag_keys,
+            reference_tags=stream_references(result),
+            data_context=result.data_context_key,
+        )
+
+    @staticmethod
+    def _kept_output(
+        result: StreamProtocol,
+        rows: Sequence[tuple[TagProtocol, DataProtocol]],
+    ) -> StreamProtocol:
+        """Return what an operator node keeps, and stores, of a run of its operator.
+
+        The rows of the run as ``_materialize_to_stream`` builds them, or, with no row,
+        the result with no rows in the same order (``_zero_rows_in_row_order``). Every
+        way a node runs its operator (a job run, sync or async, and ``node.run()`` on
+        its own) keeps this, so a node has one column order, the row order, in memory
+        and in its stored table (ITL-1133).
+
+        Args:
+            result: The operator's result of the run.
+            rows: ``result``'s rows, in order.
+
+        Returns:
+            A stream over the rows, in row order.
+        """
+        if rows:
+            return StaticOutputOperatorPod._materialize_to_stream(rows)
+        return StaticOutputOperatorPod._zero_rows_in_row_order(result)
+
+    @staticmethod
+    def _flag_source_info_nullability(table: pa.Table) -> pa.Table:
+        """Declare each ``_source_*`` field nullable only if some row's token is ``None``.
+
+        The rule ``_rows_to_table`` applies to the rows it concatenates, and that a
+        zero-row input (``_zero_row_input``) applies to no row: there, no token is
+        ``None``, so every source-info field is non-nullable.
+
+        Args:
+            table: A table whose ``_source_*`` columns hold source-info tokens.
+
+        Returns:
+            The same arrays under the new field flags.
+        """
+        from orcapod.system_constants import constants
+
+        schema = table.schema
+        for i, field in enumerate(schema):
+            if field.name.startswith(constants.SOURCE_PREFIX):
+                nullable = table.column(i).null_count > 0
+                schema = schema.set(i, field.with_nullable(nullable))  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
+        # Same arrays, new field flags: no cast, so no value or type can change.
+        return pa.Table.from_arrays(table.columns, schema=schema)
+
+    @staticmethod
+    def _zero_row_input(upstream: StreamProtocol) -> StreamProtocol | None:
+        """Return ``upstream`` as an operator input with no rows, typed as its rows are.
+
+        The zero-row form of what ``_materialize_upstream`` builds from an upstream's
+        rows: the upstream's zero-row table (``typed_zero_row_table``: user tags,
+        system tags, data and source info, with the Arrow types its rows have) in the
+        column order and with the source-info flags ``_rows_to_table`` gives, as the
+        upstream's stream (``_as_upstream_stream``), so the stream's identity,
+        pipeline hash and system-tag column names are the upstream's (ITL-912).
+
+        Args:
+            upstream: The node or stream an operator reads.
+
+        Returns:
+            The zero-row stream, or ``None`` when ``upstream`` cannot say its Arrow
+            types without rows; the caller then builds its input from the Python
+            output schema.
+        """
+        table = typed_zero_row_input(upstream)
+        if table is None:
+            return None
+        tag_keys = upstream.keys()[0]
+        return StaticOutputOperatorPod._as_upstream_stream(
+            StaticOutputOperatorPod._as_row_built_table(table, tag_keys),
+            tag_keys,
+            stream_references(upstream),
+            upstream,
+        )
+
+    def zero_row_result(self, *inputs: StreamProtocol) -> StreamProtocol:
+        """This operator's result over zero-row inputs, for its zero-row table (ITL-912).
+
+        ``static_process`` over the inputs, or, for an operator whose output schema is
+        its input's (``OUTPUT_SCHEMA_IS_INPUT_SCHEMA``), the input's columns in the
+        large-normalized form a run gives them, so no predicate or other user code is
+        evaluated. A run never comes here: it calls
+        ``static_process`` (or ``process``) whether its inputs have rows or not.
+
+        Args:
+            inputs: The inputs as zero-row streams.
+
+        Returns:
+            A stream with no rows and the columns and Arrow types of the result.
+        """
+        if self.OUTPUT_SCHEMA_IS_INPUT_SCHEMA:
+            from orcapod.utils import arrow_utils
+
+            (only,) = inputs
+            # The input's columns, each in the large-normalized form a run gives it.
+            schema = only.as_table(columns=ZERO_ROW_INPUT_COLUMNS).schema
+            normalized = pa.schema(
+                [
+                    field.with_type(
+                        arrow_utils.normalize_to_large_types(field.type, keep_null=True)
+                    )
+                    for field in schema
+                ]
+            )
+            return ArrowTableStream(
+                normalized.empty_table(),
+                tag_columns=only.keys()[0],
+                reference_tags=stream_references(only),
+                data_context=only.data_context_key,
+            )
+        return self.static_process(*inputs)
 
     @staticmethod
     def _materialize_to_stream(
@@ -311,6 +509,125 @@ class StaticOutputOperatorPod(TraceableBase):
         # No ``source_info`` argument: the table's own ``_source_*`` columns
         # pass through, one value per row.
         return ArrowTableStream(table, tag_columns=tag_keys, reference_tags=references)
+
+    @staticmethod
+    def _materialize_upstream(
+        rows: Sequence[tuple[TagProtocol, DataProtocol]],
+        upstream: StreamProtocol,
+        *,
+        zero_rows: bool = False,
+    ) -> StreamProtocol:
+        """Rebuild the rows an upstream node delivered as that node's stream.
+
+        This is how an operator node's input is built in a job: the sync
+        orchestrator rebuilds every upstream's buffered rows with it, and an
+        async operator node rebuilds its inputs with it when its run produced
+        no row (``zero_rows``). The stream takes the upstream's producer and
+        upstreams, so its identity and pipeline hash are the upstream's and
+        system-tag column names come out as they would on the upstream itself.
+
+        With rows, the table is ``_rows_to_table(rows)``: every row keeps its
+        own system tags and source info. Without rows, it is the upstream's
+        zero-row table (``_zero_row_input``), with the Arrow types its rows have
+        (ITL-912). Only an upstream that cannot say its Arrow types without rows
+        (see ``typed_zero_row_table``) is built from its Python output schema
+        (with system tags and source info), a known limitation (ITL-1089).
+
+        Args:
+            rows: The rows the upstream delivered; may be empty.
+            upstream: The upstream node or stream the rows came from.
+            zero_rows: Keep the table's columns and types but none of its rows.
+
+        Returns:
+            A stream over the rows (none when ``zero_rows``), in order.
+        """
+        from orcapod.utils import arrow_utils
+
+        if rows:
+            table, tag_keys, references = StaticOutputOperatorPod._rows_to_table(rows)
+            if zero_rows:
+                table = table.slice(0, 0)
+            return StaticOutputOperatorPod._as_upstream_stream(
+                table, tag_keys, references, upstream
+            )
+        typed = StaticOutputOperatorPod._zero_row_input(upstream)
+        if typed is not None:
+            return typed
+        # Build an empty table preserving declared field nullability.
+        tag_schema, data_schema = upstream.output_schema(
+            columns={"system_tags": True, "source": True}
+        )
+        table = arrow_utils.make_empty_table(
+            {**tag_schema, **data_schema},
+            StaticOutputOperatorPod._upstream_context(upstream).type_converter,
+        )
+        return StaticOutputOperatorPod._as_upstream_stream(
+            table, upstream.keys()[0], stream_references(upstream), upstream
+        )
+
+    @staticmethod
+    def _upstream_context(upstream: StreamProtocol) -> DataContext:
+        """The data context of ``upstream``, which its rebuilt stream is in."""
+        from orcapod.core.base import DataContextMixin
+
+        if isinstance(upstream, DataContextMixin):
+            return upstream.data_context
+        return contexts.resolve_context(upstream.data_context_key)
+
+    @staticmethod
+    def _as_upstream_stream(
+        table: pa.Table,
+        tag_keys: Sequence[str],
+        references: Sequence[str],
+        upstream: StreamProtocol,
+    ) -> StreamProtocol:
+        """Wrap a table of ``upstream``'s rows (or none) as ``upstream``'s stream.
+
+        Args:
+            table: User tags, system tags, data and source info, without the
+                context column.
+            tag_keys: The user tag columns.
+            references: The referential tags among ``tag_keys`` (ITL-1023).
+            upstream: The node or stream the table stands for.
+
+        Returns:
+            A stream with ``upstream``'s producer, upstreams and data context.
+        """
+        from orcapod.system_constants import constants
+
+        # The rebuilt stream is in the upstream's data context, as its rows are.
+        context = StaticOutputOperatorPod._upstream_context(upstream)
+        # The context column names the upstream's context on every row; without
+        # it, the stream would fill in the default context's key.
+        table = table.append_column(
+            pa.field(constants.CONTEXT_KEY, pa.large_string(), nullable=False),
+            pa.array([context.context_key] * table.num_rows, pa.large_string()),
+        )
+        if upstream.producer is None:
+            # A node with no pod (a loaded function node, a restored side-effect
+            # node, ITL-1094) cannot give the stream a producer to hash, so the
+            # stream reports the node's pipeline hash, as the async path does;
+            # otherwise it would fall back to a root's schema-only hash and an
+            # operator would name its system tags after that. A source's pipeline
+            # hash is that schema-only hash already.
+            return _RowsOfStream(
+                table,
+                tag_columns=tag_keys,
+                pipeline_hash=upstream.pipeline_hash(),
+                reference_tags=references,
+                upstreams=upstream.upstreams,
+                data_context=context,
+            )
+        # No ``source_info`` argument: the table's own ``_source_*`` columns
+        # pass through, one value per row.
+        return ArrowTableStream(
+            table,
+            tag_columns=tag_keys,
+            reference_tags=references,
+            producer=upstream.producer,
+            upstreams=upstream.upstreams,
+            data_context=context,
+        )
 
     @staticmethod
     def _materialize_input_stream(
@@ -395,14 +712,22 @@ class StaticOutputOperatorPod(TraceableBase):
 
 
 class _RowsOfStream(ArrowTableStream):
-    """Rows collected from a channel, standing in for the stream they came from.
+    """Rows standing in for the stream they came from, with its pipeline hash.
 
-    The barrier-mode ``async_execute`` rebuilds each input from its rows. A
-    rebuilt ``ArrowTableStream`` has no producer, so its own pipeline hash is
-    the schema-only hash of a root; this stream reports the pipeline hash of
-    the stream the rows came from instead, as the operator node passes it
-    (``input_pipeline_hashes``). Its content hash is that of its table, as for
-    any ``ArrowTableStream`` without a producer.
+    The barrier-mode ``async_execute`` rebuilds each input from its rows, and the
+    sync path rebuilds the rows of an upstream with no producer
+    (``_as_upstream_stream``). A rebuilt ``ArrowTableStream`` has no producer, so
+    its own pipeline hash is the schema-only hash of a root; this stream reports
+    the pipeline hash of the stream the rows came from instead (the operator
+    node's ``input_pipeline_hashes``, or the upstream's own). Its content hash is
+    that of its table, as for any ``ArrowTableStream`` without a producer.
+
+    Args:
+        table: The rows.
+        tag_columns: The user tag columns.
+        pipeline_hash: The pipeline hash of the stream the rows came from.
+        upstreams: The upstreams of the stream the rows came from, if any.
+        data_context: The rows' data context; ``None`` for the default.
     """
 
     def __init__(
@@ -412,8 +737,16 @@ class _RowsOfStream(ArrowTableStream):
         tag_columns: Collection[str],
         pipeline_hash: ContentHash,
         reference_tags: Collection[str] = (),
+        upstreams: tuple[StreamProtocol, ...] = (),
+        data_context: DataContext | None = None,
     ) -> None:
-        super().__init__(table, tag_columns=tag_columns, reference_tags=reference_tags)
+        super().__init__(
+            table,
+            tag_columns=tag_columns,
+            reference_tags=reference_tags,
+            upstreams=upstreams,
+            data_context=data_context,
+        )
         self._input_pipeline_hash: ContentHash = pipeline_hash
 
     def pipeline_hash(
@@ -451,6 +784,12 @@ class DynamicPodStream(StreamBase):
         self._set_modified_time(None)
         self._cached_time: datetime | None = None
         self._cached_stream: StreamProtocol | None = None
+        # Staleness bookkeeping, in memory only (never hashed, saved or stored): the
+        # upstreams' states when the kept result was made (``_upstream_state``), and a
+        # count of the kept results discarded, which tells a downstream operator stream
+        # that this one changed (ITL-1083).
+        self._kept_states: tuple[tuple[str, object], ...] | None = None
+        self._reset_generation: int = 0
 
     def identity_structure(self) -> Any:
         structure = (self._pod,)
@@ -476,6 +815,34 @@ class DynamicPodStream(StreamBase):
         """Clear the cached stream, forcing recomputation on next access."""
         self._cached_stream = None
         self._cached_time = None
+        self._kept_states = None
+        self._reset_generation += 1
+
+    def _typed_zero_row_table(self) -> pa.Table | None:
+        """The pod's result over its upstreams' zero-row tables (ITL-912).
+
+        The rule an operator node follows (``OperatorJobNode._typed_zero_row_table``),
+        with each upstream given as the stream it is, as ``static_process`` reads
+        it: no row is computed or read, and nothing this stream holds is consulted.
+        """
+        inputs: list[StreamProtocol] = []
+        for upstream in self._upstreams:
+            # The upstream itself with no row: the pod reads the upstream stream,
+            # not rows rebuilt from it, so its columns stay in their own order.
+            table = typed_zero_row_table(upstream)
+            if table is None:
+                return None
+            inputs.append(
+                ArrowTableStream(
+                    table,
+                    tag_columns=upstream.keys()[0],
+                    producer=upstream.producer,
+                    upstreams=upstream.upstreams,
+                    data_context=StaticOutputOperatorPod._upstream_context(upstream),
+                )
+            )
+        pod = cast(StaticOutputOperatorPod, self._pod)
+        return pod.zero_row_result(*inputs).as_table(columns=ZERO_ROW_INPUT_COLUMNS)
 
     def keys(
         self,
@@ -484,11 +851,7 @@ class DynamicPodStream(StreamBase):
         all_info: bool = False,
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         """Return the (tag_keys, data_keys) column names for this stream."""
-        tag_schema, data_schema = self._pod.output_schema(
-            *self.upstreams,
-            columns=columns,
-            all_info=all_info,
-        )
+        tag_schema, data_schema = self.output_schema(columns=columns, all_info=all_info)
         return tuple(tag_schema.keys()), tuple(data_schema.keys())
 
     def output_schema(
@@ -498,10 +861,15 @@ class DynamicPodStream(StreamBase):
         all_info: bool = False,
     ) -> tuple[Schema, Schema]:
         """Return the (tag_schema, data_schema) for this stream."""
-        return self._pod.output_schema(
-            *self.upstreams,
-            columns=columns,
-            all_info=all_info,
+        # Memoized (ITL-1111). The prediction depends on the operator's configuration
+        # and on the upstreams' schemas and pipeline hashes, all fixed for the life of
+        # this stream; never on rows, so recomputing the rows when stale leaves it valid.
+        return self._memoized_output_schema(
+            columns,
+            all_info,
+            lambda: self._pod.output_schema(
+                *self.upstreams, columns=columns, all_info=all_info
+            ),
         )
 
     @property
@@ -511,34 +879,65 @@ class DynamicPodStream(StreamBase):
         return self._cached_time
 
     def _update_cache_status(self) -> None:
+        """Discard the kept result if the operator or an upstream changed since it was made.
+
+        A pod stream or an operator stream upstream is changed when its state
+        (``_upstream_state``) differs from the one noted with the kept result: its modified
+        time moves when it completes its first computation, which happens after the result
+        was kept when the operator returned that stream unread (a pass-through), and that is
+        not a change (ITL-1083, the rule ITL-1065 set for pod streams). Any other upstream,
+        and the operator, are changed when their modified time is unknown or newer.
+        """
         if self._cached_time is None:
             return
 
-        upstream_times = [stream.last_modified for stream in self.upstreams]
-        upstream_times.append(self._pod.last_modified)
+        states = _upstream_states(self.upstreams)
+        times = [value for kind, value in states if kind == "time"]
+        times.append(self._pod.last_modified)
 
-        if any(t is None for t in upstream_times):
-            self._cached_stream = None
+        if any(t is None for t in times):
+            self._discard_result()
             self._cached_time = None
             return
 
-        # Get the maximum upstream time
-        max_upstream_time = max(cast(list[datetime], upstream_times))
+        newest = max(cast(list[datetime], times))
+        if states != self._kept_states or newest > self._cached_time:
+            self._discard_result()
+            # Noted so that the next check finds a change only if there is a new one.
+            self._kept_states = states
+            self._cached_time = datetime.now(timezone.utc)
 
-        # Invalidate cache if upstream is newer and update the cache time
-        if max_upstream_time > self._cached_time:
-            self._cached_stream = None
-            self._cached_time = max_upstream_time
+    @property
+    def is_stale(self) -> bool:
+        """Whether the next read must run the operator: no kept result, or an outdated one.
 
-    def run(self, *args: Any, **kwargs: Any) -> None:
+        Judged as ``_update_cache_status`` judges the kept result (which it discards if
+        outdated), not by comparing modified times: an upstream that completed its first
+        computation after the result was kept is newer, but not changed (ITL-1083).
+        """
+        self._update_cache_status()
+        return self._cached_stream is None
+
+    def _discard_result(self) -> None:
+        """Drop the kept result; a downstream operator stream sees the change."""
+        self._cached_stream = None
+        self._reset_generation += 1
+
+    def _refresh(self) -> None:
+        """Run the operator unless its kept result is current: the one computation
+        path of ``as_table``, ``iter_data`` and so ``run``."""
         self._update_cache_status()
 
         # recompute if cache is invalid
         if self._cached_time is None or self._cached_stream is None:
+            # Noted before the operator reads its inputs, so that a change made while it
+            # reads them is seen by the next check.
+            kept_states = _upstream_states(self.upstreams)
             self._cached_stream = self._pod.static_process(
                 *self.upstreams,
             )
             self._cached_time = datetime.now(timezone.utc)
+            self._kept_states = kept_states
 
     def as_table(
         self,
@@ -546,7 +945,7 @@ class DynamicPodStream(StreamBase):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> "pa.Table":
-        self.run()
+        self._refresh()
         assert self._cached_stream is not None, (
             "StreamProtocol has not been updated or is empty."
         )
@@ -555,7 +954,7 @@ class DynamicPodStream(StreamBase):
     def iter_data(
         self,
     ) -> Iterator[tuple[TagProtocol, DataProtocol]]:
-        self.run()
+        self._refresh()
         assert self._cached_stream is not None, (
             "StreamProtocol has not been updated or is empty."
         )
@@ -567,8 +966,8 @@ class DynamicPodStream(StreamBase):
         *,
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
-    ) -> StreamHead:
-        """Return the first rows of the operator's kept result; never runs the operator.
+    ) -> StreamView:
+        """Return the first rows of the operator's kept result; never runs it over rows.
 
         The head of an operator is not the operator over the heads of its inputs (a
         group over ten rows has the wrong members), so before the result is computed,
@@ -584,9 +983,48 @@ class DynamicPodStream(StreamBase):
             )
         return self._head_without_rows(
             config,
-            HeadStatus.NOT_COMPUTED,
+            ViewStatus.NOT_COMPUTED,
             note=STALE_NOTE if had_result else None,
         )
 
     def __repr__(self) -> str:
-        return f"{self.__class__.__name__}(kernel={self.producer}, upstreams={self.upstreams})"
+        # Upstreams by class and label only: their own repr would nest every path (ITL-1111).
+        upstreams = ", ".join(
+            short_stream_repr(upstream) for upstream in self.upstreams
+        )
+        return (
+            f"{self.__class__.__name__}(label={self.label!r}, kernel={self.producer}, "
+            f"upstreams=({upstreams}))"
+        )
+
+
+def _upstream_state(stream: StreamProtocol) -> tuple[str, object]:
+    """What tells a change of an upstream of an operator stream.
+
+    A pod stream or an operator stream computes lazily, so its modified time moves when it
+    completes its first computation, which is not a change of its content: its reset
+    generation tells a change instead (ITL-1083, as ``FunctionPodStream`` judges a pod-stream
+    input, ITL-1065). A stale pod stream counts the reset its next read makes. An operator
+    stream is first asked for its modified time, which discards its own kept result if that
+    is stale. Any other upstream (source, table stream, node) is told by its modified time.
+
+    Args:
+        stream: The upstream.
+
+    Returns:
+        ``("generation", n)`` or ``("time", modified time or None)``.
+    """
+    if isinstance(stream, FunctionPodStream):
+        generation = stream._reset_generation  # pyright: ignore[reportPrivateUsage]  # staleness bookkeeping shared by the stream kinds, never public
+        return ("generation", generation + int(stream.is_stale))
+    if isinstance(stream, DynamicPodStream):
+        _ = stream.last_modified
+        return ("generation", stream._reset_generation)  # pyright: ignore[reportPrivateUsage]  # same class
+    return ("time", stream.last_modified)
+
+
+def _upstream_states(
+    upstreams: tuple[StreamProtocol, ...],
+) -> tuple[tuple[str, object], ...]:
+    """The state of each upstream (``_upstream_state``), in order."""
+    return tuple(_upstream_state(stream) for stream in upstreams)

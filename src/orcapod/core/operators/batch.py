@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, ClassVar, TYPE_CHECKING
 
+from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import UnaryOperator
 from orcapod.core.streams import ArrowTableStream
@@ -176,6 +177,7 @@ class Batch(UnaryOperator):
             ValueError: If ``input_pipeline_hashes`` does not have one hash per input.
         """
         try:
+            output = WithoutMetaWriter(output)
             if len(input_pipeline_hashes) != len(inputs):
                 raise ValueError(
                     f"input_pipeline_hashes length ({len(input_pipeline_hashes)}) "

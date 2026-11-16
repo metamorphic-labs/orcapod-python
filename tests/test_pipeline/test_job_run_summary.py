@@ -88,7 +88,7 @@ def double(x: int) -> int:
 def make_job(store: Any, pod: Any, label: str, n_rows: int = 4) -> PipelineJob:
     """A source of ``n_rows`` rows (x = 0..n-1) feeding ``pod`` under ``label``."""
     rows = [{"k": f"r{i}", "x": i} for i in range(n_rows)]
-    job = PipelineJob(name="summary_demo", store=store)
+    job = PipelineJob(name="summary_demo", database=store)
     with job:
         source = DictSource(
             data=rows, tag_columns=["k"], tag_only_columns=True, source_id="rows"
@@ -160,7 +160,7 @@ def test_clean_run_is_quiet(store: Any, orchestrator: Any) -> None:
 
 
 def test_rerun_counts_rows_from_the_store(store: Any, orchestrator: Any) -> None:
-    """Running again counts the stored rows as from the store and computes only the new row."""
+    """Running again counts the stored rows as from the database and computes only the new row."""
     run(make_job(store, double, "doubled"), orchestrator)
     summary = run(make_job(store, double, "doubled", n_rows=5), orchestrator)
 
@@ -223,7 +223,7 @@ def plus_one(y: int) -> int:
 def test_node_with_empty_input_counts_zero_rows(store: Any, orchestrator: Any) -> None:
     """Every row fails upstream, so the next node receives none: it reports zeros."""
     rows = [{"k": f"r{i}", "x": i} for i in range(4)]
-    job = PipelineJob(name="summary_chain", store=store)
+    job = PipelineJob(name="summary_chain", database=store)
     with job:
         source = DictSource(
             data=rows, tag_columns=["k"], tag_only_columns=True, source_id="rows"

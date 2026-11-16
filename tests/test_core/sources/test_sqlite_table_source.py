@@ -566,7 +566,7 @@ class TestPipelineIntegration:
         pf = PythonDataFunction(double_response, output_keys="doubled")
         pod = FunctionPod(pf)
 
-        job = PipelineJob(name="sqlite_integration", store=InMemoryArrowDatabase())
+        job = PipelineJob(name="sqlite_integration", database=InMemoryArrowDatabase())
         with job:
             pod(src, label="doubler")
 

@@ -387,8 +387,8 @@ class TestPipelineStores:
     def test_frames_stored_and_read_back(
         self, store_name: str, orchestrator_name: str, tmp_path: Path
     ) -> None:
-        """Frames written by a job read back exactly, in each store and orchestrator."""
-        job = PipelineJob(name="frames", store=_STORES[store_name](tmp_path))
+        """Frames written by a job read back exactly, in each database and orchestrator."""
+        job = PipelineJob(name="frames", database=_STORES[store_name](tmp_path))
         with job:
             frames = make_frame.pod(_int_source(), label="make")
             frame_height.pod(frames, label="height")
@@ -412,7 +412,7 @@ class TestPipelineStores:
         A cached pod that returns ``df.columns[0]`` computes for each order instead of
         reusing the other order's result.
         """
-        job = PipelineJob(name="order", store=_STORES[store_name](tmp_path))
+        job = PipelineJob(name="order", database=_STORES[store_name](tmp_path))
         with job:
             frames = make_ordered_frame.pod(_order_source(), label="make")
             leading_names.pod(frames, label="names")
@@ -439,7 +439,7 @@ class TestPipelineStores:
         self, store_name: str, orchestrator_name: str, tmp_path: Path
     ) -> None:
         """A cached pod reading ``is_null()`` computes for each of the two frames."""
-        job = PipelineJob(name="nulls", store=_STORES[store_name](tmp_path))
+        job = PipelineJob(name="nulls", database=_STORES[store_name](tmp_path))
         with job:
             frames = make_null_struct_frame.pod(_null_struct_source(), label="make")
             struct_is_null.pod(frames, label="is_null")
@@ -455,8 +455,8 @@ class TestPipelineStores:
 
     def test_saved_job_loaded_back_reads_the_frames(self, tmp_path: Path) -> None:
         """A saved job, loaded in place of the original, reads its stored frames exactly."""
-        store_path = tmp_path / "delta"
-        job = PipelineJob(name="frames", store=DeltaTableDatabase(store_path))
+        database_path = tmp_path / "delta"
+        job = PipelineJob(name="frames", database=DeltaTableDatabase(database_path))
         with job:
             frames = make_frame.pod(_int_source(), label="make")
             frame_height.pod(frames, label="height")
@@ -464,23 +464,29 @@ class TestPipelineStores:
         saved = tmp_path / "job.json"
         job.save(str(saved))
 
-        loaded = PipelineJob.load(str(saved), store=DeltaTableDatabase(store_path))
+        loaded = PipelineJob.load(
+            str(saved), database=DeltaTableDatabase(database_path)
+        )
         node = loaded.nodes["make"]
         _, data_schema = node.output_schema()
         assert data_schema["df"] is pl.DataFrame
-        got = {tag["k"]: data["df"] for tag, data in node.iter_data()}
+        # A loaded job's nodes are empty until it runs (ITL-1095); its stored results
+        # are read through the stored view.
+        stored_view = node.as_source()
+        got = {tag["k"]: data["df"] for tag, data in stored_view.iter_data()}
         _assert_exact(got["a"], _frame(1))
         _assert_exact(got["b"], _frame(3))
         stored = dict(
             zip(
-                node.as_table().column("k").to_pylist(),
-                _stored_frames(node.as_table().column("df")),
+                stored_view.as_table().column("k").to_pylist(),
+                _stored_frames(stored_view.as_table().column("df")),
                 strict=True,
             )
         )
         _assert_exact(stored["a"], _frame(1))
         heights = {
-            tag["k"]: data["height"] for tag, data in loaded.nodes["height"].iter_data()
+            tag["k"]: data["height"]
+            for tag, data in loaded.nodes["height"].as_source().iter_data()
         }
         assert heights == {"a": 1, "b": 3}
 
@@ -495,7 +501,7 @@ class TestPipelineStores:
     def test_sqlite_store(self, tmp_path: Path) -> None:
         """Frames stored through ``SQLiteConnector`` read back exactly (ITL-877)."""
         connector = SQLiteConnector(str(tmp_path / "frames.sqlite"))
-        job = PipelineJob(name="frames", store=ConnectorArrowDatabase(connector))
+        job = PipelineJob(name="frames", database=ConnectorArrowDatabase(connector))
         with job:
             make_frame.pod(_int_source(), label="make")
         job.run()
@@ -505,7 +511,7 @@ class TestPipelineStores:
         _assert_exact(got["b"], _frame(3))
 
 
-# Runs one pipeline over a Delta store and prints how many times each pod body ran, plus
+# Runs one pipeline over a Delta database and prints how many times each pod body ran, plus
 # the frames read back. The pod bodies append to a marker file so a cache hit (body not
 # run) is observable from the parent process.
 _CROSS_PROCESS_SCRIPT = textwrap.dedent(
@@ -517,7 +523,7 @@ _CROSS_PROCESS_SCRIPT = textwrap.dedent(
     from orcapod.databases import DeltaTableDatabase
     from orcapod.sources import DictSource
 
-    store_path, marker = Path(sys.argv[1]), Path(sys.argv[2])
+    database_path, marker = Path(sys.argv[1]), Path(sys.argv[2])
 
     @function_pod(output_keys="df")
     def make_frame(n: int) -> pl.DataFrame:
@@ -534,8 +540,10 @@ _CROSS_PROCESS_SCRIPT = textwrap.dedent(
             fh.write("height\\n")
         return df.height
 
-    source = DictSource([{"k": "a", "n": 1}, {"k": "b", "n": 3}], tag_columns=["k"], tag_only_columns=True)
-    job = PipelineJob(name="frames", store=DeltaTableDatabase(store_path))
+    source = DictSource(
+        [{"k": "a", "n": 1}, {"k": "b", "n": 3}], tag_columns=["k"], tag_only_columns=True
+    )
+    job = PipelineJob(name="frames", database=DeltaTableDatabase(database_path))
     with job:
         frames = make_frame.pod(source, label="make")
         frame_height.pod(frames, label="height")
@@ -550,10 +558,10 @@ _CROSS_PROCESS_SCRIPT = textwrap.dedent(
 )
 
 
-def _run_pipeline_process(store_path: Path, marker: Path) -> dict[str, Any]:
+def _run_pipeline_process(database_path: Path, marker: Path) -> dict[str, Any]:
     """Run the pipeline script in a new process and return its printed JSON."""
     result = subprocess.run(
-        [sys.executable, "-c", _CROSS_PROCESS_SCRIPT, str(store_path), str(marker)],
+        [sys.executable, "-c", _CROSS_PROCESS_SCRIPT, str(database_path), str(marker)],
         capture_output=True,
         text=True,
         check=False,
@@ -563,14 +571,14 @@ def _run_pipeline_process(store_path: Path, marker: Path) -> dict[str, Any]:
 
 
 def test_cached_rerun_in_new_process_hits_the_cache(tmp_path: Path) -> None:
-    """A second process over the same Delta store recomputes nothing and reads equal frames."""
-    store_path, marker = tmp_path / "store", tmp_path / "calls.txt"
+    """A second process over the same Delta database recomputes nothing and reads equal frames."""
+    database_path, marker = tmp_path / "store", tmp_path / "calls.txt"
 
-    first = _run_pipeline_process(store_path, marker)
+    first = _run_pipeline_process(database_path, marker)
     calls_after_first = marker.read_text().splitlines()
     assert sorted(calls_after_first) == ["height", "height", "make", "make"]
 
-    second = _run_pipeline_process(store_path, marker)
+    second = _run_pipeline_process(database_path, marker)
     assert marker.read_text().splitlines() == calls_after_first  # nothing re-ran
     assert second == first
     assert second["heights"] == {"a": 1, "b": 3}
@@ -596,7 +604,7 @@ class TestSeriesValues:
 
     def test_pod_output_and_input(self, tmp_path: Path) -> None:
         """A stored ``pl.Series`` keeps name, dtype and values, and a pod reads it."""
-        job = PipelineJob(name="series", store=DeltaTableDatabase(tmp_path / "s"))
+        job = PipelineJob(name="series", database=DeltaTableDatabase(tmp_path / "s"))
         with job:
             columns = first_column.pod(make_frame.pod(_int_source()), label="first")
             series_sum.pod(columns, label="sum")

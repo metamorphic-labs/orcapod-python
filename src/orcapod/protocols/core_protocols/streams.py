@@ -16,10 +16,10 @@ if TYPE_CHECKING:
     from orcapod.protocols.core_protocols.pod import PodProtocol
 
 
-class StreamHeadProtocol(Protocol):
-    """The readily available first rows of a stream, as ``head`` returns them.
+class StreamViewProtocol(Protocol):
+    """Rows of a stream, as ``head`` and ``run`` return them.
 
-    ``orcapod.core.streams.head.StreamHead`` is the implementation.
+    ``orcapod.core.streams.view.StreamView`` is the implementation.
     """
 
     @property
@@ -29,7 +29,7 @@ class StreamHeadProtocol(Protocol):
 
     @property
     def status(self) -> str:
-        """Where the rows came from, or why there are none (a ``HeadStatus``)."""
+        """Where the rows came from, or why there are none (a ``ViewStatus``)."""
         ...
 
     @property
@@ -47,6 +47,22 @@ class StreamHeadProtocol(Protocol):
 
     def as_polars_df(self) -> "pl.DataFrame":
         """The rows as a Polars DataFrame."""
+        ...
+
+    def __len__(self) -> int:
+        """The number of rows in ``table``."""
+        ...
+
+    def head(self, n: int = 10) -> "StreamViewProtocol":
+        """A view of the first ``n`` rows of this view; never reads or computes."""
+        ...
+
+    def tail(self, n: int = 10) -> "StreamViewProtocol":
+        """A view of the last ``n`` rows of this view; never reads or computes."""
+        ...
+
+    def sort_by_tags(self) -> "StreamViewProtocol":
+        """A view of this view's rows in tag order; never reads or computes."""
         ...
 
     def _repr_html_(self) -> str:
@@ -195,21 +211,39 @@ class StreamProtocol(TraceableProtocol, PipelineElementProtocol, Protocol):
         """
         ...
 
+    def run(self) -> "StreamViewProtocol":
+        """Compute the whole stream and return a view of all its rows.
+
+        Does the work ``as_table()`` does, through the same path and cache; a job node
+        runs as it does in a job. Every stream has it, with no argument: it is the one
+        way to compute a stream outside a job (ITL-1081). ``head()`` and the notebook
+        preview never compute a row.
+
+        Returns:
+            StreamView: Every computed row, with the default column configuration.
+        """
+        ...
+
     def head(
         self,
         n: int = 10,
         *,
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
-    ) -> "StreamHeadProtocol":
+    ) -> "StreamViewProtocol":
         """Return at most ``n`` readily available rows, without computing.
 
         The rows are ones the stream already holds, has cached from an earlier
-        computation, has stored, or can read with a bounded read. It never calls a
-        function, runs an operator, delivers a side effect, polls or writes.
+        computation, has stored, or can read with a bounded read. It never computes,
+        polls or delivers a row (it reads only what is held or stored, or makes a bounded
+        read), never calls user code (a function, a predicate,
+        a side effect) and never writes. With no rows to show, it may apply operators
+        to zero-row tables to learn the column types, which processes no data (ITL-912). A
+        user-defined operator's ``static_process`` is applied to zero-row tables and must
+        not have effects.
 
         Returns:
-            StreamHead: The rows, and a status that tells an empty result from one
+            StreamView: The rows, and a status that tells an empty result from one
             that is not computed.
         """
         ...
@@ -402,6 +436,32 @@ class StreamWithOperationsProtocol(StreamProtocol, Protocol):
         """
         Drop the specified data columns from the stream. A ValueError is raised
         if one or more specified data columns do not exist in the stream unless strict = False.
+        """
+        ...
+
+    def drop_columns(
+        self,
+        *columns: str | Collection[str],
+        strict: bool = True,
+        label: str | None = None,
+    ) -> "StreamProtocol":
+        """Drop the named columns, whether each is a tag or a data column.
+
+        Names are given as one or more strings, or as one collection of strings
+        as the only positional argument.
+        """
+        ...
+
+    def select_columns(
+        self,
+        *columns: str | Collection[str],
+        strict: bool = True,
+        label: str | None = None,
+    ) -> "StreamProtocol":
+        """Keep exactly the named columns, tag or data; drop every other one.
+
+        Names are given as one or more strings, or as one collection of strings
+        as the only positional argument.
         """
         ...
 

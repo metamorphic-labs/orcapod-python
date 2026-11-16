@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from typing import Any, ClassVar, TYPE_CHECKING, cast
 
 from orcapod.core.referential_tags import stream_references
+from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import UnaryOperator
 from orcapod.system_constants import constants
@@ -15,7 +16,7 @@ from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
 from orcapod.types import ColumnConfig, ContentHash, Schema, SourceInfoValue
-from orcapod.utils import arrow_utils
+from orcapod.utils import arrow_utils, schema_utils
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -63,6 +64,10 @@ class Index(UnaryOperator):
     ) -> None:
         self.column = column
         self.i = i
+        # A data column never gets a meta column's name (ITL-1080): refused here,
+        # as ``MapData`` refuses it, so no path can produce one and drop it.
+        if out is not None:
+            schema_utils.require_names_not_meta([out])
         self.out = out
         self.fail_on_miss = fail_on_miss
         self._output_type: type = None  # type: ignore[assignment]
@@ -382,8 +387,10 @@ class Index(UnaryOperator):
             # The source-info columns are part of it: the projected column's token
             # type is the input's with one list level removed, as for a non-empty
             # result (ITL-1046), and every other token column keeps its input type.
+            # The system tags are part of it too: a result with rows keeps each row's
+            # (ITL-1131).
             input_schema = arrow_utils.normalize_schema_to_large_types(
-                stream.as_table(columns={"source": True}).schema
+                stream.as_table(columns={"source": True, "system_tags": True}).schema
             )
             element_field = pa.field(
                 self.out or self.column,
@@ -415,7 +422,7 @@ class Index(UnaryOperator):
                 output_schema = input_schema.append(element_field)  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
                 output_schema = output_schema.append(token_field)  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
             return ArrowTableStream(
-                output_schema.empty_table(),
+                self._as_row_built_table(output_schema.empty_table(), tag_columns),
                 tag_columns=tag_columns,
                 data_context=stream.data_context,
                 reference_tags=stream_references(stream),
@@ -447,6 +454,7 @@ class Index(UnaryOperator):
                 pipeline hash.
         """
         try:
+            output = WithoutMetaWriter(output)
             async for tag, data in inputs[0]:
                 result = self._process_one(tag, data)
                 if result is not None:

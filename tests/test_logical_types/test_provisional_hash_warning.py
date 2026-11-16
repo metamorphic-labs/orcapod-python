@@ -228,7 +228,9 @@ def test_reading_stored_results_of_the_type_warns_once(
     """A loaded job, whose pods are not saved, reads a stored column of the type."""
 
     def run_and_save() -> None:
-        job = PipelineJob(name="values", store=DeltaTableDatabase(tmp_path / "store"))
+        job = PipelineJob(
+            name="values", database=DeltaTableDatabase(tmp_path / "store")
+        )
         with job:
             _producer(name).pod(_numbers(), label="make")
         job.run()
@@ -237,7 +239,8 @@ def test_reading_stored_results_of_the_type_warns_once(
     _quiet(run_and_save)
     with recorded() as caught:
         loaded = PipelineJob.load(tmp_path / "job.json")
-        table = loaded.nodes["make"].as_table()
+        # A loaded node is empty until it runs (ITL-1095): read the stored view.
+        table = loaded.nodes["make"].as_source().as_table()
     assert table.num_rows == 3
     assert _warned_names(caught) == [name]
 

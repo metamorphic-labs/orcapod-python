@@ -178,7 +178,7 @@ class TestOrchestratorLinearPipeline:
         pf = PythonDataFunction(double_value, output_keys="result")
         pod = FunctionPod(pf)
 
-        job = PipelineJob(name="linear", store=InMemoryArrowDatabase())
+        job = PipelineJob(name="linear", database=InMemoryArrowDatabase())
         with job:
             pod(src, label="doubler")
         # job.run() auto-flushes database writes at the end of execution;
@@ -199,7 +199,7 @@ class TestOrchestratorLinearPipeline:
         pod = FunctionPod(pf)
 
         # Sync
-        sync_job = PipelineJob(name="sync", store=InMemoryArrowDatabase())
+        sync_job = PipelineJob(name="sync", database=InMemoryArrowDatabase())
         with sync_job:
             pod(src, label="doubler")
         sync_job.run()
@@ -207,7 +207,7 @@ class TestOrchestratorLinearPipeline:
         sync_values = sorted(sync_records.column("result").to_pylist())
 
         # Async
-        async_job = PipelineJob(name="async", store=InMemoryArrowDatabase())
+        async_job = PipelineJob(name="async", database=InMemoryArrowDatabase())
         with async_job:
             pod(src, label="doubler")
         async_job.run(orchestrator=AsyncPipelineOrchestrator())
@@ -235,7 +235,7 @@ class TestOrchestratorOperatorPipeline:
         pf = PythonDataFunction(double_val, output_keys="result")
         pod = FunctionPod(pf)
 
-        job = PipelineJob(name="op_pipe", store=InMemoryArrowDatabase())
+        job = PipelineJob(name="op_pipe", database=InMemoryArrowDatabase())
         with job:
             mapped = op(src, label="mapper")
             pod(mapped, label="doubler")
@@ -261,7 +261,7 @@ class TestOrchestratorDiamondDag:
         pf = PythonDataFunction(add_values, output_keys="total")
         pod = FunctionPod(pf)
 
-        job = PipelineJob(name="diamond", store=InMemoryArrowDatabase())
+        job = PipelineJob(name="diamond", database=InMemoryArrowDatabase())
         with job:
             joined = Join()(src_a, src_b, label="join")
             pod(joined, label="adder")
@@ -280,7 +280,7 @@ class TestOrchestratorDiamondDag:
         pod = FunctionPod(pf)
 
         # Sync
-        sync_job = PipelineJob(name="sync_diamond", store=InMemoryArrowDatabase())
+        sync_job = PipelineJob(name="sync_diamond", database=InMemoryArrowDatabase())
         with sync_job:
             joined = Join()(src_a, src_b, label="join")
             pod(joined, label="adder")
@@ -293,7 +293,7 @@ class TestOrchestratorDiamondDag:
         assert sync_job.adder is sync_job.nodes["adder"]
 
         # Async
-        async_job = PipelineJob(name="async_diamond", store=InMemoryArrowDatabase())
+        async_job = PipelineJob(name="async_diamond", database=InMemoryArrowDatabase())
         with async_job:
             joined = Join()(src_a, src_b, label="join")
             pod(joined, label="adder")
@@ -326,7 +326,7 @@ class TestOrchestratorRunAsync:
         pf = PythonDataFunction(double_value, output_keys="result")
         pod = FunctionPod(pf)
 
-        job = PipelineJob(name="async_loop", store=InMemoryArrowDatabase())
+        job = PipelineJob(name="async_loop", database=InMemoryArrowDatabase())
         with job:
             pod(src, label="doubler")
 
@@ -367,7 +367,7 @@ class TestBufferSizeConfiguration:
         pf = PythonDataFunction(double_value, output_keys="result")
         pod = FunctionPod(pf)
 
-        job = PipelineJob(name="bufsize", store=InMemoryArrowDatabase())
+        job = PipelineJob(name="bufsize", database=InMemoryArrowDatabase())
         with job:
             pod(src, label="doubler")
         job.run(orchestrator=AsyncPipelineOrchestrator(buffer_size=4))
@@ -397,7 +397,7 @@ class TestAsyncOrchestratorFanOut:
         pf2 = PythonDataFunction(triple_value, output_keys="result")
         pod2 = FunctionPod(pf2)
 
-        job = PipelineJob(name="fanout", store=InMemoryArrowDatabase())
+        job = PipelineJob(name="fanout", database=InMemoryArrowDatabase())
         with job:
             pod1(src, label="doubler")
             pod2(src, label="tripler")
@@ -459,7 +459,7 @@ class TestAsyncOrchestratorErrorPropagation:
         pf = PythonDataFunction(failing_fn, output_keys="result")
         pod = FunctionPod(pf)
 
-        job = PipelineJob(name="error", store=InMemoryArrowDatabase())
+        job = PipelineJob(name="error", database=InMemoryArrowDatabase())
         with job:
             pod(src, label="failer")
 
@@ -476,7 +476,7 @@ class TestAsyncOrchestratorErrorPropagation:
         pf = PythonDataFunction(failing_fn, output_keys="result")
         pod = FunctionPod(pf)
 
-        job = PipelineJob(name="error2", store=InMemoryArrowDatabase())
+        job = PipelineJob(name="error2", database=InMemoryArrowDatabase())
         with job:
             pod(src, label="failer")
 
@@ -501,7 +501,7 @@ class TestAsyncOrchestratorObserverInjection:
         pf = PythonDataFunction(double_value, output_keys="result")
         pod = FunctionPod(pf)
 
-        job = PipelineJob(name="async_obs", store=InMemoryArrowDatabase())
+        job = PipelineJob(name="async_obs", database=InMemoryArrowDatabase())
         with job:
             pod(src, label="doubler")
 
@@ -562,7 +562,7 @@ class TestAsyncOrchestratorObserverInjection:
         pf = PythonDataFunction(double_val, output_keys="result")
         pod = FunctionPod(pf)
 
-        job = PipelineJob(name="async_obs_op", store=InMemoryArrowDatabase())
+        job = PipelineJob(name="async_obs_op", database=InMemoryArrowDatabase())
         with job:
             mapped = op(src, label="mapper")
             pod(mapped, label="doubler")
@@ -615,7 +615,7 @@ class TestAsyncOrchestratorObserverInjection:
         pf = PythonDataFunction(double_value, output_keys="result")
         pod = FunctionPod(pf)
 
-        job = PipelineJob(name="async_no_obs", store=InMemoryArrowDatabase())
+        job = PipelineJob(name="async_no_obs", database=InMemoryArrowDatabase())
         with job:
             pod(src, label="doubler")
         job.run(orchestrator=AsyncPipelineOrchestrator())  # no observer

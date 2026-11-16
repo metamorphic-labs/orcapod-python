@@ -87,7 +87,7 @@ def _build(store: Any) -> PipelineJob:
         tag_only_columns=True,
         source_id="every",
     )
-    job = PipelineJob(name="tensors", store=store)
+    job = PipelineJob(name="tensors", database=store)
     with job:
         identity.pod(every, label="identity_all")
         y = identity.pod(numeric, label="identity_numeric")
@@ -101,7 +101,7 @@ def _build(store: Any) -> PipelineJob:
 def _build_list_output(store: Any) -> PipelineJob:
     """Build a job whose pod returns ``list[torch.Tensor]`` on ``store``."""
     numeric, shifted = _numeric_sources()
-    job = PipelineJob(name="tensor_lists", store=store)
+    job = PipelineJob(name="tensor_lists", database=store)
     with job:
         pair.pod(MergeJoin()(numeric, shifted, label="merge_join"), label="pair")
     return job
@@ -140,7 +140,7 @@ def _node(job: PipelineJob, label: str, column: str, key: str = "k") -> dict[str
     [(store, runner) for store in sorted(STORES) for runner in sorted(RUNNERS)],
 )
 def test_pipeline_keeps_tensors_exact(tmp_path: Path, store: str, runner: str) -> None:
-    """Every node of the job keeps tensors exact on each store and runner."""
+    """Every node of the job keeps tensors exact on each database and runner."""
     job = _build(STORES[store](tmp_path))
     RUNNERS[runner](job)
 

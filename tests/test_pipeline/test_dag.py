@@ -580,7 +580,7 @@ class TestPipelineProtocolConformance:
         from orcapod.pipeline.job import PipelineJob
         from orcapod.protocols.pipeline_protocols import PipelineProtocol
 
-        job = PipelineJob(store=InMemoryArrowDatabase())
+        job = PipelineJob(database=InMemoryArrowDatabase())
         with job:
             pass
 
@@ -641,7 +641,7 @@ class TestPipelineJobDagOnLoadedJob:
         with pipeline:
             pod(src)
         job = PipelineJob.from_pipeline(
-            pipeline, sources={"src": src}, store=InMemoryArrowDatabase()
+            pipeline, sources={"src": src}, database=InMemoryArrowDatabase()
         )
         job.run()
         save_path = tmp_path / "job.json"

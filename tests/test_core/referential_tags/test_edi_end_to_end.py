@@ -152,7 +152,7 @@ def test_edi_shaped_pipeline_runs_and_second_run_computes_nothing(
     with warnings.catch_warnings():
         # The pod call's automatic select materializes the keys it drops (section 7).
         warnings.simplefilter("ignore")
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         _build(job)
         job.run(orchestrator=orchestrator())
 
@@ -182,7 +182,7 @@ def test_edi_shaped_pipeline_runs_and_second_run_computes_nothing(
     CALLS.clear()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        job2 = PipelineJob(store=store)
+        job2 = PipelineJob(database=store)
         _build(job2)
         job2.run(orchestrator=orchestrator())
     assert CALLS == []

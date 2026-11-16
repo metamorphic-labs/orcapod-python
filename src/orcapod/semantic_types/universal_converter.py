@@ -28,6 +28,17 @@ from orcapod.semantic_types.canonical_order import (
     sort_dict_entries,
     sort_set_elements,
 )
+from orcapod.semantic_types.nested_none import (
+    NestedNoneNotRestorableError,
+    none_is_restorable,
+    require_restorable_none,
+    unrestorable_none_error,
+    with_context,
+)
+from orcapod.semantic_types.nested_storage import (
+    NestedTypeNotStorableError,
+    require_storable_in_struct_field,
+)
 from orcapod.semantic_types.type_inference import infer_python_schema_from_pylist_data
 from orcapod.types import DataType, Schema, SchemaLike
 from orcapod.utils import arrow_utils
@@ -56,6 +67,11 @@ _PYTHON_TO_ARROW_MAP: "dict | None" = None
 # Using a ContextVar (rather than an instance attribute) keeps it thread-safe,
 # coroutine-safe, and explicitly scoped to the active call chain without
 # polluting the converter instance with temporary state.
+_FROZENSET_UNSUPPORTED = (
+    "{annotation!r} is not supported: declare set[T] instead. Support for frozenset "
+    "is to be evaluated in ITL-1140."
+)
+
 _register_in_progress: contextvars.ContextVar[set[type] | None] = (
     contextvars.ContextVar("_register_in_progress", default=None)
 )
@@ -238,23 +254,43 @@ class UniversalTypeConverter:
         Raises:
             TypeError: If a leaf class has no registered ``LogicalType`` and
                 no registered factory covers it.
+            NestedNoneNotRestorableError: If an annotation declares a None at a
+                nested position that a read cannot restore (ITL-1144), naming the
+                column.
+            NestedTypeNotStorableError: If an annotation declares a logical type as
+                a dict key or value (ITL-1150), naming the column. A tuple
+                annotation is not covered here: registration does not support
+                tuples and raises a plain ``ValueError`` (``Unsupported
+                annotation``). The tuple-field refusal applies where a tuple is
+                converted to Arrow, in ``python_type_to_arrow_type`` and
+                ``python_schema_to_arrow_schema``.
         """
         if self._logical_type_registry is None:
             return
         for schema in schemas:
-            for annotation in schema.values():
-                origin = get_origin(annotation)
-                if origin is typing.Union or origin is types.UnionType:
-                    # Union types (e.g. str | Path) are valid in function input
-                    # schemas — they express that the pod accepts either concrete
-                    # type. Register each non-None branch so its LogicalType is
-                    # available when a stream is bound; the union itself has no
-                    # Arrow representation.
-                    for branch in get_args(annotation):
-                        if branch is not type(None):
-                            self.register_python_class(branch)
-                else:
-                    self.register_python_class(annotation)
+            for name, annotation in schema.items():
+                try:
+                    self._register_annotation(annotation)
+                except (
+                    NestedNoneNotRestorableError,
+                    NestedTypeNotStorableError,
+                ) as exc:
+                    raise with_context(f"Column {name!r} ({annotation})", exc) from exc
+
+    def _register_annotation(self, annotation: Any) -> None:
+        """Register one schema annotation; a union registers each non-None branch."""
+        origin = get_origin(annotation)
+        if origin is typing.Union or origin is types.UnionType:
+            # Union types (e.g. str | Path) are valid in function input
+            # schemas — they express that the pod accepts either concrete
+            # type. Register each non-None branch so its LogicalType is
+            # available when a stream is bound; the union itself has no
+            # Arrow representation.
+            for branch in get_args(annotation):
+                if branch is not type(None):
+                    self.register_python_class(branch)
+        else:
+            self.register_python_class(annotation)
 
     def register_python_class(self, annotation: Any) -> "pa.DataType":
         """Register a Python type annotation and return its Arrow type.
@@ -279,6 +315,9 @@ class UniversalTypeConverter:
             TypeError: If a concrete class has no registered ``LogicalType`` and
                 no factory covers it, or if a circular dependency is detected.
             ValueError: If a complex (non-Optional) union is encountered.
+            NestedNoneNotRestorableError: If a list or set element or a dict value is
+                declared ``X | None`` and a stored None there cannot be read back
+                (ITL-1144).
         """
         in_progress = _register_in_progress.get()
         if in_progress is None:
@@ -361,6 +400,7 @@ class UniversalTypeConverter:
                     "element type (e.g. list[int], list[str])."
                 )
             inner = self.register_python_class(args[0])
+            require_restorable_none(args[0], inner, self._is_user_class_extension)
             if self._logical_type_registry is not None and hasattr(
                 inner, "extension_name"
             ):
@@ -371,7 +411,8 @@ class UniversalTypeConverter:
                     return self._make_or_get_list_logical_type(element_lt, is_set=False)
             return pa.large_list(inner)
 
-        # set[T] → pa.large_list(T). Same restriction as list[T] unless T has a LogicalType.
+        # set[T] → the native set container, a ListLogicalType extension: over T's
+        # logical type when T has one, otherwise over T's plain Arrow type (ITL-611).
         if origin is set:
             if not args:
                 raise ValueError(
@@ -379,6 +420,7 @@ class UniversalTypeConverter:
                     "element type (e.g. set[int], set[str])."
                 )
             inner = self.register_python_class(args[0])
+            require_restorable_none(args[0], inner, self._is_user_class_extension)
             if self._logical_type_registry is not None and hasattr(
                 inner, "extension_name"
             ):
@@ -387,11 +429,15 @@ class UniversalTypeConverter:
                 )
                 if element_lt is not None:
                     return self._make_or_get_list_logical_type(element_lt, is_set=True)
-            return pa.large_list(inner)
+            return self._make_or_get_arrow_element_set_type(inner)
+
+        if origin is frozenset:
+            raise ValueError(_FROZENSET_UNSUPPORTED.format(annotation=annotation))
 
         # dict[K, V] → pa.large_list(struct{key: K, value: V}).
-        # Raise if K or V resolves to an extension type: the key/value land inside struct
-        # fields, which also forbids extension types (ET1 in design_issues/).
+        # Refuse K or V that resolves to an extension type (a logical type or a native
+        # container): the key/value land inside struct fields, which cannot hold one
+        # (ITL-1150).
         if origin is dict:
             if len(args) < 2:
                 raise ValueError(
@@ -400,20 +446,9 @@ class UniversalTypeConverter:
                 )
             key_arrow = self.register_python_class(args[0])
             val_arrow = self.register_python_class(args[1])
-            if isinstance(key_arrow, pa.ExtensionType):
-                raise ValueError(
-                    f"'dict[{args[0]}, ...]' is not yet supported: the key type maps to Arrow "
-                    f"extension type {key_arrow.extension_name!r}, which cannot be preserved "
-                    f"inside a struct field due to an Arrow limitation (ET1 in design_issues/). "
-                    f"Native dict-of-logical-type support is tracked in PLT-1732."
-                )
-            if isinstance(val_arrow, pa.ExtensionType):
-                raise ValueError(
-                    f"'dict[..., {args[1]}]' is not yet supported: the value type maps to Arrow "
-                    f"extension type {val_arrow.extension_name!r}, which cannot be preserved "
-                    f"inside a struct field due to an Arrow limitation (ET1 in design_issues/). "
-                    f"Native dict-of-logical-type support is tracked in PLT-1732."
-                )
+            require_storable_in_struct_field(key_arrow)
+            require_storable_in_struct_field(val_arrow)
+            require_restorable_none(args[1], val_arrow, self._is_user_class_extension)
             return pa.large_list(
                 pa.struct([pa.field("key", key_arrow), pa.field("value", val_arrow)])
             )
@@ -490,6 +525,51 @@ class UniversalTypeConverter:
             lt = ListLogicalType(element_logical_type, is_set=is_set)
             self._logical_type_registry.register_logical_type(lt)
         return lt.get_arrow_extension_type()
+
+    def _make_or_get_arrow_element_set_type(
+        self, element_arrow_type: "pa.DataType"
+    ) -> "pa.DataType":
+        """Return the native set container of a plain Arrow element type (ITL-611).
+
+        Created and registered on first use, looked up by extension name after that,
+        like ``_make_or_get_list_logical_type``. The element's Python type is the
+        Python type of its Arrow type, never the annotation that declared it:
+        ``set[int]``, ``set[int | None]`` and ``set[Literal[1, 2]]`` are one container
+        (``set[int64]``) that reads as ``set[int]``, as a job loaded in a fresh process
+        reads it, so neither a column's Python type nor a schema hash depends on which
+        annotation was declared first.
+
+        Args:
+            element_arrow_type: The Arrow type the element annotation maps to; an
+                extension type here (a type with no registered logical type) is not
+                wrapped.
+
+        Returns:
+            The ``pa.ExtensionType`` of the set, or ``pa.large_list(element)`` when the
+            converter has no registry or the element is an extension type.
+        """
+        from orcapod.logical_types.list_logical_type_factory import (
+            ArrowElement,
+            ListLogicalType,
+        )
+
+        if self._logical_type_registry is None or isinstance(
+            element_arrow_type, pa.BaseExtensionType
+        ):
+            return pa.large_list(element_arrow_type)
+        lt = ListLogicalType(
+            ArrowElement(
+                self.arrow_type_to_python_type(element_arrow_type), element_arrow_type
+            ),
+            is_set=True,
+        )
+        existing = self._logical_type_registry.get_by_arrow_extension_name(
+            lt.logical_type_name
+        )
+        if existing is None:
+            self._logical_type_registry.register_logical_type(lt)
+            existing = lt
+        return existing.get_arrow_extension_type()
 
     def _find_factory_for_class(
         self,
@@ -718,13 +798,20 @@ class UniversalTypeConverter:
         Raises:
             LogicalTypeIdentifierError: If the extension name is known (or was
                 reconstructed by a factory) and ``extension_metadata`` is not one
-                of the values the logical type declares readable.
+                of the values the logical type declares readable, or the name is
+                known and ``storage_type`` (in its large variants) is not the
+                registered type's storage.
             ValueError: If metadata is missing, malformed, lacks ``"category"``, or
                 no factory is registered for the category.
         """
         import json as _json
 
-        from orcapod.logical_types.identifier import require_readable
+        from orcapod.logical_types.identifier import (
+            LogicalTypeIdentifier,
+            LogicalTypeIdentifierError,
+            require_readable,
+        )
+        from orcapod.utils.arrow_utils import normalize_to_large_types
 
         if self._logical_type_registry is None:
             raise ValueError(
@@ -737,9 +824,25 @@ class UniversalTypeConverter:
             arrow_extension_name
         )
         if lt is not None:
-            # The name is known: the stored metadata must be one the type reads.
+            # The name is known: the stored metadata must be one the type reads,
+            # and the stored storage the type's own; never wrap by name alone.
             require_readable(lt, extension_metadata or b"")
-            return lt.get_arrow_extension_type()
+            extension_type = lt.get_arrow_extension_type()
+            if normalize_to_large_types(
+                storage_type, keep_null=True
+            ) != normalize_to_large_types(extension_type.storage_type, keep_null=True):
+                error = LogicalTypeIdentifierError(
+                    LogicalTypeIdentifier(
+                        arrow_extension_name, extension_metadata or b""
+                    ),
+                    (),
+                )
+                error.add_note(
+                    f"Its storage {storage_type} is not the storage of "
+                    f"{arrow_extension_name!r}, {extension_type.storage_type}."
+                )
+                raise error
+            return extension_type
 
         # Missing metadata — cannot auto-register
         if not extension_metadata:
@@ -819,8 +922,18 @@ class UniversalTypeConverter:
 
         Returns:
             A Python object of the type described by ``annotation``.
+
+        Raises:
+            NestedNoneNotRestorableError: If ``storage_value`` is None and a None of
+                ``annotation`` cannot be read back faithfully (ITL-1144). This method
+                decodes nested positions (list elements, class fields); a column's own
+                null never reaches it.
         """
         arrow_type = self.python_type_to_arrow_type(annotation)
+        if storage_value is None and not none_is_restorable(
+            arrow_type, self._is_user_class_extension
+        ):
+            raise unrestorable_none_error(arrow_type)
         converter_fn = self.get_arrow_to_python_converter(arrow_type)
         return converter_fn(storage_value)
 
@@ -903,7 +1016,12 @@ class UniversalTypeConverter:
         """
         fields = []
         for field_name, python_type in python_schema.items():
-            arrow_type = self.python_type_to_arrow_type(python_type)
+            try:
+                arrow_type = self.python_type_to_arrow_type(python_type)
+            except (NestedNoneNotRestorableError, NestedTypeNotStorableError) as exc:
+                raise with_context(
+                    f"Column {field_name!r} ({python_type})", exc
+                ) from exc
             nullable = _is_optional_type(python_type)
             fields.append(pa.field(field_name, arrow_type, nullable=nullable))
         return pa.schema(fields)
@@ -1211,7 +1329,10 @@ class UniversalTypeConverter:
             python_dict = {}
             for field_name, value in row.items():
                 if value is not None:
-                    python_dict[field_name] = converters[field_name](value)
+                    try:
+                        python_dict[field_name] = converters[field_name](value)
+                    except NestedNoneNotRestorableError as exc:
+                        raise with_context(f"Column {field_name!r}", exc) from exc
                 else:
                     python_dict[field_name] = None
             python_dicts.append(python_dict)
@@ -1307,6 +1428,9 @@ class UniversalTypeConverter:
                     f"list type must have exactly one type argument, got: {args}"
                 )
             element_type = self.python_type_to_arrow_type(args[0])
+            require_restorable_none(
+                args[0], element_type, self._is_user_class_extension
+            )
             if self._logical_type_registry is not None and hasattr(
                 element_type, "extension_name"
             ):
@@ -1325,26 +1449,14 @@ class UniversalTypeConverter:
             if len(set(args)) == 1:
                 # Homogeneous tuple → fixed-size list
                 element_type = self.python_type_to_arrow_type(args[0])
-                if hasattr(element_type, "extension_name"):
-                    raise ValueError(
-                        f"'tuple[{args[0]}, ...]' is not supported: the element type maps to "
-                        f"Arrow extension type {element_type.extension_name!r}, which cannot be "
-                        f"preserved inside a list or struct field due to an Arrow limitation "
-                        f"(ET1 in design_issues/)."
-                    )
+                require_storable_in_struct_field(element_type)
                 return pa.list_(element_type, len(args))
             else:
                 # Heterogeneous tuple → struct with indexed fields
                 fields = []
                 for i, arg_type in enumerate(args):
                     field_type = self.python_type_to_arrow_type(arg_type)
-                    if hasattr(field_type, "extension_name"):
-                        raise ValueError(
-                            f"'tuple[..., {arg_type}, ...]' is not supported: element type "
-                            f"maps to Arrow extension type {field_type.extension_name!r}, which "
-                            f"cannot be preserved inside a struct field due to an Arrow limitation "
-                            f"(ET1 in design_issues/)."
-                        )
+                    require_storable_in_struct_field(field_type)
                     fields.append((f"f{i}", field_type))
                 return pa.struct(fields)
 
@@ -1356,6 +1468,9 @@ class UniversalTypeConverter:
                 )
             key_type = self.python_type_to_arrow_type(args[0])
             value_type = self.python_type_to_arrow_type(args[1])
+            require_storable_in_struct_field(key_type)
+            require_storable_in_struct_field(value_type)
+            require_restorable_none(args[1], value_type, self._is_user_class_extension)
             key_value_struct = pa.struct([("key", key_type), ("value", value_type)])
             return pa.large_list(key_value_struct)
 
@@ -1391,13 +1506,16 @@ class UniversalTypeConverter:
                 )
             return self.python_type_to_arrow_type(next(iter(value_types)))
 
-        # Handle set types → lists
+        # Handle set types → the native set container (ITL-611)
         elif origin is set:
             if len(args) != 1:
                 raise ValueError(
                     f"set type must have exactly one type argument, got: {args}"
                 )
             element_type = self.python_type_to_arrow_type(args[0])
+            require_restorable_none(
+                args[0], element_type, self._is_user_class_extension
+            )
             if self._logical_type_registry is not None and hasattr(
                 element_type, "extension_name"
             ):
@@ -1406,7 +1524,10 @@ class UniversalTypeConverter:
                 )
                 if element_lt is not None:
                     return self._make_or_get_list_logical_type(element_lt, is_set=True)
-            return pa.large_list(element_type)
+            return self._make_or_get_arrow_element_set_type(element_type)
+
+        elif origin is frozenset:
+            raise ValueError(_FROZENSET_UNSUPPORTED.format(annotation=python_type))
 
         else:
             raise ValueError(f"Unsupported generic type: {origin}")
@@ -1647,7 +1768,16 @@ class UniversalTypeConverter:
             if lt is not None:
                 _lt = lt
                 _self = self
-                return lambda value: _lt.python_to_storage(value, _self)
+
+                def convert_logical(value: Any) -> Any:
+                    # A None at a position whose type does not admit one never reaches
+                    # the logical type's encoder, which would store a wrong value (a
+                    # Path stored the string 'None', a list[UUID] an empty list).
+                    if value is None:
+                        raise _none_not_admitted(python_type)
+                    return _lt.python_to_storage(value, _self)
+
+                return convert_logical
 
         # Get the Arrow type for this Python type
         # TODO: check if this step is necessary
@@ -1699,7 +1829,7 @@ class UniversalTypeConverter:
             def convert_list(value: Any) -> list[Any]:
                 """Convert list storage, preserving set order independence on updates."""
                 if value is None:
-                    return []
+                    raise _none_not_admitted(python_type)
                 elements = [element_converter(item) for item in value]
                 # An Arrow schema remembers a plain set only as a list. Python set
                 # inputs still need canonical storage order; actual lists keep theirs.
@@ -1712,28 +1842,32 @@ class UniversalTypeConverter:
         elif origin is dict:
             key_converter = self.get_python_to_arrow_converter(args[0])
             value_converter = self.get_python_to_arrow_converter(args[1])
+
             # A dict is order independent: entries are stored in canonical key order
             # so equal dicts store and hash identically (ITL-905).
-            return lambda value: (
-                sort_dict_entries(
+            def convert_dict(value: Any) -> list[dict[str, Any]]:
+                if value is None:
+                    raise _none_not_admitted(python_type)
+                return sort_dict_entries(
                     [
                         {"key": key_converter(k), "value": value_converter(v)}
                         for k, v in value.items()
                     ]
                 )
-                if value is not None
-                else []
-            )
+
+            return convert_dict
 
         elif origin is set:
             # A set has no order: elements are stored sorted, never in iteration
             # order, which depends on PYTHONHASHSEED for str and bytes (ITL-905).
             element_converter = self.get_python_to_arrow_converter(args[0])
-            return lambda value: (
-                sort_set_elements([element_converter(item) for item in value])
-                if value is not None
-                else []
-            )
+
+            def convert_set(value: Any) -> list[Any]:
+                if value is None:
+                    raise _none_not_admitted(python_type)
+                return sort_set_elements([element_converter(item) for item in value])
+
+            return convert_set
 
         elif origin is tuple:
             if len(set(args)) == 1:
@@ -1822,22 +1956,25 @@ class UniversalTypeConverter:
                     value_field = next(f for f in element_type if f.name == "value")
 
                     key_converter = self.get_arrow_to_python_converter(key_field.type)
-                    value_converter = self.get_arrow_to_python_converter(
-                        value_field.type
-                    )
+                    value_converter = self._nested_value_converter(value_field.type)
 
-                    return lambda value: (
-                        {
-                            key_converter(item["key"]): value_converter(item["value"])
-                            for item in value
-                            if item is not None
-                        }
-                        if value
-                        else {}
-                    )
+                    def convert_entries(value: Any) -> dict[Any, Any]:
+                        if not value:
+                            return {}
+                        converted = {}
+                        for item in value:
+                            # A null entry is not a key/value pair: never drop it.
+                            if item is None:
+                                raise unrestorable_none_error(element_type)
+                            converted[key_converter(item["key"])] = value_converter(
+                                item["value"]
+                            )
+                        return converted
+
+                    return convert_entries
 
             # Regular list
-            element_converter = self.get_arrow_to_python_converter(element_type)
+            element_converter = self._nested_value_converter(element_type)
 
             if pa.types.is_fixed_size_list(arrow_type):
                 # Fixed-size list → tuple
@@ -1857,7 +1994,7 @@ class UniversalTypeConverter:
                 n = len(get_args(python_type))
                 # prepare list of converters
                 converters = [
-                    self.get_arrow_to_python_converter(arrow_type.field(f"f{i}").type)
+                    self._nested_value_converter(arrow_type.field(f"f{i}").type)
                     for i in range(n)
                 ]
                 # this is a heterogeneous tuple
@@ -1868,9 +2005,7 @@ class UniversalTypeConverter:
             # Create converters for each field
             field_converters = {}
             for field in arrow_type:
-                field_converters[field.name] = self.get_arrow_to_python_converter(
-                    field.type
-                )
+                field_converters[field.name] = self._nested_value_converter(field.type)
 
             return lambda value: (
                 {
@@ -1891,6 +2026,45 @@ class UniversalTypeConverter:
         else:
             # Default passthrough
             return lambda value: value
+
+    def _is_user_class_extension(self, extension_name: str) -> bool:
+        """Whether *extension_name* is the logical type of a user class (ITL-1144).
+
+        Args:
+            extension_name: An Arrow extension name.
+
+        Returns:
+            True for a registered dataclass, ``orcapod.dataclass`` or pydantic type.
+        """
+        from orcapod.logical_types.user_class_logical_type import UserClassLogicalType
+
+        return isinstance(
+            self.get_logical_type_by_arrow_extension_name(extension_name),
+            UserClassLogicalType,
+        )
+
+    def _nested_value_converter(self, arrow_type: pa.DataType) -> Callable[[Any], Any]:
+        """The converter of a nested position (list element, dict value, struct field).
+
+        A null at a position whose None a read cannot restore raises instead of reading
+        as an empty value or failing inside the element's converter (ITL-1144).
+
+        Args:
+            arrow_type: The Arrow type of the nested position.
+
+        Returns:
+            A function converting one stored value of ``arrow_type`` to Python.
+        """
+        convert = self.get_arrow_to_python_converter(arrow_type)
+        if none_is_restorable(arrow_type, self._is_user_class_extension):
+            return convert
+
+        def convert_or_refuse(value: Any) -> Any:
+            if value is None:
+                raise unrestorable_none_error(arrow_type)
+            return convert(value)
+
+        return convert_or_refuse
 
     def is_dynamic_typeddict(self, python_type: type) -> bool:
         """Check if a type is one of our dynamically created TypedDicts."""
@@ -1924,6 +2098,27 @@ class UniversalTypeConverter:
 
 
 # Public API functions
+def _none_not_admitted(python_type: DataType) -> UnsupportedValueError:
+    """The error for a None given where a type that does not admit None is declared.
+
+    The container converters stored such a None as an empty container and a logical
+    type's encoder as a wrong value (a ``Path`` as the string ``'None'``): a silent
+    value change (ITL-1144). The caller adds the column name.
+
+    Args:
+        python_type: The declared type the None was given for.
+
+    Returns:
+        The error to raise.
+    """
+    return UnsupportedValueError(
+        f"a None is given where {python_type} is declared, which does not admit None "
+        f"(it would be stored as an empty container or a wrong value). Give a value of "
+        f"that type, or declare the column's own type '| None' if a missing value is "
+        f"meant."
+    )
+
+
 def python_type_to_arrow_type(
     python_type: type, data_context: DataContext | str | None = None
 ) -> pa.DataType:

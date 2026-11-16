@@ -1,4 +1,4 @@
-"""The Delta store gives back the Arrow types it was given (ITL-928, part B).
+"""The Delta database gives back the Arrow types it was given (ITL-928, part B).
 
 Delta Lake has no unsigned integer, nanosecond, second or millisecond timestamp, or
 zoned (other than UTC) timestamp type, and the Delta writer converts such columns. A
@@ -67,7 +67,7 @@ COLUMNS: dict[str, pa.Array[Any]] = {
 
 
 def _written_and_read(tmp_path: pathlib.Path, column: pa.Array[Any]) -> pa.Table:
-    """Write one three-row column to a Delta store and read it back from a new store object."""
+    """Write one three-row column to a Delta database and read it back from a new store object."""
     DeltaTableDatabase(tmp_path).add_records(
         ("t",),
         pa.table({"id": pa.array([b"a", b"b", b"c"], pa.large_binary()), "c": column}),
@@ -182,8 +182,8 @@ TAGS = {
 
 
 def _chained_job(root: pathlib.Path, table: pa.Table) -> PipelineJob:
-    """A job on a Delta store at ``root``: source -> ``double`` -> ``increment``."""
-    with PipelineJob(name="j", store=DeltaTableDatabase(root)) as job:
+    """A job on a Delta database at ``root``: source -> ``double`` -> ``increment``."""
+    with PipelineJob(name="j", database=DeltaTableDatabase(root)) as job:
         src = ArrowTableSource(
             table, tag_columns=["k"], tag_only_columns=True, source_id="src"
         )
@@ -196,7 +196,9 @@ def _chained_job(root: pathlib.Path, table: pa.Table) -> PipelineJob:
 def test_a_rerun_on_the_same_store_writes_no_pipeline_rows(
     name: str, mode: str, tmp_path: pathlib.Path
 ) -> None:
-    """The ITL-990 case: source -> pod -> pod, run twice; a fresh job reads 3 rows."""
+    """The ITL-990 case: source -> pod -> pod, run twice; a fresh job's run shows 3 rows
+    and the database holds 3 records per node (a node shows rows only after a run,
+    ITL-1095)."""
     from orcapod.pipeline import AsyncPipelineOrchestrator
 
     table = _source_table(TAGS[name])
@@ -208,6 +210,7 @@ def test_a_rerun_on_the_same_store_writes_no_pipeline_rows(
             job.run()
 
     fresh = _chained_job(tmp_path, table)
+    fresh.run()
     for label in ("double", "increment"):
         node = fresh.nodes[label]
         assert node.as_table().num_rows == 3
@@ -219,11 +222,14 @@ def test_a_rerun_on_the_same_store_writes_no_pipeline_rows(
 
 @pytest.mark.parametrize("name", list(TAGS))
 def test_a_fresh_job_reads_the_tag_type(name: str, tmp_path: pathlib.Path) -> None:
-    """A new job on the same store reads the tag type through every read of a node."""
+    """A new job on the same database, run, reads the tag type through every read of a
+    node (a node shows rows only after a run, ITL-1095)."""
     table = _source_table(TAGS[name])
     _chained_job(tmp_path, table).run()
 
-    fresh = _chained_job(tmp_path, table).nodes["double"]
+    fresh_job = _chained_job(tmp_path, table)
+    fresh_job.run()
+    fresh = fresh_job.nodes["double"]
 
     assert fresh.as_table().schema.field("k").type == TAGS[name].type
     tag, _ = next(iter(fresh.iter_data()))
@@ -234,15 +240,16 @@ def test_a_fresh_job_reads_the_tag_type(name: str, tmp_path: pathlib.Path) -> No
 
 
 # Run in a child process by ``test_a_loaded_job_reads_the_tag_type``: load the job
-# saved under ``argv[1]`` and print each function node's tag type as JSON.
+# saved under ``argv[1]`` and print each function node's stored tag type as JSON (a
+# loaded node is empty until it runs, ITL-1095: its stored rows are its stored view).
 _READ_LOADED_TAG_TYPES = """
 import json, pathlib, sys
 from orcapod import PipelineJob
 from orcapod.databases import DeltaTableDatabase
 root = pathlib.Path(sys.argv[1])
-job = PipelineJob.load(root / "job.json", store=DeltaTableDatabase(root / "store"))
+job = PipelineJob.load(root / "job.json", database=DeltaTableDatabase(root / "store"))
 print(json.dumps({
-    label: str(job.nodes[label].as_table().schema.field("k").type)
+    label: str(job.nodes[label].as_source().as_table().schema.field("k").type)
     for label in ("double", "increment")
 }))
 """
@@ -253,7 +260,7 @@ def test_a_loaded_job_reads_the_tag_type(name: str, tmp_path: pathlib.Path) -> N
     """A job saved after its run and loaded in a new process reads the tag type.
 
     The load runs in a child process, so nothing of the run (pods, sources, store
-    objects) can stand in for what the saved job and the store hold.
+    objects) can stand in for what the saved job and the database hold.
     """
     job = _chained_job(tmp_path / "store", _source_table(TAGS[name]))
     job.run()
@@ -290,7 +297,7 @@ def test_an_operator_replay_reads_the_tag_type(
     def build(mode: CacheMode) -> PipelineJob:
         """A job with operator node ``sel`` in the given cache mode."""
         store = DeltaTableDatabase(tmp_path)
-        with PipelineJob(name="o", store=store) as job:
+        with PipelineJob(name="o", database=store) as job:
             src = ArrowTableSource(
                 table, tag_columns=["k"], tag_only_columns=True, source_id="src"
             )
@@ -303,7 +310,9 @@ def test_an_operator_replay_reads_the_tag_type(
 
     build(CacheMode.LOG).run()
 
-    replayed = build(CacheMode.REPLAY).nodes["sel"].as_table()
+    replay_job = build(CacheMode.REPLAY)
+    replay_job.run()  # a node shows rows only after a run (ITL-1095)
+    replayed = replay_job.nodes["sel"].as_table()
 
     assert replayed.schema.field("k").type == TAGS[name].type
 
@@ -314,7 +323,7 @@ def test_a_cached_source_reads_the_tag_type(name: str, tmp_path: pathlib.Path) -
     table = _source_table(TAGS[name])
 
     def cached() -> CachedSource:
-        """A ``CachedSource`` of the table, cached in a new Delta store object."""
+        """A ``CachedSource`` of the table, cached in a new Delta database object."""
         return CachedSource(
             ArrowTableSource(
                 table, tag_columns=["k"], tag_only_columns=True, source_id="src"
@@ -373,7 +382,7 @@ def test_nanoseconds_cannot_be_appended_to_a_table_written_before_the_fix(
     """A build before ITL-928 stored ``timestamp[ns]`` as ``timestamp[us]``.
 
     The integer form this build writes differs from that stored type, so the append
-    is refused (nothing is written) and the store must be rebuilt.
+    is refused (nothing is written) and the database must be rebuilt.
     """
     from deltalake import write_deltalake
 
@@ -429,7 +438,7 @@ def test_unsigned_rows_append_to_a_signed_column_without_a_recorded_type(
 ) -> None:
     """A column with no recorded type may hold an unsigned column a build before
     ITL-928 wrote (Delta's ``int32`` for ``uint32``): appending to it is not refused,
-    as before. Such a store must be rebuilt (developer, November 12, 2026)."""
+    as before. Such a database must be rebuilt (developer, November 12, 2026)."""
     store = DeltaTableDatabase(tmp_path)
     store.add_records(
         ("t",),

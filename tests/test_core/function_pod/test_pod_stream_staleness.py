@@ -4,7 +4,7 @@ A stream stamps its modified time when its results are complete (its input read 
 before it ends its own iterator, the same rule as a job node (ITL-1042). An upstream in a
 chain finishes before its downstream sees the end, so after a full read every stream is at
 least as new as its upstreams: a second read (``iter_data``, ``as_table`` or ``head``) calls
-no function and reads no store. A real change upstream (``clear_cache()``) still makes the
+no function and reads no database. A real change upstream (``clear_cache()``) still makes the
 downstream stale, and its next read recomputes.
 """
 
@@ -28,12 +28,12 @@ from orcapod.core.sources import ArrowTableSource
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.protocols.observability_protocols import DataExecutionLoggerProtocol
-from orcapod.streams import HeadStatus
+from orcapod.streams import ViewStatus
 
 # Rows of the source, not in tag order.
 IDS = [3, 1, 4, 0, 2]
 
-# The read methods of the store protocol, counted on every view of an in-memory store.
+# The read methods of the database protocol, counted on every view of an in-memory store.
 STORE_READS = (
     "get_all_records",
     "get_records_with_column_value",
@@ -191,7 +191,7 @@ def _read(stream: StreamProtocol, how: str) -> int:
     if how == "as_table":
         return stream.as_table().num_rows
     head = stream.head(100)
-    assert head.status is HeadStatus.ROWS, head.header()
+    assert head.status is ViewStatus.ROWS, head.header()
     return head.table.num_rows
 
 

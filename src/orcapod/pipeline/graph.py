@@ -35,6 +35,33 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def _with_pending_nullability(
+    record: dict[str, list[str]],
+    pending: dict[str, list[str]],
+    slot: "cp.StreamProtocol",
+) -> dict[str, list[str]]:
+    """Add a slot's pending nullable columns to a saved nullability record (ITL-1138).
+
+    Args:
+        record: The nullable column names per role, as ``serialize_nullability``
+            writes them.
+        pending: The slot's pending columns that its saved job records as nullable.
+        slot: The source slot, whose tag and data schemas give the column order.
+
+    Returns:
+        The record with the pending names added, in the slot's column order.
+    """
+    tag_schema, data_schema = slot.output_schema()
+    return {
+        role: [
+            name
+            for name in schema
+            if name in record.get(role, []) or name in pending[role]
+        ]
+        for role, schema in (("tag", tag_schema), ("data", data_schema))
+    }
+
+
 class Pipeline(AbstractPipelineBase[GraphNode]):
     """A pure computational blueprint recording operator and function pod invocations.
 
@@ -48,7 +75,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
     - Operator invocations → ``OperatorNode``
 
     To run a ``Pipeline``, use
-    ``PipelineJob.from_pipeline(pipeline, sources=..., store=...)`` to create
+    ``PipelineJob.from_pipeline(pipeline, sources=..., database=...)`` to create
     a ``PipelineJob``.
 
     Args:
@@ -218,6 +245,20 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                         ),
                     }
                     descriptor["reconstructable"] = True
+                    # A column whose saved type is still text keeps its saved
+                    # nullability, which the text cannot give (ITL-1138).
+                    pending = node._pending_nullable_columns()  # pyright: ignore[reportPrivateUsage]  # the saver is the one caller
+                    output_nullable = descriptor["output_schema"].get("nullable")
+                    if output_nullable is not None:
+                        descriptor["output_schema"]["nullable"] = (
+                            _with_pending_nullability(output_nullable, pending, node)
+                        )
+                    source_nullable = serialize_nullability(
+                        node.tag_schema, node.data_schema, type_converter
+                    )
+                    descriptor["source_config"]["nullable"] = _with_pending_nullability(
+                        source_nullable, pending, node
+                    )
 
                 case FunctionNode():
                     if node._function_pod is not None:
@@ -255,7 +296,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
 
         Reconstructs topology and SourceNode declarations. The loaded
         pipeline is topology-only — to run it, use
-        ``PipelineJob.from_pipeline(pipeline, sources=..., store=...)``.
+        ``PipelineJob.from_pipeline(pipeline, sources=..., database=...)``.
 
         Args:
             path: Path to the JSON file produced by ``save()``.
@@ -401,6 +442,14 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                             descriptor.get("data_context_key")
                         ),
                     )
+                    # The saved hashes, and the saved type text of a column whose
+                    # class this process has not registered yet (ITL-1138).
+                    node._keep_saved(  # pyright: ignore[reportPrivateUsage]  # the loader is the one caller
+                        pipeline_hash=descriptor.get("pipeline_hash"),
+                        content_hash=descriptor.get("content_hash"),
+                        saved_types={"tag": saved_tag, "data": saved_data},
+                        nullable=saved_nullable,
+                    )
                     # Restore label from descriptor if set explicitly
                     stored_label = descriptor.get("label")
                     if stored_label and stored_label != node_name:
@@ -472,6 +521,27 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                     databases={},
                 )
                 reconstructed[node_hash] = node
+
+            elif node_type == "side_effect":
+                from orcapod.pipeline.loaded_side_effects import LoadedSideEffectNode
+
+                # Restored read-only: the file holds no side-effect function (ITL-1094).
+                up_hashes = upstream_map.get(node_hash, [])
+                upstream_node = reconstructed.get(up_hashes[0]) if up_hashes else None
+                if upstream_node is None:
+                    # Its input is a node this version does not restore: leave it out,
+                    # as that node; the rest of the file still loads.
+                    logger.warning(
+                        "Skipping the saved side-effect node %r: its upstream node was "
+                        "not restored from the file.",
+                        descriptor.get("label"),
+                    )
+                    continue
+                # GraphNode predates side-effect nodes; compile() stores them in the
+                # same maps through the untyped side_effect_node_class.
+                reconstructed[node_hash] = LoadedSideEffectNode(  # pyright: ignore[reportArgumentType]
+                    descriptor, input_stream=upstream_node
+                )
 
         # Build Pipeline instance
         pipeline = cls(name=name, auto_compile=False)

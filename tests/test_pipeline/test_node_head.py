@@ -2,7 +2,7 @@
 
 A node is associated with its storage (developer, November 12, 2026): its preview is the
 first rows of what it holds after a run, or of its stored table, and showing it never
-computes. These tests run jobs on both orchestrators and both stores, and load saved jobs.
+computes. These tests run jobs on both orchestrators and both databases, and load saved jobs.
 """
 
 from __future__ import annotations
@@ -23,8 +23,9 @@ from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.job import PipelineJob
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
+from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
-from orcapod.streams import HeadStatus
+from orcapod.streams import ViewStatus
 from orcapod.types import CacheMode, Schema
 
 CALLS: list[int] = []
@@ -65,7 +66,7 @@ def _source(rows: int = 25) -> ArrowTableSource:
 
 
 def _store(kind: str, tmp_path: Path) -> ArrowDatabaseProtocol:
-    """A fresh store of the given kind (``in_memory`` or ``delta``)."""
+    """A fresh database of the given kind (``in_memory`` or ``delta``)."""
     if kind == "in_memory":
         return InMemoryArrowDatabase()
     return DeltaTableDatabase(base_path=tmp_path / "store")
@@ -73,7 +74,7 @@ def _store(kind: str, tmp_path: Path) -> ArrowDatabaseProtocol:
 
 def _job(store: ArrowDatabaseProtocol) -> PipelineJob:
     """A job of ``triple`` over the source, then a select of ``y``."""
-    job = PipelineJob(name="itl991", store=store)
+    job = PipelineJob(name="itl991", database=store)
     with job:
         tripled = triple.pod(_source(), label="triple")
         _ = SelectDataColumns(["y"])(tripled, label="sel")
@@ -83,7 +84,18 @@ def _job(store: ArrowDatabaseProtocol) -> PipelineJob:
 def test_nodes_before_a_run_show_no_rows_and_compute_nothing() -> None:
     """Before a run, nodes show no rows and run neither the function nor the operator."""
     job = _job(InMemoryArrowDatabase())
-    # The operator must not run: either entry point raises if it is called.
+    original = SelectDataColumns.static_process
+
+    def static_process_over_no_rows(
+        operator: SelectDataColumns, *streams: StreamProtocol
+    ) -> StreamProtocol:
+        # Over inputs with no rows it gives only the zero-row table a head shows
+        # (ITL-912); over rows it would compute them.
+        if any(stream.as_table().num_rows for stream in streams):
+            raise AssertionError("static_process ran over rows")
+        return original(operator, *streams)
+
+    # The operator must not run over rows: either entry point raises if it does.
     with (
         mock.patch.object(
             SelectDataColumns, "process", side_effect=AssertionError("process ran")
@@ -91,7 +103,8 @@ def test_nodes_before_a_run_show_no_rows_and_compute_nothing() -> None:
         mock.patch.object(
             SelectDataColumns,
             "static_process",
-            side_effect=AssertionError("static_process ran"),
+            autospec=True,
+            side_effect=static_process_over_no_rows,
         ),
     ):
         fn_head = job.nodes["triple"].head()
@@ -100,10 +113,12 @@ def test_nodes_before_a_run_show_no_rows_and_compute_nothing() -> None:
         op_html = job.nodes["sel"]._repr_html_()
     assert "could not read" not in op_html
     assert CALLS == []
-    assert fn_head.status is HeadStatus.NOTHING_STORED
+    # A node that has not run says so and names both ways in (ITL-1095).
+    for head in (fn_head, op_head):
+        assert head.status is ViewStatus.NOT_COMPUTED
+        assert "not run" in head.header()
+        assert "as_source()" in head.header()
     assert fn_head.table.column_names == ["id", "y"]
-    assert op_head.status is HeadStatus.NOT_COMPUTED
-    assert "cache mode OFF" in op_head.header()
 
 
 @pytest.mark.parametrize("store_kind", ["in_memory", "delta"])
@@ -118,12 +133,12 @@ def test_nodes_after_a_run_show_their_first_rows(
     assert len(CALLS) == 25
     for label in ("triple", "sel"):
         node = job.nodes[label]
-        # Right after a run the rows are in memory: the store is not read at all.
+        # Right after a run the rows are in memory: the database is not read at all.
         with mock.patch.object(
-            type(store), "get_all_records", side_effect=AssertionError("store read")
+            type(store), "get_all_records", side_effect=AssertionError("database read")
         ):
             head = node.head()
-        assert head.status is HeadStatus.ROWS, label
+        assert head.status is ViewStatus.ROWS, label
         assert head.total_rows == 25
         assert head.table.equals(node.as_table().slice(0, 10)), label
         assert "first 10 of 25" in node._repr_html_()
@@ -131,26 +146,33 @@ def test_nodes_after_a_run_show_their_first_rows(
 
 
 @pytest.mark.parametrize("store_kind", ["in_memory", "delta"])
-def test_a_new_job_over_a_filled_store_reads_stored_rows_without_computing(
+def test_a_new_job_over_a_filled_store_shows_rows_once_its_run_reads_the_store(
     store_kind: str, tmp_path: Path
 ) -> None:
-    """A new job over a filled store shows stored rows without computing."""
+    """A new job over a filled store shows no rows until it runs (ITL-1095); its run
+    reads every result from the database and computes nothing."""
     store = _store(store_kind, tmp_path)
     _ = _job(store).run()
     CALLS.clear()
 
-    node = _job(store).nodes["triple"]
+    job = _job(store)
+    node = job.nodes["triple"]
+    assert node.head(4).status is ViewStatus.NOT_COMPUTED
+    # The stored view shows the stored rows meanwhile.
+    assert node.as_source().head(4).status is ViewStatus.ROWS
+    _ = job.run()
     head = node.head(4)
     assert CALLS == []
-    assert head.status is HeadStatus.ROWS
-    # The whole stored slice is read, so the header states the exact count and
-    # makes no claim of a bounded read.
-    assert head.header() == "FunctionJobNode[triple] — first 4 of 25 stored rows"
+    assert head.status is ViewStatus.ROWS
+    assert head.header() == "FunctionJobNode[triple] — first 4 of 25 rows"
     assert head.table.equals(node.as_table().slice(0, 4))
 
 
-def test_a_loaded_job_shows_stored_rows_and_never_raises(tmp_path: Path) -> None:
-    """A loaded job's nodes show stored rows, or say why there are none."""
+def test_a_loaded_job_shows_no_rows_until_it_runs_and_never_raises(
+    tmp_path: Path,
+) -> None:
+    """A loaded job's nodes show no rows before a run (ITL-1095) and say where the
+    stored rows are; ``as_source()`` shows them."""
     store = DeltaTableDatabase(base_path=tmp_path / "store")
     job = _job(store)
     _ = job.run()
@@ -158,14 +180,16 @@ def test_a_loaded_job_shows_stored_rows_and_never_raises(tmp_path: Path) -> None
     job.save(saved)
     CALLS.clear()
 
-    loaded = PipelineJob.load(str(saved), store=store)
+    loaded = PipelineJob.load(str(saved), database=store)
     fn_head = loaded.nodes["triple"].head()
     op_head = loaded.nodes["sel"].head()
     assert CALLS == []
-    assert fn_head.status is HeadStatus.ROWS
-    assert fn_head.header().endswith("first 10 of 25 stored rows")
-    assert op_head.status is HeadStatus.UNAVAILABLE
-    assert "cache mode OFF" in op_head.header()
+    for head in (fn_head, op_head):
+        assert head.status is ViewStatus.NOT_COMPUTED
+        assert "as_source()" in head.header()
+    stored = loaded.nodes["triple"].as_source().head()
+    assert stored.status is ViewStatus.ROWS
+    assert stored.header().endswith("first 10 of 25 stored rows")
 
 
 def test_blueprint_nodes_are_unavailable() -> None:
@@ -174,7 +198,7 @@ def test_blueprint_nodes_are_unavailable() -> None:
     for label in ("triple", "sel"):
         blueprint = job.nodes[label].as_node()
         head = blueprint.head()
-        assert head.status is HeadStatus.UNAVAILABLE
+        assert head.status is ViewStatus.UNAVAILABLE
         assert "pipeline blueprint" in blueprint._repr_html_()
 
 
@@ -183,12 +207,12 @@ def test_source_nodes() -> None:
     slot = SourceNode(
         name="nums", tag_schema=Schema({"id": int}), data_schema=Schema({"x": int})
     )
-    assert slot.head().status is HeadStatus.UNAVAILABLE
+    assert slot.head().status is ViewStatus.UNAVAILABLE
     assert "input slot" in slot._repr_html_()
     unbound = SourceJobNode(
         name="nums", tag_schema=Schema({"id": int}), data_schema=Schema({"x": int})
     )
-    assert unbound.head().status is HeadStatus.UNAVAILABLE
+    assert unbound.head().status is ViewStatus.UNAVAILABLE
     assert "no source bound" in unbound.head().header()
     source = _source()
     bound = SourceJobNode(name="nums", bound_source=source)
@@ -209,27 +233,27 @@ def _operator_node(
 
 
 def test_operator_node_cache_modes() -> None:
-    """Operator nodes show stored rows in REPLAY and none in LOG before a run."""
+    """Before a run an operator node shows no rows in every cache mode (ITL-1095); a
+    REPLAY node shows the stored rows once it has run."""
     store = InMemoryArrowDatabase()
     assert _operator_node(CacheMode.REPLAY, store).head().status is (
-        HeadStatus.NOTHING_STORED
+        ViewStatus.NOT_COMPUTED
     )
     seed = _operator_node(CacheMode.LOG, store)
     _ = seed.execute(_source())
 
     replay = _operator_node(CacheMode.REPLAY, store)
+    assert replay.head(3).status is ViewStatus.NOT_COMPUTED
+    _ = replay.run()
     head = replay.head(3)
-    assert head.status is HeadStatus.ROWS
-    assert (
-        head.header()
-        == "OperatorJobNode[SelectDataColumns] — first 3 of 25 stored rows"
-    )
+    assert head.status is ViewStatus.ROWS
+    assert head.header() == "OperatorJobNode[SelectDataColumns] — first 3 of 25 rows"
     assert head.table.equals(replay.as_table().slice(0, 3))
 
     log = _operator_node(CacheMode.LOG, store)
     log_head = log.head()
-    assert log_head.status is HeadStatus.NOT_COMPUTED
-    assert "not replayed" in log_head.header()
+    assert log_head.status is ViewStatus.NOT_COMPUTED
+    assert "as_source()" in log_head.header()
 
 
 @pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
@@ -239,12 +263,12 @@ def test_an_operator_node_with_an_empty_result_reads_as_computed(
     """After a run that produced no rows, an operator node is computed and empty."""
     from orcapod.core.operators import PolarsFilter
 
-    job = PipelineJob(name="itl991_empty", store=InMemoryArrowDatabase())
+    job = PipelineJob(name="itl991_empty", database=InMemoryArrowDatabase())
     with job:
         _ = PolarsFilter(constraints={"x": -1})(_source(), label="none")
     _ = job.run(orchestrator=ORCHESTRATORS[orchestrator]())
     head = job.nodes["none"].head()
-    assert head.status is HeadStatus.ROWS
+    assert head.status is ViewStatus.ROWS
     assert len(head) == 0
     assert head.table.column_names == ["id", "x"]
 
@@ -255,10 +279,10 @@ def test_an_operator_node_with_changed_inputs_shows_no_stale_rows() -> None:
     assert isinstance(fn_stream, FunctionPodStream)
     node = OperatorJobNode(operator=SelectDataColumns(["y"]), input_streams=[fn_stream])
     _ = node.execute(fn_stream)
-    assert node.head().status is HeadStatus.ROWS
+    assert node.head().status is ViewStatus.ROWS
     fn_stream.clear_cache()  # the input is modified after the run
     head = node.head()
-    assert head.status is HeadStatus.NOT_COMPUTED
+    assert head.status is ViewStatus.NOT_COMPUTED
     assert "inputs changed" in head.header()
 
 
@@ -270,7 +294,7 @@ def test_head_keeps_the_tag_arrow_type_of_the_input(
     """A node's head keeps an ``int8`` tag ``int8`` and is the prefix of ``as_table``.
 
     ``head`` and ``as_table`` share one table build (ITL-928 typing), in memory after a
-    run and from the store in a new job.
+    run and in a new job whose run reads its rows from the database.
     """
     table = pa.table(
         {"id": pa.array(range(12), pa.int8()), "x": pa.array(range(12), pa.int64())},
@@ -284,7 +308,7 @@ def test_head_keeps_the_tag_arrow_type_of_the_input(
 
     def build(store: ArrowDatabaseProtocol) -> PipelineJob:
         """Build a job of ``triple`` over the narrow-tag source on ``store``."""
-        job = PipelineJob(name="itl991_types", store=store)
+        job = PipelineJob(name="itl991_types", database=store)
         with job:
             _ = triple.pod(
                 ArrowTableSource(
@@ -297,8 +321,11 @@ def test_head_keeps_the_tag_arrow_type_of_the_input(
     store = _store(store_kind, tmp_path)
     job = build(store)
     _ = job.run(orchestrator=ORCHESTRATORS[orchestrator]())
-    for node in (job.nodes["triple"], build(store).nodes["triple"]):
+    # The new job shows rows once its run has read them from the database (ITL-1095).
+    fresh = build(store)
+    _ = fresh.run(orchestrator=ORCHESTRATORS[orchestrator]())
+    for node in (job.nodes["triple"], fresh.nodes["triple"]):
         head = node.head(5, all_info=True)
-        assert head.status is HeadStatus.ROWS
+        assert head.status is ViewStatus.ROWS
         assert head.table.schema.field("id").type == pa.int8()
         assert head.table.equals(node.as_table(all_info=True).slice(0, 5))

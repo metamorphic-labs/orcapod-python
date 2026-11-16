@@ -45,7 +45,7 @@ def _build(store: Any) -> PipelineJob:
         tag_only_columns=True,
         source_id="every",
     )
-    job = PipelineJob(name="arrays", store=store)
+    job = PipelineJob(name="arrays", database=store)
     with job:
         identity.pod(every, label="identity_all")
         y = identity.pod(numeric, label="identity_numeric")
@@ -114,14 +114,14 @@ def split(x: np.ndarray) -> list[np.ndarray]:  # pyright: ignore[reportMissingTy
     ],
 )
 def test_pod_output_list_of_arrays(tmp_path: Path, store: str, runner: str) -> None:
-    """A pod output ``list[np.ndarray]`` is stored and read back on every store and runner."""
+    """A pod output ``list[np.ndarray]`` is stored and read back on every database and runner."""
     source = DictSource(
         data=[{"k": k, "x": ARRAYS[k]} for k in NUMERIC],
         tag_columns=["k"],
         tag_only_columns=True,
         source_id="numeric",
     )
-    job = PipelineJob(name="array_lists", store=STORES[store](tmp_path))
+    job = PipelineJob(name="array_lists", database=STORES[store](tmp_path))
     with job:
         split.pod(source, label="split")
     RUNNERS[runner](job)
@@ -145,7 +145,7 @@ def first_elements(x: list[np.ndarray]) -> list[float]:  # pyright: ignore[repor
 def test_batch_and_group_by_over_an_array_column(
     tmp_path: Path, operator: str, store: str, runner: str
 ) -> None:
-    """``Batch`` and ``GroupBy`` over an array column feed a pod on every store and runner."""
+    """``Batch`` and ``GroupBy`` over an array column feed a pod on every database and runner."""
     source = DictSource(
         data=[
             {"g": "a" if i < 2 else "b", "k": f"r{i}", "x": np.arange(3.0) + i}
@@ -155,7 +155,7 @@ def test_batch_and_group_by_over_an_array_column(
         tag_only_columns=True,
         source_id="grouped",
     )
-    job = PipelineJob(name="array_groups", store=STORES[store](tmp_path))
+    job = PipelineJob(name="array_groups", database=STORES[store](tmp_path))
     with job:
         if operator == "batch":
             grouped = Batch(batch_size=2)(source)

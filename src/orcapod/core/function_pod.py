@@ -7,7 +7,7 @@ import logging
 from abc import abstractmethod
 from collections.abc import Callable, Collection, Iterator, Sequence
 from functools import update_wrapper, wraps
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 from orcapod import contexts
 from orcapod.channels import ReadableChannel, WritableChannel
@@ -21,19 +21,21 @@ from orcapod.core.referential_tags import (
     stream_references,
 )
 from orcapod.core.streams.base import (
+    ZERO_ROW_INPUT_COLUMNS,
     StreamBase,
     check_head_size,
     schema_requires_io,
+    typed_zero_row_input,
 )
-from orcapod.core.streams.head import (
+from orcapod.core.streams.view import (
     SCHEMA_NEEDS_POLL_NOTE,
     STALE_NOTE,
-    HeadStatus,
-    StreamHead,
+    ViewStatus,
+    StreamView,
 )
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
-from orcapod.errors import StoreError, TypeIdentityError
-from orcapod.utils.store_errors import keep_store_error, note_callback_failure
+from orcapod.errors import OrcapodDatabaseError, TypeIdentityError
+from orcapod.utils.database_errors import keep_database_error, note_callback_failure
 from orcapod.protocols.core_protocols import (
     ArgumentGroup,
     FunctionPodProtocol,
@@ -362,18 +364,20 @@ class _FunctionPodBase(TraceableBase):
     def _fire_post_run_hooks(self, payload: PostRunPayload) -> None:
         """Fire all registered hooks with payload in registration order.
 
-        When the invocation failed with a ``StoreError`` or a ``TypeIdentityError``
+        When the invocation failed with a ``OrcapodDatabaseError`` or a ``TypeIdentityError``
         (both fail the run under every error policy), a fail-loud hook that
-        raises does not replace it: its failure is logged and noted on the store
+        raises does not replace it: its failure is logged and noted on the database
         error, the remaining hooks are skipped as for any fail-loud failure, and the
-        caller re-raises the store error.
+        caller re-raises the database error.
 
         Args:
             payload: The post-run payload to pass to each hook.
         """
         error = payload.stats.error
-        store_error = (
-            error if isinstance(error, (StoreError, TypeIdentityError)) else None
+        database_error = (
+            error
+            if isinstance(error, (OrcapodDatabaseError, TypeIdentityError))
+            else None
         )
         for hook in self._post_run_hooks:
             fn = hook.fn if isinstance(hook, HookConfig) else hook
@@ -382,8 +386,10 @@ class _FunctionPodBase(TraceableBase):
                 fn(payload)
             except Exception as exc:
                 if on_error == "raise":
-                    if store_error is not None:
-                        note_callback_failure(store_error, f"Post-run hook {fn!r}", exc)
+                    if database_error is not None:
+                        note_callback_failure(
+                            database_error, f"Post-run hook {fn!r}", exc
+                        )
                         return
                     raise
                 logger.warning(
@@ -598,6 +604,7 @@ class _FunctionPodBase(TraceableBase):
         pipeline_config: PipelineConfig | None = None,
         *,
         observer: ExecutionObserverProtocol | None = None,
+        error_policy: Literal["continue", "fail_fast"] = "continue",
         run_id: str | None = None,
     ) -> None:
         """Streaming async execution with per-data concurrency control.
@@ -612,7 +619,17 @@ class _FunctionPodBase(TraceableBase):
             output: Writable channel for output (tag, data) pairs.
             pipeline_config: Optional pipeline-level concurrency config.
             observer: Optional observer for per-item lifecycle hooks.
+            error_policy: What a row whose function raised does, as for a node's
+                ``execute``: ``"continue"`` skips the row; ``"fail_fast"`` raises its
+                exception, which cancels the rows still in flight. Rows run
+                concurrently, so the row raised is the first to fail, which is the
+                first in input order only with one row at a time.
             run_id: Pipeline run identifier forwarded to per-row processing.
+
+        Raises:
+            Exception: Under ``"fail_fast"``, the exception of the first row whose
+                function raised, inside the ``ExceptionGroup`` of the pod's task group.
+            OrcapodDatabaseError: A failed database read or write, whatever ``error_policy`` is.
         """
         from orcapod.pipeline.observer import NoOpObserver
 
@@ -635,17 +652,17 @@ class _FunctionPodBase(TraceableBase):
                     out_tag, result_data = await self._async_invoke_with_hooks(
                         tag, data, logger=pkt_logger, run_id=run_id
                     )
-                except StoreError as exc:
-                    # A failed store read or write fails the run; only rows whose
+                except OrcapodDatabaseError as exc:
+                    # A failed database read or write fails the run; only rows whose
                     # function raised are skipped.
                     exc.add_context(tag=tag.as_dict())
-                    with keep_store_error(exc, "Observer on_data_crash"):
+                    with keep_database_error(exc, "Observer on_data_crash"):
                         obs.on_data_crash(pod_label, tag, data, exc)
                     raise
                 except TypeIdentityError as exc:
                     # A stored row that cannot be decoded as its class is never
                     # skipped as a row failure (ITL-881).
-                    with keep_store_error(exc, "Observer on_data_crash"):
+                    with keep_database_error(exc, "Observer on_data_crash"):
                         obs.on_data_crash(pod_label, tag, data, exc)
                     raise
                 except Exception as exc:
@@ -653,6 +670,8 @@ class _FunctionPodBase(TraceableBase):
                         "Data processing failed, skipping: %s", exc, exc_info=True
                     )
                     obs.on_data_crash(pod_label, tag, data, exc)
+                    if error_policy == "fail_fast":
+                        raise
                 else:
                     obs.on_data_end(pod_label, tag, data, result_data, cached=False)
                     if result_data is not None:
@@ -724,7 +743,7 @@ class _FunctionPodBase(TraceableBase):
                 type is incompatible with its parameter, or (``strict=True``) the
                 input carries a data column that is not a parameter.
         """
-        logger.debug(f"Invoking pod {self} on streams through __call__: {streams}")
+        logger.debug("Invoking pod %s on streams through __call__: %s", self, streams)
         # A function that accepts arbitrary keywords takes every column, so
         # nothing is unused and no select is added (developer, November 12, 2026,
         # ITL-807). No data function kind accepts them today.
@@ -883,7 +902,7 @@ class FunctionPod(_FunctionPodBase):
         Returns:
             A ``FunctionPodStream`` wrapping the computation.
         """
-        logger.debug(f"Invoking kernel {self} on streams: {streams}")
+        logger.debug("Invoking kernel %s on streams: %s", self, streams)
 
         input_stream = self.handle_input_streams(*streams)
 
@@ -985,6 +1004,56 @@ class FunctionPod(_FunctionPodBase):
         )
 
 
+def function_zero_row_table(
+    input_stream: StreamProtocol,
+    output_schema: Schema,
+    data_context: contexts.DataContext,
+    meta_python_schema: Schema | None = None,
+) -> pa.Table | None:
+    """The table a function pod's output rows give over ``input_stream``, with no row.
+
+    A function pod passes its input's tags through untouched, so the user tags and
+    system tags are the input's zero-row table's (``typed_zero_row_table``). The data
+    columns are those of the ``Data`` the data function returns, with no row
+    (``Data.function_output_zero_row_table``): the declared output types, the data
+    context column and the source-info columns. Nothing is computed and the function
+    is not called (ITL-912). This is the zero-row form of the table the function pod's
+    stream and node build from computed rows.
+
+    Args:
+        input_stream: The function pod's input.
+        output_schema: The function's declared output schema.
+        data_context: The data context the output rows are typed in.
+        meta_python_schema: The meta columns every output row carries, if any.
+
+    Returns:
+        User tags, system tags, data, ``_context_key``, meta and source-info columns, or
+        ``None`` when the input cannot say its Arrow types without rows.
+    """
+    from orcapod.core.datagrams.tag_data import Data
+
+    input_table = typed_zero_row_input(input_stream)
+    if input_table is None:
+        return None
+    system_tags = [
+        name
+        for name in input_table.column_names
+        if name.startswith(constants.SYSTEM_TAG_PREFIX)
+    ]
+    tags = input_table.select([*input_stream.keys()[0], *system_tags])
+    return arrow_utils.hstack_tables(
+        tags,
+        Data.function_output_zero_row_table(
+            output_schema, data_context, meta_python_schema
+        ),
+    )
+
+
+def _no_content_hashes() -> pa.Array[Any]:
+    """The content hashes of no row."""
+    return pa.array([], type=pa.large_string())
+
+
 class FunctionPodStream(StreamBase):
     """Recomputable stream wrapping a data function."""
 
@@ -1065,8 +1134,15 @@ class FunctionPodStream(StreamBase):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> tuple[Schema, Schema]:
-        return self._function_pod.output_schema(
-            self._input_stream, columns=columns, all_info=all_info
+        # Memoized (ITL-1111). The prediction depends on the function pod (its declared
+        # output types) and on the input stream's schema, both fixed for the life of
+        # this stream; never on rows.
+        return self._memoized_output_schema(
+            columns,
+            all_info,
+            lambda: self._function_pod.output_schema(
+                self._input_stream, columns=columns, all_info=all_info
+            ),
         )
 
     def _ensure_iterator(self) -> None:
@@ -1345,15 +1421,47 @@ class FunctionPodStream(StreamBase):
             if data is not None:
                 yield tag, data
 
+    def _zero_row_output_table(self) -> pa.Table | None:
+        """This stream's rows' table with no row; see ``function_zero_row_table``.
+
+        A cached data function's rows carry the result cache's ``__computed`` meta
+        column, so its zero-row table does too.
+        """
+        meta = None
+        if isinstance(self._function_pod.data_function, CachedDataFunction):
+            from orcapod.core.result_cache import ResultCache
+
+            meta = Schema({ResultCache.RESULT_COMPUTED_FLAG: bool})
+        return function_zero_row_table(
+            self._input_stream, self.output_schema()[1], self.data_context, meta
+        )
+
+    def _typed_zero_row_table(self) -> pa.Table | None:
+        """This stream's zero-row table, without calling the function (ITL-912)."""
+        return self._zero_row_table(ZERO_ROW_INPUT_COLUMNS)
+
+    def _zero_row_table(self, config: ColumnConfig) -> pa.Table | None:
+        """``as_table(columns=config)`` with no rows, shaped as ``as_table`` shapes it."""
+        table = self._zero_row_output_table()
+        if table is None:
+            return None
+        return self._shape_table(table, config, _no_content_hashes)
+
     def _table_from_pairs(
         self, pairs: list[tuple[TagProtocol, DataProtocol]]
     ) -> pa.Table:
         """Return the output rows ``pairs`` as one table with every column group.
 
-        With no rows the table has the declared columns (tags, system tags and data),
-        typed from the declared schema, as the rest of a head without rows is.
+        With no rows the table is ``function_zero_row_table``: the input's tags and
+        system tags and the declared data, context and source-info columns, with the
+        types computed rows have (ITL-912). Only when the input cannot say its Arrow
+        types without rows is it built from the declared Python schema.
         """
         if not pairs:
+            typed = self._zero_row_output_table()
+            if typed is not None:
+                return typed
+            # The input cannot say its Arrow types without rows: the declared schema.
             tag_schema, data_schema = self.output_schema(all_info=True)
             return arrow_utils.make_empty_table(
                 {**tag_schema, **data_schema}, self.data_context.type_converter
@@ -1434,13 +1542,13 @@ class FunctionPodStream(StreamBase):
         *,
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
-    ) -> StreamHead:
+    ) -> StreamView:
         """Return the first rows already computed; never calls the function.
 
         After a complete computation (``as_table``, or iteration to the end) the rows are
         the first of the result. After an iteration that stopped part way they are the
         rows computed so far (``PARTIAL``). Before any computation, or once an input
-        changed, there are none. A ``CachedFunctionPod``'s result store is not looked
+        changed, there are none. A ``CachedFunctionPod``'s result database is not looked
         up: that needs the input rows' hashes, i.e. reading the input. With
         ``sort_by_tags`` (or ``all_info``) the rows held are sorted by tag and the first
         ``n`` of those returned: after a complete computation that is
@@ -1457,7 +1565,7 @@ class FunctionPodStream(StreamBase):
         )
         if has_results and self.is_stale:
             return self._head_without_rows(
-                config, HeadStatus.NOT_COMPUTED, note=STALE_NOTE
+                config, ViewStatus.NOT_COMPUTED, note=STALE_NOTE
             )
         if has_results and schema_requires_io(self, config):
             # The input gave no rows, so its columns are still known only by polling
@@ -1468,9 +1576,9 @@ class FunctionPodStream(StreamBase):
                 and self._cached_input_iterator is None
             )
             return dataclasses.replace(
-                StreamHead.without_rows(
+                StreamView.without_rows(
                     self,
-                    HeadStatus.ROWS if finished else HeadStatus.PARTIAL,
+                    ViewStatus.ROWS if finished else ViewStatus.PARTIAL,
                     pa.table({}),
                     tag_columns=(),
                     note=SCHEMA_NEEDS_POLL_NOTE,
@@ -1491,7 +1599,7 @@ class FunctionPodStream(StreamBase):
                     type=pa.large_string(),
                 )
 
-            return StreamHead.of_rows(
+            return StreamView.of_rows(
                 self,
                 self._shape_table(
                     self._cached_output_table
@@ -1510,9 +1618,9 @@ class FunctionPodStream(StreamBase):
             and self._cached_input_iterator is None
         )
         if not finished and not self._cached_output_datas:
-            return self._head_without_rows(config, HeadStatus.NOT_COMPUTED)
+            return self._head_without_rows(config, ViewStatus.NOT_COMPUTED)
         shown, total = self._computed_prefix(wanted, contiguous=not config.sort_by_tags)
-        status = HeadStatus.ROWS if finished else HeadStatus.PARTIAL
+        status = ViewStatus.ROWS if finished else ViewStatus.PARTIAL
         if not shown:
             # Nothing to show (an empty result, inputs that all gave no output so far,
             # or n == 0): the declared columns.
@@ -1521,7 +1629,7 @@ class FunctionPodStream(StreamBase):
                 config,
                 lambda: pa.array([], type=pa.large_string()),
             )
-            return StreamHead.of_rows(
+            return StreamView.of_rows(
                 self,
                 table,
                 tag_columns=tag_columns,
@@ -1529,7 +1637,7 @@ class FunctionPodStream(StreamBase):
                 status=status,
                 origin="computed",
             )
-        return StreamHead.of_rows(
+        return StreamView.of_rows(
             self,
             self._shape_table(
                 self._table_from_pairs(shown),
@@ -1777,7 +1885,7 @@ class ReferenceFallThroughPod(WrappedFunctionPod):
     Developer decision, November 12, 2026: ``pod(stream)`` (the call form) on a stream
     with referential tags lets those tags fall through the pod. Per row, the function is
     called exactly as the plain pod calls it, on the row's parameter columns (same
-    inputs, same result identity, same result store); the row's tag is emitted
+    inputs, same result identity, same result database); the row's tag is emitted
     unchanged and, as data, the function's outputs plus the row's own referenced
     columns, so the references survive.
 
@@ -1809,7 +1917,7 @@ class ReferenceFallThroughPod(WrappedFunctionPod):
 
     @property
     def plain_pod(self) -> FunctionPod:
-        """The plain pod: its function, result identity and result store are these."""
+        """The plain pod: its function, result identity and result database are these."""
         return self._plain_pod
 
     def to_config(self) -> dict[str, Any]:
@@ -1965,7 +2073,7 @@ def fall_through_references(pod: object) -> tuple[str, ...]:
 
 
 def result_pod(pod: FunctionPodProtocol) -> FunctionPodProtocol:
-    """The pod whose results a result store holds for ``pod``: its plain pod."""
+    """The pod whose results a result database holds for ``pod``: its plain pod."""
     return pod.plain_pod if isinstance(pod, ReferenceFallThroughPod) else pod
 
 

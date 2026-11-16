@@ -139,25 +139,25 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         """Copy of compiled nodes that are operator-pod nodes (label → node)."""
         return {k: v for k, v in self._nodes.items() if v.node_type == "operator"}
 
-    def set_ephemeral_store(self, store: "ArrowDatabaseProtocol | None") -> None:
-        """Assign or remove the ephemeral result store for all nodes.
+    def set_ephemeral_database(self, database: "ArrowDatabaseProtocol | None") -> None:
+        """Assign or remove the ephemeral result database for all nodes.
 
-        Propagates ``store`` to every function-pod and operator-pod node in the
-        pipeline by calling ``node.set_ephemeral_store(store)`` on each. Source
+        Propagates ``database`` to every function-pod and operator-pod node in the
+        pipeline by calling ``node.set_ephemeral_database(database)`` on each. Source
         nodes are skipped — they produce, not consume, data. Nodes that do not
         support ephemeral storage (e.g. operator nodes in v1) treat this as a
         no-op.
 
-        Pass ``None`` to detach the ephemeral store from all nodes, reverting
+        Pass ``None`` to detach the ephemeral database from all nodes, reverting
         them to persistent-only writes for subsequent runs.
 
         Args:
-            store: An ``ArrowDatabaseProtocol`` instance to attach, or ``None``
+            database: An ``ArrowDatabaseProtocol`` instance to attach, or ``None``
                 to detach.
         """
         for node in self._nodes.values():
-            if node.node_type != "source":
-                node.set_ephemeral_store(store)
+            if node.node_type not in ("source", "side_effect"):
+                node.set_ephemeral_database(database)
 
     @property
     def dag(self) -> OrcaDAG[NodeT]:
@@ -503,7 +503,9 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
             a mapping of hash → source node (which acts as its own stream).
 
         Raises:
-            RuntimeError: If the pipeline has not been compiled.
+            RuntimeError: If the pipeline has not been compiled, or if a node was
+                loaded from a saved file without its function pod, operator or
+                side-effect pod.
         """
         import networkx as _nx
 
@@ -540,8 +542,17 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
                     label=node._label,
                 )
             elif isinstance(node, SideEffectNode):
+                side_effect_pod = node.producer
+                if side_effect_pod is None:
+                    raise RuntimeError(
+                        f"to_invocations() cannot serialise SideEffectNode "
+                        f"{node_hash!r}: it was loaded with no live side-effect pod "
+                        "(read-only / stub mode). Use PipelineJob.load() to work with "
+                        "loaded pipelines, or build the pipeline from its code before "
+                        "calling to_invocations() / from_pipeline()."
+                    )
                 inv_by_node_hash[node_hash] = SideEffectInvocation(
-                    pod=node._pod,
+                    pod=side_effect_pod,
                     input_streams=(node.upstreams[0],),
                     label=node._label,
                 )

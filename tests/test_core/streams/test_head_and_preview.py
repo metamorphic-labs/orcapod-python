@@ -29,7 +29,7 @@ from orcapod.core.sources import (
 )
 from orcapod.core.sources.polling_source import PollingSource
 from orcapod.databases import InMemoryArrowDatabase
-from orcapod.streams import HeadStatus, StreamHead
+from orcapod.streams import ViewStatus, StreamView
 from orcapod.side_effects import SideEffectPod
 from orcapod.types import ColumnConfig, Cursor, Schema
 
@@ -74,8 +74,8 @@ def test_source_head_is_the_first_rows_with_the_exact_total() -> None:
     """A source's head is the first rows of its table, with the exact row count."""
     source = _source()
     head = source.head()
-    assert isinstance(head, StreamHead)
-    assert head.status is HeadStatus.ROWS
+    assert isinstance(head, StreamView)
+    assert head.status is ViewStatus.ROWS
     assert len(head) == 10
     assert head.total_rows == 25
     assert head.table.equals(source.as_table().slice(0, 10))
@@ -114,7 +114,7 @@ def test_head_refuses_a_negative_n_and_accepts_sorting() -> None:
 def test_head_of_zero_rows_keeps_the_columns() -> None:
     """head(0) has no rows and keeps the columns."""
     head = _source().head(0)
-    assert head.status is HeadStatus.ROWS
+    assert head.status is ViewStatus.ROWS
     assert head.table.column_names == ["id", "x"]
     assert head.table.num_rows == 0
 
@@ -138,7 +138,7 @@ def test_other_in_memory_sources_serve_their_first_rows(make: Any) -> None:
     """Dict and list sources serve the first rows they hold."""
     source = make()
     head = source.head(5)
-    assert head.status is HeadStatus.ROWS
+    assert head.status is ViewStatus.ROWS
     assert head.total_rows == 12
     assert head.table.equals(source.as_table().slice(0, 5))
 
@@ -182,7 +182,7 @@ def test_function_pod_stream_is_not_computed_by_head_or_preview() -> None:
     head = stream.head()
     html = stream._repr_html_()
     assert calls == []
-    assert head.status is HeadStatus.NOT_COMPUTED
+    assert head.status is ViewStatus.NOT_COMPUTED
     assert len(head) == 0
     assert head.table.column_names == ["id", "y"]
     assert "not computed" in html
@@ -198,7 +198,7 @@ def test_function_pod_stream_shows_rows_computed_so_far() -> None:
         next(rows)
     head = stream.head()
     assert calls == [0, 10, 20]
-    assert head.status is HeadStatus.PARTIAL
+    assert head.status is ViewStatus.PARTIAL
     assert head.table.column("y").to_pylist() == [0, 30, 60]
     assert "computed so far" in head.header()
 
@@ -211,7 +211,7 @@ def test_function_pod_stream_shows_its_computed_rows() -> None:
     assert len(calls) == 25
     head = stream.head(7)
     assert len(calls) == 25
-    assert head.status is HeadStatus.ROWS
+    assert head.status is ViewStatus.ROWS
     assert head.total_rows == 25
     assert head.table.equals(table.slice(0, 7))
     assert head.header().endswith("first 7 of 25 computed rows")
@@ -224,7 +224,7 @@ def test_function_pod_stream_rows_from_iteration_only() -> None:
     _ = list(stream.iter_data())
     head = stream.head(4, columns=ALL_COLUMNS)
     assert len(calls) == 25
-    assert head.status is HeadStatus.ROWS
+    assert head.status is ViewStatus.ROWS
     assert head.table.equals(stream.as_table(columns=ALL_COLUMNS).slice(0, 4))
     assert len(calls) == 25
 
@@ -271,6 +271,18 @@ def _grouped_source() -> ArrowTableSource:
     )
 
 
+def _calls_over_rows(spy: mock.MagicMock) -> int:
+    """How many calls of the spied ``static_process`` were given rows.
+
+    A call over inputs with no rows gives only the operator's zero-row table, which a
+    head with no rows shows without computing a row (ITL-912).
+    """
+    return sum(
+        any(stream.as_table().num_rows for stream in call.args[1:])
+        for call in spy.call_args_list
+    )
+
+
 OPERATOR_CASES = {
     "join": (Join, lambda: Join()(_source(), _other_source())),
     "group_by": (GroupBy, lambda: GroupBy(by=["grp"])(_grouped_source())),
@@ -293,14 +305,14 @@ def test_operator_stream_is_not_run_by_head_or_preview(case: str) -> None:
     ) as spy:
         head = stream.head()
         _ = stream._repr_html_()
-        assert spy.call_count == 0
-        assert head.status is HeadStatus.NOT_COMPUTED
+        assert _calls_over_rows(spy) == 0
+        assert head.status is ViewStatus.NOT_COMPUTED
         assert len(head) == 0
         table = stream.as_table()
-        assert spy.call_count == 1
+        assert _calls_over_rows(spy) == 1
         after = stream.head(2)
-        assert spy.call_count == 1
-    assert after.status is HeadStatus.ROWS
+        assert _calls_over_rows(spy) == 1
+    assert after.status is ViewStatus.ROWS
     assert after.table.equals(table.slice(0, 2))
 
 
@@ -309,7 +321,7 @@ def test_an_empty_operator_result_is_not_not_computed() -> None:
     stream = PolarsFilter(constraints={"x": -1})(_source())
     _ = stream.as_table()
     head = stream.head()
-    assert head.status is HeadStatus.ROWS
+    assert head.status is ViewStatus.ROWS
     assert len(head) == 0
     assert head.header().endswith("computed: no rows")
 
@@ -323,7 +335,7 @@ def test_operator_stream_with_changed_inputs_is_not_computed() -> None:
     _ = out.as_table()
     fn_stream.clear_cache()
     head = out.head()
-    assert head.status is HeadStatus.NOT_COMPUTED
+    assert head.status is ViewStatus.NOT_COMPUTED
     assert "inputs changed" in head.header()
 
 
@@ -344,7 +356,7 @@ def test_side_effect_stream_preview_never_delivers() -> None:
     head = stream.head()
     html = stream._repr_html_()
     assert delivered == []
-    assert head.status is HeadStatus.NOT_COMPUTED
+    assert head.status is ViewStatus.NOT_COMPUTED
     assert "displaying never delivers side effects" in html
 
 
@@ -399,13 +411,13 @@ def test_polling_source_head_never_polls() -> None:
     head = source.head()
     _ = source._repr_html_()
     assert (fake.polls, fake.fetches) == (0, 0)
-    assert head.status is HeadStatus.NOT_COMPUTED
+    assert head.status is ViewStatus.NOT_COMPUTED
     assert "nothing polled yet" in head.header()
     _ = list(source.iter_data())
     seen = (fake.polls, fake.fetches)
     after = source.head()
     assert (fake.polls, fake.fetches) == seen
-    assert after.status is HeadStatus.ROWS
+    assert after.status is ViewStatus.ROWS
     assert after.table.column("val").to_pylist() == [7]
 
 
@@ -430,7 +442,7 @@ def test_derived_source_over_a_polling_source_never_polls() -> None:
     head = derived.head()
     _ = derived._repr_html_()
     assert (fake.polls, fake.fetches) == seen
-    assert head.status is HeadStatus.ROWS
+    assert head.status is ViewStatus.ROWS
     assert head.table.column("id_value").to_pylist() == [1]
 
 
@@ -447,7 +459,7 @@ def test_downstream_of_an_unpolled_source_never_polls() -> None:
     head = stream.head()
     _ = stream._repr_html_()
     assert (fake.polls, fake.fetches) == (0, 0)
-    assert head.status is HeadStatus.NOT_COMPUTED
+    assert head.status is ViewStatus.NOT_COMPUTED
     assert head.table.num_columns == 0
     assert "columns not known until its source is polled" in head.header()
 
@@ -489,7 +501,7 @@ def test_downstream_head_never_polls_for_data_columns(
     )
     head = stream.head(columns=columns, all_info=all_info)
     assert (fake.polls, fake.fetches) == (0, 0)
-    assert head.status is HeadStatus.NOT_COMPUTED
+    assert head.status is ViewStatus.NOT_COMPUTED
     assert head.table.num_columns == 0
     assert "columns not known until its source is polled" in head.header()
 
@@ -503,11 +515,11 @@ def test_cached_source_head_writes_nothing() -> None:
     assert store.list_table_paths() == []
     # Before first use its rows (earlier cached rows merged with the wrapped source's)
     # are not known: the columns are shown, with no rows.
-    assert head.status is HeadStatus.NOT_COMPUTED
+    assert head.status is ViewStatus.NOT_COMPUTED
     assert head.table.column_names == ["id", "x"]
     table = source.as_table()
     after = source.head(3)
-    assert after.status is HeadStatus.ROWS
+    assert after.status is ViewStatus.ROWS
     assert after.table.equals(table.slice(0, 3))
 
 
@@ -555,16 +567,16 @@ def test_cached_function_pod_stream_does_not_read_its_result_store() -> None:
     calls: list[int] = []
     store = InMemoryArrowDatabase()
     pod = CachedFunctionPod(_counting_pod(calls).pod, result_database=store)
-    _ = pod.process(_source()).as_table()  # fills the result store
+    _ = pod.process(_source()).as_table()  # fills the result database
     assert len(calls) == 25
 
     stream = pod.process(_source())
     head = stream.head()
-    assert head.status is HeadStatus.NOT_COMPUTED
-    table = stream.as_table()  # served from the result store
+    assert head.status is ViewStatus.NOT_COMPUTED
+    table = stream.as_table()  # served from the result database
     assert len(calls) == 25
     after = stream.head(5)
-    assert after.status is HeadStatus.ROWS
+    assert after.status is ViewStatus.ROWS
     assert after.table.equals(table.slice(0, 5))
     assert len(calls) == 25
 
@@ -610,9 +622,9 @@ def test_preview_reads_an_npy_cell_header_only() -> None:
             "jpeg": pa.array([b"\xff\xd8\xff\xe0" * 10, b"", None], pa.large_binary()),
         }
     )
-    head = StreamHead(
+    head = StreamView(
         table=table,
-        status=HeadStatus.ROWS,
+        status=ViewStatus.ROWS,
         kind="ArrowTableStream",
         label="frames",
         tag_columns=("id",),
@@ -688,7 +700,7 @@ def test_derived_source_rowless_head_has_its_own_columns() -> None:
     derived = DerivedSource(origin, tags_as_data={"id": "id_value"})
     head = derived.head()
     assert (fake.polls, fake.fetches) == (0, 0)
-    assert head.status is HeadStatus.NOT_COMPUTED
+    assert head.status is ViewStatus.NOT_COMPUTED
     assert "id_value" in head.table.column_names
     assert "nothing polled yet" in head.header()
 
@@ -704,11 +716,11 @@ def test_cached_source_keeps_the_wrapped_explanation_when_it_has_no_rows() -> No
 
 
 def test_head_of_adapts_any_head_the_protocol_allows() -> None:
-    """A head that is not a ``StreamHead`` but follows the protocol is adapted."""
-    from orcapod.core.streams.head import head_of
+    """A head that is not a ``StreamView`` but follows the protocol is adapted."""
+    from orcapod.core.streams.view import head_of
 
     class _PlainHead:
-        """A minimal ``StreamHeadProtocol`` result."""
+        """A minimal ``StreamViewProtocol`` result."""
 
         table = _table(2)
         status = "rows"
@@ -732,7 +744,7 @@ def test_head_of_adapts_any_head_the_protocol_allows() -> None:
 
     source = _source()
     head = head_of(_PlainHead(), source)
-    assert head.status is HeadStatus.ROWS
+    assert head.status is ViewStatus.ROWS
     assert head.header() == "ArrowTableSource[readings] — all 2 rows"
 
 
@@ -749,7 +761,7 @@ def test_an_empty_computed_result_has_the_requested_columns() -> None:
     stream = _counting_pod(calls).pod(PolarsFilter(constraints={"x": -1})(_source()))
     _ = list(stream.iter_data())
     head = stream.head(columns={"content_hash": True})
-    assert head.status is HeadStatus.ROWS
+    assert head.status is ViewStatus.ROWS
     assert len(head) == 0
     assert (
         head.table.column_names

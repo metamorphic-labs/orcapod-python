@@ -215,9 +215,8 @@ Fix the function (`return round(weight / 2)`), or declare the type it really ret
 `OutputTypeError` is a `TypeError` (and a `ValueError`). Inside a `PipelineJob` it counts as
 a failure of the function for that row, like an exception the function raises itself. With
 the default `error_policy="continue"` the row is skipped and reported to the observer, and
-the other rows are computed and stored. With `error_policy="fail_fast"` the synchronous
-orchestrator stops the run; the asynchronous orchestrator does not stop for row failures yet
-(ITL-879, see below).
+the other rows are computed and stored. With `error_policy="fail_fast"` the run stops and
+raises it, on either orchestrator (see "Stopping at the first failed row" below).
 
 The function-output rule is: the returned value must be an instance of the declared type, or an exact numeric equivalent; a subclass stands in for its base. What is stored for a subclass instance is decided by the logical type of the declared class: a user class is stored as the base (the declared class's fields only), while a `torch.nn.Parameter` returned for `-> torch.Tensor` is stored, read back and hashed as an `nn.Parameter`.
 
@@ -250,6 +249,16 @@ same policy. A mismatch raises `OutputTypeError` at the common function-output b
 before standalone iteration, table materialization, or sync/async storage can diverge.
 Errors name the function, output, declared type and returned type; nested locations show
 structure without including returned dictionary keys or converter messages.
+
+A declared type that storage cannot keep is refused when the pod is defined, before any value
+is returned. A dictionary is stored as a list of key/value structs, and Arrow cannot hold a
+logical type inside a struct field, so a logical type or native container (`Path`, `UUID`, a
+user class, `numpy.ndarray`, `set[int]`, `list[set[int]]`, `list[Path]`) as a dictionary key
+or value, at any depth (`dict[str, set[int]]`, `list[dict[str, set[int]]]`, a dataclass field
+typed `dict[str, set[int]]`), raises `NestedTypeNotStorableError` naming the parameter or
+output (ITL-1150). The same types are faithful as a column, inside a list, and as a field of a
+dataclass, an `orcapod.dataclass` or a pydantic model: hold such a value in a dataclass
+field, or declare the plain type (`dict[str, list[int]]`).
 
 Outputs are validated against the declared storage schema immediately, and accepted numeric
 exceptions are normalized so downstream pods, hashes and stored rows see the same value.
@@ -311,7 +320,7 @@ mice = [
 
 db = InMemoryArrowDatabase()
 
-job = PipelineJob(name="bmi_demo", store=db)
+job = PipelineJob(name="bmi_demo", database=db)
 with job:
     source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     compute_bmi.pod(source, label="bmi")
@@ -333,6 +342,21 @@ database. Each recorded step becomes a node, available afterwards as `job.nodes[
 listed under its `source_id`). A node is a
 stream, so `as_table()`, `iter_data()` and `output_schema()` all work on it.
 
+A job node shows the current run; `node.as_source()` shows everything stored for it
+(developer, November 13, 2026). After `job.run()`, a function node returns exactly the rows
+of that run's inputs, on either orchestrator. The database may hold more under the same
+node: results of an earlier run over other rows of the source stay stored and are reused
+when those rows come back, but they are not rows of this run. Before a run in this process
+(a job built over a database that already holds results, or a loaded job) every node is empty:
+`as_table()`, `iter_data()`, `head()` and the preview show no rows, and the preview says the
+node has not run and points to `run()` and to `as_source()`. A run fills it, also when every
+result is read from the database and nothing is computed. A run that raised defines no rows,
+and so does `clear_cache()`; a node whose input changed since its run (an upstream node ran
+again, or a source was bound again) is stale and empty until it runs again. The stored view,
+`node.as_source()`, reads every record stored under the node's key, whether or not the node
+has run: the node's stored history, which keeps an entry's earlier result next to its
+recomputed one, where a run loads only the latest.
+
 `InMemoryArrowDatabase` lasts only as long as the Python process. Use
 `DeltaTableDatabase("some/directory")` from `orcapod.databases` to keep results on disk
 between sessions.
@@ -345,7 +369,7 @@ row is computed; the other two results come from the database:
 ```python
 mice.append({"subject_id": "mouse_03", "weight": 27.8, "height": 0.11})
 
-job = PipelineJob(name="bmi_demo", store=db)
+job = PipelineJob(name="bmi_demo", database=db)
 with job:
     source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     compute_bmi.pod(source, label="bmi")
@@ -369,16 +393,16 @@ print("function calls:", len(calls))
     version, e.g. `@function_pod(output_keys="bmi", version="v1.0")` (the default is
     `"v0.0"`; a minor bump such as `"v0.1"` is not enough), or rename the function.
 
-!!! note "When the store cannot be read"
+!!! note "When the database cannot be read"
     A table that does not exist yet reads as empty, and its rows are computed. In a
     `DeltaTableDatabase`, a table that exists but cannot be read (for example, a data file was
     deleted or damaged) is never treated as empty: the run stops with
-    `orcapod.errors.StoreReadError`, which names the
+    `orcapod.errors.OrcapodDatabaseReadError`, which names the
     table, the node and row being processed when they are known, and the underlying error,
     whatever the orchestrator's `error_policy`. Its stored rows are not recomputed and the
     table is not overwritten, so you can repair the table or restore the file and run again.
-    A write that fails because the stored table cannot be read raises `StoreReadError` too,
-    not `StoreWriteError` (see *When the store cannot be written* below).
+    A write that fails because the stored table cannot be read raises `OrcapodDatabaseReadError` too,
+    not `OrcapodDatabaseWriteError` (see *When the database cannot be written* below).
 
     In a `DeltaTableDatabase`, rows whose column types differ from the stored table's, as
     Delta stores them (`float64` values for a column stored as `int64`, say), are refused with
@@ -392,11 +416,11 @@ print("function calls:", len(calls))
     New columns and new struct fields pass this
     check; whether they are added follows
     the database's `allow_schema_evolution` setting. In a job run, a refused append fails the
-    run as a `StoreWriteError` whose cause is the `InputValidationError`.
+    run as a `OrcapodDatabaseWriteError` whose cause is the `InputValidationError`.
 
     When you use the database directly, both errors reach you as themselves, also from
     `flush()` and from `add_records(..., flush=True)`. When several pending tables fail in one flush, the
-    `StoreReadError` (or else the first `InputValidationError`) is raised, and each other
+    `OrcapodDatabaseReadError` (or else the first `InputValidationError`) is raised, and each other
     failure is attached to it as a note and logged. Failed rows stay queued, so a later
     flush tries them again. A flush that fails for any other reason raises `RuntimeError`,
     with the first failure as its cause.
@@ -411,7 +435,7 @@ ready, and runs your function on several rows concurrently. Choose it with the
 ```python
 from orcapod.pipeline import AsyncPipelineOrchestrator
 
-job = PipelineJob(name="bmi_async", store=InMemoryArrowDatabase())
+job = PipelineJob(name="bmi_async", database=InMemoryArrowDatabase())
 with job:
     source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     compute_bmi.pod(source, label="bmi")
@@ -435,7 +459,7 @@ the next run computes only the rest. A function that is in the middle of a row c
 interrupted, so the cell waits until it returns. If it does not return (a function that
 loops forever, say), press the interrupt button again: the cell stops waiting at once, with a
 warning that the function in that node has not returned yet. The run is already cancelled,
-so nothing more is written to the store when the function does return. To stop the function
+so nothing more is written to the database when the function does return. To stop the function
 itself, restart the kernel.
 
 An `async def` function must not block (with `time.sleep`, a busy loop or another blocking
@@ -450,7 +474,7 @@ level of a notebook cell. In a script, start async code with `asyncio.run`:
 ```python
 import asyncio
 
-job = PipelineJob(name="bmi_awaited", store=InMemoryArrowDatabase())
+job = PipelineJob(name="bmi_awaited", database=InMemoryArrowDatabase())
 with job:
     source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     compute_bmi.pod(source, label="bmi")
@@ -468,14 +492,14 @@ print(job.nodes["bmi"].as_table().num_rows)
 ### Reading the run summary
 
 `job.run()` (and `await job.run_async()`) returns a `RunSummary`: for each function node, how
-many rows were computed, how many were read from the store, and how many failed. At the end
+many rows were computed, how many were read from the database, and how many failed. At the end
 of a notebook cell it is shown as a table; `print` shows the same as text. The job keeps it as
 `job.last_run`. The results themselves are read from `job.nodes`, as above.
 
 Running the same job again computes nothing new, and the summary says so:
 
 ```python
-job = PipelineJob(name="bmi_demo", store=db)
+job = PipelineJob(name="bmi_demo", database=db)
 with job:
     source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     compute_bmi.pod(source, label="bmi")
@@ -497,7 +521,7 @@ def careless_bmi(weight: float, height: float) -> float:
     return weight / heigth ** 2  # a typo: heigth
 
 
-job = PipelineJob(name="bmi_typo", store=InMemoryArrowDatabase())
+job = PipelineJob(name="bmi_typo", database=InMemoryArrowDatabase())
 with job:
     source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     careless_bmi.pod(source, label="bmi")
@@ -513,9 +537,9 @@ print(summary)
 
 `job.last_run.print_traceback("bmi")` prints the full traceback of the node's first failed
 row, ending in the line of your function that raised. Fix the function and run the job
-again: the rows that succeeded before are read from the store, and only the failed ones
-are computed. To stop a run at the first failed row instead, pass
-`SyncPipelineOrchestrator(error_policy="fail_fast")` as the orchestrator.
+again: the rows that succeeded before are read from the database, and only the failed ones
+are computed. To stop a run at the first failed row instead, see "Stopping at the first
+failed row" below.
 
 The counts are also available one by one, for example in a test:
 
@@ -526,6 +550,161 @@ print(node.computed, node.reused, node.failed, type(node.first_error).__name__)
 print(summary.ok, summary.failed_rows)
 # False 3
 ```
+
+### Loading without computing: `run(load_only=True)`
+
+A job node shows the rows of its current run, so a job built over a database that already holds
+its results is empty until it runs. A run that finds every result stored computes nothing,
+but it does compute the results that are missing. `job.run(load_only=True)` fills the nodes
+with what is already stored for this run's inputs and never computes: sources are read,
+operators run on the rows that reach them, each function node takes the stored results of
+its inputs and skips the inputs that have none, no side effect is delivered and nothing is
+written to the database. The summary counts what each node loaded and skipped:
+
+```python
+more_mice = mice + [{"subject_id": "mouse_04", "weight": 30.0, "height": 0.12}]
+
+load_job = PipelineJob(name="bmi_demo", database=db)
+with load_job:
+    source = DictSource(data=more_mice, tag_columns=["subject_id"], source_id="mice")
+    compute_bmi.pod(source, label="bmi")
+
+print(load_job.nodes["bmi"].as_table().num_rows)  # not run in this process: empty
+# 0
+calls.clear()
+summary = load_job.run(load_only=True)
+print(summary)
+# Load-only run of job 'bmi_demo': 1 row without a stored result skipped.
+#   bmi: 4 rows: 3 loaded, 1 not stored (skipped)
+print(load_job.nodes["bmi"].as_table().num_rows, "rows; function calls:", len(calls))
+# 3 rows; function calls: 0
+```
+
+`summary.nodes["bmi"].not_stored` is the number of skipped inputs, and
+`summary.nodes[label].inputs_incomplete` names the function nodes above a node that skipped
+inputs. A function node passes on only the rows it loaded, so the rows below it are
+incomplete: a group formed after it may lack members, and the result stored for a smaller
+group by an earlier run may then be loaded for it. `run_async(load_only=True)` does the same
+on the asynchronous orchestrator.
+
+A load-only run reads only job nodes, sources and streams that neither compute nor deliver.
+A pod's stream built outside the job (a function pod's, which computes when it is read, or a
+side-effect pod's, which delivers) is refused with a `ValueError` before anything is read,
+whether a node of the job reads it, a source slot is bound to it or an operator's stream
+outside the job reads it. Build the pod inside the job, so its node loads its stored results,
+or run without `load_only`. (Refusing is the consistent choice for now; ITL-1130 re-evaluates
+it.)
+
+### Running again: what a run runs
+
+`job.run()`, `await job.run_async()` and `job.nodes[label].run()` decide what to run from
+each node's state (developer, November 13 and 14, 2026). `node.run()` runs that node
+together with the job nodes it depends on and returns a view of its rows; `job.run()` does
+the same for every node of the job.
+
+| State of a node | What it shows | A run | A load-only run |
+|---|---|---|---|
+| Not run in this process (a fresh or loaded job), cleared, or stale | nothing: `head()` says "not run" (`not_computed`) | runs it | loads it |
+| Filled by a load-only run | the rows it loaded: status `loaded_only`, "N loaded, M inputs without a stored result" | runs it, computing what it skipped | holds it |
+| Filled by a run | that run's rows (`rows`) | holds it | holds it |
+
+A node that is held is not run: its rows feed the nodes after it, and nothing is computed,
+read from the database, written or delivered for it. So running an unchanged job again does
+nothing, also on the asynchronous orchestrator, and the summary says so per node:
+"rowwise: 6 rows: held from the previous run" (`summary.nodes["rowwise"].held`). A load-only
+run's rows are never held by a full run, nor are the rows of any node below them. A source
+is read only when a node that runs reads it.
+
+A node whose last run left failed rows (with the default `error_policy="continue"`) is not
+held either: the next run computes only the failed rows and reads the rest from the database,
+so running the job again after fixing a transient failure retries exactly those rows.
+
+A node is stale, and runs, when:
+
+- it has not run in this process, its last run raised, or the commit at the end of its run
+  failed;
+- `clear_cache()` was called on it, or on any job node above it;
+- a job node above it ran again;
+- its source was bound again (`job.bind(sources=...)`), or the bound source's own modified
+  time moved (a `CachedSource` that read new rows, a `PollingSource` that found new rows).
+
+Staleness comes from modified times only, so every run first asks each source feeding it,
+once, whether its data changed (`check_for_new_data()`, ITL-1102): `job.run()`,
+`run_async()` and a job node's `run()`, a load-only run too. A source that finds new data
+takes it in and moves its modified time, and the nodes below it run; one that finds nothing
+moves nothing, and a current job stays current. What each kind of source checks is in
+[Sources](sources.md#what-a-source-does-at-a-run). A check that raises does not fail the
+run: a `SourceCheckFailedWarning` names the source and the error, the run proceeds with the
+data the source already holds, and the summary lists the source in `unchecked_sources` (a
+node's `run()` that runs nothing makes no summary and keeps its `last_run`: the warning is
+the report; a run that has to read a `PollingSource` whose check failed polls it again, and
+a failing poll raises, ITL-1139). `head()` and the preview never check.
+
+A source that cannot see its data change (an in-memory source: a `DictSource` copies the
+list it is given) is not re-read: build a new source object and bind it
+(`job.bind(sources=...)`); every node that reads it becomes stale and runs, while clearing
+the nodes below would only read the same data again. To deliver a side effect again (with
+`track_completion=False`), call `clear_cache()` on its node first.
+
+`node.last_run` holds the counts of a `node.run()`, as `job.last_run` does for `job.run()`,
+and a run's writes are committed when it ends; when everything is held there is nothing to
+commit. If that commit fails, the nodes the run ran are cleared (they read as not run); the
+nodes it held keep their rows. A held node fires no observer hook and cannot fail, so the
+orchestrator's `error_policy` has nothing to apply to it.
+
+### Stopping at the first failed row
+
+Pass an orchestrator with `error_policy="fail_fast"` to stop the run at the first row whose
+function raises. The run raises that row's own exception, on either orchestrator: the same
+type and message, never an exception group. Nothing is skipped silently, no
+`RowFailuresWarning` is issued and no summary is returned (`job.last_run` keeps the previous
+run's).
+
+```python
+from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
+
+for orchestrator in (SyncPipelineOrchestrator, AsyncPipelineOrchestrator):
+    job = PipelineJob(name="bmi_typo_fast", database=InMemoryArrowDatabase())
+    with job:
+        source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+        careless_bmi.pod(source, label="bmi")
+    try:
+        job.run(orchestrator=orchestrator(error_policy="fail_fast"))
+    except NameError as error:
+        print(type(error).__name__, error)
+# NameError name 'heigth' is not defined
+# NameError name 'heigth' is not defined
+```
+
+The synchronous orchestrator computes one row at a time, so it raises the first failing row
+in input order, and the rows before it are computed and stored; the nodes after it never
+start. The asynchronous orchestrator computes rows concurrently (up to the pod's
+`max_concurrency`) and nodes run side by side: it raises the first row *to fail*, which is the
+first in input order only with `max_concurrency=1`, cancels every row and node still running,
+and closes their channels before it raises. A function already running in a worker thread
+cannot be interrupted: its result is discarded, never stored, and `job.run()` returns once it
+has finished. When rows of several nodes fail before the run stops, one error is raised and
+the others are noted on it (`error.__notes__`): a database error first (see "When the database
+cannot be written" below), then a `TypeIdentityError`, and otherwise the error of the node
+that comes first in the pipeline. A node cancelled by the failure commits the results it
+wrote before it stops. A run that raised defines no rows: afterwards every node the run ran,
+the failing node and every node the run cancelled included, reads as a node that has not
+run (empty; its stored rows are read with `as_source()`), and the next run runs it again.
+
+What is stored after such a run:
+
+After a fail_fast raise, every stored row is a correct, complete result of its own input
+row, written in the ITL-878 commit order (results before pipeline records; writes that
+succeeded are flushed before the raise). The failing row is never stored. Other rows of the
+failing node, before or after it in input order, rows that downstream nodes computed from its
+successful rows, and rows of other branches may be stored; the set stored is not specified
+beyond that. When the cancellation falls between a row's result write and its pipeline-record
+write, the result is stored without its record: a re-run reuses it without calling the
+function, as after a crash.
+
+A side-effect pod does not follow `error_policy`: its own `on_error` decides. With
+`on_error="raise"` (the default) the run raises the delivery's own exception, on either
+orchestrator; with `on_error="log"` the failure is logged at WARNING and the run goes on.
 
 ### When results are committed
 
@@ -541,11 +720,11 @@ job.run(commit_every_rows=500)  # fewer, larger commits
 
 `commit_every_rows=1` commits after every row. A node or a cached pod used on its own,
 outside `job.run()`, also commits after every row. On a `DeltaTableDatabase`,
-`commit_every_rows` must be smaller than the store's `batch_size` (default 1000):
-the store commits every pending table by itself once one table holds that many pending
+`commit_every_rows` must be smaller than the database's `batch_size` (default 1000):
+the database commits every pending table by itself once one table holds that many pending
 rows, which would not keep the order described below, so `job.run()` refuses a larger value
-with `ValueError`. Create the store with a larger `batch_size` to commit less often. For the same reason, `job.run()` first commits
-whatever such a store already holds pending (writes made without a flush, or the batches of a
+with `ValueError`. Create the database with a larger `batch_size` to commit less often. For the same reason, `job.run()` first commits
+whatever such a database already holds pending (writes made without a flush, or the batches of a
 run that failed); if that fails, the run stops before computing anything.
 
 **Memory.** A `DeltaTableDatabase` keeps the committed rows of every table it looks rows up
@@ -563,15 +742,18 @@ commit are lost, and nothing stored is damaged. Run the job again: it computes o
 whose results were not committed. A node commits its results before their pipeline records,
 so a crash between those two commits leaves results stored without pipeline records. Reading
 the node (`as_table()`, `get_all_records()`) does not show those rows until the next run,
-which finds their results in the store, computes nothing for them and writes their pipeline
+which finds their results in the database, computes nothing for them and writes their pipeline
 records.
 
 **Reads see the version this process loaded.** A `DeltaTableDatabase` keeps the committed
 rows of each table it has read in memory and answers lookups from them, extending them with
-its own commits. Rows another process commits to the same table are not seen by a store
+its own commits. Rows another process commits to the same table are not seen by a database
 object that has already loaded the table until its own next commit to that table reloads it;
 a new `DeltaTableDatabase` object reads them at once. This was already the case before
 batching; only the re-reading per lookup is gone.
+
+[Pipelines and Jobs](pipeline-job.md) covers jobs in full: nodes, databases, pipeline
+blueprints, and saving and loading.
 
 A node from a job that has run also provides:
 
@@ -581,7 +763,8 @@ A node from a job that has run also provides:
   function produced in a job with a different name, or from a source with a different
   `source_id`, are not included
 - **`as_source()`** -- a `DerivedSource` backed by those stored records, usable as the input
-  of another pipeline
+  of another pipeline (not yet as a source of a new `PipelineJob` when the node is
+  downstream of a join; see [`DerivedSource`](sources.md#derivedsource))
 
 An operator node (a `Join`, `Batch`, column selection and so on, applied inside the job) is
 read the same way: after `job.run()` its `as_table()` and `iter_data()` return the rows it
@@ -590,22 +773,25 @@ keeps that output in memory and, with the default `cache_mode=OFF`, stores nothi
 `get_all_records()` returns `None` when no matching records exist; records from an earlier
 LOG run remain readable after switching to OFF. Calling `clear_cache()` on it discards the
 output, and it then reads as a zero-row table, as before the first run, until the job runs again.
+An operator node attached in `CacheMode.REPLAY` does not compute: its run replays the rows
+stored under its key by `CacheMode.LOG` runs, every logged run of that key, not only the
+latest; before its run it shows nothing, like every node (a narrower replay is ITL-1098).
 
-### When the store cannot be written
+### When the database cannot be written
 
-A failed write to the store always fails the run. If a node's results or records cannot be
+A failed write to the database always fails the run. If a node's results or records cannot be
 stored -- the disk is full, the connection drops, or the database cannot hold one of the
-output types -- `job.run()` raises `StoreWriteError` (from `orcapod.errors`) at the first
+output types -- `job.run()` raises `OrcapodDatabaseWriteError` (from `orcapod.errors`) at the first
 failed write, on both the synchronous and the asynchronous orchestrator. A row's write that
 fails names the node, the row being stored and the table, and the database's own exception
 is chained as its cause. When committing pending writes fails, the error has `flush=True`
-and names the node and the store instead of a row and table: a commit holds a batch of rows
-(see *When results are committed*), and every view of a store shares its pending writes, so
+and names the node and the database instead of a row and table: a commit holds a batch of rows
+(see *When results are committed*), and every view of a database shares its pending writes, so
 the write that failed may belong to any row of the batch or another table. A run that
 returns normally has stored every result that could be turned into a record; a result
 rejected before that is a row failure (see below).
 
-With batched commits, a store failure that only committing reveals (an unreadable table, a
+With batched commits, a database failure that only committing reveals (an unreadable table, a
 full disk) surfaces at the node's next commit point, not at the row that caused it: the rows
 the node computed since its last commit are not stored and are computed again on the next
 run. `job.run(commit_every_rows=1)` commits after every row, so such a failure surfaces at
@@ -615,12 +801,12 @@ This holds whatever `error_policy` the orchestrator was given. `error_policy="co
 default) skips rows whose *function* raised and keeps going; it never skips a row because it
 could not be stored.
 
-`StoreWriteError` and `StoreReadError` both derive from `orcapod.errors.StoreError`, so
-`except StoreError` handles either. The error you get is always one plain store error, never
+`OrcapodDatabaseWriteError` and `OrcapodDatabaseReadError` both derive from `orcapod.errors.OrcapodDatabaseError`, so
+`except OrcapodDatabaseError` handles either. The error you get is always one plain database error, never
 an exception group and never another exception raised in its place. A post-run hook or
-observer callback that fails while the store error is on its way out is logged and recorded
+observer callback that fails while the database error is on its way out is logged and recorded
 as a note on the error (`err.__notes__`). When several nodes fail at once on the asynchronous
-orchestrator, read and write failures alike, you get the store error of the node that comes
+orchestrator, read and write failures alike, you get the database error of the node that comes
 first in the pipeline, the one the synchronous orchestrator would have stopped at; the other
 failures are logged and noted on it. A node whose failure the asynchronous orchestrator
 cancelled before it happened is not reported.
@@ -642,16 +828,63 @@ different case: a naive `datetime`, a `str` from a function declared to return `
 prepared, before anything is written, and it is a *row failure*: it is handled exactly like a
 function that raised on that row. The observer gets `on_data_crash`, the failure is logged,
 and `error_policy` decides -- `"continue"` skips the row, `"fail_fast"` raises the error
-the conversion raised. It is not a `StoreWriteError`, because the store is healthy and every
-re-run would fail at the same row. The asynchronous orchestrator currently logs row failures
-at DEBUG and does not stop for `"fail_fast"` (ITL-879); this applies to these rows too.
+the conversion raised. It is not a `OrcapodDatabaseWriteError`, because the database is healthy and every
+re-run would fail at the same row. Both orchestrators handle these rows the same way.
 
-This is the contract for now. An opt-in mode that tolerates store failures may be added
+This is the contract for now. An opt-in mode that tolerates database failures may be added
 later.
+
+### Side effects in a job: delivered by a run, never by a read
+
+A `SideEffectPod` (or `side_effect_pod`, `sink_pod`, `tap_pod`) calls its function for every
+row for what the call does outside Orcapod (send an email, write a file) and passes the row
+on unchanged. In a job, side effects are delivered only by running: `job.run()`, or
+`run()` on the side-effect node. Reading the node never delivers (ITL-1091): `as_table()`,
+`iter_data()`, the dataframe methods, `flow()`, `head()`, the notebook preview, and a node
+downstream reading its input all return the rows the node's last run passed on, which the
+node holds in memory:
+
+```python
+from orcapod.side_effects import SideEffectPod, SideEffectPodConfig
+
+sent = []
+
+def notify(ctx, weight: float, height: float) -> None:
+    sent.append(weight)  # stands for sending a message
+
+notify_job = PipelineJob(name="notify_demo", database=InMemoryArrowDatabase())
+with notify_job:
+    mice_source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+    SideEffectPod(notify)(mice_source, label="notify")
+
+notify_job.run()
+node = notify_job.nodes["notify"]
+print(node.as_table().num_rows, len(list(node.iter_data())), len(sent))
+# 3 3 3
+node.run()  # holds a current run: runs nothing and delivers nothing
+print(len(sent))
+# 3
+```
+
+- With `track_completion=True` (the default), a run delivers only the rows whose delivery the
+  node's invocation log does not record. With `track_completion=False`, a run delivers every
+  row. A node that holds a current run is not run again, so a second `job.run()` or
+  `node.run()` delivers nothing; call `clear_cache()` on the node first to deliver again.
+  Reads never deliver.
+- The rows a read returns are those the last run in this process passed on: under
+  `on_error="log"`, a row whose delivery failed is left out with `drop_on_failure=True`
+  (the default) and kept with `drop_on_failure=False`, as for the nodes downstream.
+- Before any run in this process (a new job over a database that already records deliveries),
+  after a run that raised, or once a node upstream has changed since the run, a read returns
+  no rows and `head()` says that `run()` delivers. Run the job to get the rows.
+- Outside a job, the stream a side-effect pod returns keeps nothing, so every consuming read
+  of it (`iter_data()`, `as_table()`, the dataframe methods, `flow()`, `run()`) delivers every
+  side effect again; its `head()` and notebook preview deliver nothing and show no rows. See
+  [Streams](streams.md#computing-a-stream-outside-a-job-run).
 
 ### Saving and loading a job
 
-`job.save(path)` writes the job to a JSON file: the graph, the store's location and how each
+`job.save(path)` writes the job to a JSON file: the graph, the database's location and how each
 source was configured. `PipelineJob.load(path)` reads it back, for example in a later Python
 session, so that you can read the results the job stored. The file also records
 `orcapod_version`, the Orcapod release that wrote it (the same text as `orcapod.__version__`;
@@ -671,7 +904,7 @@ from orcapod.databases import DeltaTableDatabase
 
 workdir = Path(tempfile.mkdtemp())  # any directory you keep
 
-job = PipelineJob(name="bmi_demo", store=DeltaTableDatabase(workdir / "store"))
+job = PipelineJob(name="bmi_demo", database=DeltaTableDatabase(workdir / "store"))
 with job:
     source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     compute_bmi.pod(source, label="bmi")
@@ -679,36 +912,62 @@ with job:
 job.run()
 job.save(workdir / "bmi_job.json")
 
-loaded = PipelineJob.load(workdir / "bmi_job.json")
-print(loaded.nodes["bmi"].as_table().sort_by("subject_id").to_pandas())
+loaded = PipelineJob.load(workdir / "bmi_job.json")  # its nodes are empty until it runs
+print(loaded.nodes["bmi"].as_table().num_rows)  # not run in this process: empty
+# 0
+print(loaded.nodes["bmi"].as_source().as_table().sort_by("subject_id").to_pandas())
 #   subject_id          bmi
 # 0   mouse_01  1756.944444
 # 1   mouse_02  2210.000000
 # 2   mouse_03  2297.520661
 ```
 
-A loaded job is for reading stored results. It cannot be run again: function pods are not
-saved with the job, so `loaded.run()` raises. To compute again, build the job from your code
-as before.
+A loaded job is for reading stored results. Its nodes have not run in this process, so
+they are empty; each node's stored view, `node.as_source()`, reads what the database holds. A
+loaded job cannot compute: function pods are not saved with it, so `loaded.run()` raises.
+`loaded.run(load_only=True)` fills its nodes from the database instead, as for any job (see
+*Loading without computing* above): the sources are read (an in-memory source must be bound
+first, since its data is not saved), the rebuilt operators run, and each function node takes
+the results stored for those inputs. Nodes below a source that is not available stay empty.
+`node.run(load_only=True)` does the same for one node and what it depends on.
 
-The store is the source of truth: a loaded job shows what the store holds for it. The job
-file names each run's rows by the content hash the run stored them under, so a loaded node
-reads exactly what the same node built from your code would read from that store, and no
-rows under that key is an empty result, not an error.
+```python
+loaded.bind(sources={"mice": DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")})
+summary = loaded.run(load_only=True)
+print(loaded.nodes["bmi"].as_table().num_rows, summary.nodes["bmi"].not_stored)
+# 3 0
+```
 
-- A function node's `as_table()`, `iter_data()` and `get_all_records()` return the rows the
-  saved run stored, with the types they were stored with. Rows come in the order the store
-  returns them; sort them if order matters.
+To compute again, build the job from your code as before.
+
+The database is the source of truth: a loaded job's stored views show what the database holds for
+it. The job file names each run's rows by the content hash the run stored them under, so a
+loaded node's stored view reads exactly what the same node built from your code would read
+from that database, and no rows under that key is an empty result, not an error.
+
+- A function node's `as_source()` and `get_all_records()` return the rows stored under the
+  saved run's key, with the types they were stored with: those of every run of that node
+  over the same sources, not only the saved run's inputs. Rows come in the order the database
+  returns them; sort them if order matters. The node itself (`as_table()`, `iter_data()`,
+  `head()`) is empty: it has not run in this process.
 - Operators (a join, a filter) store outputs only when caching is enabled, under `odb_v1`.
   The saved file does not record an operator's cache mode (follow-up ITL-977), so attach a
   loaded operator node in `CacheMode.REPLAY` to read the rows its run stored:
   `loaded.nodes["joined"].attach_databases(pipeline_database=store.at("<job name>"),
-  cache_mode=CacheMode.REPLAY)`. A loaded operator node reads exactly as the same node built
-  from your code and attached in `CacheMode.REPLAY`; when the store holds no rows under the
-  node's key (no table, or none of its rows), the answer is an empty result, as for that
-  node. A loaded operator not attached in `REPLAY` has no readable cache and raises from
-  `as_table()` and `iter_data()`; read its input nodes instead (an in-memory input source
-  must be bound first, see below), or build the job from your code.
+  cache_mode=CacheMode.REPLAY)`, then read its stored view, `as_source()`, which reads
+  exactly as the same node built from your code would; when the database holds no rows under
+  the node's key (no table, or none of its rows), the answer is an empty result, as for that
+  node. A loaded operator node itself is empty, like every node that has not run.
+- A side-effect node is restored read-only, in its place in the graph, with its label,
+  pipeline hash (which names its invocation log), output schema and the content hash the saved
+  job's node had (a file saved before that hash was recorded gives the blueprint's), so the
+  nodes below it keep their own identity. The file holds neither the
+  side-effect function nor the pod's configuration (`on_error`, `track_completion`,
+  `drop_on_failure`, `max_concurrency`), so a loaded side-effect node never delivers and never
+  writes its invocation log. A load-only run passes its input rows on to the nodes below it
+  and the node holds them (status `loaded_only`), as any side-effect job node does in a
+  load-only run; before that its reads return no rows. A run that is not load-only
+  (`loaded.run()`, `node.run()`) raises before anything runs.
 - A loaded node has the pipeline hash, content hash, table path and output schema its run
   had (a source node whose data was not saved gets its run's content hash once its source is
   bound). The file records which columns may be null (`T | None`), because the Arrow type text
@@ -716,9 +975,9 @@ rows under that key is an empty result, not an error.
   carry. Whether a file has these records is decided by the records themselves, not by the
   file's format version: a file without them (format `0.1.0`, or a `0.2.0` file written
   before they existed) still loads, but lossy: its schemas read every column as non-null,
-  and a loaded operator node cannot name its run's rows. When the store holds none under the
-  content hash the loaded job computes, `as_table()` and `iter_data()` raise, and `head()`
-  shows no rows and says why, rather than presenting stored rows as none. An empty record is
+  and a loaded operator node cannot name its run's rows. When the database holds none under the
+  content hash the loaded job computes, its stored view (`as_source()`, `get_all_records()`)
+  raises and says why, rather than presenting stored rows as none. An empty record is
   not a missing one: it says that no column may be null. Saving such a loaded job again does
   not record what its file did not. Upgrading such files is left to a migration tool after
   v0.3.
@@ -726,15 +985,26 @@ rows under that key is an empty result, not an error.
   paths. In-memory sources (`DictSource`, `ListSource`, `ArrowTableSource`,
   `DataFrameSource`) keep their data only in memory, so they are not saved; loading logs
   this at INFO level. This does not affect reading the other nodes. To read such a source
-  node itself, bind a source to it: `loaded.bind(sources={"mice": source})`.
-- The results are read from the store recorded in the file. Pass
-  `PipelineJob.load(path, store=...)` if the store has moved.
+  node itself, bind a source to it: `loaded.bind(sources={"mice": source})`. The source must
+  have the slot's tag and data columns with the same Python types, except that a column the
+  slot declares `T | None` may be `T` (the slot then reads it as `T | None`); `bind` refuses
+  any other (`SourceSpecMismatchError`, an `InputValidationError`). The pipeline determines
+  every node's schema: binding a source never changes a node's stored path or the schema of
+  any node's or stored table, only the values. The check compares Python types, so a
+  difference in Arrow width only (`int32` against `int64`) is not yet refused (ITL-949). A
+  joined or merged stream (one pair of system-tag columns per input), or one with no
+  system-tag columns, is refused too: make the join part of the pipeline, or store the joined
+  stream and bind the stored source. A pipeline built directly over a raw `ArrowTableStream`
+  is refused the same way: wrap its table as a source,
+  `ArrowTableSource(stream.as_table(), tag_columns=[...])`.
+- The results are read from the database recorded in the file. Pass
+  `PipelineJob.load(path, database=...)` if the database has moved.
 - The job file may also hold an optional, advisory section, `run.expected_rows`: for each
-  node, how many rows the store held under its run's key when the job was saved (written
-  only when that is certain: after a run that finished). Reading a loaded node always
-  returns what the store holds; when the store holds another number of rows, the read
-  issues one `StoreContentWarning` per node, naming the node, both numbers and the store:
-  the store may not be the one the run wrote, or it may have changed since. Deleting the
+  node, how many rows the database held under its run's key when the job was saved (written
+  only when that is certain: after a run that finished). Reading a loaded node's stored
+  view always returns what the database holds; when the database holds another number of rows,
+  the read issues one `OrcapodDatabaseContentWarning` per node, naming the node, both numbers and the database:
+  the database may not be the one the run wrote, or it may have changed since. Deleting the
   section from the file changes nothing but this check.
 
 Logical types in saved schema text carry their complete identifier, written as
@@ -761,7 +1031,7 @@ Tables written before v0.3 have no such column and are stored at an older table 
 (`pdb_v1`, `rdb_v1`). Orcapod **does not read them as results**: it does not refuse the
 store, and it does not reuse those rows.
 
-- The first run of v0.3 on a store written by v0.2 computes every input again and stores the
+- The first run of v0.3 on a database written by v0.2 computes every input again and stores the
   rows in its own tables (`pdb_v2`, `rdb_v2`).
 - Reading a node (`as_table()`, `iter_data()`, `get_all_records()`) returns the rows of the
   current data context only: nothing before that first run, one row per input after it.
@@ -783,11 +1053,11 @@ store, and it does not reuse those rows.
   that take the invocation context (`ctx_arg`). A side effect is an external action, and
   completions stored by v0.2 cannot be matched with current inputs, so running the node
   would do everything a second time. Instead the node raises
-  `SideEffectLogDataContextError` (from `orcapod.errors`, a `StoreError`), naming the
+  `SideEffectLogDataContextError` (from `orcapod.errors`, a `OrcapodDatabaseError`), naming the
   tables, before it does anything. Every older table under the node's function or pod name
-  in the job counts. Keep using the version that wrote them. A fresh store is not a safe
+  in the job counts. Keep using the version that wrote them. A fresh database is not a safe
   way around the error: it holds no completions, so on it the node performs every side
-  effect again; use one only when a repeated delivery is acceptable. If the store cannot
+  effect again; use one only when a repeated delivery is acceptable. If the database cannot
   list its tables, the node warns that it could not check, and runs.
 
 Each result row also records the full version string of the function that produced it, in
@@ -866,6 +1136,60 @@ for tag, data in count_rows.pod(readings).iter_data():
 # s1 2
 # s2 3
 ```
+
+### A `None` inside a container
+
+A `None` inside a list, a set, a dict value or a class field is accepted where its type is
+a scalar (`int`, `float`, `str`, `bool`, `bytes`, `datetime`, ...) or a class of your own
+(a dataclass, an `orcapod.dataclass` or a pydantic model): `list[int | None]`,
+`dict[str, float | None]`, `list[MyData | None]` and a field `x: int | None` store and read
+back exactly.
+
+Where the type inside is a container (`list`, `set`, `dict`) or one of the logical types
+above (`Path`, `UUID`, `numpy.ndarray`, ...), a stored `None` is not yet read back
+faithfully: it would read as an empty container or fail. Such a declaration is refused when
+the type is declared: `list[set[int] | None]`, `list[Path | None]`, `dict[str, list[int] |
+None]` or a dataclass field `x: UUID | None`, as a function's parameter or return value, a
+source's schema or a class field. The error names the column (or the class field) and the
+type. Declare the inner type without `| None`, or hold the value in a dataclass and make
+that optional (`list[MyData | None]`). A `None` at the top level of a column
+(`list[Path] | None`, `UUID | None`) is accepted as before. Lifting this restriction is
+ITL-1144.
+
+```python
+try:
+    DictSource(
+        data=[{"sample": "s1", "labels": [{1, 2}, None]}],
+        tag_columns=["sample"],
+        data_schema={"sample": str, "labels": list[set[int] | None]},
+    )
+except ValueError as error:
+    print(str(error).split(": ")[0])
+# Column 'labels' (list[set[int] | None])
+
+labels = DictSource(
+    data=[{"sample": "s1", "counts": [3, None, 1]}],
+    tag_columns=["sample"],
+    data_schema={"sample": str, "counts": list[int | None]},
+)
+for tag, data in labels.iter_data():
+    print(data["counts"])
+# [3, None, 1]
+```
+
+A column that already holds such a `None` (an Arrow table given to `ArrowTableSource`, or
+`GroupBy` or `Batch` over a column of a nullable list, set, `Path` or `UUID`) raises a
+`ValueError` naming the column when its values are read as Python values, instead of
+returning a wrong value. Before `GroupBy` or `Batch`, `DropNulls` on that column removes
+the rows whose value is `None`, so no `None` reaches the lists they build. `DropNulls` reads
+only whether a column's own value is null, so it cannot remove a `None` already nested inside
+a list: remove it from an Arrow table before giving the table to `ArrowTableSource`. Keeping
+the value in a dataclass (`list[MyData | None]`) works on both paths.
+
+A `None` given where the declared type does not allow one (`[None, [1]]` for
+`list[list[int]]`) is refused when a source is built from it, naming the column: it used to
+be stored as an empty list. A function returning one is refused as described in
+[Return values must match the declared type](#return-values-must-match-the-declared-type).
 
 ## Multiple input streams
 

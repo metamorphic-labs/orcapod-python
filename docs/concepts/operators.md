@@ -37,6 +37,14 @@ The filters are the operators that read data columns: `PolarsFilter` evaluates i
 on values, and `DropNulls` reads only whether a value is present (its validity), never the
 value. Both decide which rows exist; neither synthesizes a value.
 
+No operator carries its inputs' meta columns: the `__`-prefixed columns, such as a cached
+function pod's `__computed`, that describe how an input row was produced. An operator's
+output row is produced by the operator, so its `Data` holds none of them and its predicted
+output schema lists none, on the sync and the async path alike. A way to carry them forward
+across operators is an open design question (ITL-867). The `__` prefix is reserved for meta
+columns: a stream and a source refuse a tag column named with it, and `MapTags` and `MapData`
+refuse it as the new name of a tag or data column.
+
 ## Operator categories
 
 ### `UnaryOperator` -- single input
@@ -58,14 +66,20 @@ Takes one or more streams. Used for `Join`, which performs an N-ary inner join.
 
 N-ary inner join on shared tag columns. Requires that input streams have non-overlapping
 data columns (raises `InputValidationError` on collision). Join is **commutative** -- the
-order of input streams does not affect the result. Join drops its inputs' meta
-(`__`-prefixed) columns, such as a cached function pod's `__computed`, so they never collide
-and never appear in its output. Rows match on equality of every shared tag column, whatever
+order of input streams does not affect the result. Like every operator, Join drops its
+inputs' meta (`__`-prefixed) columns, so they never collide. Rows match on equality of every shared tag column, whatever
 its type (lists and structs compare element by element). A row with a null in any shared tag
 column matches nothing, a null list or struct included, and rows with null on both sides do
 not match each other (the SQL convention for nulls; `MergeJoin` and `SemiJoin` follow it too, on the sync and the async path, while `GroupBy` is the exception by design and puts null keys in one group); a null *inside* a list or struct is an ordinary element that equals
 another null, an empty list is not a null, and NaN equals NaN. The async path gives the same
 rows.
+
+Because a null key matches nothing, a shared tag column may differ between the inputs in
+nullability alone: `T` in one input and `T | None` in another is accepted by `Join`, `MergeJoin`
+and `SemiJoin`. In the output of `Join` and `MergeJoin` the column is `T` when any input has it
+`T`, and `T | None` only when every input has it nullable; `SemiJoin`'s output keeps the left
+input's type. Any other type difference is still an error, and a data column is never
+reconciled this way.
 
 A name is a tag or a data column, never both: if one input has `x` as a tag column and another has it as a data column, `Join` (and `MergeJoin`) raises `InputValidationError` when the graph is built; rename one with `map_tags` or `map_data`.
 
@@ -144,6 +158,17 @@ Binary join that filters the left stream to only include rows whose tags match t
 stream. The right stream's data columns are discarded. SemiJoin is **not commutative** --
 the order of inputs matters. The first stream is the one being filtered; the second stream
 provides the set of matching tags.
+
+The match keys are exactly the columns that are tag columns of both streams. A name the two
+streams share as a data column, or a tag in one and a data column in the other, is not a key
+and is ignored: the right stream's data columns are never read. If the streams share no tag
+column, every left row is returned. Because such names were match keys before v0.3, SemiJoin
+names them in a `SemiJoinIgnoredColumnWarning` (from `orcapod.errors`). This behaviour is
+provisional in v0.3 and may become an error. To silence the warning, rename or drop the
+column on the right stream before the semi join (`map_data`, `select_data_columns`,
+`drop_data_columns`, or `map_tags` for a tag). A right stream must keep at least one data
+column, so a filtered copy of the left stream (which shares every data name) can be reduced
+to one renamed column, e.g. `subset.select_data_columns(["age"]).map_data({"age": "_age"})`.
 
 ```python
 from orcapod.sources import DictSource
@@ -323,6 +348,39 @@ print(result.keys()[1])  # ('weight',)
 Selecting a column that does not exist raises `InputValidationError`; pass `strict=False` to
 ignore missing columns instead.
 
+Two more act on named columns whether each is a tag or a data column:
+
+- **`DropColumns(columns=["col1", "col2"])`** -- remove the named columns, tag or data
+- **`SelectColumns(columns=["col1", "col2"])`** -- keep exactly the named columns, tag or
+  data, and remove every other tag and data column
+
+Streams offer them as `drop_columns` and `select_columns`, which take the names as one or
+more strings or as one collection: `stream.drop_columns("a", "b")` is
+`stream.drop_columns(["a", "b"])`. A removed data column's source-info column goes with it,
+and system tags are kept, as with the four operators above.
+
+```python
+sessions = DictSource(
+    data=[
+        {"subject_id": "mouse_01", "session": 1, "age": 12, "weight": 25.3},
+        {"subject_id": "mouse_02", "session": 2, "age": 8, "weight": 22.1},
+    ],
+    tag_columns=["subject_id", "session"],
+)
+
+dropped = sessions.drop_columns("session", "age")
+print(dropped.keys())  # (('subject_id',), ('weight',))
+```
+
+```python
+selected = sessions.select_columns(["session", "weight"])
+print(selected.keys())  # (('session',), ('weight',))
+```
+
+A stream needs at least one data column, so `drop_columns` of every data column, or
+`select_columns` naming no data column, raises `InputValidationError` when it is called.
+Selecting no tag column is allowed.
+
 `SelectDataColumns` is also how you narrow a stream before a
 [function pod](function-pods.md), which accepts only the data columns its function declares.
 
@@ -479,9 +537,10 @@ The rules:
   was). The new hash is the one the row has in a stream that declared the column
   non-nullable from the start.
 
-Tag columns work the same way. A stream whose key column is `str | None` cannot be joined
-with one whose key is `str` (`Join` never reconciles types), so narrow the key first. The
-stream method is `drop_nulls`:
+Tag columns work the same way. A stream whose key column is `str | None` can be joined with
+one whose key is `str`: a null key matches nothing, so the joined key comes out `str` (see
+`Join`). Narrowing still matters wherever a column must be `T` before it is consumed, such
+as a pod parameter typed `str`. The stream method is `drop_nulls`:
 
 ```python
 by_method = recordings.drop_nulls(["session", "start_ms"])
@@ -494,7 +553,8 @@ print(by_method.pipeline_hash() == by_operator.pipeline_hash())
 
 `DropNulls()` and `stream.drop_nulls()`, with no names, drop every row that has a null in
 **any** tag or data column, and make every tag and data column non-nullable. System-tag,
-source-info, context and meta columns are never tested or changed.
+source-info, context and meta columns are never tested (meta columns are not carried
+at all, as by every operator).
 
 ```python
 visits = ArrowTableSource(
@@ -577,6 +637,10 @@ silent widening; convert explicitly.
 - **Types are normalized to their large variants.** `string` becomes `large_string`,
   `binary` becomes `large_binary` and `list` becomes `large_list`, recursively (also inside
   structs). The Arrow hasher treats each pair as identical, so this never changes a hash.
+  Every operator does this, also one that passes its rows through unchanged (a select, a
+  rename, a filter with nothing to filter, a join), on a plain stream as inside a job. Every
+  source gives large types too, so an operator's inputs already have them (see
+  [Arrow types of a source](sources.md#arrow-types-of-a-source)).
 - **Width, nullability and logical types are kept.** An `int8` column stays `int8`, a
   `float32` column stays `float32`, and a logical type such as `Path` keeps its logical type.
 - **List columns built by `MergeJoin`, `Batch` and `GroupBy`** are `large_list<T>`, where `T`
@@ -596,8 +660,8 @@ silent widening; convert explicitly.
   the outputs of other operators and function pods. An input that delivers no rows gives no
   rows on both paths. One limit remains: an async channel carries rows, not a schema, so
   where the sync path returns an empty stream with typed columns the async path emits
-  nothing, and an operator node that received no rows reads back columns typed from its
-  Python output schema (ITL-858, ITL-912).
+  nothing. An operator node that received no rows still reads back the sync path's columns
+  and Arrow types: its operator applied to its inputs' zero-row tables (ITL-858, ITL-912).
 
 ```python
 import pyarrow as pa

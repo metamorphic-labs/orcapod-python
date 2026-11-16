@@ -70,7 +70,7 @@ class TestPipelineJobRecording:
         """Concrete sources in with-block become SourceNodes in job.pipeline."""
         src_a, src_b = _make_two_sources()
 
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             Join()(src_a, src_b)
 
@@ -108,7 +108,7 @@ class TestPipelineJobRecording:
             infer_nullable=True,
         )
 
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             Join()(src_a, src_b)
 
@@ -125,7 +125,7 @@ class TestPipelineJobRecording:
         ).output_schema()
         node_b = SourceNode(name="spec_b", tag_schema=tag_b, data_schema=data_b)
 
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             Join()(src_a, node_b)
 
@@ -136,7 +136,7 @@ class TestPipelineJobRecording:
         from orcapod.pipeline.graph import Pipeline
 
         src_a, src_b = _make_two_sources()
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             Join()(src_a, src_b)
 
@@ -158,7 +158,7 @@ class TestPipelineJobBind:
         node_a = SourceNode(name="a", tag_schema=tag_a, data_schema=data_a)
         node_b = SourceNode(name="b", tag_schema=tag_b, data_schema=data_b)
 
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             Join()(node_a, node_b)
 
@@ -167,16 +167,16 @@ class TestPipelineJobBind:
         assert "a" in job.sources and "b" in job.sources
 
     def test_bind_store_mutates_job(self, store):
-        """bind(store=...) updates the store in place and returns None."""
+        """bind(database=...) updates the database in place and returns None."""
         src_a, src_b = _make_two_sources()
         job = PipelineJob()
         with job:
             Join()(src_a, src_b)
 
         new_store = InMemoryArrowDatabase()
-        result = job.bind(store=new_store)
+        result = job.bind(database=new_store)
         assert result is None  # bind() returns None
-        assert job.store is new_store
+        assert job.database is new_store
 
     def test_bind_preserves_existing_sources(self, store):
         """bind(sources=...) merges new sources with existing ones."""
@@ -186,7 +186,7 @@ class TestPipelineJobBind:
         node_a = SourceNode(name="a", tag_schema=tag_a, data_schema=data_a)
         node_b = SourceNode(name="b", tag_schema=tag_b, data_schema=data_b)
 
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             Join()(node_a, node_b)
 
@@ -205,7 +205,7 @@ class TestPipelineJobBind:
             name="a", tag_schema=tag_a, data_schema=Schema({"value": int, "extra": str})
         )
 
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             Join()(wrong_node, src_b)
 
@@ -227,7 +227,7 @@ class TestPipelineJobBind:
             Join()(node_a, node_b)
 
         job = PipelineJob.from_pipeline(
-            pipeline, sources={"a": src_a, "b": src_b}, store=store
+            pipeline, sources={"a": src_a, "b": src_b}, database=store
         )
         assert isinstance(job, PipelineJob)
         # compiled_pipeline is computed lazily (schema-normalised) — not the
@@ -250,7 +250,7 @@ class TestPipelineJobBind:
             Join()(node_a, node_b)
 
         job = PipelineJob.from_pipeline(
-            pipeline, sources={"a": src_a, "b": src_b}, store=store
+            pipeline, sources={"a": src_a, "b": src_b}, database=store
         )
         assert job._name == ("my_pipeline",), (
             "PipelineJob._name should match Pipeline.name after from_pipeline()"
@@ -269,7 +269,7 @@ class TestPipelineJobCompleteness:
         tag_b, data_b = src_b.output_schema()
         node_b = SourceNode(name="spec_b", tag_schema=tag_b, data_schema=data_b)
 
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             Join()(src_a, node_b)
 
@@ -277,7 +277,7 @@ class TestPipelineJobCompleteness:
 
     def test_unbound_specs_empty_when_all_bound(self, store):
         src_a, src_b = _make_two_sources()
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             Join()(src_a, src_b)  # both auto-bound via content-hash-based spec names
 
@@ -285,7 +285,7 @@ class TestPipelineJobCompleteness:
 
     def test_is_complete_true_when_all_bound_with_store(self, store):
         src_a, src_b = _make_two_sources()
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             Join()(src_a, src_b)
 
@@ -293,7 +293,7 @@ class TestPipelineJobCompleteness:
 
     def test_is_complete_false_when_store_missing(self):
         src_a, src_b = _make_two_sources()
-        job = PipelineJob()  # no store
+        job = PipelineJob()  # no database
         with job:
             Join()(src_a, src_b)
 
@@ -304,7 +304,7 @@ class TestPipelineJobCompleteness:
         tag_b, data_b = src_b.output_schema()
         node_b = SourceNode(name="spec_b", tag_schema=tag_b, data_schema=data_b)
 
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             Join()(src_a, node_b)
 
@@ -323,7 +323,7 @@ class TestUnboundSources:
         tag_b, data_b = src_b.output_schema()
         node_b = SourceNode(name="spec_b", tag_schema=tag_b, data_schema=data_b)
 
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             Join()(src_a, node_b)
 
@@ -332,7 +332,7 @@ class TestUnboundSources:
     def test_unbound_sources_empty_when_all_bound(self, store):
         """unbound_sources is empty when all sources are bound."""
         src_a, src_b = _make_two_sources()
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             Join()(src_a, src_b)
 
@@ -349,7 +349,7 @@ class TestUnboundSources:
         tag_b, data_b = src_b.output_schema()
         node_b = SourceNode(name="spec_b", tag_schema=tag_b, data_schema=data_b)
 
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             Join()(src_a, node_b)
 
@@ -368,7 +368,7 @@ class TestPipelineJobIsRunnable:
         """is_runnable returns True when all upstream SourceSpecs are bound."""
         src_a, src_b = _make_two_sources()
 
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             Join()(src_a, src_b, label="joiner")
 
@@ -380,7 +380,7 @@ class TestPipelineJobIsRunnable:
         tag_b, data_b = src_b.output_schema()
         node_b = SourceNode(name="spec_b", tag_schema=tag_b, data_schema=data_b)
 
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             Join()(src_a, node_b, label="joiner")
 
@@ -389,7 +389,7 @@ class TestPipelineJobIsRunnable:
     def test_is_runnable_false_for_unknown_label(self, store):
         """is_runnable returns False for a node label that doesn't exist."""
         src_a, src_b = _make_two_sources()
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             Join()(src_a, src_b)
 
@@ -398,7 +398,7 @@ class TestPipelineJobIsRunnable:
     def test_repr_includes_class_name(self, store):
         """repr() includes PipelineJob class name."""
         src_a, src_b = _make_two_sources()
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             Join()(src_a, src_b)
 
@@ -418,7 +418,7 @@ class TestPipelineJobRun:
         pf = PythonDataFunction(add_values, output_keys="total")
         pod = FunctionPod(data_function=pf)
 
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             joined = Join()(src_a, src_b)
             pod(joined, label="adder")
@@ -435,7 +435,7 @@ class TestPipelineJobRun:
         pf = PythonDataFunction(add_values, output_keys="total")
         pod = FunctionPod(data_function=pf)
 
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             joined = Join()(src_a, src_b, label="joiner")
             pod(joined, label="adder")
@@ -454,7 +454,7 @@ class TestPipelineJobRun:
         pf = PythonDataFunction(add_values, output_keys="total")
         pod = FunctionPod(data_function=pf)
 
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             joined = Join()(src_a, node_b)
             pod(joined, label="adder")
@@ -469,7 +469,7 @@ class TestPipelineJobRun:
 
         src_a, src_b = _make_two_sources()
 
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             Join()(src_a, src_b, label="joiner")
 
@@ -492,7 +492,7 @@ class TestPipelineJobRun:
         pf = PythonDataFunction(add_values, output_keys="total")
         pod = FunctionPod(data_function=pf)
 
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             joined = Join()(src_a, src_b, label="joiner")
             pod(joined, label="adder")
@@ -514,14 +514,14 @@ class TestPipelineJobRun:
         )
 
     def test_run_requires_store(self):
-        """run() without a store raises ValueError."""
+        """run() without a database raises ValueError."""
         src_a, src_b = _make_two_sources()
 
-        job = PipelineJob()  # no store
+        job = PipelineJob()  # no database
         with job:
             Join()(src_a, src_b)
 
-        with pytest.raises(ValueError, match="store"):
+        with pytest.raises(ValueError, match="database"):
             job.run()
 
     def test_run_twice_is_safe(self, store):
@@ -530,7 +530,7 @@ class TestPipelineJobRun:
         pf = PythonDataFunction(add_values, output_keys="total")
         pod = FunctionPod(data_function=pf)
 
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             joined = Join()(src_a, src_b)
             pod(joined, label="adder")
@@ -553,7 +553,7 @@ class TestPipelineJobRun:
         pf = PythonDataFunction(double_x, output_keys="result")
         pod = FunctionPod(data_function=pf)
 
-        job = PipelineJob(name="orch_param", store=db)
+        job = PipelineJob(name="orch_param", database=db)
         with job:
             pod(src, label="doubler")
 
@@ -573,7 +573,7 @@ class TestPipelineJobRun:
         pf = PythonDataFunction(double_x, output_keys="result")
         pod = FunctionPod(data_function=pf)
 
-        job = PipelineJob(name="async_orch", store=db)
+        job = PipelineJob(name="async_orch", database=db)
         with job:
             pod(src, label="doubler")
 
@@ -590,7 +590,7 @@ class TestPipelineJobEndToEnd:
         pf = PythonDataFunction(add_values, output_keys="total")
         pod = FunctionPod(data_function=pf)
 
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             joined = Join()(src_a, src_b, label="joiner")
             pod(joined, label="adder")
@@ -628,7 +628,7 @@ class TestPipelineJobEndToEnd:
         job = PipelineJob.from_pipeline(
             pipeline,
             sources={"src_a": src_a, "src_b": src_b},
-            store=store,
+            database=store,
         )
         _ = job.run()
 
@@ -640,7 +640,7 @@ class TestPipelineJobEndToEnd:
 class TestPipelineJobSerialization:
     def test_save_creates_file(self, store, tmp_path):
         src_a, src_b = _make_two_sources()
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             Join()(src_a, src_b)
 
@@ -650,7 +650,7 @@ class TestPipelineJobSerialization:
 
     def test_save_has_version(self, store, tmp_path):
         src_a, src_b = _make_two_sources()
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             Join()(src_a, src_b)
 
@@ -661,7 +661,7 @@ class TestPipelineJobSerialization:
 
     def test_save_stamps_orcapod_version(self, store, tmp_path):
         src_a, src_b = _make_two_sources()
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             Join()(src_a, src_b)
         path = tmp_path / "stamped.json"
@@ -674,7 +674,7 @@ class TestPipelineJobSerialization:
 
     def test_format_0_3_0_roundtrip_keeps_stamp_and_nodes(self, store, tmp_path):
         src_a, src_b = _make_two_sources()
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             Join()(src_a, src_b)
         path = tmp_path / "roundtrip.json"
@@ -697,7 +697,9 @@ class TestPipelineJobSerialization:
         data = json.loads(path.read_text())
         assert data["orcapod_pipeline_job_version"] == "0.1.0"
         assert "orcapod_version" not in data
-        loaded = PipelineJob.load(str(path))
+        # The file keeps the pre-ITL-1082 key ``bindings.store``: it loads with an
+        # explicit database (the saved block is ignored).
+        loaded = PipelineJob.load(str(path), database=InMemoryArrowDatabase())
         # Hashes recomputed on load equal the ones the 0.1.0 writer stored.
         stored = {n["label"]: n for n in data["pipeline"]["nodes"].values()}
         assert set(loaded.pipeline.nodes) == set(stored)
@@ -705,10 +707,61 @@ class TestPipelineJobSerialization:
             assert node.content_hash().to_string() == stored[label]["content_hash"]
             assert node.pipeline_hash().to_string() == stored[label]["pipeline_hash"]
 
+    def test_saved_file_names_the_database_under_bindings_database(
+        self, store, tmp_path
+    ):
+        """save() writes the database config as ``bindings.database``; load() reads it."""
+        src_a, src_b = _make_two_sources()
+        job = PipelineJob(database=store)
+        with job:
+            Join()(src_a, src_b)
+        path = tmp_path / "job.json"
+        job.save(str(path))
+        bindings = json.loads(path.read_text())["bindings"]
+        assert "store" not in bindings
+        assert bindings["database"] == store.to_config()
+        loaded = PipelineJob.load(str(path))
+        assert loaded.database is not None
+        assert loaded.database.to_config() == store.to_config()
+
+    def _file_with_old_key(self, store, tmp_path) -> Path:
+        """A saved job whose database block sits under the pre-rename key."""
+        src_a, src_b = _make_two_sources()
+        job = PipelineJob(database=store)
+        with job:
+            Join()(src_a, src_b)
+        path = tmp_path / "old.json"
+        job.save(str(path))
+        data = json.loads(path.read_text())
+        data["bindings"]["store"] = data["bindings"].pop("database")
+        path.write_text(json.dumps(data))
+        return path
+
+    def test_file_with_the_old_store_key_raises_without_a_database(
+        self, store, tmp_path
+    ):
+        """No silent load without the database, no fallback read of the old key."""
+        path = self._file_with_old_key(store, tmp_path)
+        with pytest.raises(ValueError) as excinfo:
+            PipelineJob.load(str(path))
+        message = str(excinfo.value)
+        assert "bindings.store" in message
+        assert "bindings.database" in message
+        assert "saved before the rename" in message
+        assert "database=" in message
+
+    def test_file_with_the_old_store_key_loads_with_an_explicit_database(
+        self, store, tmp_path
+    ):
+        """An explicit database overrides the saved block, so the old key is moot."""
+        path = self._file_with_old_key(store, tmp_path)
+        loaded = PipelineJob.load(str(path), database=store)
+        assert loaded.database is store
+
     @pytest.mark.parametrize("version", ["9.9.9", "0.4.0", ""])
     def test_unknown_job_format_version_is_rejected(self, store, tmp_path, version):
         src_a, src_b = _make_two_sources()
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             Join()(src_a, src_b)
         path = tmp_path / "unknown.json"
@@ -723,7 +776,7 @@ class TestPipelineJobSerialization:
     def test_load_ignores_orcapod_version(self, store, tmp_path, variant):
         """The stamp is informational: absent or unfamiliar, the file loads."""
         src_a, src_b = _make_two_sources()
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             Join()(src_a, src_b)
         path = tmp_path / "job_version.json"
@@ -741,7 +794,7 @@ class TestPipelineJobSerialization:
     def test_save_includes_run_block(self, store, tmp_path):
         """Unsaved template has status=pending and null run fields."""
         src_a, src_b = _make_two_sources()
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             Join()(src_a, src_b)
 
@@ -754,7 +807,7 @@ class TestPipelineJobSerialization:
     def test_load_roundtrip_restores_pipeline(self, store, tmp_path):
         """load() restores the pipeline topology."""
         src_a, src_b = _make_two_sources()
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             Join()(src_a, src_b, label="joiner")
 
@@ -770,7 +823,7 @@ class TestPipelineJobSerialization:
         pf = PythonDataFunction(add_values, output_keys="total")
         pod = FunctionPod(data_function=pf)
 
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             joined = Join()(src_a, src_b)
             pod(joined, label="adder")
@@ -790,7 +843,7 @@ class TestPipelineJobSerialization:
     def test_load_version_mismatch_raises(self, store, tmp_path):
         """PipelineJob.load() raises ValueError for an unsupported format version."""
         src_a, src_b = _make_two_sources()
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             Join()(src_a, src_b)
         path = tmp_path / "job_bad.json"
@@ -804,12 +857,12 @@ class TestPipelineJobSerialization:
     def test_load_before_run_has_run_false(self, store, tmp_path):
         """Loaded job saved before run() has _has_run=False."""
         src_a, src_b = _make_two_sources()
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             Join()(src_a, src_b)
         path = tmp_path / "pending.json"
         job.save(str(path))
-        loaded = PipelineJob.load(str(path), store=store)
+        loaded = PipelineJob.load(str(path), database=store)
         assert loaded._has_run is False
 
     def test_load_after_run_restores_has_run_true(self, store, tmp_path):
@@ -817,14 +870,14 @@ class TestPipelineJobSerialization:
         src_a, src_b = _make_two_sources()
         pf = PythonDataFunction(add_values, output_keys="total")
         pod = FunctionPod(data_function=pf)
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             joined = Join()(src_a, src_b)
             pod(joined, label="adder")
         _ = job.run()
         path = tmp_path / "completed.json"
         job.save(str(path))
-        loaded = PipelineJob.load(str(path), store=store)
+        loaded = PipelineJob.load(str(path), database=store)
         assert loaded._has_run is True
 
     def test_load_restores_pipeline_name(self, store, tmp_path):
@@ -833,14 +886,14 @@ class TestPipelineJobSerialization:
         pf = PythonDataFunction(add_values, output_keys="total")
         pod = FunctionPod(data_function=pf)
 
-        job = PipelineJob(name="named_pipeline", store=store)
+        job = PipelineJob(name="named_pipeline", database=store)
         with job:
             joined = Join()(src_a, src_b)
             pod(joined, label="adder")
 
         path = tmp_path / "named.json"
         job.save(str(path))
-        loaded = PipelineJob.load(str(path), store=store)
+        loaded = PipelineJob.load(str(path), database=store)
 
         assert loaded._name == ("named_pipeline",), (
             "PipelineJob.load() should restore _name from the saved pipeline name"
@@ -853,7 +906,7 @@ class TestPipelineJobSerialization:
         node_b = SourceNode(name="unbound_b", tag_schema=tag_b, data_schema=data_b)
         pf = PythonDataFunction(add_values, output_keys="total")
         pod = FunctionPod(data_function=pf)
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             joined = Join()(src_a, node_b)
             pod(joined, label="adder")
@@ -861,7 +914,7 @@ class TestPipelineJobSerialization:
         assert "unbound_b" in job.unbound_sources
         path = tmp_path / "partial.json"
         job.save(str(path))
-        loaded = PipelineJob.load(str(path), store=store)
+        loaded = PipelineJob.load(str(path), database=store)
         assert "unbound_b" in loaded.unbound_sources
 
     def test_load_bind_works_after_load(self, store, tmp_path):
@@ -869,7 +922,7 @@ class TestPipelineJobSerialization:
         src_a, src_b = _make_two_sources()
         pf = PythonDataFunction(add_values, output_keys="total")
         pod = FunctionPod(data_function=pf)
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             joined = Join()(src_a, src_b)
             pod(joined, label="adder")
@@ -882,7 +935,7 @@ class TestPipelineJobSerialization:
 
         # bind() must not raise "no matching source slot".
         loaded.bind(
-            sources={src_a.source_id: src_a, src_b.source_id: src_b}, store=store
+            sources={src_a.source_id: src_a, src_b.source_id: src_b}, database=store
         )
 
         assert loaded._sources[src_a.source_id] is src_a
@@ -893,7 +946,7 @@ class TestPipelineJobSerialization:
         src_a, src_b = _make_two_sources()
         pf = PythonDataFunction(add_values, output_keys="total")
         pod = FunctionPod(data_function=pf)
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             joined = Join()(src_a, src_b)
             pod(joined, label="adder")
@@ -907,7 +960,7 @@ class TestPipelineJobSerialization:
         assert loaded.is_runnable("adder") is False
 
         loaded.bind(
-            sources={src_a.source_id: src_a, src_b.source_id: src_b}, store=store
+            sources={src_a.source_id: src_a, src_b.source_id: src_b}, database=store
         )
 
         # Binding sources permits reads, not execution of a loaded job.
@@ -920,13 +973,13 @@ class TestPipelineJobSerialization:
         src_a, src_b = _make_two_sources()
         pf = PythonDataFunction(add_values, output_keys="total")
         pod = FunctionPod(data_function=pf)
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             joined = Join()(src_a, src_b)
             pod(joined, label="adder")
         job.save(str(tmp_path / "completed.json"))
 
-        loaded = PipelineJob.load(str(tmp_path / "completed.json"), store=store)
+        loaded = PipelineJob.load(str(tmp_path / "completed.json"), database=store)
         adder = loaded.nodes.get("adder")
         assert adder is not None, "Expected 'adder' in loaded job nodes"
         assert isinstance(adder, FunctionJobNode), (
@@ -938,7 +991,7 @@ class TestPipelineJobSerialization:
         src_a, src_b = _make_two_sources()
         pf = PythonDataFunction(add_values, output_keys="total")
         pod = FunctionPod(data_function=pf)
-        job = PipelineJob(store=store)
+        job = PipelineJob(database=store)
         with job:
             joined = Join()(src_a, src_b)
             pod(joined, label="adder")
@@ -950,7 +1003,7 @@ class TestPipelineJobSerialization:
         path = tmp_path / "completed.json"
         job.save(str(path))
 
-        loaded = PipelineJob.load(str(path), store=store)
+        loaded = PipelineJob.load(str(path), database=store)
         loaded_records = loaded.nodes["adder"].get_all_records()
         assert loaded_records is not None, (
             "get_all_records() returned None on a loaded job; "
@@ -1016,7 +1069,7 @@ def pipeline_job_complete(compiled_pipeline, db, source_a, source_b):
     """A PipelineJob with store and all sources bound."""
     return PipelineJob.from_pipeline(
         compiled_pipeline,
-        store=db,
+        database=db,
         sources={"slot_a": source_a, "slot_b": source_b},
     )
 
@@ -1028,7 +1081,7 @@ def pipeline_job_with_sources(store):
     pf = PythonDataFunction(add_values, output_keys="total")
     pod = FunctionPod(data_function=pf)
 
-    job = PipelineJob(store=store)
+    job = PipelineJob(database=store)
     with job:
         joined = Join()(src_a, src_b, label="joiner")
         pod(joined, label="adder")
@@ -1104,7 +1157,7 @@ class TestFromPipeline:
 
     def test_from_pipeline_creates_pipeline_job(self, compiled_pipeline, db):
         """from_pipeline returns a PipelineJob with the same topology."""
-        job = PipelineJob.from_pipeline(compiled_pipeline, store=db)
+        job = PipelineJob.from_pipeline(compiled_pipeline, database=db)
         assert isinstance(job, PipelineJob)
 
     def test_from_pipeline_raises_for_stub_nodes(self, db, tmp_path):
@@ -1127,14 +1180,14 @@ class TestFromPipeline:
         loaded_pipeline = Pipeline.load(str(path))
 
         with pytest.raises(RuntimeError, match="function_pod is None"):
-            PipelineJob.from_pipeline(loaded_pipeline, store=db)
+            PipelineJob.from_pipeline(loaded_pipeline, database=db)
 
     def test_from_pipeline_with_sources_binds_them(
         self, compiled_pipeline, db, source_a
     ):
         """Sources passed to from_pipeline are immediately bound."""
         job = PipelineJob.from_pipeline(
-            compiled_pipeline, store=db, sources={"slot_a": source_a}
+            compiled_pipeline, database=db, sources={"slot_a": source_a}
         )
         assert "slot_a" in job._sources
 
@@ -1157,8 +1210,8 @@ class TestMutatingBind:
         assert "slot_a" in pipeline_job._sources
 
     def test_bind_mutates_store(self, pipeline_job, db):
-        pipeline_job.bind(store=db)
-        assert pipeline_job._store is db
+        pipeline_job.bind(database=db)
+        assert pipeline_job._database is db
 
 
 class TestAsPipeline:

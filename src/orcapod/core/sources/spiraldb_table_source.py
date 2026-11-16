@@ -40,13 +40,15 @@ from collections.abc import AsyncIterator, Collection, Generator, Iterator, Mapp
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from typing_extensions import override
+
 from orcapod.core.sources.base import RootSource
 from orcapod.core.referential_tags import TagOnlyColumns, source_reference_tags
 from orcapod.core.sources.derived_source import validate_tags_as_data
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import check_head_size
-from orcapod.core.streams.head import HeadStatus, StreamHead
+from orcapod.core.streams.view import ViewStatus, StreamView
 from orcapod.databases.spiraldb_connector import SpiralDBConnector
 from orcapod.errors import InputValidationError, SourceTooLargeError
 from orcapod.types import ColumnConfig
@@ -131,21 +133,21 @@ class _Head(NamedTuple):
 
 
 def _schema_difference(found: "pa.Schema", expected: "pa.Schema") -> str:
-    """Describe how a scanned batch's columns differ from the ones the source expects."""
+    """Describe how the table's columns as found differ from the ones the source expects."""
     if found.names != expected.names:
         return (
-            f"a scan returned columns {found.names} but the source was built with "
+            f"the table has columns {found.names} but the source was built with "
             f"{expected.names}"
         )
     for got, want in zip(found, expected, strict=True):
         if not got.equals(want, check_metadata=True):
             return (
-                f"a scan returned column {got.name!r} as {got} with metadata "
+                f"the table has column {got.name!r} as {got} with metadata "
                 f"{got.metadata} but the source was built with {want} with metadata "
                 f"{want.metadata}"
             )
     return (
-        f"a scan returned schema metadata {found.metadata} but the source was built "
+        f"the table has schema metadata {found.metadata} but the source was built "
         f"with {expected.metadata}"
     )
 
@@ -466,6 +468,53 @@ class SpiralDBTableSource(RootSource):
         with self._connector() as connector:
             return connector.get_row_count_estimate(self._table_name, asof=self._asof)
 
+    @override
+    def check_for_new_data(self) -> bool:
+        """Advance the pinned version when the table has a newer one (ITL-1102).
+
+        The source holds no rows: every read scans the table at the pinned version. A
+        source built without ``asof`` pinned the version the table had then; this
+        check reads the table's current version (metadata only: no row is read, and
+        ``max_rows`` does not apply) and, when it is newer, pins it and moves the
+        modified time, so the next read returns the new rows. An ``asof`` given by the
+        user never moves. Rows keep their record ids (the hash of their key), so only
+        rows whose key or data changed are new entries downstream. A version that
+        moved without changing the rows (if SpiralDB moves it on compaction) makes the
+        nodes below run again and reuse every stored result.
+
+        Returns:
+            ``True`` if the pinned version moved.
+
+        Raises:
+            ValueError: If the table was dropped and created again (another table id)
+                or its columns changed: build the source again to read it.
+        """
+        if self._given_asof is not None:
+            return False
+        with self._connector() as connector:
+            table_id = connector.get_spiral_table_id(self._table_name)
+            if table_id != self._table_id:
+                raise ValueError(
+                    f"SpiralDB table {self._qualified!r} is now another table (id "
+                    f"{table_id!r}; the source reads {self._table_id!r}): it was "
+                    "dropped and created again. Build the source again to read it."
+                )
+            schema = arrow_utils.drop_system_columns(
+                connector.get_arrow_schema(self._table_name).empty_table()
+            ).schema
+            if not schema.equals(self._table_schema, check_metadata=True):
+                raise ValueError(
+                    f"SpiralDB table {self._qualified!r}: "
+                    f"{_schema_difference(schema, self._table_schema)}. Build the "
+                    "source again to read it as it is now."
+                )
+            version = connector.get_table_version(self._table_name) or None
+        if version is None or (self._asof is not None and version <= self._asof):
+            return False
+        self._asof = version
+        self._update_modified_time()
+        return True
+
     def _too_large(self, found: str) -> SourceTooLargeError:
         """Return the error for a read that goes over ``max_rows``."""
         return SourceTooLargeError(
@@ -709,7 +758,7 @@ class SpiralDBTableSource(RootSource):
         *,
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
-    ) -> StreamHead:
+    ) -> StreamView:
         """Return the source's first ``n`` rows, read in one bounded scan.
 
         At most ``n`` rows are read (fewer when the source's ``limit`` is smaller), with
@@ -723,8 +772,8 @@ class SpiralDBTableSource(RootSource):
         head = self._head(n, columns=config)
         tag_columns = self.keys(columns=config)[0]
         if not head.rows_read:
-            empty = StreamHead.without_rows(
-                self, HeadStatus.NOT_COMPUTED, head.rows, tag_columns=tag_columns
+            empty = StreamView.without_rows(
+                self, ViewStatus.NOT_COMPUTED, head.rows, tag_columns=tag_columns
             )
             return dataclasses.replace(
                 empty,
@@ -732,7 +781,7 @@ class SpiralDBTableSource(RootSource):
                 total_is_estimate=True,
                 description=self._head_note(head),
             )
-        return StreamHead.of_rows(
+        return StreamView.of_rows(
             self,
             head.rows,
             tag_columns=tag_columns,
@@ -743,6 +792,16 @@ class SpiralDBTableSource(RootSource):
                 head, config.sort_by_tags and bool(self._tag_columns)
             ),
         )
+
+    def run(self) -> StreamView:
+        """Read the whole table into memory and return a ``StreamView`` of every row.
+
+        Does what ``as_table()`` does: one scan of every row the source reads (``where``,
+        ``limit``, ``max_rows`` and the pinned version applied), held in memory. Nothing
+        is kept on the source, so every call scans again. ``head(n)`` and the notebook
+        preview are the bounded read: they read only the first ``n`` rows.
+        """
+        return super().run()
 
     def _display_name(self) -> str:
         """The name a preview header shows: the label when one was given, else the

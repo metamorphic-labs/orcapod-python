@@ -172,7 +172,7 @@ def test_function_not_reading_the_reference_keeps_its_result_identity() -> None:
     """Section 12.4: retagging the source does not force the function to run again."""
     store = InMemoryArrowDatabase()
     CALLS.clear()
-    plain_job = PipelineJob(store=store)
+    plain_job = PipelineJob(database=store)
     with plain_job:
         half_amp.pod.process(
             _source(tag_only_columns=True).select_data_columns(["amp"]), label="half"
@@ -183,7 +183,7 @@ def test_function_not_reading_the_reference_keeps_its_result_identity() -> None:
     # The same source with a referential tag: a new pipeline (new records), but the
     # function's inputs are the same data, so every result is found in the store.
     CALLS.clear()
-    referential_job = PipelineJob(store=store)
+    referential_job = PipelineJob(database=store)
     with referential_job:
         # The call form: ``t`` falls through the pod.
         half_amp.pod(_source(), label="half")

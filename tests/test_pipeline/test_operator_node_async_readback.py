@@ -2,7 +2,7 @@
 
 ``job.nodes[label]`` is a stream: ``as_table()`` and ``iter_data()`` must return the rows the
 operator produced, whether the job ran on ``SyncPipelineOrchestrator`` or
-``AsyncPipelineOrchestrator``, with either store and either ``materialize_results`` setting.
+``AsyncPipelineOrchestrator``, with either database and either ``materialize_results`` setting.
 An operator node in a job runs with the default ``cache_mode=OFF`` and stores nothing, so
 ``get_all_records()`` returns ``None`` on both.
 """
@@ -168,7 +168,7 @@ CASES = [
 
 
 def _make_store(kind: str, tmp_path: Path) -> ArrowDatabaseProtocol:
-    """A fresh store of the given kind (``in_memory`` or ``delta``)."""
+    """A fresh database of the given kind (``in_memory`` or ``delta``)."""
     if kind == "in_memory":
         return InMemoryArrowDatabase()
     return DeltaTableDatabase(base_path=tmp_path / "store")
@@ -181,9 +181,9 @@ def _run_job(
     tmp_path: Path,
     materialize_results: bool = True,
 ) -> PipelineJob:
-    """Build ``case`` in a new job on a fresh store and run it on ``orchestrator``."""
+    """Build ``case`` in a new job on a fresh database and run it on ``orchestrator``."""
     job = PipelineJob(
-        name="itl896", store=_make_store(store_kind, tmp_path / orchestrator)
+        name="itl896", database=_make_store(store_kind, tmp_path / orchestrator)
     )
     with job:
         _ = case.build(_source_a(), _source_b(), _source_c())
@@ -436,8 +436,8 @@ AFTER_NO_ROWS_CASES = [
     Case(
         "batch_all_after_no_rows", lambda a, b, c: Batch()(_no_match(a), label="op"), 0
     ),
-    # Both inputs empty: a zero-row operator node reads back types built from Python
-    # types (ITL-912), so one empty and one non-empty input disagree on ``id`` on sync.
+    # Both inputs empty: each is its upstream's zero-row table, typed as its rows are
+    # (ITL-912).
     Case(
         "merge_join_after_no_rows",
         lambda a, b, c: MergeJoin()(_no_match(a), _no_match(c), label="op"),
@@ -494,23 +494,76 @@ def test_operator_node_with_no_rows_reads_back_empty_after_async_run(
     assert list(async_node.iter_data()) == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "ITL-858/ITL-912: no row reaches the async node, so it reads back the table "
-        "built from the Python output schema: int8 becomes int64, and the system-tag "
-        "and source-info columns are missing"
+ZERO_ROW_CASES = [
+    NO_MATCH,
+    Case(
+        "drop_nulls_drops_every_row",
+        lambda a, b, c: DropNulls(["s"])(
+            PolarsFilter(constraints={"id": 2})(a), label="op"
+        ),
+        0,
     ),
+    Case(
+        "join_no_match",
+        lambda a, b, c: Join()(
+            PolarsFilter(constraints={"id": 1})(a),
+            PolarsFilter(constraints={"id": 2})(b),
+            label="op",
+        ),
+        0,
+    ),
+    Case(
+        "semi_join_no_match",
+        lambda a, b, c: SemiJoin()(
+            PolarsFilter(constraints={"id": 1})(a),
+            PolarsFilter(constraints={"id": 2})(b),
+            label="op",
+        ),
+        0,
+    ),
+    Case(
+        "merge_join_no_match",
+        lambda a, b, c: MergeJoin()(
+            PolarsFilter(constraints={"id": 1})(a),
+            PolarsFilter(constraints={"id": 2})(c),
+            label="op",
+        ),
+        0,
+    ),
+    Case(
+        "filter_after_operator",
+        lambda a, b, c: PolarsFilter(constraints={"grp": "none"})(
+            SelectDataColumns(["x"])(a), label="op"
+        ),
+        0,
+    ),
+    # An input that delivers no row at all: both paths build that input from the
+    # upstream's zero-row table (ITL-912), so they agree with each other. The last
+    # case is a function node, not an operator node.
+    *AFTER_NO_ROWS_CASES[:-1],
+]
+
+
+@pytest.mark.parametrize(
+    "case", ZERO_ROW_CASES, ids=[case.name for case in ZERO_ROW_CASES]
 )
 def test_operator_node_with_no_rows_keeps_columns_and_types_after_async_run(
-    tmp_path: Path,
+    case: Case, tmp_path: Path
 ) -> None:
-    """A zero-row async result should keep the sync path's columns and Arrow types."""
-    sync_node, async_node = _sync_and_async_nodes(NO_MATCH, tmp_path)
+    """A zero-row async result keeps the sync path's columns and Arrow types (ITL-1080).
 
-    assert async_node.as_table(all_info=True).schema == (
-        sync_node.as_table(all_info=True).schema
-    )
+    The node has no output row to read a type from; it rebuilds its inputs with no rows,
+    as the sync orchestrator builds them, and keeps the operator's result over those.
+    """
+    sync_node, async_node = _sync_and_async_nodes(case, tmp_path)
+
+    sync_table = sync_node.as_table(all_info=True)
+    async_table = async_node.as_table(all_info=True)
+    assert sync_table.num_rows == async_table.num_rows == 0
+    assert async_table.schema == sync_table.schema
+    assert async_node.as_table().schema == sync_node.as_table().schema
+    assert async_node.keys(all_info=True) == sync_node.keys(all_info=True)
+    assert list(async_node.iter_data()) == []
 
 
 AFTER_OPERATOR_CASES = [
@@ -582,13 +635,6 @@ def test_clear_cache_returns_operator_node_to_not_yet_run(tmp_path: Path) -> Non
     assert async_cleared.schema == sync_cleared.schema
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "ITL-912: the zero-row table built from the Python output schema widens "
-        "int8 to int64 and changes nullability"
-    ),
-)
 @pytest.mark.parametrize("orchestrator", ["sync", "async"])
 def test_clear_cache_keeps_operator_node_arrow_types(
     orchestrator: str, tmp_path: Path
@@ -634,7 +680,7 @@ def test_operator_node_reads_back_only_the_latest_run(
     expected_ids: list[int],
 ) -> None:
     """A second run replaces the node's rows, even when it produces none."""
-    job = PipelineJob(name="itl896_rerun", store=InMemoryArrowDatabase())
+    job = PipelineJob(name="itl896_rerun", database=InMemoryArrowDatabase())
     with job:
         _ = PolarsFilter(constraints={"grp": "g1"})(
             _rerun_source([1, 2], ["g1", "g1"]), label="op"
@@ -650,3 +696,56 @@ def test_operator_node_reads_back_only_the_latest_run(
     assert sorted(repr(tag.as_dict()["id"]) for tag, _ in node.iter_data()) == [
         repr(i) for i in expected_ids
     ]
+
+
+@pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
+def test_join_with_an_input_that_delivered_no_row_completes_alike_on_both_paths(
+    orchestrator: str, tmp_path: Path
+) -> None:
+    """An input with no row is its upstream's zero-row table on both paths.
+
+    So an ``int8`` key stays ``int8`` (ITL-912), and ``Join`` with a non-empty ``int8``
+    input completes with no row, on the async path as on the sync path (ITL-1080).
+    """
+    case = Case(
+        "join_after_no_rows",
+        lambda a, b, c: Join()(_no_match(a), b, label="op"),
+        0,
+    )
+    job = _run_job(case, orchestrator, "in_memory", tmp_path)
+    node: object = job.nodes["op"]
+    assert isinstance(node, StreamProtocol)
+    assert list(node.iter_data()) == []
+    table = node.as_table(all_info=True)
+    assert table.num_rows == 0
+    assert table.schema.field("id").type == pa.int8()
+
+
+def test_rebuilt_upstream_keeps_the_upstream_data_context() -> None:
+    """Rows rebuilt as an upstream's stream keep that stream's data context.
+
+    Non-public on purpose: ``_materialize_upstream`` is how both orchestrators rebuild
+    an operator node's inputs, and a second data context is not reachable from a job.
+    """
+    import dataclasses
+
+    from orcapod.contexts import get_default_context
+    from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+    from orcapod.core.streams import ArrowTableStream
+
+    other = dataclasses.replace(get_default_context(), context_key="std:v0.9:other")
+    upstream = ArrowTableStream(
+        pa.table({"id": pa.array([1, 2], pa.int8()), "x": pa.array([3, 4], pa.int8())}),
+        tag_columns=["id"],
+        data_context=other,
+    )
+    rows = list(upstream.iter_data())
+    for buffer, zero_rows in ((rows, False), (rows, True), ([], False)):
+        stream = StaticOutputOperatorPod._materialize_upstream(
+            buffer, upstream, zero_rows=zero_rows
+        )
+        assert stream.data_context_key == "std:v0.9:other"
+        contexts_column = stream.as_table(columns={"context": True}).column(
+            "_context_key"
+        )
+        assert set(contexts_column.to_pylist()) <= {"std:v0.9:other"}

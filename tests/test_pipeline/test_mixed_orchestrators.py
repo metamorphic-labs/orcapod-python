@@ -1,4 +1,4 @@
-"""One store, two orchestrators: a run on one extends a store written by the other (ITL-885).
+"""One store, two orchestrators: a run on one extends a database written by the other (ITL-885).
 
 A job run by ``SyncPipelineOrchestrator`` and then by ``AsyncPipelineOrchestrator`` on the same
 store, or the other way round, must find every stored result: the second run computes
@@ -115,7 +115,7 @@ def _run(
 ) -> tuple[PipelineJob, list[str]]:
     """Build ``graph`` in a new job on ``store``, run it; return the job and the pod calls."""
     CALLS.clear()
-    job = PipelineJob(name="mixed", store=store)
+    job = PipelineJob(name="mixed", database=store)
     with job:
         GRAPHS[graph](_source("a", [1, 2, 3, 4]), _source("b", [5, 6, 7, 8]))
     _ = job.run(orchestrator=ORCHESTRATORS[orchestrator]())

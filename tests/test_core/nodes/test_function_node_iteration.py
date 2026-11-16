@@ -59,14 +59,17 @@ class TestIterDatasReadOnly:
             list(node.iter_data())
             mock_proc.assert_not_called()
 
-    def test_iter_after_db_populated_hot_loads_without_compute(self):
-        """iter_data() on a node with DB records hot-loads without _process_data_internal."""
+    def test_iter_after_db_populated_yields_nothing_until_a_run_loads(self):
+        """A node over a populated DB yields nothing before a run (ITL-1095); its run
+        loads every result from the DB without _process_data_internal."""
         db = InMemoryArrowDatabase()
         node1 = _make_node(n=3, db=db)
         node1.run()  # populate DB
 
         node2 = _make_node(n=3, db=db)
+        assert list(node2.iter_data()) == []
         with patch.object(node2, "_process_data_internal") as mock_proc:
+            node2.run()
             results = list(node2.iter_data())
             mock_proc.assert_not_called()
         assert len(results) == 3
@@ -120,16 +123,20 @@ class TestIterDatasReadOnly:
         assert "id" in table.column_names
         assert "result" in table.column_names
 
-    def test_run_cache_only_is_noop(self):
-        """run() on a CACHE_ONLY node returns without error and without computation."""
+    def test_run_cache_only_raises_and_points_to_the_stored_view(self):
+        """run() on a CACHE_ONLY node computes nothing: its input is unavailable, so it
+        has nothing to run or look up, and it says to read ``as_source()`` (ITL-1095)."""
         from orcapod.pipeline.serialization import LoadStatus
 
         node = _make_node()
+        # A loaded node whose upstream is unavailable keeps that input stream; only its
+        # status says it cannot be read (FunctionJobNode.from_descriptor).
         node._load_status = LoadStatus.CACHE_ONLY
-        node._input_stream = None  # simulate no upstream
 
         with patch.object(node, "execute") as mock_exec:
-            node.run()
+            for load_only in (False, True):
+                with pytest.raises(RuntimeError, match=r"as_source\(\)"):
+                    node.run(load_only=load_only)
             mock_exec.assert_not_called()
 
     def test_run_unavailable_raises(self):
@@ -138,7 +145,7 @@ class TestIterDatasReadOnly:
 
         node = _make_node()
         node._load_status = LoadStatus.UNAVAILABLE
-        with pytest.raises(RuntimeError, match="was loaded without a store"):
+        with pytest.raises(RuntimeError, match="was loaded without a database"):
             node.run()
 
     def test_execute_error_policy_continue_skips_failures(self):

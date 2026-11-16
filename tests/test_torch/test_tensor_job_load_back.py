@@ -34,7 +34,9 @@ def parameter(n: int) -> torch.nn.Parameter:
 
 def _save(tmp_path: Path, function: Any) -> Path:
     """Run and save a job whose pod returns a tensor, followed by a ``Join``."""
-    job = op.PipelineJob(name="tensors", store=DeltaTableDatabase(tmp_path / "store"))
+    job = op.PipelineJob(
+        name="tensors", database=DeltaTableDatabase(tmp_path / "store")
+    )
     with job:
         source = DictSource(
             [{"id": 1, "n": 3}, {"id": 2, "n": 4}],
@@ -87,7 +89,8 @@ def test_a_loaded_job_reads_its_stored_tensors(
     assert loaded.nodes["value"].output_schema()[1]["value"] is torch.Tensor
     assert loaded.nodes["joined"].load_status == LoadStatus.FULL
     assert loaded.nodes["joined"].output_schema()[1]["value"] is torch.Tensor
-    got = _values(loaded.nodes["value"])
+    # A loaded node is empty until it runs (ITL-1095): read the stored view.
+    got = _values(loaded.nodes["value"].as_source())
     assert sorted(got) == [1, 2]
     for row_id, n in ((1, 3), (2, 4)):
         expected = function(n)
