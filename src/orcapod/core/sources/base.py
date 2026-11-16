@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.core.streams.base import StreamBase, typed_zero_row_table
+from orcapod.system_constants import constants
 from orcapod.core.streams.view import StreamView
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.types import ColumnConfig, Schema
@@ -61,6 +62,12 @@ class RootSource(StreamBase):
             data_context=data_context,
             config=config,
         )
+        if source_id is not None and constants.BLOCK_SEPARATOR in source_id:
+            raise ValueError(
+                f"source_id {source_id!r} contains {constants.BLOCK_SEPARATOR!r}, which "
+                "separates the parts of a source-info token "
+                "(<source id>::<record id>::<column>); give the source another name"
+            )
         self._source_id = source_id
 
     # -------------------------------------------------------------------------

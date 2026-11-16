@@ -14,7 +14,8 @@ from typing import Any, cast
 import pyarrow as pa
 import pytest
 
-from orcapod.utils.arrow_utils import BATCH_FOLD_LABEL, GROUP_BY_FOLD_LABEL
+from orcapod.core.operators.batch import BATCH_FOLD_LABEL
+from orcapod.core.operators.group_by import GROUP_BY_FOLD_LABEL
 from orcapod.core.operators import Batch, Join
 from orcapod.system_constants import constants
 

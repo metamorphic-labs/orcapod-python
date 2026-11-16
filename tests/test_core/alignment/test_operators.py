@@ -20,7 +20,8 @@ from typing import Any
 import polars as pl
 import pytest
 
-from orcapod.utils.arrow_utils import BATCH_FOLD_LABEL, GROUP_BY_FOLD_LABEL
+from orcapod.core.operators.batch import BATCH_FOLD_LABEL
+from orcapod.core.operators.group_by import GROUP_BY_FOLD_LABEL
 from orcapod import PipelineJob
 from orcapod.core.operators import (
     Batch,

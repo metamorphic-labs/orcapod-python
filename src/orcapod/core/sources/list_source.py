@@ -4,7 +4,10 @@ from collections.abc import Callable, Collection
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 from orcapod.core.sources.base import RootSource
-from orcapod.core.sources.stream_builder import SourceStreamBuilder
+from orcapod.core.sources.stream_builder import (
+    SourceStreamBuilder,
+    normalize_record_id_columns,
+)
 from orcapod.protocols.core_protocols import TagProtocol
 from orcapod.types import ContentHash, SchemaLike
 from orcapod.utils import arrow_utils
@@ -39,6 +42,7 @@ class ListSource(RootSource):
         tag_function_hash_mode: Literal["content", "signature", "name"] = "name",
         data_schema: SchemaLike | None = None,
         source_id: str | None = None,
+        record_id_columns: str | Collection[str] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(source_id=source_id, **kwargs)
@@ -94,6 +98,7 @@ class ListSource(RootSource):
             tag_columns=tag_columns,
             source_id=self._source_id,
             source_kind=self.SOURCE_KIND,
+            record_id_columns=normalize_record_id_columns(record_id_columns) or (),
         )
 
         self._stream = result.stream

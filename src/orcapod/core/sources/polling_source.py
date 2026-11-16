@@ -22,7 +22,10 @@ from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.source_ids import hash_source_id
-from orcapod.core.sources.stream_builder import SourceStreamBuilder
+from orcapod.core.sources.stream_builder import (
+    SourceStreamBuilder,
+    normalize_record_id_columns,
+)
 from orcapod.core.streams.view import (
     ViewStatus,
     StreamView,
@@ -200,14 +203,17 @@ class PollingSource(RootSource, Generic[T]):
             All fields are validated at construction — ``ValueError`` is
             raised for out-of-range values.
         source_id: Optional stable string identifier for provenance tracking.
-            Defaults to ``str(impl.identity())`` when omitted.
+            Defaults to ``polling_source:<label>:<hex>`` of the semantic hash of
+            ``impl.identity()``.
         label: Optional human-readable label shown in pipeline diagrams.
         data_context: Optional data context key or instance for type
             conversion and hashing.
         config: Optional Orcapod framework config.
+        record_id_columns: Required. The key columns whose values identify a row
+            (the record id), in key order.
 
     Raises:
-        ValueError: If ``impl.schema()`` returns a non-``None`` schema that
+        ValueError: If ``record_id_columns`` is not given, or ``impl.schema()`` returns a non-``None`` schema that
             does not include all columns named in ``tag_columns``.
 
     Example::
@@ -244,6 +250,7 @@ class PollingSource(RootSource, Generic[T]):
             MyDBSource("postgresql://..."),
             tag_columns="row_id",
             polling_config=PollingConfig(interval=5.0, duration=60.0),
+            record_id_columns="row_id",
         )
 
     Note:
@@ -269,7 +276,17 @@ class PollingSource(RootSource, Generic[T]):
         label: str | None = None,
         data_context: str | Any | None = None,
         config: Any | None = None,
+        record_id_columns: str | Collection[str] | None = None,
     ) -> None:
+        # Polled rows arrive in batches built one at a time, so a position names a row
+        # only within its batch: a polled row is identified by its key (ITL-1158).
+        key_columns = normalize_record_id_columns(record_id_columns)
+        if not key_columns:
+            raise ValueError(
+                "a PollingSource needs record_id_columns: rows arrive in batches, so a "
+                "position does not identify a row; name the key columns whose values "
+                "identify each row."
+            )
         super().__init__(
             source_id=source_id,
             label=label,
@@ -277,6 +294,7 @@ class PollingSource(RootSource, Generic[T]):
             config=config,
         )
         self._impl: DynamicSourceProtocol[T] = impl
+        self._record_id_columns: tuple[str, ...] = key_columns
         self._tag_columns: tuple[str, ...] = tuple(_normalize_column_list(tag_columns))
         self._polling_config = polling_config
         self._cursor: Cursor[T] | None = None
@@ -409,7 +427,7 @@ class PollingSource(RootSource, Generic[T]):
                     assert schema_hash is not None
                     src_col, rec_col = system_tag_column_names(schema_hash)
                     tag_schema = Schema(
-                        {**dict(tag_schema), src_col: str, rec_col: bytes}
+                        {**dict(tag_schema), src_col: str, rec_col: str}
                     )
                 return tag_schema, self._data_schema
         if self._batches:
@@ -589,6 +607,7 @@ class PollingSource(RootSource, Generic[T]):
             "impl_module": impl_type.__module__,
             "impl_class": impl_type.__qualname__,
             "tag_columns": list(self._tag_columns),
+            "record_id_columns": list(self._record_id_columns),
             "polling_config": dataclasses.asdict(self._polling_config),
             "source_id": self._source_id,
             "impl_config": self._impl.to_config(),
@@ -637,6 +656,7 @@ class PollingSource(RootSource, Generic[T]):
             tag_columns=config["tag_columns"],
             polling_config=polling_config,
             source_id=config.get("source_id"),
+            record_id_columns=config.get("record_id_columns"),
         )
 
     # -------------------------------------------------------------------------
@@ -812,6 +832,7 @@ class PollingSource(RootSource, Generic[T]):
             arrow_table,
             tag_columns=self._tag_columns,
             source_id=self._source_id,
+            record_id_columns=self._record_id_columns,
         )
         return result.stream
 

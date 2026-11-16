@@ -30,6 +30,7 @@ from typing_extensions import override
 
 from orcapod.core.sources.db_table_source import DBTableSource
 from orcapod.databases.sqlite_connector import SQLiteConnector
+from orcapod.protocols.db_connector_protocol import DBConnectorProtocol
 from orcapod.utils.schema_utils import _normalize_column_list
 
 if TYPE_CHECKING:
@@ -75,8 +76,10 @@ class SQLiteTableSource(DBTableSource):
             the table's primary-key columns are used; ROWID-only tables fall
             back to ``["rowid"]``.
         system_tag_columns: Additional system-level tag columns.
-        record_id_column: Column for stable per-row record IDs in provenance.
-        source_id: Canonical source name. Defaults to *table_name*.
+        record_id_columns: The key columns that identify a row; ``None``: the
+            primary key (a table without one is refused); ``()``: the position.
+        source_id: Canonical source name. Defaults to
+            ``sqlite_table:<db path as passed>:main.<table>``.
         label: Human-readable label for this source node.
         data_context: Data context governing type conversion and hashing.
         config: OrcaPod configuration.
@@ -95,7 +98,7 @@ class SQLiteTableSource(DBTableSource):
         table_name: str,
         tag_columns: str | Collection[str] | None = None,
         system_tag_columns: Collection[str] = (),
-        record_id_column: str | None = None,
+        record_id_columns: str | Collection[str] | None = None,
         source_id: str | None = None,
         label: str | None = None,
         data_context: str | contexts.DataContext | None = None,
@@ -130,7 +133,7 @@ class SQLiteTableSource(DBTableSource):
                 table_name,
                 tag_columns=resolved_tags,
                 system_tag_columns=system_tag_columns,
-                record_id_column=record_id_column,
+                record_id_columns=record_id_columns,
                 source_id=source_id,
                 label=label,
                 data_context=data_context,
@@ -143,6 +146,24 @@ class SQLiteTableSource(DBTableSource):
             except Exception:
                 # Suppress connector close errors to avoid masking __init__ failures.
                 pass
+
+    @override
+    def _table_address(self, connector: DBConnectorProtocol, table_name: str) -> str:
+        """Return ``<db path as passed>:main.<table>``.
+
+        SQLite names a table ``<schema>.<table>``, the schema of the main database
+        file being ``main``; the file itself is the database's address, so it comes
+        first, as passed (a relative path stays relative; ITL-1154).
+
+        Args:
+            connector: The connector (unused: the path is the source's own).
+            table_name: The table's name.
+
+        Returns:
+            The table's address.
+        """
+        del connector
+        return f"{os.fspath(self._db_path)}:main.{table_name}"
 
     @contextmanager
     @override
@@ -184,7 +205,7 @@ class SQLiteTableSource(DBTableSource):
             table_name=config["table_name"],
             tag_columns=config.get("tag_columns"),
             system_tag_columns=config.get("system_tag_columns", ()),
-            record_id_column=config.get("record_id_column"),
+            record_id_columns=config.get("record_id_columns"),
             source_id=config.get("source_id"),
             label=config.get("label"),
             data_context=config.get("data_context"),

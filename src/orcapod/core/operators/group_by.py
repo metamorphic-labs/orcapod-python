@@ -41,6 +41,14 @@ def _null_last_key(value: Any) -> tuple[Any, ...]:
     return (0, value)
 
 
+GROUP_BY_FOLD_LABEL = "group_v1"
+"""Label of the folds of ``GroupBy``: the folded source id and record id are
+``"group_v1:<hex>"`` (ITL-1154). It names the operation; the procedure is
+``arrow_utils.fold_system_tag_values``. Change it only when this operation's fold
+would give an existing member list a different value.
+"""
+
+
 class GroupBy(UnaryOperator):
     """Reduce rows sharing a key into one row with list-valued data members.
 
@@ -244,9 +252,7 @@ class GroupBy(UnaryOperator):
                     **{c: [m[c] for m in members] for c in member_columns},
                     **{
                         c: arrow_utils.fold_system_tag_values(
-                            c,
-                            [m[c] for m in members],
-                            label=arrow_utils.GROUP_BY_FOLD_LABEL,
+                            [m[c] for m in members], label=GROUP_BY_FOLD_LABEL
                         )
                         for c in system_tag_columns
                     },

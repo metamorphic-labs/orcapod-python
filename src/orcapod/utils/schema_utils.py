@@ -579,6 +579,30 @@ def require_output_keys_not_tags(
         )
 
 
+def require_names_without_separator(names: Collection[str]) -> None:
+    """Raise if a tag or data column name contains ``::``.
+
+    ``::`` separates the parts of a source-info token, ``<source id>::<record id>::<column>``,
+    which splits at its first and last ``::`` only because neither a source id nor a
+    column name holds one; the record id between them may hold anything (ITL-1154).
+
+    Args:
+        names: Tag or data column names.
+
+    Raises:
+        InputValidationError: If a name contains ``::``. The message names the column.
+    """
+    from orcapod.system_constants import constants
+
+    for name in sorted(names):
+        if constants.BLOCK_SEPARATOR in name:
+            raise InputValidationError(
+                f"column name {name!r} contains {constants.BLOCK_SEPARATOR!r}, which "
+                "separates the parts of a source-info token; give the column another "
+                "name."
+            )
+
+
 def require_names_not_meta(names: Collection[str]) -> None:
     """Raise if a tag or data column name starts with the reserved meta prefix.
 

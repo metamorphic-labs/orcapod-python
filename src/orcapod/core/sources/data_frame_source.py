@@ -5,7 +5,10 @@ from collections.abc import Collection
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from orcapod.core.sources.base import RootSource
-from orcapod.core.sources.stream_builder import SourceStreamBuilder
+from orcapod.core.sources.stream_builder import (
+    SourceStreamBuilder,
+    normalize_record_id_columns,
+)
 from orcapod.utils import arrow_utils, polars_data_utils
 from orcapod.utils.schema_utils import _normalize_column_list
 from orcapod.utils.lazy_module import LazyModule
@@ -38,6 +41,7 @@ class DataFrameSource(RootSource):
         system_tag_columns: Collection[str] = (),
         source_id: str | None = None,
         schema: pa.Schema | None = None,
+        record_id_columns: str | Collection[str] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(source_id=source_id, **kwargs)
@@ -79,6 +83,7 @@ class DataFrameSource(RootSource):
             tag_columns=tag_columns,
             source_id=self._source_id,
             source_kind=self.SOURCE_KIND,
+            record_id_columns=normalize_record_id_columns(record_id_columns) or (),
             system_tag_columns=system_tag_columns,
         )
 

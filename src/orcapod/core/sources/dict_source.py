@@ -4,7 +4,10 @@ from collections.abc import Collection, Mapping
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from orcapod.core.sources.base import RootSource
-from orcapod.core.sources.stream_builder import SourceStreamBuilder
+from orcapod.core.sources.stream_builder import (
+    SourceStreamBuilder,
+    normalize_record_id_columns,
+)
 from orcapod.types import DataValue, SchemaLike
 from orcapod.utils import arrow_utils
 from orcapod.utils.schema_utils import _normalize_column_list
@@ -35,6 +38,7 @@ class DictSource(RootSource):
         system_tag_columns: Collection[str] = (),
         data_schema: SchemaLike | pa.Schema | None = None,
         source_id: str | None = None,
+        record_id_columns: str | Collection[str] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(source_id=source_id, **kwargs)
@@ -67,6 +71,7 @@ class DictSource(RootSource):
             tag_columns=tag_columns,
             source_id=self._source_id,
             source_kind=self.SOURCE_KIND,
+            record_id_columns=normalize_record_id_columns(record_id_columns) or (),
             system_tag_columns=system_tag_columns,
         )
 

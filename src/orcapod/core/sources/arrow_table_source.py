@@ -5,7 +5,10 @@ from collections.abc import Collection
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from orcapod.core.sources.base import RootSource
-from orcapod.core.sources.stream_builder import SourceStreamBuilder
+from orcapod.core.sources.stream_builder import (
+    SourceStreamBuilder,
+    normalize_record_id_columns,
+)
 from orcapod.utils import arrow_utils
 from orcapod.utils.schema_utils import _normalize_column_list
 
@@ -53,7 +56,7 @@ class ArrowTableSource(RootSource):
     Record identity
     ---------------
     Every row gets a record ID system tag derived from ``source_id`` and a
-    per-row token.  With ``record_id_column`` the token is that column's value,
+    per-row token.  With ``record_id_columns`` the token is that column's value,
     so the ID follows the row.  Without it the token is the row's position
     (``row_0``, ``row_1``, ...), so a row supplied at a different position
     under the same ``source_id`` gets a different record ID.  Downstream
@@ -66,7 +69,7 @@ class ArrowTableSource(RootSource):
     when omitted it defaults to ``arrow_table:<algorithm label>:<hex>`` of the
     table hash, which changes with row order.
     Whenever row order can vary between runs, pass an explicit ``source_id``
-    and set ``record_id_column`` to a column that is unique per row.
+    and set ``record_id_columns`` to a column that is unique per row.
     """
 
     # The config type key; also the kind prefix of the default source id.
@@ -77,7 +80,7 @@ class ArrowTableSource(RootSource):
         table: "pa.Table",
         tag_columns: str | Collection[str] = (),
         system_tag_columns: Collection[str] = (),
-        record_id_column: str | None = None,
+        record_id_columns: str | Collection[str] | None = None,
         infer_nullable: bool = False,
         **kwargs: Any,
     ) -> None:
@@ -98,7 +101,7 @@ class ArrowTableSource(RootSource):
             tag_columns=tag_columns,
             source_id=self._source_id,
             source_kind=self.SOURCE_KIND,
-            record_id_column=record_id_column,
+            record_id_columns=normalize_record_id_columns(record_id_columns) or (),
             system_tag_columns=system_tag_columns,
         )
 
@@ -107,7 +110,7 @@ class ArrowTableSource(RootSource):
         self._table_hash = result.table_hash
         self._tag_columns = result.tag_columns
         self._system_tag_columns = result.system_tag_columns
-        self._record_id_column = record_id_column
+        self._record_id_columns = normalize_record_id_columns(record_id_columns)
 
         if self._source_id is None:
             self._source_id = result.source_id
@@ -117,6 +120,9 @@ class ArrowTableSource(RootSource):
         return {
             "source_type": self.SOURCE_KIND,
             "tag_columns": list(self._tag_columns),
+            "record_id_columns": None
+            if self._record_id_columns is None
+            else list(self._record_id_columns),
             "source_id": self.source_id,
             **self._identity_config(),
         }

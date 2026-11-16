@@ -45,7 +45,12 @@ from typing_extensions import override
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.source_ids import location_source_id
 from orcapod.core.sources.derived_source import validate_tags_as_data
-from orcapod.core.sources.stream_builder import SourceStreamBuilder
+from orcapod.core.sources.stream_builder import (
+    SourceStreamBuilder,
+    key_column_type_allowed,
+    normalize_record_id_columns,
+    row_identifiers,
+)
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import check_head_size
 from orcapod.core.streams.view import ViewStatus, StreamView
@@ -152,6 +157,38 @@ def _schema_difference(found: "pa.Schema", expected: "pa.Schema") -> str:
     )
 
 
+SPIRALDB_SOURCE_ID_HAS_TABLE_ID = True
+"""Whether a SpiralDB default source id ends in ``@<table id>`` (ITL-1154).
+
+The developer decides whether the table id stays part of the default; it is one
+constant so the change is one line.
+"""
+
+
+def spiraldb_table_address(
+    project_id: str, dataset: str, table_name: str, table_id: str
+) -> str:
+    """Return a SpiralDB table's address: ``<project>.<dataset>.<table>[@<table id>]``.
+
+    ``<project>.<dataset>.<table>`` is Spiral's own full table identifier
+    (``Table.identifier``); the table id follows when
+    ``SPIRALDB_SOURCE_ID_HAS_TABLE_ID`` is set.
+
+    Args:
+        project_id: The Spiral project.
+        dataset: The dataset.
+        table_name: The table's name.
+        table_id: SpiralDB's id of the table.
+
+    Returns:
+        The address, the location part of the default source id.
+    """
+    address = f"{project_id}.{dataset}.{table_name}"
+    if SPIRALDB_SOURCE_ID_HAS_TABLE_ID:
+        address += f"@{table_id}"
+    return address
+
+
 class SpiralDBTableSource(RootSource):
     """A read-only Source over a table in a SpiralDB dataset, read in batches.
 
@@ -173,9 +210,11 @@ class SpiralDBTableSource(RootSource):
     not apply, and the header says how many rows the table has.
 
     Identity. The source is identified by where the table is, never by its rows. The
-    default ``source_id`` is ``<project_id>/<dataset>.<table_name>@<table id>``, where
-    the table id is SpiralDB's own: a table dropped and created again under the same
-    name is a different source, and a renamed table gets a new source id too.
+    default ``source_id`` is ``spiraldb_table:<project_id>.<dataset>.<table_name>@<table
+    id>`` (``spiraldb_table_address``): Spiral's own table identifier, then the table id,
+    SpiralDB's own, so a table dropped and created again under the same name is a
+    different source, and a renamed table gets a new source id too. A row is
+    identified by its primary key (or ``record_id_columns``) in the JSON key form.
     ``where``, ``limit`` and ``asof`` choose which rows are read and are not part of
     the source's identity. ``tags_as_data`` is: it decides what a data column holds,
     so its sorted items enter the content hash (when it is given), and its copies
@@ -261,7 +300,15 @@ class SpiralDBTableSource(RootSource):
         config: "OrcapodConfig | None" = None,
         overrides: dict[str, str] | None = None,
         tags_as_data: Mapping[str, str] | None = None,
+        record_id_columns: str | Collection[str] | None = None,
     ) -> None:
+        given_key = normalize_record_id_columns(record_id_columns)
+        if given_key == ():
+            raise ValueError(
+                "a SpiralDB table's scan order does not identify a row, so "
+                "record_id_columns=() (the position) is not offered: name key "
+                "columns, or leave record_id_columns unset for the primary key."
+            )
         for name, value in (("limit", limit), ("max_rows", max_rows)):
             if value is not None and not _is_positive_int(value):
                 raise ValueError(
@@ -292,13 +339,16 @@ class SpiralDBTableSource(RootSource):
                 raise ValueError(
                     f"{location}: Table {table_name!r} not found in database."
                 )
-            self._key_columns: tuple[str, ...] = tuple(
-                connector.get_pk_columns(table_name)
+            self._key_columns: tuple[str, ...] = (
+                given_key
+                if given_key is not None
+                else tuple(connector.get_pk_columns(table_name))
             )
             if not self._key_columns:
                 raise ValueError(
                     f"{location}: Table {table_name!r} has no primary key columns, so "
-                    "its rows cannot be identified."
+                    "its rows cannot be identified: name key columns with "
+                    "record_id_columns=[...]."
                 )
             self._table_id = connector.get_spiral_table_id(table_name)
             schema = connector.get_arrow_schema(table_name)
@@ -321,10 +371,25 @@ class SpiralDBTableSource(RootSource):
                 f"{location}: where names columns that table {table_name!r} does not "
                 f"have: {unknown}. Columns: {schema.names}"
             )
+        key_problems = [
+            f"{c!r} is not a column"
+            if c not in schema.names
+            else f"{c!r} has type {schema.field(c).type}"
+            for c in self._key_columns
+            if c not in schema.names
+            or not key_column_type_allowed(schema.field(c).type)
+        ]
+        if key_problems:
+            raise ValueError(
+                f"{location}: table {table_name!r} cannot identify its rows by key "
+                f"columns {list(self._key_columns)}: {'; '.join(key_problems)}. A key "
+                "column must hold strings, integers, booleans, timestamps or dates."
+            )
+        self._record_id_columns = given_key
         if self._source_id is None:
             self._source_id = location_source_id(
                 self.SOURCE_KIND,
-                f"{project_id}/{dataset}.{table_name}@{self._table_id}",
+                spiraldb_table_address(project_id, dataset, table_name, self._table_id),
             )
 
         # A zero-row stream with the table's columns answers every schema question.
@@ -520,26 +585,19 @@ class SpiralDBTableSource(RootSource):
         )
 
     def _key_tokens(self, table: "pa.Table") -> list[str]:
-        """Return each row's token: the labelled Arrow hash of its primary key.
+        """Return each row's identifier: the canonical JSON of its primary key.
+
+        The same key form as every other source (``key_row_identifier``, ITL-1154).
 
         Raises:
-            ValueError: If a key column holds a null.
+            ValueError: If a key column holds a null or a type that cannot identify
+                a row, or two rows of the batch have one key; the message names the
+                table.
         """
-        keys = table.select(list(self._key_columns))
-        for name in self._key_columns:
-            if keys.column(name).null_count:
-                raise ValueError(
-                    f"SpiralDB table {self._qualified!r}: key column {name!r} holds "
-                    "a null, so the row cannot be identified."
-                )
-        # A key is never null: hash its fields as non-nullable whatever is reported,
-        # so a token does not depend on the table's nullability record.
-        keys = keys.cast(pa.schema([f.with_nullable(False) for f in keys.schema]))
-        hasher = self.data_context.arrow_hasher
-        return [
-            hasher.hash_table(keys.slice(i, 1)).to_string()
-            for i in range(keys.num_rows)
-        ]
+        try:
+            return row_identifiers(table, self._key_columns)
+        except ValueError as exc:
+            raise ValueError(f"SpiralDB table {self._qualified!r}: {exc}") from exc
 
     def _batch_streams(self) -> Generator["ArrowTableStream", None, None]:
         """Scan the table once and yield its rows as streams of at most ``batch_rows`` rows.
@@ -623,7 +681,7 @@ class SpiralDBTableSource(RootSource):
                         system_tag_columns=self._system_tag_columns,
                         schema_hash=self._schema_hash,
                         source_id=self.source_id,
-                        provenance_tokens=tokens,
+                        row_identifiers=tokens,
                     )
 
     def iter_data(self) -> Iterator["tuple[TagProtocol, DataProtocol]"]:
@@ -828,6 +886,9 @@ class SpiralDBTableSource(RootSource):
             "max_rows": self._max_rows,
             "batch_rows": self._batch_rows,
             "tags_as_data": dict(self._tags_as_data) or None,
+            "record_id_columns": None
+            if self._record_id_columns is None
+            else list(self._record_id_columns),
             "source_id": self.source_id,
             **self._identity_config(),
         }
@@ -859,6 +920,7 @@ class SpiralDBTableSource(RootSource):
             limit=config.get("limit"),
             asof=config.get("asof"),
             max_rows=config.get("max_rows", DEFAULT_MAX_ROWS),
+            record_id_columns=config.get("record_id_columns"),
             batch_rows=config.get("batch_rows", DEFAULT_BATCH_ROWS),
             tags_as_data=config.get("tags_as_data"),
             source_id=config.get("source_id"),

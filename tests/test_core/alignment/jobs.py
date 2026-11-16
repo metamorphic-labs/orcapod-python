@@ -17,7 +17,7 @@ from typing import Any
 
 import pyarrow as pa
 
-from orcapod.utils.arrow_utils import GROUP_BY_FOLD_LABEL
+from orcapod.core.operators.group_by import GROUP_BY_FOLD_LABEL
 from orcapod import PipelineJob
 from orcapod.core.operators import GroupBy, Join
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase

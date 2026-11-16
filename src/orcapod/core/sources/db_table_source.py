@@ -22,6 +22,7 @@ from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.source_ids import location_source_id
 from orcapod.core.sources.reload import keep_nullable_columns, same_rows
 from orcapod.core.sources.stream_builder import (
+    normalize_record_id_columns,
     SourceStreamBuilder,
     SourceStreamResult,
 )
@@ -57,10 +58,11 @@ class DBTableSource(RootSource):
             if the table has no primary key and no explicit columns are given.
         system_tag_columns: Additional system-level tag columns (passed through
             to ``SourceStreamBuilder``; mirrors ``DeltaTableSource`` API).
-        record_id_column: Column for stable per-row record IDs in provenance
-            strings.  If ``None``, row indices are used.
+        record_id_columns: The key columns whose values identify a row (the record
+            id), in key order. ``None`` (default): the table's primary key; a table
+            without one is refused. ``()``: the row's position, ``row_<n>``.
         source_id: Canonical source name for the registry and provenance tokens.
-            Defaults to ``table_name``.
+            Defaults to ``<kind>:<table address>`` (``_table_address``).
         label: Human-readable label for this source node.
         data_context: Data context governing type conversion and hashing.
         config: Orcapod configuration (controls hash character counts, etc.).
@@ -79,7 +81,7 @@ class DBTableSource(RootSource):
         table_name: str,
         tag_columns: str | Collection[str] | None = None,
         system_tag_columns: Collection[str] = (),
-        record_id_column: str | None = None,
+        record_id_columns: str | Collection[str] | None = None,
         source_id: str | None = None,
         label: str | None = None,
         data_context: str | contexts.DataContext | None = None,
@@ -88,7 +90,9 @@ class DBTableSource(RootSource):
         _query: str | None = None,
     ) -> None:
         if source_id is None:
-            source_id = location_source_id(self.SOURCE_KIND, table_name)
+            source_id = location_source_id(
+                self.SOURCE_KIND, self._table_address(connector, table_name)
+            )
         super().__init__(
             source_id=source_id,
             label=label,
@@ -98,12 +102,27 @@ class DBTableSource(RootSource):
 
         self._connector = connector
         self._table_name = table_name
-        self._record_id_column = record_id_column
+        self._record_id_columns = normalize_record_id_columns(record_id_columns)
 
         # Step 1: Validate the table exists first so the error is always
         # "not found" rather than a misleading "no primary key" for missing tables.
         if table_name not in connector.get_table_names():
             raise ValueError(f"Table {table_name!r} not found in database.")
+
+        # A row is identified by its primary key unless key columns are named, or
+        # () asks for the position (ITL-1154). No silent fallback to position.
+        if self._record_id_columns is None:
+            self._key_columns: tuple[str, ...] = tuple(
+                connector.get_pk_columns(table_name)
+            )
+            if not self._key_columns:
+                raise ValueError(
+                    f"Table {table_name!r} has no primary key, so its rows have no "
+                    "identifier: name key columns with record_id_columns=[...], or "
+                    "pass record_id_columns=() to identify rows by position."
+                )
+        else:
+            self._key_columns = self._record_id_columns
 
         # Step 2: Resolve tag columns — default to PK columns
         if tag_columns is None:
@@ -134,6 +153,23 @@ class DBTableSource(RootSource):
         self._system_tag_columns = result.system_tag_columns
         if self._source_id is None:
             self._source_id = result.source_id
+
+    def _table_address(self, connector: DBConnectorProtocol, table_name: str) -> str:
+        """Return the table's full address in the database's own convention.
+
+        The location part of the default source id (``<kind>:<address>``). A generic
+        connector exposes no database address, so it is the table name; a subclass
+        that knows its database's convention overrides this (ITL-1154).
+
+        Args:
+            connector: The connector the source reads through.
+            table_name: The table's name.
+
+        Returns:
+            The table's address.
+        """
+        del connector
+        return table_name
 
     def _read_table(
         self, connector: DBConnectorProtocol, held: pa.Schema | None = None
@@ -184,7 +220,7 @@ class DBTableSource(RootSource):
             table,
             tag_columns=self._tag_columns,
             source_id=self._source_id,
-            record_id_column=self._record_id_column,
+            record_id_columns=self._key_columns,
             system_tag_columns=self._system_tag_columns,
         )
 
@@ -202,7 +238,7 @@ class DBTableSource(RootSource):
 
         A database table has no cheap exact sign of a change, so every check reads the
         whole table, as building the source did, and compares it with the rows held,
-        in any order when a ``record_id_column`` gives the record ids: a table that
+        in any order when a ``record_id_columns`` gives the record ids: a table that
         returns the same rows in another order (an
         unordered ``SELECT``) is unchanged. The rows are compared as read, every column
         included (a ``system_tag_columns`` column too; ``same_rows``).
@@ -223,8 +259,8 @@ class DBTableSource(RootSource):
                 f"built with {self._table.schema}, the table now has {table.schema}. "
                 "Build a new source to read it"
             )
-        # Row positions are record ids without a record_id_column: order counts.
-        if same_rows(self._table, table, ordered=self._record_id_column is None):
+        # Row positions are record ids without key columns: order counts.
+        if same_rows(self._table, table, ordered=not self._key_columns):
             return False
         self._stream = self._build(table).stream
         self._table = table
@@ -239,7 +275,9 @@ class DBTableSource(RootSource):
             "table_name": self._table_name,
             "tag_columns": list(self._tag_columns),
             "system_tag_columns": list(self._system_tag_columns),
-            "record_id_column": self._record_id_column,
+            "record_id_columns": None
+            if self._record_id_columns is None
+            else list(self._record_id_columns),
             "source_id": self.source_id,
             **self._identity_config(),
         }

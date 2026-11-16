@@ -798,8 +798,8 @@ LABEL_DEFINITIONS = {
     "polars_expr_v1": "hashing/semantic_hashing/polars_expr.py",
     "polars_dataframe_v1": "hashing/semantic_hashing/builtin_handlers.py",
     "polars_series_v1": "hashing/semantic_hashing/builtin_handlers.py",
-    "group_v1": "utils/arrow_utils.py",
-    "batch_v1": "utils/arrow_utils.py",
+    "group_v1": "core/operators/group_by.py",
+    "batch_v1": "core/operators/batch.py",
 }
 
 
