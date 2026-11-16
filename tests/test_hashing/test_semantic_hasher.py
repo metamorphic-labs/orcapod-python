@@ -187,10 +187,9 @@ class TestContainers:
         h2 = hasher.hash_object({3, 1, 2})
         assert h1 == h2
 
-    def test_frozenset_equals_set(self, hasher):
-        """set and frozenset with same elements should hash the same
-        (both tagged as 'set' in the expansion)."""
-        assert hasher.hash_object({1, 2, 3}) == hasher.hash_object(frozenset([1, 2, 3]))
+    def test_frozenset_differs_from_set(self, hasher):
+        """A frozenset is its own type, tagged ``frozenset`` (ITL-1154)."""
+        assert hasher.hash_object({1, 2, 3}) != hasher.hash_object(frozenset([1, 2, 3]))
 
     def test_ordered_dict_same_as_dict(self, hasher):
         od = OrderedDict([("z", 1), ("a", 2)])
@@ -1322,9 +1321,9 @@ class TestResolver:
         expected_resolver = calling_hasher.hash_object([inner_via_calling])
         assert resolver_result == expected_resolver
 
-        # The two inner hashes differ only in their label, and a label never enters
-        # a hash input (ITL-945), so the enclosing hashes are equal.
-        assert no_resolver_result == resolver_result
+        # The two inner hashes differ only in their label, and a hash fed into another
+        # hash carries its label (ITL-1154), so the enclosing hashes differ.
+        assert no_resolver_result != resolver_result
 
         # A resolver that gives the nested object another digest changes the
         # enclosing hash: what the resolver returns is what gets embedded.
@@ -1441,7 +1440,7 @@ class TestUniformHasherPropagation:
         outer = NestedRecord("outer", inner, semantic_hasher=hasher_b)
 
         # Record the hasher inner is asked to hash itself with: the two hashers
-        # differ only in their label, which no digest shows (ITL-945).
+        # differ only in their label.
         asked_with: list[object] = []
         inner_content_hash = inner.content_hash
 
@@ -1466,14 +1465,15 @@ class TestUniformHasherPropagation:
         assert result == expected_uniform
 
         # A mixed computation (inner uses its own hasher_a) differs from the uniform
-        # one only in the label of the inner hash. A label never enters a hash input
-        # (ITL-945), so both give the same digest.
+        # one only in the label of the inner hash. A hash fed into another hash
+        # carries its label (ITL-1154), so the two give different digests: the entry
+        # point's hasher really is used throughout.
         inner_with_own_hasher = inner.content_hash()  # uses hasher_a
         assert inner_with_own_hasher.method == "hasher_a"
         mixed_result = hasher_b.hash_object(
             {"label": "outer", "inner": inner_with_own_hasher}
         )
-        assert result == mixed_result
+        assert result != mixed_result
 
     def test_three_level_chain_uses_entry_hasher_throughout(self):
         """In a three-level chain A→B→C, calling C.content_hash() uses C's hasher
