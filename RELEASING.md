@@ -69,7 +69,10 @@ Do these on `metamorphic-labs` `main` before anything is pushed:
    on a commit that contains them. The Release workflow's build job checks this before it
    creates the tag (`scripts/check_golden_tags.py --release-version X.Y.Z`) and stops if the
    release is not recorded, or if a golden file was added after the release step (the
-   release revision must be the last revision when the commit is tagged).
+   release revision must be the last revision when the commit is tagged). It also runs the
+   tag check (`scripts/check_golden_tags.py`) there, so a branch that changed what an earlier
+   release of the data context shipped is not released. Tags of earlier data contexts are
+   not checked, so the first release of a data context passes with nothing to check.
 3. **Check that `main` is green** — the `Run Tests` workflow on the commit you are
    releasing. The Release workflow re-runs the unit tests on Python 3.11, 3.12 and 3.13
    and the license check, but not the PostgreSQL or SpiralDB integration jobs.

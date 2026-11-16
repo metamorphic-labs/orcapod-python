@@ -9,6 +9,7 @@ so a mark on that module cannot switch it off.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -20,6 +21,9 @@ SKIP_OR_XFAIL = frozenset({"skip", "skipif", "xfail"})
 
 GOLDEN_ENTRY_TEST = "test_golden_entry"
 """The test function, in ``test_golden_hashes.py``, that checks one golden entry."""
+
+GOLDEN_TEST_MODULE = Path(__file__).resolve().with_name("test_golden_hashes.py")
+"""The module holding ``GOLDEN_ENTRY_TEST``; items of any other module are ignored."""
 
 
 def needs(group: str) -> Any:
@@ -70,6 +74,8 @@ def golden_entry_violations(items: Iterable[Any]) -> dict[str, list[str]]:
     found: dict[str, list[str]] = {}
     for item in items:
         if getattr(item, "originalname", None) != GOLDEN_ENTRY_TEST:
+            continue
+        if Path(str(getattr(item, "path", ""))).resolve() != GOLDEN_TEST_MODULE:
             continue
         group = str(item.callspec.params["group"])
         bad = disallowed_marks(group, item.iter_markers())

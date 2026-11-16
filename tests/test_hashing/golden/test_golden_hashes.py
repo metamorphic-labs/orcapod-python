@@ -148,26 +148,56 @@ def test_collected_golden_entries_carry_only_the_optional_package_skip(
     assert not found, f"golden entries marked skip or xfail: {found}"
 
 
+class _FakeItem:
+    """A collected golden entry test with the given group and marks."""
+
+    originalname = "test_golden_entry"
+
+    def __init__(
+        self, group: str, marks: list[Any], path: Path = Path(__file__)
+    ) -> None:
+        self.nodeid = f"test_golden_hashes.py::test_golden_entry[{group}:x]"
+        self.path = path
+        self.callspec = type(
+            "CallSpec", (), {"params": {"group": group, "entry": "x"}}
+        )()
+        self._marks = [getattr(mark, "mark", mark) for mark in marks]
+
+    def iter_markers(self) -> list[Any]:
+        return self._marks
+
+
 def test_the_collection_hook_refuses_a_skipped_golden_entry(
     pytestconfig: pytest.Config,
 ) -> None:
     """The conftest hook, outside this module, fails the collection on a forbidden mark."""
     from tests.test_hashing.golden import conftest
 
-    class _Spec:
-        params = {"group": "semantic", "entry": "value.none"}
+    skipped = _FakeItem("semantic", [pytest.mark.skip(reason="module-level skip")])
+    with pytest.raises(pytest.UsageError, match="semantic:x"):
+        conftest.pytest_collection_modifyitems(pytestconfig, [skipped])
 
-    class _Item:
-        originalname = "test_golden_entry"
-        nodeid = "test_golden_hashes.py::test_golden_entry[semantic:value.none]"
-        callspec = _Spec()
 
-        def iter_markers(self) -> list[Any]:
-            return [pytest.mark.skip(reason="module-level skip").mark]
+def test_the_collection_hook_allows_the_optional_package_skip(
+    pytestconfig: pytest.Config,
+) -> None:
+    """The torch group's optional-package skip passes the collection hook."""
+    from tests.test_hashing.golden import conftest
 
-    with pytest.raises(pytest.UsageError, match="semantic:value.none"):
-        conftest.pytest_collection_modifyitems(pytestconfig, [_Item()])
-    conftest.pytest_collection_modifyitems(pytestconfig, [])
+    items = [_FakeItem("torch", [needs("torch")]), _FakeItem("semantic", [])]
+    conftest.pytest_collection_modifyitems(pytestconfig, items)
+
+
+def test_the_collection_hook_ignores_other_modules(pytestconfig: pytest.Config) -> None:
+    """A test of the same name in another module is not a golden entry."""
+    from tests.test_hashing.golden import conftest
+
+    other = _FakeItem(
+        "semantic",
+        [pytest.mark.skip(reason="x")],
+        path=Path(__file__).with_name("x.py"),
+    )
+    conftest.pytest_collection_modifyitems(pytestconfig, [other])
 
 
 def test_golden_test_module_marks_nothing() -> None:

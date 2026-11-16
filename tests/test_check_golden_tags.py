@@ -333,3 +333,30 @@ def test_inherited_git_location_variables_do_not_redirect_the_check(
     )
     assert result.returncode == 1, result.stdout
     assert "semantic-01.json differs" in result.stderr
+
+
+def test_tags_of_earlier_data_contexts_pass_with_nothing_to_check(
+    tmp_path: Path,
+) -> None:
+    """The Release workflow's first release of a context: older tags only, none of it.
+
+    As on the public repository before v0.3.0: tags whose commits have no
+    ``released_manifests.json`` (v0.1.x) or the old ``{"v1": null}`` form (v0.2.0). In CI
+    the check passes with nothing to check; it never fails for want of a release tag.
+    """
+    root = tmp_path / "repo"
+    pins = root / store.PINS_FILE
+    pins.parent.mkdir(parents=True)
+    _ = (root / "README.md").write_text("old release\n")
+    _git(root.parent, "init", "-q", str(root))
+    _commit(root, "v0.1.x: no released_manifests.json")
+    _git(root, "tag", "v0.1.4")
+    _ = pins.write_text('{\n    "v1": null\n}\n')
+    _commit(root, "v0.2.0: the old pin form")
+    _git(root, "tag", "v0.2.0")
+    store.copy_tree(store.PROJECT_ROOT, root, VERSION)
+    store.reopen_tree(root, VERSION, "2026-11-15")
+    _commit(root, "the open v1 data context")
+    result = _check(root, ci=True)
+    assert result.returncode == 0, result.stderr
+    assert "nothing to check" in result.stdout

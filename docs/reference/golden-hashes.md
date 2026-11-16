@@ -305,8 +305,9 @@ build job before the tag is made; tested by `tests/test_check_golden_tags.py`
 
 ### Tag check
 
-`scripts/check_golden_tags.py`, a step of the `Run Tests` workflow; tested by
-`tests/test_check_golden_tags.py`
+`scripts/check_golden_tags.py`, a step of the `Run Tests` workflow and of the Release
+workflow's build job before the tag is made (so a release dispatched from a branch that
+rewrote an earlier release is refused); tested by `tests/test_check_golden_tags.py`
 
 - **Checks:** for each tag `vX.Y.Z` whose `released_manifests.json` pins release `X.Y.Z` of
   the current data context (the one manifest at HEAD): every golden file listed by the
