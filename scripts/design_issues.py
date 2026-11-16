@@ -2,8 +2,9 @@
 
 The log is one file per entry, ``docs/dev/design_issues/<LINEAR-ISSUE-ID>-<ENTRY-ID>.md``
 (see ``docs/dev/design_issues/README.md``). This script reads the log as a whole. The log
-was at the top-level ``design_issues/`` until ITL-1169; an entry file still there is an
-error in every mode.
+was at the top-level ``design_issues/`` until ITL-1169, and the development documents
+(specs, plans, scripts) were in a top-level ``superpowers/``; both now live under
+``docs/dev/``. A file still at either old location is an error in every mode.
 
 Usage:
 
@@ -30,6 +31,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LOG_DIR = REPO_ROOT / "docs" / "dev" / "design_issues"
 OLD_LOG_DIR = REPO_ROOT / "design_issues"
+DEV_DOCS_DIR = REPO_ROOT / "docs" / "dev"
+OLD_DEV_DOCS_DIR = REPO_ROOT / "superpowers"
 
 STATUSES = ("open", "in progress", "resolved")
 SEVERITIES = ("critical", "high", "medium", "low", "trivial")
@@ -301,22 +304,53 @@ def load_entries(entries_dir: Path) -> tuple[list[tuple[Path, Entry]], list[str]
 
 
 def files_at_old_location() -> list[str]:
-    """List the files left at the log's old location, the top-level ``design_issues/``.
+    """List the files left at an old location that ITL-1169 moved under ``docs/dev/``.
 
-    Dotfiles (such as ``.DS_Store``) are not counted.
+    The old locations are the top-level ``design_issues/`` (the log, now
+    ``docs/dev/design_issues/``) and the top-level ``superpowers/`` (specs, plans and
+    scripts, now at the same relative place under ``docs/dev/``). Dotfiles (such as
+    ``.DS_Store``) are not counted.
 
     Returns:
-        One message per file found, naming the new location; empty if there is none.
+        One message per file found, naming where it belongs; empty if there is none.
     """
-    if not OLD_LOG_DIR.is_dir():
-        return []
-    new = LOG_DIR.relative_to(REPO_ROOT).as_posix()
-    return [
-        f"{path}: the design issues log moved to {new}/ (ITL-1169); "
-        f"move this file there (git mv design_issues/{path.name} {new}/)"
-        for path in sorted(OLD_LOG_DIR.iterdir())
-        if not path.name.startswith(".")
+    log = LOG_DIR.relative_to(REPO_ROOT).as_posix()
+    problems = [
+        f"{path}: the design issues log moved to {log}/ (ITL-1169); "
+        f"move this file there (git mv design_issues/{path.name} {log}/)"
+        for path in _visible_files(OLD_LOG_DIR, recursive=False)
     ]
+    for path in _visible_files(OLD_DEV_DOCS_DIR, recursive=True):
+        old = path.relative_to(REPO_ROOT).as_posix()
+        new = (DEV_DOCS_DIR / path.relative_to(OLD_DEV_DOCS_DIR)).relative_to(REPO_ROOT)
+        problems.append(
+            f"{path}: development documents live under docs/dev/ (ITL-1169); "
+            f"move this file there (git mv {old} {new.as_posix()})"
+        )
+    return problems
+
+
+def _visible_files(directory: Path, *, recursive: bool) -> list[Path]:
+    """List what a directory holds, if it exists, except dotfiles.
+
+    Args:
+        directory: The directory to list.
+        recursive: Whether to list the files of its subdirectories too.
+
+    Returns:
+        The items, sorted. Without ``recursive`` a subdirectory is one item; with it,
+        only files are listed, and nothing inside a dot-directory.
+    """
+    if not directory.is_dir():
+        return []
+    if not recursive:
+        return sorted(p for p in directory.iterdir() if not p.name.startswith("."))
+    return sorted(
+        p
+        for p in directory.rglob("*")
+        if p.is_file()
+        and not any(part.startswith(".") for part in p.relative_to(directory).parts)
+    )
 
 
 def _entry_order(entry: Entry) -> tuple[str, str, str, int, str]:
