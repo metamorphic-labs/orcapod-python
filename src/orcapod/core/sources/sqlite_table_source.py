@@ -197,8 +197,9 @@ class SQLiteTableSource(DBTableSource):
         """
         del connector
         # The path is read up to the last ``:main.``, so only the table name must not
-        # hold a ``:``.
-        return joined_location(":", os.fspath(self._db_path), f"main.{table_name}")
+        # hold a ``:``; the path is kept as passed, colons included (``C:\\data``).
+        table = joined_location(":", f"main.{table_name}")
+        return f"{os.fspath(self._db_path)}:{table}"
 
     @contextmanager
     @override

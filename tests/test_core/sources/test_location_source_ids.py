@@ -439,3 +439,16 @@ def test_a_rowid_key_beside_an_integer_primary_key_keeps_its_name(
     table = source.as_table(columns={"system_tags": True})
     (name,) = [n for n in table.column_names if n.startswith("_tag_record_id")]
     assert table.column(name).to_pylist() == ['{"rowid":7}']
+
+
+def test_a_sqlite_path_may_hold_a_colon(tmp_path: Path) -> None:
+    """Only the table name is checked: a path keeps its colons (``C:\\data``)."""
+    folder = tmp_path / "run:1"
+    folder.mkdir()
+    path = folder / "db.sqlite"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE trials (k TEXT PRIMARY KEY, v INT)")
+        conn.execute("INSERT INTO trials VALUES ('a', 1)")
+    conn.close()
+    source = SQLiteTableSource(path, "trials", tag_only_columns=True)
+    assert source.source_id == f"sqlite_table:{path}:main.trials"

@@ -706,6 +706,7 @@ def schema_row_identifiers() -> dict[str, Any]:
             record_id_columns=key,
             source_id="golden_rows",
             data_context=_ctx(),
+            tag_only_columns=True,
         )
         out.update(_prefixed(variant, stream_summary(source)))
     return out
@@ -787,9 +788,15 @@ def schema_location_default_source_ids() -> dict[str, Any]:
                     list(zip(*table.to_pydict().values())),
                 )
             sources = {
-                "csv": CSVSource("rows.csv", tag_columns="subject"),
-                "delta_table": DeltaTableSource("golden_delta", tag_columns="subject"),
-                "sqlite_table": SQLiteTableSource("golden.sqlite", "golden_trials"),
+                "csv": CSVSource(
+                    "rows.csv", tag_columns="subject", tag_only_columns=True
+                ),
+                "delta_table": DeltaTableSource(
+                    "golden_delta", tag_columns="subject", tag_only_columns=True
+                ),
+                "sqlite_table": SQLiteTableSource(
+                    "golden.sqlite", "golden_trials", tag_only_columns=True
+                ),
             }
             for kind, source in sources.items():
                 out[f"{kind}.source_id"] = source.source_id
