@@ -17,7 +17,7 @@ from orcapod import PipelineJob
 from orcapod.core.cached_function_pod import CachedFunctionPod
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.nodes.source_node import SourceNode
-from orcapod.core.operators import Batch, DropNulls, MergeJoin
+from orcapod.core.operators import DropNulls, MergeJoin
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import SourceSpecMismatchError
 from orcapod.types import Schema
@@ -201,19 +201,11 @@ def test_the_exact_form_on_plain_tags_says_nothing_about_referential_tags() -> N
 # ── not supported yet: the plain-tag way out and the issue ──────────────────
 
 
-@pytest.mark.parametrize(
-    ("call", "issue"),
-    [
-        (lambda s: Batch(batch_size=2)(s), "ITL-1017"),
-        (lambda s: MergeJoin()(s, s), "ITL-1018"),
-    ],
-    ids=["batch", "merge_join"],
-)
-def test_not_supported_yet_names_tag_only_columns_true_and_the_issue(
-    call: Callable[[op.sources.DictSource], object], issue: str
-) -> None:
+def test_not_supported_yet_names_tag_only_columns_true_and_the_issue() -> None:
+    # MergeJoin is the operator not supported yet (Batch is, since ITL-1017).
+    source = _source(["k", "x"])
     with pytest.raises(NotImplementedError) as excinfo:
-        _ = call(_source(["k", "x"]))
+        _ = MergeJoin()(source, source)
     message = str(excinfo.value)
-    assert issue in message
+    assert "ITL-1018" in message
     assert "tag_only_columns=True" in message

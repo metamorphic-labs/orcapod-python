@@ -500,12 +500,23 @@ _NULLABLE_MEMBER = pytest.mark.xfail(
         "(ITL-1136: the Arrow-to-Python reading drops list item nullability)"
     ),
 )
-PREDICTION_STEPS = [
-    pytest.param(step, marks=_NULLABLE_MEMBER)
-    if step in ("batch", "group_by")
-    else step
-    for step in OPERATOR_STEPS
-]
+
+
+def _prediction_steps(steps: list[str]) -> list[Any]:
+    """``steps`` as prediction cases, with the known failure marked on its steps.
+
+    Filter the raw step names before calling this: a marked step is a
+    ``pytest.param``, which is not equal to its name.
+    """
+    return [
+        pytest.param(step, marks=_NULLABLE_MEMBER)
+        if step in ("batch", "group_by")
+        else step
+        for step in steps
+    ]
+
+
+PREDICTION_STEPS = _prediction_steps(OPERATOR_STEPS)
 
 
 @pytest.mark.parametrize("config", list(COLUMN_CONFIGS))
@@ -531,8 +542,8 @@ class TestOutputSchemaPrediction:
 
 # ── referential tags (ITL-1023) ─────────────────────────────────────────────
 
-# Not supported with referential tags yet: Batch (ITL-1017), MergeJoin (ITL-1018).
-REFERENTIAL_STEPS = [step for step in STEPS if step not in ("merge_join", "batch")]
+# Not supported with referential tags yet: MergeJoin (ITL-1018).
+REFERENTIAL_STEPS = [step for step in STEPS if step != "merge_join"]
 
 
 @pytest.fixture
@@ -582,7 +593,10 @@ TestReferentialOutputSchemaPrediction = pytest.mark.usefixtures("referential")(
     pytest.mark.parametrize("config", list(COLUMN_CONFIGS))(
         pytest.mark.parametrize("pairs", PAIRS)(
             pytest.mark.parametrize(
-                "step", [step for step in PREDICTION_STEPS if step in REFERENTIAL_STEPS]
+                "step",
+                _prediction_steps(
+                    [step for step in OPERATOR_STEPS if step in REFERENTIAL_STEPS]
+                ),
             )(
                 type(
                     "TestReferentialOutputSchemaPrediction",
@@ -594,3 +608,42 @@ TestReferentialOutputSchemaPrediction = pytest.mark.usefixtures("referential")(
         )
     )
 )
+
+
+def _without_n(schemas: Any) -> tuple[list[Any], list[Any]]:
+    """``_schema_items`` of ``schemas`` without the data column ``n``."""
+    tag_items, data_items = _schema_items(schemas)
+    return tag_items, [(name, hint) for name, hint in data_items if name != "n"]
+
+
+@pytest.mark.parametrize("tag_only", [True, False], ids=["plain", "referential"])
+@pytest.mark.parametrize("config", list(COLUMN_CONFIGS))
+@pytest.mark.parametrize("pairs", PAIRS)
+@pytest.mark.parametrize("step", ["batch", "group_by"])
+class TestAggregatedPredictionApartFromItemNullability:
+    """Batch and GroupBy predict every column but ``n`` of their computed result.
+
+    Their whole-schema prediction cases are strict expected failures for ITL-1136 alone
+    (``n``'s nullable list items read as ``list[int]``). These cases leave ``n`` out, so
+    a regression in any other column, the tags in either role included, still fails.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _tag_mode(self, tag_only: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(f"{__name__}.TAG_ONLY", tag_only)
+
+    def test_plain_stream(self, step: str, pairs: int, config: str) -> None:
+        kwargs = COLUMN_CONFIGS[config]
+        predicted = _stream(step, pairs, WITH_ROWS).output_schema(**kwargs)
+        computed = _computed(step, pairs).output_schema(**kwargs)
+        assert predicted[1]["n"] == list[int | None]
+        assert _without_n(predicted) == _without_n(computed)
+
+    def test_job_node(self, step: str, pairs: int, config: str) -> None:
+        kwargs = COLUMN_CONFIGS[config]
+        job = _job(step, pairs, WITH_ROWS)
+        _ = job.run(orchestrator=SyncPipelineOrchestrator())
+        predicted = job.nodes["op"].output_schema(**kwargs)
+        computed = _computed(step, pairs).output_schema(**kwargs)
+        assert predicted[1]["n"] == list[int | None]
+        assert _without_n(predicted) == _without_n(computed)

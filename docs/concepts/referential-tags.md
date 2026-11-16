@@ -86,7 +86,8 @@ does not make it compute again.
 | `MapTags` / `map_tags` | Renames the column in both roles; `tag_only=True` renames the tag only and leaves a plain tag. |
 | `MapData` / `map_data` | Always a data-only move: the data column is renamed and `x` stays a plain tag. |
 | Filters, `DropNulls`, `SemiJoin`, `Pick`, `Index` | Keep the reference. |
-| `Batch`, `MergeJoin` | Not supported with referential tags yet: they raise. |
+| `Batch` | Keeps every tag, list-valued, as for plain tags: `x` becomes the same list in both roles and stays referential. Its source info is one token per member, like any data column: nothing is merged. |
+| `MergeJoin` | Not supported with referential tags yet: it raises. |
 
 ```python
 units = op.sources.DictSource(
@@ -104,6 +105,18 @@ print(spikes.select_columns(["time", "amp"]).keys())
 # (('time',), ('time', 'amp'))
 print(spikes.drop_columns(["time"]).keys())
 # (('unit',), ('unit', 'amp'))
+```
+
+`Batch` lists every column, a referential tag included, so the tag and its data stay one
+column:
+
+```python
+batched = spikes.batch()
+print(batched.keys())
+# (('unit', 'time'), ('unit', 'time', 'amp'))
+for tag, data in batched.iter_data():
+    print(tag["time"], data["time"])
+# [10, 20] [10, 20]
 ```
 
 ### After `GroupBy`: rename a non-key column with `map_data`
@@ -162,7 +175,7 @@ referential_tags.reference_materialization = "warn"  # the default
 ## Not supported yet
 
 These raise "not supported with referential tags yet" when a referential tag reaches them:
-`Batch`, `MergeJoin`, storing an operator node's results (`LOG` and `REPLAY` cache modes),
+`MergeJoin`, storing an operator node's results (`LOG` and `REPLAY` cache modes),
 `DerivedSource` over a stream with referential tags, and saving a pipeline or job.
 `PollingSource` keeps its tags plain. Each error names its issue and the way out: build the
 source with `tag_only_columns=True` to keep every tag plain, as in v0.3. A plain tag is not

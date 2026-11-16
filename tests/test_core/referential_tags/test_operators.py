@@ -411,6 +411,21 @@ def test_select_and_drop_columns_with_no_rows_keep_the_populated_shape(
     assert table.schema == populated.schema
 
 
+@pytest.mark.parametrize(
+    "make_op",
+    [lambda: SelectColumns(["x", "y"]), lambda: DropColumns(["k"])],
+    ids=["select", "drop"],
+)
+def test_select_and_drop_columns_commute_with_batch(make_op) -> None:
+    # Batch keeps a referential tag one list column in both roles (ITL-1017), so
+    # selecting or dropping before or after it gives the same rows and reference.
+    after = make_op()(Batch(batch_size=2)(_xky()))
+    before = Batch(batch_size=2)(make_op()(_xky()))
+    assert after.keys() == before.keys() == (("x",), ("x", "y"))
+    assert stream_references(after) == stream_references(before) == ("x",)
+    assert _rows(after) == _rows(before) == [{"x": [10, 20], "y": [2, 3]}]
+
+
 def test_select_and_drop_columns_on_plain_tags_are_unchanged() -> None:
     plain = _xky(tag_only_columns=True)
     assert SelectColumns(["x", "y"])(plain).keys() == (("x",), ("y",))
@@ -502,17 +517,9 @@ def test_extraction_named_like_a_tag_raises() -> None:
 # ── not supported yet: raise, never a wrong answer ──────────────────────────
 
 
-@pytest.mark.parametrize(
-    "call, issue",
-    [
-        (lambda: Batch(batch_size=2)(_a()), "ITL-1017"),
-        (lambda: MergeJoin()(_a(), _b()), "ITL-1018"),
-    ],
-    ids=["batch", "merge_join"],
-)
-def test_uncovered_operators_raise(call, issue: str) -> None:
-    with pytest.raises(NotImplementedError, match=issue):
-        call()
+def test_uncovered_operators_raise() -> None:
+    with pytest.raises(NotImplementedError, match="ITL-1018"):
+        MergeJoin()(_a(), _b())
 
 
 # ── renames (developer decision, November 12, 2026) ─────────────────────────
@@ -583,8 +590,9 @@ def test_map_tags_on_plain_tags_is_unchanged() -> None:
 
 
 def test_uncovered_operators_still_work_on_plain_tags() -> None:
-    plain = _a(tag_only_columns=True)
-    assert Batch(batch_size=2)(plain).keys() == (("x",), ("a",))
+    plain = MergeJoin()(_a(tag_only_columns=True), _b(tag_only_columns=True))
+    tags, data = plain.keys()
+    assert tags == ("x",) and sorted(data) == ["a", "b"]
 
 
 def test_derived_source_over_a_referential_stream_raises() -> None:
