@@ -53,9 +53,8 @@ class MapData(UnaryOperator):
             dropped.
         strict: When ``True`` (the default), a key of ``name_map`` that is not a
             data column of the input raises ``InputValidationError``; when
-            ``False`` it is ignored. Not part of the operator's identity: it
-            decides only whether an input is refused, never what an accepted
-            input gives.
+            ``False`` it is ignored. Part of the operator's identity, as for
+            ``SelectTagColumns`` and the other column operators.
     """
 
     def __init__(
@@ -252,6 +251,7 @@ class MapData(UnaryOperator):
             self.__class__.__name__,
             self.name_map,
             self.drop_unmapped,
+            self.strict,
         )
 
 
@@ -264,9 +264,8 @@ class MapTags(UnaryOperator):
             dropped.
         strict: When ``True`` (the default), a key of ``name_map`` that is not a
             tag column of the input raises ``InputValidationError``; when
-            ``False`` it is ignored. Not part of the operator's identity: it
-            decides only whether an input is refused, never what an accepted
-            input gives.
+            ``False`` it is ignored. Part of the operator's identity, as for
+            ``SelectTagColumns`` and the other column operators.
     """
 
     def __init__(
@@ -452,6 +451,7 @@ class MapTags(UnaryOperator):
             self.__class__.__name__,
             self.name_map,
             self.drop_unmapped,
+            self.strict,
         )
 
 
@@ -472,9 +472,8 @@ class MapColumns(UnaryOperator):
             data column); system tags are kept.
         strict: When ``True`` (the default), a key of ``name_map`` that is
             neither a tag nor a data column of the input raises
-            ``InputValidationError``; when ``False`` it is ignored. Not part of
-            the operator's identity: it decides only whether an input is
-            refused, never what an accepted input gives.
+            ``InputValidationError``; when ``False`` it is ignored. Part of the
+            operator's identity, as for ``SelectColumns``.
 
     Raises:
         InputValidationError: When called on a stream where a new name is taken
@@ -518,6 +517,7 @@ class MapColumns(UnaryOperator):
             self.__class__.__name__,
             self.name_map,
             self.drop_unmapped,
+            self.strict,
         )
 
     @staticmethod

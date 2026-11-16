@@ -5,8 +5,8 @@ A key of the mapping that is not a column of the mapped kind is refused by defau
 columns of that kind; a name that is a column of the other kind says which method
 renames it. The check runs when the operator is called on a stream, before any row
 is processed, and on the async path against the first row. ``strict=False`` keeps
-the earlier behaviour: such a name is ignored. ``strict`` is not part of the
-operator's identity. ``MapColumns`` renames tag and data columns in one step; a tag
+the earlier behaviour: such a name is ignored. ``strict`` is part of the
+operator's identity, as for the column selection operators. ``MapColumns`` renames tag and data columns in one step; a tag
 stays a tag and data stays data. Tests drive the operators through ``op(stream)``
 and the stream methods.
 """
@@ -244,7 +244,7 @@ def test_non_strict_renames_the_names_that_exist(
     assert getattr(_source(), method)(name_map, strict=False).keys() == keys
 
 
-# ── strict is not part of the identity ─────────────────────────────────────
+# ── strict is part of the identity ─────────────────────────────────────────
 
 
 @pytest.mark.parametrize(
@@ -256,13 +256,13 @@ def test_non_strict_renames_the_names_that_exist(
     ],
     ids=["map_tags", "map_data", "map_columns"],
 )
-def test_strict_is_not_part_of_the_identity(
-    op_cls: type, name_map: dict[str, str]
-) -> None:
+def test_strict_enters_the_identity(op_cls: type, name_map: dict[str, str]) -> None:
     strict = op_cls(name_map)(_source())
     lenient = op_cls(name_map, strict=False)(_source())
-    assert strict.content_hash() == lenient.content_hash()
-    assert strict.pipeline_hash() == lenient.pipeline_hash()
+    assert strict.content_hash() != lenient.content_hash()
+    assert strict.pipeline_hash() != lenient.pipeline_hash()
+    # The rows are the same: an accepted input gives the same result.
+    assert _rows(strict) == _rows(lenient)
 
 
 @pytest.mark.parametrize("op_cls", [MapTags, MapData, MapColumns])
