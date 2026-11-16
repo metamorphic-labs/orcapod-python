@@ -78,14 +78,14 @@ does not make it compute again.
 
 | Operator | Referential tag `x` |
 |---|---|
-| `Join` | Plain with plain: as before. Plain with referential, or referential with referential: a referential tag and **one** data column `x`. When `x` is referential on several inputs, its source info is one merged token (below). Every other data-name collision is still an error. |
+| `Join` | Plain with plain: as before. Plain with referential, or referential with referential: a referential tag and **one** data column `x`. When `x` is referential on several inputs, its source info is one merged token (below). A key that is `T` in one input and `T \| None` in another is `T` in both roles, as for a plain key. Every other data-name collision is still an error. |
 | `GroupBy` | A group key stays scalar in both roles, and its source info is one merged token (below). A non-key loses its tag role, as every non-key tag does, but keeps its data column: a list like every other data column, one source-info token per member. The members are ordered by the non-key tags, so that list is in value order and the other data lists follow it. |
 | `SelectDataColumns`, `DropDataColumns` | Removing the data column leaves `x` a plain tag with the same values, with a `ReferenceMaterializationWarning`. |
 | `SelectTagColumns`, `DropTagColumns` | Removing the tag leaves `x` a data column. |
 | `MapTags` / `map_tags` | Renames the column in both roles; `tag_only=True` renames the tag only and leaves a plain tag. |
 | `MapData` / `map_data` | Always a data-only move: the data column is renamed and `x` stays a plain tag. |
 | Filters, `DropNulls`, `SemiJoin`, `Pick`, `Index` | Keep the reference. |
-| `Batch`, `MergeJoin` | Not supported with referential tags yet: they raise. |
+| `Batch`, `MergeJoin`, `SelectColumns`, `DropColumns` | Not supported with referential tags yet: they raise. |
 
 ```python
 units = op.sources.DictSource(
@@ -136,6 +136,6 @@ referential_tags.reference_materialization = "warn"  # the default
 ## Not supported yet
 
 These raise "not supported with referential tags yet" when a referential tag reaches them:
-`Batch`, `MergeJoin`, storing an operator node's results (`LOG` and `REPLAY` cache modes),
+`Batch`, `MergeJoin`, `SelectColumns`, `DropColumns`, storing an operator node's results (`LOG` and `REPLAY` cache modes),
 `DerivedSource` over a stream with referential tags, and saving a pipeline or job.
 `PollingSource` keeps its tags plain.

@@ -189,6 +189,19 @@ class Join(NonZeroInputOperator):
             merged = self._merged_references(
                 tag_schema, references, other_tag_schema, other_references
             )
+            # A shared tag key that differs in nullability only is non-nullable
+            # (ITL-829): a null key matches nothing. A referential key is one
+            # column, so its data role takes the same type (ITL-1023).
+            reconciled, other_reconciled = reconcile_key_nullability(
+                tag_schema, other_tag_schema
+            )
+            data_schema = self._narrow_references(
+                data_schema, tag_schema, reconciled, references
+            )
+            other_data_schema = self._narrow_references(
+                other_data_schema, other_tag_schema, other_reconciled, other_references
+            )
+            tag_schema, other_tag_schema = reconciled, other_reconciled
             shared_data = set(data_schema) & set(other_data_schema)
             if unmerged := shared_data - merged:
                 # A shared data column of two types is reported as a type conflict,
@@ -207,15 +220,45 @@ class Join(NonZeroInputOperator):
                         f"{data_schema[name]} in one input and "
                         f"{other_data_schema[name]} in another"
                     )
-            # A shared tag key that differs in nullability only is non-nullable
-            # (ITL-829): a null key matches nothing.
-            tag_schema = schema_utils.union_schemas(
-                *reconcile_key_nullability(tag_schema, other_tag_schema)
-            )
+            tag_schema = schema_utils.union_schemas(tag_schema, other_tag_schema)
             data_schema = schema_utils.union_schemas(data_schema, other_data_schema)
             references |= other_references
             check_namespaces(tag_schema, data_schema, references)
         return tag_schema, data_schema
+
+    @staticmethod
+    def _narrow_references(
+        data_schema: Schema,
+        tag_schema: Schema,
+        reconciled: Schema,
+        references: Collection[str],
+    ) -> Schema:
+        """Give a referential key narrowed by ``reconcile_key_nullability`` its data type.
+
+        A referential tag is one column in two roles (ITL-1023): when the join makes
+        the key non-nullable (ITL-829), its data role is that type too.
+
+        Args:
+            data_schema: One input's data schema.
+            tag_schema: The input's tag schema.
+            reconciled: The tag schema after ``reconcile_key_nullability``.
+            references: The input's referential tags.
+
+        Returns:
+            ``data_schema`` with each narrowed referential key given its tag type.
+        """
+        narrowed = [
+            name
+            for name in references
+            if name in data_schema and reconciled[name] != tag_schema[name]
+        ]
+        return Schema(
+            {
+                name: reconciled[name] if name in narrowed else data_type
+                for name, data_type in data_schema.items()
+            },
+            optional_fields=data_schema.optional_fields,
+        )
 
     @staticmethod
     def _merged_references(
@@ -1111,11 +1154,22 @@ class Join(NonZeroInputOperator):
             left_table if name in left_table.column_names else right_table
             for name in referential
         ]
+        # A referential join key is one column: its data role is nullable only
+        # when the key is nullable in both tags, as the merged tag is (ITL-829).
+        left_tags, right_tags = left_tag.as_table().schema, right_tag.as_table().schema
+        fields = [
+            owner.schema.field(name).with_nullable(
+                key_nullable(
+                    left_tags.field(name).nullable, right_tags.field(name).nullable
+                )
+            )
+            if name in left_tags.names and name in right_tags.names
+            else owner.schema.field(name)
+            for owner, name in zip(owners, referential)
+        ]
         references = pa.Table.from_arrays(
             [owner.column(name) for owner, name in zip(owners, referential)],
-            schema=pa.schema(
-                [owner.schema.field(name) for owner, name in zip(owners, referential)]
-            ),
+            schema=pa.schema(fields),
         )
         return Data(
             arrow_utils.hstack_tables(references, left_rest, right_rest),

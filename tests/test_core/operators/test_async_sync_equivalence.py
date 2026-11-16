@@ -471,6 +471,24 @@ CASES = [
         ),
     ),
     Case(
+        # A referential key T on one side and T | None on the other (ITL-829).
+        "ref_join_key_nullability",
+        Join,
+        lambda: (
+            source_b(referential=True),
+            _source(
+                {
+                    "k": pa.array([1, None, 3], pa.int16()),
+                    "kn": pa.array([7, 8, 9], pa.int32()),
+                },
+                ("k",),
+                "n",
+                nullable=("k",),
+                referential=True,
+            ),
+        ),
+    ),
+    Case(
         "ref_semijoin",
         SemiJoin,
         lambda: (source_a(referential=True), source_b(referential=True)),

@@ -15,6 +15,7 @@ import warnings
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+import pyarrow as pa
 import pytest
 
 import orcapod as op
@@ -61,6 +62,64 @@ def _rows(stream) -> list[dict[str, object]]:
 
 
 # ── Join (section 9) ────────────────────────────────────────────────────────
+
+
+def _keyed(sid: str, value: str, *, nullable_key: bool, referential: bool):
+    """Tag ``x: int64`` (with a null when ``nullable_key``) and data ``value``."""
+    xs = [1, None, 3] if nullable_key else [1, 2, 3]
+    table = pa.table(
+        {"x": pa.array(xs, pa.int64()), value: pa.array([10, 20, 30], pa.int64())},
+        schema=pa.schema(
+            [
+                pa.field("x", pa.int64(), nullable=nullable_key),
+                pa.field(value, pa.int64(), nullable=False),
+            ]
+        ),
+    )
+    return op.sources.ArrowTableSource(
+        table, tag_columns=["x"], tag_only_columns=not referential, source_id=sid
+    )
+
+
+@pytest.mark.parametrize(
+    ("left_ref", "right_ref"),
+    [(True, True), (False, True), (True, False)],
+    ids=["ref_ref", "plain_ref", "ref_plain"],
+)
+@pytest.mark.parametrize("nullable_side", ["left", "right"])
+def test_join_key_differing_in_nullability_only_is_t_in_both_roles(
+    left_ref: bool, right_ref: bool, nullable_side: str
+) -> None:
+    """ITL-829 for a referential key: a null key matches nothing, so the one column
+    is ``T`` as a tag and as data, predicted and computed alike."""
+    left = _keyed("L", "a", nullable_key=nullable_side == "left", referential=left_ref)
+    right = _keyed(
+        "R", "b", nullable_key=nullable_side == "right", referential=right_ref
+    )
+    join = Join()
+    joined = join(left, right)
+    tag_schema, data_schema = joined.output_schema()
+    assert tag_schema["x"] is int
+    assert data_schema["x"] is int
+    assert stream_references(joined) == ("x",)
+    # Schema prediction checked against static_process (CLAUDE.md standing rule).
+    assert (
+        join.output_schema(left, right)
+        == join.static_process(left, right).output_schema()
+    )
+    table = joined.as_table()
+    assert table.column_names.count("x") == 1
+    assert not table.schema.field("x").nullable
+    assert sorted(table.column("x").to_pylist()) == [1, 3]
+
+
+def test_join_key_of_another_type_still_raises() -> None:
+    left = _keyed("L", "a", nullable_key=False, referential=True)
+    right = op.sources.DictSource(
+        [{"x": "1", "b": 1}], tag_columns=["x"], source_id="R"
+    )
+    with pytest.raises(InputValidationError):
+        Join()(left, right)
 
 
 def test_join_plain_with_plain_is_unchanged() -> None:
