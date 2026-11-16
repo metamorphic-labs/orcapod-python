@@ -396,7 +396,8 @@ class TestSpiralDBRefusesReservedNames:
                 _ = deliver.process(_source(), label="out")
 
         assert exc_info.value.node_label == "out"
-        assert exc_info.value.column == "__data_context"
+        # The first column it cannot store: the time-zone-aware timestamp.
+        assert exc_info.value.column == "executed_at"
         assert DELIVERED == []
 
     def test_operator_cache_refused_when_attached(self, spiral_database):
@@ -446,14 +447,33 @@ class TestSpiralDBRefusesReservedNames:
         spiral_database.flush()
         assert spiral_database.list_table_paths() == []
 
+    def test_write_refuses_time_zone_aware_timestamp(self, spiral_database):
+        """SpiralDB drops the time zone, so the column would read back as another type."""
+        table = pa.table(
+            {
+                "ts": pa.array(
+                    [datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)],
+                    type=pa.timestamp("us", tz="UTC"),
+                )
+            }
+        )
+
+        with pytest.raises(UnstorableColumnError) as exc_info:
+            spiral_database.add_record(("t",), b"1", table)
+
+        assert exc_info.value.column == "ts"
+        assert "time zone" in exc_info.value.reason
+        assert "timestamp[us]" in exc_info.value.reason
+        spiral_database.flush()
+        assert spiral_database.list_table_paths() == []
+
     def test_key_column_may_start_with_double_underscore(self, spiral_database):
-        """``__record_id`` is the key, which SpiralDB accepts; every type is stored."""
+        """``__record_id`` is the key, which SpiralDB accepts; lists are stored."""
         table = pa.table(
             {
                 "v": pa.array([[{"key": "a", "value": "b"}]], type=EXECUTOR_INFO_TYPE),
                 "ts": pa.array(
-                    [datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)],
-                    type=pa.timestamp("us", tz="UTC"),
+                    [datetime.datetime(2026, 1, 1)], type=pa.timestamp("us")
                 ),
             }
         )
@@ -563,3 +583,28 @@ class TestEveryTableChecked:
             _ = double.pod(_source(), label="dbl")
         _ = job.run()
         assert sorted(CALLS) == [1, 2]
+
+
+class TestRefusedBindLeavesJobAsItWas:
+    def test_refused_database_bind_changes_nothing(self, tmp_path: pathlib.Path):
+        """Every node is checked before any is attached (CodeRabbit, ITL-1162)."""
+        in_memory = InMemoryArrowDatabase()
+        job = PipelineJob(name="p", database=in_memory)
+        with job:
+            out = double.pod(_source(), label="dbl")
+            _ = SelectDataColumns(["double"])(out, label="sel")
+        _ = job.run()
+        assert sorted(CALLS) == [1, 2]
+        sqlite = _sqlite_database(tmp_path)
+
+        with pytest.raises(UnstorableColumnError) as exc_info:
+            job.bind(database=sqlite)
+
+        assert exc_info.value.node_label == "dbl"
+        # The job keeps its database: a new run reads the stored results.
+        job.nodes["dbl"].clear_cache()
+        CALLS.clear()
+        _ = job.run()
+        assert CALLS == []
+        assert sorted(job.nodes["dbl"].as_table()["double"].to_pylist()) == [2, 4]
+        assert sqlite.list_table_paths() == []

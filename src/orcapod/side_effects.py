@@ -1130,6 +1130,24 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
     # DB attachment
     # ------------------------------------------------------------------
 
+    def require_storable_tables(self, pipeline_database: ArrowDatabaseProtocol) -> None:
+        """Refuse a database that cannot store this node's invocation log (ITL-1162).
+
+        Nothing is delivered and nothing changes.
+
+        Args:
+            pipeline_database: The database for the invocation log.
+
+        Raises:
+            UnstorableColumnError: If the database cannot store a column, naming
+                this node.
+        """
+        try:
+            require_storable(pipeline_database, _stored_invocation_log_schema())
+        except UnstorableColumnError as exc:
+            exc.add_context(node_label=self.label)
+            raise
+
     def attach_databases(
         self,
         pipeline_database: ArrowDatabaseProtocol | None = None,
@@ -1146,12 +1164,8 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
         """
         if pipeline_database is not None:
             # A database that cannot store the invocation log refuses it now,
-            # before anything is delivered (ITL-1162).
-            try:
-                require_storable(pipeline_database, _stored_invocation_log_schema())
-            except UnstorableColumnError as exc:
-                exc.add_context(node_label=self.label)
-                raise
+            # before anything is delivered or changes (ITL-1162).
+            self.require_storable_tables(pipeline_database)
         self._pipeline_database = pipeline_database
         self._unlisted_store_reported = False
         self._current_log_checked = False

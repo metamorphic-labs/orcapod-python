@@ -952,10 +952,12 @@ class SpiralDBConnector:
     ) -> str | None:
         """Say why SpiralDB cannot store a column, or ``None`` when it can (ITL-1162).
 
-        SpiralDB stores Arrow tables natively, so every type is stored; its limits
-        are on column names (ITL-1164). It reserves ``.`` as its column-group
-        separator in every name, and the ``__`` prefix on value (column group)
-        columns; a key column may start with ``__`` (``__record_id``).
+        SpiralDB stores Arrow tables natively, but not every column as written
+        (ITL-1164). It reserves ``.`` as its column-group separator in every name,
+        and the ``__`` prefix on value (column group) columns; a key column may
+        start with ``__`` (``__record_id``). It drops a timestamp's time zone, so a
+        time-zone-aware timestamp column (``timestamp[us, tz=UTC]``) would read
+        back as another type and is refused.
 
         Args:
             name: The column's name.
@@ -969,6 +971,11 @@ class SpiralDBConnector:
             return "SpiralDB reserves '.' in column names as its column-group separator"
         if name.startswith("__") and not primary_key:
             return "SpiralDB reserves the '__' prefix on value columns"
+        if pa.types.is_timestamp(arrow_type) and arrow_type.tz is not None:
+            return (
+                "SpiralDB drops a timestamp's time zone, so it reads back as "
+                f"timestamp[{arrow_type.unit}]"
+            )
         return None
 
     def validate_records(self, records: pa.Table) -> None:

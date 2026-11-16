@@ -1386,6 +1386,40 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
     # attach_databases
     # ------------------------------------------------------------------
 
+    def require_storable_tables(
+        self,
+        pipeline_database: ArrowDatabaseProtocol,
+        result_database: ArrowDatabaseProtocol | None = None,
+    ) -> None:
+        """Refuse databases that cannot store this node's tables (ITL-1162).
+
+        Checks the result table (``CachedFunctionPod.require_storable_results``)
+        against ``result_database`` and the pipeline records' own columns against
+        ``pipeline_database``. Nothing is computed and nothing changes. A node
+        loaded without its function stores nothing and is not checked.
+
+        Args:
+            pipeline_database: The database for pipeline records.
+            result_database: The database for results; defaults to
+                ``pipeline_database.at("_result")``, as in ``attach_databases``.
+
+        Raises:
+            UnstorableColumnError: If a database cannot store a column, naming
+                this node.
+        """
+        if self._function_pod is None:
+            return
+        if result_database is None:
+            result_database = pipeline_database.at("_result")
+        try:
+            CachedFunctionPod(
+                self._function_pod, result_database=result_database
+            ).require_storable_results()
+            require_storable(pipeline_database, _pipeline_meta_schema())
+        except UnstorableColumnError as exc:
+            exc.add_context(node_label=self.label)
+            raise
+
     def attach_databases(
         self,
         pipeline_database: ArrowDatabaseProtocol | None = None,
@@ -1422,6 +1456,10 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 ``set_ephemeral_database(ephemeral_database)`` after
                 ``attach_databases()``.
         """
+        if pipeline_database is not None:
+            # A database that cannot store this node's tables refuses them now,
+            # before anything runs or changes (ITL-1162).
+            self.require_storable_tables(pipeline_database, result_database)
         # Another database has its own tables of other generations to account for.
         self._stale_tables_checked = False
         self._current_tables_checked = False
@@ -1437,19 +1475,10 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
 
             if self._function_pod is not None:
                 # Normal path: wrap in CachedFunctionPod for compute + cache.
-                cached_function_pod = CachedFunctionPod(
+                self._cached_function_pod = CachedFunctionPod(
                     self._function_pod,
                     result_database=result_database,
                 )
-                # A database that cannot store the result table or the pipeline
-                # records refuses them now, before anything runs (ITL-1162).
-                try:
-                    cached_function_pod.require_storable_results()
-                    require_storable(pipeline_database, _pipeline_meta_schema())
-                except UnstorableColumnError as exc:
-                    exc.add_context(node_label=self.label)
-                    raise
-                self._cached_function_pod = cached_function_pod
             else:
                 # Read-only stub path (loaded job without a live function pod).
                 # Use the record path stored from the descriptor so that

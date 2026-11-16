@@ -135,8 +135,9 @@ and binary columns come back as `large_string` and `large_binary`, the types Orc
 | `PostgreSQLConnector` | `bool`, `int32`, `int64`, `float`, `double`, `large_string`, `large_binary`, `date32`, `timestamp[us]`, `timestamp[us, tz=UTC]` |
 
 Any other type (lists, structs, dates or timestamps on SQLite, narrower integers and floats,
-logical types) is refused. `SpiralDBConnector` stores every type, but SpiralDB reserves the
-`__` prefix on value columns (the `__record_id` key is allowed) and `.` in any column name.
+logical types) is refused. `SpiralDBConnector` stores other types as written, except a
+timestamp with a time zone (SpiralDB drops the zone), and SpiralDB reserves the `__` prefix on
+value columns (the `__record_id` key is allowed) and `.` in any column name.
 
 Orcapod's own stored tables hold such columns. A function node's result table holds
 list-valued executor columns and `__`-prefixed columns. A side-effect node's log holds a UTC
