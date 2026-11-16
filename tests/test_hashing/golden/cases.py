@@ -748,8 +748,8 @@ def schema_location_default_source_ids() -> dict[str, Any]:
     Each source reads ``_builder_table()``'s rows from a fixed relative location in a
     temporary directory (``rows.csv``, a Delta folder ``golden_delta``, a SQLite table
     ``golden_trials``), so no value depends on the machine. Pinned: the default
-    ``<kind>:<location>`` and the stream summary (record ids are uuid5 of
-    ``<source_id>::row_<n>``). The polling source's default is the semantic hash of its
+    ``<kind>:<location>`` and the stream summary (record ids are ``row_<n>``, and the
+    primary key's JSON for SQLite). The polling source's default is the semantic hash of its
     implementation's identity.
 
     Returns:
@@ -841,6 +841,98 @@ def schema_derived_source_tags_as_data() -> dict[str, Any]:
         )
         out[f"{variant}.source_id"] = derived.source_id
         out.update(_prefixed(variant, stream_summary(derived)))
+    return out
+
+
+@case("schema", "key_policy_identity")
+def schema_key_policy_identity() -> dict[str, Any]:
+    """Pin sources that differ only in key policy (developer, November 16, 2026, ITL-1154).
+
+    A root source's identity holds its resolved key columns (``()`` for the
+    position), so two sources with one ``source_id`` and schema that name their rows
+    differently have different content hashes and the same pipeline hash. Pinned per
+    source kind, for two key policies each: the content hash, and the pipeline hash
+    where the source has a schema without polling.
+
+    Returns:
+        Each variant's content hash and pipeline hash.
+    """
+    import sqlite3
+    import tempfile
+
+    from orcapod.core.sources import (
+        ArrowTableSource,
+        DerivedSource,
+        ListSource,
+        PollingSource,
+        SQLiteTableSource,
+    )
+
+    table = _builder_table()
+    out: dict[str, Any] = {}
+
+    def pin(variant: str, source: Any, *, pipeline: bool = True) -> None:
+        out[f"{variant}.content_hash"] = source.content_hash().to_string()
+        if pipeline:
+            out[f"{variant}.pipeline_hash"] = source.pipeline_hash().to_string()
+
+    for variant, key in {"position": None, "key": "subject"}.items():
+        arrow = ArrowTableSource(
+            table,
+            tag_columns=["subject"],
+            record_id_columns=key,
+            source_id="golden_keys",
+            data_context=_ctx(),
+            tag_only_columns=True,
+        )
+        pin(f"arrow_table.{variant}", arrow)
+        derived = DerivedSource(
+            arrow,
+            tags_as_data={"subject": "subject_value"},
+            source_id="golden_keys_derived",
+            record_id_columns=key,
+        )
+        pin(f"derived_tags_as_data.{variant}", derived)
+    for variant, key in {"position": None, "key": "element_index"}.items():
+        listed = ListSource(
+            "value",
+            [10, 20, 30],
+            source_id="golden_keys_list",
+            record_id_columns=key,
+            data_context=_ctx(),
+        )
+        pin(f"list.{variant}", listed)
+    for variant, key in {
+        "subject": "subject",
+        "subject_count": ["subject", "count"],
+    }.items():
+        polling = PollingSource(
+            GoldenPollingImpl(),
+            tag_columns="subject",
+            record_id_columns=key,
+            source_id="golden_keys_polling",
+        )
+        pin(f"polling_source.{variant}", polling, pipeline=False)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = f"{tmp}/golden.sqlite"
+        with contextlib.closing(sqlite3.connect(path)) as conn, conn:
+            conn.execute(
+                "CREATE TABLE golden_trials "
+                "(subject TEXT PRIMARY KEY, weight REAL NOT NULL, count INTEGER)"
+            )
+            conn.executemany(
+                "INSERT INTO golden_trials VALUES (?, ?, ?)",
+                list(zip(*table.to_pydict().values())),
+            )
+        for variant, key in {"primary_key": None, "position": ()}.items():
+            sqlite = SQLiteTableSource(
+                path,
+                "golden_trials",
+                record_id_columns=key,
+                source_id="golden_keys_sqlite",
+                tag_only_columns=True,
+            )
+            pin(f"sqlite_table.{variant}", sqlite)
     return out
 
 

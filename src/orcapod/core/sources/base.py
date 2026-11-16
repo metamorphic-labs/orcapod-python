@@ -90,9 +90,24 @@ class RootSource(StreamBase):
     # Content identity
     # -------------------------------------------------------------------------
 
+    _key_columns: tuple[str, ...]
+    """The resolved key columns of the record ids, in key order; ``()`` for the
+    position. Every concrete source sets it in ``__init__``."""
+
     def identity_structure(self) -> Any:
-        """Default identity based on class name, output schema, and source_id."""
-        return (self.__class__.__name__, self.output_schema(), self.source_id)
+        """Identity from the class name, output schema, ``source_id`` and key columns.
+
+        The key columns are the resolved ``record_id_columns`` (``()`` for the
+        position): two sources that differ only in how they name their rows are two
+        sources, so their records never share a cache (developer, November 16, 2026,
+        ITL-1154). The pipeline hash stays schema-only.
+        """
+        return (
+            self.__class__.__name__,
+            self.output_schema(),
+            self.source_id,
+            self._key_columns,
+        )
 
     # -------------------------------------------------------------------------
     # PipelineElementProtocol — schema-only identity (base case of Merkle chain)

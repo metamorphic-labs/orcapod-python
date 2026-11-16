@@ -120,6 +120,7 @@ class ArrowTableSource(RootSource):
         self._tag_columns = result.tag_columns
         self._system_tag_columns = result.system_tag_columns
         self._record_id_columns = normalize_record_id_columns(record_id_columns)
+        self._key_columns = self._record_id_columns or ()
 
         if self._source_id is None:
             self._source_id = result.source_id

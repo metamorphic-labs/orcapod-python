@@ -681,8 +681,11 @@ Every pipeline element has two parallel hashes:
    identity. For a source it is a stable address, not a digest of its rows (developer,
    November 11, 2026: "sources content hash is meant to be a stable address and is not
    necessarily going to reflect the very data content"). A root source hashes
-   (class name, output schema, source_id); given a source_id, changed, added or reordered
-   rows leave it unchanged. Row content enters only where a source puts it into its own
+   (class name, output schema, source_id, key columns); given a source_id, changed, added or
+   reordered rows leave it unchanged. The key columns are the resolved record_id_columns in key
+   order (() for the position; a database or SpiralDB table's primary key by default): two
+   sources that differ only in how they name their rows are two sources, with one pipeline
+   hash and one source id (developer, November 16, 2026, ITL-1154). Row content enters only where a source puts it into its own
    identity: the default source_id of the in-memory sources
    (<source kind>:<algorithm label>:<hex> of the table hash, used when none is given) and the elements of a ListSource. A downstream stream or node hashes its
    pod's identity plus its upstreams' content hashes; a function pod's identity is its uri,

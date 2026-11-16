@@ -271,6 +271,7 @@ class DerivedSource(RootSource):
         super().__init__(source_id=source_id, **kwargs)
         self._origin = origin
         self._record_id_columns = key_columns
+        self._key_columns = key_columns or ()
         self._cached_table: pa.Table | None = None
         self._cached_stream: ArrowTableStream | None = None
         # The origin job node's modified time when its rows were cached: a check reads
@@ -286,7 +287,7 @@ class DerivedSource(RootSource):
 
         The plain form is tied to the origin node's content hash. The
         ``tags_as_data`` form is the root source rule (class name, output schema,
-        ``source_id``) followed by the sorted mapping items: two mappings can give
+        ``source_id``, key columns) followed by the sorted mapping items: two mappings can give
         the same schema (two tag columns of one type copied to one name) while the
         copy holds different values, so with an explicit ``source_id`` the mapping
         has to tell the sources apart (ITL-1000).

@@ -92,13 +92,14 @@ class ListSource(RootSource):
                 arrow_utils.infer_schema_nullable(arrow_table)
             )
 
+        self._key_columns = normalize_record_id_columns(record_id_columns) or ()
         builder = SourceStreamBuilder(self.data_context, self.orcapod_config)
         result = builder.build(
             arrow_table,
             tag_columns=tag_columns,
             source_id=self._source_id,
             source_kind=self.SOURCE_KIND,
-            record_id_columns=normalize_record_id_columns(record_id_columns) or (),
+            record_id_columns=self._key_columns,
         )
 
         self._stream = result.stream
@@ -137,8 +138,8 @@ class ListSource(RootSource):
             return self.data_context.semantic_hasher.hash_object(src)
 
     def identity_structure(self) -> Any:
-        """Return identity including class name, field name, elements, and tag
-        function hash.
+        """Return identity including class name, field name, elements, tag
+        function hash and key columns (``()`` for the position; ITL-1154).
         """
         try:
             elements_repr: Any = tuple(self._elements)
@@ -149,6 +150,7 @@ class ListSource(RootSource):
             self.name,
             elements_repr,
             self._tag_function_hash,
+            self._key_columns,
         )
 
     def to_config(self, db_registry=None) -> dict[str, Any]:

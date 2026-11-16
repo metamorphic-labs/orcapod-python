@@ -84,6 +84,7 @@ class DeltaTableSource(RootSource):
         self._tag_columns: Collection[str] = _normalize_column_list(tag_columns)
         self._system_tag_columns: Collection[str] = system_tag_columns
         self._record_id_columns = normalize_record_id_columns(record_id_columns)
+        self._key_columns = self._record_id_columns or ()
         self._version: int = self._delta_table.version()
         table = self._read_table()
         # The rows as read, columns and types included: a check compares a new read

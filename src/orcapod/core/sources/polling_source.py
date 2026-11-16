@@ -299,6 +299,7 @@ class PollingSource(RootSource, Generic[T]):
         )
         self._impl: DynamicSourceProtocol[T] = impl
         self._record_id_columns: tuple[str, ...] = key_columns
+        self._key_columns = key_columns
         self._tag_columns: tuple[str, ...] = tuple(_normalize_column_list(tag_columns))
         self._polling_config = polling_config
         self._cursor: Cursor[T] | None = None
@@ -378,12 +379,13 @@ class PollingSource(RootSource, Generic[T]):
     # -------------------------------------------------------------------------
 
     def identity_structure(self) -> Any:
-        """Identity derived from the impl's own identity and tag columns.
+        """Identity derived from the impl's own identity, tag columns and key columns.
 
         Delegates to ``impl.identity()`` so that the implementer fully
-        controls what makes two ``PollingSource`` instances distinct.
+        controls what makes two ``PollingSource`` instances distinct; the key
+        columns (``record_id_columns``) follow, as for every root source (ITL-1154).
         """
-        return (self._impl.identity(), self._tag_columns)
+        return (self._impl.identity(), self._tag_columns, self._key_columns)
 
     # -------------------------------------------------------------------------
     # Sync stream delegation

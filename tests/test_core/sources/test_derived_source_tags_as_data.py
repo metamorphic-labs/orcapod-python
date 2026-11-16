@@ -425,6 +425,7 @@ class TestIdentity:
             "DerivedSource",
             derived.output_schema(),
             derived.source_id,
+            (),  # the key columns: none, rows are named by position (ITL-1154)
             ("tags_as_data", tuple(sorted(COPY.items()))),
         )
 
