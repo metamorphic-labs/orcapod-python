@@ -1586,6 +1586,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         from orcapod.pipeline.serialization import (
             SUPPORTED_JOB_FORMAT_VERSIONS,
             resolve_source_from_config,
+            source_config_at_version,
         )
 
         path = _Path(path)
@@ -1619,6 +1620,12 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             data.get("bindings", {}).get("sources", {}).items()
         ):
             source_type = src_config.get("source_type")
+            # The file's version decides which tags are plain (ITL-1019): a refusal
+            # is the file's error, not a source that could not be rebuilt.
+            try:
+                src_config = source_config_at_version(src_config, version)
+            except ValueError as exc:
+                raise ValueError(f"{path}: source {spec_name!r}: {exc}") from exc
             try:
                 source = resolve_source_from_config(src_config)
                 if source is not None:

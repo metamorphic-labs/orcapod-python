@@ -34,8 +34,14 @@ logger = logging.getLogger(__name__)
 #   0.3.0: a source's tags may be referential (ITL-1023). A file at 0.1.0 or 0.2.0
 #          holds v0.3 sources: their configs carry no ``tag_only_columns`` and read
 #          back with every declared tag plain, so their saved hashes match.
+# Plain tags are decided by this version, never by a missing key (ITL-1159, ITL-1019):
+# everything in a file at a ``PLAIN_TAG_FORMAT_VERSIONS`` version is plain, and such a
+# file never holds ``tag_only_columns`` or ``fall_through_references``. From 0.3.0 on,
+# every source config that takes the option writes ``tag_only_columns`` and every
+# function node writes ``fall_through_references``; a load refuses a file without them.
 PIPELINE_FORMAT_VERSION = "0.3.0"
 SUPPORTED_FORMAT_VERSIONS = frozenset({"0.1.0", "0.2.0", "0.3.0"})
+PLAIN_TAG_FORMAT_VERSIONS = frozenset({"0.1.0", "0.2.0"})
 
 # ---------------------------------------------------------------------------
 # LoadStatus
@@ -1292,6 +1298,159 @@ _BUILTIN_TYPE_MAP: dict[str, type] = {
 # ---------------------------------------------------------------------------
 
 # Same scheme as ``PIPELINE_FORMAT_VERSION``: the written version, and the set a
-# load accepts (``PipelineJob.load``).
+# load accepts (``PipelineJob.load``). The plain-tag rule stated there holds for a
+# job file too (``PLAIN_TAG_FORMAT_VERSIONS``, ``source_config_at_version``).
 PIPELINE_JOB_FORMAT_VERSION = "0.3.0"
 SUPPORTED_JOB_FORMAT_VERSIONS = frozenset({"0.1.0", "0.2.0", "0.3.0"})
+
+
+# ---------------------------------------------------------------------------
+# Referential tags in saved files (ITL-1019)
+# ---------------------------------------------------------------------------
+
+FALL_THROUGH_REFERENCES_KEY = "fall_through_references"
+"""The function node descriptor key naming the referential tags its pod lets fall
+through (a list; empty for a plain pod)."""
+
+
+def saved_fall_through_references(
+    descriptor: dict[str, Any], version: str
+) -> tuple[str, ...]:
+    """Return the referential tags a saved function node lets fall through.
+
+    The file's format version decides what a file may hold (ITL-1019): at a
+    ``PLAIN_TAG_FORMAT_VERSIONS`` version nothing is referential and the key is never
+    written; from 0.3.0 on the key is always written. The saved output schema is
+    checked against it: its tag and data halves share exactly these names. When the
+    descriptor holds the pod's config, the config's list must agree too.
+
+    Args:
+        descriptor: A function node descriptor of a saved pipeline.
+        version: The file's format version.
+
+    Returns:
+        The referential tags, in the saved order.
+
+    Raises:
+        ValueError: If the key is present in a file of a plain-tag version, missing
+            or not a list of names in a later one, or disagrees with the saved output
+            schema or the saved pod config.
+    """
+    from orcapod.core.referential_tags import reference_names
+
+    output_schema = descriptor.get("output_schema") or {}
+    shared = reference_names(
+        output_schema.get("tag", {}), output_schema.get("data", {})
+    )
+    if version in PLAIN_TAG_FORMAT_VERSIONS:
+        if FALL_THROUGH_REFERENCES_KEY in descriptor:
+            raise ValueError(
+                f"a file at format {version} holds only plain tags, but it names "
+                f"{FALL_THROUGH_REFERENCES_KEY} {descriptor[FALL_THROUGH_REFERENCES_KEY]!r}"
+            )
+        references: tuple[str, ...] = ()
+    else:
+        if FALL_THROUGH_REFERENCES_KEY not in descriptor:
+            raise ValueError(
+                f"a file at format {version} names the fall-through references of "
+                f"every function node, but this one has no {FALL_THROUGH_REFERENCES_KEY}"
+            )
+        saved = descriptor[FALL_THROUGH_REFERENCES_KEY]
+        if not isinstance(saved, list) or not all(isinstance(n, str) for n in saved):
+            raise ValueError(
+                f"{FALL_THROUGH_REFERENCES_KEY} must be a list of names, got {saved!r}"
+            )
+        references = tuple(saved)
+    if set(shared) != set(references):
+        raise ValueError(
+            f"the saved output schema has the referential tags {sorted(shared)}, but "
+            f"{FALL_THROUGH_REFERENCES_KEY} is {sorted(references)}"
+        )
+    function_config = descriptor.get("function_config")
+    if function_config is not None and version not in PLAIN_TAG_FORMAT_VERSIONS:
+        configured = function_config.get(FALL_THROUGH_REFERENCES_KEY, [])
+        if set(configured) != set(references):
+            raise ValueError(
+                f"the saved pod lets {sorted(configured)} fall through, but "
+                f"{FALL_THROUGH_REFERENCES_KEY} is {sorted(references)}"
+            )
+    return references
+
+
+def check_saved_output_schema_is_plain(
+    descriptor: dict[str, Any], version: str
+) -> None:
+    """Refuse a saved node with a referential tag in a file of a plain-tag version.
+
+    Args:
+        descriptor: A node descriptor of a saved pipeline.
+        version: The file's format version.
+
+    Raises:
+        ValueError: If the version holds only plain tags and the node's saved tag and
+            data halves share a name.
+    """
+    from orcapod.core.referential_tags import reference_names
+
+    if version not in PLAIN_TAG_FORMAT_VERSIONS:
+        return
+    output_schema = descriptor.get("output_schema") or {}
+    if shared := reference_names(
+        output_schema.get("tag", {}), output_schema.get("data", {})
+    ):
+        raise ValueError(
+            f"a file at format {version} holds only plain tags, but the saved output "
+            f"schema has the referential tags {list(shared)}"
+        )
+
+
+def source_config_at_version(config: dict[str, Any], version: str) -> dict[str, Any]:
+    """Return a saved source config with its ``tag_only_columns`` as its version means.
+
+    A source config of a ``PLAIN_TAG_FORMAT_VERSIONS`` file never holds
+    ``tag_only_columns``: every one of its tags is plain, which the returned config
+    states (``tag_only_columns=True``) for each source in it that takes the option,
+    nested sources (the inner source of a cached source, a derived source's origin)
+    included. A config of a later version holds the option for each such source and
+    is returned as it is.
+
+    Args:
+        config: A saved source config.
+        version: The file's format version.
+
+    Returns:
+        The config to rebuild the source from (a copy when anything was added).
+
+    Raises:
+        ValueError: If a config of a plain-tag version holds ``tag_only_columns``, or
+            one of a later version lacks it.
+    """
+    _ensure_registries()
+    plain_version = version in PLAIN_TAG_FORMAT_VERSIONS
+
+    def upgrade(value: Any) -> Any:
+        if isinstance(value, list):
+            return [upgrade(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        upgraded = {key: upgrade(item) for key, item in value.items()}
+        cls = SOURCE_REGISTRY.get(upgraded.get("source_type"))  # pyright: ignore[reportArgumentType]  # any saved value
+        if cls is None or not getattr(cls, "TAKES_TAG_ONLY_COLUMNS", False):
+            return upgraded
+        if plain_version and "tag_only_columns" in upgraded:
+            raise ValueError(
+                f"a file at format {version} holds only plain tags, but source "
+                f"config {upgraded.get('source_type')!r} names tag_only_columns "
+                f"{upgraded['tag_only_columns']!r}"
+            )
+        if plain_version:
+            upgraded["tag_only_columns"] = True
+        elif "tag_only_columns" not in upgraded:
+            raise ValueError(
+                f"a file at format {version} states the plain tags of every source, "
+                f"but source config {upgraded.get('source_type')!r} has no "
+                "tag_only_columns"
+            )
+        return upgraded
+
+    return upgrade(config)

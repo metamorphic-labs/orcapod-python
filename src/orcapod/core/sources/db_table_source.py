@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Iterator
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from typing_extensions import override
 
@@ -72,6 +72,8 @@ class DBTableSource(RootSource):
         ValueError: If the table is not found, has no PK columns and none are
             provided, or is empty.
     """
+
+    TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = True
 
     def __init__(
         self,
