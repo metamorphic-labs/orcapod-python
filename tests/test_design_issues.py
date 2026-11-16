@@ -1,4 +1,4 @@
-"""The design issues log (``design_issues/``), one file per entry (ITL-968).
+"""The design issues log (``docs/dev/design_issues/``), one file per entry (ITL-968).
 
 Every test drives ``scripts/design_issues.py`` as a command, the way a developer and CI
 use it.
@@ -6,6 +6,7 @@ use it.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -60,18 +61,48 @@ def _write(directory: Path, name: str, text: str) -> None:
 
 
 def test_repository_entries_are_well_formed() -> None:
-    """Every file in ``design_issues/`` except ``README.md`` is a valid entry."""
+    """Every file in ``docs/dev/design_issues/`` except ``README.md`` is a valid entry."""
     result = _run(SCRIPT, "--check")
     assert result.returncode == 0, result.stderr
 
 
 def test_repository_log_has_a_readme() -> None:
-    assert (REPO_ROOT / "design_issues" / "README.md").is_file()
+    assert (REPO_ROOT / "docs" / "dev" / "design_issues" / "README.md").is_file()
 
 
 def test_the_single_file_log_is_not_brought_back() -> None:
-    """Entries live in ``design_issues/``; ``DESIGN_ISSUES.md`` no longer exists."""
+    """Entries live in ``docs/dev/design_issues/``; ``DESIGN_ISSUES.md`` no longer exists."""
     assert not (REPO_ROOT / "DESIGN_ISSUES.md").exists()
+
+
+@pytest.fixture
+def repo_copy(tmp_path: Path) -> Path:
+    """A repository holding the script and an empty log at ``docs/dev/design_issues``."""
+    (tmp_path / "scripts").mkdir()
+    shutil.copy(SCRIPT, tmp_path / "scripts" / SCRIPT.name)
+    log = tmp_path / "docs" / "dev" / "design_issues"
+    log.mkdir(parents=True)
+    (log / "README.md").write_text("# Design issues\n", encoding="utf-8")
+    return tmp_path
+
+
+def test_check_refuses_entries_at_the_old_location(repo_copy: Path) -> None:
+    """An entry added at the top-level ``design_issues/`` (moved in ITL-1169) fails."""
+    old = repo_copy / "design_issues"
+    old.mkdir()
+    _write(old, "ITL-7-AB1.md", ENTRY)
+    result = _run(repo_copy / "scripts" / SCRIPT.name, "--check")
+    assert result.returncode == 1
+    assert "ITL-7-AB1.md" in result.stderr
+    assert "docs/dev/design_issues" in result.stderr
+
+
+def test_check_ignores_an_old_location_holding_only_dotfiles(repo_copy: Path) -> None:
+    old = repo_copy / "design_issues"
+    old.mkdir()
+    (old / ".DS_Store").write_text("", encoding="utf-8")
+    result = _run(repo_copy / "scripts" / SCRIPT.name, "--check")
+    assert result.returncode == 0, result.stderr
 
 
 # --- --check ------------------------------------------------------------------------

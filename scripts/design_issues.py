@@ -1,7 +1,9 @@
-"""Read and check the design issues log in ``design_issues/``.
+"""Read and check the design issues log in ``docs/dev/design_issues/``.
 
-The log is one file per entry, ``design_issues/<LINEAR-ISSUE-ID>-<ENTRY-ID>.md`` (see
-``design_issues/README.md``). This script reads the log as a whole.
+The log is one file per entry, ``docs/dev/design_issues/<LINEAR-ISSUE-ID>-<ENTRY-ID>.md``
+(see ``docs/dev/design_issues/README.md``). This script reads the log as a whole. The log
+was at the top-level ``design_issues/`` until ITL-1169; an entry file still there is an
+error in every mode.
 
 Usage:
 
@@ -26,6 +28,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+LOG_DIR = REPO_ROOT / "docs" / "dev" / "design_issues"
+OLD_LOG_DIR = REPO_ROOT / "design_issues"
 
 STATUSES = ("open", "in progress", "resolved")
 SEVERITIES = ("critical", "high", "medium", "low", "trivial")
@@ -296,6 +300,25 @@ def load_entries(entries_dir: Path) -> tuple[list[tuple[Path, Entry]], list[str]
     return entries, problems
 
 
+def files_at_old_location() -> list[str]:
+    """List the files left at the log's old location, the top-level ``design_issues/``.
+
+    Dotfiles (such as ``.DS_Store``) are not counted.
+
+    Returns:
+        One message per file found, naming the new location; empty if there is none.
+    """
+    if not OLD_LOG_DIR.is_dir():
+        return []
+    new = LOG_DIR.relative_to(REPO_ROOT).as_posix()
+    return [
+        f"{path}: the design issues log moved to {new}/ (ITL-1169); "
+        f"move this file there (git mv design_issues/{path.name} {new}/)"
+        for path in sorted(OLD_LOG_DIR.iterdir())
+        if not path.name.startswith(".")
+    ]
+
+
 def _entry_order(entry: Entry) -> tuple[str, str, str, int, str]:
     """Sort key: area text without Markdown marks, the area heading, then the id.
 
@@ -394,12 +417,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--dir",
         type=Path,
-        default=REPO_ROOT / "design_issues",
+        default=LOG_DIR,
         help="directory holding the entry files",
     )
     args = parser.parse_args(argv)
 
     loaded, problems = load_entries(args.dir)
+    problems = files_at_old_location() + problems
     if problems:
         print("\n".join(problems), file=sys.stderr)
         return 1
