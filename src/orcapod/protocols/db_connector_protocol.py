@@ -125,8 +125,9 @@ class DBConnectorProtocol(Protocol):
 
         The one place a connector states which columns it stores (ITL-1162). A
         connector stores a column only when it reads it back as written: the same
-        Arrow type, in its large variant (``large_string``, ``large_binary``). A
-        type the backend would widen, turn into text or fail to bind is refused.
+        name, and the same Arrow type in its large variant (``large_string``,
+        ``large_binary``). A type the backend would widen, turn into text or fail to
+        bind is refused, and so is a name the backend reserves.
         ``ConnectorArrowDatabase.require_storable`` asks this for every column of
         a table before anything of it is written.
 

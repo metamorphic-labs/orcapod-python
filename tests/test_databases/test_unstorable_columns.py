@@ -350,3 +350,216 @@ class TestConnectorRule:
         finally:
             connector._conn = None
         assert (reason is None) is storable, reason
+
+
+# ---------------------------------------------------------------------------
+# SpiralDB: reserved column names (ITL-1164), through the pyspiral fake
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def spiral_database(tmp_path: pathlib.Path):
+    """A ``ConnectorArrowDatabase`` over ``SpiralDBConnector``, stored by the fake."""
+    from orcapod.databases import SpiralDBConnector
+    from tests.test_databases import fake_pyspiral
+
+    with fake_pyspiral.install(tmp_path / "spiral"):
+        connector = SpiralDBConnector("p")
+        try:
+            yield ConnectorArrowDatabase(connector)
+        finally:
+            connector.close()
+
+
+class TestSpiralDBRefusesReservedNames:
+    def test_function_node_refused_before_anything_runs(self, spiral_database):
+        job = PipelineJob(name="p", database=spiral_database)
+
+        with pytest.raises(UnstorableColumnError) as exc_info:
+            with job:
+                _ = double.pod(_source(), label="dbl")
+
+        err = exc_info.value
+        assert err.node_label == "dbl"
+        assert err.database_kind == "SpiralDBConnector"
+        assert err.column == "__input_data_hash"
+        assert "'__' prefix" in err.reason
+        assert "DeltaTableDatabase" in str(err)
+        assert CALLS == []
+        assert spiral_database.list_table_paths() == []
+
+    def test_side_effect_node_refused_before_delivery(self, spiral_database):
+        job = PipelineJob(name="p", database=spiral_database)
+
+        with pytest.raises(UnstorableColumnError) as exc_info:
+            with job:
+                _ = deliver.process(_source(), label="out")
+
+        assert exc_info.value.node_label == "out"
+        assert exc_info.value.column == "__data_context"
+        assert DELIVERED == []
+
+    def test_operator_cache_refused_when_attached(self, spiral_database):
+        job = PipelineJob(name="p", database=spiral_database)
+        with job:
+            _ = SelectDataColumns(["x"])(_source(), label="sel")
+
+        with pytest.raises(UnstorableColumnError) as exc_info:
+            job.nodes["sel"].attach_databases(
+                pipeline_database=spiral_database.at("p"), cache_mode=CacheMode.LOG
+            )
+
+        assert exc_info.value.node_label == "sel"
+        assert exc_info.value.column == "__node_content_hash"
+
+    def test_operator_without_cache_runs(self, spiral_database):
+        """An operator whose cache is off stores nothing, so nothing is refused."""
+        job = PipelineJob(name="p", database=spiral_database)
+        with job:
+            _ = SelectDataColumns(["x"])(_source(), label="sel")
+        _ = job.run()
+        assert sorted(job.nodes["sel"].as_table()["x"].to_pylist()) == [1, 2]
+
+    def test_cached_source_refused_when_built(self, spiral_database):
+        from orcapod.core.sources.cached_source import CachedSource
+
+        with pytest.raises(UnstorableColumnError) as exc_info:
+            _ = CachedSource(_source(), cache_database=spiral_database)
+
+        assert exc_info.value.column == "__data_context"
+
+    @pytest.mark.parametrize(
+        "name, reason",
+        [
+            ("__value", "'__' prefix"),
+            ("a.b", "'.'"),
+        ],
+    )
+    def test_write_refuses_reserved_name(self, spiral_database, name, reason):
+        table = pa.table({name: pa.array([1], type=pa.int64())})
+
+        with pytest.raises(UnstorableColumnError) as exc_info:
+            spiral_database.add_record(("t",), b"1", table)
+
+        assert exc_info.value.column == name
+        assert reason in exc_info.value.reason
+        spiral_database.flush()
+        assert spiral_database.list_table_paths() == []
+
+    def test_key_column_may_start_with_double_underscore(self, spiral_database):
+        """``__record_id`` is the key, which SpiralDB accepts; every type is stored."""
+        table = pa.table(
+            {
+                "v": pa.array([[{"key": "a", "value": "b"}]], type=EXECUTOR_INFO_TYPE),
+                "ts": pa.array(
+                    [datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)],
+                    type=pa.timestamp("us", tz="UTC"),
+                ),
+            }
+        )
+        spiral_database.add_record(("t",), b"1", table, flush=True)
+        stored = spiral_database.get_all_records(("t",))
+        assert stored is not None
+        assert stored.num_rows == 1
+
+
+class TestSpiralFakeRefusesLikeSpiralDB:
+    """The fake refuses the names SpiralDB refuses, with its messages (ITL-1164)."""
+
+    @pytest.mark.parametrize(
+        "name, message",
+        [
+            (
+                "__input_data_hash",
+                "Column name '__input_data_hash' has reserved prefix: column group "
+                "columns must not start with '__'",
+            ),
+            ("a.b", "Column 'a.b' contains a reserved dot-separator"),
+        ],
+    )
+    def test_connector_write_refused(self, tmp_path: pathlib.Path, name, message):
+        from orcapod.databases import SpiralDBConnector
+        from orcapod.types import ColumnInfo
+        from tests.test_databases import fake_pyspiral
+
+        with fake_pyspiral.install(tmp_path / "spiral"):
+            connector = SpiralDBConnector("p")
+            connector.create_table_if_not_exists(
+                "t",
+                [
+                    ColumnInfo("k", pa.large_string(), nullable=False),
+                    ColumnInfo(name, pa.int64(), nullable=True),
+                ],
+                pk_column="k",
+            )
+            rows = pa.table(
+                {
+                    "k": pa.array(["a"], type=pa.large_string()),
+                    name: pa.array([1], type=pa.int64()),
+                }
+            )
+            with pytest.raises(ValueError, match="reserved") as exc_info:
+                connector.upsert_records("t", rows, id_column="k")
+            connector.close()
+        assert message in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# Every stored table of a node is checked, also through a wrapper
+# ---------------------------------------------------------------------------
+
+
+class TestEveryTableChecked:
+    def test_function_node_pipeline_database_checked(self, tmp_path: pathlib.Path):
+        """A SQLite pipeline database is refused even when results go elsewhere."""
+        job = PipelineJob(name="p", database=InMemoryArrowDatabase())
+        with job:
+            _ = double.pod(_source(), label="dbl")
+        node = job.nodes["dbl"]
+
+        with pytest.raises(UnstorableColumnError) as exc_info:
+            node.attach_databases(
+                pipeline_database=_sqlite_database(tmp_path),
+                result_database=InMemoryArrowDatabase(),
+            )
+
+        assert exc_info.value.node_label == "dbl"
+        assert exc_info.value.column == "__pipeline_recomputation_index"
+        assert exc_info.value.arrow_type == pa.int32()
+
+    def test_extension_aware_wrapper_checked_before_delivery(
+        self, tmp_path: pathlib.Path
+    ):
+        """The check reaches a connector database inside ``ExtensionAwareDatabase``."""
+        from orcapod.contexts import get_default_context
+        from orcapod.databases import ExtensionAwareDatabase
+
+        # The wrapper's annotations do not match the protocols (existing debt).
+        converter: Any = get_default_context().type_converter
+        wrapped: Any = ExtensionAwareDatabase(
+            _sqlite_database(tmp_path), converter=converter
+        )
+        job = PipelineJob(name="p", database=wrapped)
+
+        with pytest.raises(UnstorableColumnError) as exc_info:
+            with job:
+                _ = deliver.process(_source(), label="out")
+
+        assert exc_info.value.node_label == "out"
+        assert exc_info.value.column == "executed_at"
+        assert DELIVERED == []
+
+    def test_extension_aware_wrapper_over_in_memory_not_checked(self):
+        """A wrapped database that states no rule stores every column."""
+        from orcapod.contexts import get_default_context
+        from orcapod.databases import ExtensionAwareDatabase
+
+        converter: Any = get_default_context().type_converter
+        wrapped: Any = ExtensionAwareDatabase(
+            InMemoryArrowDatabase(), converter=converter
+        )
+        job = PipelineJob(name="p", database=wrapped)
+        with job:
+            _ = double.pod(_source(), label="dbl")
+        _ = job.run()
+        assert sorted(CALLS) == [1, 2]

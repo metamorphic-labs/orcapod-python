@@ -120,24 +120,37 @@ run and computes nothing on a second `run()`.
 A job created without a database can be recorded but not run. Give it one later with
 `job.bind(database=...)`; `run()` without a database raises `ValueError`.
 
-### SQL connector databases
+### Connector databases
 
-A `ConnectorArrowDatabase` over a `SQLiteConnector` or a `PostgreSQLConnector` stores a
-column only when the connector reads it back as written, with the same Arrow type (text and
-binary columns come back as `large_string` and `large_binary`, the types Orcapod uses):
+A `ConnectorArrowDatabase` stores a column only when its connector can store it as written.
+Each connector states which columns those are, and anything else is refused with
+`UnstorableColumnError` before anything of the table is written.
+
+The SQL connectors store a column only when they read it back with the same Arrow type (text
+and binary columns come back as `large_string` and `large_binary`, the types Orcapod uses):
 
 | Connector | Column types it stores |
 |---|---|
 | `SQLiteConnector` | `bool`, `int64`, `double`, `large_string`, `large_binary` |
 | `PostgreSQLConnector` | `bool`, `int32`, `int64`, `float`, `double`, `large_string`, `large_binary`, `date32`, `timestamp[us]`, `timestamp[us, tz=UTC]` |
 
-Any other column type (lists, structs, dates or timestamps on SQLite, narrower integers and
-floats, logical types) is refused with `UnstorableColumnError` before anything of the table is
-written. A function node's result table always holds list-valued executor columns, and a
-side-effect node's log a UTC timestamp, so a job refuses every function node on either
-connector, and every side-effect node on SQLite, when the job is built, before anything runs. Use `InMemoryArrowDatabase` or
-`DeltaTableDatabase` for those jobs. Storing list and struct columns on a SQL connector is
-planned for a later release.
+Any other type (lists, structs, dates or timestamps on SQLite, narrower integers and floats,
+logical types) is refused. `SpiralDBConnector` stores every type, but SpiralDB reserves the
+`__` prefix on value columns (the `__record_id` key is allowed) and `.` in any column name.
+
+Orcapod's own stored tables hold such columns. A function node's result table holds
+list-valued executor columns and `__`-prefixed columns. A side-effect node's log holds a UTC
+timestamp and `__data_context`, and an operator cache and a cached source hold
+`__data_context` too. So a job refuses these nodes when it is built, before anything runs:
+
+- every function node, on all three connectors;
+- every side-effect node, on SQLite and SpiralDB;
+- every operator cache (an operator node with caching on) and cached source, on SpiralDB.
+
+An operator cache or cached source on a SQL connector is refused when it is written, before
+anything is stored, if one of its columns has a type the connector does not store. Use
+`InMemoryArrowDatabase` or `DeltaTableDatabase` for such jobs. Storing these columns on
+connector databases is planned for a later release.
 
 ```python
 from orcapod.databases import ConnectorArrowDatabase, SQLiteConnector

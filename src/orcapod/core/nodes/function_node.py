@@ -67,6 +67,7 @@ from orcapod.contexts.stored import (
     find_stale_tables,
     report_rows_of_other_data_contexts,
     report_unexpected_row_count,
+    require_storable,
 )
 from orcapod.utils.database_errors import (
     commit_best_effort,
@@ -124,6 +125,28 @@ _PIPELINE_BASE_ENTRY_ID_COL = "__pipeline_base_entry_id"
 # Column storing the recomputation chain index (pa.int32).
 # 0 for the first computation, N+1 for each miss-triggered recompute.
 _PIPELINE_RECOMPUTATION_INDEX_COL = "__pipeline_recomputation_index"
+
+
+def _pipeline_meta_schema() -> pa.Schema:
+    """The bookkeeping columns of a function node's pipeline record (``pdb_v2``).
+
+    The record holds the tags, system tags and input source-info columns, then
+    these. One definition for the writer (``add_pipeline_record``) and for the
+    check of the pipeline database when it is attached (ITL-1162).
+    """
+    return pa.schema(
+        [
+            pa.field(constants.DATA_RECORD_ID, pa.large_binary()),
+            pa.field(constants.NODE_CONTENT_HASH_COL, pa.large_binary()),
+            pa.field(constants.INPUT_DATA_HASH_COL, pa.large_binary()),
+            pa.field(constants.OUTPUT_DATA_HASH_COL, pa.large_binary()),
+            pa.field(constants.DATA_CONTEXT_COL, pa.large_string()),
+            pa.field(f"{constants.META_PREFIX}computed", pa.bool_()),
+            pa.field(constants.IS_EPHEMERAL_COL, pa.bool_()),
+            pa.field(_PIPELINE_BASE_ENTRY_ID_COL, pa.large_binary()),
+            pa.field(_PIPELINE_RECOMPUTATION_INDEX_COL, pa.int32()),
+        ]
+    )
 
 
 def _build_record_id_preimage(
@@ -1418,10 +1441,11 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                     self._function_pod,
                     result_database=result_database,
                 )
-                # A database that cannot store the result table refuses it now,
-                # before anything runs (ITL-1162).
+                # A database that cannot store the result table or the pipeline
+                # records refuses them now, before anything runs (ITL-1162).
                 try:
                     cached_function_pod.require_storable_results()
+                    require_storable(pipeline_database, _pipeline_meta_schema())
                 except UnstorableColumnError as exc:
                     exc.add_context(node_label=self.label)
                     raise
@@ -2851,40 +2875,27 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         input_source_table = input_table_with_source.select(source_col_names)
 
         # Build the meta columns table.
-        meta_table = pa.table(
+        meta_table = pa.Table.from_pydict(
             {
-                constants.DATA_RECORD_ID: pa.array(
-                    [data_record_id.bytes], type=pa.large_binary()
-                ),
-                constants.NODE_CONTENT_HASH_COL: pa.array(
-                    [self.content_hash().to_prefixed_digest()], type=pa.large_binary()
-                ),
-                constants.INPUT_DATA_HASH_COL: pa.array(
-                    [input_data.content_hash().to_prefixed_digest()],
-                    type=pa.large_binary(),
-                ),
-                constants.OUTPUT_DATA_HASH_COL: pa.array(
-                    [
-                        output_data_hash.to_prefixed_digest()
-                        if output_data_hash is not None
-                        else None
-                    ],
-                    type=pa.large_binary(),
-                ),
-                constants.DATA_CONTEXT_COL: pa.array(
-                    [self._stored_data_context_key], type=pa.large_string()
-                ),
-                f"{constants.META_PREFIX}computed": pa.array(
-                    [computed], type=pa.bool_()
-                ),
-                constants.IS_EPHEMERAL_COL: pa.array([is_ephemeral], type=pa.bool_()),
-                _PIPELINE_BASE_ENTRY_ID_COL: pa.array(
-                    [base_entry_id], type=pa.large_binary()
-                ),
-                _PIPELINE_RECOMPUTATION_INDEX_COL: pa.array(
-                    [new_index], type=pa.int32()
-                ),
-            }
+                constants.DATA_RECORD_ID: [data_record_id.bytes],
+                constants.NODE_CONTENT_HASH_COL: [
+                    self.content_hash().to_prefixed_digest()
+                ],
+                constants.INPUT_DATA_HASH_COL: [
+                    input_data.content_hash().to_prefixed_digest()
+                ],
+                constants.OUTPUT_DATA_HASH_COL: [
+                    output_data_hash.to_prefixed_digest()
+                    if output_data_hash is not None
+                    else None
+                ],
+                constants.DATA_CONTEXT_COL: [self._stored_data_context_key],
+                f"{constants.META_PREFIX}computed": [computed],
+                constants.IS_EPHEMERAL_COL: [is_ephemeral],
+                _PIPELINE_BASE_ENTRY_ID_COL: [base_entry_id],
+                _PIPELINE_RECOMPUTATION_INDEX_COL: [new_index],
+            },
+            schema=_pipeline_meta_schema(),
         )
 
         # Combine: tag (with system tags) + input source columns + meta columns

@@ -952,9 +952,10 @@ class SpiralDBConnector:
     ) -> str | None:
         """Say why SpiralDB cannot store a column, or ``None`` when it can (ITL-1162).
 
-        SpiralDB stores Arrow tables natively, so no column is refused here yet.
-        Its column-name rules (a reserved ``__`` prefix on non-key columns,
-        ITL-1164) are not stated here yet.
+        SpiralDB stores Arrow tables natively, so every type is stored; its limits
+        are on column names (ITL-1164). It reserves ``.`` as its column-group
+        separator in every name, and the ``__`` prefix on value (column group)
+        columns; a key column may start with ``__`` (``__record_id``).
 
         Args:
             name: The column's name.
@@ -962,8 +963,12 @@ class SpiralDBConnector:
             primary_key: Whether the column is the table's primary key.
 
         Returns:
-            Always ``None``.
+            A short reason, or ``None`` when SpiralDB stores the column.
         """
+        if "." in name:
+            return "SpiralDB reserves '.' in column names as its column-group separator"
+        if name.startswith("__") and not primary_key:
+            return "SpiralDB reserves the '__' prefix on value columns"
         return None
 
     def validate_records(self, records: pa.Table) -> None:

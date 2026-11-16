@@ -17,7 +17,11 @@ from orcapod.core.function_pod import (
 from orcapod.core.streams.view import StreamView
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
-from orcapod.contexts.stored import StaleTables, require_storable
+from orcapod.contexts.stored import (
+    StaleTables,
+    data_context_field,
+    require_storable,
+)
 from orcapod.core.result_cache import ResultCache, pod_timestamp_type
 from orcapod.hooks import InvocationStatus
 from orcapod.protocols.core_protocols import (
@@ -74,9 +78,10 @@ class CachedFunctionPod(WrappedFunctionPod):
     def require_storable_results(self) -> None:
         """Refuse a result database that cannot store this pod's result table (ITL-1162).
 
-        The result table holds the function's variation and execution columns
-        (``__pf_var_*``, ``__pf_exec_*``), its output columns and the ``__pod_ts``
-        timestamp, typed from their declared schemas; nothing is computed. A
+        The result table holds the input data hash, the function's variation and
+        execution columns (``__pf_var_*``, ``__pf_exec_*``), its output columns,
+        the ``__pod_ts`` timestamp and ``__data_context``, typed from their declared
+        schemas; nothing is computed. (The source-info columns are text.) A
         database that states which columns it stores (``ConnectorArrowDatabase``)
         refuses here, before the function runs; any other database accepts.
 
@@ -97,9 +102,17 @@ class CachedFunctionPod(WrappedFunctionPod):
             },
             **pf.output_data_schema,
         }
-        schema = self.data_context.type_converter.python_schema_to_arrow_schema(
+        declared = self.data_context.type_converter.python_schema_to_arrow_schema(
             python_schema
-        ).append(pa.field(constants.POD_TIMESTAMP, pod_timestamp_type()))
+        )
+        schema = pa.schema(
+            [
+                pa.field(constants.INPUT_DATA_HASH_COL, pa.large_binary()),
+                *declared,
+                pa.field(constants.POD_TIMESTAMP, pod_timestamp_type()),
+                data_context_field(),
+            ]
+        )
         require_storable(self._cache.result_database, schema)
 
     @property

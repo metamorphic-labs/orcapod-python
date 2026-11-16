@@ -80,9 +80,10 @@ class UnstorableColumnError(ValueError):
     """A database cannot store a column of a table it is asked to hold (ITL-1162).
 
     Raised by a database whose backend states which columns it stores faithfully (a
-    ``ConnectorArrowDatabase``: the SQLite and PostgreSQL connectors), before
-    anything of the table is written. A job raises it when the database is attached
-    to a node whose stored tables hold such a column, before anything runs.
+    ``ConnectorArrowDatabase``: column types on the SQLite and PostgreSQL connectors,
+    reserved column names on SpiralDB), before anything of the table is written. A
+    job raises it when the database is attached to a node whose stored tables hold
+    such a column, before anything runs.
 
     Attributes:
         database_kind: The kind of database that refused, e.g. ``"SQLiteConnector"``.

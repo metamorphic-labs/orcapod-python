@@ -108,9 +108,14 @@ def with_data_context(table: "pa.Table", context_key: str) -> "pa.Table":
         ``large_string`` holding ``context_key`` on every row.
     """
     return table.append_column(
-        pa.field(constants.DATA_CONTEXT_COL, pa.large_string(), nullable=False),
+        data_context_field(),
         pa.array([context_key] * table.num_rows, type=pa.large_string()),
     )
+
+
+def data_context_field() -> "pa.Field[pa.DataType]":
+    """The ``__data_context`` field every stored table ends with (``with_data_context``)."""
+    return pa.field(constants.DATA_CONTEXT_COL, pa.large_string(), nullable=False)
 
 
 def require_same_data_context(input_context_key: str, own_context_key: str) -> None:

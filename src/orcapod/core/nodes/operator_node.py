@@ -50,8 +50,11 @@ from orcapod.errors import (
     PipelineJobRequiredError,
     OrcapodDatabaseReadError,
     OrcapodDatabaseWriteError,
+    UnstorableColumnError,
 )
 from orcapod.contexts.stored import (
+    data_context_field,
+    require_storable,
     keep_rows_of_data_context,
     require_same_data_context,
     account_for_stale_tables,
@@ -843,6 +846,25 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             pipeline_database: Database for pipeline records.
             cache_mode: Caching behaviour (OFF, LOG, or REPLAY).
         """
+        if cache_mode != CacheMode.OFF:
+            # A database that cannot store the cache's own columns refuses it now,
+            # before anything runs (ITL-1162). The operator's output columns are
+            # checked when they are written.
+            try:
+                require_storable(
+                    pipeline_database,
+                    pa.schema(
+                        [
+                            pa.field(
+                                constants.NODE_CONTENT_HASH_COL, pa.large_binary()
+                            ),
+                            data_context_field(),
+                        ]
+                    ),
+                )
+            except UnstorableColumnError as exc:
+                exc.add_context(node_label=self.label)
+                raise
         # Another database has its own tables of other generations to account for.
         self._stale_tables_checked = False
         self._skipped_rows_reported = False

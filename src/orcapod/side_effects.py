@@ -42,6 +42,7 @@ from orcapod.errors import (
 from orcapod.contexts.stored import (
     StaleTables,
     account_for_stale_tables,
+    data_context_field,
     find_stale_tables,
     require_same_data_context,
     require_storable,
@@ -485,7 +486,7 @@ def _invocation_log_schema() -> pa.Schema:
 
 def _stored_invocation_log_schema() -> pa.Schema:
     """The columns of an invocation log row as stored, ``__data_context`` included."""
-    return with_data_context(_invocation_log_schema().empty_table(), "").schema
+    return _invocation_log_schema().append(data_context_field())
 
 
 def _write_invocation_row(
