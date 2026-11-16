@@ -280,3 +280,22 @@ def test_the_gate_fails_outside_a_repository_even_locally(tmp_path: Path) -> Non
     store.copy_tree(store.PROJECT_ROOT, plain, VERSION)
     result = _gate(plain, "0.3.0")
     assert result.returncode == 1
+
+
+def test_the_gate_refuses_a_golden_addition_after_the_release_step(repo: Path) -> None:
+    """The tagged commit's last revision is the release: no unreleased file ships with it."""
+    folder = _folder(repo)
+    name = store.next_file_name(store.group_files(folder)["schema"][-1].name)
+    _ = (folder / name).write_text(dump({"new.entry": "x"}))
+    manifest = store.read_json(store.manifest_path(repo, VERSION))
+    manifest["golden"]["history"] = store.with_file(
+        manifest["golden"]["history"],
+        name,
+        store.file_digest(folder / name),
+        "2026-11-20",
+    )
+    store.write_json(store.manifest_path(repo, VERSION), manifest)
+    _commit(repo, f"add {name} after the release step")
+    result = _gate(repo, "0.3.0")
+    assert result.returncode == 1
+    assert "last revision" in result.stderr

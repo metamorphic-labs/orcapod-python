@@ -189,7 +189,8 @@ def check_release(repo: Path, release: str) -> list[str]:
     The Release workflow runs this before it creates the tag: HEAD's
     ``released_manifests.json`` pins ``release`` under the current context's
     ``releases``, its manifest pin is set, and the pinned digest is the digest of the
-    release revision of ``release`` in HEAD's golden history.
+    release revision of ``release`` in HEAD's golden history, which is its last revision
+    (no golden file added after the release step ships unreleased).
 
     Args:
         repo: Repository root.
@@ -217,15 +218,23 @@ def check_release(repo: Path, release: str) -> list[str]:
     manifest = _show_json(repo, "HEAD", CONTEXTS / "data" / f"{version}.json")
     golden = manifest.get("golden") if isinstance(manifest, dict) else None
     history = golden.get("history") if isinstance(golden, dict) else None
+    entries: list[Any] = history if isinstance(history, list) else []
     revisions = [
         revision
-        for revision in (history if isinstance(history, list) else [])
+        for revision in entries
         if isinstance(revision, dict) and revision.get("release") == release
     ]
     if [revision.get("digest") for revision in revisions] != [releases[release]]:
         problems.append(
             f"the pinned digest of {release} is not the release revision of {release} "
             "in the golden history"
+        )
+    elif entries[-1] is not revisions[0]:
+        problems.append(
+            f"the release revision of {release} is not the last revision of the golden "
+            "history: a golden file added after the release step would ship unreleased; "
+            f"tag the commit of the release step, or run --release {release} again after "
+            "the addition (a new version)"
         )
     return problems
 

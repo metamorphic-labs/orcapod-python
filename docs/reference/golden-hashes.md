@@ -296,7 +296,9 @@ build job before the tag is made; tested by `tests/test_check_golden_tags.py`
 
 - **Checks:** HEAD's `released_manifests.json` pins release `X.Y.Z` of the current data
   context, its `manifest` pin is set, and the pinned digest is the release revision of
-  `X.Y.Z` in HEAD's golden history. It fails without git.
+  `X.Y.Z`, which is the last revision of HEAD's golden history: a golden file added after
+  the release step would ship unreleased, so such a commit is not tagged. It fails without
+  git.
 - **Protects against:** a release cut without the release step (11). The final-release
   check cannot catch it in the Release workflow, whose tests run before the tag exists,
   under a development version.
