@@ -125,6 +125,11 @@ def _pg_type_to_arrow(pg_type_name: str, udt_name: str) -> pa.DataType:
     return _pa.large_string()
 
 
+# PostgreSQL truncates an identifier (a quoted one too) to NAMEDATALEN - 1 bytes, 63 on a
+# default build, so a longer column name reads back as another name (ITL-1162).
+_PG_MAX_IDENTIFIER_BYTES = 63
+
+
 def _pg_sql_type(arrow_type: pa.DataType) -> str | None:
     """Return the PostgreSQL column type for an Arrow type, or ``None`` when there is none.
 
@@ -212,11 +217,12 @@ def _pg_unstorable_reason(arrow_type: pa.DataType) -> str | None:
     """
     from orcapod.utils.arrow_utils import normalize_to_large_types
 
+    arrow_type = normalize_to_large_types(arrow_type, keep_null=True)
     sql_type = _pg_sql_type(arrow_type)
     if sql_type is None:
         return "PostgreSQL has no column type for it here"
     read_back = _pg_type_to_arrow(sql_type.lower(), sql_type.lower())
-    if read_back != normalize_to_large_types(arrow_type):
+    if read_back != arrow_type:
         return f"PostgreSQL stores it as {sql_type}, which reads back as {read_back}"
     return None
 
@@ -586,7 +592,8 @@ class PostgreSQLConnector:
         ``timestamp[us, tz=UTC]`` (``string`` and ``binary`` read back in their
         large variants). Other integer widths, and timestamps of another unit or
         time zone, read back as another type, and lists, structs and extension types have no column type here.
-        The name and the key role do not matter to PostgreSQL.
+        A name longer than 63 bytes (UTF-8) is refused: PostgreSQL truncates it,
+        so it would read back as another name. The key role does not matter.
 
         Args:
             name: The column's name.
@@ -596,6 +603,12 @@ class PostgreSQLConnector:
         Returns:
             A short reason, or ``None`` when PostgreSQL stores the column.
         """
+        size = len(name.encode("utf-8"))
+        if size > _PG_MAX_IDENTIFIER_BYTES:
+            return (
+                f"PostgreSQL truncates a column name to {_PG_MAX_IDENTIFIER_BYTES} "
+                f"bytes, and this name has {size}"
+            )
         return _pg_unstorable_reason(arrow_type)
 
     def validate_records(self, records: pa.Table) -> None:

@@ -126,11 +126,12 @@ def _sqlite_unstorable_reason(arrow_type: pa.DataType) -> str | None:
     """
     from orcapod.utils.arrow_utils import normalize_to_large_types  # noqa: PLC0415
 
+    arrow_type = normalize_to_large_types(arrow_type, keep_null=True)
     sql_type = _sqlite_sql_type(arrow_type)
     if sql_type is None:
         return "SQLite has no column type for it"
     read_back = _sqlite_type_to_arrow(sql_type)
-    if read_back != normalize_to_large_types(arrow_type):
+    if read_back != arrow_type:
         return f"SQLite stores it as {sql_type}, which reads back as {read_back}"
     return None
 

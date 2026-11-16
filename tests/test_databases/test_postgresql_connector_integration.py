@@ -548,3 +548,51 @@ def test_function_node_job_refused(connector: PostgreSQLConnector) -> None:
             _ = double.pod(source, label="dbl")
     assert exc_info.value.column == "__pf_exec_executor_info"
     assert connector.get_table_names() == []
+
+
+@pytest.mark.postgres
+def test_long_column_name_refused_and_nothing_written(
+    connector: PostgreSQLConnector,
+) -> None:
+    """A name PostgreSQL would truncate is refused before the table exists (ITL-1162)."""
+    from orcapod.errors import UnstorableColumnError
+
+    db = ConnectorArrowDatabase(connector)
+    name = "_tag_source_id::" + "0" * 64
+    table = pa.table({name: pa.array(["s"], type=pa.large_string())})
+    with pytest.raises(UnstorableColumnError):
+        db.add_record(("t",), b"1", table)
+    db.flush()
+    assert connector.get_table_names() == []
+
+
+@pytest.mark.postgres
+def test_operator_cache_refused_at_write_and_nothing_written(
+    connector: PostgreSQLConnector,
+) -> None:
+    """An operator cache's system-tag column names exceed 63 bytes (ITL-1162)."""
+    from orcapod import PipelineJob
+    from orcapod.core.operators import SelectDataColumns
+    from orcapod.errors import OrcapodDatabaseWriteError, UnstorableColumnError
+    from orcapod.sources import DictSource
+    from orcapod.types import CacheMode
+
+    db = ConnectorArrowDatabase(connector)
+    job = PipelineJob(name="p", database=db)
+    source = DictSource(
+        data=[{"k": "a", "x": 1, "y": 2}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="src",
+    )
+    with job:
+        _ = SelectDataColumns(["x"])(source, label="sel")
+    job.nodes["sel"].attach_databases(
+        pipeline_database=db.at("p"), cache_mode=CacheMode.LOG
+    )
+    with pytest.raises(OrcapodDatabaseWriteError) as exc_info:
+        _ = job.run()
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, UnstorableColumnError)
+    assert cause.column.startswith("_tag_")
+    assert connector.get_table_names() == []

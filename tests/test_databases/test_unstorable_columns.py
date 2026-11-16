@@ -643,3 +643,90 @@ class TestWriteChecksOrder:
         assert stored is not None
         assert stored.schema.field("v").type == pa.large_string()
         assert stored["v"].to_pylist() == ["a", "a"]
+
+    @pytest.mark.parametrize(
+        "arrow_type, values",
+        [
+            pytest.param(pa.string_view(), ["a"], id="string_view"),
+            pytest.param(pa.binary_view(), [b"a"], id="binary_view"),
+        ],
+    )
+    def test_view_types_stored_in_large_variant(
+        self, tmp_path: pathlib.Path, arrow_type, values
+    ):
+        """View layouts are normalized before the check, as every table is."""
+        database = _sqlite_database(tmp_path)
+        table = pa.table({"v": pa.array(values, type=arrow_type)})
+        database.add_record(("t",), b"1", table, flush=True)
+
+        stored = database.get_all_records(("t",))
+
+        assert stored is not None
+        assert stored["v"].to_pylist() == values
+
+
+# ---------------------------------------------------------------------------
+# PostgreSQL truncates identifiers to 63 bytes; SQLite has no such limit
+# ---------------------------------------------------------------------------
+
+
+def _mocked_postgresql() -> tuple[PostgreSQLConnector, MagicMock]:
+    """A ``PostgreSQLConnector`` over a mocked connection (no server)."""
+    with patch("psycopg.connect") as mock_connect:
+        conn = MagicMock()
+        mock_connect.return_value = conn
+        return PostgreSQLConnector("postgresql://localhost/test"), conn
+
+
+class TestIdentifierLength:
+    @pytest.mark.parametrize(
+        "name, storable",
+        [
+            ("a" * 63, True),
+            ("a" * 64, False),
+            ("é" * 31, True),  # 62 bytes
+            ("é" * 32, False),  # 64 bytes
+            ("_tag_source_id::" + "0" * 64, False),  # a system-tag column name
+        ],
+    )
+    def test_postgresql_rule(self, name, storable):
+        connector, _ = _mocked_postgresql()
+        try:
+            reason = connector.unstorable_column_reason(
+                name, pa.int64(), primary_key=False
+            )
+        finally:
+            connector._conn = None
+        assert (reason is None) is storable, reason
+        if not storable:
+            assert reason is not None and "63 bytes" in reason
+
+    def test_postgresql_refuses_long_name_before_anything_is_written(self):
+        connector, conn = _mocked_postgresql()
+        try:
+            database = ConnectorArrowDatabase(connector)
+            name = "_tag_source_id::" + "0" * 64
+            table = pa.table({name: pa.array(["s"], type=pa.large_string())})
+            calls_before = len(conn.mock_calls)
+
+            with pytest.raises(UnstorableColumnError) as exc_info:
+                database.add_record(("t",), b"1", table)
+            database.flush()  # nothing was buffered
+
+            assert exc_info.value.column == name
+            assert exc_info.value.database_kind == "PostgreSQLConnector"
+            assert len(conn.mock_calls) == calls_before  # no statement was sent
+        finally:
+            connector._conn = None
+
+    def test_sqlite_keeps_long_names(self, tmp_path: pathlib.Path):
+        """SQLite has no identifier length limit: a long name reads back as written."""
+        database = _sqlite_database(tmp_path)
+        name = "_tag_source_id::" + "0" * 200
+        table = pa.table({name: pa.array(["s"], type=pa.large_string())})
+        database.add_record(("t",), b"1", table, flush=True)
+
+        stored = database.get_all_records(("t",))
+
+        assert stored is not None
+        assert name in stored.column_names

@@ -344,11 +344,12 @@ class ConnectorArrowDatabase:
                 f"got {rid_type}. Encode the column to bytes before calling add_records()."
             )
 
+        # Checked and buffered in the large variants every connector reads back
+        # (view types included), so a read that joins buffered and committed rows
+        # sees one layout (ITL-1122, ITL-1162).
+        records = normalize_table_to_large_types(records, keep_null=True)
         self.require_storable(records.schema)
         self._connector.validate_records(records)
-        # Buffered in the large variants every connector reads back, so a read that
-        # joins buffered and committed rows sees one layout (ITL-1122, ITL-1162).
-        records = normalize_table_to_large_types(records, keep_null=True)
 
         records = self._deduplicate_within_table(records)
         record_key = self._get_record_key(record_path)
