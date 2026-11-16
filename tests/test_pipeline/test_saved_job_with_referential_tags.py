@@ -322,3 +322,51 @@ def test_a_source_config_with_a_bare_string_tag_column_loads(
     rebuilt, original = loaded.sources["spikes"], job.sources["spikes"]
     assert rebuilt.keys() == original.keys()
     assert rebuilt.as_table().to_pylist() == original.as_table().to_pylist()
+
+
+@pytest.mark.parametrize("version", sorted(PLAIN_TAG_FORMAT_VERSIONS))
+def test_an_older_pipeline_with_a_referential_restored_source_schema_is_refused(
+    tmp_path: Path, version: str
+) -> None:
+    # A source node is rebuilt from its source config's schemas, so those are what a
+    # plain-tag version must hold plain, not only the descriptor's output schema.
+    job = _job(tmp_path, tag_only=True)
+    job.compiled_pipeline.save(tmp_path / "pipeline.json")
+    data = _saved(tmp_path / "pipeline.json")
+    data["orcapod_pipeline_version"] = version
+    for descriptor in _function_descriptors({"pipeline": data}).values():
+        del descriptor["fall_through_references"]
+    plain_path = tmp_path / "plain.json"
+    plain_path.write_text(json.dumps(data))
+    Pipeline.load(plain_path)  # the untouched file loads
+
+    for descriptor in data["nodes"].values():
+        if descriptor["node_type"] == "source":
+            descriptor["source_config"]["data_schema"]["unit"] = "int64"
+    path = tmp_path / "edited.json"
+    path.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match=f"a file at format {version} holds only"):
+        Pipeline.load(path)
+
+
+@pytest.mark.parametrize("version", [*sorted(PLAIN_TAG_FORMAT_VERSIONS), "0.3.0"])
+def test_a_mapping_inside_a_source_config_is_not_read_as_a_source(
+    version: str,
+) -> None:
+    # A filter value may hold any key, ``source_type`` included; only the nested
+    # source fields (a cached source's inner source, a derived source's origin) are
+    # source configs.
+    where = {"source_type": "delta_table"}
+    tag_only = (
+        {} if version in PLAIN_TAG_FORMAT_VERSIONS else {"tag_only_columns": True}
+    )
+    config = {"source_type": "csv", "where": dict(where), **tag_only}
+    assert source_config_at_version(config, version)["where"] == where
+    cached = {
+        "source_type": "cached",
+        "inner_source": {"source_type": "csv", **tag_only},
+        "cache_database": {"source_type": "delta_table"},
+    }
+    upgraded = source_config_at_version(cached, version)
+    assert upgraded["inner_source"]["tag_only_columns"] is True
+    assert upgraded["cache_database"] == {"source_type": "delta_table"}
