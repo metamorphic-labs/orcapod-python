@@ -478,6 +478,22 @@ class TestGenericAliasHandler:
         """types.GenericAlias (e.g. dict[str, int]) produces a ContentHash."""
         assert isinstance(hasher.hash_object(dict[str, int]), ContentHash)
 
+    def test_alias_without_origin_is_refused(self, hasher):
+        """A generic alias with no ``__origin__`` is refused, never hashed by ``repr``.
+
+        No ``typing`` or ``collections.abc`` alias lacks an origin (Python 3.11 to
+        3.13); only a third-party subclass can, and its ``repr`` is not stable.
+        """
+        import typing
+
+        class _NoOrigin(typing._GenericAlias, _root=True):  # pyright: ignore[reportPrivateUsage]
+            pass
+
+        alias = _NoOrigin(list, (int,))
+        object.__setattr__(alias, "__origin__", None)
+        with pytest.raises(TypeError, match="no __origin__"):
+            hasher.hash_object(alias)
+
     def test_typing_generic_alias_hashed(self, hasher):
         """typing generics (e.g. Dict[str, int]) produce a ContentHash."""
         import typing

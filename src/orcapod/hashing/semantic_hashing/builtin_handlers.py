@@ -290,7 +290,12 @@ class GenericAliasHandler:
         origin = getattr(obj, "__origin__", None)
         args = getattr(obj, "__args__", None) or ()
         if origin is None:
-            return f"generic_alias:{obj!r}"
+            # No typing or collections.abc alias lacks an origin (Python 3.11 to 3.13);
+            # a third-party one's repr is not stable, so it is refused, never hashed.
+            raise TypeError(
+                f"GenericAliasHandler: the generic alias {obj!r} has no __origin__, so "
+                "it has no stable identity to hash."
+            )
         if origin is typing.Union:
             return Encoded("union", {"args": _sorted_hashes(hasher, args)})
         return Encoded(
