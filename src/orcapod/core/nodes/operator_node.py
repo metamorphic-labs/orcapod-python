@@ -1048,8 +1048,8 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             return reference_names(saved.get("tag", {}), saved.get("data", {}))
         return stream_references(self)
 
-    def _stored_references(self, schema: "pa.Schema") -> tuple[str, ...]:
-        """Return the referential tags the stored table marks, checked against the node.
+    def _check_stored_references(self, schema: "pa.Schema") -> None:
+        """Refuse a stored table whose referential tag marker disagrees with the node.
 
         The stored table states its bindings (developer, November 16, 2026, ITL-1019):
         a referential tag column carries the marker of ``referential_tags``. The node
@@ -1058,9 +1058,6 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
 
         Args:
             schema: The schema of the node's stored table.
-
-        Returns:
-            The referential tags, in the order the node declares them.
 
         Raises:
             InputValidationError: If the table's marker is invalid, or the table and
@@ -1083,20 +1080,19 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
                 f"declares {sorted(expected)}. The table was not written by this "
                 "node's pipeline; nothing was read."
             )
-        return expected
 
-    def _stream_over_stored(
-        self, records: "pa.Table", references: Sequence[str]
-    ) -> ArrowTableStream:
+    def _stream_over_stored(self, records: "pa.Table") -> ArrowTableStream:
         """Return a stream over rows read from the stored table, without the marker.
 
         In a stream the binding is the shared name of a tag and a data column, so the
         marker stays with the stored table: carried on, it would be written by a
         downstream store whose binding it is not.
 
+        The binding is the node's (``declared_references``), which every read checked
+        against the table's marker (``_check_stored_references``).
+
         Args:
             records: The stored rows, without the bookkeeping columns.
-            references: The referential tags the table marks (``_stored_references``).
 
         Returns:
             The stream, in this node's data context.
@@ -1105,7 +1101,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         return ArrowTableStream(
             without_reference_marks(records),
             tag_columns=self.keys()[0],
-            reference_tags=references,
+            reference_tags=self.declared_references(),
             data_context=self.data_context,
         )
 
@@ -1346,8 +1342,9 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         keeps this node's. Rows of another data context are left out and reported once.
 
         Every read of the stored table goes through here, so every read checks the
-        table's referential tag marker against the node (``_stored_references``). The
-        rows keep the marker; a read into a stream drops it (``_stream_over_stored``).
+        table's referential tag marker against the node (``_check_stored_references``).
+        The rows keep the marker; a read into a stream drops it
+        (``_stream_over_stored``).
 
         Returns:
             The rows, with ``HASH_COLUMN_NAME`` and ``NODE_CONTENT_HASH_COL`` and without
@@ -1364,7 +1361,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         )
         if records is None:
             return None
-        _ = self._stored_references(records.schema)
+        self._check_stored_references(records.schema)
         stored_rows = records.num_rows
         records = keep_rows_of_data_context(records, self.data_context_key)
         if records.num_rows < stored_rows and not self._skipped_rows_reported:
@@ -1556,8 +1553,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             ]
             if cols_to_drop:
                 records_table = records_table.drop(cols_to_drop)
-        # The table's binding was checked against the node's when it was read.
-        return self._stream_over_stored(records_table, self.declared_references())
+        return self._stream_over_stored(records_table)
 
     def get_cached_output(self) -> StreamProtocol | None:
         """Return cached output stream in REPLAY mode, else None.
@@ -1697,10 +1693,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             if cols_to_drop:
                 records = records.drop(cols_to_drop)
 
-        # The table's binding was checked against the node's when it was read.
-        self._cached_output_stream = self._stream_over_stored(
-            records, self.declared_references()
-        )
+        self._cached_output_stream = self._stream_over_stored(records)
         self._update_modified_time()
 
     def run(self, *, load_only: bool = False) -> StreamView:
