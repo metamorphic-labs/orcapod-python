@@ -207,6 +207,19 @@ def test_a_030_source_config_without_tag_only_columns_is_refused(
         PipelineJob.load(_edited(tmp_path, edit))
 
 
+def test_a_source_config_that_contradicts_its_slot_is_refused(tmp_path: Path) -> None:
+    def edit(data: dict[str, Any]) -> None:
+        # The slot declares ``unit`` referential; the config says every tag is plain.
+        data["bindings"]["sources"]["spikes"]["tag_only_columns"] = True
+
+    path = _edited(tmp_path, edit)
+    with pytest.raises(ValueError, match="source 'spikes'") as raised:
+        PipelineJob.load(path)
+    message = str(raised.value)
+    assert str(path) in message
+    assert "['unit']" in message and "[]" in message
+
+
 def test_a_030_function_node_without_its_references_is_refused(tmp_path: Path) -> None:
     def edit(data: dict[str, Any]) -> None:
         for descriptor in _function_descriptors(data).values():

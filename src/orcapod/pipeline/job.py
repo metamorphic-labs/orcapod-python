@@ -1585,6 +1585,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         from orcapod.pipeline.graph import Pipeline
         from orcapod.pipeline.serialization import (
             SUPPORTED_JOB_FORMAT_VERSIONS,
+            check_source_config_binding,
             resolve_source_from_config,
             source_config_at_version,
         )
@@ -1630,6 +1631,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             # is the file's error, not a source that could not be rebuilt.
             try:
                 src_config = source_config_at_version(src_config, version)
+                if spec_name in slots:
+                    slot = slots[spec_name]
+                    check_source_config_binding(
+                        src_config, slot.tag_schema.keys(), slot.data_schema.keys()
+                    )
             except ValueError as exc:
                 raise ValueError(f"{path}: source {spec_name!r}: {exc}") from exc
             try:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json as _json
 import logging
-from collections.abc import Collection
+from collections.abc import Collection, Iterable
 from enum import Enum
 from typing import TYPE_CHECKING, Any, cast
 
@@ -1454,3 +1454,41 @@ def source_config_at_version(config: dict[str, Any], version: str) -> dict[str, 
         return upgraded
 
     return upgrade(config)
+
+
+def check_source_config_binding(
+    config: dict[str, Any], tag_names: Iterable[str], data_names: Iterable[str]
+) -> None:
+    """Refuse a saved source config whose referential tags contradict its slot.
+
+    The source config (``tag_columns`` and ``tag_only_columns``) and the slot's saved
+    schema (a name in both halves is a referential tag) each state the source's
+    bindings, independently; a file in which they disagree is refused before the
+    source is rebuilt (ITL-1019). A config of a source that does not take the option,
+    or one written without ``tag_columns``, is not checked here.
+
+    Args:
+        config: A saved source config, as its file version means it
+            (``source_config_at_version``).
+        tag_names: The slot's saved tag column names.
+        data_names: The slot's saved data column names.
+
+    Raises:
+        ValueError: If the config and the slot name different referential tags.
+    """
+    from orcapod.core.referential_tags import reference_names, source_reference_tags
+
+    _ensure_registries()
+    cls = SOURCE_REGISTRY.get(config.get("source_type"))  # pyright: ignore[reportArgumentType]  # any saved value
+    if cls is None or not getattr(cls, "TAKES_TAG_ONLY_COLUMNS", False):
+        return
+    tag_columns = config.get("tag_columns")
+    if not tag_columns or "tag_only_columns" not in config:
+        return
+    configured = source_reference_tags(tag_columns, config["tag_only_columns"])
+    declared = reference_names(tag_names, data_names)
+    if set(configured) != set(declared):
+        raise ValueError(
+            f"its config makes {sorted(configured)} referential, but its slot's saved "
+            f"schema declares {sorted(declared)}"
+        )
