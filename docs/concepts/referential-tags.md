@@ -170,6 +170,32 @@ A node reads the binding back from its table, and refuses a table whose marker d
 with what the node declares (its pod's fall-through tags, or for a loaded job the saved
 file's).
 
+An operator node that stores its output (`LOG`) marks its table the same way: the
+referential tags of the operator's own output carry the marker, written from the
+operator's binding, never from a marker that came in from upstream. A `REPLAY` read, and
+the stored view `get_all_records()`, check the marker against the node (its operator's
+prediction, or for a loaded job the saved output schema, where a referential tag is in
+both halves). A database that keeps no field metadata is refused when it is attached in
+`LOG` or `REPLAY` mode. Source info stays part of each stored row's record hash; the
+marker never enters it.
+
+`node.as_source()` gives the stored rows as a source with the bindings the stored table
+states, in the plain form and with `tags_as_data` (a copy of a referential tag is a new,
+plain data column). Nothing is added to the derived source's identity for the binding: its
+plain form's content hash is the node's, which carries the binding already, and its
+pipeline hash is its output schema, where a referential tag is in both halves.
+
+```python
+derived = job.nodes["scale"].as_source()
+print(derived.keys())
+# (('unit', 'time'), ('unit', 'time', 'scaled'))
+print(derived.as_table().column_names)
+# ['unit', 'time', 'scaled']
+```
+
+In a stream the binding is the shared name, so the marker stays with the stored table:
+the rows of a replay or of a derived source carry none.
+
 A saved job or pipeline (format `0.3.0`) states every binding: each source config writes
 `tag_only_columns` (`True` when every tag is plain), and each function node writes
 `fall_through_references` (empty for a plain pod). The format version, never a missing
@@ -180,7 +206,5 @@ the file is checked against the stored tables when a node reads them.
 ## Not supported yet
 
 These raise "not supported with referential tags yet" when a referential tag reaches them:
-`Batch`, `MergeJoin`, `SelectColumns`, `DropColumns`, storing an operator node's results (`LOG` and `REPLAY` cache modes),
-and `DerivedSource` over a stream with referential tags (so `node.as_source()` of a node
-with referential tags).
+`Batch`, `MergeJoin`, `SelectColumns` and `DropColumns`.
 `PollingSource` keeps its tags plain.
