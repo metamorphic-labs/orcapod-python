@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
 from orcapod.protocols.core_protocols import TagProtocol
-from orcapod.types import SchemaLike
+from orcapod.types import ContentHash, SchemaLike
 from orcapod.utils import arrow_utils
 from orcapod.utils.canonical_type_names import stabilize_type_names
 from orcapod.utils.tensor_conversions import warn_source_tensor_conversions
@@ -101,8 +101,16 @@ class ListSource(RootSource):
             self._source_id = result.source_id
         warn_source_tensor_conversions(self._source_id, rows)
 
-    def _hash_tag_function(self) -> str:
-        """Produce a stable hash string for the tag function."""
+    def _hash_tag_function(self) -> str | ContentHash:
+        """Produce the stable identity of the tag function.
+
+        Returns:
+            The function's qualified name (``"name"``), its signature text
+            (``"signature"``), or the semantic hash of its source text
+            (``"content"``). The hash is returned as a ``ContentHash``, never as its
+            hex text: it enters ``identity_structure``, and a hash fed into another
+            hash carries its label (ITL-1154).
+        """
         if self._tag_function_hash_mode == "name":
             fn = self._tag_function
             return f"{fn.__module__}.{fn.__qualname__}"
@@ -121,7 +129,7 @@ class ListSource(RootSource):
             import inspect
 
             src = inspect.getsource(self._tag_function)
-            return self.data_context.semantic_hasher.hash_object(src).to_hex()
+            return self.data_context.semantic_hasher.hash_object(src)
 
     def identity_structure(self) -> Any:
         """Return identity including class name, field name, elements, and tag

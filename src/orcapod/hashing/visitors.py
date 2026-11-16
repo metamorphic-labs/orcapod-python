@@ -205,12 +205,13 @@ class SemanticHashingVisitor(ArrowTypeDataVisitor):
        column's own extension metadata), replacing the column with a
        ``pa.large_binary()`` value of the form::
 
-           <identifier_text_bytes> + b"::" + content_hash.digest
+           <identifier_text_bytes> + b"::" + content_hash.to_prefixed_digest()
 
        where the identifier text is the logical type's whole identifier,
        ``"<extension name>;<lowercase hex of the extension metadata>"``
-       (``LogicalTypeIdentifier.text``). The label of the value hash is not
-       part of the bytes.
+       (``LogicalTypeIdentifier.text``), and the prefixed digest is
+       ``b"<label>:" + digest``: a hash fed into another hash carries its label
+       (ITL-1154).
     3. If no hasher is registered (or the converter doesn't know the type),
        return the extension type and storage value unchanged. The downstream
        ``StarfixArrowHasher`` / ``ArrowDigester`` will see the full extension
@@ -447,14 +448,16 @@ class SemanticHashingVisitor(ArrowTypeDataVisitor):
         else:
             content_hash = self._python_hasher.hash_object(python_obj)
 
-        # Encode as binary: "<identifier text>::<digest>", where the identifier text
-        # is "<extension name>;<hex of extension metadata>"
+        # Encode as binary: "<identifier text>::<label>:<digest>", where the
+        # identifier text is "<extension name>;<hex of extension metadata>"
         # (``LogicalTypeIdentifier.text``): the cell commits to the whole identifier
-        # of its logical type, so a changed identifier moves the row hash. Only the
-        # digest of the value hash is fed in, never its label: a label names the
-        # algorithm and is not part of any hash input.
+        # of its logical type, so a changed identifier moves the row hash. The value
+        # hash enters with its label: a hash fed into another hash carries the name
+        # of the algorithm that produced it (ITL-1154).
         type_name = arrow_type_identifier(extension_type).text
-        hash_bytes = type_name.encode("utf-8") + b"::" + content_hash.digest
+        hash_bytes = (
+            type_name.encode("utf-8") + b"::" + content_hash.to_prefixed_digest()
+        )
         return pa.large_binary(), hash_bytes
 
     def visit_struct(
