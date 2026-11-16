@@ -309,7 +309,7 @@ A record id is the row identifier (rule 8), built from row positions or key valu
 | observer events (`node_hash`) | `core/nodes/function_node.py:FunctionJobNode.execute`, `core/nodes/function_node.py:FunctionJobNode.async_execute`, `core/nodes/function_node.py:FunctionJobNode._execute_load_only`, `core/nodes/function_node.py:FunctionJobNode._async_execute_load_only`, `core/nodes/function_node.py:FunctionJobNode._async_execute_cache_only`, `core/nodes/operator_node.py:OperatorJobNode.execute`, `core/nodes/operator_node.py:OperatorJobNode.async_execute`, `core/nodes/source_node.py:SourceNodeBase.execute`, `core/nodes/source_node.py:SourceNodeBase.async_execute` |
 | hooks (`pod_hash`) | `core/function_pod.py:_FunctionPodBase._build_post_run_payload` |
 | in-memory graph keys and sort keys | `pipeline/base.py:AbstractPipelineBase.compile`, `pipeline/base.py:AbstractPipelineBase.compile.<locals>.<lambda>`, `pipeline/base.py:AbstractPipelineBase._record_invocation`, `pipeline/base.py:AbstractPipelineBase.to_invocations`, `pipeline/base.py:AbstractPipelineBase.from_invocations`, `pipeline/job.py:PipelineJob.compile` |
-| canonical input order (sort by digest). Open: ITL-1154 tie order, developer decision pending. Measured: system-tag column names follow the stable pipeline-hash sort; each row's values are sorted by (source id, record id) by `sort_system_tag_values`; the operator's identity holds its inputs as a frozenset | `core/operators/join.py:Join.order_input_streams.<locals>.<lambda>`, `core/operators/merge_join.py:MergeJoin._canonical_order.<locals>.<lambda>` |
+| canonical input order (sort by digest). Inputs with equal pipeline hashes (developer decision, November 16, 2026, ITL-1154: kept as it is): system-tag column names follow the stable pipeline-hash sort; each row's values are sorted by (source id, record id) by `sort_system_tag_values`, so the result does not depend on argument order; the operator's identity holds its inputs as a frozenset | `core/operators/join.py:Join.order_input_streams.<locals>.<lambda>`, `core/operators/merge_join.py:MergeJoin._canonical_order.<locals>.<lambda>` |
 | in-memory identity and repr | `core/base.py:ContentIdentifiableBase.__hash__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__hash__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__eq__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__repr__` |
 | comparing a stored hash with the computed one; error text | `core/nodes/operator_node.py:OperatorJobNode._read_run_records`, `core/sources/source_proxy.py:SourceProxy.bind`, `core/data_function_proxy.py:DataFunctionProxy.bind`, `pipeline/job.py:PipelineJob.bind`, `errors.py:EphemeralResultMissingError.__init__` |
 
@@ -532,6 +532,13 @@ pipeline hash even when both inputs share one schema. Inputs are an unordered se
 identity, so input order never matters, and two inputs with the same source identity (same
 class, schemas and `source_id`) count as one input: `MergeJoin()(m1, m1b)` hashes like
 `MergeJoin()(m1, m1)` when `m1b` has the `source_id` of `m1`.
+
+**Inputs with equal pipeline hashes tie, and argument order never breaks the tie** (developer
+decision, November 16, 2026, ITL-1154). The system-tag column names follow the stable
+pipeline-hash sort, and each row's system-tag values at the tied positions are sorted by
+(source id, record id) (`arrow_utils.sort_system_tag_values`), so `MergeJoin()(a, b)` and
+`MergeJoin()(b, a)` over two sources of one schema give the same rows, the same column names
+and the same hashes.
 
 **Known exclusions from `identity_structure()`:**
 

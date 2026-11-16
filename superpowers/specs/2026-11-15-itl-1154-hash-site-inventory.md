@@ -142,7 +142,7 @@ P15, P16, P23 (random ids). All ok.
 | X1 | `execute` / `async_execute` of function, operator and source nodes (`node_hash`) | observer events |
 | X2 | `function_pod.py` `_build_post_run_payload`, `hooks.py` | `pod_hash` passed to hooks |
 | X3 | `pipeline/base.py` `compile`, `_record_invocation`; `pipeline/job.py` `compile` | in-memory graph keys and sort keys (labelled strings) |
-| X4 | `join.py` `order_input_streams`, `merge_join.py` `_canonical_order` (sort by `to_hex`) | canonical input order (ordering only) |
+| X4 | `join.py` `order_input_streams`, `merge_join.py` `_canonical_order` (sort by `to_hex`) | canonical input order (ordering only). Ties between equal pipeline hashes: kept as they are (developer decision, November 16, 2026): per-row value sort, frozenset identity |
 | X5 | `ContentIdentifiableBase` / `ContentIdentifiableMixin` `__hash__`, `__eq__`, `__repr__`; `ContentHash.display_name` | in-memory identity, repr |
 | X6 | `operator_node.py` (`_read_run_records`), `source_proxy.py` / `data_function_proxy.py` (`bind`), `pipeline/job.py` `bind`, `errors.py` `EphemeralResultMissingError` (repr) | comparing a stored hash with the computed one; error text |
 
