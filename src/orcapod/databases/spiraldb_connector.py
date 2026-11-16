@@ -947,6 +947,13 @@ class SpiralDBConnector:
         if len(novel) > 0:
             write_rows(novel)
 
+    @property
+    def keeps_field_metadata(self) -> bool:
+        """Whether this connector keeps Arrow field metadata: it does, in the native KV
+        store (ITL-1019). Verified against the pyspiral fake only; schema evolution
+        is refused by ``ConnectorArrowDatabase``."""
+        return True
+
     def validate_records(self, records: pa.Table) -> None:
         """No-op: ``SpiralDBConnector`` preserves Arrow field metadata via the native KV store."""
 

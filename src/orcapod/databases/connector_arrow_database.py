@@ -269,6 +269,17 @@ class ConnectorArrowDatabase:
             flush=flush,
         )
 
+    @property
+    def keeps_field_metadata(self) -> bool:
+        """Whether this database keeps Arrow field metadata: as its connector states.
+
+        A connector without the ``keeps_field_metadata`` member does not keep it
+        (ITL-1019).
+        """
+        from orcapod.protocols.database_protocols import keeps_field_metadata
+
+        return keeps_field_metadata(self._connector)
+
     def validate_records(self, records: pa.Table) -> None:
         """Raise ``ValueError`` if the connector could not store ``records`` as given.
 

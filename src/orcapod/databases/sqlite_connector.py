@@ -391,6 +391,11 @@ class SQLiteConnector:
             rows = (tuple(row[c] for c in cols) for row in records.to_pylist())
             conn.executemany(sql, rows)
 
+    @property
+    def keeps_field_metadata(self) -> bool:
+        """Whether this connector keeps Arrow field metadata: it does not (ITL-1019)."""
+        return False
+
     def validate_records(self, records: pa.Table) -> None:
         """Reject tables carrying any Arrow field or schema metadata.
 

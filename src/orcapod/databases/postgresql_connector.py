@@ -527,6 +527,11 @@ class PostgreSQLConnector:
                 conn.rollback()
                 raise
 
+    @property
+    def keeps_field_metadata(self) -> bool:
+        """Whether this connector keeps Arrow field metadata: it does not (ITL-1019)."""
+        return False
+
     def validate_records(self, records: pa.Table) -> None:
         """Reject tables carrying any Arrow field or schema metadata.
 

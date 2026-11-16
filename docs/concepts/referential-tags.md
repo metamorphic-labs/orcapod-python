@@ -142,10 +142,14 @@ column that carries Arrow field metadata: the key `orcapod:tag_kind` with the va
 marker. The function's result table never records referential status, so plain and
 referential runs of the same function share their results. The marker moves no hash, and
 the stores keep it on every write (first write, append, merge, schema evolution; in
-memory and on Delta). The SQLite and PostgreSQL databases keep no Arrow
-metadata at all: a function node that would store a referential tag there is refused when
-its database is attached, before anything is written. Use a database that keeps field
-metadata, or keep those tags plain with `tag_only_columns`.
+memory and on Delta). A database states whether it keeps
+field metadata with `keeps_field_metadata`
+(`orcapod.protocols.database_protocols.FieldMetadataKeepingDatabaseProtocol`): the
+in-memory, Delta and SpiralDB databases do; the SQLite and PostgreSQL databases keep no
+Arrow metadata at all. A node that would store a referential tag in a database that does
+not state it (a database without the member included) is refused when its database is
+attached, before anything is written. Use a database that keeps field metadata, or keep
+those tags plain with `tag_only_columns`.
 
 ```python
 from orcapod.core.referential_tags import stored_references
