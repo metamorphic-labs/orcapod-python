@@ -55,7 +55,9 @@ def test_building_a_source_is_quick_and_names_the_table():
     elapsed = time.monotonic() - start
 
     assert elapsed < 10
-    assert source.source_id == f"{PROJECT}/default.spike_event@{source.table_id}"
+    assert source.source_id == (
+        f"spiraldb_table:{PROJECT}/default.spike_event@{source.table_id}"
+    )
     assert source.table_id.startswith("table_")
     assert "unit_id" in source.keys()[0]
     assert source.row_count_estimate > 0
