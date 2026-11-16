@@ -341,8 +341,8 @@ class ConnectorArrowDatabase:
                 f"got {rid_type}. Encode the column to bytes before calling add_records()."
             )
 
-        self._connector.validate_records(records)
         self.require_storable(records.schema)
+        self._connector.validate_records(records)
 
         records = self._deduplicate_within_table(records)
         record_key = self._get_record_key(record_path)
@@ -453,11 +453,12 @@ class ConnectorArrowDatabase:
                 # A connector reads text and binary back in their large variants,
                 # which are the same types (ITL-1162).
                 existing_cols = {
-                    c.name: normalize_to_large_types(c.arrow_type)
+                    c.name: normalize_to_large_types(c.arrow_type, keep_null=True)
                     for c in self._connector.get_column_info(table_name)
                 }
                 pending_cols = {
-                    c.name: normalize_to_large_types(c.arrow_type) for c in columns
+                    c.name: normalize_to_large_types(c.arrow_type, keep_null=True)
+                    for c in columns
                 }
                 if existing_cols != pending_cols:
 

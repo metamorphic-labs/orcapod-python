@@ -608,3 +608,25 @@ class TestRefusedBindLeavesJobAsItWas:
         assert CALLS == []
         assert sorted(job.nodes["dbl"].as_table()["double"].to_pylist()) == [2, 4]
         assert sqlite.list_table_paths() == []
+
+
+class TestWriteChecksOrder:
+    def test_extension_type_refused_as_unstorable_column(self, tmp_path: pathlib.Path):
+        """The type rule runs before the metadata check (CodeRabbit, ITL-1162)."""
+        database = _sqlite_database(tmp_path)
+        table = pa.table({"u": pa.array([b"0123456789abcdef"], type=pa.uuid())})
+
+        with pytest.raises(UnstorableColumnError) as exc_info:
+            database.add_record(("t",), b"1", table)
+
+        assert exc_info.value.column == "u"
+
+    def test_null_column_is_not_a_large_string_column(self, spiral_database):
+        """The schema comparison keeps ``null``: a later ``large_string`` is a change."""
+        null_table = pa.table({"v": pa.array([None], type=pa.null())})
+        text_table = pa.table({"v": pa.array(["a"], type=pa.large_string())})
+        spiral_database.add_record(("t",), b"1", null_table, flush=True)
+
+        spiral_database.add_record(("t",), b"2", text_table)
+        with pytest.raises(ValueError, match="Schema mismatch"):
+            spiral_database.flush()
