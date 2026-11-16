@@ -531,13 +531,8 @@ class TestOutputSchemaPrediction:
 
 # ── referential tags (ITL-1023) ─────────────────────────────────────────────
 
-# Not supported with referential tags yet: Batch (ITL-1017), MergeJoin (ITL-1018),
-# SelectColumns and DropColumns (ITL-1022).
-REFERENTIAL_STEPS = [
-    step
-    for step in STEPS
-    if step not in ("merge_join", "batch", "select_columns", "drop_columns")
-]
+# Not supported with referential tags yet: Batch (ITL-1017), MergeJoin (ITL-1018).
+REFERENTIAL_STEPS = [step for step in STEPS if step not in ("merge_join", "batch")]
 
 
 @pytest.fixture

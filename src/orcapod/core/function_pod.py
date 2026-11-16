@@ -18,6 +18,7 @@ from orcapod.core.datagrams import Data
 from orcapod.core.referential_tags import (
     materialization_diagnostic_off,
     not_supported_yet,
+    reference_names,
     stream_references,
 )
 from orcapod.core.streams.base import (
@@ -252,9 +253,46 @@ class _FunctionPodBase(TraceableBase):
             ValueError: If inputs are incompatible with the data function schema.
         """
         input_stream = self.handle_input_streams(*streams)
-        incoming_tag_schema, incoming_data_schema = input_stream.output_schema()
-        self._validate_input_schema(incoming_data_schema)
-        self._validate_output_keys(incoming_tag_schema.keys())
+        self._validate_input(*input_stream.output_schema())
+
+    def _validate_input(self, tag_schema: Schema, data_schema: Schema) -> None:
+        """Validate a (joined) input's schemas against the function.
+
+        Its data must fit the function's parameters (``_validate_input_schema``) and no
+        output key may be one of its tags (``_validate_output_keys``). When the data
+        does not fit and the input has referential tags the function does not read,
+        the error says so and names the ways out: this is the exact form, which hands
+        every data column to the function (ITL-1022).
+
+        Args:
+            tag_schema: The input's tag schema.
+            data_schema: The input's data schema.
+
+        Raises:
+            ValueError: If the data does not fit the function's parameters.
+            InputValidationError: If an output key of the function is a tag name.
+        """
+        try:
+            self._validate_input_schema(data_schema)
+        except ValueError as error:
+            parameters = self.input_data_schema
+            unread = [
+                name
+                for name in reference_names(tag_schema, data_schema)
+                if name not in parameters
+            ]
+            if not unread:
+                raise
+            raise ValueError(
+                f"{error}. {unread} are referential tags of the input (each a tag "
+                "and a data column of one name) that the function does not read, and "
+                "the exact form, pod.process(stream) or pod(stream, strict=True), "
+                "hands every data column to the function. Call the pod as "
+                "pod(stream) to let them pass through as referential tags, or build "
+                f"the source with tag_only_columns={unread} (or True) to keep them "
+                "plain tags"
+            ) from error
+        self._validate_output_keys(tag_schema.keys())
 
     def _validate_output_keys(self, tag_names: Collection[str]) -> None:
         """Reject an output key that is also a tag column of the input.
@@ -808,9 +846,7 @@ class _FunctionPodBase(TraceableBase):
         tag_schema, incoming_data_schema = self.multi_stream_handler().output_schema(
             *streams, columns=columns, all_info=all_info
         )
-        # validate that incoming_data_schema is valid
-        self._validate_input_schema(incoming_data_schema)
-        self._validate_output_keys(tag_schema.keys())
+        self._validate_input(tag_schema, incoming_data_schema)
         # The output schema of the FunctionPodProtocol is determined by the data function
         # TODO: handle and extend to include additional columns
         # Namely, the source columns
@@ -907,9 +943,7 @@ class FunctionPod(_FunctionPodBase):
         input_stream = self.handle_input_streams(*streams)
 
         # perform input stream schema validation
-        tag_schema, data_schema = input_stream.output_schema()
-        self._validate_input_schema(data_schema)
-        self._validate_output_keys(tag_schema.keys())
+        self._validate_input(*input_stream.output_schema())
         self.tracker_manager.record_function_pod_invocation(
             self, input_stream, label=label
         )

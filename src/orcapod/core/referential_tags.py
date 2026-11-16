@@ -176,7 +176,8 @@ def not_supported_yet(operation: str, issue: str) -> NotImplementedError:
     """
     return NotImplementedError(
         f"{operation}: not supported with referential tags yet ({issue}). Build the "
-        "source with tag_only_columns=[...] to keep those tags plain."
+        "source with tag_only_columns=True to keep every tag plain, as in v0.3, or "
+        "tag_only_columns=[...] to keep the named tags plain."
     )
 
 

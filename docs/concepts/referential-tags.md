@@ -82,10 +82,11 @@ does not make it compute again.
 | `GroupBy` | A group key stays scalar in both roles, and its source info is one merged token (below). A non-key loses its tag role, as every non-key tag does, but keeps its data column: a list like every other data column, one source-info token per member. The members are ordered by the non-key tags, so that list is in value order and the other data lists follow it. |
 | `SelectDataColumns`, `DropDataColumns` | Removing the data column leaves `x` a plain tag with the same values, with a `ReferenceMaterializationWarning`. |
 | `SelectTagColumns`, `DropTagColumns` | Removing the tag leaves `x` a data column. |
+| `SelectColumns`, `DropColumns` | `x` is one column, so naming it acts on both roles: selecting it keeps `x` referential, dropping it (or not selecting it) removes the column from both roles. The roles are never split, so nothing is materialized. |
 | `MapTags` / `map_tags` | Renames the column in both roles; `tag_only=True` renames the tag only and leaves a plain tag. |
 | `MapData` / `map_data` | Always a data-only move: the data column is renamed and `x` stays a plain tag. |
 | Filters, `DropNulls`, `SemiJoin`, `Pick`, `Index` | Keep the reference. |
-| `Batch`, `MergeJoin`, `SelectColumns`, `DropColumns` | Not supported with referential tags yet: they raise. |
+| `Batch`, `MergeJoin` | Not supported with referential tags yet: they raise. |
 
 ```python
 units = op.sources.DictSource(
@@ -96,6 +97,31 @@ units = op.sources.DictSource(
 joined = spikes.join(units)
 print(joined.keys())
 # (('unit', 'time'), ('unit', 'area', 'time', 'amp'))
+```
+
+```python
+print(spikes.select_columns(["time", "amp"]).keys())
+# (('time',), ('time', 'amp'))
+print(spikes.drop_columns(["time"]).keys())
+# (('unit',), ('unit', 'amp'))
+```
+
+### After `GroupBy`: rename a non-key column with `map_data`
+
+`GroupBy` keeps only its key tags, and drops every other tag itself: there is nothing left
+to drop with `drop_tag_columns` afterwards (that raises, since the tag is gone). A
+referential non-key column loses its tag role there, but keeps its data column, a list
+like every other data column. So after the grouping it is data only, and is renamed with
+`map_data`; `map_tags` would find no tag of that name and rename nothing.
+
+```python
+by_unit = spikes.group_by(["unit"])
+print(by_unit.keys())
+# (('unit',), ('unit', 'time', 'amp'))
+
+renamed = by_unit.map_data({"time": "times"})
+print(renamed.keys())
+# (('unit',), ('unit', 'times', 'amp'))
 ```
 
 ### Source info of a merged value
@@ -136,6 +162,20 @@ referential_tags.reference_materialization = "warn"  # the default
 ## Not supported yet
 
 These raise "not supported with referential tags yet" when a referential tag reaches them:
-`Batch`, `MergeJoin`, `SelectColumns`, `DropColumns`, storing an operator node's results (`LOG` and `REPLAY` cache modes),
+`Batch`, `MergeJoin`, storing an operator node's results (`LOG` and `REPLAY` cache modes),
 `DerivedSource` over a stream with referential tags, and saving a pipeline or job.
-`PollingSource` keeps its tags plain.
+`PollingSource` keeps its tags plain. Each error names its issue and the way out: build the
+source with `tag_only_columns=True` to keep every tag plain, as in v0.3.
+
+## Errors that name a referential tag
+
+- `pod.process(stream)` and `pod(stream, strict=True)` are exact: they hand every data
+  column to the function, so a referential tag the function does not read is refused like
+  any extra column. The error names the referential tags and the two ways out: call the
+  pod, `pod(stream)`, which lets them pass through, or keep them plain with
+  `tag_only_columns`.
+- Binding a source to a job's input slot is strict: a column that is a referential tag on
+  one side and a plain tag or a data column on the other is refused (it is listed as a
+  missing or unexpected column). The error says which side holds it as a referential tag,
+  and how to make the two agree: `tag_only_columns` on the source, or a slot declared with
+  the column in both roles.
