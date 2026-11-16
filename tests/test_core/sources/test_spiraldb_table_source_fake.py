@@ -327,7 +327,7 @@ class TestSourceId:
             Schema({"sex": str | None}),
         )
         assert self._identity(source) == (
-            "semantic_v1:f876112385f90f7ee2b9f8a856bbc91386057600c029b7f4e358cd2fee47a02f",
+            "semantic_v1:742aca7f6359844b4999e5bce29fda0769dca57e737d585e9ab4020c6dc6147c",
             self._M1,
             f"subject::{self._M1}::sex",
         )
@@ -351,7 +351,7 @@ class TestSourceId:
             "edi-sample-a", "subject", source_id="subject", tag_only_columns=True
         )
         assert self._identity(source) == (
-            "semantic_v1:12ebbe62805e556e94bc50165be00d91ab4aa308afcd6e74eb5b5af031daa0d2",
+            "semantic_v1:6f4e8a26863d5efe7ccdc6d0859624960c9a6c6e36a0ca94ce62e48b68149dcc",
             self._M1,
             f"subject::{self._M1}::sex",
         )

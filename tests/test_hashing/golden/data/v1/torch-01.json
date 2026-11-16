@@ -1,5 +1,5 @@
 {
-  "datagram.content_hash": "semantic_v1:cd1cd96bc9821435ecf451e7d68ea3eb9ffcd4e815b3eaca6cd3c587098b8092",
+  "datagram.content_hash": "semantic_v1:385e4314d082b1fa78f6f627c771909df6aaa8ee43d93be3c978a3813fe2c6d4",
   "datagram.pipeline_hash": "semantic_v1:bfc7294530f474c3fb9e7b41389d74a0bc9ce5f193c38c6a1f12a46d426f858e",
   "datagram.row[{\"k\":\"r1\"}]._tag_record_id::bfc7294530f474c3fb9e7b41389d74a0bc9ce5f193c38c6a1f12a46d426f858e": "row_0",
   "datagram.row[{\"k\":\"r1\"}]._tag_source_id::bfc7294530f474c3fb9e7b41389d74a0bc9ce5f193c38c6a1f12a46d426f858e": "golden_torch_tensor",

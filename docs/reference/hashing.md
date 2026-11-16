@@ -134,7 +134,7 @@ stored = rule_store.get_all_records(pipeline_table)
 print(ContentHash.from_prefixed_digest(stored["__input_data_hash"][0].as_py()))
 # arrow_v1:000002fcbe7eec1821a57679d34084a583d8282798563aa706ecb9c0c24382580de4df
 print(ContentHash.from_prefixed_digest(stored["__node_content_hash"][0].as_py()))
-# semantic_v1:b64c44d1c7e0f7cbbf9db0f61ff3c085326b5a69fc6b83e6af9b5bc4e8ac2bb5
+# semantic_v1:43529fee65d63d64303db070024f9dbae24ba6f9c3e9ec0ebc12c79f5dde6ddb
 print([name for name in stored.column_names if name.startswith("_tag_source_id")])
 # ['_tag_source_id::3bd6e739b7e15bd3402717af3bafd487d480f3b382028cb22c2250fcb6a90e64']
 ```
@@ -369,11 +369,11 @@ side_pod = SideEffectPod(_log_fn, ctx_arg_name="ctx")
 
 | Object | `content_hash()` | `pipeline_hash()` |
 |--------|-----------------|-------------------|
-| `scores` | `semantic_v1:916b3881098e81b475b6ee1a40700ae8683cec275c23f0ba5e872bbeacdc6ef7` | `semantic_v1:a19744e791fb1f4c5431daad4380327d8c45f52d4f9353ce944b287265097650` |
-| `attendance` | `semantic_v1:2d88820efbb03cb124fbb8d78f4c54111c2f2b10cdc137bf7751364b202bf146` | `semantic_v1:eb2bdc439e8a48f8246b2ea8d52227418571f43c998be577b5a1c0794ca4d749` |
-| `joined` | `semantic_v1:26e7a8550d7ccaddbf852398858907667c708c9c91a14f4f8480a503d0ac3759` | `semantic_v1:a308714c9fb11116c31a493dd1a09be8b43654b8b8e07acbfbd9fbfb72998571` |
+| `scores` | `semantic_v1:80462569849407b33efc33ecc0381cd0858643c31d9349a350eb5fbc71e9208f` | `semantic_v1:a19744e791fb1f4c5431daad4380327d8c45f52d4f9353ce944b287265097650` |
+| `attendance` | `semantic_v1:48795b2977ca4fb5cadc4d8f57436a593555a36d69d1b39126b8a6f177847106` | `semantic_v1:eb2bdc439e8a48f8246b2ea8d52227418571f43c998be577b5a1c0794ca4d749` |
+| `joined` | `semantic_v1:792d218f5fcbceab6d8012bf35ef49c663c04b4e04e8c06d34e5879150a04964` | `semantic_v1:a308714c9fb11116c31a493dd1a09be8b43654b8b8e07acbfbd9fbfb72998571` |
 | `pod` | `semantic_v1:781abfcf2b8637daa3393e0e94e4b9b5b9709c7869cf44049819a2946f9d18ec` | `semantic_v1:781abfcf2b8637daa3393e0e94e4b9b5b9709c7869cf44049819a2946f9d18ec` |
-| `node` | `semantic_v1:21329bac1782f818074dfe7410277e3341e9dacff326ae252517442b7ab04fc6` | `semantic_v1:0ae6bcf82d5a5e52b4ba8de2bc389335d448ad5dc2703ab8e3149199b77c2ba0` |
+| `node` | `semantic_v1:e51bb0b27c83974fa4bd5f92d2144036e4ccb71f40448bec72f0edced01391d7` | `semantic_v1:0ae6bcf82d5a5e52b4ba8de2bc389335d448ad5dc2703ab8e3149199b77c2ba0` |
 
 > `pod.content_hash() == pod.pipeline_hash()` because `grade` has no `ctx_arg_name`, so
 > `identity_structure()` and `pipeline_identity_structure()` return the same value.
@@ -446,13 +446,13 @@ each suffix is the stream's `pipeline_hash()` (sites 1b and 6).
 | Site | Item | Value |
 |------|------|-------|
 | 12 | `run_id` | *(non-deterministic — changes each run)* |
-| 13 | `snapshot_hash` | `0810448026f328d0` |
+| 13 | `snapshot_hash` | `ec336c684fa5c875` |
 | 14 | `datagram_uuid` | *(time-ordered UUID v7 — changes each run)* |
 
-> `snapshot_hash = "0810448026f328d0"` is deterministic: the pipeline has one leaf node whose
+> `snapshot_hash = "ec336c684fa5c875"` is deterministic: the pipeline has one leaf node whose
 > `content_hash().to_string()` is
-> `"semantic_v1:963861d601d30a7858e2b80c355024a0071449b8324d90cfb69c2875a8bb927d"`.
-> `hashlib.sha256(leaf_hash.encode()).hexdigest()[:16]` = `"0810448026f328d0"`. The hash
+> `"semantic_v1:195343e1e04294d53c252fba6b24a048688a0bfaf8236df866a9e881d6ab2d8e"`.
+> `hashlib.sha256(leaf_hash.encode()).hexdigest()[:16]` = `"ec336c684fa5c875"`. The hash
 > enters with its label.
 
 ---

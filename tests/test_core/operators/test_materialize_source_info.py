@@ -601,7 +601,7 @@ class TestIdentityPinned:
             "semantic_v1:c8cae9378bede79d28f76996ed259870c8d2ca5a098acc6ff51c5e9d1f1ef7f8"
         )
         assert node.content_hash().to_string() == (
-            "semantic_v1:c6678fc8cc56d4ba4704d0ac1971da3d9d52373c727239be05583e122c27bc19"
+            "semantic_v1:d1aec65936bf8878f51638b2fdc5350d976a46e06eb27f1900e2cf43402d8d87"
         )
         ids = _record_ids(node)
         assert ids["a"] == ROW_ZERO_RECORD_ID
@@ -630,20 +630,21 @@ class TestIdentityPinned:
 # given ``source_id``, and its default id (now ``arrow_table:<label>:<hex>``) is part of
 # every source-info token these record hashes cover. Re-recorded for ITL-1154: a
 # source-info token now holds the row identifier (``row_<n>``) and the full-length
-# default source id.
+# default source id. Re-recorded again for ITL-1154 (key columns in a source's
+# identity): the node content hash, which every stored row hash covers, moved.
 ROW_ZERO_RECORD_ID = b"arrow_v1:" + bytes.fromhex(
-    "0000026641dfcb5c91f51a51e3777fcf0888b16f0075eb3f6bfe47c5eaf23a2b52dbb7"
+    "000002bbc126062384bfa4de05339a770b5f3e57180a980b25a58dbbd8b82a699c646e"
 )
 PRE_FIX_RECORD_IDS = frozenset(
     {
         ROW_ZERO_RECORD_ID,
         b"arrow_v1:"
         + bytes.fromhex(
-            "000002ce7593dd7fd04d3a61c0147edf2d3786bb440932d674d98708ec7eb7e39f2b2a"
+            "000002b8a3da15135dad402dfb5c8743130749eccff27236d54677d4b12fbc2ef656d7"
         ),
         b"arrow_v1:"
         + bytes.fromhex(
-            "00000281a8327b4deb26ede41aa34333b273c387068987dc56a70c3761500f0c3489bf"
+            "00000222756f5e433bce8378cf38aace9a2d6686ae621241da4ff47ea3936bbd0bb44d"
         ),
     }
 )
