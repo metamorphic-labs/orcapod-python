@@ -988,7 +988,7 @@ data. The rules:
   `record_id_columns` (a name or several, in key order; `()` asks for the position).
   Defaults: database tables and SpiralDB, the primary key (a database table without one is
   refused); in-memory, CSV and Delta, the position; `PollingSource` requires key columns. A
-  key value is a string, an integer or a boolean (provisionally a timestamp or a date, as
+  key value is a string, an integer, a boolean, a timestamp or a date (the last two as
   ISO-8601 text); any other type, a null key and a repeated key are refused when the source is
   built. Never format one by hand, and
   never write a label as a literal; a new root source declares `SOURCE_KIND` and builds its

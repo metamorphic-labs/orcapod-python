@@ -187,7 +187,7 @@ or several, in key order; every source accepts it):
 | `row_<n>` | the row's position: the default of in-memory, CSV and Delta sources, or `record_id_columns=()` |
 | `{"<column>":<value>,...}` | key columns: those named, or by default the primary key of a database table (SQLite, PostgreSQL, another connector) and of a SpiralDB table. Canonical JSON in key order, no spaces; `17` and `"17"` differ |
 
-A key value must be a string, an integer or a boolean, or (provisionally) a timestamp, written
+A key value must be a string, an integer, a boolean, a timestamp (developer, November 16, 2026), written
 as ISO-8601 text from its stored integer (a naive timestamp without an offset, a zoned one in
 UTC with `Z`, the fraction digits fixed by the unit), or a date, `YYYY-MM-DD`. Any other type
 (floats, bytes, times of day, UUIDs, containers, logical types) is refused when the source is
