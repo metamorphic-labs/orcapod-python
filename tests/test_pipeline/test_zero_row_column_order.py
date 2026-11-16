@@ -500,12 +500,23 @@ _NULLABLE_MEMBER = pytest.mark.xfail(
         "(ITL-1136: the Arrow-to-Python reading drops list item nullability)"
     ),
 )
-PREDICTION_STEPS = [
-    pytest.param(step, marks=_NULLABLE_MEMBER)
-    if step in ("batch", "group_by")
-    else step
-    for step in OPERATOR_STEPS
-]
+
+
+def _prediction_steps(steps: list[str]) -> list[Any]:
+    """``steps`` as prediction cases, with the known failure marked on its steps.
+
+    Filter the raw step names before calling this: a marked step is a
+    ``pytest.param``, which is not equal to its name.
+    """
+    return [
+        pytest.param(step, marks=_NULLABLE_MEMBER)
+        if step in ("batch", "group_by")
+        else step
+        for step in steps
+    ]
+
+
+PREDICTION_STEPS = _prediction_steps(OPERATOR_STEPS)
 
 
 @pytest.mark.parametrize("config", list(COLUMN_CONFIGS))
@@ -587,7 +598,10 @@ TestReferentialOutputSchemaPrediction = pytest.mark.usefixtures("referential")(
     pytest.mark.parametrize("config", list(COLUMN_CONFIGS))(
         pytest.mark.parametrize("pairs", PAIRS)(
             pytest.mark.parametrize(
-                "step", [step for step in PREDICTION_STEPS if step in REFERENTIAL_STEPS]
+                "step",
+                _prediction_steps(
+                    [step for step in OPERATOR_STEPS if step in REFERENTIAL_STEPS]
+                ),
             )(
                 type(
                     "TestReferentialOutputSchemaPrediction",
