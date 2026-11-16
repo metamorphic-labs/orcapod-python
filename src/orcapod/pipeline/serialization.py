@@ -1386,9 +1386,13 @@ def check_saved_output_schema_is_plain(
         descriptor: A node descriptor of a saved pipeline.
         version: The file's format version.
 
+    A source node is rebuilt from its source config's ``tag_schema`` and
+    ``data_schema`` when the config holds them, so those are checked too.
+
     Raises:
         ValueError: If the version holds only plain tags and the node's saved tag and
-            data halves share a name.
+            data halves share a name, in its output schema or in the schemas its
+            source config restores.
     """
     from orcapod.core.referential_tags import reference_names
 
@@ -1402,6 +1406,19 @@ def check_saved_output_schema_is_plain(
             f"a file at format {version} holds only plain tags, but the saved output "
             f"schema has the referential tags {list(shared)}"
         )
+    source_config = descriptor.get("source_config") or {}
+    if shared := reference_names(
+        source_config.get("tag_schema") or {}, source_config.get("data_schema") or {}
+    ):
+        raise ValueError(
+            f"a file at format {version} holds only plain tags, but the saved source "
+            f"schema has the referential tags {list(shared)}"
+        )
+
+
+# The fields of a source config that hold a nested source config: a cached source's
+# inner source and a derived source's origin.
+NESTED_SOURCE_CONFIG_KEYS = ("inner_source", "origin")
 
 
 def source_config_at_version(config: dict[str, Any], version: str) -> dict[str, Any]:
@@ -1428,12 +1445,13 @@ def source_config_at_version(config: dict[str, Any], version: str) -> dict[str, 
     _ensure_registries()
     plain_version = version in PLAIN_TAG_FORMAT_VERSIONS
 
-    def upgrade(value: Any) -> Any:
-        if isinstance(value, list):
-            return [upgrade(item) for item in value]
-        if not isinstance(value, dict):
-            return value
-        upgraded = {key: upgrade(item) for key, item in value.items()}
+    def upgrade(value: dict[str, Any]) -> dict[str, Any]:
+        # Only the nested source fields hold source configs; any other mapping (a
+        # filter such as ``where``) is the source's own data, whatever its keys.
+        upgraded = dict(value)
+        for key in NESTED_SOURCE_CONFIG_KEYS:
+            if isinstance(upgraded.get(key), dict):
+                upgraded[key] = upgrade(upgraded[key])
         cls = SOURCE_REGISTRY.get(upgraded.get("source_type"))  # pyright: ignore[reportArgumentType]  # any saved value
         if cls is None or not getattr(cls, "TAKES_TAG_ONLY_COLUMNS", False):
             return upgraded
@@ -1487,6 +1505,9 @@ def check_source_config_binding(
     # ``None``: a database source takes its tags from the table's keys when read.
     if tag_columns is None or "tag_only_columns" not in config:
         return
+    # A source takes one tag name as a bare string: that name, never its characters.
+    if isinstance(tag_columns, str):
+        tag_columns = [tag_columns]
     configured = source_reference_tags(tag_columns, config["tag_only_columns"])
     declared = reference_names(tag_names, data_names)
     if set(configured) != set(declared):

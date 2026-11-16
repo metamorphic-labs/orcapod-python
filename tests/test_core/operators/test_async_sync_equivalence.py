@@ -498,6 +498,25 @@ CASES = [
         lambda: GroupBy(["ta"]),
         lambda: (source_a(referential=True),),
     ),
+    # Batch keeps every tag list-valued; a referential tag is the same list in both
+    # roles and stays referential (ITL-1017).
+    Case(
+        "ref_batch_2",
+        lambda: Batch(batch_size=2),
+        lambda: (source_a(referential=True),),
+    ),
+    Case(
+        "ref_batch_2_drop_partial",
+        lambda: Batch(batch_size=2, drop_partial_batch=True),
+        lambda: (source_a(referential=True),),
+    ),
+    Case("ref_batch_all", Batch, lambda: (source_a(referential=True),)),
+    Case(
+        # The group key's merged tokens are listed, one per member: nothing new is folded.
+        "ref_batch_after_group_by",
+        lambda: Batch(batch_size=2),
+        lambda: (GroupBy(["k"])(source_a(referential=True)),),
+    ),
     Case(
         "ref_polars_filter",
         lambda: PolarsFilter(constraints={"ta": 5}),
@@ -516,6 +535,17 @@ CASES = [
     Case(
         "ref_drop_data_columns",
         lambda: DropDataColumns(["k"]),
+        lambda: (source_a(referential=True),),
+    ),
+    # A referential tag named or not named is kept or removed in both roles (ITL-1022).
+    Case(
+        "ref_select_columns",
+        lambda: SelectColumns(["k", "i8", "st"]),
+        lambda: (source_a(referential=True),),
+    ),
+    Case(
+        "ref_drop_columns",
+        lambda: DropColumns(["ta", "s"]),
         lambda: (source_a(referential=True),),
     ),
     Case(
@@ -900,6 +930,26 @@ def test_async_provenance_equals_sync(case: Case) -> None:
     assert_same_provenance(
         sync_rows(case.make_op(), *sources), async_rows(case.make_op(), *sources)
     )
+
+
+@pytest.mark.parametrize("empty", [False, True], ids=["rows", "no_rows"])
+def test_batch_of_a_batch_keeps_its_references_on_both_paths(empty: bool) -> None:
+    """A batched referential tag batched again nests one level deeper, in both roles.
+
+    Outside the matrix: its list-valued ``k`` cannot be emptied by ``no_rows``, so the
+    rows are removed before the first ``Batch`` (ITL-1017).
+    """
+    source = source_a(referential=True)
+    batched = Batch(batch_size=2)(no_rows(source) if empty else source)
+    expected = sync_rows(Batch(), batched)
+    op = Batch()
+    _ = op(batched)
+    actual = async_rows(op, batched)
+    assert len(actual) == len(expected) == (0 if empty else 1)
+    assert_equivalent(expected, actual)
+    assert_same_provenance(expected, actual)
+    for tag, data in actual:
+        assert tag["k"] == data["k"] == [[1, 2], [3]]
 
 
 def test_semijoin_with_nested_columns() -> None:

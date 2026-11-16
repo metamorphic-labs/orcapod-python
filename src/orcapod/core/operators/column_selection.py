@@ -644,7 +644,15 @@ class _TagAndDataColumnsOperator(UnaryOperator, ABC):
     Unlike those operators, no data meta (``__``) column of the input is carried,
     on either path, as ``Join`` does; and a result without a data column is refused
     when the operator is called, on both paths.
+
+    A referential tag (ITL-1022) is one physical column whose name is in both
+    groups, so naming it acts on that one column in both roles: it is kept as a
+    referential tag or removed from both, never split into a plain tag and a data
+    column. Nothing is materialized, so these operators never report it.
     """
+
+    # Referential tags: handled (ITL-1022). A name acts on both roles alike.
+    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = None
 
     _verb: ClassVar[str] = ""
 
@@ -757,6 +765,11 @@ class _TagAndDataColumnsOperator(UnaryOperator, ABC):
                 ]
             ),
             tag_columns=[c for c in tag_columns if c not in tags_removed],
+            # A referential tag is kept or removed in both roles at once, so every
+            # kept one is still referential.
+            reference_tags=[
+                c for c in stream_references(stream) if c not in tags_removed
+            ],
             data_context=stream.data_context_key,
         )
 

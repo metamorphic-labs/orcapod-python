@@ -12,7 +12,7 @@ stream's public methods.
 from __future__ import annotations
 
 import warnings
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import pyarrow as pa
@@ -22,6 +22,7 @@ import orcapod as op
 from orcapod.core import referential_tags
 from orcapod.core.operators import (
     Batch,
+    DropColumns,
     DropDataColumns,
     DropNulls,
     DropTagColumns,
@@ -33,6 +34,7 @@ from orcapod.core.operators import (
     MergeJoin,
     Pick,
     PolarsFilter,
+    SelectColumns,
     SelectDataColumns,
     SelectTagColumns,
     SemiJoin,
@@ -317,6 +319,121 @@ def test_removing_a_referential_tag_keeps_its_data(drop) -> None:
     assert data.source_info()["x"] == "S::row_0::x"
 
 
+# ── SelectColumns / DropColumns: one physical column (ITL-1022) ────────────
+
+
+def _xky(**kw: Any):
+    """Referential tags ``k`` and ``x``; data ``y``."""
+    return _ref(
+        [{"k": 1, "x": 10, "y": 2}, {"k": 2, "x": 20, "y": 3}], ["k", "x"], "C", **kw
+    )
+
+
+@pytest.mark.parametrize(
+    ("make_op", "keys", "references"),
+    [
+        # Naming a referential tag keeps its one column in both roles.
+        (lambda: SelectColumns(["x", "y"]), (("x",), ("x", "y")), ("x",)),
+        (lambda: SelectColumns(["x"]), (("x",), ("x",)), ("x",)),
+        # Not naming it removes the column, in both roles.
+        (lambda: SelectColumns(["k", "y"]), (("k",), ("k", "y")), ("k",)),
+        # Dropping it removes the column, in both roles.
+        (lambda: DropColumns(["x"]), (("k",), ("k", "y")), ("k",)),
+        (lambda: DropColumns(["k", "x"]), ((), ("y",)), ()),
+        # Not naming it keeps it referential.
+        (lambda: DropColumns(["y"]), (("k", "x"), ("k", "x")), ("k", "x")),
+    ],
+    ids=["select_x_y", "select_x", "select_k_y", "drop_x", "drop_k_x", "drop_y"],
+)
+def test_select_and_drop_columns_act_on_the_one_column_in_both_roles(
+    make_op, keys, references
+) -> None:
+    with warnings.catch_warnings():
+        # Neither splits the roles, so nothing is materialized.
+        warnings.simplefilter("error", ReferenceMaterializationWarning)
+        result = make_op()(_xky())
+    assert result.keys() == keys
+    assert stream_references(result) == references
+    table = result.as_table(columns={"source": True})
+    tag_keys, data_keys = keys
+    for name in ("k", "x", "y"):
+        present = name in tag_keys or name in data_keys
+        assert table.column_names.count(name) == int(present)
+        assert (f"_source_{name}" in table.column_names) == (name in data_keys)
+    for tag, data in result.iter_data():
+        for name in references:
+            assert tag[name] == data[name]
+
+
+def test_selected_reference_keeps_its_values_and_source_info() -> None:
+    result = SelectColumns(["x", "y"])(_xky())
+    assert _rows(result) == [{"x": 10, "y": 2}, {"x": 20, "y": 3}]
+    assert result.as_table(columns={"source": True}).column(
+        "_source_x"
+    ).to_pylist() == ["C::row_0::x", "C::row_1::x"]
+
+
+@pytest.mark.parametrize(
+    "make_op",
+    [
+        lambda: SelectColumns(["x", "y"]),
+        lambda: SelectColumns(["k", "y"]),
+        lambda: SelectColumns(["x"]),
+        lambda: DropColumns(["x"]),
+        lambda: DropColumns(["k", "x"]),
+        lambda: DropColumns(["y"]),
+    ],
+)
+def test_select_and_drop_columns_predict_their_result(make_op) -> None:
+    source = _xky()
+    predicted = make_op().output_schema(source)
+    # Checked against static_process (CLAUDE.md standing rule); the binding is the
+    # name intersection of the two halves, so the schemas also carry it.
+    result = make_op().static_process(source)
+    assert predicted == result.output_schema()
+    assert referential_tags.reference_names(*predicted) == stream_references(result)
+
+
+@pytest.mark.parametrize(
+    "make_op",
+    [lambda: SelectColumns(["x", "y"]), lambda: DropColumns(["k"])],
+    ids=["select", "drop"],
+)
+def test_select_and_drop_columns_with_no_rows_keep_the_populated_shape(
+    make_op,
+) -> None:
+    source = _xky()
+    populated = make_op()(source).as_table(columns={"source": True})
+    empty = make_op()(PolarsFilter(constraints={"k": 0})(source))
+    assert stream_references(empty) == stream_references(make_op()(source))
+    table = empty.as_table(columns={"source": True})
+    assert table.num_rows == 0
+    assert table.schema == populated.schema
+
+
+@pytest.mark.parametrize(
+    "make_op",
+    [lambda: SelectColumns(["x", "y"]), lambda: DropColumns(["k"])],
+    ids=["select", "drop"],
+)
+def test_select_and_drop_columns_commute_with_batch(
+    make_op: Callable[[], SelectColumns | DropColumns],
+) -> None:
+    # Batch keeps a referential tag one list column in both roles (ITL-1017), so
+    # selecting or dropping before or after it gives the same rows and reference.
+    after = make_op()(Batch(batch_size=2)(_xky()))
+    before = Batch(batch_size=2)(make_op()(_xky()))
+    assert after.keys() == before.keys() == (("x",), ("x", "y"))
+    assert stream_references(after) == stream_references(before) == ("x",)
+    assert _rows(after) == _rows(before) == [{"x": [10, 20], "y": [2, 3]}]
+
+
+def test_select_and_drop_columns_on_plain_tags_are_unchanged() -> None:
+    plain = _xky(tag_only_columns=True)
+    assert SelectColumns(["x", "y"])(plain).keys() == (("x",), ("y",))
+    assert DropColumns(["x"])(plain).keys() == (("k",), ("y",))
+
+
 # ── row-preserving operators (section 10) ───────────────────────────────────
 
 
@@ -402,17 +519,9 @@ def test_extraction_named_like_a_tag_raises() -> None:
 # ── not supported yet: raise, never a wrong answer ──────────────────────────
 
 
-@pytest.mark.parametrize(
-    "call, issue",
-    [
-        (lambda: Batch(batch_size=2)(_a()), "ITL-1017"),
-        (lambda: MergeJoin()(_a(), _b()), "ITL-1018"),
-    ],
-    ids=["batch", "merge_join"],
-)
-def test_uncovered_operators_raise(call, issue: str) -> None:
-    with pytest.raises(NotImplementedError, match=issue):
-        call()
+def test_uncovered_operators_raise() -> None:
+    with pytest.raises(NotImplementedError, match="ITL-1018"):
+        MergeJoin()(_a(), _b())
 
 
 # ── renames (developer decision, November 12, 2026) ─────────────────────────
@@ -483,5 +592,6 @@ def test_map_tags_on_plain_tags_is_unchanged() -> None:
 
 
 def test_uncovered_operators_still_work_on_plain_tags() -> None:
-    plain = _a(tag_only_columns=True)
-    assert Batch(batch_size=2)(plain).keys() == (("x",), ("a",))
+    plain = MergeJoin()(_a(tag_only_columns=True), _b(tag_only_columns=True))
+    tags, data = plain.keys()
+    assert tags == ("x",) and sorted(data) == ["a", "b"]
