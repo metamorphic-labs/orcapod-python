@@ -365,7 +365,7 @@ sessions = DictSource(
         {"subject_id": "mouse_01", "session": 1, "age": 12, "weight": 25.3},
         {"subject_id": "mouse_02", "session": 2, "age": 8, "weight": 22.1},
     ],
-    tag_columns=["subject_id", "session"],
+    tag_columns=["subject_id", "session"], tag_only_columns=True,
 )
 
 dropped = sessions.drop_columns("session", "age")

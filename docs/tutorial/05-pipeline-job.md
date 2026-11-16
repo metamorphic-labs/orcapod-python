@@ -23,12 +23,12 @@ data_dir = make_dataset()
 
 sessions = CSVSource(
     str(data_dir / "sessions.csv"),
-    tag_columns=["subject_id", "session"],
+    tag_columns=["subject_id", "session"], tag_only_columns=True,
     source_id="sessions",
 )
 units = CSVSource(
     str(data_dir / "units.csv"),
-    tag_columns=["subject_id", "session", "probe", "unit"],
+    tag_columns=["subject_id", "session", "probe", "unit"], tag_only_columns=True,
     source_id="units",
 )
 
@@ -263,7 +263,7 @@ job = PipelineJob(name="depths", database=DeltaTableDatabase("exercise_db"))
 with job:
     units = CSVSource(
         str(data_dir / "units.csv"),
-        tag_columns=["subject_id", "session", "probe", "unit"],
+        tag_columns=["subject_id", "session", "probe", "unit"], tag_only_columns=True,
         source_id="units",
     )
     to_mm.pod(units.select_data_columns(["depth_um"]), label="depth_mm")

@@ -20,16 +20,16 @@ from orcapod.sources import CSVSource
 data_dir = make_dataset()
 
 subjects = CSVSource(
-    str(data_dir / "subjects.csv"), tag_columns=["subject_id"], source_id="subjects"
+    str(data_dir / "subjects.csv"), tag_columns=["subject_id"], tag_only_columns=True, source_id="subjects"
 )
 sessions = CSVSource(
     str(data_dir / "sessions.csv"),
-    tag_columns=["subject_id", "session"],
+    tag_columns=["subject_id", "session"], tag_only_columns=True,
     source_id="sessions",
 )
 units = CSVSource(
     str(data_dir / "units.csv"),
-    tag_columns=["subject_id", "session", "probe", "unit"],
+    tag_columns=["subject_id", "session", "probe", "unit"], tag_only_columns=True,
     source_id="units",
 )
 ```
@@ -158,7 +158,7 @@ Suppose three sessions passed quality control, and the list is in a CSV file:
 )
 passed = CSVSource(
     str(data_dir / "passed_qc.csv"),
-    tag_columns=["subject_id", "session"],
+    tag_columns=["subject_id", "session"], tag_only_columns=True,
     source_id="passed_qc",
 )
 
@@ -242,7 +242,7 @@ try:
     imec0.join(imec1)
 except InputValidationError as err:
     print(err)
-# Input streams are not compatible: Datas should not have overlapping keys, but KeysView(Schema({'n_spikes': int})) found in SelectDataColumns and SelectDataColumns.
+# Input streams are not compatible: Datas should not have overlapping keys, but ['n_spikes'] found in SelectDataColumns and SelectDataColumns.
 ```
 
 The split above only serves to produce the clash. Unit numbers restart on each probe

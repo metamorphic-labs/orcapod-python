@@ -27,7 +27,7 @@ def compute_bmi(weight: float, height: float) -> float:
 
 
 def mice(rows):
-    return DictSource(data=rows, tag_columns=["subject_id"], source_id="mice")
+    return DictSource(data=rows, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
 
 
 cohort_a = [

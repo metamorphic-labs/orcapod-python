@@ -59,7 +59,7 @@ job = PipelineJob(name="install_check", database=InMemoryArrowDatabase())
 with job:
     numbers = DictSource(
         data=[{"name": "a", "value": 1}, {"name": "b", "value": 2}],
-        tag_columns=["name"],
+        tag_columns=["name"], tag_only_columns=True,
     )
     double.pod(numbers, label="double")
 job.run()

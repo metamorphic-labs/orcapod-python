@@ -26,7 +26,7 @@ from orcapod.sources import CSVSource
 
 subjects = CSVSource(
     str(data_dir / "subjects.csv"),
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
     source_id="subjects",
 )
 print(subjects.as_pandas_df())
@@ -84,7 +84,7 @@ session name:
 ```python
 sessions = CSVSource(
     str(data_dir / "sessions.csv"),
-    tag_columns=["subject_id", "session"],
+    tag_columns=["subject_id", "session"], tag_only_columns=True,
     source_id="sessions",
 )
 print(sessions.output_schema())
@@ -142,7 +142,7 @@ probes = DictSource(
         {"probe": "imec0", "region": "V1", "n_channels": 384},
         {"probe": "imec1", "region": "CA1", "n_channels": 384},
     ],
-    tag_columns=["probe"],
+    tag_columns=["probe"], tag_only_columns=True,
     source_id="probes",
 )
 print(probes.as_pandas_df())
@@ -177,14 +177,14 @@ have?
     ```python
     units = CSVSource(
         str(data_dir / "units.csv"),
-        tag_columns=["subject_id", "session", "probe", "unit"],
+        tag_columns=["subject_id", "session", "probe", "unit"], tag_only_columns=True,
         source_id="units",
     )
     print(units.output_schema())
     # (Schema({'subject_id': str, 'session': str, 'probe': str, 'unit': int}), Schema({'region': str, 'depth_um': int, 'n_spikes': int}))
     print(units.as_table().num_rows)
     # 64
-    ```
+```
 
     You could argue that `region` belongs with the tags, because it says what the row is
     about. That is a real choice, and it has consequences: tags are what rows are matched on
@@ -199,7 +199,7 @@ column of `subjects.csv` a tag.
 
     ```python
     try:
-        CSVSource(str(data_dir / "subjects.csv"), tag_columns=["mouse"])
+        CSVSource(str(data_dir / "subjects.csv"), tag_columns=["mouse"], tag_only_columns=True)
     except ValueError as err:
         print(err)
     # tag_columns not found in table: {'mouse'}. Available columns: ['subject_id', 'sex', 'age_weeks', 'genotype']
@@ -207,12 +207,12 @@ column of `subjects.csv` a tag.
     try:
         CSVSource(
             str(data_dir / "subjects.csv"),
-            tag_columns=["subject_id", "sex", "age_weeks", "genotype"],
+            tag_columns=["subject_id", "sex", "age_weeks", "genotype"], tag_only_columns=True,
         )
     except ValueError as err:
         print(err)
     # No data columns found in the table. At least one data column is required.
-    ```
+```
 
     The first message lists the columns that do exist, which is usually enough to spot a
     typo. The second states a rule: a stream needs at least one data column.
