@@ -862,3 +862,26 @@ class TestReviewFollowUps:
         assert exc_info.value.node_label == "dbl"
         assert exc_info.value.database_kind == "SQLiteConnector"
         assert CALLS == []
+
+    def test_sql_type_maps_accept_view_types(self, tmp_path: pathlib.Path):
+        """CREATE TABLE maps view layouts as the rule reads them (CLI run 12)."""
+        from orcapod.types import ColumnInfo
+
+        connector = SQLiteConnector(str(tmp_path / "views.db"))
+        try:
+            connector.create_table_if_not_exists(
+                "t",
+                [
+                    ColumnInfo("k", pa.string_view(), nullable=False),
+                    ColumnInfo("b", pa.binary_view(), nullable=True),
+                ],
+                pk_column="k",
+            )
+            types = {c.name: c.arrow_type for c in connector.get_column_info("t")}
+        finally:
+            connector.close()
+        assert types == {"k": pa.large_string(), "b": pa.large_binary()}
+        from orcapod.databases.postgresql_connector import _arrow_type_to_pg_sql
+
+        assert _arrow_type_to_pg_sql(pa.string_view()) == "TEXT"
+        assert _arrow_type_to_pg_sql(pa.binary_view()) == "BYTEA"

@@ -147,6 +147,10 @@ def _pg_sql_type(arrow_type: pa.DataType) -> str | None:
     """
     import pyarrow as _pa
 
+    from orcapod.utils.arrow_utils import normalize_to_large_types
+
+    # View layouts map as their large variants, as the storability rule reads them.
+    arrow_type = normalize_to_large_types(arrow_type, keep_null=True)
     if arrow_type == _pa.bool_():
         return "BOOLEAN"
     if _pa.types.is_integer(arrow_type):

@@ -432,19 +432,23 @@ class TestReservedNamesRefusedLive:
             is not None
         )
         table = _unique_table("itl1162_names")
-        connector.create_table_if_not_exists(
-            table,
-            [
-                ColumnInfo("k", pa.large_string(), nullable=False),
-                ColumnInfo(name, pa.int64(), nullable=True),
-            ],
-            pk_column="k",
-        )
-        rows = pa.table(
-            {
-                "k": pa.array(["a"], type=pa.large_string()),
-                name: pa.array([1], type=pa.int64()),
-            }
-        )
-        with pytest.raises(Exception, match="reserved"):
-            connector.upsert_records(table, rows, id_column="k")
+        try:
+            connector.create_table_if_not_exists(
+                table,
+                [
+                    ColumnInfo("k", pa.large_string(), nullable=False),
+                    ColumnInfo(name, pa.int64(), nullable=True),
+                ],
+                pk_column="k",
+            )
+            rows = pa.table(
+                {
+                    "k": pa.array(["a"], type=pa.large_string()),
+                    name: pa.array([1], type=pa.int64()),
+                }
+            )
+            with pytest.raises(Exception, match="reserved"):
+                connector.upsert_records(table, rows, id_column="k")
+        finally:
+            if table in connector.get_table_names():
+                connector.delete_table(table)
