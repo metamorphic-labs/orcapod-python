@@ -62,11 +62,14 @@ class RootSource(StreamBase):
             data_context=data_context,
             config=config,
         )
-        if source_id is not None and constants.BLOCK_SEPARATOR in source_id:
+        if source_id is not None and (
+            constants.BLOCK_SEPARATOR in source_id or source_id.endswith(":")
+        ):
             raise ValueError(
-                f"source_id {source_id!r} contains {constants.BLOCK_SEPARATOR!r}, which "
-                "separates the parts of a source-info token "
-                "(<source id>::<record id>::<column>); give the source another name"
+                f"source_id {source_id!r} contains {constants.BLOCK_SEPARATOR!r} or ends "
+                "with ':', which would blur the separator of the parts of a source-info "
+                "token (<source id>::<record id>::<column>); give the source another "
+                "name"
             )
         self._source_id = source_id
 

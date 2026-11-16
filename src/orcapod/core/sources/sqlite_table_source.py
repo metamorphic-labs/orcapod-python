@@ -32,6 +32,7 @@ from typing_extensions import override
 
 from orcapod.core.referential_tags import TagOnlyColumns, check_tag_only_columns
 from orcapod.core.sources.db_table_source import DBTableSource
+from orcapod.core.sources.stream_builder import normalize_record_id_columns
 from orcapod.databases.sqlite_connector import SQLiteConnector
 from orcapod.protocols.db_connector_protocol import DBConnectorProtocol
 from orcapod.utils.schema_utils import _normalize_column_list
@@ -141,11 +142,14 @@ class SQLiteTableSource(DBTableSource):
                 resolved_tags = _normalize_column_list(tag_columns)
 
             # Step 4: Determine the fetch query.
-            # If "rowid" is in resolved_tags but not a real column, we need
+            # If "rowid" is a tag or a key column but not a real column, we need
             # SELECT rowid, * to include it.  This also handles from_config
             # reconstruction where tag_columns=["rowid"] is passed explicitly.
             normal_cols = {ci.name for ci in connector.get_column_info(table_name)}
-            if "rowid" in resolved_tags and "rowid" not in normal_cols:
+            needs_rowid = "rowid" in resolved_tags or "rowid" in (
+                normalize_record_id_columns(record_id_columns) or ()
+            )
+            if needs_rowid and "rowid" not in normal_cols:
                 _query: str | None = f'SELECT rowid, * FROM "{table_name}"'
             else:
                 _query = None

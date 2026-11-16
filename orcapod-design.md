@@ -257,7 +257,7 @@ _tag_record_id::schema1   (e.g., value: "row_42" or '{"user_id":"abc123"}')
 ### Three Evolution Rules
 
 **1. Name-Preserving (~90% of operations)**
-Single-stream operations (filter, select, rename, batch, map). System tag column names and values pass through unchanged.
+Single-stream operations (filter, select, rename, map). System tag column names and values pass through unchanged. `Batch` is a single-stream operation too, but it reduces rows and follows rule 3.
 
 **2. Name-Extending (multi-input operations)**
 Joins and merges. Each incoming system tag column name is extended by appending `::node_pipeline_hash:canonical_position`. The `::` delimiter separates each extension segment, and `:` separates the pipeline hash from the canonical position within a segment. Canonical position assignment respects commutativity — for commutative operations, inputs are sorted by `pipeline_hash` to ensure identical column names regardless of wiring order.

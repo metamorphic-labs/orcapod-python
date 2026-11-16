@@ -347,3 +347,53 @@ def test_a_key_polled_again_stops_the_async_source_at_once() -> None:
         asyncio.run(collect())
     assert seen == [10]
     assert len(fake.fetch_cursors) == 2
+
+
+def test_a_rowid_key_is_read_when_it_is_not_a_tag(tmp_path: Path) -> None:
+    """``record_id_columns="rowid"`` reads the rowid even when the tags differ."""
+    path = tmp_path / "db.sqlite"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE logs (category TEXT, msg TEXT)")
+        conn.execute("INSERT INTO logs VALUES ('a', 'x'), ('b', 'y')")
+    conn.close()
+    source = SQLiteTableSource(
+        path,
+        "logs",
+        tag_columns="category",
+        record_id_columns="rowid",
+        tag_only_columns=True,
+    )
+    table = source.as_table(columns={"system_tags": True})
+    (name,) = [n for n in table.column_names if n.startswith("_tag_record_id")]
+    assert sorted(str(v) for v in table.column(name).to_pylist()) == [
+        '{"rowid":1}',
+        '{"rowid":2}',
+    ]
+
+
+def test_a_colon_at_a_token_boundary_is_refused() -> None:
+    """A column starting with ':' or a source id ending with ':' is refused.
+
+    Either would make a source-info token read two ways: ``s::row_0:::x`` is column
+    ``:x`` of record ``row_0`` and column ``x`` of record ``row_0:`` (ITL-1154).
+    """
+    from orcapod.core.sources.source_ids import location_source_id
+    from orcapod.errors import InputValidationError
+
+    with pytest.raises(InputValidationError, match="starts with ':'"):
+        DictSource(
+            data=[{"k": "a", ":x": 1}],
+            tag_columns=["k"],
+            source_id="s",
+            tag_only_columns=True,
+        )
+    with pytest.raises(ValueError, match="ends with ':'"):
+        DictSource(
+            data=[{"k": "a", "x": 1}],
+            tag_columns=["k"],
+            source_id="s:",
+            tag_only_columns=True,
+        )
+    with pytest.raises(ValueError, match="end with ':'"):
+        location_source_id("csv", "data:")
+    assert location_source_id("csv", "a:b") == "csv:a:b"

@@ -268,17 +268,21 @@ def _sorted_hashes(
 ) -> list[ContentHash]:
     """Hash each of ``args`` and return the hashes ordered by digest.
 
-    The hashes are returned as ``ContentHash`` objects: the structure hasher feeds only
-    their digests into the enclosing hash, never their labels.
+    The hashes are returned as ``ContentHash`` objects, which the structure hasher
+    embeds with their labels (ITL-1154).
 
     Args:
         hasher: The structure hasher in use.
         args: The members of a union.
 
     Returns:
-        One hash per member, sorted by hex digest so that member order does not matter.
+        One hash per member, sorted by hex digest and then label, so that member
+        order does not matter even for two members whose digests are equal.
     """
-    return sorted((hasher.hash_object(arg) for arg in args), key=ContentHash.to_hex)
+    return sorted(
+        (hasher.hash_object(arg) for arg in args),
+        key=lambda member: (member.to_hex(), member.method),
+    )
 
 
 class GenericAliasHandler:

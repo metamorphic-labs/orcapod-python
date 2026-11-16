@@ -983,14 +983,16 @@ data. The rules:
   `postgresql_table:<database>.<schema>.<table>`, `db_table:<table>`,
   `spiraldb_table:<project>.<dataset>.<table>@<table id>` (developer, November 16, 2026). `::`
   is refused in every source id, given or default, and in every column name
-  (`schema_utils.require_names_without_separator`), so a source-info token splits at its first
-  and last `::`. Key columns (developer, November 16, 2026, ITL-1154): every source accepts
+  (`schema_utils.require_names_without_separator`), as are a source id ending with `:` and a
+  column name starting with one, so a source-info token splits at its first and last `::`. Key columns (developer, November 16, 2026, ITL-1154): every source accepts
   `record_id_columns` (a name or several, in key order; `()` asks for the position).
   Defaults: database tables and SpiralDB, the primary key (a database table without one is
   refused); in-memory, CSV and Delta, the position; `PollingSource` requires key columns. A
   key value is a string, an integer, a boolean, a timestamp or a date (the last two as
-  ISO-8601 text); any other type, a null key and a repeated key are refused when the source is
-  built. Never format one by hand, and
+  ISO-8601 text, four-digit years: a value outside years 1 to 9999 is refused); any other type,
+  a null key, a repeated key and an unordered collection of key columns (a set) are refused
+  when the source is built, and a `PollingSource` refuses a key an earlier batch already
+  holds. Never format one by hand, and
   never write a label as a literal; a new root source declares `SOURCE_KIND` and builds its
   default with one of the two. `PollingSource` hashes `impl.identity()`, never its `repr`.
   `node.as_source()` gives no id of its own; it takes the `DerivedSource` default. The
@@ -1093,8 +1095,8 @@ data. The rules:
 - `GroupBy` requires every column in `by` to be a scalar tag column; it raises
   `InputValidationError` for unknown, data, or list-valued columns (the last usually means the
   stream came from `Batch` — group before batching, not after). Members are sorted by non-key
-  tag values with the system `record_id` as tiebreaker, so the hashed lists are stable across
-  runs. Groups themselves are emitted in key order, so a reordered input yields a
+  tag values with the system `record_id` and then the source id as tiebreakers (a record id
+  names a row within its source only), so the hashed lists are stable across runs. Groups themselves are emitted in key order, so a reordered input yields a
   byte-identical table.
 - `GroupBy`'s output tag columns are its `by` columns, scalar, in the input's tag order; every
   other tag is dropped (ITL-1070; ITL-955 had kept them as `list[T]` tags, never released). The

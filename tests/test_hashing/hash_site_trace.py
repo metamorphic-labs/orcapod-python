@@ -58,6 +58,9 @@ produced: Counter[tuple[str, str, str, str]] = Counter()
 consumed: Counter[tuple[str, str, str, str, str, str]] = Counter()
 """(accessor, label, site, origin, producer site, producer origin) -> count."""
 _producer_of: dict[tuple[str, bytes], tuple[str, str]] = {}
+"""(label, digest) -> the first producer: the fallback for a hash parsed from text."""
+_producer_by_object: dict[int, tuple[Any, tuple[str, str]]] = {}
+"""id(hash) -> (the hash, its producer); the hash is kept so its id is never reused."""
 
 
 def _depth() -> int:
@@ -136,6 +139,7 @@ def _install_content_hash() -> None:
         site, origin = _sites(frame)
         produced[(kind, method, site, origin)] += 1
         if kind == "construct":
+            _producer_by_object[id(self)] = (self, (site, origin))
             _producer_of.setdefault((method, bytes(digest)), (site, origin))
 
     def record(self: Any, accessor: str) -> None:
@@ -145,7 +149,15 @@ def _install_content_hash() -> None:
         site, origin = _sites(frame)
         method = object.__getattribute__(self, "method")
         raw = digest_slot.__get__(self, type(self))
-        p_site, p_origin = _producer_of.get((method, raw), ("<unknown>", "<unknown>"))
+        # The object's own producer; equal hashes made at two sites stay apart. A
+        # parsed hash has none, so it falls back to the first producer of its digest.
+        own = _producer_by_object.get(id(self))
+        if own is not None and own[0] is self:
+            p_site, p_origin = own[1]
+        else:
+            p_site, p_origin = _producer_of.get(
+                (method, raw), ("<unknown>", "<unknown>")
+            )
         consumed[(accessor, method, site, origin, p_site, p_origin)] += 1
 
     def digest_get(self: Any) -> bytes:

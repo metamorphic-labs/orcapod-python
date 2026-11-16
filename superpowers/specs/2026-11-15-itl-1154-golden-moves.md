@@ -62,6 +62,8 @@ v0.1.4 / v0.2, v0.3 already changes every hash and every stored path (new data c
 new table layouts; ITL-944), so data written by an earlier release is already reported as
 stale and recomputed, and data written by a development build of `v1` is recomputed the
 same way: a moved entry id or path is not found, and the node computes again. Nothing is
-lost or read wrongly. The regeneration replaces the 848 entries in the unreleased `v1`
+lost or read wrongly, with one exception: a side-effect node (a sink) finds its completed
+deliveries by entry id, so deliveries logged by a development build of `v1` are not
+recognized and a run delivers them again (the changelog says so). The regeneration replaces the 848 entries in the unreleased `v1`
 files with `--remove` (their pinned names) then `--add` (the new values); no other entry
 changes and nothing else is added.

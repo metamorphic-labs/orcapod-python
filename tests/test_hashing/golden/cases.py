@@ -24,6 +24,7 @@ Values that are volatile by design are deliberately not pinned:
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import collections
@@ -774,7 +775,9 @@ def schema_location_default_source_ids() -> dict[str, Any]:
         try:
             pa_csv.write_csv(table, "rows.csv")
             write_deltalake("golden_delta", table)
-            with sqlite3.connect("golden.sqlite") as conn:
+            # ``with conn`` commits; ``closing`` closes the file before the
+            # temporary directory is removed (Windows refuses an open file).
+            with contextlib.closing(sqlite3.connect("golden.sqlite")) as conn, conn:
                 conn.execute(
                     "CREATE TABLE golden_trials "
                     "(subject TEXT PRIMARY KEY, weight REAL NOT NULL, count INTEGER)"

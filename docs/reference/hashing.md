@@ -249,7 +249,7 @@ test session with `-p tests.test_hashing.hash_site_trace`.
 | Location | Hash consumed | Into | Form | Call sites |
 |---|---|---|---|---|
 | nested hash in a structure | any nested hash: types, schemas, upstream streams, value hashes | the enclosing structure hash | `{"__type__": "hash", "label": ..., "digest": ...}` | `hashing/semantic_hashing/semantic_hasher.py:_nested_hash` |
-| union and generic alias arguments | argument type hashes, sorted by digest (ordering only) | the type hash, via the nested form | as above | `hashing/semantic_hashing/builtin_handlers.py:_sorted_hashes` |
+| union and generic alias arguments | argument type hashes, sorted by digest, then label (ordering only) | the type hash, via the nested form | as above | `hashing/semantic_hashing/builtin_handlers.py:_sorted_hashes`, `hashing/semantic_hashing/builtin_handlers.py:_sorted_hashes.<locals>.<lambda>` |
 | logical-type cell, scalar and container | a value-hashed cell's value hash | the Arrow table hash | `<identifier>::<label>:<digest>`; a container cell: count, then per element a marker, a u64 length and the element token | `hashing/visitors.py:SemanticHashingVisitor.visit_extension` |
 | entry-id preimage | the input row's data hash | entry ids, pipeline record id, side-effect log key | `b"<label>:" + digest` | `core/nodes/function_node.py:_build_record_id_preimage` |
 | operator-cache row | the node content hash | `_record_hash` | `b"<label>:" + digest` | `core/nodes/operator_node.py:OperatorJobNode._store_output_stream` |
@@ -365,11 +365,11 @@ side_pod = SideEffectPod(_log_fn, ctx_arg_name="ctx")
 
 | Object | `content_hash()` | `pipeline_hash()` |
 |--------|-----------------|-------------------|
-| `scores` | `semantic_v1:123db4cf199c8591080423df8e9ee36c20435732195a706b442da2a9088476c2` | `semantic_v1:577916c072bcdd784ac1da886acfa33881c38281475a82508f9ecdc8de4799a8` |
-| `attendance` | `semantic_v1:ec9cb32280025c3307e627cfd46af211739b13e63fc23da9be3ab7ec83733837` | `semantic_v1:96fb3b2d45b82b78d224aaae23a1cb086e1a2ea98285183706f7f68944d0bc24` |
-| `joined` | `semantic_v1:f7c478aa0d37888e2305e70de95c81a01ee858c2c5cfb165cfc9034281ed81eb` | `semantic_v1:c28a220e44441f7a079709aca3640376610c6a2f4d09c413bf26bc31743daee6` |
-| `pod` | `semantic_v1:f994371fc3dd550b5d9e1da52545c735f225ab15c160f5fd1cd8f3e1d4ec2783` | `semantic_v1:f994371fc3dd550b5d9e1da52545c735f225ab15c160f5fd1cd8f3e1d4ec2783` |
-| `node` | `semantic_v1:76d16bec67883d98ca039188ee359d75845ef1d028a3cc083e3bca2dc1f4f479` | `semantic_v1:6db83c3c1367eed2ef98d362ba2abb680952dd67c1b7fdd73f52b91518f2b53f` |
+| `scores` | `semantic_v1:916b3881098e81b475b6ee1a40700ae8683cec275c23f0ba5e872bbeacdc6ef7` | `semantic_v1:a19744e791fb1f4c5431daad4380327d8c45f52d4f9353ce944b287265097650` |
+| `attendance` | `semantic_v1:2d88820efbb03cb124fbb8d78f4c54111c2f2b10cdc137bf7751364b202bf146` | `semantic_v1:eb2bdc439e8a48f8246b2ea8d52227418571f43c998be577b5a1c0794ca4d749` |
+| `joined` | `semantic_v1:26e7a8550d7ccaddbf852398858907667c708c9c91a14f4f8480a503d0ac3759` | `semantic_v1:a308714c9fb11116c31a493dd1a09be8b43654b8b8e07acbfbd9fbfb72998571` |
+| `pod` | `semantic_v1:781abfcf2b8637daa3393e0e94e4b9b5b9709c7869cf44049819a2946f9d18ec` | `semantic_v1:781abfcf2b8637daa3393e0e94e4b9b5b9709c7869cf44049819a2946f9d18ec` |
+| `node` | `semantic_v1:21329bac1782f818074dfe7410277e3341e9dacff326ae252517442b7ab04fc6` | `semantic_v1:0ae6bcf82d5a5e52b4ba8de2bc389335d448ad5dc2703ab8e3149199b77c2ba0` |
 
 > `pod.content_hash() == pod.pipeline_hash()` because `grade` has no `ctx_arg_name`, so
 > `identity_structure()` and `pipeline_identity_structure()` return the same value.
@@ -381,39 +381,39 @@ side_pod = SideEffectPod(_log_fn, ctx_arg_name="ctx")
 
 | Site | Item | Value |
 |------|------|-------|
-| 3 | Schema hash (scores) | `577916c072bcdd784ac1da886acfa33881c38281475a82508f9ecdc8de4799a8` |
+| 3 | Schema hash (scores) | `a19744e791fb1f4c5431daad4380327d8c45f52d4f9353ce944b287265097650` |
 | 4 | `scores.source_id` | `"scores_v1"` (explicit; no Arrow hash computed) |
-| 5 | `alice` `record_id` bytes (hex) | `e2d15e48e9f05f0f81e25d8e9f120b0a` |
-| 5 | `bob` `record_id` bytes (hex) | `0d565e02049f5913bf45a5711e71ff52` |
+| 5 | `alice` `record_id` | `row_0` (its position: `scores` names no key columns) |
+| 5 | `bob` `record_id` | `row_1` |
 
 System tag column names on `scores` (sites 3 + 5):
 
 ```
-_tag_source_id::577916c072bcdd784ac1da886acfa33881c38281475a82508f9ecdc8de4799a8
-_tag_record_id::577916c072bcdd784ac1da886acfa33881c38281475a82508f9ecdc8de4799a8
+_tag_source_id::a19744e791fb1f4c5431daad4380327d8c45f52d4f9353ce944b287265097650
+_tag_record_id::a19744e791fb1f4c5431daad4380327d8c45f52d4f9353ce944b287265097650
 ```
 
 Post-join system tag column names (site 6):
 
 ```
-_tag_source_id::577916c072bcdd784ac1da886acfa33881c38281475a82508f9ecdc8de4799a8::577916c072bcdd784ac1da886acfa33881c38281475a82508f9ecdc8de4799a8:0
-_tag_record_id::577916c072bcdd784ac1da886acfa33881c38281475a82508f9ecdc8de4799a8::577916c072bcdd784ac1da886acfa33881c38281475a82508f9ecdc8de4799a8:0
-_tag_source_id::96fb3b2d45b82b78d224aaae23a1cb086e1a2ea98285183706f7f68944d0bc24::96fb3b2d45b82b78d224aaae23a1cb086e1a2ea98285183706f7f68944d0bc24:1
-_tag_record_id::96fb3b2d45b82b78d224aaae23a1cb086e1a2ea98285183706f7f68944d0bc24::96fb3b2d45b82b78d224aaae23a1cb086e1a2ea98285183706f7f68944d0bc24:1
+_tag_source_id::a19744e791fb1f4c5431daad4380327d8c45f52d4f9353ce944b287265097650::a19744e791fb1f4c5431daad4380327d8c45f52d4f9353ce944b287265097650:0
+_tag_record_id::a19744e791fb1f4c5431daad4380327d8c45f52d4f9353ce944b287265097650::a19744e791fb1f4c5431daad4380327d8c45f52d4f9353ce944b287265097650:0
+_tag_source_id::eb2bdc439e8a48f8246b2ea8d52227418571f43c998be577b5a1c0794ca4d749::eb2bdc439e8a48f8246b2ea8d52227418571f43c998be577b5a1c0794ca4d749:1
+_tag_record_id::eb2bdc439e8a48f8246b2ea8d52227418571f43c998be577b5a1c0794ca4d749::eb2bdc439e8a48f8246b2ea8d52227418571f43c998be577b5a1c0794ca4d749:1
 ```
 
-The suffix `::577916c...:0` on `scores` columns encodes the canonical join position (`0`); the
-suffix `::96fb3b2...:1` on `attendance` columns encodes position `1`. The pipeline hash in
+The suffix `::a19744e...:0` on `scores` columns encodes the canonical join position (`0`); the
+suffix `::eb2bdc4...:1` on `attendance` columns encodes position `1`. The pipeline hash in
 each suffix is the stream's `pipeline_hash()` (sites 1b and 6).
 
 #### §3 — Pipeline DB Entry Keys
 
 | Site | Row | Value (hex) |
 |------|-----|-------------|
-| 7 | `alice` `base_entry_id` | `6172726f775f76313a000002262241cf2035116e7220c5d770435408291e5cac9f8600c47854634b96d6b673` |
-| 7 | `bob` `base_entry_id` | `6172726f775f76313a0000027e2b05c90a2b99931595d9c46fe86171d85ade44b8829c5f465a7ececed55040` |
-| 8 | `alice` `pipeline_entry_id` (idx=0) | `6172726f775f76313a000002b771b90e363d0f0623fdcb318bd7d433e9e232e45322c00a9b3475506257b057` |
-| 8 | `bob` `pipeline_entry_id` (idx=0) | `6172726f775f76313a000002966301b9abf3a8071162423baad504c9b7c71b2bec8c052ee64265550f0f6d0d` |
+| 7 | `alice` `base_entry_id` | `6172726f775f76313a0000029a2d37584820ff55fe7d7094fd4969a5700bfac520ef992bec3e14a6ddecba84` |
+| 7 | `bob` `base_entry_id` | `6172726f775f76313a000002610e9096dcfead882f81c5017fa3c3db2d98c9b631766d3fae6d275014527915` |
+| 8 | `alice` `pipeline_entry_id` (idx=0) | `6172726f775f76313a00000262d1dd80d0993a00228fdc099ac6b2100cc9b758be2bfa3af26e28ff9cfd0c75` |
+| 8 | `bob` `pipeline_entry_id` (idx=0) | `6172726f775f76313a0000021991499aae99e538c06f12bfe1335a72017ddce904291eb35463437a51122247` |
 
 > The hex prefix `6172726f775f7631` decodes to the ASCII string `arrow_v1` — the
 > `method` portion of the `b"{method}:{digest}"` format described in §3.
@@ -422,10 +422,10 @@ each suffix is the stream's `pipeline_hash()` (sites 1b and 6).
 
 | Site | Row | Value |
 |------|-----|-------|
-| 10 | `alice` `invocation_hash` | `semantic_v1:14d51d1929777dcbbfeb6ffbdfc32876739cde2f2ce03d26cac781042aae0214::arrow_v1:000002b771b90e363d0f0623fdcb318bd7d433e9e232e45322c00a9b3475506257b057` |
-| 10 | `bob` `invocation_hash` | `semantic_v1:14d51d1929777dcbbfeb6ffbdfc32876739cde2f2ce03d26cac781042aae0214::arrow_v1:000002966301b9abf3a8071162423baad504c9b7c71b2bec8c052ee64265550f0f6d0d` |
+| 10 | `alice` `invocation_hash` | `semantic_v1:fd7ca26128a414fd0c569adfa78e3bea72e72cd47d173ad3380636209a175b2a::arrow_v1:00000262d1dd80d0993a00228fdc099ac6b2100cc9b758be2bfa3af26e28ff9cfd0c75` |
+| 10 | `bob` `invocation_hash` | `semantic_v1:fd7ca26128a414fd0c569adfa78e3bea72e72cd47d173ad3380636209a175b2a::arrow_v1:0000021991499aae99e538c06f12bfe1335a72017ddce904291eb35463437a51122247` |
 
-> Both rows share the same `semantic_v1:14d51d19...` component — this is the
+> Both rows share the same `semantic_v1:fd7ca261...` component — this is the
 > `SideEffectPodStream.pipeline_hash()`, which depends only on the pod and its upstream
 > topology, not on row content. The `arrow_v1:...` component is the per-row `record_id`
 > from site 9, which differs per row.
@@ -434,21 +434,21 @@ each suffix is the stream's `pipeline_hash()` (sites 1b and 6).
 
 | Site | Item | Value |
 |------|------|-------|
-| 11 | `data_function.uri` | `('grade', '37ff1cf52cd878dc29b78dc38d0d0f2d67b9aa5795c0febe8ef50dd2f0459c91', 'v0', 'python.function.v0')` |
-| 11 | `output_schema_hash` (uri[1]) | `37ff1cf52cd878dc29b78dc38d0d0f2d67b9aa5795c0febe8ef50dd2f0459c91` (bare digest: it is part of a name) |
+| 11 | `data_function.uri` | `('grade', '6dfe7b63d41fec2df9e9fe6e7581428678c88866f4927b45dd48a44df73dfe3d', 'v0', 'python.function.v0')` |
+| 11 | `output_schema_hash` (uri[1]) | `6dfe7b63d41fec2df9e9fe6e7581428678c88866f4927b45dd48a44df73dfe3d` (bare digest: it is part of a name) |
 
 #### §6 — Pipeline Run Identity
 
 | Site | Item | Value |
 |------|------|-------|
 | 12 | `run_id` | *(non-deterministic — changes each run)* |
-| 13 | `snapshot_hash` | `9b744dabab258289` |
+| 13 | `snapshot_hash` | `0810448026f328d0` |
 | 14 | `datagram_uuid` | *(time-ordered UUID v7 — changes each run)* |
 
-> `snapshot_hash = "9b744dabab258289"` is deterministic: the pipeline has one leaf node whose
+> `snapshot_hash = "0810448026f328d0"` is deterministic: the pipeline has one leaf node whose
 > `content_hash().to_string()` is
-> `"semantic_v1:eef8b1a89639de271a3b1cbd66d4a009f5a63c21933b69ba2668965e8daad762"`.
-> `hashlib.sha256(leaf_hash.encode()).hexdigest()[:16]` = `"9b744dabab258289"`. The hash
+> `"semantic_v1:963861d601d30a7858e2b80c355024a0071449b8324d90cfb69c2875a8bb927d"`.
+> `hashlib.sha256(leaf_hash.encode()).hexdigest()[:16]` = `"0810448026f328d0"`. The hash
 > enters with its label.
 
 ---
@@ -1021,7 +1021,7 @@ the row.
 
 | Field | Value |
 |---|---|
-| **Inputs** | All system tag columns from `tag.as_table(columns={"system_tags": True})` (including join-chained columns) + `INPUT_DATA_HASH_COL` (`input_data.content_hash().digest` as `pa.large_binary()`) |
+| **Inputs** | All system tag columns from `tag.as_table(columns={"system_tags": True})` (including join-chained columns) + `INPUT_DATA_HASH_COL` (`input_data.content_hash().to_prefixed_digest()` as `pa.large_binary()`: the digest with its label) |
 | **Algorithm** | `StarfixArrowHasher.hash_table(preimage).to_prefixed_digest()` — single-row Arrow table hash |
 | **Output format** | `bytes` in `b"{method}:{digest}"` format |
 | **Uniqueness guarantee** | Unique per `(node, tag lineage, input_data content)` across all recomputation attempts; used as the in-memory cache key and Phase 1 DB filter |
@@ -1058,7 +1058,7 @@ the pod function as an idempotency key via `InvocationContext.invocation_hash`.
 
 | Field | Value |
 |---|---|
-| **Inputs** | System tags + `INPUT_DATA_HASH_COL` (`input_data.content_hash().digest` as `pa.large_binary()`) + `_SIDE_EFFECT_RECOMPUTATION_INDEX_COL` (fixed `0`, `pa.int32()`) |
+| **Inputs** | System tags + `INPUT_DATA_HASH_COL` (`input_data.content_hash().to_prefixed_digest()` as `pa.large_binary()`: the digest with its label) + `_SIDE_EFFECT_RECOMPUTATION_INDEX_COL` (fixed `0`, `pa.int32()`) |
 | **Algorithm** | `StarfixArrowHasher.hash_table(preimage)` |
 | **Output format** | `ContentHash`; `.to_prefixed_digest()` → `bytes` when stored in the delivery log |
 | **Uniqueness guarantee** | Unique per `(tag lineage, input_data content)` at `recomputation_index=0`. Pod-version scoping is provided by the delivery log's table path (derived from `pipeline_hash()` and `uri`), not by the preimage. |

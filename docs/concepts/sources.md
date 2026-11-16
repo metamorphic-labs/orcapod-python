@@ -515,12 +515,13 @@ check existed; a run whose nodes are all current proceeds. Reading a polling sou
 rows after a failed check is ITL-1139.
 
 A source that takes in new data keeps its record id rule. Without key columns, a
-row's record id comes from its position, so a row that moves (a reorder, rows inserted
-before it, or a polling source's batches, each numbered from `row_0`) gets
-another id and is recorded as a new entry; its function result is still reused, because
+row's record id comes from its position, so a row that moves (a reorder or rows inserted
+before it) gets another id and is recorded as a new entry; its function result is still reused, because
 results are stored by the hash of the row's data. Give a source that will take in new data
-key columns that are unique per row (ITL-1104). Further revisions of what each kind
-checks are collected in ITL-1103.
+key columns that are unique per row (ITL-1104). A `PollingSource` requires them: its
+rows arrive in batches, so a key identifies a polled row, and a batch that repeats a key
+already polled is refused. Further revisions of what each kind checks are collected in
+ITL-1103.
 
 ## How sources add provenance columns
 

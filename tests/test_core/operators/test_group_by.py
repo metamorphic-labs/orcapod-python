@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import get_origin
+from typing import Any, get_origin
 
 import pyarrow as pa
 import pytest
@@ -293,6 +293,33 @@ class TestGroupByOrdering:
         out = GroupBy(by=["s"]).process(src)
         # Emission order would give ["z", "a"]; record_id imposes ["a", "z"].
         assert out.as_table().column("path").to_pylist()[0] == ["a", "z"]
+
+    def test_source_id_breaks_ties_between_equal_record_ids(self):
+        """Equal record ids from two sources still have one member order (ITL-1154).
+
+        A record id names a row within its source only, so two members can share
+        one; the source-id column orders them. A raw stream with one system-tag
+        pair holding two sources stands in for such an input.
+        """
+        source_col = (
+            f"{constants.SYSTEM_TAG_SOURCE_ID_PREFIX}{constants.BLOCK_SEPARATOR}h"
+        )
+        record_col = (
+            f"{constants.SYSTEM_TAG_RECORD_ID_PREFIX}{constants.BLOCK_SEPARATOR}h"
+        )
+
+        def grouped(order: list[int]) -> list[Any]:
+            rows = {
+                "g": ["G", "G"],
+                source_col: ["source_b", "source_a"],
+                record_col: ["row_0", "row_0"],
+                "v": [2, 1],
+            }
+            table = pa.table({k: [v[i] for i in order] for k, v in rows.items()})
+            stream = ArrowTableStream(table, tag_columns=["g"])
+            return GroupBy(by=["g"]).process(stream).as_table().column("v").to_pylist()
+
+        assert grouped([0, 1]) == grouped([1, 0]) == [[1, 2]]
 
     def test_join_fan_out_ties_broken_by_every_record_id_column(self):
         """A joined stream carries one record_id per canonical input position.

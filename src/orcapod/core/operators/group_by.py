@@ -221,15 +221,18 @@ class GroupBy(UnaryOperator):
         # was joined into.  So *every* record_id column has to take part --
         # consulting only the first would tie on exactly the fan-out rows the
         # tiebreaker exists for.  They are sorted by name so the key order is
-        # itself independent of column order in the input table.
+        # itself independent of column order in the input table. A record id
+        # names a row within its source only (ITL-1154), so the source-id columns
+        # come last: two members with equal record ids from different sources still
+        # have one order.
         sort_columns = dropped_tags
-        sort_columns += tuple(
-            sorted(
-                c
-                for c in system_tag_columns
-                if c.startswith(constants.SYSTEM_TAG_RECORD_ID_PREFIX)
+        for prefix in (
+            constants.SYSTEM_TAG_RECORD_ID_PREFIX,
+            constants.SYSTEM_TAG_SOURCE_ID_PREFIX,
+        ):
+            sort_columns += tuple(
+                sorted(c for c in system_tag_columns if c.startswith(prefix))
             )
-        )
 
         groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
         for row in table.to_pylist():
