@@ -537,6 +537,17 @@ CASES = [
         lambda: DropDataColumns(["k"]),
         lambda: (source_a(referential=True),),
     ),
+    # A referential tag named or not named is kept or removed in both roles (ITL-1022).
+    Case(
+        "ref_select_columns",
+        lambda: SelectColumns(["k", "i8", "st"]),
+        lambda: (source_a(referential=True),),
+    ),
+    Case(
+        "ref_drop_columns",
+        lambda: DropColumns(["ta", "s"]),
+        lambda: (source_a(referential=True),),
+    ),
     Case(
         "ref_index",
         lambda: Index("l8", 0, out="first"),
