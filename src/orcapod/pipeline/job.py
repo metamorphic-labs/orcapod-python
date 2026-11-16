@@ -1606,6 +1606,12 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             _json.dump(data["pipeline"], tmp)
         try:
             pipeline = Pipeline.load(tmp_path)
+        except ValueError as exc:
+            # The embedded pipeline was read from a temporary file: name the job file.
+            message = str(exc)
+            if tmp_path in message:
+                exc.args = (message.replace(tmp_path, str(path)),)
+            raise
         finally:
             os.unlink(tmp_path)
 

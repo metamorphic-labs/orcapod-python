@@ -212,8 +212,11 @@ def test_a_030_function_node_without_its_references_is_refused(tmp_path: Path) -
         for descriptor in _function_descriptors(data).values():
             del descriptor["fall_through_references"]
 
-    with pytest.raises(ValueError, match="has no fall_through_references"):
-        PipelineJob.load(_edited(tmp_path, edit))
+    path = _edited(tmp_path, edit)
+    with pytest.raises(ValueError, match="has no fall_through_references") as raised:
+        PipelineJob.load(path)
+    # The error names the job file, not the temporary file of its embedded pipeline.
+    assert str(raised.value).startswith(f"{path}: saved node")
 
 
 def test_references_that_disagree_with_the_saved_schema_are_refused(
