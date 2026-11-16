@@ -35,6 +35,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.csv as pa_csv
 import pydantic
 
 import orcapod as op
@@ -657,6 +658,94 @@ def schema_source_stream_builder() -> dict[str, Any]:
         out[f"{variant}.source_id"] = result.source_id
         out[f"{variant}.system_tag_columns"] = list(result.system_tag_columns)
         out.update(_prefixed(variant, stream_summary(result.stream)))
+    return out
+
+
+class GoldenPollingImpl:
+    """A polling source implementation whose identity is fixed (default source id).
+
+    Only ``identity`` is used by the golden case; the source is never polled.
+    """
+
+    def identity(self) -> Any:
+        return ("golden_polling", 1)
+
+    def to_config(self) -> dict[str, Any] | None:
+        return None
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any]) -> GoldenPollingImpl:
+        raise NotImplementedError
+
+    def schema(self) -> Any:
+        return None
+
+    async def poll(self, cursor: Any = None) -> bool:
+        return False
+
+    async def fetch(self, cursor: Any = None) -> Any:
+        raise NotImplementedError
+
+    async def close(self) -> None:
+        return None
+
+
+@case("schema", "location_default_source_ids")
+def schema_location_default_source_ids() -> dict[str, Any]:
+    """Pin the default source id of every source built from a location (ITL-1154).
+
+    Each source reads ``_builder_table()``'s rows from a fixed relative location in a
+    temporary directory (``rows.csv``, a Delta folder ``golden_delta``, a SQLite table
+    ``golden_trials``), so no value depends on the machine. Pinned: the default
+    ``<kind>:<location>`` and the stream summary (record ids are uuid5 of
+    ``<source_id>::row_<n>``). The polling source's default is the semantic hash of its
+    implementation's identity.
+
+    Returns:
+        Each source's default source id and stream summary.
+    """
+    import os
+    import sqlite3
+    import tempfile
+
+    from deltalake import write_deltalake
+
+    from orcapod.core.sources import (
+        CSVSource,
+        DeltaTableSource,
+        PollingSource,
+        SQLiteTableSource,
+    )
+
+    table = _builder_table()
+    out: dict[str, Any] = {}
+    previous = os.getcwd()
+    with tempfile.TemporaryDirectory() as tmp:
+        os.chdir(tmp)
+        try:
+            pa_csv.write_csv(table, "rows.csv")
+            write_deltalake("golden_delta", table)
+            with sqlite3.connect("golden.sqlite") as conn:
+                conn.execute(
+                    "CREATE TABLE golden_trials "
+                    "(subject TEXT PRIMARY KEY, weight REAL NOT NULL, count INTEGER)"
+                )
+                conn.executemany(
+                    "INSERT INTO golden_trials VALUES (?, ?, ?)",
+                    list(zip(*table.to_pydict().values())),
+                )
+            sources = {
+                "csv": CSVSource("rows.csv", tag_columns="subject"),
+                "delta_table": DeltaTableSource("golden_delta", tag_columns="subject"),
+                "sqlite_table": SQLiteTableSource("golden.sqlite", "golden_trials"),
+            }
+            for kind, source in sources.items():
+                out[f"{kind}.source_id"] = source.source_id
+                out.update(_prefixed(kind, stream_summary(source)))
+        finally:
+            os.chdir(previous)
+    polling = PollingSource(GoldenPollingImpl(), tag_columns="subject")
+    out["polling_source.source_id"] = polling.source_id
     return out
 
 
