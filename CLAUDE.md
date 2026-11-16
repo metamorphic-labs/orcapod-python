@@ -650,7 +650,9 @@ carry. The rule is in one place, `core/operators/meta_columns.py` (sync results 
 operator base classes, async rows through `WithoutMetaWriter`). A carry-forward mode is ITL-867.
 The meta prefix (`__`) is reserved: `ArrowTableStream` and the source builder refuse a tag named
 with it, and `MapTags` / `MapData` / `MapColumns` (targets) and `Pick` / `Index` (`out`) refuse it as a new name
-(`schema_utils.require_names_not_meta`, at construction).
+(`schema_utils.require_names_not_meta`, at construction). The three mappers also refuse a new name
+that a stream reads as a system column (system-tag or source-info prefix, the context key column;
+`schema_utils.require_names_not_system`, ITL-1160).
 
 **Operator or derived source?** (developer, November 11, 2026) The test is: does any data
 element come from a tag value, or from anywhere other than the input's data elements? If yes,

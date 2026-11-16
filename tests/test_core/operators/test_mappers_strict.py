@@ -444,3 +444,62 @@ def test_map_columns_keeps_arrow_types() -> None:
     assert schema.field("animal").type == source_schema.field("subject").type
     assert schema.field("years").type == source_schema.field("age").type
     assert schema.field("years").type == pa.int64()
+
+
+# ── a new name a stream would read as a system column ──────────────────────
+
+RESERVED_NEW_NAMES = [
+    f"{constants.SYSTEM_TAG_PREFIX}y",
+    f"{constants.SOURCE_PREFIX}y",
+    constants.CONTEXT_KEY,
+]
+
+
+@pytest.mark.parametrize(
+    ("op_cls", "old_name"),
+    [
+        (MapTags, "subject"),
+        (MapData, "age"),
+        (MapColumns, "subject"),
+        (MapColumns, "age"),
+    ],
+    ids=["map_tags", "map_data", "map_columns_tag", "map_columns_data"],
+)
+@pytest.mark.parametrize(
+    "new_name", RESERVED_NEW_NAMES, ids=["system_tag", "source", "context_key"]
+)
+@pytest.mark.parametrize("strict", [True, False])
+def test_a_system_column_name_is_refused_as_a_new_name(
+    op_cls: type, old_name: str, new_name: str, strict: bool
+) -> None:
+    # Refused when built, so neither the sync nor the async path can produce one.
+    with pytest.raises(InputValidationError, match=f"{new_name!r}.*reserved"):
+        op_cls({old_name: new_name}, strict=strict)
+
+
+@pytest.mark.parametrize(
+    ("method", "old_name"),
+    [("map_tags", "subject"), ("map_data", "age"), ("map_columns", "age")],
+)
+@pytest.mark.parametrize(
+    "new_name", RESERVED_NEW_NAMES, ids=["system_tag", "source", "context_key"]
+)
+def test_the_stream_methods_refuse_a_system_column_name(
+    method: str, old_name: str, new_name: str
+) -> None:
+    with pytest.raises(InputValidationError, match="reserved"):
+        getattr(_source(), method)({old_name: new_name})
+
+
+@pytest.mark.parametrize("new_name", ["_age", "_content_hash"])
+def test_other_underscore_names_stay_usable_as_new_names(new_name: str) -> None:
+    """Only names a stream reads as system columns are refused (see ITL-1160)."""
+    source = _source()
+    for stream, async_op in (
+        (source.map_data({"age": new_name}), MapData({"age": new_name})),
+        (source.map_columns({"age": new_name}), MapColumns({"age": new_name})),
+    ):
+        assert stream.keys() == (("cohort", "subject"), (new_name, "weight"))
+        assert stream.as_table().column_names[2] == new_name
+        rows = async_rows(async_op, source)
+        assert all(data.keys() == (new_name, "weight") for _, data in rows)
