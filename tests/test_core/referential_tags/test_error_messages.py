@@ -184,6 +184,57 @@ def test_a_pod_without_fall_through_does_not_promise_it() -> None:
     assert cached(source).keys() == (("k", "x"), ("half",))
 
 
+@op.function_pod(output_keys=["out"])
+def defaulted(y: int = 1) -> int:
+    return y
+
+
+def _only_an_unread_reference() -> op.sources.DictSource:
+    """Data ``x`` only: a referential tag that ``defaulted`` does not read."""
+    return op.sources.DictSource(
+        [{"k": 1, "x": 10}],
+        tag_columns=["k", "x"],
+        tag_only_columns=["k"],
+        source_id="u",
+    )
+
+
+def test_no_remedy_is_offered_that_cannot_work() -> None:
+    """Every data column is an unread reference: name only the ways out that work."""
+    source = _only_an_unread_reference()
+    # Keeping x plain leaves the source no data column, so tag_only_columns cannot help.
+    with pytest.raises(ValueError, match="At least one data column is required"):
+        _ = op.sources.DictSource(
+            [{"k": 1, "x": 10}],
+            tag_columns=["k", "x"],
+            tag_only_columns=True,
+            source_id="u",
+        )
+    # A plain FunctionPod's call lets x fall through: that is the one way out.
+    pod = defaulted.pod
+    assert isinstance(pod, FunctionPod)
+    with pytest.raises(ValueError, match="column 'x' is not a parameter") as excinfo:
+        _ = pod.process(source)
+    message = str(excinfo.value)
+    assert "['x'] are referential tags of the input" in message
+    assert "pod(stream) to let them pass through as referential tags" in message
+    assert "tag_only_columns" not in message
+    assert pod(source).keys() == (("k", "x"), ("x", "out"))
+    # A wrapper's call keeps no data column for x, so it fails the same way: neither
+    # remedy is offered, and the error says why.
+    cached = CachedFunctionPod(pod, result_database=InMemoryArrowDatabase())
+    for call in (cached.process, cached):
+        with pytest.raises(
+            ValueError, match="column 'x' is not a parameter"
+        ) as excinfo:
+            _ = call(source)
+        message = str(excinfo.value)
+        assert "['x'] are referential tags of the input" in message
+        assert "pod(stream)," not in message
+        assert "tag_only_columns" not in message
+        assert "no data column of the input is a parameter" in message
+
+
 def test_the_exact_form_on_plain_tags_says_nothing_about_referential_tags() -> None:
     plain = _source(["k", "x"], tag_only_columns=True)
     assert half.pod.process(plain).keys() == (("k", "x"), ("half",))

@@ -12,7 +12,7 @@ stream's public methods.
 from __future__ import annotations
 
 import warnings
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import pyarrow as pa
@@ -416,7 +416,9 @@ def test_select_and_drop_columns_with_no_rows_keep_the_populated_shape(
     [lambda: SelectColumns(["x", "y"]), lambda: DropColumns(["k"])],
     ids=["select", "drop"],
 )
-def test_select_and_drop_columns_commute_with_batch(make_op) -> None:
+def test_select_and_drop_columns_commute_with_batch(
+    make_op: Callable[[], SelectColumns | DropColumns],
+) -> None:
     # Batch keeps a referential tag one list column in both roles (ITL-1017), so
     # selecting or dropping before or after it gives the same rows and reference.
     after = make_op()(Batch(batch_size=2)(_xky()))

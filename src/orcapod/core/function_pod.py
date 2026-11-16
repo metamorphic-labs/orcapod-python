@@ -283,20 +283,38 @@ class _FunctionPodBase(TraceableBase):
             ]
             if not unread:
                 raise
-            # Only a plain ``FunctionPod``'s call lets references fall through
-            # (``__call__``); a wrapper pod's call drops their data columns.
-            call = (
-                "pod(stream) to let them pass through as referential tags"
-                if isinstance(self, FunctionPod)
-                else "pod(stream), which keeps them as plain tags"
+            # Name only the ways out that can work for this input. Only a plain
+            # ``FunctionPod``'s call lets references fall through (``__call__``),
+            # whatever the other columns. A wrapper pod's call drops their data
+            # columns, and keeping them plain removes them: either leaves the
+            # function a column to read only when a parameter column remains.
+            has_parameter_column = any(name in parameters for name in data_schema)
+            remedies: list[str] = []
+            if isinstance(self, FunctionPod):
+                remedies.append(
+                    "call the pod as pod(stream) to let them pass through as "
+                    "referential tags"
+                )
+            elif has_parameter_column:
+                remedies.append(
+                    "call the pod as pod(stream), which keeps them as plain tags"
+                )
+            if has_parameter_column:
+                remedies.append(
+                    f"add {unread} to the tag_only_columns of the source that "
+                    "declares them (tag_only_columns=True keeps every tag plain)"
+                )
+            way_out = (
+                ", or ".join(remedies)
+                if remedies
+                else "no data column of the input is a parameter of the function, "
+                "so neither calling the pod nor keeping them plain leaves it one"
             )
             raise ValueError(
                 f"{error}. {unread} are referential tags of the input (each a tag "
                 "and a data column of one name) that the function does not read, and "
                 "the exact form, pod.process(stream) or pod(stream, strict=True), "
-                f"hands every data column to the function. Call the pod as {call}, "
-                f"or add {unread} to the tag_only_columns of the source that declares "
-                "them (tag_only_columns=True keeps every tag plain)"
+                f"hands every data column to the function: {way_out}"
             ) from error
         self._validate_output_keys(tag_schema.keys())
 

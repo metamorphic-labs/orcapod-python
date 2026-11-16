@@ -191,7 +191,10 @@ example a copy in the source's data under another name, or
   any extra column. The error names the referential tags and the two ways out: call the
   pod, `pod(stream)`, which for a plain `FunctionPod` lets them pass through as
   referential tags (a wrapper pod such as `CachedFunctionPod` has no fall-through: its
-  call keeps them as plain tags), or keep them plain with `tag_only_columns`.
+  call keeps them as plain tags), or keep them plain with `tag_only_columns`. It offers
+  only a way out that can work: when no data column of the input is a parameter, a
+  wrapper pod's call and `tag_only_columns` would leave the function nothing to read,
+  and the error says so instead.
 - Binding a source to a job's input slot is strict: a column that is a referential tag on
   one side and a plain tag or a data column on the other is refused (it is listed as a
   missing or unexpected column). The error says which side holds it as a referential tag,
