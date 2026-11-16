@@ -210,6 +210,15 @@ print(renamed.keys())
 # (('subject_id',), ('sex', 'age', 'genotype'))
 ```
 
+or the same renames as keyword arguments, which build the same step:
+
+```python
+print(subjects.map_data(age_weeks="age").keys())
+# (('subject_id',), ('sex', 'age', 'genotype'))
+```
+
+A name that is not a Python identifier, such as `"spike count"`, needs the dictionary.
+
 Columns you do not rename are kept. A name that is not a column of that kind is refused: a
 `map_data` of a tag column raises `InputValidationError` and says to use `map_tags`.
 `map_columns` renames tag and data columns in one call. Pass `drop_unmapped=True` to keep only

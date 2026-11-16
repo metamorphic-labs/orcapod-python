@@ -522,3 +522,79 @@ def test_a_new_name_with_the_token_separator_is_refused(
     """A source-info token splits on ``::`` (ITL-1154): no column name may blur it."""
     with pytest.raises(InputValidationError, match="separator"):
         op_cls({old_name: new_name})
+
+
+# ── renames as keyword arguments (ITL-1171) ────────────────────────────────
+
+KEYWORD_FORMS = [
+    ("map_tags", {"subject": "animal"}),
+    ("map_data", {"age": "years", "weight": "kg"}),
+    ("map_columns", {"subject": "animal", "age": "years"}),
+]
+
+
+@pytest.mark.parametrize(("method", "renames"), KEYWORD_FORMS)
+@pytest.mark.parametrize("drop_unmapped", [False, True])
+def test_keyword_renames_build_the_dict_form(
+    method: str, renames: dict[str, str], drop_unmapped: bool
+) -> None:
+    source = _source()
+    by_dict = getattr(source, method)(renames, drop_unmapped=drop_unmapped)
+    by_keyword = getattr(source, method)(drop_unmapped=drop_unmapped, **renames)
+    assert by_keyword.content_hash() == by_dict.content_hash()
+    assert by_keyword.pipeline_hash() == by_dict.pipeline_hash()
+    assert by_keyword.keys() == by_dict.keys()
+    assert _rows(by_keyword) == _rows(by_dict)
+
+
+@pytest.mark.parametrize("method", ["map_tags", "map_data", "map_columns"])
+def test_a_dict_and_keyword_renames_together_are_refused(method: str) -> None:
+    with pytest.raises(TypeError, match="either as one dict .* or as keyword"):
+        getattr(_source(), method)({"age": "years"}, weight="kg")
+
+
+@pytest.mark.parametrize("method", ["map_tags", "map_data", "map_columns"])
+def test_the_dict_is_positional_and_drop_unmapped_keyword_only(method: str) -> None:
+    source = _source()
+    with pytest.raises(TypeError):
+        getattr(source, method)({"age": "years"}, True)
+    # ``name_map=`` is no longer the dict: it reads as a rename of a column
+    # called ``name_map``, whose new name is not a string.
+    with pytest.raises(TypeError, match="must be strings"):
+        getattr(source, method)(name_map={"age": "years"})
+
+
+@pytest.mark.parametrize("method", ["map_tags", "map_data", "map_columns"])
+@pytest.mark.parametrize(
+    "call",
+    [lambda m, s: getattr(s, m)(age=3), lambda m, s: getattr(s, m)({"age": 3})],
+    ids=["keyword", "dict"],
+)
+def test_a_name_that_is_not_a_string_is_refused(
+    method: str, call: Callable[[str, StreamProtocol], Any]
+) -> None:
+    with pytest.raises(TypeError, match="must be strings"):
+        call(method, _source())
+
+
+@pytest.mark.parametrize("method", ["map_tags", "map_data", "map_columns"])
+def test_no_rename_is_the_empty_mapping(method: str) -> None:
+    source = _source()
+    none = getattr(source, method)()
+    empty = getattr(source, method)({})
+    assert none.content_hash() == empty.content_hash()
+    assert none.keys() == source.keys()
+
+
+def test_an_option_named_column_is_renamed_through_the_dict() -> None:
+    source = DictSource(
+        data=[{"k": "a", "label": 1, "strict": 2}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="options",
+    )
+    renamed = source.map_data({"label": "lbl", "strict": "st"}, label="renamed")
+    assert renamed.keys() == (("k",), ("lbl", "st"))
+    assert renamed.label == "renamed"
+    # As keywords, ``label`` and ``strict`` are the options, not renames.
+    assert source.map_data(label="node").keys() == source.keys()

@@ -406,6 +406,18 @@ renamed = sessions.map_columns({"session": "session_no", "age": "age_weeks"})
 print(renamed.keys())  # (('subject_id', 'session_no'), ('age_weeks', 'weight'))
 ```
 
+The three methods also take the renames as keyword arguments, `old="new"`. Both forms build
+the same operator, with the same hashes:
+
+```python
+by_keyword = sessions.map_columns(session="session_no", age="age_weeks")
+print(by_keyword.pipeline_hash() == renamed.pipeline_hash())  # True
+```
+
+Give the renames as one dict (the only positional argument) or as keyword arguments, not both.
+`drop_unmapped`, `strict` and `label` are options, never renames: a column with one of those
+names, or a name that is not a Python identifier (`"spike count"`), is renamed through the dict.
+
 A name that is not a column the operator renames raises `InputValidationError` when the
 operator is called: a tag name for `map_data`, a data name for `map_tags`, and for all three a
 name that is no column at all. The message names the columns that exist and, for a column of
