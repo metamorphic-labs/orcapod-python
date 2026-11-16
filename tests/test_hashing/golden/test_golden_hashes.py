@@ -22,7 +22,6 @@ import os
 import subprocess
 import sys
 import uuid
-from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +32,12 @@ import pytest
 from orcapod.contexts import get_default_context
 from orcapod.types import Schema
 from tests.test_hashing.golden import cases, store
+from tests.test_hashing.golden.marks import (
+    disallowed_marks,
+    entry_marks,
+    golden_entry_violations,
+    needs,
+)
 
 GENERATOR = Path(__file__).with_name("generate_golden_hashes.py")
 
@@ -56,26 +61,12 @@ def _load_golden() -> tuple[dict[str, dict[str, Any]], str | None]:
 GOLDEN, LOAD_ERROR = _load_golden()
 
 
-def _needs(group: str) -> Any:
-    """A skip mark for a group whose optional dependency is not installed (ITL-871)."""
-    module = cases.OPTIONAL_GROUPS.get(group)
-    return pytest.mark.skipif(
-        not cases.group_available(group),
-        reason=f"golden group {group!r} needs the optional package {module!r}",
-    )
-
-
-def _entry_marks(group: str) -> list[Any]:
-    """The only marks a golden entry may carry: the optional-package skip (ITL-871)."""
-    return [_needs(group)] if group in cases.OPTIONAL_GROUPS else []
-
-
 GOLDEN_ENTRIES = [
-    pytest.param(group, entry, id=f"{group}:{entry}", marks=_entry_marks(group))
+    pytest.param(group, entry, id=f"{group}:{entry}", marks=entry_marks(group))
     for group in cases.GROUPS
     for entry in GOLDEN[group]
 ]
-GROUP_PARAMS = [pytest.param(group, marks=_needs(group)) for group in cases.GROUPS]
+GROUP_PARAMS = [pytest.param(group, marks=needs(group)) for group in cases.GROUPS]
 
 
 def _moved_message(group: str, entry: str, expected: Any, actual: Any) -> str:
@@ -139,30 +130,6 @@ def test_no_unpinned_entries(live: dict[str, dict[str, Any]], group: str) -> Non
 # No golden entry is skipped or expected to fail, but for a missing optional package
 # ---------------------------------------------------------------------------
 
-_SKIP_OR_XFAIL = frozenset({"skip", "skipif", "xfail"})
-
-
-def disallowed_marks(group: str, marks: Iterable[Any]) -> list[str]:
-    """The skip and xfail marks on a golden entry of ``group`` that the rules forbid.
-
-    The one allowed mark is the optional-package skip of an optional group, exactly as
-    ``_needs`` makes it.
-
-    Args:
-        group: The entry's group.
-        marks: The entry's marks, as ``pytest.Mark`` or ``pytest.MarkDecorator`` objects.
-
-    Returns:
-        A description of each forbidden mark.
-    """
-    allowed = [mark.mark for mark in _entry_marks(group)]
-    found = [getattr(mark, "mark", mark) for mark in marks]
-    return [
-        f"{mark.name}{mark.args}{mark.kwargs}"
-        for mark in found
-        if mark.name in _SKIP_OR_XFAIL and mark not in allowed
-    ]
-
 
 def test_golden_entry_params_carry_only_the_optional_package_skip() -> None:
     """No parametrized golden entry is marked skip or xfail but by the ITL-871 rule."""
@@ -177,15 +144,30 @@ def test_collected_golden_entries_carry_only_the_optional_package_skip(
     request: pytest.FixtureRequest,
 ) -> None:
     """The collected golden entry tests carry no other skip or xfail, whoever added it."""
-    found: dict[str, list[str]] = {}
-    for item in request.session.items:
-        if getattr(item, "originalname", None) != "test_golden_entry":
-            continue
-        group = item.callspec.params["group"]  # pyright: ignore[reportAttributeAccessIssue]
-        bad = disallowed_marks(group, item.iter_markers())
-        if bad:
-            found[item.nodeid] = bad
+    found = golden_entry_violations(request.session.items)
     assert not found, f"golden entries marked skip or xfail: {found}"
+
+
+def test_the_collection_hook_refuses_a_skipped_golden_entry(
+    pytestconfig: pytest.Config,
+) -> None:
+    """The conftest hook, outside this module, fails the collection on a forbidden mark."""
+    from tests.test_hashing.golden import conftest
+
+    class _Spec:
+        params = {"group": "semantic", "entry": "value.none"}
+
+    class _Item:
+        originalname = "test_golden_entry"
+        nodeid = "test_golden_hashes.py::test_golden_entry[semantic:value.none]"
+        callspec = _Spec()
+
+        def iter_markers(self) -> list[Any]:
+            return [pytest.mark.skip(reason="module-level skip").mark]
+
+    with pytest.raises(pytest.UsageError, match="semantic:value.none"):
+        conftest.pytest_collection_modifyitems(pytestconfig, [_Item()])
+    conftest.pytest_collection_modifyitems(pytestconfig, [])
 
 
 def test_golden_test_module_marks_nothing() -> None:
@@ -205,7 +187,7 @@ def test_golden_test_module_marks_nothing() -> None:
         ("semantic", pytest.mark.xfail(reason="moved")),
         ("schema", pytest.mark.skip(reason="later")),
         ("torch", pytest.mark.skipif(True, reason="another reason")),
-        ("arrow", _needs("torch")),
+        ("arrow", needs("torch")),
     ],
 )
 def test_a_forbidden_mark_is_reported(group: str, mark: Any) -> None:
@@ -215,7 +197,7 @@ def test_a_forbidden_mark_is_reported(group: str, mark: Any) -> None:
 
 def test_the_optional_package_skip_is_allowed() -> None:
     """The optional-package skip of an optional group is not reported."""
-    assert disallowed_marks("torch", [_needs("torch").mark]) == []
+    assert disallowed_marks("torch", [needs("torch").mark]) == []
 
 
 GENERATOR_TIMEOUT_S = 600
@@ -516,6 +498,12 @@ import sys
 
 from orcapod.contexts import get_default_context
 from tests.test_hashing.golden import cases, store
+from tests.test_hashing.golden.marks import (
+    disallowed_marks,
+    entry_marks,
+    golden_entry_violations,
+    needs,
+)
 from tests.test_hashing.golden.generate_golden_hashes import main
 
 # Stand in for a supported PyTorch that predates float8_e8m0fnu (added in torch

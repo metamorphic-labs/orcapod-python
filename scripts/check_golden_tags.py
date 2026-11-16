@@ -45,10 +45,32 @@ class GitUnavailableError(RuntimeError):
     """git, the history or the tags cannot be read."""
 
 
+# Variables that point git at another repository than ``--repo`` (git(1), "Environment
+# Variables"); they are removed so that the repository read is the one named, and
+# ``--no-replace-objects`` keeps replace refs from substituting the objects read.
+_GIT_LOCATION_VARIABLES = frozenset(
+    {
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_NAMESPACE",
+        "GIT_GRAFT_FILE",
+        "GIT_SHALLOW_FILE",
+    }
+)
+
+
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
+    env = {k: v for k, v in os.environ.items() if k not in _GIT_LOCATION_VARIABLES}
     try:
         return subprocess.run(
-            ["git", "-C", str(repo), *args], capture_output=True, check=False
+            ["git", "--no-replace-objects", "-C", str(repo), *args],
+            capture_output=True,
+            check=False,
+            env=env,
         )
     except FileNotFoundError as exc:
         raise GitUnavailableError("git is not installed") from exc

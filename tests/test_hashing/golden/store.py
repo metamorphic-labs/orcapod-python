@@ -98,9 +98,28 @@ def golden_folder(root: Path, manifest: Mapping[str, Any]) -> Path:
     return root / GOLDEN_ROOT / manifest["golden"]["folder"]
 
 
+def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Build a JSON object, refusing a key that appears twice (JSON keeps the last)."""
+    out: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in out:
+            raise GoldenLayoutError(f"the key {key!r} appears twice in one JSON object")
+        out[key] = value
+    return out
+
+
 def read_json(path: Path) -> Any:
-    """Parse a JSON file."""
-    return json.loads(path.read_text(encoding="utf-8"))
+    """Parse a JSON file, refusing an object that repeats a key.
+
+    Raises:
+        GoldenLayoutError: An object in the file repeats a key; the message names the file.
+    """
+    try:
+        return json.loads(
+            path.read_text(encoding="utf-8"), object_pairs_hook=_unique_keys
+        )
+    except GoldenLayoutError as exc:
+        raise GoldenLayoutError(f"{path}: {exc}") from exc
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -470,6 +489,13 @@ def folder_problems(history: Sequence[Mapping[str, Any]], folder: Path) -> list[
                 problems.append(f"{name} is listed by revisions {listed[name]} and {i}")
                 continue
             listed[name] = i
+            match = FILE_NAME.match(name)
+            if match is None or match["group"] not in GROUPS:
+                problems.append(
+                    f"{name}, listed by revision {i}, is not a golden file name "
+                    "(<group>-NN.json of a known group, in the golden folder)"
+                )
+                continue
             path = folder / name
             if not path.is_file():
                 problems.append(f"{name}, listed by revision {i}, is missing")

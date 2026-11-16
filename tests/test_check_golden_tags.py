@@ -299,3 +299,37 @@ def test_the_gate_refuses_a_golden_addition_after_the_release_step(repo: Path) -
     result = _gate(repo, "0.3.0")
     assert result.returncode == 1
     assert "last revision" in result.stderr
+
+
+def test_inherited_git_location_variables_do_not_redirect_the_check(
+    repo: Path, tmp_path: Path
+) -> None:
+    """``--repo`` is the repository read, whatever ``GIT_DIR`` and friends point at."""
+    other = tmp_path / "other"
+    _ = subprocess.run(
+        ["git", "clone", "-q", str(repo), str(other)],
+        check=True,
+        capture_output=True,
+        env=_env(ci=False),
+    )
+    path = _folder(other) / "semantic-01.json"
+    _ = path.write_text(path.read_text().replace("semantic_v1", "semantic_v2", 1))
+    _commit(other, "edit a released file")
+    _git(other, "fetch", "-q", "--tags")
+    assert _check(other).returncode == 1
+    env = _env(ci=True, ceiling=tmp_path)
+    env.update(
+        GIT_DIR=str(repo / ".git"),
+        GIT_WORK_TREE=str(other),
+        GIT_COMMON_DIR=str(repo / ".git"),
+        GIT_OBJECT_DIRECTORY=str(repo / ".git" / "objects"),
+    )
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--repo", str(other)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    assert result.returncode == 1, result.stdout
+    assert "semantic-01.json differs" in result.stderr

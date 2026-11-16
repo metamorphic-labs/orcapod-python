@@ -175,6 +175,44 @@ def test_a_recorded_file_of_an_unknown_group_is_reported(tree: Path) -> None:
     )
 
 
+def test_a_key_repeated_inside_one_file_is_an_error(tmp_path: Path) -> None:
+    """JSON keeps the last of two equal keys; the store refuses the file instead."""
+    _ = (tmp_path / "arrow-01.json").write_text(
+        '{"example.entry": "old", "example.entry": "current"}\n'
+    )
+    with pytest.raises(store.GoldenLayoutError, match="example.entry"):
+        _ = store.load_folder(tmp_path)
+
+
+def test_a_key_repeated_inside_a_recorded_file_is_reported(tree: Path) -> None:
+    name = NEXT_SCHEMA
+    folder = _folder(tree)
+    _ = (folder / name).write_bytes(b'{"dup.entry": "a", "dup.entry": "b"}\n')
+    manifest = _manifest(tree)
+    manifest["golden"]["history"] = store.with_file(
+        manifest["golden"]["history"],
+        name,
+        store.file_digest(folder / name),
+        "2026-11-15",
+    )
+    store.write_json(store.manifest_path(tree, VERSION), manifest)
+    assert any("dup.entry" in p for p in store.tree_problems(tree, VERSION))
+
+
+@pytest.mark.parametrize(
+    "name", ["../arrow-01.json", "sub/arrow-01.json", "obsolete-01.json", "arrow.json"]
+)
+def test_a_listed_name_that_is_not_a_golden_file_name_is_reported(
+    tree: Path, name: str
+) -> None:
+    """A history entry names a ``<group>-NN.json`` file of a known group, in the folder."""
+    history = _history(tree)
+    history[0]["added"][name] = "0" * 64
+    history = store.rechain(history)
+    problems = store.folder_problems(history, _folder(tree))
+    assert any(name in p and "not a golden file name" in p for p in problems)
+
+
 def test_a_missing_listed_file_is_reported(tree: Path) -> None:
     (_folder(tree) / "torch-01.json").unlink()
     assert any(
