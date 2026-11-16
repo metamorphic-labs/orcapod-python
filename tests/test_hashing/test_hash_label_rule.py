@@ -104,6 +104,12 @@ class TestLabelFormat:
         assert hasher.hasher_id == "arrow_v1"
         assert hasher.hash_table(pa.table({"x": [1]})).method == "arrow_v1"
 
+    def test_ordered_arrow_hash_has_its_own_label(self) -> None:
+        """The order-including Arrow hash is a procedure of its own: ``arrow_ordered_v1``."""
+        hasher = get_default_context().arrow_hasher
+        table = pa.table({"x": [1]})
+        assert hasher.hash_table_ordered(table).method == "arrow_ordered_v1"
+
     def test_value_hash_labels(self, tmp_path: Path) -> None:
         """Array, pandas, Polars expression and directory values carry their own label."""
         hasher = get_default_context().semantic_hasher
@@ -352,6 +358,20 @@ class TestRenamingALabelMovesEveryHashItFeeds:
         _ = request.getfixturevalue("renamed_labels")
         after = context.arrow_hasher.hash_table(table)
         assert after.digest != before.digest
+
+    @pytest.mark.parametrize(
+        "value",
+        [pd.DataFrame({"a": [1, 2]}), pd.Series([1, 2], name="a")],
+        ids=["dataframe", "series"],
+    )
+    def test_pandas_value_moves_with_the_ordered_arrow_label(
+        self, value: Any, request: pytest.FixtureRequest
+    ) -> None:
+        """A pandas value hash takes the ordered Arrow digest with its label (D1)."""
+        hasher = get_default_context().semantic_hasher
+        before = hasher.hash_object(value)
+        _ = request.getfixturevalue("renamed_labels")
+        assert hasher.hash_object(value).digest != before.digest
 
     def test_plain_table_keeps_its_digest(self, request: pytest.FixtureRequest) -> None:
         """A table of plain columns embeds no hash: a renamed label leaves its digest."""
@@ -741,6 +761,7 @@ SOURCE_ROOT = Path(orcapod.__file__).parent
 LABEL_DEFINITIONS = {
     "semantic_v1": "hashing/semantic_hashing/semantic_hasher.py",
     "arrow_v1": "hashing/arrow_hashers.py",
+    "arrow_ordered_v1": "hashing/arrow_hashers.py",
     "directory_v1": "hashing/directory_hashers.py",
     "ndarray_v1": "hashing/semantic_hashing/builtin_handlers.py",
     "polars_expr_v1": "hashing/semantic_hashing/polars_expr.py",
