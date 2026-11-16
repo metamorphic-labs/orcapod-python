@@ -613,3 +613,42 @@ TestReferentialOutputSchemaPrediction = pytest.mark.usefixtures("referential")(
         )
     )
 )
+
+
+def _without_n(schemas: Any) -> tuple[list[Any], list[Any]]:
+    """``_schema_items`` of ``schemas`` without the data column ``n``."""
+    tag_items, data_items = _schema_items(schemas)
+    return tag_items, [(name, hint) for name, hint in data_items if name != "n"]
+
+
+@pytest.mark.parametrize("tag_only", [True, False], ids=["plain", "referential"])
+@pytest.mark.parametrize("config", list(COLUMN_CONFIGS))
+@pytest.mark.parametrize("pairs", PAIRS)
+@pytest.mark.parametrize("step", ["batch", "group_by"])
+class TestAggregatedPredictionApartFromItemNullability:
+    """Batch and GroupBy predict every column but ``n`` of their computed result.
+
+    Their whole-schema prediction cases are strict expected failures for ITL-1136 alone
+    (``n``'s nullable list items read as ``list[int]``). These cases leave ``n`` out, so
+    a regression in any other column, the tags in either role included, still fails.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _tag_mode(self, tag_only: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(f"{__name__}.TAG_ONLY", tag_only)
+
+    def test_plain_stream(self, step: str, pairs: int, config: str) -> None:
+        kwargs = COLUMN_CONFIGS[config]
+        predicted = _stream(step, pairs, WITH_ROWS).output_schema(**kwargs)
+        computed = _computed(step, pairs).output_schema(**kwargs)
+        assert predicted[1]["n"] == list[int | None]
+        assert _without_n(predicted) == _without_n(computed)
+
+    def test_job_node(self, step: str, pairs: int, config: str) -> None:
+        kwargs = COLUMN_CONFIGS[config]
+        job = _job(step, pairs, WITH_ROWS)
+        _ = job.run(orchestrator=SyncPipelineOrchestrator())
+        predicted = job.nodes["op"].output_schema(**kwargs)
+        computed = _computed(step, pairs).output_schema(**kwargs)
+        assert predicted[1]["n"] == list[int | None]
+        assert _without_n(predicted) == _without_n(computed)
