@@ -109,8 +109,8 @@ developer.
   If the developer types into the worker's terminal directly, that instruction wins; tell
   the coordinator with an escalation.
 - **Plan first.** Follow `CLAUDE.md` and the Sensei skill chain (`work-start`, then
-  `brainstorming` or `writing-plans`). Save the plan under `superpowers/` before changing
-  code. For anything beyond a contained bug fix, send the plan summary and open questions
+  `brainstorming` or `writing-plans`). Put the plan in the Linear issue or the pull
+  request description, never in a file in the repository, before changing code. For anything beyond a contained bug fix, send the plan summary and open questions
   through `ask` and wait for the coordinator's approval before implementing. Flag any
   point that needs the developer's decision explicitly (see "Approving plans" below).
 - **Tests.** Write the failing regression test first. Run everything through `uv run`.

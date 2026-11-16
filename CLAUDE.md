@@ -45,14 +45,6 @@ When fixing a bug or addressing a design problem:
 When discovering a new issue that won't be fixed immediately, ask the user whether it should be
 logged in `design_issues/` before adding it.
 
-## Superpowers artifacts
-
-Place all superpowers-related artifacts (design specs, plans, etc.) in the `superpowers/`
-directory at the project root — **not** under `docs/`. The `docs/` directory is reserved for
-actual library documentation.
-
-- Specs go in `superpowers/specs/`
-
 ## Backward compatibility
 
 This is a greenfield project pre-v0.1.0. Do **not** add backward-compatibility shims,
@@ -83,6 +75,8 @@ Python docstrings everywhere.
 to refer to names (e.g. ``PollingSource``, ``iter_data``, ``CursorInvalidatedError``).
 
 ## Documentation samples
+
+`docs/` holds library documentation only: agent plans, specs and working notes never go there.
 
 Every fenced `python` block in `README.md`, `docs/index.md`, `docs/getting-started.md`,
 `docs/troubleshooting.md`, `docs/concepts/`, `docs/reference/` and `docs/tutorial/` is executed
