@@ -234,4 +234,41 @@ def test_polled_batches_give_each_row_its_own_record_id() -> None:
     source.check_for_new_data()
     table = source.as_table(columns={"system_tags": True, "source": True})
     (record_id,) = [n for n in table.column_names if n.startswith("_tag_record_id")]
-    assert sorted(table.column(record_id).to_pylist()) == ['{"id":1}', '{"id":2}']
+    assert sorted(str(v) for v in table.column(record_id).to_pylist()) == [
+        '{"id":1}',
+        '{"id":2}',
+    ]
+
+
+def test_a_bad_polled_key_stops_the_source_at_once() -> None:
+    """A batch whose keys repeat is refused, not retried (ITL-1154)."""
+    import asyncio
+
+    from orcapod.errors import RowIdentifierError
+    from tests.test_channels.test_polling_source import _batch
+
+    duplicate = {
+        "id": pa.array([1, 1], type=pa.int64()),
+        "val": pa.array([10, 20], type=pa.int64()),
+    }
+    fake = FakeDynamicSource(batches=[duplicate, _batch(2, 20)])
+    source = PollingSource(fake, tag_columns="id", record_id_columns="id")
+
+    async def collect() -> list[Any]:
+        return [pair async for pair in source.async_iter_data()]
+
+    with pytest.raises(RowIdentifierError, match="appears in rows 0 and 1"):
+        asyncio.run(collect())
+    assert len(fake.fetch_cursors) == 1
+
+
+def test_a_sqlite_table_without_a_primary_key_names_rowid(tmp_path: Path) -> None:
+    """The refusal of a rowid-only table names ``record_id_columns="rowid"``."""
+    path = tmp_path / "db.sqlite"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE logs (msg TEXT)")
+        conn.execute("INSERT INTO logs VALUES ('a')")
+    with pytest.raises(ValueError, match='record_id_columns="rowid"'):
+        SQLiteTableSource(path, "logs")
+    source = SQLiteTableSource(path, "logs", record_id_columns="rowid")
+    assert source.keys()[0] == ("rowid",)

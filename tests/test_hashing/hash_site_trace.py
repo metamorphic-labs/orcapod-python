@@ -141,6 +141,9 @@ def _install_content_hash() -> None:
 
         def traced(self: Any, *args: Any, **kwargs: Any) -> Any:
             record(self, name)
+            # A comparison reads both operands' digests.
+            if name == "__eq__" and args and isinstance(args[0], ContentHash):
+                record(args[0], name)
             _state.depth = _depth() + 1
             try:
                 return original(self, *args, **kwargs)

@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from orcapod.core.sources.source_ids import hash_source_id
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+from orcapod.errors import RowIdentifierError
 from orcapod.system_constants import constants
 from orcapod.types import ContentHash
 from orcapod.utils import arrow_utils, schema_utils
@@ -187,7 +188,7 @@ def row_identifiers(table: pa.Table, record_id_columns: Sequence[str]) -> list[s
         One identifier per row, in row order.
 
     Raises:
-        ValueError: If a key column is missing or of a type that is not allowed, a
+        RowIdentifierError: If a key column is missing or of a type that is not allowed, a
             key value is null, or two rows have the same key. The message names the
             column or the key.
     """
@@ -195,14 +196,14 @@ def row_identifiers(table: pa.Table, record_id_columns: Sequence[str]) -> list[s
         return [positional_row_identifier(i) for i in range(table.num_rows)]
     missing = [c for c in record_id_columns if c not in table.column_names]
     if missing:
-        raise ValueError(
+        raise RowIdentifierError(
             f"record_id_columns {missing} not found in table columns: "
             f"{table.column_names}"
         )
     for column in record_id_columns:
         arrow_type = table.schema.field(column).type
         if not key_column_type_allowed(arrow_type):
-            raise ValueError(
+            raise RowIdentifierError(
                 f"key column {column!r} has type {arrow_type}, which cannot identify "
                 "a row: a key column must hold strings, integers, booleans, "
                 "timestamps or dates. Name a string or integer key column in "
@@ -216,13 +217,13 @@ def row_identifiers(table: pa.Table, record_id_columns: Sequence[str]) -> list[s
         key = [(c, columns[c][i]) for c in record_id_columns]
         nulls = [c for c, value in key if value is None]
         if nulls:
-            raise ValueError(
+            raise RowIdentifierError(
                 f"key column {nulls[0]!r} is null in row {i}: a key value identifies "
                 "the row and cannot be null"
             )
         identifier = key_row_identifier(key)
         if identifier in seen:
-            raise ValueError(
+            raise RowIdentifierError(
                 f"key {identifier} appears in rows {seen[identifier]} and {i}: key "
                 "values must be unique, so each row has its own identifier"
             )

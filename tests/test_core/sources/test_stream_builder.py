@@ -287,18 +287,22 @@ class TestKeyRowIdentifiers:
 
     def test_int_and_str_keys_differ(self) -> None:
         """``17`` and ``"17"`` are different keys."""
-        ints = ArrowTableSource(
-            pa.table({"k": [17], "v": [1.0]}), tag_columns=["k"], record_id_columns="k"
-        )
-        strs = ArrowTableSource(
-            pa.table({"k": ["17"], "v": [1.0]}),
-            tag_columns=["k"],
-            record_id_columns="k",
-        )
-        assert (
-            ints.as_table(columns={"system_tags": True}).to_pylist()[0]
-            != (strs.as_table(columns={"system_tags": True}).to_pylist()[0])
-        )
+
+        def record_id(value: object) -> str:
+            source = ArrowTableSource(
+                pa.table({"k": [value], "v": [1.0]}),
+                tag_columns=["v"],
+                record_id_columns="k",
+                source_id="s",
+            )
+            table = source.as_table(columns={"system_tags": True})
+            (name,) = [n for n in table.column_names if n.startswith("_tag_record_id")]
+            value = table.column(name).to_pylist()[0]
+            assert isinstance(value, str)
+            return value
+
+        assert record_id(17) == '{"k":17}'
+        assert record_id("17") == '{"k":"17"}'
 
     @pytest.mark.parametrize(
         ("values", "match"),

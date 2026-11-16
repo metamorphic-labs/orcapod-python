@@ -239,8 +239,8 @@ def renamed_labels() -> Iterator[dict[str, str]]:
     ):
         if hasattr(module, name):
             saved.append((module, name, getattr(module, name)))
-    label_feeds.rename_labels()
     try:
+        label_feeds.rename_labels()
         yield label_feeds.RENAMED
     finally:
         for owner, name, value in saved:

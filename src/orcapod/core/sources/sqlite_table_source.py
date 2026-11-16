@@ -1,9 +1,11 @@
 """SQLiteTableSource — a read-only RootSource backed by a SQLite table.
 
 Wraps a SQLite table as an OrcaPod Source. Primary-key columns are used
-as tag columns by default. For tables with no explicit primary key
-(ROWID-only tables), the implicit ``rowid`` integer column is used
-automatically.
+as tag columns and as the row identifier (the record id) by default. For a
+table with no explicit primary key (a ROWID-only table) the implicit ``rowid``
+integer column becomes the tag, but the rows have no default identifier: pass
+``record_id_columns="rowid"`` (or ``()`` for the position), since SQLite may
+renumber the rowids of such a table (``VACUUM``).
 
 Example::
 
@@ -60,7 +62,8 @@ class SQLiteTableSource(DBTableSource):
        - If *tag_columns* is provided, uses them as-is.
        - Otherwise uses the table's primary-key columns.
        - If the table has no explicit PK (ROWID-only), falls back to the
-         implicit ``rowid`` integer column.
+         implicit ``rowid`` integer column; such a table also needs
+         ``record_id_columns`` (``"rowid"`` or ``()``), or it is refused.
     4. Determines the fetch query: injects ``SELECT rowid, *`` when
        ``"rowid"`` is a resolved tag column and not a normal table column
        (handles both auto-detection and ``from_config`` reconstruction).
@@ -120,9 +123,19 @@ class SQLiteTableSource(DBTableSource):
         connector = SQLiteConnector(db_path)
 
         try:
+            # A missing table is reported as missing, not as a table without a key.
+            if table_name not in connector.get_table_names():
+                raise ValueError(f"Table {table_name!r} not found in database.")
             # Step 3: Resolve tag columns.
+            pk_cols = connector.get_pk_columns(table_name)
+            if record_id_columns is None and not pk_cols:
+                raise ValueError(
+                    f"Table {table_name!r} has no primary key, so its rows have no "
+                    'identifier: pass record_id_columns="rowid" (SQLite may renumber '
+                    "rowids, for example on VACUUM), name other key columns, or pass "
+                    "record_id_columns=() to identify rows by position."
+                )
             if tag_columns is None:
-                pk_cols = connector.get_pk_columns(table_name)
                 resolved_tags: list[str] = pk_cols if pk_cols else ["rowid"]
             else:
                 resolved_tags = _normalize_column_list(tag_columns)

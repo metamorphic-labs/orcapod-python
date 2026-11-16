@@ -106,7 +106,7 @@ class TestArrowTableSourceInfoTokens:
         source_col = [c for c in table.column_names if c.startswith("_source_score")]
         assert source_col, "Expected a _source_score column"
         values = table.column(source_col[0]).to_pylist()
-        assert all('::{"user_id":' in v for v in values)
+        assert all(v is not None and '::{"user_id":' in v for v in values)
 
     def test_source_id_appears_in_provenance_token(self):
         src = _make_arrow_source(source_id="my_ds")

@@ -9,6 +9,7 @@ added to the table with its class.
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -56,6 +57,43 @@ def _traced_sites() -> set[str]:
     return set(json.loads(result.stdout))
 
 
+_COMPREHENSIONS: dict[type[ast.AST], str] = {
+    ast.GeneratorExp: "<genexpr>",
+    ast.ListComp: "<listcomp>",
+    ast.SetComp: "<setcomp>",
+    ast.DictComp: "<dictcomp>",
+}
+
+
+def _qualified_names(tree: ast.Module) -> set[str]:
+    """Every function's qualified name in a module, as ``__qualname__`` spells it.
+
+    Nested functions get ``<locals>`` and lambdas ``<lambda>``, so a call site the trace
+    records (``Class.method.<locals>.<lambda>``) is found by its whole name.
+    """
+    names: set[str] = set()
+
+    def visit(node: ast.AST, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.ClassDef):
+                visit(child, f"{prefix}{child.name}.")
+            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                qualname = f"{prefix}{child.name}"
+                names.add(qualname)
+                visit(child, f"{qualname}.<locals>.")
+            elif isinstance(child, ast.Lambda):
+                names.add(f"{prefix}<lambda>")
+                visit(child, prefix)
+            elif type(child) in _COMPREHENSIONS:
+                names.add(f"{prefix}{_COMPREHENSIONS[type(child)]}")
+                visit(child, prefix)
+            else:
+                visit(child, prefix)
+
+    visit(tree, "")
+    return names
+
+
 def test_every_traced_hash_site_is_in_the_inventory() -> None:
     """A call site that produces or reads a digest is listed, with its class."""
     traced = _traced_sites()
@@ -73,7 +111,6 @@ def test_every_documented_site_exists() -> None:
     for site in sorted(_documented_sites()):
         path, qualname = site.split(":", 1)
         source = (PROJECT_ROOT / "src" / "orcapod" / path).read_text(encoding="utf-8")
-        name = qualname.split(".<locals>")[0].split(".")[-1]
-        if not re.search(rf"def {re.escape(name)}\b", source):
+        if qualname not in _qualified_names(ast.parse(source)):
             stale.append(site)
     assert not stale, f"documented hash sites that no longer exist: {stale}"

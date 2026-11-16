@@ -56,7 +56,7 @@ from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import check_head_size
 from orcapod.core.streams.view import ViewStatus, StreamView
 from orcapod.databases.spiraldb_connector import SpiralDBConnector
-from orcapod.errors import InputValidationError, SourceTooLargeError
+from orcapod.errors import InputValidationError, RowIdentifierError, SourceTooLargeError
 from orcapod.types import ColumnConfig
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
@@ -348,10 +348,9 @@ class SpiralDBTableSource(RootSource):
                 raise ValueError(
                     f"{location}: Table {table_name!r} not found in database."
                 )
+            primary_key = tuple(connector.get_pk_columns(table_name))
             self._key_columns: tuple[str, ...] = (
-                given_key
-                if given_key is not None
-                else tuple(connector.get_pk_columns(table_name))
+                given_key if given_key is not None else primary_key
             )
             if not self._key_columns:
                 raise ValueError(
@@ -369,8 +368,9 @@ class SpiralDBTableSource(RootSource):
                 else (connector.get_table_version(table_name) or None)
             )
 
+        # The default tags are the primary key, whatever identifies the rows.
         resolved_tags = (
-            list(self._key_columns)
+            list(primary_key or self._key_columns)
             if tag_columns is None
             else _normalize_column_list(tag_columns)
         )
@@ -599,14 +599,16 @@ class SpiralDBTableSource(RootSource):
         The same key form as every other source (``key_row_identifier``, ITL-1154).
 
         Raises:
-            ValueError: If a key column holds a null or a type that cannot identify
-                a row, or two rows of the batch have one key; the message names the
-                table.
+            RowIdentifierError: If a key column holds a null or a type that cannot
+                identify a row, or two rows of the batch have one key; the message
+                names the table.
         """
         try:
             return row_identifiers(table, self._key_columns)
-        except ValueError as exc:
-            raise ValueError(f"SpiralDB table {self._qualified!r}: {exc}") from exc
+        except RowIdentifierError as exc:
+            raise RowIdentifierError(
+                f"SpiralDB table {self._qualified!r}: {exc}"
+            ) from exc
 
     def _batch_streams(self) -> Generator["ArrowTableStream", None, None]:
         """Scan the table once and yield its rows as streams of at most ``batch_rows`` rows.
@@ -659,6 +661,8 @@ class SpiralDBTableSource(RootSource):
                         "deleted rows not yet compacted)"
                     )
             seen = 0
+            # Keys must be unique across the whole read, not only within a slice.
+            identifiers: set[str] = set()
             for batch in connector.scan_batches(
                 self._table_name,
                 where=self._where or None,
@@ -684,6 +688,14 @@ class SpiralDBTableSource(RootSource):
                     # Tokens first: they refuse a null key before it is copied into
                     # a non-nullable column.
                     tokens = self._key_tokens(rows)
+                    repeated = identifiers.intersection(tokens)
+                    if repeated:
+                        raise RowIdentifierError(
+                            f"SpiralDB table {self._qualified!r}: key "
+                            f"{sorted(repeated)[0]} appears in two rows; key values "
+                            "must be unique, so each row has its own identifier"
+                        )
+                    identifiers.update(tokens)
                     yield self._builder.attach_provenance(
                         self._with_tag_copies(rows),
                         tag_columns=self._tag_columns,

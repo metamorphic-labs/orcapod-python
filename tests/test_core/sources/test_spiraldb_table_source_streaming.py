@@ -18,7 +18,7 @@ import pytest
 from orcapod import PipelineJob, function_pod
 from orcapod.databases import DeltaTableDatabase
 from orcapod.databases.spiraldb_connector import _serialize_arrow_metadata
-from orcapod.errors import SourceTooLargeError
+from orcapod.errors import RowIdentifierError, SourceTooLargeError
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.serialization import resolve_source_from_config
 from orcapod.sources import SpiralDBTableSource
@@ -834,3 +834,25 @@ class TestNotebookPreview:
         # The two tag columns are marked in the display (ITL-1081).
         assert "bold = tag" in html
         assert html.count("font-weight:bold") == 2
+
+
+class TestNamedKeyColumns:
+    """``record_id_columns`` on a SpiralDB table (ITL-1154)."""
+
+    def test_a_key_repeated_in_another_slice_is_refused(self, project):
+        """Keys must be unique across the whole read, not only within one slice."""
+        source = SpiralDBTableSource(
+            _PROJECT, "event", batch_rows=1, record_id_columns="subject_id"
+        )
+        with pytest.raises(RowIdentifierError, match="appears in two rows"):
+            list(source.iter_data())
+
+    def test_named_keys_leave_the_primary_key_as_the_tags(self, project):
+        """The default tags are the primary key, whatever identifies the rows."""
+        source = SpiralDBTableSource(_PROJECT, "event", record_id_columns="timestamp")
+        assert tuple(source.keys()[0]) == ("subject_id", "timestamp")
+
+    def test_position_is_not_offered(self, project):
+        """A SpiralDB scan order does not identify a row: ``()`` is refused."""
+        with pytest.raises(ValueError, match="record_id_columns=\\(\\)"):
+            SpiralDBTableSource(_PROJECT, "event", record_id_columns=())

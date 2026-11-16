@@ -458,8 +458,9 @@ def test_sqlite_job_runs_only_the_new_rows(
     sqlite_path: Path, orchestrator: str
 ) -> None:
     job = _job(
-        SQLiteTableSource(sqlite_path, "t", record_id_columns="k"),
-        tag_only_columns=True,
+        SQLiteTableSource(
+            sqlite_path, "t", record_id_columns="k", tag_only_columns=True
+        )
     )
     _run(job, orchestrator)
     CALLS.clear()
