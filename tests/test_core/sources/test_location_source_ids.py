@@ -133,8 +133,16 @@ def sqlite_path(tmp_path: Path) -> Path:
 
 def test_csv_default_and_given(csv_path: Path) -> None:
     """``csv:<path as passed>``; a given id is used as it is."""
-    assert CSVSource(str(csv_path), tag_columns="k").source_id == f"csv:{csv_path}"
-    assert CSVSource(str(csv_path), tag_columns="k", source_id=GIVEN).source_id == GIVEN
+    assert (
+        CSVSource(str(csv_path), tag_columns="k", tag_only_columns=True).source_id
+        == f"csv:{csv_path}"
+    )
+    assert (
+        CSVSource(
+            str(csv_path), tag_columns="k", source_id=GIVEN, tag_only_columns=True
+        ).source_id
+        == GIVEN
+    )
 
 
 def test_csv_path_with_double_colon_needs_a_source_id(tmp_path: Path) -> None:
@@ -142,25 +150,34 @@ def test_csv_path_with_double_colon_needs_a_source_id(tmp_path: Path) -> None:
     path = tmp_path / "a::b.csv"
     path.write_text("k,v\na,1\n")
     with pytest.raises(ValueError, match="source_id"):
-        CSVSource(str(path), tag_columns="k")
-    assert CSVSource(str(path), tag_columns="k", source_id="ab").source_id == "ab"
+        CSVSource(str(path), tag_columns="k", tag_only_columns=True)
+    assert (
+        CSVSource(
+            str(path), tag_columns="k", source_id="ab", tag_only_columns=True
+        ).source_id
+        == "ab"
+    )
 
 
 def test_delta_default_and_given(delta_path: Path) -> None:
     """``delta_table:<path as passed>``; a given id is used as it is."""
-    assert DeltaTableSource(delta_path, tag_columns="k").source_id == (
-        f"delta_table:{delta_path}"
+    assert DeltaTableSource(
+        delta_path, tag_columns="k", tag_only_columns=True
+    ).source_id == (f"delta_table:{delta_path}")
+    given = DeltaTableSource(
+        delta_path, tag_columns="k", source_id=GIVEN, tag_only_columns=True
     )
-    given = DeltaTableSource(delta_path, tag_columns="k", source_id=GIVEN)
     assert given.source_id == GIVEN
 
 
 def test_sqlite_default_and_given(sqlite_path: Path) -> None:
     """``sqlite_table:<db path as passed>:main.<table>``; a given id is used as is."""
-    assert SQLiteTableSource(sqlite_path, "trials").source_id == (
-        f"sqlite_table:{sqlite_path}:main.trials"
+    assert SQLiteTableSource(
+        sqlite_path, "trials", tag_only_columns=True
+    ).source_id == (f"sqlite_table:{sqlite_path}:main.trials")
+    given = SQLiteTableSource(
+        sqlite_path, "trials", source_id=GIVEN, tag_only_columns=True
     )
-    given = SQLiteTableSource(sqlite_path, "trials", source_id=GIVEN)
     assert given.source_id == GIVEN
 
 
@@ -186,10 +203,16 @@ def test_polling_default_is_the_hash_of_the_impl_identity() -> None:
     "make",
     [
         lambda: DictSource(
-            data=[{"k": "a", "v": 1}], tag_columns=["k"], source_id=GIVEN
+            data=[{"k": "a", "v": 1}],
+            tag_columns=["k"],
+            source_id=GIVEN,
+            tag_only_columns=True,
         ),
         lambda: ArrowTableSource(
-            pa.table({"k": ["a"], "v": [1]}), tag_columns=["k"], source_id=GIVEN
+            pa.table({"k": ["a"], "v": [1]}),
+            tag_columns=["k"],
+            source_id=GIVEN,
+            tag_only_columns=True,
         ),
         lambda: ListSource(name="item", data=[1, 2], source_id=GIVEN),
     ],
@@ -203,7 +226,12 @@ def test_in_memory_sources_keep_a_given_id(make: Any) -> None:
 def test_a_given_source_id_with_the_separator_is_refused() -> None:
     """A given source id holding ``::`` is refused (ITL-1154)."""
     with pytest.raises(ValueError, match="'::'"):
-        DictSource(data=[{"k": "a", "v": 1}], tag_columns=["k"], source_id="a::b")
+        DictSource(
+            data=[{"k": "a", "v": 1}],
+            tag_columns=["k"],
+            source_id="a::b",
+            tag_only_columns=True,
+        )
 
 
 def test_a_column_name_with_the_separator_is_refused() -> None:
@@ -211,7 +239,12 @@ def test_a_column_name_with_the_separator_is_refused() -> None:
     from orcapod.errors import InputValidationError
 
     with pytest.raises(InputValidationError, match="'::'"):
-        DictSource(data=[{"k": "a", "x::y": 1}], tag_columns=["k"], source_id="s")
+        DictSource(
+            data=[{"k": "a", "x::y": 1}],
+            tag_columns=["k"],
+            source_id="s",
+            tag_only_columns=True,
+        )
 
 
 def test_a_polling_source_needs_key_columns() -> None:
@@ -269,6 +302,48 @@ def test_a_sqlite_table_without_a_primary_key_names_rowid(tmp_path: Path) -> Non
         conn.execute("CREATE TABLE logs (msg TEXT)")
         conn.execute("INSERT INTO logs VALUES ('a')")
     with pytest.raises(ValueError, match='record_id_columns="rowid"'):
-        SQLiteTableSource(path, "logs")
-    source = SQLiteTableSource(path, "logs", record_id_columns="rowid")
+        SQLiteTableSource(path, "logs", tag_only_columns=True)
+    source = SQLiteTableSource(
+        path, "logs", record_id_columns="rowid", tag_only_columns=True
+    )
     assert source.keys()[0] == ("rowid",)
+
+
+def test_a_key_polled_again_is_refused_and_the_batch_not_committed() -> None:
+    """A key repeated in a later batch is refused; earlier rows stay (ITL-1154).
+
+    The refused batch is not committed and the cursor does not move, so a later
+    read polls the same batch again and is refused again.
+    """
+    from orcapod.errors import RowIdentifierError
+    from tests.test_channels.test_polling_source import _batch
+
+    fake = FakeDynamicSource(batches=[_batch(1, 10), _batch(1, 11)])
+    source = PollingSource(fake, tag_columns="id", record_id_columns="id")
+    assert [data["val"] for _, data in source.iter_data()] == [10]
+    with pytest.raises(RowIdentifierError, match='repeats the key {"id":1}'):
+        source.check_for_new_data()
+    assert source.head().as_table().column("val").to_pylist() == [10]
+    with pytest.raises(RowIdentifierError, match="repeats the key"):
+        list(source.iter_data())
+
+
+def test_a_key_polled_again_stops_the_async_source_at_once() -> None:
+    """On the async path the repeated key is not retried (ITL-1154)."""
+    import asyncio
+
+    from orcapod.errors import RowIdentifierError
+    from tests.test_channels.test_polling_source import _batch
+
+    fake = FakeDynamicSource(batches=[_batch(1, 10), _batch(1, 11), _batch(2, 20)])
+    source = PollingSource(fake, tag_columns="id", record_id_columns="id")
+    seen: list[Any] = []
+
+    async def collect() -> None:
+        async for _, data in source.async_iter_data():
+            seen.append(data["val"])
+
+    with pytest.raises(RowIdentifierError, match="repeats the key"):
+        asyncio.run(collect())
+    assert seen == [10]
+    assert len(fake.fetch_cursors) == 2

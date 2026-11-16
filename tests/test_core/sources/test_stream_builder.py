@@ -178,6 +178,25 @@ class TestArrowTableSourceUsesBuilder:
         assert identity[0] == "ArrowTableSource"
 
 
+class TestKeyColumnOrder:
+    """Several key columns are given in key order, never in a set (ITL-1154)."""
+
+    @pytest.mark.parametrize("unordered", [{"a", "b"}, frozenset({"a", "b"})])
+    def test_a_set_of_key_columns_is_refused(self, unordered: Any) -> None:
+        table = pa.table({"a": [1, 2], "b": [3, 4], "v": [1.0, 2.0]})
+        with pytest.raises(TypeError, match="key order"):
+            ArrowTableSource(table, record_id_columns=unordered, source_id="s")
+
+    def test_a_list_and_a_tuple_give_the_same_identifiers(self) -> None:
+        table = pa.table({"a": [1, 2], "b": [3, 4], "v": [1.0, 2.0]})
+        columns = {"system_tags": True}
+        by_list = ArrowTableSource(table, record_id_columns=["b", "a"], source_id="s")
+        by_tuple = ArrowTableSource(table, record_id_columns=("b", "a"), source_id="s")
+        assert by_list.as_table(columns=columns).equals(
+            by_tuple.as_table(columns=columns)
+        )
+
+
 class TestKeyRowIdentifiers:
     """A row named by key columns: the canonical JSON of its key (ITL-1154).
 

@@ -441,6 +441,7 @@ class TestRenamingALabelMovesEveryHashItFeeds:
         _ = request.getfixturevalue("renamed_labels")
         after = entry_ids()
         assert len(before) == 2
+        assert len(after) == 2
         assert set(after).isdisjoint(before)
 
     def test_operator_cache_and_cached_source_keys_move(
@@ -459,6 +460,7 @@ class TestRenamingALabelMovesEveryHashItFeeds:
         after_digests = [key.removeprefix(prefix_new) for key in after]
         assert all(key.startswith(prefix_new) for key in after)
         assert len(before_digests) == 4
+        assert len(after_digests) == 4
         assert set(after_digests).isdisjoint(before_digests)
 
     def test_run_snapshot_moves_with_the_structure_label(

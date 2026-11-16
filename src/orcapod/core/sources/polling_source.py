@@ -16,7 +16,7 @@ import logging
 import threading
 from collections.abc import Collection
 from math import floor
-from typing import Any, ClassVar, Generic, TYPE_CHECKING, TypeVar
+from typing import Any, ClassVar, Generic, TYPE_CHECKING, TypeVar, cast
 
 from typing_extensions import override
 
@@ -37,8 +37,10 @@ from orcapod.core.streams.base import (
 from orcapod.errors import (
     CursorInvalidatedError,
     InputValidationError,
+    RowIdentifierError,
     SchemaInconsistencyError,
 )
+from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Cursor, PollingConfig, Schema
 from orcapod.utils import arrow_utils, polars_data_utils
 from orcapod.utils.arrow_utils import system_tag_column_names
@@ -210,7 +212,9 @@ class PollingSource(RootSource, Generic[T]):
             conversion and hashing.
         config: Optional Orcapod framework config.
         record_id_columns: Required. The key columns whose values identify a row
-            (the record id), in key order.
+            (the record id), in key order. A key is polled once: a batch that
+            repeats a key of its own or of an earlier batch is refused with
+            ``RowIdentifierError`` and not committed.
 
     Raises:
         ValueError: If ``record_id_columns`` is not given, or ``impl.schema()`` returns a non-``None`` schema that
@@ -299,6 +303,9 @@ class PollingSource(RootSource, Generic[T]):
         self._polling_config = polling_config
         self._cursor: Cursor[T] | None = None
         self._batches: list[ArrowTableStream] = []
+        # Every record id committed so far: a polled row is identified by its key
+        # alone, so a key polled again is refused (ITL-1154).
+        self._committed_record_ids: set[str] = set()
         self._state_lock: threading.Lock = threading.Lock()
         self._canonical_arrow_schema: pa.Schema | None = None
         # The default source id is the kind and the semantic hash of the impl's identity:
@@ -339,8 +346,8 @@ class PollingSource(RootSource, Generic[T]):
         When ``SourceStreamBuilder`` materialises a source stream it embeds a
         schema hash in the two system-tag column names::
 
-            _tag::source:<HASH>   →  source-ID column (str)
-            _tag::source:<HASH>::record_id  →  record-ID column (bytes)
+            _tag_source_id::<HASH>  →  source-ID column (large_string)
+            _tag_record_id::<HASH>  →  record-ID column (large_string)
 
         where ``<HASH>`` is produced by ``compute_source_schema_hash(tag_schema,
         data_schema, data_context, config)``.
@@ -695,7 +702,7 @@ class PollingSource(RootSource, Generic[T]):
             with self._state_lock:
                 if self._cursor is None:
                     if new_stream is not None:
-                        self._batches.append(new_stream)
+                        self._commit_batch(new_stream)
                     self._cursor = new_cursor
                     committed = True
             return committed and self._mark_new_rows(new_stream)
@@ -717,7 +724,7 @@ class PollingSource(RootSource, Generic[T]):
                 with self._state_lock:
                     if self._cursor == cursor_snapshot:
                         if new_stream is not None:
-                            self._batches.append(new_stream)
+                            self._commit_batch(new_stream)
                         self._cursor = new_cursor
                         committed = True
                 return committed and self._mark_new_rows(new_stream)
@@ -725,6 +732,37 @@ class PollingSource(RootSource, Generic[T]):
                 "PollingSource %r: sync poll — cache still valid", self._source_id
             )
             return False
+
+    def _commit_batch(self, new_stream: ArrowTableStream) -> None:
+        """Append a polled batch, refusing a key that an earlier batch already holds.
+
+        Called with ``_state_lock`` held. A polled row is identified by its key alone,
+        so the same key polled twice would give two rows one record id (ITL-1154).
+
+        Args:
+            new_stream: The batch to commit; its own keys are already unique.
+
+        Raises:
+            RowIdentifierError: If a row of the batch has the record id of a row
+                committed earlier. Nothing is committed and the cursor does not move.
+        """
+        table = new_stream.as_table(columns={"system_tags": True})
+        (column,) = [
+            name
+            for name in table.column_names
+            if name.startswith(constants.SYSTEM_TAG_RECORD_ID_PREFIX)
+        ]
+        record_ids = cast("list[str]", table.column(column).to_pylist())
+        repeated = sorted(self._committed_record_ids.intersection(record_ids))
+        if repeated:
+            raise RowIdentifierError(
+                f"PollingSource {self._source_id!r}: a polled batch repeats the key "
+                f"{repeated[0]} of a row polled earlier ({len(repeated)} repeated "
+                "in all). A polled row is identified by its key alone, so a key is "
+                "polled once; give the update a new key or start a new source."
+            )
+        self._committed_record_ids.update(record_ids)
+        self._batches.append(new_stream)
 
     def _get_combined_stream(self) -> ArrowTableStream:
         """Return all committed batches concatenated as a single stream.
@@ -1047,7 +1085,7 @@ class PollingSource(RootSource, Generic[T]):
                         with self._state_lock:
                             if self._cursor == cursor_snapshot:
                                 if new_stream is not None:
-                                    self._batches.append(new_stream)
+                                    self._commit_batch(new_stream)
                                 self._cursor = new_cursor
                                 committed = True
                             # else: sync caller already advanced cursor —

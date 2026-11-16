@@ -45,11 +45,22 @@ def normalize_record_id_columns(
 
     Returns:
         ``None``, or the key columns as a tuple (empty for the position).
+
+    Raises:
+        TypeError: If several key columns are given in a collection without an
+            order (a set or a mapping): the key order is part of every row
+            identifier, so it must be stated.
     """
     if record_id_columns is None:
         return None
     if isinstance(record_id_columns, str):
         return (record_id_columns,)
+    if not isinstance(record_id_columns, Sequence):
+        raise TypeError(
+            "record_id_columns must list the key columns in key order (a list or "
+            f"a tuple), not a {type(record_id_columns).__name__}: the order is part "
+            "of every row identifier."
+        )
     return tuple(record_id_columns)
 
 

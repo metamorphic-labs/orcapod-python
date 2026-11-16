@@ -57,12 +57,9 @@ def _traced_sites() -> set[str]:
     return set(json.loads(result.stdout))
 
 
-_COMPREHENSIONS: dict[type[ast.AST], str] = {
-    ast.GeneratorExp: "<genexpr>",
-    ast.ListComp: "<listcomp>",
-    ast.SetComp: "<setcomp>",
-    ast.DictComp: "<dictcomp>",
-}
+_COMPREHENSIONS: dict[type[ast.AST], str] = {ast.GeneratorExp: "<genexpr>"}
+"""Code blocks with a frame of their own. A list, set or dict comprehension is named
+by the function it is written in (the trace names it so on Python 3.11 too)."""
 
 
 def _qualified_names(tree: ast.Module) -> set[str]:

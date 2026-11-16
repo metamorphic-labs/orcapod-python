@@ -24,6 +24,7 @@ base classes), which says what the hash is for. Events with no library frame on 
 
 from __future__ import annotations
 
+import re
 import hashlib
 import json
 import os
@@ -63,9 +64,27 @@ def _depth() -> int:
     return getattr(_state, "depth", 0)
 
 
+_INLINED_COMPREHENSION = re.compile(r"\.<locals>\.<(?:list|set|dict)comp>(\.|$)")
+"""A frame Python 3.11 gives a list, set or dict comprehension; 3.12 inlines it (PEP 709)."""
+
+
 def _rel(frame: FrameType) -> str:
+    """Return ``<path under src>:<qualname>`` of a frame, the same on every Python.
+
+    A comprehension's own frame (Python 3.11 only) is named by the function it is
+    written in, as Python 3.12 and later name it.
+    """
     path = frame.f_code.co_filename
-    return f"{path[len(_SRC) :]}:{frame.f_code.co_qualname}"
+    qualname = frame.f_code.co_qualname
+    # ``f.<locals>.<listcomp>`` -> ``f``; ``f.<locals>.<listcomp>.<lambda>`` ->
+    # ``f.<locals>.<lambda>``, as Python 3.12 names them; nested ones one at a time.
+    previous = None
+    while previous != qualname:
+        previous = qualname
+        qualname = _INLINED_COMPREHENSION.sub(
+            lambda m: ".<locals>." if m.group(1) else "", qualname, count=1
+        )
+    return f"{path[len(_SRC) :]}:{qualname}"
 
 
 def _sites(frame: FrameType | None) -> tuple[str, str]:

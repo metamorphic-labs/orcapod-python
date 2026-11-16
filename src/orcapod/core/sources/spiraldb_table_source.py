@@ -444,7 +444,10 @@ class SpiralDBTableSource(RootSource):
 
         Raises:
             InputValidationError: If the mapping fails ``DerivedSource``'s rule, or a
-                tag it names is not a key column of the table.
+                tag it names is not one of the source's key columns (the
+                ``record_id_columns`` given, by default the primary key). Only a key
+                column is checked for nulls by every read, so only a key column can
+                be copied into a non-nullable data column.
         """
         tag_keys, data_keys = keys
         validate_tags_as_data(self._tags_as_data, tag_keys, data_keys)

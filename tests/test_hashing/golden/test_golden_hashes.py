@@ -215,10 +215,15 @@ def test_golden_store_problems_names_a_repeated_key(
     path = sorted(folder.glob("semantic-*.json"))[0]
     text = path.read_text(encoding="utf-8")
     first_line = text.splitlines()[1]
+    key = first_line.split('"')[1]
     path.write_text(text.replace(first_line, first_line + "\n" + first_line, 1))
     monkeypatch.setattr(conftest, "GOLDEN_ROOT", tmp_path)
     problems = conftest.golden_store_problems()
-    assert any(path.name in problem for problem in problems), problems
+    # The file's digest no longer matches either; the repeated key must be named too.
+    assert any(
+        path.name in problem and f"the key {key!r} appears twice" in problem
+        for problem in problems
+    ), problems
 
 
 def test_the_collection_hook_allows_the_optional_package_skip(
