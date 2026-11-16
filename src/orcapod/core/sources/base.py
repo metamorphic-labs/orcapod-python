@@ -62,6 +62,13 @@ class RootSource(StreamBase):
             data_context=data_context,
             config=config,
         )
+        if source_id == "":
+            raise ValueError(
+                "source_id is empty: a source id is the source's name, and an empty "
+                "one would make every source-info token start with "
+                f"{constants.BLOCK_SEPARATOR!r}; give the source a name, or leave "
+                "source_id unset for the default"
+            )
         if source_id is not None and (
             constants.BLOCK_SEPARATOR in source_id or source_id.endswith(":")
         ):

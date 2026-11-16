@@ -947,8 +947,8 @@ data. The rules:
   DBTableSource used directly (a generic connector, no database address) has no default:
   it requires a source_id (developer, November 16, 2026). ::
   is refused in every source id, given or default, and in every column name
-  (schema_utils.require_names_without_separator), as are a source id ending with : and a
-  column name starting with one, so a source-info token splits at its first and last ::. Key columns (developer, November 16, 2026, ITL-1154): every source accepts
+  (schema_utils.require_names_without_separator), as are an empty source id, a source id ending
+  with : and a column name starting with one, so a source-info token splits at its first and last ::. Key columns (developer, November 16, 2026, ITL-1154): every source accepts
   record_id_columns (a name or several, in key order; () asks for the position).
   Defaults: database tables and SpiralDB, the primary key (a database table without one is
   refused); in-memory, CSV and Delta, the position; PollingSource requires key columns. A

@@ -234,6 +234,17 @@ def test_a_given_source_id_with_the_separator_is_refused() -> None:
         )
 
 
+def test_an_empty_source_id_is_refused() -> None:
+    """An empty source id names nothing; its tokens would start with ``::`` (ITL-1154)."""
+    with pytest.raises(ValueError, match="empty"):
+        DictSource(
+            data=[{"k": "a", "v": 1}],
+            tag_columns=["k"],
+            source_id="",
+            tag_only_columns=True,
+        )
+
+
 def test_a_column_name_with_the_separator_is_refused() -> None:
     """A column name holding ``::`` is refused (ITL-1154)."""
     from orcapod.errors import InputValidationError
