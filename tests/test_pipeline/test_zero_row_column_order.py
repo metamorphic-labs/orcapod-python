@@ -531,12 +531,12 @@ class TestOutputSchemaPrediction:
 
 # ── referential tags (ITL-1023) ─────────────────────────────────────────────
 
-# Not supported with referential tags yet: Batch (ITL-1017), MergeJoin (ITL-1018),
-# SelectColumns and DropColumns (ITL-1022).
+# Not supported with referential tags yet: MergeJoin (ITL-1018), SelectColumns and
+# DropColumns (ITL-1022).
 REFERENTIAL_STEPS = [
     step
     for step in STEPS
-    if step not in ("merge_join", "batch", "select_columns", "drop_columns")
+    if step not in ("merge_join", "select_columns", "drop_columns")
 ]
 
 

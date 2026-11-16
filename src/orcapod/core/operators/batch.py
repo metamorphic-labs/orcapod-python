@@ -6,6 +6,7 @@ from typing import Any, ClassVar, TYPE_CHECKING
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import UnaryOperator
+from orcapod.core.referential_tags import stream_references
 from orcapod.core.streams import ArrowTableStream
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
 from orcapod.system_constants import constants
@@ -24,12 +25,25 @@ from orcapod.types import Schema
 
 
 class Batch(UnaryOperator):
-    """
-    Base class for all operators.
+    """Group consecutive rows into batches of ``batch_size`` rows, list-wrapping them.
+
+    ``Batch`` has no key, so it keeps every tag, list-valued: those lists are what
+    tells a batch's members apart.  Every user tag, data and source-info column
+    becomes a list with one element per member; system-tag columns fold to a scalar
+    digest and gain a ``::{pipeline_hash}`` name suffix.
+
+    A referential tag (ITL-1017, developer decision of November 16, 2026: "Batch
+    always simply takes anything and puts into list") is one column, so it becomes
+    the same list in both roles and stays referential.  Its source info is one token
+    per member, as for any data column: nothing is merged, so no token is folded.
+
+    Args:
+        batch_size: Rows per batch; ``0`` puts every row in one batch.
+        drop_partial_batch: Drop a last batch with fewer than ``batch_size`` rows.
     """
 
-    # Referential tags (ITL-1023): not handled yet.
-    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = "ITL-1017"
+    # Referential tags (ITL-1023): handled (ITL-1017).
+    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = None
 
     def __init__(self, batch_size: int = 0, drop_partial_batch: bool = False, **kwargs):
         if batch_size < 0:
@@ -49,10 +63,11 @@ class Batch(UnaryOperator):
     def unary_static_process(self, stream: StreamProtocol) -> StreamProtocol:
         """Group rows into fixed-size batches, list-wrapping their values.
 
-        Tag and data columns become list-valued.  Source-info columns become
-        list-valued too, one element per batch member.  System-tag columns are
-        folded to a scalar instead -- record identity hashes them directly, so
-        they must not become lists.
+        Tag and data columns become list-valued; a referential tag, one column,
+        becomes the same list in both roles and stays referential.  Source-info
+        columns become list-valued too, one element per batch member.  System-tag
+        columns are folded to a scalar instead -- record identity hashes them
+        directly, so they must not become lists.
 
         Args:
             stream: The upstream stream.
@@ -108,10 +123,12 @@ class Batch(UnaryOperator):
             batched_table, stream.pipeline_hash().to_hex(n_char)
         )
 
+        # A referential tag stays referential: the same list in both roles.
         return ArrowTableStream(
             batched_table,
             tag_columns=tag_columns,
             data_context=stream.data_context,
+            reference_tags=stream_references(stream),
         )
 
     def unary_output_schema(
@@ -123,9 +140,9 @@ class Batch(UnaryOperator):
     ) -> tuple[Schema, Schema]:
         """Predict the batched output schemas without batching.
 
-        Every user tag, data, and source column becomes ``list[T]``.  System
-        tag columns keep their scalar type and gain a ``::{pipeline_hash}``
-        name suffix.
+        Every user tag, data, and source column becomes ``list[T]``, so a
+        referential tag is ``list[T]`` in both halves.  System tag columns keep
+        their scalar type and gain a ``::{pipeline_hash}`` name suffix.
 
         Args:
             stream: The upstream stream.

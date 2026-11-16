@@ -21,7 +21,6 @@ import pytest
 import orcapod as op
 from orcapod.core import referential_tags
 from orcapod.core.operators import (
-    Batch,
     DropDataColumns,
     DropNulls,
     DropTagColumns,
@@ -402,17 +401,9 @@ def test_extraction_named_like_a_tag_raises() -> None:
 # ── not supported yet: raise, never a wrong answer ──────────────────────────
 
 
-@pytest.mark.parametrize(
-    "call, issue",
-    [
-        (lambda: Batch(batch_size=2)(_a()), "ITL-1017"),
-        (lambda: MergeJoin()(_a(), _b()), "ITL-1018"),
-    ],
-    ids=["batch", "merge_join"],
-)
-def test_uncovered_operators_raise(call, issue: str) -> None:
-    with pytest.raises(NotImplementedError, match=issue):
-        call()
+def test_uncovered_operators_raise() -> None:
+    with pytest.raises(NotImplementedError, match="ITL-1018"):
+        MergeJoin()(_a(), _b())
 
 
 # ── renames (developer decision, November 12, 2026) ─────────────────────────
@@ -483,8 +474,9 @@ def test_map_tags_on_plain_tags_is_unchanged() -> None:
 
 
 def test_uncovered_operators_still_work_on_plain_tags() -> None:
-    plain = _a(tag_only_columns=True)
-    assert Batch(batch_size=2)(plain).keys() == (("x",), ("a",))
+    plain = MergeJoin()(_a(tag_only_columns=True), _b(tag_only_columns=True))
+    tags, data = plain.keys()
+    assert tags == ("x",) and sorted(data) == ["a", "b"]
 
 
 def test_derived_source_over_a_referential_stream_raises() -> None:
