@@ -730,3 +730,22 @@ class TestIdentifierLength:
 
         assert stored is not None
         assert name in stored.column_names
+
+
+class TestPipelineRecordsAndEphemeralResults:
+    def test_ephemeral_database_checked_before_anything_changes(
+        self, tmp_path: pathlib.Path
+    ):
+        job = PipelineJob(name="p", database=InMemoryArrowDatabase())
+        with job:
+            _ = double.pod(_source(), label="dbl")
+
+        with pytest.raises(UnstorableColumnError) as exc_info:
+            job.set_ephemeral_database(_sqlite_database(tmp_path))
+
+        assert exc_info.value.node_label == "dbl"
+        assert exc_info.value.column == EXECUTOR_INFO
+        # No node took the database: a run computes and stores as before.
+        assert job.nodes["dbl"].ephemeral_result_database is None
+        _ = job.run()
+        assert sorted(CALLS) == [1, 2]

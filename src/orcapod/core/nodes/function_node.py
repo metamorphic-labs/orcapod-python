@@ -852,6 +852,30 @@ class FunctionNodeBase(StreamBase):
             f"input_stream={short_stream_repr(self._input_stream)})"
         )
 
+    def require_storable_results(self, result_database: ArrowDatabaseProtocol) -> None:
+        """Refuse a result database that cannot store this node's result table (ITL-1162).
+
+        Nothing is computed and nothing changes. A node without its function stores
+        no results and is not checked.
+
+        Args:
+            result_database: The database results would be stored in (the
+                persistent result database or an ephemeral one).
+
+        Raises:
+            UnstorableColumnError: If the database cannot store a column, naming
+                this node.
+        """
+        if self._function_pod is None:
+            return
+        try:
+            CachedFunctionPod(
+                self._function_pod, result_database=result_database
+            ).require_storable_results()
+        except UnstorableColumnError as exc:
+            exc.add_context(node_label=self.label)
+            raise
+
     @abstractmethod
     def set_ephemeral_database(self, database: "ArrowDatabaseProtocol | None") -> None:
         """Assign or remove the ephemeral result database for this node.
@@ -1411,10 +1435,8 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             return
         if result_database is None:
             result_database = pipeline_database.at("_result")
+        self.require_storable_results(result_database)
         try:
-            CachedFunctionPod(
-                self._function_pod, result_database=result_database
-            ).require_storable_results()
             require_storable(pipeline_database, _pipeline_meta_schema())
         except UnstorableColumnError as exc:
             exc.add_context(node_label=self.label)
@@ -1931,6 +1953,10 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             database: The ``ArrowDatabaseProtocol`` to use for ephemeral result
                 storage, or ``None`` to detach and revert to persistent-only writes.
         """
+        if database is not None:
+            # A database that cannot store the result table refuses it now, before
+            # anything runs or changes (ITL-1162).
+            self.require_storable_results(database)
         # Another database has its own tables of other generations to account for,
         # as in ``attach_databases``.
         self._stale_tables_checked = False
