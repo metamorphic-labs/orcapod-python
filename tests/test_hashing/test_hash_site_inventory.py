@@ -10,6 +10,7 @@ added to the table with its class.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -28,6 +29,20 @@ def _documented_sites() -> set[str]:
     return set(SITE.findall(text[start:end]))
 
 
+def _subprocess_env() -> dict[str, str]:
+    """The environment for a fresh interpreter: ``src`` on ``PYTHONPATH``.
+
+    The child does not inherit pytest.ini's ``pythonpath = src``, so it is passed
+    explicitly rather than relying on orcapod being installed.
+    """
+    env = dict(os.environ)
+    src = str(PROJECT_ROOT / "src")
+    env["PYTHONPATH"] = (
+        os.pathsep.join([src, env["PYTHONPATH"]]) if env.get("PYTHONPATH") else src
+    )
+    return env
+
+
 def _traced_sites() -> set[str]:
     """The library call sites the trace sees, from a fresh process."""
     result = subprocess.run(
@@ -36,6 +51,7 @@ def _traced_sites() -> set[str]:
         text=True,
         check=True,
         cwd=PROJECT_ROOT,
+        env=_subprocess_env(),
     )
     return set(json.loads(result.stdout))
 

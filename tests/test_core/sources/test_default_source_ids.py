@@ -53,8 +53,14 @@ def test_location_source_id_is_kind_then_location() -> None:
 
 @pytest.mark.parametrize(
     ("kind", "location"),
-    [("csv", "a::b.csv"), ("csv", ""), ("", "x"), ("c:sv", "x")],
-    ids=["double-colon", "empty-location", "empty-kind", "colon-in-kind"],
+    [("csv", "a::b.csv"), ("csv", ":b.csv"), ("csv", ""), ("", "x"), ("c:sv", "x")],
+    ids=[
+        "double-colon",
+        "leading-colon",
+        "empty-location",
+        "empty-kind",
+        "colon-in-kind",
+    ],
 )
 def test_location_source_id_refuses(kind: str, location: str) -> None:
     """A location with ``::``, an empty location and a bad kind have no default."""

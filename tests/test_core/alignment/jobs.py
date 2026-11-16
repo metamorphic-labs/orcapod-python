@@ -17,6 +17,7 @@ from typing import Any
 
 import pyarrow as pa
 
+from orcapod.utils.arrow_utils import GROUP_BY_FOLD_LABEL
 from orcapod import PipelineJob
 from orcapod.core.operators import GroupBy, Join
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
@@ -209,6 +210,7 @@ def layout(job: PipelineJob, view: View, config: dict[str, Any]) -> Layout:
         tag_keys=tuple(tag_keys),
         data_keys=tuple(data_keys),
         members=members,
+        fold_label=GROUP_BY_FOLD_LABEL if view.node == "grouped" else None,
         content_hash_column=content_hash_column(config),
         # ITL-1059: a plain DerivedSource has null source info and no system tags by
         # design (for now).

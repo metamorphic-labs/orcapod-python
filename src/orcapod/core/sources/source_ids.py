@@ -58,8 +58,9 @@ def location_source_id(kind: str, location: str) -> str:
 
     Raises:
         ValueError: If the kind is empty or contains ``:``, or the location is empty or
-            contains ``::``, the separator of a source-info value: such a location has
-            no default id, so give the source a ``source_id``.
+            the id would contain ``::``, the separator of a source-info value (a
+            location holding ``::`` or starting with ``:``): such a location has no
+            default id, so give the source a ``source_id``.
     """
     if not kind or ":" in kind:
         raise ValueError(f"source kind must be non-empty without ':', got {kind!r}")
@@ -68,10 +69,10 @@ def location_source_id(kind: str, location: str) -> str:
             f"a {kind} source has an empty location, so it has no default source id; "
             "give it a source_id"
         )
-    if "::" in location:
+    source_id = f"{kind}:{location}"
+    if "::" in source_id:
         raise ValueError(
-            f"the location {location!r} of a {kind} source contains '::', the separator "
-            "of a source-info value, so it cannot be the default source id; give the "
-            "source a source_id"
+            f"the default source id {source_id!r} of a {kind} source would contain "
+            "'::', the separator of a source-info value; give the source a source_id"
         )
-    return f"{kind}:{location}"
+    return source_id

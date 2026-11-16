@@ -58,7 +58,6 @@ def rename_labels() -> None:
     from orcapod.contexts import get_default_context
     from orcapod.hashing import arrow_hashers, directory_hashers, pandas_value_hash
     from orcapod.hashing.semantic_hashing import builtin_handlers, polars_expr
-    from orcapod.hashing.semantic_hashing.torch_handler import TorchTensorHandler
 
     context = get_default_context()
     context.semantic_hasher._hasher_id = RENAMED["semantic_v1"]  # pyright: ignore[reportAttributeAccessIssue]
@@ -74,6 +73,10 @@ def rename_labels() -> None:
     builtin_handlers.PolarsDataFrameHandler.HASH_LABEL = RENAMED["polars_dataframe_v1"]
     builtin_handlers.PolarsSeriesHandler.HASH_LABEL = RENAMED["polars_series_v1"]
     directory_hashers.DIRECTORY_HASH_LABEL = RENAMED["directory_v1"]  # pyright: ignore[reportConstantRedefinition]
+    try:  # torch is optional: its label is renamed only where it is installed
+        from orcapod.hashing.semantic_hashing.torch_handler import TorchTensorHandler
+    except ImportError:
+        return
     TorchTensorHandler.HASH_LABEL = RENAMED["torch_tensor_v1"]
 
 

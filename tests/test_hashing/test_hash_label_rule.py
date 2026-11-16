@@ -14,6 +14,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -210,7 +211,6 @@ def renamed_labels() -> Iterator[dict[str, str]]:
     to rename a label); the fixture restores them afterwards.
     """
     from orcapod.hashing import arrow_hashers
-    from orcapod.hashing.semantic_hashing.torch_handler import TorchTensorHandler
 
     context = get_default_context()
     saved: list[tuple[object, str, object]] = [
@@ -221,8 +221,13 @@ def renamed_labels() -> Iterator[dict[str, str]]:
         (PandasSeriesHandler, "HASH_LABEL", PandasSeriesHandler.HASH_LABEL),
         (PolarsDataFrameHandler, "HASH_LABEL", PolarsDataFrameHandler.HASH_LABEL),
         (PolarsSeriesHandler, "HASH_LABEL", PolarsSeriesHandler.HASH_LABEL),
-        (TorchTensorHandler, "HASH_LABEL", TorchTensorHandler.HASH_LABEL),
     ]
+    try:  # torch is optional
+        from orcapod.hashing.semantic_hashing.torch_handler import TorchTensorHandler
+    except ImportError:
+        pass
+    else:
+        saved.append((TorchTensorHandler, "HASH_LABEL", TorchTensorHandler.HASH_LABEL))
     for module, name in (
         (pandas_value_hash, "PANDAS_DATAFRAME_HASH_LABEL"),
         (pandas_value_hash, "PANDAS_SERIES_HASH_LABEL"),
@@ -243,6 +248,20 @@ def renamed_labels() -> Iterator[dict[str, str]]:
 _HEX_RUN = re.compile(r"[0-9a-f]{16,}")
 
 
+def _subprocess_env() -> dict[str, str]:
+    """The environment for a fresh interpreter: ``src`` on ``PYTHONPATH``.
+
+    The child does not inherit pytest.ini's ``pythonpath = src``, so it is passed
+    explicitly rather than relying on orcapod being installed.
+    """
+    env = dict(os.environ)
+    src = str(PROJECT_ROOT / "src")
+    env["PYTHONPATH"] = (
+        os.pathsep.join([src, env["PYTHONPATH"]]) if env.get("PYTHONPATH") else src
+    )
+    return env
+
+
 def _run_module(side: str) -> Any:
     """Run ``label_feeds`` in a fresh process and return its JSON output."""
     result = subprocess.run(
@@ -251,6 +270,7 @@ def _run_module(side: str) -> Any:
         text=True,
         check=True,
         cwd=PROJECT_ROOT,
+        env=_subprocess_env(),
     )
     return json.loads(result.stdout)
 

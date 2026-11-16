@@ -44,15 +44,12 @@ def fold_record_ids(record_ids: Sequence[bytes | None]) -> bytes:
     return uuid.uuid5(AGGREGATED_RECORD_ID_NAMESPACE, name).bytes
 
 
-FOLD_LABELS = ("batch_v1", "group_v1")
-"""The labels of the source-id folds of ``Batch`` and ``GroupBy`` (site 6b)."""
-
-
 def fold_values(values: Sequence[Any], label: str) -> str:
     """The folded value of any other system tag of an ordered member list (site 6b).
 
-    ``"<label>:<hex>"``: the fold's label (``FOLD_LABELS``), then the SHA-256 of the
-    canonical JSON member list.
+    ``"<label>:<hex>"``: the fold's label (``BATCH_FOLD_LABEL`` or
+    ``GROUP_BY_FOLD_LABEL``, each defined once beside the fold), then the SHA-256 of the
+    canonical JSON member list, computed here on its own.
     """
     members = json.dumps(
         [None if v is None else str(v) for v in values],

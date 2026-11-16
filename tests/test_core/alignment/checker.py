@@ -35,7 +35,7 @@ import pyarrow as pa
 
 from orcapod.system_constants import constants
 
-from .oracle import FOLD_LABELS, Oracle, Origin, fold_record_ids, fold_values
+from .oracle import Oracle, Origin, fold_record_ids, fold_values
 
 MAX_REPORTED = 12
 
@@ -62,6 +62,9 @@ class Layout:
             every row by the current design (ITL-1059); every other view fails on it.
         no_system_tags: Whether the view may have no system tags although they are
             asked for: the same plain ``DerivedSource`` (ITL-1059), and nothing else.
+        fold_label: The label of the fold that produced the folded system tags, for a
+            view with members: ``BATCH_FOLD_LABEL`` (``Batch``) or
+            ``GROUP_BY_FOLD_LABEL`` (``GroupBy``).
     """
 
     tag_keys: tuple[str, ...]
@@ -71,6 +74,7 @@ class Layout:
     content_hash_column: str = DEFAULT_CONTENT_HASH_COLUMN
     null_tokens: bool = False
     no_system_tags: bool = False
+    fold_label: str | None = None
 
 
 @dataclass
@@ -494,12 +498,14 @@ class _RowChecker:
         Returns:
             The pair's source when the pair is valid, else ``None``.
         """
+        label = self.layout.fold_label
+        if label is None:
+            self.fail(name, "the layout names no fold label for a folded system tag")
+            return None
         sources = {s for member in self.state.members for s in member}
         for source in sorted(sources):
             origins = [member.get(source) for member in self.state.members]
-            if source_value not in {
-                fold_values([source] * len(origins), label) for label in FOLD_LABELS
-            }:
+            if fold_values([source] * len(origins), label) != source_value:
                 continue
             if not self._check_lineage(name, source, lineage):
                 return None
