@@ -66,7 +66,9 @@ Do these on `metamorphic-labs` `main` before anything is pushed:
    `src/orcapod/contexts/released_manifests.json`, and at the data context's first release
    sets `released_in` and the `manifest` pin. It computes no hash and refuses a version
    already released. Commit both files with the release pull request; the release is tagged
-   on a commit that contains them.
+   on a commit that contains them. The Release workflow's build job checks this before it
+   creates the tag (`scripts/check_golden_tags.py --release-version X.Y.Z`) and stops if the
+   release is not recorded.
 3. **Check that `main` is green** — the `Run Tests` workflow on the commit you are
    releasing. The Release workflow re-runs the unit tests on Python 3.11, 3.12 and 3.13
    and the license check, but not the PostgreSQL or SpiralDB integration jobs.

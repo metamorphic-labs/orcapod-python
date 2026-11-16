@@ -209,7 +209,7 @@ of the whole tree is caught only by records outside it, the tags and PyPI.
 | 8 | A new file repeats a released entry name with another value | either | Duplicate-name check | the name is reported with both files |
 | 9 | A golden entry is marked `skip` or `xfail` to silence it | either | No-skip rule | the golden test reports the mark |
 | 10 | A hasher definition or library in a released `v1.json` is edited | accidental | Manifest pin | the manifest without `golden` no longer matches `manifest` |
-| 11 | A release is cut without the release step | accidental | Final-release check | a final version has no `releases` line |
+| 11 | A release is cut without the release step | accidental | Release gate, final-release check | the Release workflow stops before tagging; a final version has no `releases` line |
 | 12 | A released file is edited and its hash in `added` updated to match | deliberate | Chain | that revision's digest no longer computes, or the next revision's `previous` no longer matches |
 | 13 | As 12, with every later digest computed again | deliberate | Release pins | the pinned release digest is no longer in the chain |
 | 14 | As 13, with the pins rewritten too | deliberate | Tag check, PyPI | the file and the history differ from the release tag; the published `v1.json` shows the original chain |
@@ -288,6 +288,18 @@ PyPI protect everything against a rewrite of the tree.
   version; the version comes from the git tag) has its own `releases` line and a pinned
   manifest.
 - **Protects against:** a release cut without the release step (11).
+
+### Release gate
+
+`scripts/check_golden_tags.py --release-version X.Y.Z`, a step of the Release workflow's
+build job before the tag is made; tested by `tests/test_check_golden_tags.py`
+
+- **Checks:** HEAD's `released_manifests.json` pins release `X.Y.Z` of the current data
+  context, its `manifest` pin is set, and the pinned digest is the release revision of
+  `X.Y.Z` in HEAD's golden history. It fails without git.
+- **Protects against:** a release cut without the release step (11). The final-release
+  check cannot catch it in the Release workflow, whose tests run before the tag exists,
+  under a development version.
 
 ### Tag check
 

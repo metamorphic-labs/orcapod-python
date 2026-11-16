@@ -183,6 +183,53 @@ def check_tag(repo: Path, tag: str, version: str) -> list[str] | None:
     return problems
 
 
+def check_release(repo: Path, release: str) -> list[str]:
+    """Check that HEAD records a release of the current data context, before it is tagged.
+
+    The Release workflow runs this before it creates the tag: HEAD's
+    ``released_manifests.json`` pins ``release`` under the current context's
+    ``releases``, its manifest pin is set, and the pinned digest is the digest of the
+    release revision of ``release`` in HEAD's golden history.
+
+    Args:
+        repo: Repository root.
+        release: The library version being released, without a leading ``v``.
+
+    Returns:
+        One sentence per problem; empty when HEAD records the release.
+    """
+    version = _current_version(repo)
+    step = (
+        f"run generate_golden_hashes.py --release {release} in the release pull request"
+    )
+    pins = _show_json(repo, "HEAD", PINS)
+    pin = pins.get(version) if isinstance(pins, dict) else None
+    releases = pin.get("releases") if isinstance(pin, dict) else None
+    if not isinstance(pin, dict) or not isinstance(releases, dict):
+        return [f"HEAD has no pin of data context {version}: {step}"]
+    if release not in releases:
+        return [
+            f"HEAD does not record release {release} of data context {version}: {step}"
+        ]
+    problems: list[str] = []
+    if pin.get("manifest") is None:
+        problems.append(f"the manifest of data context {version} is not pinned: {step}")
+    manifest = _show_json(repo, "HEAD", CONTEXTS / "data" / f"{version}.json")
+    golden = manifest.get("golden") if isinstance(manifest, dict) else None
+    history = golden.get("history") if isinstance(golden, dict) else None
+    revisions = [
+        revision
+        for revision in (history if isinstance(history, list) else [])
+        if isinstance(revision, dict) and revision.get("release") == release
+    ]
+    if [revision.get("digest") for revision in revisions] != [releases[release]]:
+        problems.append(
+            f"the pinned digest of {release} is not the release revision of {release} "
+            "in the golden history"
+        )
+    return problems
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the check.
 
@@ -196,7 +243,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         description="Check HEAD against every release tag of the current data context."
     )
     _ = parser.add_argument("--repo", type=Path, default=REPO_ROOT)
+    _ = parser.add_argument(
+        "--release-version",
+        metavar="X.Y.Z",
+        help=(
+            "instead of comparing with the tags, check that HEAD records this release "
+            "(the Release workflow's gate before it tags); fails without git"
+        ),
+    )
     args = parser.parse_args(argv)
+    if args.release_version is not None:
+        try:
+            problems = check_release(args.repo, args.release_version.removeprefix("v"))
+        except GitUnavailableError as exc:
+            print(f"error: cannot read HEAD: {exc}", file=sys.stderr)
+            return 1
+        if problems:
+            print(
+                f"release {args.release_version} is not recorded in the golden history:",
+                file=sys.stderr,
+            )
+            for problem in problems:
+                print(f"  {problem}", file=sys.stderr)
+            return 1
+        print(f"HEAD records release {args.release_version} in the golden history")
+        return 0
     in_ci = os.environ.get("CI", "").lower() == "true"
     try:
         tags = _require_history(args.repo)

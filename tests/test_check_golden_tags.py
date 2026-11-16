@@ -218,3 +218,65 @@ def test_a_repository_without_tags_fails_in_ci(tmp_path: Path) -> None:
     result = _check(root, ci=True)
     assert result.returncode == 1
     assert "no tags" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# --release-version: the Release workflow's gate before a tag is made
+# ---------------------------------------------------------------------------
+
+
+def _gate(repo: Path, version: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--repo",
+            str(repo),
+            "--release-version",
+            version,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_env(ci=False, ceiling=repo.parent),
+    )
+
+
+def test_the_gate_passes_a_recorded_release(repo: Path) -> None:
+    result = _gate(repo, "0.3.0")
+    assert result.returncode == 0, result.stderr
+    assert "0.3.0" in result.stdout
+
+
+def test_the_gate_refuses_a_release_without_its_golden_step(repo: Path) -> None:
+    result = _gate(repo, "0.3.1")
+    assert result.returncode == 1
+    assert "generate_golden_hashes.py --release 0.3.1" in result.stderr
+
+
+def test_the_gate_refuses_an_open_data_context(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    store.copy_tree(store.PROJECT_ROOT, root, VERSION)
+    store.reopen_tree(root, VERSION, "2026-11-15")
+    _git(root.parent, "init", "-q", str(root))
+    _commit(root, "open data context")
+    result = _gate(root, "0.3.0")
+    assert result.returncode == 1
+    assert "0.3.0" in result.stderr
+
+
+def test_the_gate_refuses_a_pin_that_is_not_the_release_revision(repo: Path) -> None:
+    pins = store.read_json(store.pins_path(repo))
+    pins[VERSION]["releases"]["0.3.0"] = "0" * 64
+    store.write_json(store.pins_path(repo), pins)
+    _commit(repo, "tamper with the pin")
+    result = _gate(repo, "0.3.0")
+    assert result.returncode == 1
+    assert "release revision" in result.stderr
+
+
+def test_the_gate_fails_outside_a_repository_even_locally(tmp_path: Path) -> None:
+    plain = tmp_path / "plain"
+    store.copy_tree(store.PROJECT_ROOT, plain, VERSION)
+    result = _gate(plain, "0.3.0")
+    assert result.returncode == 1
