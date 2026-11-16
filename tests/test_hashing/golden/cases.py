@@ -661,6 +661,55 @@ def schema_source_stream_builder() -> dict[str, Any]:
     return out
 
 
+@case("schema", "row_identifiers")
+def schema_row_identifiers() -> dict[str, Any]:
+    """Pin the row identifier forms of the record id (ITL-1154).
+
+    Position (``row_<n>``), and the canonical JSON of the key columns: one string key,
+    a composite key (string, then integer, in key order), and timestamp, date and
+    boolean keys. Each variant's stream summary pins the record ids and the
+    source-info tokens built on them.
+
+    Returns:
+        Each variant's stream summary.
+    """
+    import datetime as dt
+
+    from orcapod.core.sources import ArrowTableSource
+
+    table = pa.table(
+        {
+            "subject": pa.array(["s2", "s1"], pa.large_string()),
+            "trial": pa.array([7, 3], pa.int64()),
+            "start": pa.array(
+                [dt.datetime(2026, 1, 2, 3, 4, 5, 6), dt.datetime(1969, 12, 31)],
+                pa.timestamp("us"),
+            ),
+            "day": pa.array([dt.date(2026, 1, 2), dt.date(2000, 2, 29)], pa.date32()),
+            "ok": pa.array([True, False], pa.bool_()),
+            "value": pa.array([1.5, 2.5], pa.float64()),
+        }
+    )
+    out: dict[str, Any] = {}
+    for variant, key in {
+        "position": None,
+        "string_key": "subject",
+        "composite_key": ["subject", "trial"],
+        "timestamp_key": "start",
+        "date_key": "day",
+        "bool_key": "ok",
+    }.items():
+        source = ArrowTableSource(
+            table,
+            tag_columns=["subject"],
+            record_id_columns=key,
+            source_id="golden_rows",
+            data_context=_ctx(),
+        )
+        out.update(_prefixed(variant, stream_summary(source)))
+    return out
+
+
 class GoldenPollingImpl:
     """A polling source implementation whose identity is fixed (default source id).
 
