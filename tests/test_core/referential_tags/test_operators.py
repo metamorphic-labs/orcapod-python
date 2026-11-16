@@ -110,7 +110,11 @@ def test_join_key_differing_in_nullability_only_is_t_in_both_roles(
     table = joined.as_table()
     assert table.column_names.count("x") == 1
     assert not table.schema.field("x").nullable
-    assert sorted(table.column("x").to_pylist()) == [1, 3]
+    assert sorted(int(x) for x in table.column("x").to_pylist() if x is not None) == [
+        1,
+        3,
+    ]
+    assert table.column("x").null_count == 0
 
 
 def test_join_key_of_another_type_still_raises() -> None:
