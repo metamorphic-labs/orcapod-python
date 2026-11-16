@@ -98,8 +98,8 @@ def _loaded_replaying(
 ) -> PipelineJob:
     """Load the saved job and let its join node replay what the run stored.
 
-    A saved job does not record an operator node's cache mode (it loads as ``OFF``),
-    so the mode is attached again after loading.
+    A saved job does not record an operator node's cache mode (it loads as ``OFF``;
+    design issue LJ4, ITL-1163), so the mode is attached again after loading.
     """
     loaded = PipelineJob.load(tmp_path / "job.json", database=database)
     store = database or DeltaTableDatabase(tmp_path / "store")

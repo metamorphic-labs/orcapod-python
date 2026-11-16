@@ -21,6 +21,7 @@ from orcapod.core.operators import Join
 from orcapod.core.referential_tags import (
     REFERENTIAL_TAG_METADATA_KEY,
     ReferenceMaterializationWarning,
+    mark_references,
     without_reference_marks,
 )
 from orcapod.core.sources import DerivedSource
@@ -185,8 +186,31 @@ def test_a_derived_source_refuses_records_that_disagree_with_the_node() -> None:
             flush=True,
         )
     source = _function_job(tampered, run=False).nodes["double"].as_source()
-    with pytest.raises(InputValidationError, match=r"marks the referential tags \[\]"):
+    # The node checks its own table first and names it.
+    with pytest.raises(
+        InputValidationError,
+        match=r"pipeline table .* marks the referential tags \[\], but the node's pod "
+        r"declares \['unit'\]",
+    ):
         _ = source.as_table()
+
+
+def test_a_derived_source_checks_the_records_it_reads_itself(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The derived source reads the binding from the records, not from the node alone."""
+    node = _function_job(InMemoryArrowDatabase()).nodes["double"]
+    records = node.get_all_records()
+    assert records is not None
+    # Records that mark one tag more than the node shares between tag and data.
+    wrong = mark_references(records, ["unit", "time"])
+    monkeypatch.setattr(node, "get_all_records", lambda *_, **__: wrong)
+    with pytest.raises(
+        InputValidationError,
+        match=r"the stored records mark the referential tags \['time', 'unit'\], but "
+        r"the node declares \['unit'\]",
+    ):
+        _ = node.as_source().as_table()
 
 
 # ---------------------------------------------------------------------------
