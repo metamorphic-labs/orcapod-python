@@ -102,7 +102,7 @@ class TestCSVSource:
 
     def test_source_id_defaults_to_file_path(self, csv_path):
         src = CSVSource(file_path=csv_path)
-        assert src.source_id == csv_path
+        assert src.source_id == f"csv:{csv_path}"
 
     def test_source_id_explicit_overrides_default(self, csv_path):
         src = CSVSource(file_path=csv_path, source_id="my_csv_name")
@@ -187,7 +187,7 @@ class TestDeltaTableSource:
 
     def test_source_id_defaults_to_directory_name(self, delta_path):
         src = DeltaTableSource(delta_table_path=delta_path)
-        assert src.source_id == delta_path.name
+        assert src.source_id == f"delta_table:{delta_path.name}"
 
     def test_source_id_explicit_overrides_default(self, delta_path):
         src = DeltaTableSource(delta_table_path=delta_path, source_id="my_delta")

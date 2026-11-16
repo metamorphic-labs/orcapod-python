@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Iterator
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any
+from typing import Any, ClassVar, TYPE_CHECKING
 
 from typing_extensions import override
 
@@ -63,6 +63,9 @@ class PostgreSQLTableSource(DBTableSource):
             no *tag_columns* are given.
         psycopg.OperationalError: If the DSN is invalid or connection fails.
     """
+
+    SOURCE_KIND: ClassVar[str] = "postgresql_table"
+    """Config type key and default source-id kind of this source (one vocabulary)."""
 
     def __init__(
         self,
@@ -118,7 +121,7 @@ class PostgreSQLTableSource(DBTableSource):
         # was closed after construction.
         base = super().to_config()
         base.pop("connector", None)
-        return {**base, "source_type": "postgresql_table", "dsn": self._dsn}
+        return {**base, "source_type": self.SOURCE_KIND, "dsn": self._dsn}
 
     @classmethod
     def from_config(

@@ -208,7 +208,7 @@ def test_delta_failed_check_warns_and_runs_on_held_rows(
     with pytest.warns(SourceCheckFailedWarning, match="changed its columns"):
         summary = _run(job, orchestrator)
     assert CALLS == []
-    assert summary.unchecked_sources == ("table",)
+    assert summary.unchecked_sources == ("delta_table:table",)
     assert _ys(job) == [1, 11, 21]
 
 

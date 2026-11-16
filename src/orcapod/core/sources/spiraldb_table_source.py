@@ -38,11 +38,12 @@ import dataclasses
 import datetime
 from collections.abc import AsyncIterator, Collection, Generator, Iterator, Mapping
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import Any, ClassVar, NamedTuple, TYPE_CHECKING
 
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource
+from orcapod.core.sources.source_ids import location_source_id
 from orcapod.core.sources.derived_source import validate_tags_as_data
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
@@ -234,6 +235,9 @@ class SpiralDBTableSource(RootSource):
             given twice, or is reserved for system columns.
     """
 
+    SOURCE_KIND: ClassVar[str] = "spiraldb_table"
+    """Config type key and default source-id kind of this source (one vocabulary)."""
+
     # Whether a notebook display reads the first rows. False shows the schema and the
     # table's recorded row count only, with no scan (kept for the ITL-991 ruling on what
     # a preview may read).
@@ -318,7 +322,10 @@ class SpiralDBTableSource(RootSource):
                 f"have: {unknown}. Columns: {schema.names}"
             )
         if self._source_id is None:
-            self._source_id = f"{project_id}/{dataset}.{table_name}@{self._table_id}"
+            self._source_id = location_source_id(
+                self.SOURCE_KIND,
+                f"{project_id}/{dataset}.{table_name}@{self._table_id}",
+            )
 
         # A zero-row stream with the table's columns answers every schema question.
         self._builder = SourceStreamBuilder(self.data_context, self.orcapod_config)
@@ -807,7 +814,7 @@ class SpiralDBTableSource(RootSource):
         version. An ``asof`` the user gave is saved.
         """
         return {
-            "source_type": "spiraldb_table",
+            "source_type": self.SOURCE_KIND,
             "project_id": self._project_id,
             "dataset": self._dataset,
             "overrides": self._overrides,

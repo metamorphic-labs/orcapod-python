@@ -615,7 +615,7 @@ class TestPipelineJob:
             )
             Join()(lengths, probe, label="back")
         job.run()
-        assert set(job.sources) == {"probe", derived.source_id}
+        assert set(job.sources) == {"sqlite_table:probe", derived.source_id}
         assert job.nodes["back"].as_table().num_rows == 3
 
     def test_saved_job_reloads_the_derived_source(self, tmp_path):

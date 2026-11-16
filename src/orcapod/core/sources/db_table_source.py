@@ -14,11 +14,12 @@ from __future__ import annotations
 
 from collections.abc import Collection, Iterator
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any
+from typing import Any, ClassVar, TYPE_CHECKING
 
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource
+from orcapod.core.sources.source_ids import location_source_id
 from orcapod.core.sources.reload import keep_nullable_columns, same_rows
 from orcapod.core.sources.stream_builder import (
     SourceStreamBuilder,
@@ -69,6 +70,9 @@ class DBTableSource(RootSource):
             provided, or is empty.
     """
 
+    SOURCE_KIND: ClassVar[str] = "db_table"
+    """Config type key and default source-id kind of this source (one vocabulary)."""
+
     def __init__(
         self,
         connector: DBConnectorProtocol,
@@ -84,7 +88,7 @@ class DBTableSource(RootSource):
         _query: str | None = None,
     ) -> None:
         if source_id is None:
-            source_id = table_name
+            source_id = location_source_id(self.SOURCE_KIND, table_name)
         super().__init__(
             source_id=source_id,
             label=label,
@@ -230,7 +234,7 @@ class DBTableSource(RootSource):
     def to_config(self, db_registry=None) -> dict[str, Any]:
         """Serialize source configuration to a JSON-compatible dict."""
         return {
-            "source_type": "db_table",
+            "source_type": self.SOURCE_KIND,
             "connector": self._connector.to_config(),
             "table_name": self._table_name,
             "tag_columns": list(self._tag_columns),

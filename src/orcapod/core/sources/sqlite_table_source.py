@@ -24,7 +24,7 @@ from __future__ import annotations
 import os
 from collections.abc import Collection, Iterator
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any
+from typing import Any, ClassVar, TYPE_CHECKING
 
 from typing_extensions import override
 
@@ -85,6 +85,9 @@ class SQLiteTableSource(DBTableSource):
         ValueError: If the table is not found or is empty.
         sqlite3.OperationalError: If *db_path* cannot be opened.
     """
+
+    SOURCE_KIND: ClassVar[str] = "sqlite_table"
+    """Config type key and default source-id kind of this source (one vocabulary)."""
 
     def __init__(
         self,
@@ -158,7 +161,7 @@ class SQLiteTableSource(DBTableSource):
         """Serialize source configuration to a JSON-compatible dict."""
         base = super().to_config()
         base.pop("connector", None)
-        return {**base, "source_type": "sqlite_table", "db_path": str(self._db_path)}
+        return {**base, "source_type": self.SOURCE_KIND, "db_path": str(self._db_path)}
 
     @classmethod
     def from_config(

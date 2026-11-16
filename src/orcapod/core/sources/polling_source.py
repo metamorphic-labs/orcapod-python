@@ -16,11 +16,12 @@ import logging
 import threading
 from collections.abc import Collection
 from math import floor
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import Any, ClassVar, Generic, TYPE_CHECKING, TypeVar
 
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource
+from orcapod.core.sources.source_ids import hash_source_id
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
 from orcapod.core.streams.view import (
     ViewStatus,
@@ -256,6 +257,9 @@ class PollingSource(RootSource, Generic[T]):
         implementations. No eviction policy is implemented.
     """
 
+    SOURCE_KIND: ClassVar[str] = "polling_source"
+    """Config type key and default source-id kind of this source (one vocabulary)."""
+
     def __init__(
         self,
         impl: DynamicSourceProtocol[T],
@@ -279,9 +283,13 @@ class PollingSource(RootSource, Generic[T]):
         self._batches: list[ArrowTableStream] = []
         self._state_lock: threading.Lock = threading.Lock()
         self._canonical_arrow_schema: pa.Schema | None = None
-        # Derive source_id from impl identity if not explicitly provided
+        # The default source id is the kind and the semantic hash of the impl's identity:
+        # a hash, never the identity's repr, which is not stable (ITL-1154).
         if self._source_id is None:
-            self._source_id = str(self._impl.identity())
+            self._source_id = hash_source_id(
+                self.SOURCE_KIND,
+                self.data_context.semantic_hasher.hash_object(self._impl.identity()),
+            )
         # Split impl.schema() into tag/data schemas
         self._tag_schema: Schema | None = None
         self._data_schema: Schema | None = None
@@ -577,7 +585,7 @@ class PollingSource(RootSource, Generic[T]):
         """
         impl_type = type(self._impl)
         return {
-            "source_type": "polling_source",
+            "source_type": self.SOURCE_KIND,
             "impl_module": impl_type.__module__,
             "impl_class": impl_type.__qualname__,
             "tag_columns": list(self._tag_columns),

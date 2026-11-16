@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import os
 from collections.abc import Collection
-from typing import TYPE_CHECKING, Any
+from typing import Any, ClassVar, TYPE_CHECKING
 
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource
+from orcapod.core.sources.source_ids import location_source_id
 from orcapod.core.sources.reload import keep_nullable_columns, same_rows
 from orcapod.core.sources.stream_builder import (
     SourceStreamBuilder,
@@ -43,6 +44,9 @@ class CSVSource(RootSource):
     value, or the row's position.
     """
 
+    SOURCE_KIND: ClassVar[str] = "csv"
+    """Config type key and default source-id kind of this source (one vocabulary)."""
+
     def __init__(
         self,
         file_path: str,
@@ -54,7 +58,7 @@ class CSVSource(RootSource):
         **kwargs: Any,
     ) -> None:
         if source_id is None:
-            source_id = file_path
+            source_id = location_source_id(self.SOURCE_KIND, str(file_path))
         super().__init__(source_id=source_id, **kwargs)
 
         self._file_path = file_path
@@ -144,7 +148,7 @@ class CSVSource(RootSource):
     def to_config(self, db_registry=None) -> dict[str, Any]:
         """Serialize this source's configuration to a JSON-compatible dict."""
         return {
-            "source_type": "csv",
+            "source_type": self.SOURCE_KIND,
             "file_path": self._file_path,
             "tag_columns": list(self._tag_columns),
             "system_tag_columns": list(self._system_tag_columns),

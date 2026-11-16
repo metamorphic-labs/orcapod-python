@@ -286,7 +286,7 @@ class TestSourceId:
     ):
         """The default source id is the project, dataset, table and table id."""
         source = SpiralDBTableSource("edi-sample-a", "subject")
-        expected = f"edi-sample-a/default.subject@{source.table_id}"
+        expected = f"spiraldb_table:edi-sample-a/default.subject@{source.table_id}"
         assert source.source_id == expected
         assert self._identity(source)[2] == f"{expected}::{self._M1}::sex"
 

@@ -370,7 +370,9 @@ class TestIdentity:
         table_id = project.table("default.event").table_id
 
         assert source.table_id == table_id
-        assert source.source_id == f"{_PROJECT}/default.event@{table_id}"
+        assert source.source_id == (
+            f"spiraldb_table:{_PROJECT}/default.event@{table_id}"
+        )
 
     def test_a_given_source_id_is_used_as_it_is(self, project):
         """A ``source_id`` given by the user is used unchanged."""

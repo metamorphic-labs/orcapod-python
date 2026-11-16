@@ -242,7 +242,8 @@ class TestConstruction:
         assert "trial" in tag_schema
 
     def test_default_source_id_is_table_name(self, source):
-        assert source.source_id == "measurements"
+        """The default is ``<kind>:<table name>`` (ITL-1154)."""
+        assert source.source_id == "db_table:measurements"
 
     def test_explicit_source_id_overrides_default(self, connector):
         src = DBTableSource(connector, "measurements", source_id="my_meas")
@@ -424,7 +425,7 @@ class TestConfig:
 
     def test_to_config_has_source_id(self, source):
         config = source.to_config()
-        assert config["source_id"] == "measurements"
+        assert config["source_id"] == "db_table:measurements"
 
     def test_to_config_has_identity_fields(self, source):
         config = source.to_config()

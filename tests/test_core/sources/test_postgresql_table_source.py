@@ -181,7 +181,7 @@ class TestPKAsDefaultTags:
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector()
             src = PostgreSQLTableSource(DSN, "measurements")
-        assert src.source_id == "measurements"
+        assert src.source_id == "postgresql_table:measurements"
 
     def test_explicit_source_id_overrides_default(self):
         from orcapod.core.sources import PostgreSQLTableSource
@@ -430,7 +430,9 @@ class TestToConfig:
         assert "session_id" in self._make_src().to_config()["tag_columns"]
 
     def test_has_source_id(self):
-        assert self._make_src().to_config()["source_id"] == "measurements"
+        assert (
+            self._make_src().to_config()["source_id"] == "postgresql_table:measurements"
+        )
 
     def test_has_content_hash(self):
         assert "content_hash" in self._make_src().to_config()
