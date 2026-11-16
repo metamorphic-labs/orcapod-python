@@ -62,6 +62,13 @@ ORCHESTRATORS = {
     "async": AsyncPipelineOrchestrator,
 }
 
+TAG_ONLY: bool = True
+"""The sources' ``tag_only_columns``: plain tags, as v0.3 (ITL-1023).
+
+The referential classes at the end set it to ``False`` (every tag referential) for
+the steps that handle referential tags (``REFERENTIAL_STEPS``).
+"""
+
 WITH_ROWS = ("g1", "g1", "g2")
 """Groups of the sources' rows: the filter on ``g1`` keeps two rows."""
 NO_ROWS = ("g2", "g2", "g3")
@@ -98,7 +105,10 @@ def _source(
 ) -> StreamProtocol:
     """A source of ``data`` behind a filter keeping group ``g1``."""
     source = ArrowTableSource(
-        _table(groups, data), tag_columns=["g", "id"], source_id=name
+        _table(groups, data),
+        tag_columns=["g", "id"],
+        tag_only_columns=TAG_ONLY,
+        source_id=name,
     )
     return PolarsFilter(constraints={"g": "g1"})(source)
 
@@ -325,7 +335,9 @@ def _join_job(ids: list[int]) -> PipelineJob:
         table = pa.table(
             {"id": pa.array(ids, pa.int64()), column: pa.array(ids, pa.int64())}
         )
-        return ArrowTableSource(table, tag_columns=["id"], source_id=name)
+        return ArrowTableSource(
+            table, tag_columns=["id"], tag_only_columns=True, source_id=name
+        )
 
     job = PipelineJob(name="itl1133", database=InMemoryArrowDatabase())
     with job:
@@ -515,3 +527,75 @@ class TestOutputSchemaPrediction:
         predicted = job.nodes["op"].output_schema(**kwargs)
         computed = _computed(step, pairs).output_schema(**kwargs)
         assert _schema_items(predicted) == _schema_items(computed)
+
+
+# ── referential tags (ITL-1023) ─────────────────────────────────────────────
+
+# Not supported with referential tags yet: Batch (ITL-1017), MergeJoin (ITL-1018),
+# SelectColumns and DropColumns (ITL-1022).
+REFERENTIAL_STEPS = [
+    step
+    for step in STEPS
+    if step not in ("merge_join", "batch", "select_columns", "drop_columns")
+]
+
+
+@pytest.fixture
+def referential(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every source tag referential."""
+    monkeypatch.setattr(f"{__name__}.TAG_ONLY", False)
+
+
+def _methods(cls: type) -> dict[str, Any]:
+    """The test methods (and helpers) of ``cls``, without its class marks."""
+    return {
+        name: value
+        for name, value in vars(cls).items()
+        if name.startswith(("test_", "_expected"))
+    }
+
+
+TestReferentialPlainStream = pytest.mark.usefixtures("referential")(
+    pytest.mark.parametrize("pairs", PAIRS)(
+        pytest.mark.parametrize("step", REFERENTIAL_STEPS)(
+            type(
+                "TestReferentialPlainStream",
+                (),
+                {"__doc__": "TestPlainStream over referential sources."}
+                | _methods(TestPlainStream),
+            )
+        )
+    )
+)
+
+TestReferentialJobNode = pytest.mark.usefixtures("referential")(
+    pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))(
+        pytest.mark.parametrize("pairs", PAIRS)(
+            pytest.mark.parametrize("step", REFERENTIAL_STEPS)(
+                type(
+                    "TestReferentialJobNode",
+                    (),
+                    {"__doc__": "TestJobNode over referential sources."}
+                    | _methods(TestJobNode),
+                )
+            )
+        )
+    )
+)
+
+TestReferentialOutputSchemaPrediction = pytest.mark.usefixtures("referential")(
+    pytest.mark.parametrize("config", list(COLUMN_CONFIGS))(
+        pytest.mark.parametrize("pairs", PAIRS)(
+            pytest.mark.parametrize(
+                "step", [step for step in PREDICTION_STEPS if step in REFERENTIAL_STEPS]
+            )(
+                type(
+                    "TestReferentialOutputSchemaPrediction",
+                    (),
+                    {"__doc__": "TestOutputSchemaPrediction over referential sources."}
+                    | _methods(TestOutputSchemaPrediction),
+                )
+            )
+        )
+    )
+)

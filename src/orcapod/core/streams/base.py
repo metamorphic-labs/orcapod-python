@@ -933,13 +933,17 @@ class StreamBase(TraceableBase):
         Returns:
             The table, or ``None`` when the stream cannot type it without rows.
         """
+        from orcapod.core.referential_tags import stream_references
         from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 
         typed = typed_zero_row_table(self)
         if typed is None:
             return None
         return ArrowTableStream(
-            typed, tag_columns=self.keys()[0], data_context=self.data_context_key
+            typed,
+            tag_columns=self.keys()[0],
+            reference_tags=stream_references(self),
+            data_context=self.data_context_key,
         ).as_table(columns=config)
 
     def _typed_zero_row_table(self) -> pa.Table | None:

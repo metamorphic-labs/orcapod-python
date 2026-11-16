@@ -89,6 +89,7 @@ def _loaded_and_filled(saved: pathlib.Path) -> PipelineJob:
             ),
         ),
         tag_columns=["id"],
+        tag_only_columns=True,
         source_id="asrc",
     )
     loaded.bind(

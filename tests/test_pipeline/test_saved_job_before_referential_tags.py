@@ -22,6 +22,7 @@ from orcapod.pipeline.serialization import (
     PIPELINE_JOB_FORMAT_VERSION,
     SUPPORTED_FORMAT_VERSIONS,
     SUPPORTED_JOB_FORMAT_VERSIONS,
+    resolve_database_from_config,
 )
 from orcapod.sources import CSVSource
 
@@ -44,7 +45,11 @@ def test_format_versions() -> None:
 
 def test_a_v03_job_loads_with_unchanged_hashes(saved: dict[str, Any]) -> None:
     assert saved["orcapod_pipeline_job_version"] == "0.1.0"
-    job = PipelineJob.load("job.json")
+    # Saved before the database rename (ITL-1082): the file names its store under
+    # ``bindings.store``, which a load reads only through an explicit database.
+    job = PipelineJob.load(
+        "job.json", database=resolve_database_from_config(saved["bindings"]["store"])
+    )
     nodes = saved["pipeline"]["nodes"]
     older = next(node for node in nodes.values() if node["label"] == "older")
     # A job node's content hash is the one its saved run recorded.

@@ -836,6 +836,7 @@ class DynamicPodStream(StreamBase):
                 ArrowTableStream(
                     table,
                     tag_columns=upstream.keys()[0],
+                    reference_tags=stream_references(upstream),
                     producer=upstream.producer,
                     upstreams=upstream.upstreams,
                     data_context=StaticOutputOperatorPod._upstream_context(upstream),
