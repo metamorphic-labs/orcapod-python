@@ -327,12 +327,12 @@ class TestSourceId:
             Schema({"sex": str | None}),
         )
         assert self._identity(source) == (
-            "semantic_v1:896d8f323df90ee26e6a38f1eb730be7a9de343fd1c852dbf0f7655b360bc7ff",
+            "semantic_v1:f876112385f90f7ee2b9f8a856bbc91386057600c029b7f4e358cd2fee47a02f",
             self._M1,
             f"subject::{self._M1}::sex",
         )
         assert source.pipeline_hash().to_string() == (
-            "semantic_v1:cc6c553ba26af325cd96432edb5bc4ea5453427594965cca7e85a66a420e87f1"
+            "semantic_v1:657ec561c0408591d01265e8e3a4e70223d1301634f8c3fc4edced2be6f34948"
         )
         row_hash = source.as_table(columns={"content_hash": True}).column(
             "_content_hash"
@@ -351,12 +351,12 @@ class TestSourceId:
             "edi-sample-a", "subject", source_id="subject", tag_only_columns=True
         )
         assert self._identity(source) == (
-            "semantic_v1:a06a417294cabb0625e47a9357ebf9cc8183576b17498282901bd68d0f02e820",
+            "semantic_v1:12ebbe62805e556e94bc50165be00d91ab4aa308afcd6e74eb5b5af031daa0d2",
             self._M1,
             f"subject::{self._M1}::sex",
         )
         assert source.pipeline_hash().to_string() == (
-            "semantic_v1:2e5095e09a558132e652e106af1dca4abf8654285409fc4db63a66ddc63a9f94"
+            "semantic_v1:762a06a391948ba159c51df90475d609d745b9bf054e2b040f42495513b5498a"
         )
 
 

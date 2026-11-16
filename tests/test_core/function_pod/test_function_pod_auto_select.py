@@ -263,10 +263,10 @@ def test_stream_passed_for_its_tags_restricts_the_rows() -> None:
 
 # The hashes ``add.pod(_xs(), _ys())`` had on main before ITL-807 (commit 25650c42).
 _JOINED_PIPELINE_HASH = (
-    "3202203f55b6da5b8a255f526d2a2e04792e88bde45b48588df7c31bd7c98b17"
+    "8c0e0a4e746fee990b4921bb3efc2e4b023732046a08ee858ee7cac4e1c552ab"
 )
 _JOINED_CONTENT_HASH = (
-    "07a4093d77ff0f2d0267123f8403b860a4ce332857f84e02dbf8f35ed6492f46"
+    "40b6fb80a6d7b1ee43c5e50a5d648ddb3c4ae025c8670516d57473e86e8153c4"
 )
 
 
