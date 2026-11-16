@@ -22,26 +22,35 @@ else:
     pa = LazyModule("pyarrow")
 
 
-def _other_group_note(
-    names: Collection[str], other_columns: Collection[str], group: str, method: str
-) -> str:
-    """Name the missing names that are columns of the other group, for an error.
+def _with_other_group_note(
+    error: InputValidationError,
+    names: Collection[str],
+    other_columns: Collection[str],
+    group: str,
+    method: str,
+) -> InputValidationError:
+    """Add to a refusal which of the names are columns of the other group.
+
+    A reporting helper: the caller, which knows the other group's columns,
+    annotates the error the mapper raised from its own group alone.
 
     Args:
-        names: The names that are not columns of the renamed group.
+        error: The refusal of names that are not columns of the renamed group.
+        names: The names the mapper was given.
         other_columns: The input's columns of the other group.
         group: The other group, ``"tag"`` or ``"data"``.
         method: The stream method that renames a column of the other group.
 
     Returns:
-        One ``"; 'x' is a data column: use map_data"`` clause per such name, or an
-        empty string.
+        The error with one ``"; 'x' is a data column: use map_data"`` clause per
+        name that is a column of the other group.
     """
-    return "".join(
+    note = "".join(
         f"; {n!r} is a {group} column: use {method}"
         for n in names
         if n in other_columns
     )
+    return InputValidationError(f"{error}{note}")
 
 
 class MapData(UnaryOperator):
@@ -72,13 +81,10 @@ class MapData(UnaryOperator):
         self.strict = strict
         super().__init__(**kwargs)
 
-    def _require_data_columns(
-        self, tag_columns: Collection[str], data_columns: Collection[str]
-    ) -> None:
+    def _require_data_columns(self, data_columns: Collection[str]) -> None:
         """Refuse, when ``strict``, a name that is not a data column (ITL-1160).
 
         Args:
-            tag_columns: The input's tag columns.
             data_columns: The input's data columns, without meta columns.
 
         Raises:
@@ -89,10 +95,28 @@ class MapData(UnaryOperator):
         if missing and self.strict:
             raise InputValidationError(
                 f"MapData: {missing} not among the data columns "
-                f"{list(data_columns)}"
-                f"{_other_group_note(missing, tag_columns, 'tag', 'map_tags')}; "
-                f"use strict=False to ignore names that are not data columns"
+                f"{list(data_columns)} (use strict=False to ignore names that are "
+                f"not data columns)"
             )
+
+    def _check_names(
+        self, tag_columns: Collection[str], data_columns: Collection[str]
+    ) -> None:
+        """Run ``_require_data_columns`` and name the tag columns among the names.
+
+        Args:
+            tag_columns: The input's tag columns.
+            data_columns: The input's data columns, without meta columns.
+
+        Raises:
+            InputValidationError: As ``_require_data_columns``, annotated.
+        """
+        try:
+            self._require_data_columns(data_columns)
+        except InputValidationError as error:
+            raise _with_other_group_note(
+                error, self.name_map, tag_columns, "tag", "map_tags"
+            ) from error
 
     def to_config(self) -> dict[str, Any]:
         """Serialize this MapData operator to a config dict.
@@ -155,7 +179,7 @@ class MapData(UnaryOperator):
 
     def validate_unary_input(self, stream: StreamProtocol) -> None:
         tag_columns, data_columns = stream.keys()
-        self._require_data_columns(
+        self._check_names(
             tag_columns, [c for c in data_columns if not is_meta_column(c)]
         )
         # verify that renamed value does NOT collide with other columns
@@ -227,7 +251,7 @@ class MapData(UnaryOperator):
                     pkt_keys = data.keys()
                     # The names are checked against the first row, as
                     # ``validate_unary_input`` checks them against the stream.
-                    self._require_data_columns(
+                    self._check_names(
                         tag.keys(), [k for k in pkt_keys if not is_meta_column(k)]
                     )
                     rename_map = {
@@ -283,14 +307,11 @@ class MapTags(UnaryOperator):
         self.strict = strict
         super().__init__(**kwargs)
 
-    def _require_tag_columns(
-        self, tag_columns: Collection[str], data_columns: Collection[str]
-    ) -> None:
+    def _require_tag_columns(self, tag_columns: Collection[str]) -> None:
         """Refuse, when ``strict``, a name that is not a tag column (ITL-1160).
 
         Args:
             tag_columns: The input's tag columns.
-            data_columns: The input's data columns, without meta columns.
 
         Raises:
             InputValidationError: When ``strict`` and a key of ``name_map`` is
@@ -299,10 +320,28 @@ class MapTags(UnaryOperator):
         missing = [n for n in self.name_map if n not in tag_columns]
         if missing and self.strict:
             raise InputValidationError(
-                f"MapTags: {missing} not among the tag columns {list(tag_columns)}"
-                f"{_other_group_note(missing, data_columns, 'data', 'map_data')}; "
-                f"use strict=False to ignore names that are not tag columns"
+                f"MapTags: {missing} not among the tag columns {list(tag_columns)} "
+                f"(use strict=False to ignore names that are not tag columns)"
             )
+
+    def _check_names(
+        self, tag_columns: Collection[str], data_columns: Collection[str]
+    ) -> None:
+        """Run ``_require_tag_columns`` and name the data columns among the names.
+
+        Args:
+            tag_columns: The input's tag columns.
+            data_columns: The input's data columns, without meta columns.
+
+        Raises:
+            InputValidationError: As ``_require_tag_columns``, annotated.
+        """
+        try:
+            self._require_tag_columns(tag_columns)
+        except InputValidationError as error:
+            raise _with_other_group_note(
+                error, self.name_map, data_columns, "data", "map_data"
+            ) from error
 
     def to_config(self) -> dict[str, Any]:
         """Serialize this MapTags operator to a config dict.
@@ -360,7 +399,7 @@ class MapTags(UnaryOperator):
         It takes two streams as input and raises an error if the inputs are not valid.
         """
         tag_columns, data_columns = stream.keys()
-        self._require_tag_columns(
+        self._check_names(
             tag_columns, [c for c in data_columns if not is_meta_column(c)]
         )
         # verify that renamed value does NOT collide with other columns
@@ -426,7 +465,7 @@ class MapTags(UnaryOperator):
                     tag_keys = tag.keys()
                     # The names are checked against the first row, as
                     # ``validate_unary_input`` checks them against the stream.
-                    self._require_tag_columns(
+                    self._check_names(
                         tag_keys, [k for k in data.keys() if not is_meta_column(k)]
                     )
                     rename_map = {

@@ -418,7 +418,7 @@ try:
     sessions.map_tags({"age": "age_weeks"})
 except InputValidationError as error:
     print(error)
-# MapTags: ['age'] not among the tag columns ['subject_id', 'session']; 'age' is a data column: use map_data; use strict=False to ignore names that are not tag columns
+# MapTags: ['age'] not among the tag columns ['subject_id', 'session'] (use strict=False to ignore names that are not tag columns); 'age' is a data column: use map_data
 ```
 
 A new name already taken by a column that is not renamed is refused too.
