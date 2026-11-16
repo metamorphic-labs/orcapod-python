@@ -46,6 +46,14 @@ When fixing a bug or addressing a design problem:
 When discovering a new issue that won't be fixed immediately, ask the user whether it should be
 logged in `docs/dev/design_issues/` before adding it.
 
+## Superpowers artifacts
+
+Place all superpowers-related artifacts (design specs, plans, etc.) in the `superpowers/`
+directory at the project root — **not** under `docs/`. The `docs/` directory is reserved for
+actual library documentation.
+
+- Specs go in `superpowers/specs/`
+
 ## Backward compatibility
 
 This is a greenfield project pre-v0.1.0. Do **not** add backward-compatibility shims,
@@ -77,7 +85,6 @@ to refer to names (e.g. ``PollingSource``, ``iter_data``, ``CursorInvalidatedErr
 
 ## Documentation samples
 
-`docs/` holds library documentation only: agent plans, specs and working notes never go there.
 `docs/dev/` (the design issues log and the design specification) is developer material, kept
 out of the published site (`exclude_docs` in `mkdocs.yml`) and out of the sample test.
 
