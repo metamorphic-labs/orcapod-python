@@ -12,7 +12,7 @@ the option.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import TypedDict
 from unittest.mock import patch
@@ -175,7 +175,7 @@ def _pass_x(x: int | None) -> int | None:
     return x
 
 
-def _system_tag_values(source: SourceProtocol) -> list[list[object]]:
+def _system_tag_values(source: SourceProtocol) -> Sequence[Sequence[object]]:
     table = source.as_table(columns=ColumnConfig(system_tags=True))
     return [
         table.column(name).to_pylist()
