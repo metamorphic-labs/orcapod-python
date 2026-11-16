@@ -83,7 +83,7 @@ closed. `tests/test_design_issues.py` runs the same check, so CI rejects a malfo
 ## Entries older than this convention
 
 The entries that were in `DESIGN_ISSUES.md` were moved here with their text unchanged by
-`scripts/migrate_design_issues.py`. Three things in them are tolerated and are not for new
+a one-shot migration script (ITL-968; removed in ITL-1169). Three things in them are tolerated and are not for new
 entries:
 
 - **No Linear issue.** An entry with no `**Issue:**` line is named `NOISSUE-<ENTRY-ID>.md`.
@@ -96,10 +96,11 @@ entries:
 
 A branch that still edits an entry in `DESIGN_ISSUES.md` conflicts once when it merges
 `main` (the file is deleted there). While that merge is in progress, keep the branch's
-copy, then:
+copy, then take the migration script from a `main` commit that still has it and run it:
 
 ```
-uv run python scripts/migrate_design_issues.py --source DESIGN_ISSUES.md
+git show 37716c76:scripts/migrate_design_issues.py > /tmp/migrate_design_issues.py
+uv run python /tmp/migrate_design_issues.py --source DESIGN_ISSUES.md --out design_issues
 git rm -f DESIGN_ISSUES.md
 git diff MERGE_HEAD --stat -- design_issues/
 ```
