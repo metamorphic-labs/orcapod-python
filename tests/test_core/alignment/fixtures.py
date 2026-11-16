@@ -215,6 +215,7 @@ def make_sources(scenario: str, input_order: str = "shuffled") -> Sources:
         built[name] = ArrowTableSource(
             table,
             tag_columns=list(TAG_COLUMNS),
+            tag_only_columns=True,
             source_id=name,
             record_id_column=record_id_column,
         )

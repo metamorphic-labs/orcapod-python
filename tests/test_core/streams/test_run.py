@@ -69,7 +69,11 @@ def _table(rows: int = ROWS) -> pa.Table:
 def _source(rows: int = ROWS, label: str = "readings") -> ArrowTableSource:
     """An ``ArrowTableSource`` over ``_table(rows)``."""
     return ArrowTableSource(
-        _table(rows), tag_columns=["id"], source_id="readings", label=label
+        _table(rows),
+        tag_columns=["id"],
+        tag_only_columns=True,
+        source_id="readings",
+        label=label,
     )
 
 
@@ -164,7 +168,10 @@ def _operator_stream() -> Any:
 def _join_stream() -> Any:
     """A ``Join`` stream of ``_source()`` with a ``DictSource`` of ``z`` on ``id``."""
     other = DictSource(
-        [{"id": i, "z": i + 1} for i in range(ROWS)], tag_columns=["id"], label="z"
+        [{"id": i, "z": i + 1} for i in range(ROWS)],
+        tag_columns=["id"],
+        tag_only_columns=True,
+        label="z",
     )
     return Join()(_source(), other)
 
@@ -226,7 +233,10 @@ KINDS: dict[str, Callable[[], Any]] = {
     "arrow_table_stream": lambda: ArrowTableStream(_table(), tag_columns=["id"]),
     "arrow_table_source": _source,
     "dict_source": lambda: DictSource(
-        [{"id": i, "x": i} for i in range(ROWS)], tag_columns=["id"], label="d"
+        [{"id": i, "x": i} for i in range(ROWS)],
+        tag_columns=["id"],
+        tag_only_columns=True,
+        label="d",
     ),
     "function_pod_stream": _function_pod_stream,
     "cached_function_pod_stream": _cached_function_pod_stream,

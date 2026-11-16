@@ -67,7 +67,12 @@ def _consumer(declared: Any) -> Any:
 
 
 def _source() -> DictSource:
-    return DictSource([{"k": 0, "i": 0}], tag_columns=["k"], source_id="one_row")
+    return DictSource(
+        [{"k": 0, "i": 0}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="one_row",
+    )
 
 
 def _run_job(database: Any, declared: Any, value: Any, *, use_async: bool) -> Any:
@@ -160,6 +165,7 @@ def test_identifier_bytes(declared: Any, value: Any, name: str) -> None:
     source = DictSource(
         [{"k": 0, "s": value}],
         tag_columns=["k"],
+        tag_only_columns=True,
         data_schema={"k": int, "s": declared},
     )
     arrow_type = source.as_table().schema.field("s").type
@@ -173,6 +179,7 @@ def test_a_list_of_sets_embeds_the_inner_set_identifier() -> None:
     source = DictSource(
         [{"k": 0, "s": [{2, 1}]}],
         tag_columns=["k"],
+        tag_only_columns=True,
         data_schema={"k": int, "s": list[set[int]]},
     )
     arrow_type = source.as_table().schema.field("s").type
@@ -211,6 +218,7 @@ def _row_hash(declared: Any, value: Any) -> Any:
     source = DictSource(
         [{"k": 0, "s": value}],
         tag_columns=["k"],
+        tag_only_columns=True,
         data_schema={"k": int, "s": declared},
         source_id="row_hash",
     )
@@ -708,6 +716,7 @@ def test_a_list_of_sets_inside_a_dict_value_is_refused() -> None:
         DictSource(
             [{"k": 0, "v": {"a": [{2, 1}]}}],
             tag_columns=["k"],
+            tag_only_columns=True,
             data_schema={"k": int, "v": dict[str, list[set[int]]]},
             source_id="one_row",
         )
