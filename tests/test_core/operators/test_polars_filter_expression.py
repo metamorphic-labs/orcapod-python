@@ -32,6 +32,7 @@ def _readings() -> DictSource:
         ],
         tag_columns=["id"],
         label="readings",
+        tag_only_columns=True,
     )
 
 
@@ -44,6 +45,7 @@ def _names() -> DictSource:
         ],
         tag_columns=["id"],
         label="names",
+        tag_only_columns=True,
     )
 
 

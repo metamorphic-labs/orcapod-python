@@ -56,6 +56,7 @@ def _source(value: set[str]) -> DictSource:
         tag_columns=["k"],
         data_schema={"k": str, "s": set[str]},
         source_id="set_order",
+        tag_only_columns=True,
     )
 
 
@@ -77,6 +78,7 @@ class TestPlainSetOrder:
             data=[{"k": "r", "s": {300, -1, 7}}],
             tag_columns=["k"],
             data_schema={"k": str, "s": set[int]},
+            tag_only_columns=True,
         )
         assert source.as_table().column("s").to_pylist() == [[-1, 7, 300]]
 
@@ -92,6 +94,7 @@ class TestPlainSetOrder:
                 data=rows,
                 tag_columns=["k"],
                 data_schema={"k": str, "s": set[float]},
+                tag_only_columns=True,
             ).as_table()
 
     @pytest.mark.parametrize("operation", ["update", "with_columns"])
