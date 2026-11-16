@@ -47,7 +47,7 @@ structurally similar but type-distinct containers produce different hashes:
   dict       → {"__type__": "dict",      "items": [[k, v], ...]}  # any other key; sorted pairs
   tuple      → {"__type__": "tuple",     "items": [...]}
   set        → {"__type__": "set",       "items": [...]}   # items sorted by canonical JSON
-  frozenset  → {"__type__": "set",       "items": [...]}   # same tag as set
+  frozenset  → {"__type__": "frozenset", "items": [...]}   # its own type; sorted as set
   namedtuple → {"__type__": "namedtuple","name": "T",
                 "fields": [[name, value], ...]}             # declared field order
 
@@ -326,8 +326,9 @@ class SemanticAwarePythonHasher:
             # Sort by each item's canonical JSON text: a total order that never
             # ties two distinct items ({1, "1"} sorts as [1, "1"]), so the order,
             # and the hash, never depend on set iteration order (PYTHONHASHSEED).
+            # A frozenset is a type of its own (ITL-1154): tagged apart from set.
             return {
-                "__type__": "set",
+                "__type__": "frozenset" if isinstance(obj, frozenset) else "set",
                 "items": sorted(expanded_items, key=_canonical_json),
             }
 
