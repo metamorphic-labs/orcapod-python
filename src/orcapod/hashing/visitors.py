@@ -313,7 +313,28 @@ class SemanticHashingVisitor(ArrowTypeDataVisitor):
                 return self._hashes_container_elements(args[0])
         if python_type is typing.Any or not isinstance(python_type, type):
             return False
-        return self._python_hasher.type_handler_registry.has_handler(python_type)
+        return self._column_value_handled(python_type)
+
+    def _column_value_handled(self, python_type: type) -> bool:
+        """Return True if a column of ``python_type`` is hashed through a value handler.
+
+        A logical type gets a column value handler only when its stored form is not its
+        identity (ITL-1154, rule 3): a handler for the Python type is registered and does
+        not declare ``COLUMN_VALUE_HANDLER = False``. ``UUIDHandler`` declares it: a UUID
+        column's 16 stored bytes are its identity, so starfix hashes the column as stored
+        (the extension identity in the field metadata, then the bytes), while a bare
+        ``uuid.UUID`` value keeps its tagged value hash.
+
+        Args:
+            python_type: The Python type of the column's logical type.
+
+        Returns:
+            Whether the column's values are replaced by their value hashes.
+        """
+        handler = self._python_hasher.type_handler_registry.get_handler_for_type(
+            python_type
+        )
+        return handler is not None and getattr(handler, "COLUMN_VALUE_HANDLER", True)
 
     def _hashes_container_elements(self, element_python_type: Any) -> bool:
         """Return True if a native container's elements are hashed by value.
@@ -339,7 +360,7 @@ class SemanticHashingVisitor(ArrowTypeDataVisitor):
         return (
             isinstance(inner, type)
             and self._type_converter.get_logical_type(inner) is not None
-            and self._python_hasher.type_handler_registry.has_handler(inner)
+            and self._column_value_handled(inner)
         )
 
     def visit_extension(
@@ -433,7 +454,7 @@ class SemanticHashingVisitor(ArrowTypeDataVisitor):
             return extension_type, storage_value
 
         # Only hash if a semantic hasher is registered for this Python type.
-        if not self._python_hasher.type_handler_registry.has_handler(python_type):
+        if not self._column_value_handled(python_type):
             return extension_type, storage_value
 
         # Convert storage value → Python object and hash it.
