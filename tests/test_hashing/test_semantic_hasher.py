@@ -486,10 +486,9 @@ class TestGenericAliasHandler:
         """
         import typing
 
-        class _NoOrigin(typing._GenericAlias, _root=True):  # pyright: ignore[reportPrivateUsage]
-            pass
-
-        alias = _NoOrigin(list, (int,))
+        # A fresh alias (never the cached ``typing.List[int]``) with its origin removed.
+        list_alias: Any = typing.List[int]  # noqa: UP006 - a typing alias is the subject
+        alias = list_alias.copy_with((int,))
         object.__setattr__(alias, "__origin__", None)
         with pytest.raises(TypeError, match="no __origin__"):
             hasher.hash_object(alias)

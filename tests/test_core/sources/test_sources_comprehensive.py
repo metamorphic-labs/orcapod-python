@@ -41,7 +41,7 @@ from orcapod.core.sources import (
     SourceRegistry,
 )
 from orcapod.protocols.core_protocols import StreamProtocol
-from orcapod.types import Schema
+from orcapod.types import ContentHash, Schema
 
 
 # ---------------------------------------------------------------------------
@@ -399,10 +399,11 @@ class TestListSourceAdditional:
             expected_tag_keys=["bucket"],
             tag_function_hash_mode="content",
         )
-        # Identity structure should include a non-empty hash
+        # The identity holds the source text's hash as a ContentHash, so it enters the
+        # source's hash with its label (ITL-1154).
         identity = src.identity_structure()
-        assert isinstance(identity[3], str)
-        assert len(identity[3]) > 0
+        assert isinstance(identity[3], ContentHash)
+        assert identity[3].method == "semantic_v1"
 
     def test_tag_function_hash_mode_name(self):
         """'name' mode uses the qualified name of the function."""
@@ -413,7 +414,9 @@ class TestListSourceAdditional:
             expected_tag_keys=["label"],
             tag_function_hash_mode="name",
         )
-        assert _tag_fn_for_signature.__qualname__ in src._tag_function_hash
+        tag_function_hash = src._tag_function_hash
+        assert isinstance(tag_function_hash, str)
+        assert _tag_fn_for_signature.__qualname__ in tag_function_hash
 
     def test_empty_list_raises(self):
         """An empty ListSource cannot build a valid stream."""

@@ -432,31 +432,57 @@ Orcapod stores or embeds in a name is pinned in the golden folder of the current
 
 ## Hash labels
 
-One rule holds for every hash label (developer, November 11, 2026; ITL-945; stated with
-examples in `docs/reference/hashing.md`, "The hash label rule").
+One rule holds for every hash (developer, November 15, 2026; ITL-1154, revising ITL-945;
+stated with examples in `docs/reference/hashing.md`, "The hash label rule"): **a hash always
+carries its label, except where it is written into a name, whose grammar fixes which
+algorithm produced it.**
 
 - A label names the algorithm that produced a digest (the whole procedure: canonical form,
   preparation, encoding, digest function) and nothing else. Format `<algorithm>_v<N>`,
-  integer `N`: `semantic_v1`, `arrow_v1`, `directory_v1`, `ndarray_v1`, `polars_expr_v1`. The
-  file content hash keeps `sha256`, the only exception. A logical type's implementer picks
-  its label.
+  integer `N`: `semantic_v1`, `arrow_v1`, `arrow_ordered_v1`, `directory_v1`, `ndarray_v1`,
+  `polars_expr_v1`, `batch_v1`, `group_v1`. The file content hash keeps `sha256`, the only
+  exception. A logical type's implementer picks its label.
 - Change a label only when its algorithm would give an existing input a different digest.
 - Define each label in exactly one place, as a constant beside its algorithm. Never write a
   label literal anywhere else in code, and never in a data context file.
-- Never feed a label into a hash computation. Feed a nested hash's digest only: never put
-  `to_string()`, `str(hash)` or `to_prefixed_digest()` into an identity structure, a preimage
-  table or a digest input. Inside a structure, return the `ContentHash` object and let the
-  structure hasher embed it.
-- A hash inside a name (path component, column name, `uri`) is the bare hex digest:
-  `to_hex()`. Exception (developer, November 11, 2026): a source id is the source's name. A
-  default source id built from a hash keeps a source-kind prefix and the hash's label
-  (`derived:<label>:<hex>`, via `to_string()`, never a label literal) and is used as it is in
-  the `source_id` system tag and in source-info values.
+- A hash fed into another hash carries its label. Inside a structure, return the
+  `ContentHash` object and let the structure hasher embed it
+  (`{"__type__": "hash", "label": ..., "digest": ...}`); never its `to_hex()` text. Into a
+  preimage table or digest input, feed `to_prefixed_digest()` (binary) or `to_string()`
+  (text), never `.digest` or `to_hex()`. A logical-type cell is
+  `<identifier>::<label>:<digest>`. Renaming a label moves every hash it feeds.
+- A hash inside a name (path component, column name, `uri`, slot name, run URI) is the bare
+  hex digest: `to_hex()`. A name later fed into a hash (the function `uri` in a pod's
+  identity, system-tag column names in an entry-id table) is still a name.
+- Source ids: a source id is the source's name. A default source id built from a hash says
+  what made it: a dedicated algorithm gives `<algorithm>_v<N>:<hex>` (the folded source id
+  of `Batch` / `GroupBy`: `batch_v1:` / `group_v1:`); a general algorithm applied by an
+  operation gives `<kind>:<label>:<hex>` (`derived:semantic_v1:<hex>`, via `to_string()`,
+  never a label literal; built by `hash_source_id`). Only source ids have a kind prefix. A
+  row identifier that is a hash carries its label and no kind (the SpiralDB key token,
+  `arrow_v1:<hex>`).
 - A hash stored as a value in its own column or field carries its label: `to_string()` as
   text, `to_prefixed_digest()` in a binary column.
 - A record id is an identifier built by a recipe, not a hash, and carries no label.
+- Handler routes: a value handler describes its value as tagged data (`Encoded`, hashed by
+  `semantic_v1`: `bytes` / `bytearray` as `Encoded("bytes", {"hex": ...})`, `uuid.UUID` as
+  `Encoded("uuid", {"hex": ...})`). It returns a labelled hash of its own only when the
+  identity needs a dedicated algorithm: external content (`File`, `Directory`) or a library
+  value's canonical form (arrays, tensors, pandas, Polars, Arrow tables, Polars
+  expressions). `frozenset` is its own type (`{"__type__": "frozenset", ...}`), never `set`.
+- Column value handlers: a logical type's column is hashed through a value handler only when
+  its stored form is not its identity. A handler that hashes bare values only declares
+  `COLUMN_VALUE_HANDLER = False` (`UUIDHandler`: a UUID column is hashed as stored).
+- Grammar restrictions the encodings rest on: no label contains `:`; the registry refuses `;`
+  in an extension name; extension metadata enters the identifier text as hex
+  (`tests/test_hashing/test_hash_grammar.py`).
+- Every place that produces or reads a digest is listed, with its class (into a hash, stored
+  value, in a name, row identifier, id from a recipe, display only), in the "Hash site
+  inventory" of `docs/reference/hashing.md`. A new hash site is added there with its class;
+  `tests/test_hashing/test_hash_site_inventory.py` traces the library and fails on a call
+  site the table does not list.
 - `tests/test_hashing/test_hash_label_rule.py` recomputes every golden value under renamed
-  labels; a value that moves there means a label reached a hash input.
+  labels: a value moves if and only if a label feeds it.
 
 ## Testing conventions
 
@@ -769,8 +795,9 @@ current data context are the current entries.
    to a deterministic digest via `arrow_utils.fold_system_tag_values` and their column name
    gains `::{pipeline_hash}` — a blend of rules 2 and 3.
 
-   The fold is SHA-based (`uuid5` for `record_id`, SHA-256 of the canonical JSON member list
-   for `source_id`) and so is stable across processes. Never use `hash()` or a set-based construction there: the digest
+   The fold is SHA-based (`uuid5` for `record_id`, no label; for `source_id` the SHA-256 of
+   the canonical JSON member list after the fold's label, `batch_v1:<hex>` / `group_v1:<hex>`,
+   ITL-1154) and so is stable across processes. Never use `hash()` or a set-based construction there: the digest
    becomes a cache key, so a per-process value would look correct in a single-process test and
    miss the cache on every new driver run.
 

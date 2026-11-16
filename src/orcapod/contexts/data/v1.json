@@ -252,15 +252,15 @@
         },
         {
             "definition": "semantic_hasher",
-            "change": "hash label rule: a nested hash enters its parent as its digest only, never with its label, so every structure hash that contains a nested hash moves; labels are <algorithm>_v1 (semantic_v1, arrow_v1, directory_v1, ndarray_v1, polars_expr_v1; the file hash keeps sha256), each defined once in code beside its algorithm and not in this file (ITL-945)"
+            "change": "hash label rule: a hash fed into another hash carries its label, so a nested hash enters its parent as {\"__type__\": \"hash\", \"label\": ..., \"digest\": ...} and every structure hash that contains a nested hash moves; bytes and uuid.UUID values hash as tagged data, and frozenset is tagged apart from set; labels are <algorithm>_v1, each defined once in code beside its algorithm and not in this file; the file hash keeps sha256 (ITL-945, revised by ITL-1154)"
         },
         {
             "definition": "arrow_hasher",
-            "change": "hash label rule: the token of a value-hashed extension cell holds the extension name and the raw digest, no label (ITL-945)"
+            "change": "hash label rule: the token of a value-hashed extension cell is the logical type identifier, then the value hash with its label (<identifier>::<label>:<digest>); a UUID column is hashed as stored; the order-including table hash is labelled arrow_ordered_v1 and enters the pandas value hash with its label (ITL-945, revised by ITL-1154)"
         },
         {
             "definition": "entry_id",
-            "change": "hash label rule: the input data hash enters the entry-id table, and the node content hash enters the operator-cache row key, as raw digests without a label; names (function uri, path components) hold bare hex digests (ITL-945)"
+            "change": "hash label rule: the input data hash enters the entry-id table, and the node content hash enters the operator-cache row key, with their labels; the folded source id of Batch and GroupBy carries batch_v1 / group_v1; names (function uri, path components) hold bare hex digests (ITL-945, revised by ITL-1154)"
         }
     ]
 }

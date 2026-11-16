@@ -19,7 +19,7 @@ import json
 import uuid
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import polars as pl
 import pyarrow as pa
@@ -155,7 +155,9 @@ class TestUuidColumnsAreHashedAsStored:
 
     def _table(self) -> pa.Table:
         source = DictSource(
-            data=[{"id": "a", "u": VALUE}, {"id": "b", "u": uuid.UUID(int=0)}],
+            data=cast(
+                "Any", [{"id": "a", "u": VALUE}, {"id": "b", "u": uuid.UUID(int=0)}]
+            ),
             tag_columns=["id"],
             source_id="uuid_column",
         )
@@ -182,7 +184,9 @@ class TestUuidColumnsAreHashedAsStored:
             table
         ) == context.arrow_hasher.hash_table(other)
         changed = DictSource(
-            data=[{"id": "a", "u": VALUE}, {"id": "b", "u": uuid.UUID(int=1)}],
+            data=cast(
+                "Any", [{"id": "a", "u": VALUE}, {"id": "b", "u": uuid.UUID(int=1)}]
+            ),
             tag_columns=["id"],
             source_id="uuid_column",
         ).as_table()
