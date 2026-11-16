@@ -1482,6 +1482,8 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             # A database that cannot store this node's tables refuses them now,
             # before anything runs or changes (ITL-1162).
             self.require_storable_tables(pipeline_database, result_database)
+        if ephemeral_database is not None:
+            self.require_storable_results(ephemeral_database)
         # Another database has its own tables of other generations to account for.
         self._stale_tables_checked = False
         self._current_tables_checked = False

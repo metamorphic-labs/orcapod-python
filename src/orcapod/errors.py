@@ -83,7 +83,11 @@ class UnstorableColumnError(ValueError):
     ``ConnectorArrowDatabase``: column types on the SQLite and PostgreSQL connectors,
     reserved column names on SpiralDB), before anything of the table is written. A
     job raises it when the database is attached to a node whose stored tables hold
-    such a column, before anything runs.
+    such a column, before anything runs, for the columns known from declared
+    schemas alone: a node's own columns and a function's outputs. The columns a
+    node carries from its input (tags, system tags, source info) and an operator's
+    output columns are refused when their table is first written, before anything
+    of it is stored.
 
     Attributes:
         database_kind: The kind of database that refused, e.g. ``"SQLiteConnector"``.

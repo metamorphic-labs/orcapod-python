@@ -749,3 +749,25 @@ class TestPipelineRecordsAndEphemeralResults:
         assert job.nodes["dbl"].ephemeral_result_database is None
         _ = job.run()
         assert sorted(CALLS) == [1, 2]
+
+    def test_attach_with_refused_ephemeral_database_changes_nothing(
+        self, tmp_path: pathlib.Path
+    ):
+        in_memory = InMemoryArrowDatabase()
+        job = PipelineJob(name="p", database=in_memory)
+        with job:
+            _ = double.pod(_source(), label="dbl")
+        _ = job.run()
+        node = job.nodes["dbl"]
+
+        with pytest.raises(UnstorableColumnError):
+            node.attach_databases(
+                pipeline_database=InMemoryArrowDatabase(),
+                ephemeral_database=_sqlite_database(tmp_path),
+            )
+
+        # The node kept its databases and its run: nothing is recomputed.
+        CALLS.clear()
+        assert sorted(node.as_table()["double"].to_pylist()) == [2, 4]
+        assert node.ephemeral_result_database is None
+        assert CALLS == []
