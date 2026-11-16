@@ -339,7 +339,7 @@ _SCRIPT = textwrap.dedent(
 
 
     if mode == "save":
-        source = DictSource([{"k": 0, "i": 0}], tag_columns=["k"], source_id="one_row")
+        source = DictSource([{"k": 0, "i": 0}], tag_columns=["k"], tag_only_columns=True, source_id="one_row")
         job = PipelineJob(name="fields", database=DeltaTableDatabase(work + "/store"))
         with job:
             produce.pod(source, label="produce")

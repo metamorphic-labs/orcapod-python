@@ -334,6 +334,7 @@ _REGISTRATION_ORDER = textwrap.dedent(
         source = DictSource(
             [{"k": 0, "v": {1}}],
             tag_columns=["k"],
+            tag_only_columns=True,
             data_schema={"k": int, "v": declared[name]},
             source_id="one_row",
         )
@@ -388,6 +389,7 @@ _TWO_WIDTHS = textwrap.dedent(
         source = DictSource(
             [{"k": 0, "v": value}],
             tag_columns=["k"],
+            tag_only_columns=True,
             data_schema={"k": int, "v": annotation},
             source_id="one_row",
         )
@@ -449,6 +451,7 @@ _LOAD_THEN_DECLARE = textwrap.dedent(
     source = DictSource(
         [{"k": 0, "v": {1, 300}}],
         tag_columns=["k"],
+        tag_only_columns=True,
         data_schema={"k": int, "v": set[int]},
         source_id="one_row",
     )
@@ -534,7 +537,7 @@ _READ_STORED_COLUMN = textwrap.dedent(
             "notes": getattr(exc, "__notes__", []),
         }))
         sys.exit(0)
-    source = ArrowTableSource(table, tag_columns=["k"], source_id="stored")
+    source = ArrowTableSource(table, tag_columns=["k"], tag_only_columns=True, source_id="stored")
     _, data = next(iter(source.iter_data()))
     value = data.as_dict()["c"]
     print(json.dumps({
@@ -664,6 +667,7 @@ _TWO_WIDTHS_IN_A_LIST = textwrap.dedent(
         source = DictSource(
             [{"k": 0, "v": value}],
             tag_columns=["k"],
+            tag_only_columns=True,
             data_schema={"k": int, "v": annotation},
             source_id="one_row",
         )

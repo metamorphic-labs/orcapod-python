@@ -653,7 +653,7 @@ def make(x: int) -> Sample:
 
 job = PipelineJob(name="w", database=DeltaTableDatabase(Path(os.environ["WS_DB"])))
 with job:
-    make.pod(DictSource(data=[{"k": "a", "x": 1}], tag_columns=["k"], source_id="s"), label="make")
+    make.pod(DictSource(data=[{"k": "a", "x": 1}], tag_columns=["k"], tag_only_columns=True, source_id="s"), label="make")
 job.run()
 report({"rows": job.nodes["make"].as_table().num_rows})
 """

@@ -468,7 +468,9 @@ entry point. The standing exception is verifying a schema prediction, which must
 against `static_process(...).output_schema(...)`; see "Important implementation details".
 
 Tests and golden fixtures that build a source with tag columns pass `tag_only_columns=True`
-unless the test is about the default (developer, November 16, 2026, ITL-1159).
+unless the test is about the default (developer, November 16, 2026, ITL-1159). This covers the
+sources that take the option (the table, file and database sources); `ListSource`,
+`DerivedSource`, `CachedSource` and `PollingSource` do not take it.
 
 ---
 

@@ -27,6 +27,7 @@ _ROW_HASH_SCRIPT = textwrap.dedent(
     source = DictSource(
         data=[{"k": "r", "s": {"apple", "banana", "cherry", "date", "elder"}}],
         tag_columns=["k"],
+        tag_only_columns=True,
         data_schema={"k": str, "s": set[str]},
         source_id="set_order",
     )

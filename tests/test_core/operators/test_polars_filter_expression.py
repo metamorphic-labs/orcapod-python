@@ -198,6 +198,7 @@ _JOB_SCRIPT = textwrap.dedent("""\
             {"id": "c", "x": 3, "y": 30},
         ],
         tag_columns=["id"],
+        tag_only_columns=True,
         label="readings",
     )
     names = DictSource(
@@ -207,6 +208,7 @@ _JOB_SCRIPT = textwrap.dedent("""\
             {"id": "c", "name": "gamma"},
         ],
         tag_columns=["id"],
+        tag_only_columns=True,
         label="names",
     )
 
