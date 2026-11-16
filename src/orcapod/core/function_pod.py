@@ -18,6 +18,7 @@ from orcapod.core.datagrams import Data
 from orcapod.core.referential_tags import (
     materialization_diagnostic_off,
     not_supported_yet,
+    reference_names,
     stream_references,
 )
 from orcapod.core.streams.base import (
@@ -252,9 +253,70 @@ class _FunctionPodBase(TraceableBase):
             ValueError: If inputs are incompatible with the data function schema.
         """
         input_stream = self.handle_input_streams(*streams)
-        incoming_tag_schema, incoming_data_schema = input_stream.output_schema()
-        self._validate_input_schema(incoming_data_schema)
-        self._validate_output_keys(incoming_tag_schema.keys())
+        self._validate_input(*input_stream.output_schema())
+
+    def _validate_input(self, tag_schema: Schema, data_schema: Schema) -> None:
+        """Validate a (joined) input's schemas against the function.
+
+        Its data must fit the function's parameters (``_validate_input_schema``) and no
+        output key may be one of its tags (``_validate_output_keys``). When the data
+        does not fit and the input has referential tags the function does not read,
+        the error says so and names the ways out: this is the exact form, which hands
+        every data column to the function (ITL-1022).
+
+        Args:
+            tag_schema: The input's tag schema.
+            data_schema: The input's data schema.
+
+        Raises:
+            ValueError: If the data does not fit the function's parameters.
+            InputValidationError: If an output key of the function is a tag name.
+        """
+        try:
+            self._validate_input_schema(data_schema)
+        except ValueError as error:
+            parameters = self.input_data_schema
+            unread = [
+                name
+                for name in reference_names(tag_schema, data_schema)
+                if name not in parameters
+            ]
+            if not unread:
+                raise
+            # Name only the ways out that can work for this input. Only a plain
+            # ``FunctionPod``'s call lets references fall through (``__call__``),
+            # whatever the other columns. A wrapper pod's call drops their data
+            # columns, and keeping them plain removes them: either leaves the
+            # function a column to read only when a parameter column remains.
+            has_parameter_column = any(name in parameters for name in data_schema)
+            remedies: list[str] = []
+            if isinstance(self, FunctionPod):
+                remedies.append(
+                    "call the pod as pod(stream) to let them pass through as "
+                    "referential tags"
+                )
+            elif has_parameter_column:
+                remedies.append(
+                    "call the pod as pod(stream), which keeps them as plain tags"
+                )
+            if has_parameter_column:
+                remedies.append(
+                    f"add {unread} to the tag_only_columns of the source that "
+                    "declares them (tag_only_columns=True keeps every tag plain)"
+                )
+            way_out = (
+                ", or ".join(remedies)
+                if remedies
+                else "no data column of the input is a parameter of the function, "
+                "so neither calling the pod nor keeping them plain leaves it one"
+            )
+            raise ValueError(
+                f"{error}. {unread} are referential tags of the input (each a tag "
+                "and a data column of one name) that the function does not read, and "
+                "the exact form, pod.process(stream) or pod(stream, strict=True), "
+                f"hands every data column to the function: {way_out}"
+            ) from error
+        self._validate_output_keys(tag_schema.keys())
 
     def _validate_output_keys(self, tag_names: Collection[str]) -> None:
         """Reject an output key that is also a tag column of the input.
@@ -808,9 +870,7 @@ class _FunctionPodBase(TraceableBase):
         tag_schema, incoming_data_schema = self.multi_stream_handler().output_schema(
             *streams, columns=columns, all_info=all_info
         )
-        # validate that incoming_data_schema is valid
-        self._validate_input_schema(incoming_data_schema)
-        self._validate_output_keys(tag_schema.keys())
+        self._validate_input(tag_schema, incoming_data_schema)
         # The output schema of the FunctionPodProtocol is determined by the data function
         # TODO: handle and extend to include additional columns
         # Namely, the source columns
@@ -907,9 +967,7 @@ class FunctionPod(_FunctionPodBase):
         input_stream = self.handle_input_streams(*streams)
 
         # perform input stream schema validation
-        tag_schema, data_schema = input_stream.output_schema()
-        self._validate_input_schema(data_schema)
-        self._validate_output_keys(tag_schema.keys())
+        self._validate_input(*input_stream.output_schema())
         self.tracker_manager.record_function_pod_invocation(
             self, input_stream, label=label
         )
@@ -1861,7 +1919,24 @@ class WrappedFunctionPod(_FunctionPodBase):
         return self._function_pod.uri
 
     def validate_inputs(self, *streams: StreamProtocol) -> None:
-        self._function_pod.validate_inputs(*streams)
+        try:
+            self._function_pod.validate_inputs(*streams)
+        except ValueError:
+            self._refuse_as_this_pod(*streams)
+            raise
+
+    def _refuse_as_this_pod(self, *streams: StreamProtocol) -> None:
+        """Validate ``streams`` as this pod, so a refusal names this pod's call.
+
+        The inner pod words a referential-tag refusal for its own call, which may let
+        references fall through where this pod's does not (ITL-1022). Called only when
+        the inner pod refused; when this check passes, the caller re-raises the inner
+        pod's error.
+
+        Raises:
+            ValueError: If the input does not fit this pod, with this pod's advice.
+        """
+        self._validate_input(*self.handle_input_streams(*streams).output_schema())
 
     def argument_symmetry(self, streams: Collection[StreamProtocol]) -> ArgumentGroup:
         return self._function_pod.argument_symmetry(streams)
@@ -1872,9 +1947,13 @@ class WrappedFunctionPod(_FunctionPodBase):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> tuple[Schema, Schema]:
-        return self._function_pod.output_schema(
-            *streams, columns=columns, all_info=all_info
-        )
+        try:
+            return self._function_pod.output_schema(
+                *streams, columns=columns, all_info=all_info
+            )
+        except ValueError:
+            self._refuse_as_this_pod(*streams)
+            raise
 
     # TODO: reconsider whether to return FunctionPodStream here in the signature
     def process(
