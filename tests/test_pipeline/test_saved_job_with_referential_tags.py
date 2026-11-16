@@ -317,3 +317,8 @@ def test_a_source_config_with_a_bare_string_tag_column_loads(
 
     loaded = PipelineJob.load(path)
     assert _hashes(loaded) == _hashes(job)
+    # The source was rebuilt from the edited config, with its bindings and rows.
+    assert set(loaded.sources) == set(job.sources) == {"spikes"}
+    rebuilt, original = loaded.sources["spikes"], job.sources["spikes"]
+    assert rebuilt.keys() == original.keys()
+    assert rebuilt.as_table().to_pylist() == original.as_table().to_pylist()
