@@ -27,8 +27,8 @@ useful kind is the **sink**, made with `@sink_pod`: it runs once for each row an
 which rows it has already handled, so a re-run does not repeat the effect for them. A row
 counts as handled once its function has returned and that has been recorded; if the process
 stops in between, the next run calls the function for that row again. A row is identified by
-its position unless its source names a column that is unique per row (`record_id_column`
-on `ArrowTableSource`), so reordering the rows of a source without one can make the sink
+its position unless its source names key columns that are unique per row
+(`record_id_columns`), so reordering the rows of a source without them can make the sink
 handle them again.
 
 ```python

@@ -660,7 +660,7 @@ class TestStoredHashValuesCarryTheirLabel:
     def test_folded_source_id_carries_the_fold_label(
         self, operator: Batch | GroupBy, label: str
     ) -> None:
-        """A folded source id is ``"<fold label>:<hex>"``; a folded record id has none."""
+        """A folded source id and record id are both ``"<fold label>:<hex>"``."""
         source = DictSource(
             data=[
                 {"id": "a", "cohort": "x", "v": 1},
@@ -679,8 +679,10 @@ class TestStoredHashValuesCarryTheirLabel:
         (folded,) = cast("list[str]", table.column(source_column).to_pylist())
         assert folded.startswith(f"{label}:")
         assert BARE_SHA256.fullmatch(folded.removeprefix(f"{label}:"))
-        (record_id,) = cast("list[bytes]", table.column(record_column).to_pylist())
-        assert len(record_id) == 16
+        # The folded record id carries the operation's label too (ITL-1154).
+        (record_id,) = cast("list[str]", table.column(record_column).to_pylist())
+        assert record_id.startswith(f"{label}:")
+        assert BARE_SHA256.fullmatch(record_id.removeprefix(f"{label}:"))
 
     def test_operator_cache_and_cached_source_row_keys_are_labelled(self) -> None:
         """The row keys of the two cache tables are ``b"arrow_v1:" + digest``."""
@@ -728,7 +730,7 @@ def _bare_stream(
     context_key: str | None = None,
 ) -> ArrowTableStream:
     """Build a one-row stream with no producer; each argument sets one value."""
-    names = ["id", "x", "__note", "_tag::origin"]
+    names = ["id", "x", "__note", "_tag_origin"]
     arrays: list[pa.Array[Any]] = [
         pa.array([tag], pa.large_string()),
         pa.array([data], pa.int64()),

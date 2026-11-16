@@ -443,16 +443,19 @@ algorithm produced it.**
 - A hash inside a name (path component, column name, `uri`, slot name, run URI) is the bare
   hex digest: `to_hex()`. A name later fed into a hash (the function `uri` in a pod's
   identity, system-tag column names in an entry-id table) is still a name.
-- Source ids: a source id is the source's name. A default source id built from a hash says
-  what made it: a dedicated algorithm gives `<algorithm>_v<N>:<hex>` (the folded source id
-  of `Batch` / `GroupBy`: `batch_v1:` / `group_v1:`); a general algorithm applied by an
-  operation gives `<kind>:<label>:<hex>` (`derived:semantic_v1:<hex>`, via `to_string()`,
-  never a label literal; built by `hash_source_id`). Only source ids have a kind prefix. A
-  row identifier that is a hash carries its label and no kind (the SpiralDB key token,
-  `arrow_v1:<hex>`).
+- Source ids: a source id is the source's name. A default built from a hash is
+  `<kind>:<label>:<hex>` (`derived:semantic_v1:<hex>`, via `to_string()`, never a label
+  literal; built by `hash_source_id`). A value folded by an operation is
+  `<operation label>:<hex>` (`batch_v1:` / `group_v1:`, for the folded source id and record id
+  alike).
+- Record ids (developer, November 16, 2026, ITL-1154): the record-id system tag holds the row
+  identifier itself, as text (`large_string`): `row_<n>`, or the canonical JSON of the key
+  columns in key order (`{"unit":"u1","time":1700000000}`, built only by
+  `stream_builder.key_row_identifier`). It is not a hash, holds no source id and carries no
+  label; never build it with `uuid5`. A source-info token is `<source id>::<record id>::<column>`.
 - A hash stored as a value in its own column or field carries its label: `to_string()` as
   text, `to_prefixed_digest()` in a binary column.
-- A record id is an identifier built by a recipe, not a hash, and carries no label.
+- A random identifier (`uuid7`, `uuid4`) is not a hash and carries no label.
 - Handler routes: a value handler describes its value as tagged data (`Encoded`, hashed by
   `semantic_v1`: `bytes` / `bytearray` as `Encoded("bytes", {"hex": ...})`, `uuid.UUID` as
   `Encoded("uuid", {"hex": ...})`). It returns a labelled hash of its own only when the
@@ -713,6 +716,10 @@ generation of hashing; rows of the current data context are the current entries.
 - The layout version is the last component of a table path. A change to the bookkeeping
   columns of a table kind moves its layout version, so the table gets a new path. Never add,
   rename or retype a stored column without it.
+- The v0.3 layouts (pdb_v2, rdb_v2, tdb_v2, odb_v1, sdb_v1) were redefined before
+  their first release (ITL-1154): the record-id system tag became text (large_string) without a
+  layout bump, since no release shipped them. A store written by a development build of v0.3 is
+  discarded, not migrated (its side-effect logs would deliver again).
 - Every new stored table kind writes __data_context (contexts/stored.with_data_context), and
   every read or lookup keeps rows of the current data context only
   (keep_rows_of_data_context, or a lookup constraint on the column).
@@ -765,8 +772,8 @@ generation of hashing; rows of the current data context are the current entries.
    directly to derive record identity. They fold to a deterministic digest via
    arrow_utils.fold_system_tag_values and their column name gains ::{pipeline_hash}.
 
-   The fold is SHA-based (uuid5 for record_id, no label; for source_id the SHA-256 of the canonical JSON member list
-   after the fold's label, batch_v1:<hex> / group_v1:<hex>, ITL-1154) and so is stable
+   The fold is SHA-based (one helper for both system tags: the SHA-256 of the canonical JSON member list after the
+   operation's label, batch_v1:<hex> / group_v1:<hex>, each label defined beside its operation; ITL-1154) and so is stable
    across processes. Never use hash() or a set-based construction there: the digest becomes a
    cache key, so a per-process value would look correct in a single-process test and miss the
    cache on every new driver run.
@@ -903,7 +910,7 @@ data. The rules:
   PipelineJob.bind, the bound_source setter (and SourceJobNode.__init__) and
   PipelineJob.load: per column the declared Python type (structural classes of one identity
   are one type, equivalent_hints), or T where the slot declares T | None; and exactly
-  one source-id (str) and one record-id (bytes) system-tag column, no other. Anything
+  one source-id (str) and one record-id (str) system-tag column, no other. Anything
   else raises SourceSpecMismatchError before anything is bound. The
   source's rows are given as the declared schema at one place, _DeclaredForm (nullable
   fields over the same arrays; the system-tag column NAMES of the declared schema hash,
@@ -924,8 +931,19 @@ data. The rules:
   polling_source, cached), or names the operation that derives the source
   (tags_as_data). A default built from a hash is <kind>:<algorithm label>:<hex>, built
   only by core/sources/source_ids.hash_source_id; one built from where the data lives is
-  <kind>:<location> (csv:<path>, sqlite_table:<table>), built only by
-  location_source_id, which refuses a location holding ::. Never format one by hand, and
+  <kind>:<location>, built only by location_source_id: csv:<path as passed>,
+  delta_table:<path or URI as passed>, sqlite_table:<db path as passed>:main.<table>,
+  postgresql_table:<database>.<schema>.<table>, db_table:<table>,
+  spiraldb_table:<project>.<dataset>.<table>@<table id> (developer, November 16, 2026). ::
+  is refused in every source id, given or default, and in every column name
+  (schema_utils.require_names_without_separator), so a source-info token splits at its first
+  and last ::. Key columns (developer, November 16, 2026, ITL-1154): every source accepts
+  record_id_columns (a name or several, in key order; () asks for the position).
+  Defaults: database tables and SpiralDB, the primary key (a database table without one is
+  refused); in-memory, CSV and Delta, the position; PollingSource requires key columns. A
+  key value is a string, an integer or a boolean (provisionally a timestamp or a date, as
+  ISO-8601 text); any other type, a null key and a repeated key are refused when the source is
+  built. Never format one by hand, and
   never write a label as a literal; a new root source declares SOURCE_KIND and builds its
   default with one of the two. PollingSource hashes impl.identity(), never its repr.
   node.as_source() gives no id of its own; it takes the DerivedSource default. The
@@ -969,7 +987,7 @@ data. The rules:
   too; a bare source's run() never does. A source over another (CachedSource, DerivedSource)
   reads it again when its modified time moved since the last read, never on what the
   inner check returned (another wrapper may have taken the change), and records that time
-  only after the read succeeded. Without a record_id_column a row's record id is its position: a
+  only after the read succeeded. Without key columns a row's record id is its position: a
   change of row order is a change; with one, only content counts
   (reload.same_rows(..., ordered=), decided by the caller; in doubt, order counts).
 - Empty data → ArrowTableSource raises ValueError("Table is empty").

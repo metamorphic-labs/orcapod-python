@@ -20,9 +20,9 @@ appended, because it is a variant of the same system tag mechanism.)
 | 2 | `pipeline_hash()` | `SemanticAwarePythonHasher` → JSON + SHA-256 | `ContentHash` | Unique per pipeline topology + schema; data-exclusive |
 | 3 | Schema hash (system tag column naming) | `SemanticAwarePythonHasher.hash_object((tag_schema, data_schema)).to_hex(n)` | Truncated hex `str` | Unique per `(tag_schema, data_schema)` pair; embedded in system tag column names |
 | 4 | Default `source_id` of an in-memory source | `"<source kind>:" + StarfixArrowHasher.hash_table(table).to_string()` | `str`, `<source kind>:<algorithm label>:<hex>` | Unique per source kind and raw table content; used as the source's name when none is given |
-| 5 | Per-row `record_id` (system tag value) | `uuid.uuid5(NAMESPACE, f"{source_id}::{provenance_token}")` | `bytes` (16, UUID v5) | Deterministic per `(source_id, row_identity)`; stable across re-runs of the same source |
+| 5 | Per-row `record_id` (system tag value) | the row identifier itself: `row_<n>`, or the canonical JSON of the key columns (`key_row_identifier`) | `str` (`large_string`) | Names the row within its source; stable as long as its position or its key is |
 | 6 | Join system tag suffix | `stream.pipeline_hash().to_hex(n)` + `:{idx}` appended to column name | Column name suffix | Unique per `(input topology, canonical join position)`; encodes full join lineage in column name |
-| 6b | Aggregating operator system tag fold | `uuid.uuid5(NAMESPACE, joined_member_hex)` for `record_id`; SHA-256 of the canonical JSON list of member values otherwise | `bytes` (16) / `"<fold label>:<hex>"` `str`, plus a column name suffix | Deterministic per ordered member set; keeps system tags scalar through a many-to-one reduction |
+| 6b | Aggregating operator system tag fold | SHA-256 of the canonical JSON list of member values, after the operation's label, for both system tags | `"<fold label>:<hex>"` `str`, plus a column name suffix | Deterministic per ordered member set; keeps system tags scalar through a many-to-one reduction |
 | 7 | `compute_base_entry_id()` | `StarfixArrowHasher.hash_table(system_tags + INPUT_DATA_HASH_COL)` | `bytes` (`b"method:digest"`) | Unique per `(node, tag lineage, input_data content)` across all recomputation attempts |
 | 8 | `compute_pipeline_entry_id()` | `StarfixArrowHasher.hash_table(system_tags + INPUT_DATA_HASH_COL + recomputation_index)` | `bytes` (`b"method:digest"`) | Unique per `(node, tag lineage, input_data content, recomputation attempt)` |
 | 9 | Side-effect `record_id` | `StarfixArrowHasher.hash_table(system_tags + INPUT_DATA_HASH_COL + recomputation_index=0)` | `bytes` | Unique per `(tag lineage, input_data content)`; pod-version scoped via table path (`uri` + `pipeline_hash()`) |
@@ -50,9 +50,9 @@ Orcapod computes (developer, November 15, 2026; ITL-1154, revising ITL-945):
 | 4 | **A hash fed into another hash carries its label.** A nested hash in a structure is `{"__type__": "hash", "label": "<label>", "digest": "<hex>"}`; a value-hashed cell in a table is `<identifier>::<label>:<digest>`; the entry-id preimage, the operator-cache row, the pandas value hash and a directory's file entries take `b"<label>:" + digest`; the run snapshot takes `"<label>:<hex>"`. So two algorithms that happen to produce the same digest never feed the same input (a `File` whose bytes are some value's canonical JSON, and that value's `semantic_v1` hash), and renaming a label moves every hash it feeds. (This reverses ITL-945's rule 6, "a label never enters a hash computation".) |
 | 5 | A hash stored as a value in its own column or field carries its label: `"<label>:<hex>"` as text, `b"<label>:" + digest` in a binary column. |
 | 6 | A hash inside a name is the bare hex digest: path components, column names, the function `uri`, operator identity, source-node slot names, the run URI. The name's grammar fixes which algorithm produced the digest. A name that is later fed into a hash (the function `uri` in a pod's identity, system-tag column names in an entry-id table) is still a name: its digest moves whenever what it was computed from moves. |
-| 7 | **Source ids.** A source id is the source's name. A default source id built from a hash says what made it: a dedicated algorithm gives `<algorithm>_v<N>:<hex>` (the folded source id of `Batch` and `GroupBy`, `batch_v1:<hex>` / `group_v1:<hex>`); a general algorithm applied by an operation gives `<kind>:<label>:<hex>` (`dict:arrow_v1:<hex>`, `derived:semantic_v1:<hex>`, `tags_as_data:semantic_v1:<hex>`). Only source ids have a kind prefix. |
-| 8 | A row identifier that is a hash carries its label and no kind prefix: its position in the record-id recipe and in the source-info token says what it is (the SpiralDB key token, `arrow_v1:<hex>`). |
-| 9 | A record id is an identifier built by a recipe (`uuid5`, `uuid7`), not a hash, and carries no label. |
+| 7 | **Source ids.** A source id is the source's name; a given one is used exactly as given. A default names its kind first, `<kind>:<rest>`: `<kind>:<label>:<hex>` when built from a hash (`dict:arrow_v1:<hex>`, `derived:semantic_v1:<hex>`, `tags_as_data:semantic_v1:<hex>`), `<kind>:<location>` when built from where the data lives (`csv:<path>`). A value folded by an operation is `<operation label>:<hex>` (`batch_v1:<hex>`, `group_v1:<hex>`). See "Default source ids and row identifiers". |
+| 8 | **Record ids.** A record id is the row identifier itself, as text: `row_<n>` (the position) or the canonical JSON of the key columns (`{"unit":"u1","time":1700000000}`). It is not a hash and holds no source id; the source id is the other system tag. A folded record id is `<operation label>:<hex>`, like a folded source id. A source-info token is `<source id>::<record id>::<column>`. |
+| 9 | A random identifier (`uuid7`, `uuid4`: datagram and result ids, run ids) is not a hash and carries no label. |
 | 10 | **Handler routes.** A value handler describes its value as tagged data (`Encoded`), hashed by `semantic_v1`: `bytes` / `bytearray` as `{"__type__": "bytes", "hex": ...}`, `uuid.UUID` as `{"__type__": "uuid", "hex": ...}`. It returns a labelled hash of its own only when the identity needs a dedicated algorithm: external content (`File`, `Directory`) or a library value's canonical form (`numpy.ndarray`, torch, pandas, Polars, `pa.Table`, a Polars expression). |
 | 11 | **Column value handlers.** A logical type's column is hashed through a value handler only when its stored form is not its identity. A UUID column's 16 stored bytes are its identity, so starfix hashes it as stored (`UUIDHandler.COLUMN_VALUE_HANDLER = False`); a bare `uuid.UUID` keeps its tagged value hash. |
 | 12 | The implementer of a logical type chooses the label of its value hash, in the same format. |
@@ -93,7 +93,6 @@ Where a hash appears, and in which form:
 | Labelled, inside a hash input | a nested hash in a structure: `{"__type__": "hash", "label": "<label>", "digest": "<hex>"}`; a value-hashed cell in a table: `b"<extension name>;<hex of the extension metadata>::<label>:" + digest` (the logical type's whole identifier, which the hashed field also keeps as its extension name and metadata, so the type is part of the hash of a column with no value too); the input data hash in the entry-id preimage (§3); the node content hash in the operator-node record hash; the sink hashes of the run snapshot (site 13); the ordered Arrow digest in a pandas value hash (§10); a file's hash in a directory entry |
 | Bare digest in a name | the function `uri` (its second component), the path components `schema:<pipeline digest>`, `instance:<content digest>` and `node:<content digest>`, system-tag column names, the operator `uri`, the function `uri` at the start of a function output's source-info token, source-node slot names, the run URI (`<job>@<snapshot>`) |
 | Labelled hash inside a source id | every default source id built from a hash: `<source kind>:<label>:<hex>` for an in-memory source (`arrow_table:`, `dict:`, `list:`, `data_frame:`, then the labelled table hash) and a `DerivedSource` (`derived:`, then the node's labelled content hash; also what `node.as_source()` returns), defined once by `hash_source_id` in `core/sources/source_ids.py`; `tags_as_data:<label>:<hex>` of a `tags_as_data` derivation (`DerivedSource._default_source_id`); `<fold label>:<hex>` of a folded source id (`fold_system_tag_values`) |
-| Labelled row identifier | the SpiralDB key token, `arrow_v1:<hex>` (`SpiralDBTableSource._key_tokens`) |
 
 A function node's table in v0.3, with the values it stores:
 
@@ -154,9 +153,10 @@ class's `SOURCE_KIND`, which is also its config type key (one vocabulary). Every
 built in `core/sources/source_ids.py`: `hash_source_id` for a default built from a hash,
 `location_source_id` for one built from where the data lives. A default never contains
 `::`, the separator of a source-info value: a location that holds `::` has no default, and
-the source refuses it until a `source_id` is given (developer, November 15, 2026: "every
+the source refuses it until a `source_id` is given; a given source id that holds `::` is
+refused too, and so is a column name that holds it (developer, November 15, 2026: "every
 source ought to have some default naming convention for the source id that reflects the
-category, but we should make it totally overridable").
+category, but we should make it totally overridable"; November 16, 2026, ITL-1154).
 
 | Source | Kind | Default source id |
 |---|---|---|
@@ -167,11 +167,11 @@ category, but we should make it totally overridable").
 | `DerivedSource` (a node's records; `node.as_source()`) | `derived` | `derived:semantic_v1:<hex>` of the node's content hash |
 | `DerivedSource` with `tags_as_data` | `tags_as_data` (an operation) | `tags_as_data:semantic_v1:<hex>` of the derivation |
 | `CSVSource` | `csv` | `csv:<file path as passed>` |
-| `DeltaTableSource` | `delta_table` | `delta_table:<directory name>` |
-| `SQLiteTableSource` | `sqlite_table` | `sqlite_table:<table name>` |
-| `PostgreSQLTableSource` | `postgresql_table` | `postgresql_table:<table name>` |
-| `DBTableSource` (any other connector) | `db_table` | `db_table:<table name>` |
-| `SpiralDBTableSource` | `spiraldb_table` | `spiraldb_table:<project>/<dataset>.<table>@<table id>` |
+| `DeltaTableSource` | `delta_table` | `delta_table:<path or URI of the table folder as passed>` |
+| `SQLiteTableSource` | `sqlite_table` | `sqlite_table:<db path as passed>:main.<table>` (SQLite names a table `<schema>.<table>`; the main database's schema is `main`) |
+| `PostgreSQLTableSource` | `postgresql_table` | `postgresql_table:<database>.<schema>.<table>` (the three-part name, from `current_database()` and `current_schema()`) |
+| `DBTableSource` (any other connector) | `db_table` | `db_table:<table name>`: the connector protocol exposes no database address, so two databases with one table name share this default |
+| `SpiralDBTableSource` | `spiraldb_table` | `spiraldb_table:<project>.<dataset>.<table>@<table id>` (Spiral's own table identifier, then SpiralDB's table id; `SPIRALDB_SOURCE_ID_HAS_TABLE_ID`) |
 | `PollingSource` | `polling_source` | `polling_source:semantic_v1:<hex>` of `impl.identity()` (never its `repr`) |
 | `CachedSource` | `cached` | the wrapped source's id |
 | folded source id of `Batch` / `GroupBy` (a system-tag value, not a source) | | `batch_v1:<hex>` / `group_v1:<hex>` |
@@ -179,14 +179,26 @@ category, but we should make it totally overridable").
 Two sources of one kind can share a default (two Delta folders with one name, two
 databases with a table `trials`); a pipeline that reads both gives each a `source_id`.
 
-A row's record id is `uuid5(namespace, "<source_id>::<row identifier>")` (site 5). The row
-identifier is one of:
+A row's record id is its row identifier (site 5), chosen by `record_id_columns` (a column name
+or several, in key order; every source accepts it):
 
 | Row identifier | When |
 |---|---|
-| `row_<n>` | no `record_id_column`: the row's position |
-| `<column>=<value>` | a `record_id_column` is given |
-| `arrow_v1:<hex>` | a SpiralDB table: the Arrow hash of the row's key columns, with its label (rule 8) |
+| `row_<n>` | the row's position: the default of in-memory, CSV and Delta sources, or `record_id_columns=()` |
+| `{"<column>":<value>,...}` | key columns: those named, or by default the primary key of a database table (SQLite, PostgreSQL, another connector) and of a SpiralDB table. Canonical JSON in key order, no spaces; `17` and `"17"` differ |
+
+A key value must be a string, an integer or a boolean, or (provisionally) a timestamp, written
+as ISO-8601 text from its stored integer (a naive timestamp without an offset, a zoned one in
+UTC with `Z`, the fraction digits fixed by the unit), or a date, `YYYY-MM-DD`. Any other type
+(floats, bytes, times of day, UUIDs, containers, logical types) is refused when the source is
+built, and so is a null key value and a key repeated in two rows. A database table without a
+primary key is refused unless `record_id_columns` names a key or asks for the position
+(`()`); a SpiralDB table refuses `()`; a `PollingSource` needs `record_id_columns`, since a
+position names a row only within its batch (ITL-1158).
+
+Name a source (`source_id`) and a key (`record_id_columns`) when its results must stay
+reusable as its data changes: a default in-memory source id is the hash of the whole table, and
+a position moves when rows are inserted or reordered.
 
 ## Hash site inventory
 
@@ -198,8 +210,7 @@ Every place Orcapod produces a digest, and every place it reads one, with its cl
 | into a hash | carries its label |
 | stored value | carries its label (`"<label>:<hex>"` text, `b"<label>:" + digest` binary) |
 | in a name | bare hex; the name's grammar fixes the algorithm |
-| row identifier | carries its label, no kind prefix (rule 8) |
-| id from a recipe | no label (`uuid5`, `uuid7`, `uuid4`) |
+| id from a recipe | no label (`uuid7`, `uuid4`; a record id is a row identifier, not a hash) |
 | display only | logs, observers, hooks, error text, in-memory keys and ordering: never stored, never hashed |
 
 **A new hash site is added here, with its class.** `tests/test_hashing/test_hash_site_inventory.py`
@@ -224,8 +235,7 @@ test session with `-p tests.test_hashing.hash_site_trace`.
 | Polars expression hash | the expression's canonical tree | SHA-256 of canonical JSON, `polars_expr_v1` | `PolarsFilter` identity | `hashing/semantic_hashing/polars_expr.py:polars_expr_content_hash` |
 | value handlers with an ignore list | wrap the value digests above | the type's label | top level, nested, Arrow cell | `logical_types/ignore_list.py:IgnoreListHandler.handle`, `logical_types/ignore_list.py:IgnoreListHandler.hash_ignoring` |
 | parse a stored hash | `"<label>:<hex>"` or `b"<label>:" + digest` | the stored label | saved jobs and pipelines, proxies, a node's saved run hash, a cached output hash | `types.py:ContentHash.from_string`, `types.py:ContentHash.from_prefixed_digest` |
-| source record id | `"{source_id}::{row token}"` | `uuid5`, fixed namespace | the `record_id` system tag | `core/sources/stream_builder.py:_make_record_id` |
-| folds of `Batch` / `GroupBy` | members' record ids; canonical JSON member list | `uuid5` (record id, no label); SHA-256 hex after `batch_v1` / `group_v1` (source id) | folded system tags | `utils/arrow_utils.py:fold_system_tag_values` |
+| folds of `Batch` / `GroupBy` | the canonical JSON list of a group's member values, for each system tag | SHA-256 hex after the operation's label: `batch_v1` (`batch.py`), `group_v1` (`group_by.py`); one helper | folded source id and record id | `utils/arrow_utils.py:fold_system_tag_values` |
 | run snapshot | sorted labelled sink hashes | SHA-256 hex, 16 digits | the run URI `<job>@<snapshot>` (a name) | `pipeline/job.py:PipelineJob._prepare_run`, `pipeline/job.py:PipelineJob._prepare_run.<locals>.<genexpr>` |
 | user-class identity | a class's identity record | SHA-256 hex prefix | extension name `name@<fingerprint>` (a name) | `logical_types/user_class_identity.py:identity_string` |
 | database registry key | a database config, canonical JSON | SHA-256 hex, 8 digits | `db_<hex>` key in a saved job (a name) | `pipeline/serialization.py:DatabaseRegistry._make_key` |
@@ -282,11 +292,10 @@ column names in an entry-id table, a source id in a source's identity and record
 stays a name: its grammar fixes the algorithm, and it moves whenever what it was computed
 from moves.
 
-### Row identifier (labelled, rule 8)
+### Row identifiers
 
-| Identifier | Call sites |
-|---|---|
-| SpiralDB key token, `arrow_v1:<hex>` | `core/sources/spiraldb_table_source.py:SpiralDBTableSource._key_tokens` |
+A record id is the row identifier (rule 8), built from row positions or key values by
+`stream_builder.row_identifiers`, never from a digest, so it is not a hash site.
 
 ### Display only
 
@@ -295,7 +304,7 @@ from moves.
 | observer events (`node_hash`) | `core/nodes/function_node.py:FunctionJobNode.execute`, `core/nodes/function_node.py:FunctionJobNode.async_execute`, `core/nodes/function_node.py:FunctionJobNode._execute_load_only`, `core/nodes/function_node.py:FunctionJobNode._async_execute_load_only`, `core/nodes/function_node.py:FunctionJobNode._async_execute_cache_only`, `core/nodes/operator_node.py:OperatorJobNode.execute`, `core/nodes/operator_node.py:OperatorJobNode.async_execute`, `core/nodes/source_node.py:SourceNodeBase.execute`, `core/nodes/source_node.py:SourceNodeBase.async_execute` |
 | hooks (`pod_hash`) | `core/function_pod.py:_FunctionPodBase._build_post_run_payload` |
 | in-memory graph keys and sort keys | `pipeline/base.py:AbstractPipelineBase.compile`, `pipeline/base.py:AbstractPipelineBase.compile.<locals>.<lambda>`, `pipeline/base.py:AbstractPipelineBase._record_invocation`, `pipeline/base.py:AbstractPipelineBase.to_invocations`, `pipeline/base.py:AbstractPipelineBase.from_invocations`, `pipeline/job.py:PipelineJob.compile` |
-| canonical input order (sort by digest) | `core/operators/join.py:Join.order_input_streams.<locals>.<lambda>`, `core/operators/merge_join.py:MergeJoin._canonical_order.<locals>.<lambda>` |
+| canonical input order (sort by digest; inputs with equal pipeline hashes keep their argument order, a stable sort: decision pending) | `core/operators/join.py:Join.order_input_streams.<locals>.<lambda>`, `core/operators/merge_join.py:MergeJoin._canonical_order.<locals>.<lambda>` |
 | in-memory identity and repr | `core/base.py:ContentIdentifiableBase.__hash__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__hash__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__eq__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__repr__` |
 | comparing a stored hash with the computed one; error text | `core/nodes/operator_node.py:OperatorJobNode._read_run_records`, `core/sources/source_proxy.py:SourceProxy.bind`, `core/data_function_proxy.py:DataFunctionProxy.bind`, `pipeline/job.py:PipelineJob.bind`, `errors.py:EphemeralResultMissingError.__init__` |
 
@@ -506,7 +515,7 @@ The table below shows what each class returns from `identity_structure()`.
 | `ArrowTableStream` | `(producer, argument_symmetry(upstreams))` | Falls back to `(class_name, as_table(all_info=True), tag_columns)` when no producer or producer is not a `PipelineElementProtocol` |
 | `RootSource` (`ArrowTableSource`) | `(class_name, (tag_schema, data_schema), source_id)` | `source_id` is the explicit user-supplied value; when not provided it defaults to `<source kind>:<algorithm label>:<hex>` of the Arrow hash of the raw table (site 4). Data-inclusive base case of the Merkle chain. |
 | `DerivedSource` | Origin node's `content_hash` | Inherits its generating node's identity |
-| `DerivedSource` with `tags_as_data` | `(class_name, output_schema, source_id, ("tags_as_data", sorted items))`; the default `source_id` is `tags_as_data:<label>:<hex>` of the hash of `(("DerivedSource", sorted tags_as_data items), (origin,))`, the origin entering through its `content_hash`; a `record_id_column`, when set, is appended to the parameters as `("record_id_column", name)` | The rule of every root source plus the mapping, which enters the `content_hash` directly (two mappings can give one schema) and so also with an explicit `source_id`; the origin enters through the default `source_id` only, which is the content hash an operator node doing the derivation would have |
+| `DerivedSource` with `tags_as_data` | `(class_name, output_schema, source_id, ("tags_as_data", sorted items))`; the default `source_id` is `tags_as_data:<label>:<hex>` of the hash of `(("DerivedSource", sorted tags_as_data items), (origin,))`, the origin entering through its `content_hash`; `record_id_columns`, when given, is appended to the parameters as `("record_id_columns", (names...))` | The rule of every root source plus the mapping, which enters the `content_hash` directly (two mappings can give one schema) and so also with an explicit `source_id`; the origin enters through the default `source_id` only, which is the content hash an operator node doing the derivation would have |
 | Operators (unary) | `(operator_class_name, upstream_stream)` | Stream reference resolved via `content_resolver` |
 | Operators (binary/N-ary) | `(operator_class_name, argument_symmetry(streams))` | `frozenset` for commutative (Join, MergeJoin); `tuple` for ordered (SemiJoin) |
 | `SelectTagColumns`, `SelectDataColumns`, `DropTagColumns`, `DropDataColumns`, `SelectColumns`, `DropColumns` | `(operator_class_name, sorted unique column names as a list, strict)` | The operators act on a set of names: a list, a tuple, a set, a single string, a repeated or a reordered name list give one hash (ITL-942) |
@@ -863,7 +872,7 @@ sequence before the stream is returned:
 
 1. **Site 3 — Schema hash:** computed from `(tag_schema, data_schema)`; embedded in system tag column names.
 2. **Site 4 — Default `source_id`:** `<source kind>:<algorithm label>:<hex>` of the raw table hash if no explicit `source_id` is given.
-3. **Site 5 — Per-row `record_id`:** a UUID v5 computed from `(source_id, row_provenance_token)` and stored per row.
+3. **Site 5 — Per-row `record_id`:** the row identifier (`row_<n>` or the key's canonical JSON), stored per row as text.
 4. Two system tag columns, `_tag_source_id::{schema_hash}` and `_tag_record_id::{schema_hash}`, are appended to every row.
 
 At Join time (site 6), all existing system tag columns are **renamed** by appending a
@@ -899,34 +908,32 @@ topology suffix, encoding the full join lineage into each column name.
 
 | Field | Value |
 |---|---|
-| **Inputs** | `source_id` string + provenance token: `"{col}={value}"` when `record_id_column` is specified, otherwise `"row_{index}"` |
-| **Algorithm** | `uuid.uuid5(_SOURCE_RECORD_ID_NAMESPACE, f"{source_id}::{provenance_token}")` where `_SOURCE_RECORD_ID_NAMESPACE = uuid.uuid5(NAMESPACE_URL, "https://orcapod.org/namespaces/source-record-id")` is a fixed constant (`core/sources/stream_builder.py`) |
-| **Output format** | `bytes` (16 bytes, UUID v5 bit pattern), stored in a `large_binary` Arrow column; the column keeps that type through tags, operators and stored tables (ITL-942: before v0.3 a source gave it `fixed_size_binary[16]`, so the operator cache key of one row differed between a direct run and the async orchestrator) |
-| **Uniqueness guarantee** | Deterministic per `(source_id, row_identity)`; stable across identical re-runs of the same source |
-| **Known exclusions** | When `record_id_column` is not specified, the row index is used as the provenance token; `record_id` changes if rows are **reordered** within the source table |
+| **Inputs** | The row's position, or the values of the key columns (`record_id_columns`, or a database table's primary key) |
+| **Algorithm** | `row_<n>`, or the canonical JSON object of the key columns in key order with no spaces (`stream_builder.key_row_identifier`) |
+| **Output format** | `str`, stored in a `large_string` Arrow column; the column keeps that type through tags, operators and stored tables. Not a hash; it holds no source id |
+| **Uniqueness guarantee** | Unique within the source: a key repeated in two rows, and a null key value, are refused when the source is built |
+| **Known exclusions** | A positional identifier changes when rows are inserted before the row or reordered; a key-based one follows the row |
 
-The recipe recomputes a record id from the source id and the token alone. The value below is
-the one pinned for this row in the golden hash file (`v1/pipeline-01.json`):
+The record id names the row, and the source-info token names the row and its column:
 
 ```python
-import uuid
-
-record_id_namespace = uuid.uuid5(
-    uuid.NAMESPACE_URL, "https://orcapod.org/namespaces/source-record-id"
-)
 subjects = DictSource(
     data=[{"subject": "s1", "age": 3, "weight": 20.5}],
     tag_columns=["subject"],
     source_id="subjects",
+    record_id_columns="subject",
 )
-first_row = subjects.as_table(columns={"system_tags": True}).to_pylist()[0]
-stored_record_id = next(
-    value for name, value in first_row.items() if name.startswith("_tag_record_id")
+first_row = subjects.as_table(
+    columns={"system_tags": True, "source": True}
+).to_pylist()[0]
+print(
+    next(
+        value for name, value in first_row.items() if name.startswith("_tag_record_id")
+    )
 )
-print(stored_record_id == uuid.uuid5(record_id_namespace, "subjects::row_0").bytes)
-# True
-print(stored_record_id.hex())
-# e8e02084627f5e1aad83839e421538e8
+# {"subject":"s1"}
+print(first_row["_source_age"])
+# subjects::{"subject":"s1"}::age
 ```
 
 ---
@@ -953,9 +960,9 @@ tag columns too, so those calls are as wide as the joins make them (ITL-1132).
 
 | Field | Value |
 |---|---|
-| **Inputs** | The ordered list of a group's member values for one system tag column, plus that column's name (which selects the fold) |
-| **Algorithm** | `arrow_utils.fold_system_tag_values()`. For a `record_id` column: `uuid.uuid5(_AGGREGATED_RECORD_ID_NAMESPACE, BLOCK_SEPARATOR.join(v.hex() for v in values))`, where `_AGGREGATED_RECORD_ID_NAMESPACE = uuid.uuid5(NAMESPACE_URL, "https://orcapod.org/namespaces/aggregated-record-id")` is a fixed constant. A `None` member contributes `null`. For every other system tag column: SHA-256 of the canonical JSON array of the members in order (`json.dumps([None if v is None else str(v) for v in values], separators=(",", ":"), ensure_ascii=False)`, UTF-8), as 64 hex characters after the fold's label: `batch_v1:<hex>` for `Batch` (`BATCH_FOLD_LABEL`), `group_v1:<hex>` for `GroupBy` (`GROUP_BY_FOLD_LABEL`). The folded source id is a source id built by a dedicated algorithm, so it carries that algorithm's label (ITL-1154). The array marks where each member ends, so `["ab", "c"]` and `["a", "bc"]` fold differently, and a `None` member (`null`) differs from `""` (ITL-942; before v0.3 the members were concatenated with no separator). The folded column name then gains `{BLOCK_SEPARATOR}{stream.pipeline_hash().to_hex(system_tag_n_char)}` via `arrow_utils.append_to_system_tags()`. |
-| **Output format** | `bytes` (16, UUID v5 bit pattern, no label: an id built by a recipe) for a `record_id` column; `"<fold label>:<64 hex>"` `str` otherwise — in both cases **scalar**, matching the input column's type |
+| **Inputs** | The ordered list of a group's member values for one system tag column, and the operation's label |
+| **Algorithm** | `arrow_utils.fold_system_tag_values(values, label=...)`, one helper for both system tags: SHA-256 of the canonical JSON array of the members in order (`json.dumps([None if v is None else str(v) for v in values], separators=(",", ":"), ensure_ascii=False)`, UTF-8), as 64 hex characters after the operation's label: `batch_v1:<hex>` for `Batch` (`BATCH_FOLD_LABEL`, in `batch.py`), `group_v1:<hex>` for `GroupBy` (`GROUP_BY_FOLD_LABEL`, in `group_by.py`). The label names the operation; each operation's procedure may change on its own (ITL-1154). The array marks where each member ends, so `["ab", "c"]` and `["a", "bc"]` fold differently, and a `None` member (`null`) differs from `""` (ITL-942). The folded column name then gains `{BLOCK_SEPARATOR}{stream.pipeline_hash().to_hex(system_tag_n_char)}` via `arrow_utils.append_to_system_tags()`. |
+| **Output format** | `"<fold label>:<64 hex>"` `str` for the source id and the record id alike: **scalar**, matching the input column's type |
 | **Uniqueness guarantee** | Deterministic per ordered member set, and stable across processes (both primitives are SHA-based). `Batch` and `GroupBy` both order their members deterministically before folding, so an unchanged member set always folds to the same digest |
 | **Known exclusions** | Member order is significant; a permuted member set folds differently. This is why `GroupBy` sorts members by their non-key tag values with `record_id` as a tiebreaker rather than relying on upstream emission order |
 
