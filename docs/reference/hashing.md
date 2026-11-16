@@ -891,11 +891,12 @@ sequence before the stream is returned:
 3. **Site 5 — Per-row `record_id`:** the row identifier (`row_<n>` or the key's canonical JSON), stored per row as text.
 4. Two system tag columns, `_tag_source_id::{schema_hash}` and `_tag_record_id::{schema_hash}`, are appended to every row.
 
-`tag_only_columns=True` (every tag plain; the default and the only value v0.3 accepts) enters
-none of these sites: a source built with it has the schema hash, `source_id`, record ids and
-saved config of the same source built without it. Every golden fixture that builds a source
-with tag columns passes `tag_only_columns=True`, so the golden values of data context `v1` pin
-plain tags, and stay pinned when v0.4 makes tags referential by default.
+`tag_only_columns` (the tags kept plain; `True` for all of them) enters these sites only
+through the schema: a referential tag is also a data column, so it is in the data schema and
+the schema hash, while the default `source_id` (the table hash) and the record ids are those
+of the same source with every tag plain. Every golden fixture that builds a source with tag
+columns passes `tag_only_columns=True`, so the golden values of data context `v1` pin plain
+tags, unchanged now that tags are referential by default.
 
 At Join time (site 6), all existing system tag columns are **renamed** by appending a
 topology suffix, encoding the full join lineage into each column name.

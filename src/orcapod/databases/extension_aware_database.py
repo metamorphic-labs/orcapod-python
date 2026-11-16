@@ -164,6 +164,19 @@ class ExtensionAwareDatabase:
             flush=flush,
         )
 
+    def validate_records(self, records: pa.Table) -> None:
+        """Raise ``ValueError`` if the wrapped database could not store ``records``.
+
+        Delegates to the wrapped database when it can check rows before writing
+        (``RecordValidatingDatabaseProtocol``); otherwise accepts them.
+        """
+        from orcapod.protocols.database_protocols import (
+            RecordValidatingDatabaseProtocol,
+        )
+
+        if isinstance(self._db, RecordValidatingDatabaseProtocol):
+            self._db.validate_records(records)
+
     def flush(self) -> None:
         self._db.flush()
 

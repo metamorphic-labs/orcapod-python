@@ -6,7 +6,7 @@ from typing import Any, ClassVar, TYPE_CHECKING
 
 from typing_extensions import override
 
-from orcapod.core.sources.base import RootSource
+from orcapod.core.sources.base import RootSource, saved_tag_only_columns
 from orcapod.core.referential_tags import TagOnlyColumns, source_reference_tags
 from orcapod.core.sources.source_ids import location_source_id
 from orcapod.core.sources.reload import keep_nullable_columns, same_rows
@@ -45,14 +45,14 @@ class CSVSource(RootSource):
     moves its modified time. Record ids keep their rule: the ``record_id_columns``
     value, or the row's position.
 
-    Plain tags: ``tag_only_columns`` (keyword-only) is ``True``, the default, and keeps
-    every tag column a tag only, not data, as every source does in v0.3. Any other value
-    is refused: referential tags arrive in v0.4, where tags become referential by default
-    and ``tag_only_columns`` names the tags kept plain.
+    Referential tags (ITL-1023): every declared tag column is referential by default,
+    also a data column of the same name. ``tag_only_columns`` (keyword-only) names the
+    tags kept plain (tag only, not data, as in v0.3); ``True`` keeps all of them plain.
     """
 
     SOURCE_KIND: ClassVar[str] = "csv"
     """Config type key and default source-id kind of this source (one vocabulary)."""
+    TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -185,7 +185,7 @@ class CSVSource(RootSource):
         return cls(
             file_path=config["file_path"],
             tag_columns=config.get("tag_columns", ()),
-            tag_only_columns=config.get("tag_only_columns", True),
+            tag_only_columns=saved_tag_only_columns(config),
             system_tag_columns=config.get("system_tag_columns", ()),
             record_id_columns=config.get("record_id_columns"),
             source_id=config.get("source_id"),

@@ -85,6 +85,7 @@ class DBTableSource(RootSource):
 
     SOURCE_KIND: ClassVar[str] = "db_table"
     """Config type key and default source-id kind of this source (one vocabulary)."""
+    TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = True
 
     def __init__(
         self,

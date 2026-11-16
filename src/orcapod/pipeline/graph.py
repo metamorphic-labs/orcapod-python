@@ -174,6 +174,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
 
         import json as _json
         from orcapod.pipeline.serialization import (
+            FALL_THROUGH_REFERENCES_KEY,
             PIPELINE_FORMAT_VERSION,
             serialize_nullability,
             serialize_output_schema,
@@ -182,15 +183,8 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         from orcapod.core.nodes import OperatorNode, FunctionNode
         from orcapod.core.nodes.source_node import SourceNode as SourceNodeClass
 
-        from orcapod.core.referential_tags import (
-            not_supported_yet,
-            stream_references,
-        )
-
         nodes: dict[str, Any] = {}
         for content_hash_str, node in self._persistent_node_map.items():
-            if stream_references(node):
-                raise not_supported_yet("Saving a pipeline", "ITL-1019")
             tag_schema, data_schema = node.output_schema()
             try:
                 type_converter = node.data_context.type_converter
@@ -264,6 +258,10 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                     if node._function_pod is not None:
                         descriptor["function_config"] = node._function_pod.to_config()
                     descriptor["table_scope"] = node._table_scope
+                    # Written for every function node, also a plain one (ITL-1019).
+                    descriptor[FALL_THROUGH_REFERENCES_KEY] = list(
+                        node.declared_references()
+                    )
 
                 case OperatorNode():
                     if node._operator is not None:
@@ -309,8 +307,11 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         """
         import json as _json
         from orcapod.pipeline.serialization import (
+            FALL_THROUGH_REFERENCES_KEY,
             SUPPORTED_FORMAT_VERSIONS,
+            check_saved_output_schema_is_plain,
             deserialize_schema,
+            saved_fall_through_references,
         )
         from orcapod.core.nodes import FunctionNode, OperatorNode
         from orcapod.core.nodes.source_node import SourceNode as SourceNodeClass
@@ -371,6 +372,19 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                 SavedSchemaVersionError,
                 deserialize_output_schema,
             )
+
+            # The format version decides which tags may be referential (ITL-1019).
+            try:
+                check_saved_output_schema_is_plain(descriptor, version)
+                if descriptor.get("node_type") == "function":
+                    # Stated explicitly from here on, whatever the version.
+                    descriptor[FALL_THROUGH_REFERENCES_KEY] = list(
+                        saved_fall_through_references(descriptor, version)
+                    )
+            except ValueError as exc:
+                raise ValueError(
+                    f"{path}: saved node {descriptor.get('label')!r}: {exc}"
+                ) from exc
 
             # Validate even a leaf node's saved identifiers before exposing the job.
             context = resolve_saved_context(descriptor.get("data_context_key"))

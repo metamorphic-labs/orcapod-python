@@ -17,7 +17,6 @@ from orcapod.core.data_function import CachedDataFunction, PythonDataFunction
 from orcapod.core.datagrams import Data
 from orcapod.core.referential_tags import (
     materialization_diagnostic_off,
-    not_supported_yet,
     reference_names,
     stream_references,
 )
@@ -2004,21 +2003,47 @@ class ReferenceFallThroughPod(WrappedFunctionPod):
         return self._plain_pod
 
     def to_config(self) -> dict[str, Any]:
-        """Raise: a pipeline holding referential tags cannot be saved yet (ITL-1019).
+        """Serialize this pod: the plain pod's config and the references (ITL-1019).
 
-        Raises:
-            NotImplementedError: Always.
+        Returns:
+            The plain pod's config with ``fall_through_references``, the referential
+            tags that fall through.
         """
-        raise not_supported_yet("Saving a fall-through function pod", "ITL-1019")
+        from orcapod.pipeline.serialization import FALL_THROUGH_REFERENCES_KEY
+
+        return {
+            **self._plain_pod.to_config(),
+            FALL_THROUGH_REFERENCES_KEY: list(self._references),
+        }
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "ReferenceFallThroughPod":
-        """Raise: a fall-through pod is never saved, so never loaded (ITL-1019).
+    def from_config(
+        cls, config: dict[str, Any], *, fallback_to_proxy: bool = False
+    ) -> "ReferenceFallThroughPod":
+        """Rebuild the pod from ``to_config``'s output.
+
+        Args:
+            config: A config written by ``to_config``.
+            fallback_to_proxy: Passed to ``FunctionPod.from_config``.
+
+        Returns:
+            The fall-through pod over the rebuilt plain pod.
 
         Raises:
-            NotImplementedError: Always.
+            ValueError: If the config names no ``fall_through_references``.
         """
-        raise not_supported_yet("Loading a fall-through function pod", "ITL-1019")
+        from orcapod.pipeline.serialization import FALL_THROUGH_REFERENCES_KEY
+
+        if FALL_THROUGH_REFERENCES_KEY not in config:
+            raise ValueError(
+                f"a fall-through pod config names {FALL_THROUGH_REFERENCES_KEY}; "
+                "this one does not"
+            )
+        plain = {k: v for k, v in config.items() if k != FALL_THROUGH_REFERENCES_KEY}
+        return cls(
+            FunctionPod.from_config(plain, fallback_to_proxy=fallback_to_proxy),
+            config[FALL_THROUGH_REFERENCES_KEY],
+        )
 
     def identity_structure(self) -> Any:
         return (self._plain_pod, ("fall_through_references", self._references))

@@ -31,11 +31,12 @@ class DataFrameSource(RootSource):
     The DataFrame is converted to an Arrow table and enriched by
     ``SourceStreamBuilder`` (source-info, schema-hash, system tags).
 
-    Plain tags: ``tag_only_columns`` (keyword-only) is ``True``, the default, and keeps
-    every tag column a tag only, not data, as every source does in v0.3. Any other value
-    is refused: referential tags arrive in v0.4, where tags become referential by default
-    and ``tag_only_columns`` names the tags kept plain.
+    Referential tags (ITL-1023): every declared tag column is referential by default,
+    also a data column of the same name. ``tag_only_columns`` (keyword-only) names the
+    tags kept plain (tag only, not data, as in v0.3); ``True`` keeps all of them plain.
     """
+
+    TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = True
 
     # The config type key; also the kind prefix of the default source id.
     SOURCE_KIND: ClassVar[str] = "data_frame"

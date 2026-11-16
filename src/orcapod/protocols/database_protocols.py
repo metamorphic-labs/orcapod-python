@@ -228,6 +228,21 @@ class TableCommittingDatabaseProtocol(Protocol):
 
 
 @runtime_checkable
+class RecordValidatingDatabaseProtocol(Protocol):
+    """A database that can say, before writing, whether it can store some rows.
+
+    A database whose backend cannot keep every part of an Arrow table (the SQLite and
+    PostgreSQL connector databases keep no field metadata) refuses such rows on
+    write. ``validate_records`` applies the same check without writing, so a caller
+    can refuse up front (ITL-1019: a referential tag marker).
+    """
+
+    def validate_records(self, records: pa.Table) -> None:
+        """Raise ``ValueError`` if the database could not store ``records`` as given."""
+        ...
+
+
+@runtime_checkable
 class DatabaseRegistryProtocol(Protocol):
     """Protocol for a database config registry used during pipeline save/load.
 

@@ -193,8 +193,9 @@ class TestTrueKeepsEveryTagPlain:
         assert named.content_hash() == explicit.content_hash()
         assert named.pipeline_hash() == explicit.pipeline_hash()
 
-    def test_plain_saved_config_has_no_key(self, build: Build) -> None:
-        assert "tag_only_columns" not in build(tag_only_columns=True).to_config()
+    def test_plain_saved_config_states_true(self, build: Build) -> None:
+        # Format 0.3.0 states every binding (ITL-1019): a plain source writes True.
+        assert build(tag_only_columns=True).to_config()["tag_only_columns"] is True
 
 
 class TestTheDefaultIsReferential:
@@ -243,7 +244,7 @@ class TestTheOption:
 
 
 class TestFromConfig:
-    """A config without the key reads back plain; a referential one reads back as saved."""
+    """A config states its binding and reads back as saved; one without it is refused."""
 
     def test_config_reads_back_plain(self, tmp_path: Path) -> None:
         source = _csv(tmp_path, tag_only_columns=True)
@@ -256,3 +257,14 @@ class TestFromConfig:
         loaded = CSVSource.from_config(source.to_config())
         assert loaded.content_hash() == source.content_hash()
         assert loaded.keys() == source.keys()
+
+    def test_referential_config_states_no_plain_tag(self, tmp_path: Path) -> None:
+        assert _csv(tmp_path).to_config()["tag_only_columns"] == []
+
+    def test_config_without_the_key_is_refused(self, tmp_path: Path) -> None:
+        # The saved format version decides plain tags, never a missing key (ITL-1159):
+        # a 0.1.0 or 0.2.0 file is given True by the loader before a source reads it.
+        config = {**_csv(tmp_path).to_config()}
+        del config["tag_only_columns"]
+        with pytest.raises(ValueError, match="tag_only_columns"):
+            _ = CSVSource.from_config(config)

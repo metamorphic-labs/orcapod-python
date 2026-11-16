@@ -47,18 +47,21 @@ Two construction rules apply to every source and are the most common first error
 - At least one column must be left over as a data column, otherwise it raises
   `ValueError: No data columns found in the table`.
 
-**Plain tags and `tag_only_columns`.** The sources built from a table (`ArrowTableSource`,
-`DictSource`, `DataFrameSource`, `CSVSource`, `DeltaTableSource` and the database sources) also
-take the keyword-only option `tag_only_columns`. In v0.3 every tag column is plain: it is a tag only,
-never also a data column. `tag_only_columns=True` says so explicitly; it is the default and
-the only value v0.3 accepts, and it changes no hash, source id, record id or saved config. Any
-other value is refused. In v0.4 tags become referential by default (a tag that is also the
-data column of the same name), and `tag_only_columns` keeps a tag plain, so code that must
-keep today's behaviour passes `tag_only_columns=True` now.
+**Referential and plain tags: `tag_only_columns`.** The sources built from a table
+(`ArrowTableSource`, `DictSource`, `DataFrameSource`, `CSVSource`, `DeltaTableSource` and the
+database sources) take the keyword-only option `tag_only_columns`. By default every declared
+tag is referential: it is also the data column of the same name (see
+[Referential tags](referential-tags.md)). `tag_only_columns` names the tags kept plain, a tag
+only and never a data column, as every tag was in v0.3; `tag_only_columns=True` keeps all of
+them plain. Plain and referential sources over one table have the same source id and record
+ids, but different schemas and so different hashes.
 
 ```python
 from orcapod.sources import DictSource
 
+referential = DictSource(data=[{"k": "a", "x": 1}], tag_columns=["k"])
+print(referential.keys())
+# (('k',), ('k', 'x'))
 plain = DictSource(
     data=[{"k": "a", "x": 1}], tag_columns=["k"], tag_only_columns=True
 )

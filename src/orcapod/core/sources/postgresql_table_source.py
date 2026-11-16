@@ -21,6 +21,7 @@ from typing_extensions import override
 
 from orcapod.core.sources.db_table_source import DBTableSource
 from orcapod.core.sources.source_ids import joined_location
+from orcapod.core.sources.base import saved_tag_only_columns
 from orcapod.databases.postgresql_connector import PostgreSQLConnector
 from orcapod.protocols.db_connector_protocol import DBConnectorProtocol
 
@@ -169,7 +170,7 @@ class PostgreSQLTableSource(DBTableSource):
             dsn=config["dsn"],
             table_name=config["table_name"],
             tag_columns=config.get("tag_columns"),
-            tag_only_columns=config.get("tag_only_columns", True),
+            tag_only_columns=saved_tag_only_columns(config),
             system_tag_columns=config.get("system_tag_columns", ()),
             record_id_columns=config.get("record_id_columns"),
             source_id=config.get("source_id"),

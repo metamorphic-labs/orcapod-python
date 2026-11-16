@@ -25,10 +25,17 @@ import weakref
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from orcapod.errors import InputValidationError
 from orcapod.types import SourceInfoValue
+
+from orcapod.utils.lazy_module import LazyModule
+
+if TYPE_CHECKING:
+    import pyarrow as pa
+else:
+    pa = LazyModule("pyarrow")
 
 # Diagnostic emitted when a structural operator materializes a reference (section 7.4).
 # ``"warn"`` emits a ``ReferenceMaterializationWarning``; ``"silent"`` emits nothing. The
@@ -161,6 +168,149 @@ def warn_materialized(operation: object, names: Iterable[str]) -> None:
         ReferenceMaterializationWarning,
         stacklevel=3,
     )
+
+
+# The marker of a referential tag in a stored table (developer, November 16, 2026,
+# ITL-1019): Arrow field metadata on the stored tag column, at the level of a logical
+# type's extension metadata. Only a referential tag carries it; a plain tag carries no
+# marker. It is not ``ARROW:extension:*`` metadata, so no schema or table hash reads it.
+REFERENTIAL_TAG_METADATA_KEY = b"orcapod:tag_kind"
+REFERENTIAL_TAG_METADATA_VALUE = b"referential"
+
+
+def mark_references(table: "pa.Table", references: Iterable[str]) -> "pa.Table":
+    """Return ``table`` with exactly the columns ``references`` marked referential.
+
+    A stored table states its own bindings: the writer marks the columns it knows to be
+    referential and removes a marker any other column carries (one that came in from
+    upstream metadata is not this writer's binding). Values and every other field
+    property (name, type, nullability, other metadata) are unchanged.
+
+    Args:
+        table: The rows about to be stored.
+        references: The referential tags of the rows; each must be a column of
+            ``table``.
+
+    Returns:
+        The table with the marker on exactly the ``references`` columns.
+
+    Raises:
+        ValueError: If a reference is not a column of ``table``.
+    """
+    refs = set(references)
+    if missing := refs - set(table.column_names):
+        raise ValueError(
+            f"referential tags {sorted(missing)} are not columns of the stored table"
+        )
+    schema = table.schema
+    changed = False
+    for index, field in enumerate(schema):
+        metadata: dict[bytes | str, bytes | str] = {
+            key: value for key, value in (field.metadata or {}).items()
+        }
+        marked = metadata.get(REFERENTIAL_TAG_METADATA_KEY) is not None
+        if field.name in refs:
+            if metadata.get(REFERENTIAL_TAG_METADATA_KEY) == (
+                REFERENTIAL_TAG_METADATA_VALUE
+            ):
+                continue
+            metadata[REFERENTIAL_TAG_METADATA_KEY] = REFERENTIAL_TAG_METADATA_VALUE
+        elif marked:
+            del metadata[REFERENTIAL_TAG_METADATA_KEY]
+        else:
+            continue
+        schema = schema.set(
+            index,
+            field.with_metadata(metadata) if metadata else field.remove_metadata(),
+        )
+        changed = True
+    if not changed:
+        return table
+    # The same arrays under the new field metadata: no cast, no copy.
+    return pa.Table.from_arrays(table.columns, schema=schema)
+
+
+def stored_references(schema: "pa.Schema") -> tuple[str, ...]:
+    """Return the columns a stored table marks as referential tags, in column order.
+
+    Args:
+        schema: The Arrow schema of a stored table.
+
+    Returns:
+        The names of the columns that carry the referential tag marker.
+
+    Raises:
+        ValueError: If a column carries the marker key with another value.
+    """
+    names: list[str] = []
+    for field in schema:
+        value = (field.metadata or {}).get(REFERENTIAL_TAG_METADATA_KEY)
+        if value is None:
+            continue
+        if value != REFERENTIAL_TAG_METADATA_VALUE:
+            raise ValueError(
+                f"stored column {field.name!r} has {REFERENTIAL_TAG_METADATA_KEY!r} "
+                f"metadata {value!r}; the only valid value is "
+                f"{REFERENTIAL_TAG_METADATA_VALUE!r}"
+            )
+        names.append(field.name)
+    return tuple(names)
+
+
+def require_database_keeps_marker(database: object, references: Iterable[str]) -> None:
+    """Refuse, before anything is written, a database that cannot store the marker.
+
+    A stored table must state what it stores (developer, November 16, 2026, ITL-1019),
+    so a referential tag is never stored unmarked. A database that checks rows before
+    writing them (``RecordValidatingDatabaseProtocol``, the connector-backed databases)
+    is asked whether it keeps the marker and refused if it does not. Any other database
+    is accepted without a check: the in-memory and Delta databases keep Arrow field
+    metadata.
+
+    Args:
+        database: The database a node will store its referential tags in.
+        references: The referential tags it will store; nothing is checked when empty.
+
+    Raises:
+        InputValidationError: If the database cannot keep the marker, naming the
+            database kind and the two ways out.
+    """
+    from orcapod.protocols.database_protocols import RecordValidatingDatabaseProtocol
+
+    references = tuple(references)
+    if not references or not isinstance(database, RecordValidatingDatabaseProtocol):
+        return
+    probe = mark_references(
+        pa.table({name: pa.array([], type=pa.null()) for name in references}),
+        references,
+    )
+    try:
+        database.validate_records(probe)
+    except ValueError as exc:
+        raise InputValidationError(
+            f"{type(database).__name__} cannot store the referential tags "
+            f"{list(references)}: a stored referential tag carries Arrow field "
+            f"metadata, and this database keeps none ({exc}). Use a database that "
+            "keeps field metadata (DeltaTableDatabase, InMemoryArrowDatabase, the "
+            "SpiralDB database), or keep these tags plain with tag_only_columns on "
+            "the source. Nothing was written."
+        ) from exc
+
+
+def without_reference_marks(table: "pa.Table") -> "pa.Table":
+    """Return ``table`` with no referential tag marker on any column.
+
+    A stored table read into a stream drops the marker: in a stream the binding is the
+    name intersection of the tag and data keys, and a marker carried further would be
+    written by a downstream store whose binding it is not.
+
+    Args:
+        table: Rows read from a stored table.
+
+    Returns:
+        The same rows; no field carries the marker.
+    """
+    return mark_references(table, ())
 
 
 def not_supported_yet(operation: str, issue: str) -> NotImplementedError:

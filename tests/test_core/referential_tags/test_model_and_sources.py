@@ -104,23 +104,27 @@ def test_arrow_table_source_default_and_tag_only() -> None:
     assert data.arrow_schema().field("x").type == pa.int8()
 
 
-def test_to_config_writes_tag_only_columns_only_for_referential_sources(
-    tmp_path: object,
-) -> None:
+def test_to_config_always_writes_tag_only_columns(tmp_path: object) -> None:
+    """Format 0.3.0 states every source's plain tags; the version, not a missing key,
+    decides an older file's meaning (ITL-1019)."""
     from pathlib import Path
 
     path = Path(str(tmp_path)) / "rows.csv"
     path.write_text("x,y\n1,0.5\n2,0.75\n")
     plain = op.sources.CSVSource(str(path), tag_columns=["x"], tag_only_columns=True)
     referential = op.sources.CSVSource(str(path), tag_columns=["x"])
-    assert "tag_only_columns" not in plain.to_config()
+    assert plain.to_config()["tag_only_columns"] is True
     assert referential.to_config()["tag_only_columns"] == []
-    # A v0.3 config (no key) reads back with every tag plain.
     assert op.sources.CSVSource.from_config(plain.to_config()).keys() == plain.keys()
     assert (
         op.sources.CSVSource.from_config(referential.to_config()).keys()
         == referential.keys()
     )
+    # A config without the key is refused: its meaning is not guessed.
+    config = plain.to_config()
+    del config["tag_only_columns"]
+    with pytest.raises(ValueError, match="has no tag_only_columns"):
+        op.sources.CSVSource.from_config(config)
 
 
 @pytest.mark.parametrize("tag_only", [(), ("k",)], ids=["referential", "plain"])

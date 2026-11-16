@@ -42,7 +42,7 @@ from typing import Any, ClassVar, NamedTuple, TYPE_CHECKING
 
 from typing_extensions import override
 
-from orcapod.core.sources.base import RootSource
+from orcapod.core.sources.base import RootSource, saved_tag_only_columns
 from orcapod.core.referential_tags import TagOnlyColumns, source_reference_tags
 from orcapod.core.sources.source_ids import joined_location, location_source_id
 from orcapod.core.sources.derived_source import validate_tags_as_data
@@ -285,6 +285,7 @@ class SpiralDBTableSource(RootSource):
 
     SOURCE_KIND: ClassVar[str] = "spiraldb_table"
     """Config type key and default source-id kind of this source (one vocabulary)."""
+    TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = True
 
     # Whether a notebook display reads the first rows. False shows the schema and the
     # table's recorded row count only, with no scan (kept for the ITL-991 ruling on what
@@ -952,7 +953,7 @@ class SpiralDBTableSource(RootSource):
             table_name=config["table_name"],
             dataset=config.get("dataset", "default"),
             tag_columns=config.get("tag_columns"),
-            tag_only_columns=config.get("tag_only_columns", True),
+            tag_only_columns=saved_tag_only_columns(config),
             system_tag_columns=config.get("system_tag_columns", ()),
             where=_locationfrom_config(config.get("where") or {}),
             limit=config.get("limit"),
