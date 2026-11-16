@@ -91,7 +91,7 @@ class TestProtocolConformance:
 
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector()
-            src = PostgreSQLTableSource(DSN, "measurements")
+            src = PostgreSQLTableSource(DSN, "measurements", tag_only_columns=True)
         assert isinstance(src, SourceProtocol)
 
     def test_is_stream_protocol(self):
@@ -100,7 +100,7 @@ class TestProtocolConformance:
 
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector()
-            src = PostgreSQLTableSource(DSN, "measurements")
+            src = PostgreSQLTableSource(DSN, "measurements", tag_only_columns=True)
         assert isinstance(src, StreamProtocol)
 
     def test_is_pipeline_element_protocol(self):
@@ -109,7 +109,7 @@ class TestProtocolConformance:
 
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector()
-            src = PostgreSQLTableSource(DSN, "measurements")
+            src = PostgreSQLTableSource(DSN, "measurements", tag_only_columns=True)
         assert isinstance(src, PipelineElementProtocol)
 
 
@@ -124,7 +124,7 @@ class TestPKAsDefaultTags:
 
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector()
-            src = PostgreSQLTableSource(DSN, "measurements")
+            src = PostgreSQLTableSource(DSN, "measurements", tag_only_columns=True)
         tag_schema, _ = src.output_schema()
         assert "session_id" in tag_schema
 
@@ -133,7 +133,7 @@ class TestPKAsDefaultTags:
 
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector()
-            src = PostgreSQLTableSource(DSN, "measurements")
+            src = PostgreSQLTableSource(DSN, "measurements", tag_only_columns=True)
         _, data_schema = src.output_schema()
         assert "session_id" not in data_schema
 
@@ -142,7 +142,7 @@ class TestPKAsDefaultTags:
 
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector()
-            src = PostgreSQLTableSource(DSN, "measurements")
+            src = PostgreSQLTableSource(DSN, "measurements", tag_only_columns=True)
         _, data_schema = src.output_schema()
         assert "trial" in data_schema
         assert "response" in data_schema
@@ -171,7 +171,7 @@ class TestPKAsDefaultTags:
                 pk_columns=["user_id", "event_id"],
                 batches=[batch],
             )
-            src = PostgreSQLTableSource(DSN, "events")
+            src = PostgreSQLTableSource(DSN, "events", tag_only_columns=True)
         tag_schema, _ = src.output_schema()
         assert "user_id" in tag_schema
         assert "event_id" in tag_schema
@@ -181,7 +181,7 @@ class TestPKAsDefaultTags:
 
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector()
-            src = PostgreSQLTableSource(DSN, "measurements")
+            src = PostgreSQLTableSource(DSN, "measurements", tag_only_columns=True)
         assert src.source_id == "postgresql_table:orcapod.public.measurements"
 
     def test_explicit_source_id_overrides_default(self):
@@ -189,7 +189,9 @@ class TestPKAsDefaultTags:
 
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector()
-            src = PostgreSQLTableSource(DSN, "measurements", source_id="meas")
+            src = PostgreSQLTableSource(
+                DSN, "measurements", source_id="meas", tag_only_columns=True
+            )
         assert src.source_id == "meas"
 
 
@@ -204,7 +206,9 @@ class TestExplicitTagOverride:
 
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector()
-            src = PostgreSQLTableSource(DSN, "measurements", tag_columns=["trial"])
+            src = PostgreSQLTableSource(
+                DSN, "measurements", tag_columns=["trial"], tag_only_columns=True
+            )
         tag_schema, _ = src.output_schema()
         assert "trial" in tag_schema
         assert "session_id" not in tag_schema
@@ -215,7 +219,10 @@ class TestExplicitTagOverride:
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector()
             src = PostgreSQLTableSource(
-                DSN, "measurements", tag_columns=["session_id", "trial"]
+                DSN,
+                "measurements",
+                tag_columns=["session_id", "trial"],
+                tag_only_columns=True,
             )
         tag_schema, _ = src.output_schema()
         assert "session_id" in tag_schema
@@ -234,7 +241,7 @@ class TestNoPKError:
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector(pk_columns=[])
             with pytest.raises(ValueError, match="has no primary key columns"):
-                PostgreSQLTableSource(DSN, "measurements")
+                PostgreSQLTableSource(DSN, "measurements", tag_only_columns=True)
 
 
 # ===========================================================================
@@ -249,7 +256,7 @@ class TestTableErrors:
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector(table_names=[])
             with pytest.raises(ValueError, match="not found in database"):
-                PostgreSQLTableSource(DSN, "nonexistent")
+                PostgreSQLTableSource(DSN, "nonexistent", tag_only_columns=True)
 
     def test_empty_table_raises_value_error(self):
         from orcapod.core.sources import PostgreSQLTableSource
@@ -257,7 +264,7 @@ class TestTableErrors:
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector(batches=[])
             with pytest.raises(ValueError, match="is empty"):
-                PostgreSQLTableSource(DSN, "measurements")
+                PostgreSQLTableSource(DSN, "measurements", tag_only_columns=True)
 
 
 # ===========================================================================
@@ -271,7 +278,7 @@ class TestStreamBehaviour:
 
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector()
-            src = PostgreSQLTableSource(DSN, "measurements")
+            src = PostgreSQLTableSource(DSN, "measurements", tag_only_columns=True)
         assert src.producer is None
 
     def test_upstreams_is_empty(self):
@@ -279,7 +286,7 @@ class TestStreamBehaviour:
 
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector()
-            src = PostgreSQLTableSource(DSN, "measurements")
+            src = PostgreSQLTableSource(DSN, "measurements", tag_only_columns=True)
         assert src.upstreams == ()
 
     def test_iter_data_yields_one_per_row(self):
@@ -287,7 +294,7 @@ class TestStreamBehaviour:
 
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector()
-            src = PostgreSQLTableSource(DSN, "measurements")
+            src = PostgreSQLTableSource(DSN, "measurements", tag_only_columns=True)
         assert len(list(src.iter_data())) == 3
 
     def test_iter_data_tags_contain_pk(self):
@@ -295,7 +302,7 @@ class TestStreamBehaviour:
 
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector()
-            src = PostgreSQLTableSource(DSN, "measurements")
+            src = PostgreSQLTableSource(DSN, "measurements", tag_only_columns=True)
         for tags, _ in src.iter_data():
             assert "session_id" in tags
 
@@ -304,7 +311,7 @@ class TestStreamBehaviour:
 
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector()
-            src = PostgreSQLTableSource(DSN, "measurements")
+            src = PostgreSQLTableSource(DSN, "measurements", tag_only_columns=True)
         assert len(src.output_schema()) == 2
 
     def test_as_table_returns_pyarrow_table(self):
@@ -312,7 +319,7 @@ class TestStreamBehaviour:
 
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector()
-            src = PostgreSQLTableSource(DSN, "measurements")
+            src = PostgreSQLTableSource(DSN, "measurements", tag_only_columns=True)
         assert isinstance(src.as_table(), pa.Table)
 
     def test_as_table_row_count_matches_source(self):
@@ -320,7 +327,7 @@ class TestStreamBehaviour:
 
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector()
-            src = PostgreSQLTableSource(DSN, "measurements")
+            src = PostgreSQLTableSource(DSN, "measurements", tag_only_columns=True)
         assert src.as_table().num_rows == 3
 
     def test_connector_is_closed_after_construction(self):
@@ -329,7 +336,7 @@ class TestStreamBehaviour:
         with patch(_PATCH) as mock_cls:
             mock_connector = _make_mock_connector()
             mock_cls.return_value = mock_connector
-            PostgreSQLTableSource(DSN, "measurements")
+            PostgreSQLTableSource(DSN, "measurements", tag_only_columns=True)
         mock_connector.close.assert_called_once()
 
     def test_connector_is_closed_even_when_super_raises(self):
@@ -339,7 +346,7 @@ class TestStreamBehaviour:
             mock_connector = _make_mock_connector(table_names=[])
             mock_cls.return_value = mock_connector
             with pytest.raises(ValueError):
-                PostgreSQLTableSource(DSN, "nonexistent")
+                PostgreSQLTableSource(DSN, "nonexistent", tag_only_columns=True)
         mock_connector.close.assert_called_once()
 
     def test_close_exception_is_suppressed_on_success_path(self):
@@ -350,7 +357,9 @@ class TestStreamBehaviour:
             mock_connector = _make_mock_connector()
             mock_connector.close.side_effect = RuntimeError("close failed")
             mock_cls.return_value = mock_connector
-            src = PostgreSQLTableSource(DSN, "measurements")  # must not raise
+            src = PostgreSQLTableSource(
+                DSN, "measurements", tag_only_columns=True
+            )  # must not raise
         assert src is not None
 
     def test_close_exception_does_not_mask_super_init_failure(self):
@@ -362,7 +371,7 @@ class TestStreamBehaviour:
             mock_connector.close.side_effect = RuntimeError("close failed")
             mock_cls.return_value = mock_connector
             with pytest.raises(ValueError, match="not found in database"):
-                PostgreSQLTableSource(DSN, "nonexistent")
+                PostgreSQLTableSource(DSN, "nonexistent", tag_only_columns=True)
 
 
 # ===========================================================================
@@ -376,10 +385,10 @@ class TestDeterministicHashing:
 
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector()
-            src1 = PostgreSQLTableSource(DSN, "measurements")
+            src1 = PostgreSQLTableSource(DSN, "measurements", tag_only_columns=True)
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector()
-            src2 = PostgreSQLTableSource(DSN, "measurements")
+            src2 = PostgreSQLTableSource(DSN, "measurements", tag_only_columns=True)
         assert src1.pipeline_hash() == src2.pipeline_hash()
 
     def test_content_hash_is_deterministic(self):
@@ -387,10 +396,10 @@ class TestDeterministicHashing:
 
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector()
-            src1 = PostgreSQLTableSource(DSN, "measurements")
+            src1 = PostgreSQLTableSource(DSN, "measurements", tag_only_columns=True)
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector()
-            src2 = PostgreSQLTableSource(DSN, "measurements")
+            src2 = PostgreSQLTableSource(DSN, "measurements", tag_only_columns=True)
         assert src1.content_hash() == src2.content_hash()
 
     def test_different_tag_columns_yields_different_pipeline_hash(self):
@@ -398,10 +407,12 @@ class TestDeterministicHashing:
 
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector()
-            src1 = PostgreSQLTableSource(DSN, "measurements")
+            src1 = PostgreSQLTableSource(DSN, "measurements", tag_only_columns=True)
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector()
-            src2 = PostgreSQLTableSource(DSN, "measurements", tag_columns=["trial"])
+            src2 = PostgreSQLTableSource(
+                DSN, "measurements", tag_columns=["trial"], tag_only_columns=True
+            )
         assert src1.pipeline_hash() != src2.pipeline_hash()
 
 
@@ -416,7 +427,7 @@ class TestToConfig:
 
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector()
-            return PostgreSQLTableSource(DSN, "measurements")
+            return PostgreSQLTableSource(DSN, "measurements", tag_only_columns=True)
 
     def test_has_source_type_postgresql_table(self):
         assert self._make_src().to_config()["source_type"] == "postgresql_table"
@@ -461,7 +472,7 @@ class TestFromConfig:
 
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector()
-            return PostgreSQLTableSource(DSN, "measurements")
+            return PostgreSQLTableSource(DSN, "measurements", tag_only_columns=True)
 
     def test_from_config_reconstructs_source_id(self):
         from orcapod.core.sources import PostgreSQLTableSource
@@ -489,7 +500,9 @@ class TestFromConfig:
 
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector()
-            src = PostgreSQLTableSource(DSN, "measurements", tag_columns=["trial"])
+            src = PostgreSQLTableSource(
+                DSN, "measurements", tag_columns=["trial"], tag_only_columns=True
+            )
         config = src.to_config()
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector()
@@ -515,7 +528,7 @@ def test_resolve_source_from_config_dispatches_to_postgresql_table_source():
 
     with patch(_PATCH) as mock_cls:
         mock_cls.return_value = _make_mock_connector()
-        src = PostgreSQLTableSource(DSN, "measurements")
+        src = PostgreSQLTableSource(DSN, "measurements", tag_only_columns=True)
     config = src.to_config()
 
     with patch(_PATCH) as mock_cls:

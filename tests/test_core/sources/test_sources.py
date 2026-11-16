@@ -37,6 +37,7 @@ def _make_arrow_source(record_id_columns=None, source_id=None):
         record_id_columns=record_id_columns,
         source_id=source_id,
         infer_nullable=True,
+        tag_only_columns=True,
     )
 
 

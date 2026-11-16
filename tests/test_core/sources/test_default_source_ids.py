@@ -1,237 +1,257 @@
-"""Every source's default source id names its kind; a given id is used as it is (ITL-1154).
+"""Default source ids built from a hash: ``<source kind>:<algorithm label>:<hex>`` (ITL-957).
 
-Developer, November 15, 2026: "every source ought to have some default naming convention
-for the source id that reflects the category, but we should make it totally overridable."
-A default is ``<kind>:<rest>``, the kind being the class's ``SOURCE_KIND`` (its config type
-key): ``<kind>:<label>:<hex>`` from a hash, ``<kind>:<location>`` from where the data lives.
+Developer decision of November 11, 2026: a source id is the source's name and must make
+the source easy to identify. A default id built from a hash carries the source kind (the
+class's config type key) and the hash's own label. The one string is used unchanged as
+the ``source_id`` system tag value and inside the ``_source_<col>`` values. A source id
+given by the user is never changed.
 """
 
 from __future__ import annotations
 
-import sqlite3
-from pathlib import Path
-from typing import Any
+from collections.abc import Callable
 
+import polars as pl
 import pyarrow as pa
 import pytest
-from deltalake import write_deltalake
 
-from orcapod.contexts import get_default_context
+from orcapod.config import HashingConfig, OrcapodConfig
+from orcapod.core.function_pod import FunctionPod
+from orcapod.core.nodes.function_node import FunctionJobNode
+from orcapod.core.nodes.operator_node import OperatorJobNode
+from orcapod.core.operators import MapData
 from orcapod.core.sources import (
     ArrowTableSource,
-    CachedSource,
-    CSVSource,
     DataFrameSource,
-    DeltaTableSource,
     DerivedSource,
     DictSource,
     ListSource,
-    PollingSource,
-    SQLiteTableSource,
+    RootSource,
 )
-from orcapod.core.sources.db_table_source import DBTableSource
-from orcapod.core.sources.postgresql_table_source import PostgreSQLTableSource
-from orcapod.core.sources.source_ids import hash_source_id, location_source_id
-from orcapod.core.sources.spiraldb_table_source import SpiralDBTableSource
-from orcapod.pipeline.serialization import SOURCE_REGISTRY
-from tests.test_channels.test_polling_source import FakeDynamicSource
+from orcapod.databases import InMemoryArrowDatabase
+from orcapod.system_constants import constants
+from orcapod.types import CacheMode
 
-GIVEN = "a given id: kept as it is, with : and spaces"
+from ..conftest import double, make_int_stream
 
-
-# ---------------------------------------------------------------------------
-# The one place that builds a location default
-# ---------------------------------------------------------------------------
+ROWS = [{"id": 1, "x": 10}, {"id": 2, "x": 20}, {"id": 3, "x": 30}]
 
 
-def test_location_source_id_is_kind_then_location() -> None:
-    """``location_source_id`` joins the kind and the location with one ``:``."""
-    assert location_source_id("csv", "data/x.csv") == "csv:data/x.csv"
-    # A ':' in the location is kept: only '::' is refused.
-    assert location_source_id("csv", "C:/x.csv") == "csv:C:/x.csv"
+def _arrow_table() -> pa.Table:
+    return pa.table(
+        {
+            "id": pa.array([1, 2, 3], pa.int64()),
+            "x": pa.array([10, 20, 30], pa.int64()),
+        },
+        schema=pa.schema(
+            [
+                pa.field("id", pa.int64(), nullable=False),
+                pa.field("x", pa.int64(), nullable=False),
+            ]
+        ),
+    )
 
 
-@pytest.mark.parametrize(
-    ("kind", "location"),
-    [("csv", "a::b.csv"), ("csv", ":b.csv"), ("csv", ""), ("", "x"), ("c:sv", "x")],
-    ids=[
-        "double-colon",
-        "leading-colon",
-        "empty-location",
-        "empty-kind",
-        "colon-in-kind",
-    ],
+def _arrow_table_source(**kwargs) -> RootSource:
+    return ArrowTableSource(
+        _arrow_table(), tag_columns=["id"], tag_only_columns=True, **kwargs
+    )
+
+
+def _dict_source(**kwargs) -> RootSource:
+    return DictSource(ROWS, tag_columns=["id"], tag_only_columns=True, **kwargs)
+
+
+def _list_source(**kwargs) -> RootSource:
+    return ListSource("x", [10, 20, 30], **kwargs)
+
+
+def _data_frame_source(**kwargs) -> RootSource:
+    return DataFrameSource(
+        pl.DataFrame(ROWS), tag_columns=["id"], tag_only_columns=True, **kwargs
+    )
+
+
+# (source class, expected kind, factory, name of a data column)
+InMemorySourceClass = (
+    type[ArrowTableSource] | type[DictSource] | type[ListSource] | type[DataFrameSource]
 )
-def test_location_source_id_refuses(kind: str, location: str) -> None:
-    """A location with ``::``, an empty location and a bad kind have no default."""
-    with pytest.raises(ValueError):
-        location_source_id(kind, location)
-
-
-# ---------------------------------------------------------------------------
-# One vocabulary: the kind is the config type key
-# ---------------------------------------------------------------------------
-
-
-ROOT_SOURCES: list[type[Any]] = [
-    ArrowTableSource,
-    CachedSource,
-    CSVSource,
-    DataFrameSource,
-    DeltaTableSource,
-    DerivedSource,
-    DictSource,
-    ListSource,
-    PollingSource,
-    SQLiteTableSource,
-    PostgreSQLTableSource,
-    SpiralDBTableSource,
-    DBTableSource,
+IN_MEMORY_SOURCES: list[
+    tuple[InMemorySourceClass, str, Callable[..., RootSource], str]
+] = [
+    (ArrowTableSource, "arrow_table", _arrow_table_source, "x"),
+    (DictSource, "dict", _dict_source, "x"),
+    (ListSource, "list", _list_source, "x"),
+    (DataFrameSource, "data_frame", _data_frame_source, "x"),
 ]
+IDS = [kind for _, kind, _, _ in IN_MEMORY_SOURCES]
 
 
-@pytest.mark.parametrize("cls", ROOT_SOURCES, ids=lambda c: c.__name__)
-def test_every_root_source_has_a_kind(cls: type[Any]) -> None:
-    """Every root source class declares a ``SOURCE_KIND`` with no ``:``."""
-    kind = cls.__dict__.get("SOURCE_KIND")
-    assert isinstance(kind, str) and kind and ":" not in kind
+def _arrow_label(source: RootSource) -> str:
+    """The label the source's Arrow hasher puts on a table hash (never a literal)."""
+    return source.data_context.arrow_hasher.hash_table(_arrow_table()).method
 
 
-def test_registry_keys_are_the_kinds() -> None:
-    """The source config registry is keyed by each class's ``SOURCE_KIND``."""
-    for key, cls in SOURCE_REGISTRY.items():
-        assert key == cls.SOURCE_KIND, (key, cls)
-
-
-# ---------------------------------------------------------------------------
-# Location defaults, and a given id kept as it is
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def csv_path(tmp_path: Path) -> Path:
-    path = tmp_path / "rows.csv"
-    path.write_text("k,v\na,1\nb,2\n")
-    return path
-
-
-@pytest.fixture
-def delta_path(tmp_path: Path) -> Path:
-    path = tmp_path / "events"
-    write_deltalake(str(path), pa.table({"k": ["a", "b"], "v": [1, 2]}))
-    return path
-
-
-@pytest.fixture
-def sqlite_path(tmp_path: Path) -> Path:
-    path = tmp_path / "db.sqlite"
-    with sqlite3.connect(path) as conn:
-        conn.execute("CREATE TABLE trials (k TEXT PRIMARY KEY, v INTEGER)")
-        conn.execute("INSERT INTO trials VALUES ('a', 1), ('b', 2)")
-    return path
-
-
-def test_csv_default_and_given(csv_path: Path) -> None:
-    """``csv:<path as passed>``; a given id is used as it is."""
-    assert CSVSource(str(csv_path), tag_columns="k").source_id == f"csv:{csv_path}"
-    assert CSVSource(str(csv_path), tag_columns="k", source_id=GIVEN).source_id == GIVEN
-
-
-def test_csv_path_with_double_colon_needs_a_source_id(tmp_path: Path) -> None:
-    """A path holding ``::`` cannot be a default id: the source asks for a source_id."""
-    path = tmp_path / "a::b.csv"
-    path.write_text("k,v\na,1\n")
-    with pytest.raises(ValueError, match="source_id"):
-        CSVSource(str(path), tag_columns="k")
-    assert CSVSource(str(path), tag_columns="k", source_id="ab").source_id == "ab"
-
-
-def test_delta_default_and_given(delta_path: Path) -> None:
-    """``delta_table:<path as passed>``; a given id is used as it is."""
-    assert DeltaTableSource(delta_path, tag_columns="k").source_id == (
-        f"delta_table:{delta_path}"
-    )
-    given = DeltaTableSource(delta_path, tag_columns="k", source_id=GIVEN)
-    assert given.source_id == GIVEN
-
-
-def test_sqlite_default_and_given(sqlite_path: Path) -> None:
-    """``sqlite_table:<db path as passed>:main.<table>``; a given id is used as is."""
-    assert SQLiteTableSource(sqlite_path, "trials").source_id == (
-        f"sqlite_table:{sqlite_path}:main.trials"
-    )
-    given = SQLiteTableSource(sqlite_path, "trials", source_id=GIVEN)
-    assert given.source_id == GIVEN
-
-
-def test_polling_default_is_the_hash_of_the_impl_identity() -> None:
-    """``polling_source:<label>:<hex>`` of ``impl.identity()``, never its repr."""
-    source = PollingSource(
-        FakeDynamicSource(batches=[]), tag_columns="id", record_id_columns="id"
-    )
-    identity_hash = get_default_context().semantic_hasher.hash_object(
-        "FakeDynamicSource"
-    )
-    assert source.source_id == hash_source_id("polling_source", identity_hash)
-    given = PollingSource(
-        FakeDynamicSource(batches=[]),
-        tag_columns="id",
-        record_id_columns="id",
-        source_id=GIVEN,
-    )
-    assert given.source_id == GIVEN
+def _source_id_values(source: RootSource) -> set[str]:
+    table = source.as_table(all_info=True)
+    columns = [
+        c
+        for c in table.column_names
+        if c.startswith(constants.SYSTEM_TAG_SOURCE_ID_PREFIX)
+    ]
+    assert columns, "the source has no source_id system tag column"
+    values: set[str] = set()
+    for column in columns:
+        for value in table.column(column).to_pylist():
+            assert isinstance(value, str)
+            values.add(value)
+    return values
 
 
 @pytest.mark.parametrize(
-    "make",
-    [
-        lambda: DictSource(
-            data=[{"k": "a", "v": 1}], tag_columns=["k"], source_id=GIVEN
-        ),
-        lambda: ArrowTableSource(
-            pa.table({"k": ["a"], "v": [1]}), tag_columns=["k"], source_id=GIVEN
-        ),
-        lambda: ListSource(name="item", data=[1, 2], source_id=GIVEN),
-    ],
-    ids=["dict", "arrow_table", "list"],
+    ("cls", "kind", "make", "data_column"), IN_MEMORY_SOURCES, ids=IDS
 )
-def test_in_memory_sources_keep_a_given_id(make: Any) -> None:
-    """A given id is used as it is by the in-memory sources too."""
-    assert make().source_id == GIVEN
+class TestInMemoryDefaultSourceId:
+    def test_default_is_kind_label_hex(self, cls, kind, make, data_column):
+        source = make()
+        parts = source.source_id.split(":")
+        assert len(parts) == 3, source.source_id
+        assert parts[0] == kind
+        assert parts[1] == _arrow_label(source)
+        assert len(parts[2]) >= 64
+        int(parts[2], 16)  # raises unless the last part is hex
+
+    def test_kind_is_the_config_type_key_defined_once_on_the_class(
+        self, cls, kind, make, data_column
+    ):
+        source = make()
+        assert cls.SOURCE_KIND == kind
+        assert source.to_config()["source_type"] == cls.SOURCE_KIND
+        assert source.source_id.startswith(f"{cls.SOURCE_KIND}:")
+
+    def test_same_string_in_system_tag_and_source_info(
+        self, cls, kind, make, data_column
+    ):
+        source = make()
+        assert _source_id_values(source) == {source.source_id}
+        table = source.as_table(all_info=True)
+        info = table.column(f"{constants.SOURCE_PREFIX}{data_column}").to_pylist()
+        sep = constants.BLOCK_SEPARATOR
+        assert info == [
+            f"{source.source_id}{sep}row_{i}{sep}{data_column}" for i in range(3)
+        ]
+
+    def test_default_never_contains_the_block_separator(
+        self, cls, kind, make, data_column
+    ):
+        assert constants.BLOCK_SEPARATOR not in make().source_id
+
+    def test_default_is_deterministic(self, cls, kind, make, data_column):
+        assert make().source_id == make().source_id
+
+    @pytest.mark.parametrize("given", ["my_source", "a:b:c", "0123abcd", "arrow_table"])
+    def test_given_source_id_is_never_changed(
+        self, cls, kind, make, data_column, given
+    ):
+        source = make(source_id=given)
+        assert source.source_id == given
+        assert _source_id_values(source) == {given}
+        table = source.as_table(all_info=True)
+        info = table.column(f"{constants.SOURCE_PREFIX}{data_column}").to_pylist()
+        sep = constants.BLOCK_SEPARATOR
+        assert info == [f"{given}{sep}row_{i}{sep}{data_column}" for i in range(3)]
+
+    def test_default_is_full_length_whatever_path_n_char(
+        self, cls, kind, make, data_column
+    ):
+        """A default source id is a name, never shortened (developer, November 16, 2026)."""
+        full = make().source_id
+        config = OrcapodConfig(hashing=HashingConfig(path_n_char=12))
+        assert make(config=config).source_id == full
 
 
-def test_a_given_source_id_with_the_separator_is_refused() -> None:
-    """A given source id holding ``::`` is refused (ITL-1154)."""
-    with pytest.raises(ValueError, match="'::'"):
-        DictSource(data=[{"k": "a", "v": 1}], tag_columns=["k"], source_id="a::b")
+class TestArrowTableDefaultIsTheLabelledTableHash:
+    def test_default_is_kind_plus_the_table_hash_string(self):
+        source = _arrow_table_source()
+        table_hash = source.data_context.arrow_hasher.hash_table(_arrow_table())
+        assert source.source_id == f"arrow_table:{table_hash.to_string()}"
 
 
-def test_a_column_name_with_the_separator_is_refused() -> None:
-    """A column name holding ``::`` is refused (ITL-1154)."""
-    from orcapod.errors import InputValidationError
+class TestKindsTellSourcesApart:
+    def test_each_in_memory_class_has_its_own_kind(self):
+        kinds = [cls.SOURCE_KIND for cls, _, _, _ in IN_MEMORY_SOURCES]
+        assert len(set(kinds)) == len(kinds)
 
-    with pytest.raises(InputValidationError, match="'::'"):
-        DictSource(data=[{"k": "a", "x::y": 1}], tag_columns=["k"], source_id="s")
+    def test_same_table_under_two_classes_gets_two_ids(self):
+        # A DataFrameSource given an explicit schema builds the very table the
+        # ArrowTableSource is given, so only the kind differs.
+        arrow = _arrow_table_source()
+        frame = DataFrameSource(
+            pl.DataFrame(ROWS),
+            tag_columns=["id"],
+            schema=_arrow_table().schema,
+            tag_only_columns=True,
+        )
+        assert arrow.source_id.split(":")[1:] == frame.source_id.split(":")[1:]
+        assert arrow.source_id != frame.source_id
 
 
-def test_a_polling_source_needs_key_columns() -> None:
-    """A polled row is identified by its key: no key columns, no source (ITL-1158)."""
-    with pytest.raises(ValueError, match="record_id_columns"):
-        PollingSource(FakeDynamicSource(batches=[]), tag_columns="id")
-    with pytest.raises(ValueError, match="record_id_columns"):
-        PollingSource(
-            FakeDynamicSource(batches=[]), tag_columns="id", record_id_columns=()
+# ---------------------------------------------------------------------------
+# node.as_source() and a plain node-backed DerivedSource
+# ---------------------------------------------------------------------------
+
+
+def _function_node() -> FunctionJobNode:
+    return FunctionJobNode(
+        function_pod=FunctionPod.from_fn(double, output_keys="result"),
+        input_stream=make_int_stream(n=3),
+        pipeline_database=InMemoryArrowDatabase(),
+    )
+
+
+def _operator_node() -> OperatorJobNode:
+    return OperatorJobNode(
+        operator=MapData({"x": "renamed_x"}),
+        input_streams=(make_int_stream(n=3),),
+        pipeline_database=InMemoryArrowDatabase(),
+        cache_mode=CacheMode.LOG,
+    )
+
+
+NODES = [_function_node, _operator_node]
+NODE_IDS = ["function_node", "operator_node"]
+
+
+@pytest.mark.parametrize("make_node", NODES, ids=NODE_IDS)
+class TestAsSourceDefaultSourceId:
+    def test_as_source_id_is_derived_plus_the_labelled_content_hash(self, make_node):
+        node = make_node()
+        assert (
+            node.as_source().source_id == f"derived:{node.content_hash().to_string()}"
         )
 
+    def test_kind_is_defined_once_on_the_class(self, make_node):
+        node = make_node()
+        assert DerivedSource.SOURCE_KIND == "derived"
+        assert node.as_source().source_id.startswith(f"{DerivedSource.SOURCE_KIND}:")
 
-def test_polled_batches_give_each_row_its_own_record_id() -> None:
-    """Rows of different batches no longer share a record id (ITL-1158)."""
-    from tests.test_channels.test_polling_source import _batch
+    def test_as_source_id_has_three_parts_and_no_node_path(self, make_node):
+        node = make_node()
+        source_id = node.as_source().source_id
+        assert len(source_id.split(":")) == 3
+        assert "/" not in source_id
+        for component in node.node_identity_path:
+            assert component not in source_id
 
-    fake = FakeDynamicSource(batches=[_batch(1, 10), _batch(2, 20)])
-    source = PollingSource(fake, tag_columns="id", record_id_columns="id")
-    list(source.iter_data())
-    source.check_for_new_data()
-    table = source.as_table(columns={"system_tags": True, "source": True})
-    (record_id,) = [n for n in table.column_names if n.startswith("_tag_record_id")]
-    assert sorted(table.column(record_id).to_pylist()) == ['{"id":1}', '{"id":2}']
+    def test_as_source_uses_the_derived_source_default(self, make_node):
+        node = make_node()
+        assert node.as_source().source_id == DerivedSource(node).source_id
+
+    def test_as_source_id_is_the_same_before_and_after_the_run(self, make_node):
+        node = make_node()
+        before = node.as_source().source_id
+        node.run()
+        assert node.as_source().source_id == before
+
+    def test_given_source_id_is_never_changed(self, make_node):
+        assert DerivedSource(make_node(), source_id="my:name").source_id == "my:name"

@@ -28,6 +28,7 @@ from typing import Any, ClassVar, TYPE_CHECKING
 
 from typing_extensions import override
 
+from orcapod.core.referential_tags import TagOnlyColumns, check_tag_only_columns
 from orcapod.core.sources.db_table_source import DBTableSource
 from orcapod.databases.sqlite_connector import SQLiteConnector
 from orcapod.protocols.db_connector_protocol import DBConnectorProtocol
@@ -83,6 +84,11 @@ class SQLiteTableSource(DBTableSource):
         label: Human-readable label for this source node.
         data_context: Data context governing type conversion and hashing.
         config: OrcaPod configuration.
+        tag_only_columns: Tag columns kept as tags only, not data, exactly as in
+            v0.3; ``True`` for all of them. Keyword-only. ``True`` is the default and
+            the only value v0.3 accepts: any other value is refused, because
+            referential tags arrive in v0.4 (tags then become referential by default
+            and ``tag_only_columns`` keeps a tag plain).
 
     Raises:
         ValueError: If the table is not found or is empty.
@@ -103,7 +109,10 @@ class SQLiteTableSource(DBTableSource):
         label: str | None = None,
         data_context: str | contexts.DataContext | None = None,
         config: "OrcapodConfig | None" = None,
+        *,
+        tag_only_columns: TagOnlyColumns = True,
     ) -> None:
+        check_tag_only_columns(tag_only_columns)
         self._db_path = db_path
         # A check (ITL-1102) reopens the database found now, whatever the working
         # directory is then; an in-memory database or a URI is kept as given.
@@ -138,6 +147,7 @@ class SQLiteTableSource(DBTableSource):
                 label=label,
                 data_context=data_context,
                 config=config,
+                tag_only_columns=tag_only_columns,
                 _query=_query,
             )
         finally:
@@ -204,6 +214,7 @@ class SQLiteTableSource(DBTableSource):
             db_path=config["db_path"],
             table_name=config["table_name"],
             tag_columns=config.get("tag_columns"),
+            tag_only_columns=config.get("tag_only_columns", True),
             system_tag_columns=config.get("system_tag_columns", ()),
             record_id_columns=config.get("record_id_columns"),
             source_id=config.get("source_id"),
