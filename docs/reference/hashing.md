@@ -81,8 +81,8 @@ The labels of v0.3:
 | `polars_expr_v1` | the Polars expression hash (§1c) | `POLARS_EXPR_HASH_LABEL`, `hashing/semantic_hashing/polars_expr.py` |
 | `polars_dataframe_v1` | the Polars DataFrame value hash (§1e) | `PolarsDataFrameHandler.HASH_LABEL`, `hashing/semantic_hashing/builtin_handlers.py` |
 | `polars_series_v1` | the Polars Series value hash (§1e) | `PolarsSeriesHandler.HASH_LABEL`, `hashing/semantic_hashing/builtin_handlers.py` |
-| `batch_v1` | the folded source id of `Batch` (site 6b) | `BATCH_FOLD_LABEL`, `utils/arrow_utils.py` |
-| `group_v1` | the folded source id of `GroupBy` (site 6b) | `GROUP_BY_FOLD_LABEL`, `utils/arrow_utils.py` |
+| `batch_v1` | the folded source id and record id of `Batch` (site 6b) | `BATCH_FOLD_LABEL`, `core/operators/batch.py` |
+| `group_v1` | the folded source id and record id of `GroupBy` (site 6b) | `GROUP_BY_FOLD_LABEL`, `core/operators/group_by.py` |
 | `sha256` | the file content hash: SHA-256 of the file's bytes | the file hasher's `algorithm` |
 
 Where a hash appears, and in which form:
@@ -176,8 +176,13 @@ category, but we should make it totally overridable"; November 16, 2026, ITL-115
 | `CachedSource` | `cached` | the wrapped source's id |
 | folded source id of `Batch` / `GroupBy` (a system-tag value, not a source) | | `batch_v1:<hex>` / `group_v1:<hex>` |
 
-Two sources of one kind can share a default (two Delta folders with one name, two
-databases with a table `trials`); a pipeline that reads both gives each a `source_id`.
+A location default names the data where it lives, so two sources of one kind share it only
+when they read the same data, with one exception: the generic `DBTableSource` (`db_table:`)
+knows no database, so two of them over same-named tables in different databases share a
+default; a pipeline that reads both gives each a `source_id`. A location whose parts cannot be
+told apart has no default (`joined_location`): a SQLite table name holding `:`, a PostgreSQL or
+SpiralDB name holding `.`, a SpiralDB address or table id holding `@`. Such a source needs a
+`source_id`.
 
 A row's record id is its row identifier (site 5), chosen by `record_id_columns` (a column name
 or several, in key order; every source accepts it):

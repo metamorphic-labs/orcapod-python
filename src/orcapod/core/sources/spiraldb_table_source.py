@@ -44,7 +44,7 @@ from typing_extensions import override
 
 from orcapod.core.referential_tags import TagOnlyColumns, check_tag_only_columns
 from orcapod.core.sources.base import RootSource
-from orcapod.core.sources.source_ids import location_source_id
+from orcapod.core.sources.source_ids import joined_location, location_source_id
 from orcapod.core.sources.derived_source import validate_tags_as_data
 from orcapod.core.sources.stream_builder import (
     SourceStreamBuilder,
@@ -183,10 +183,15 @@ def spiraldb_table_address(
 
     Returns:
         The address, the location part of the default source id.
+
+    Raises:
+        ValueError: If a part contains its separator (``.`` in a name, ``@`` in
+            the address or the table id), so the parts could not be told apart;
+            give the source a ``source_id``.
     """
-    address = f"{project_id}.{dataset}.{table_name}"
+    address = joined_location(".", project_id, dataset, table_name)
     if SPIRALDB_SOURCE_ID_HAS_TABLE_ID:
-        address += f"@{table_id}"
+        address = joined_location("@", address, table_id)
     return address
 
 

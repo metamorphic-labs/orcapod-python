@@ -20,6 +20,7 @@ from typing_extensions import override
 
 from orcapod.core.referential_tags import TagOnlyColumns, check_tag_only_columns
 from orcapod.core.sources.db_table_source import DBTableSource
+from orcapod.core.sources.source_ids import joined_location
 from orcapod.databases.postgresql_connector import PostgreSQLConnector
 from orcapod.protocols.db_connector_protocol import DBConnectorProtocol
 
@@ -131,7 +132,7 @@ class PostgreSQLTableSource(DBTableSource):
             The table's address.
         """
         database, schema = cast("PostgreSQLConnector", connector).current_location()
-        return f"{database}.{schema}.{table_name}"
+        return joined_location(".", database, schema, table_name)
 
     @contextmanager
     @override

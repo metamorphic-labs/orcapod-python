@@ -397,3 +397,45 @@ def test_a_colon_at_a_token_boundary_is_refused() -> None:
     with pytest.raises(ValueError, match="end with ':'"):
         location_source_id("csv", "data:")
     assert location_source_id("csv", "a:b") == "csv:a:b"
+
+
+def test_a_location_whose_parts_cannot_be_told_apart_has_no_default_id(
+    tmp_path: Path,
+) -> None:
+    """A part holding its separator would give two locations one default id."""
+    from orcapod.core.sources.source_ids import joined_location
+    from orcapod.core.sources.spiraldb_table_source import spiraldb_table_address
+
+    assert joined_location(".", "db", "public", "t") == "db.public.t"
+    with pytest.raises(ValueError, match="give the source a source_id"):
+        joined_location(".", "a.b", "c", "t")
+    with pytest.raises(ValueError, match="give the source a source_id"):
+        spiraldb_table_address("proj", "data.set", "t", "id1")
+    path = tmp_path / "db.sqlite"
+    with sqlite3.connect(path) as conn:
+        conn.execute('CREATE TABLE "extra:main.logs" (k TEXT PRIMARY KEY, v INT)')
+        conn.execute("INSERT INTO \"extra:main.logs\" VALUES ('a', 1)")
+    conn.close()
+    with pytest.raises(ValueError, match="give the source a source_id"):
+        SQLiteTableSource(path, "extra:main.logs", tag_only_columns=True)
+    named = SQLiteTableSource(
+        path, "extra:main.logs", source_id="logs", tag_only_columns=True
+    )
+    assert named.source_id == "logs"
+
+
+def test_a_rowid_key_beside_an_integer_primary_key_keeps_its_name(
+    tmp_path: Path,
+) -> None:
+    """The injected rowid is aliased, so SQLite does not name it after the key."""
+    path = tmp_path / "db.sqlite"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
+        conn.execute("INSERT INTO t VALUES (7, 'x')")
+    conn.close()
+    source = SQLiteTableSource(
+        path, "t", record_id_columns="rowid", tag_only_columns=True
+    )
+    table = source.as_table(columns={"system_tags": True})
+    (name,) = [n for n in table.column_names if n.startswith("_tag_record_id")]
+    assert table.column(name).to_pylist() == ['{"rowid":7}']

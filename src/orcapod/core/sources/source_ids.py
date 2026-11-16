@@ -78,3 +78,32 @@ def location_source_id(kind: str, location: str) -> str:
             "value; give the source a source_id"
         )
     return source_id
+
+
+def joined_location(separator: str, *parts: str) -> str:
+    """Join the parts of a location with ``separator``, refusing a part that holds it.
+
+    A default source id must name one location only: ``a.b`` + ``c`` and ``a`` +
+    ``b.c`` would both be ``a.b.c``. A part that contains the separator (or is
+    empty) leaves the parts indistinguishable, so such a location has no default id
+    (ITL-1154, ITL-1157).
+
+    Args:
+        separator: The text between the parts, for example ``.``.
+        parts: The parts in order, for example a database, a schema and a table.
+
+    Returns:
+        The parts joined by ``separator``.
+
+    Raises:
+        ValueError: If a part is empty or contains ``separator``; give the source a
+            ``source_id``.
+    """
+    for part in parts:
+        if not part or separator in part:
+            raise ValueError(
+                f"{part!r} is empty or contains {separator!r}, so the default source "
+                f"id cannot tell the parts of {separator.join(parts)!r} apart; give "
+                "the source a source_id"
+            )
+    return separator.join(parts)

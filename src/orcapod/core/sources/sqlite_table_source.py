@@ -32,6 +32,7 @@ from typing_extensions import override
 
 from orcapod.core.referential_tags import TagOnlyColumns, check_tag_only_columns
 from orcapod.core.sources.db_table_source import DBTableSource
+from orcapod.core.sources.source_ids import joined_location
 from orcapod.core.sources.stream_builder import normalize_record_id_columns
 from orcapod.databases.sqlite_connector import SQLiteConnector
 from orcapod.protocols.db_connector_protocol import DBConnectorProtocol
@@ -150,7 +151,8 @@ class SQLiteTableSource(DBTableSource):
                 normalize_record_id_columns(record_id_columns) or ()
             )
             if needs_rowid and "rowid" not in normal_cols:
-                _query: str | None = f'SELECT rowid, * FROM "{table_name}"'
+                # Aliased: unaliased, SQLite names it after an INTEGER PRIMARY KEY.
+                _query: str | None = f'SELECT rowid AS rowid, * FROM "{table_name}"'
             else:
                 _query = None
 
@@ -188,9 +190,15 @@ class SQLiteTableSource(DBTableSource):
 
         Returns:
             The table's address.
+
+        Raises:
+            ValueError: If the table name contains ``:``, which would make the
+                boundary after the path ambiguous; give the source a ``source_id``.
         """
         del connector
-        return f"{os.fspath(self._db_path)}:main.{table_name}"
+        # The path is read up to the last ``:main.``, so only the table name must not
+        # hold a ``:``.
+        return joined_location(":", os.fspath(self._db_path), f"main.{table_name}")
 
     @contextmanager
     @override

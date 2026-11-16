@@ -160,6 +160,7 @@ class TestUuidColumnsAreHashedAsStored:
             ),
             tag_columns=["id"],
             source_id="uuid_column",
+            tag_only_columns=True,
         )
         return source.as_table()
 
@@ -189,6 +190,7 @@ class TestUuidColumnsAreHashedAsStored:
             ),
             tag_columns=["id"],
             source_id="uuid_column",
+            tag_only_columns=True,
         ).as_table()
         assert context.arrow_hasher.hash_table(
             changed
