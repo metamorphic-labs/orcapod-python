@@ -207,10 +207,17 @@ def test_a_030_source_config_without_tag_only_columns_is_refused(
         PipelineJob.load(_edited(tmp_path, edit))
 
 
-def test_a_source_config_that_contradicts_its_slot_is_refused(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "contradiction",
+    [{"tag_only_columns": True}, {"tag_columns": [], "tag_only_columns": True}],
+    ids=["all_plain", "no_tags"],
+)
+def test_a_source_config_that_contradicts_its_slot_is_refused(
+    tmp_path: Path, contradiction: dict[str, Any]
+) -> None:
     def edit(data: dict[str, Any]) -> None:
-        # The slot declares ``unit`` referential; the config says every tag is plain.
-        data["bindings"]["sources"]["spikes"]["tag_only_columns"] = True
+        # The slot declares ``unit`` referential; the config makes nothing referential.
+        data["bindings"]["sources"]["spikes"].update(contradiction)
 
     path = _edited(tmp_path, edit)
     with pytest.raises(ValueError, match="source 'spikes'") as raised:

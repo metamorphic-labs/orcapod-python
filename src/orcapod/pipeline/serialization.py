@@ -1465,7 +1465,8 @@ def check_source_config_binding(
     schema (a name in both halves is a referential tag) each state the source's
     bindings, independently; a file in which they disagree is refused before the
     source is rebuilt (ITL-1019). A config of a source that does not take the option,
-    or one written without ``tag_columns``, is not checked here.
+    or one whose ``tag_columns`` is absent or ``None`` (a database source that takes
+    its tags from the table's keys), is not checked here.
 
     Args:
         config: A saved source config, as its file version means it
@@ -1483,7 +1484,8 @@ def check_source_config_binding(
     if cls is None or not getattr(cls, "TAKES_TAG_ONLY_COLUMNS", False):
         return
     tag_columns = config.get("tag_columns")
-    if not tag_columns or "tag_only_columns" not in config:
+    # ``None``: a database source takes its tags from the table's keys when read.
+    if tag_columns is None or "tag_only_columns" not in config:
         return
     configured = source_reference_tags(tag_columns, config["tag_only_columns"])
     declared = reference_names(tag_names, data_names)
