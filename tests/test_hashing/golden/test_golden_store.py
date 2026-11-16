@@ -138,12 +138,17 @@ def test_a_file_not_named_group_and_counter_is_an_error(
 
 
 def test_an_edited_listed_file_is_reported(tree: Path) -> None:
+    """The problem says to restore the file, never to record the edit with the generator."""
     path = _folder(tree) / "arrow-01.json"
     _ = path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
-    assert any(
-        "arrow-01.json does not have the sha256" in p
+    [problem] = [
+        p
         for p in store.tree_problems(tree, VERSION)
-    )
+        if "arrow-01.json does not have the sha256" in p
+    ]
+    assert "restore" in problem
+    assert "--remove" in problem
+    assert "to record it" not in problem
 
 
 def test_an_unlisted_file_is_reported(tree: Path) -> None:

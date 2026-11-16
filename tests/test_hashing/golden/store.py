@@ -479,7 +479,9 @@ def folder_problems(history: Sequence[Mapping[str, Any]], folder: Path) -> list[
                     + (
                         "a released golden file never changes"
                         if end is not None and i <= end
-                        else "run generate_golden_hashes.py to record it"
+                        else "restore the file (git checkout); a value change no release "
+                        "lists needs approval, then generate_golden_hashes.py --remove "
+                        "and --add on the restored tree"
                     )
                 )
     if not folder.is_dir():
