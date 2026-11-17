@@ -1,10 +1,10 @@
 """ITL-1187: does changing delta.dataSkippingStatsColumns on an existing table apply to old files?
 
-Creates a table without the property (statistics for ``v`` by default), sets the property to
-name only ``s``, appends once more, and prints for each data file the columns it has a
-minimum for. Seen with deltalake 1.0.2: the first file keeps ``v`` and ``s``; the file
-appended after the change has ``s`` only. A change applies to files written afterwards; earlier files are
-not rewritten.
+Creates a table without the property (deltalake keeps statistics for ``v`` and ``s`` by
+default), sets the property to name only ``s``, appends once more, and prints for each data
+file the columns it has a minimum for. Seen with deltalake 1.0.2: the first file keeps ``v``
+and ``s``; the file appended after the change has ``s`` only. A change applies to files
+written afterwards; earlier files are not rewritten.
 
 Usage: uv run python docs/dev/scripts/itl_1187/alter_property.py <empty or missing directory>
 """
