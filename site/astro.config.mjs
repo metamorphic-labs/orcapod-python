@@ -83,6 +83,12 @@ export default defineConfig({
 			title: 'Orcapod',
 			description:
 				'Intuitive and powerful library for highly reproducible scientific data pipelines',
+			// orcapod.org's logo and favicon, unmodified (src/assets). The content build
+			// writes the favicon into public/ (SITE_PUBLIC_FILES in docs_site_content.py).
+			logo: { src: './src/assets/orcapod-icon.png' },
+			favicon: '/favicon.ico',
+			// The brand fonts and the blue colour scheme (src/styles/orcapod.css).
+			customCss: ['./src/styles/orcapod.css'],
 			plugins: [starlightLinksValidator()],
 			// The banner on every page: the site documents main, not a release.
 			routeMiddleware: './src/routeData.ts',

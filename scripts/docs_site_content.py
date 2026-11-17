@@ -4,7 +4,8 @@
 pages as they are. The Starlight site under ``site/`` never holds a copy in git. This
 script writes the site's content collection (``site/src/content/docs/``) and its
 static files (``site/public/``) from ``docs/`` on every build; both are generated and
-ignored by git.
+ignored by git. ``site/public/`` also gets the site's own static files
+(``SITE_PUBLIC_FILES``: the favicon).
 
 The conversion is mechanical and deterministic. For each published page:
 
@@ -73,6 +74,11 @@ PUBLISHED_FOLDERS = ("tutorial", "concepts", "reference", "api")
 # What it never publishes: developer material. Every other top-level entry of ``docs/``
 # is an error, so that publishing a new folder (or not) is a decision.
 EXCLUDED = ("dev",)
+
+# The site's own static files, written into ``site/public/`` with the files the pages
+# link to: published path to source file. The favicon is orcapod.org's (``favicon`` in
+# ``site/astro.config.mjs``).
+SITE_PUBLIC_FILES = {"favicon.ico": SITE_DIR / "src" / "assets" / "favicon.ico"}
 
 # mkdocs admonition types and the Starlight aside each becomes.
 ASIDE_TYPES = {
@@ -555,12 +561,26 @@ def convert_page(page: Page, resolver: LinkResolver) -> str:
 
 
 def build_content(
-    pages: Sequence[Page], docs_dir: Path, out_dir: Path, public_dir: Path, base: str
+    pages: Sequence[Page],
+    docs_dir: Path,
+    out_dir: Path,
+    public_dir: Path,
+    base: str,
+    site_files: Mapping[str, bytes] | None = None,
 ) -> None:
     """Write the converted ``pages`` to ``out_dir`` and linked files to ``public_dir``.
 
     Each directory ends up holding exactly what this build writes, so a page removed
     from ``docs/`` leaves the site.
+
+    Args:
+        pages: The published pages.
+        docs_dir: The ``docs/`` folder the pages and linked files come from.
+        out_dir: The site's content collection.
+        public_dir: The site's static files.
+        base: The site's base path.
+        site_files: The site's own static files (published path to content), written
+            into ``public_dir`` beside the linked files.
 
     Raises:
         ContentError: If a page cannot be converted; its path is in the message.
@@ -576,10 +596,12 @@ def build_content(
         except ContentError as exc:
             raise ContentError(f"docs/{page.path}: {exc}") from exc
     _sync_tree(out_dir, {path: text.encode() for path, text in converted.items()})
-    _sync_tree(
-        public_dir,
-        {asset: (docs_dir / asset).read_bytes() for asset in sorted(resolver.assets)},
-    )
+    # A linked file is never at the top level (a top-level entry of docs/ is a page or
+    # a folder), where the site's own files are.
+    public = {
+        asset: (docs_dir / asset).read_bytes() for asset in sorted(resolver.assets)
+    }
+    _sync_tree(public_dir, {**public, **(site_files or {})})
 
 
 def _sync_tree(directory: Path, files: dict[str, bytes]) -> None:
@@ -658,7 +680,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 except ApiPageError as exc:
                     raise ContentError(f"docs/{path}: {exc}") from exc
             pages.append(Page(path, text))
-        build_content(pages, docs_dir, out_dir, public_dir, base)
+        site_files = {
+            path: source.read_bytes() for path, source in SITE_PUBLIC_FILES.items()
+        }
+        build_content(pages, docs_dir, out_dir, public_dir, base, site_files)
     except ContentError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

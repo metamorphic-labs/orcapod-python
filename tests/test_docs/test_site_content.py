@@ -275,6 +275,15 @@ def test_linked_file_is_copied(tmp_path: Path):
     assert (public / "tutorial" / "data.py").read_text() == "print('hi')\n"
 
 
+def test_the_favicon_is_written_with_the_linked_files(tmp_path: Path):
+    """The site's favicon (orcapod.org's, in site/src/assets) is in public/ on every build."""
+    docs = make_docs(tmp_path, {"index.md": "# Home\n"})
+    proc, _, public = run_build(docs, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    favicon = REPO_ROOT / "site" / "src" / "assets" / "favicon.ico"
+    assert (public / "favicon.ico").read_bytes() == favicon.read_bytes()
+
+
 @pytest.mark.parametrize(
     ("link", "message"),
     [

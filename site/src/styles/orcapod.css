@@ -1,0 +1,72 @@
+/*
+ * The Orcapod theme for Starlight: the brand of orcapod.org (its logo, fonts, background
+ * and text colours) with a blue accent family.
+ *
+ * orcapod.org is black on #fcfafc; it has no brand blue. The blues here (hue about 212)
+ * are the site's own: links, the current sidebar entry, the development-version banner
+ * and note asides. Every text colour meets WCAG AA against the background it sits on
+ * (body text over 12:1, links 4.9:1 or more in light mode and 9.4:1 or more in dark).
+ *
+ * Starlight's dark theme is the default (:root); the light theme overrides it
+ * (:root[data-theme='light']), as in Starlight's own props.css.
+ */
+
+:root {
+	/* Fonts: orcapod.org sets its text in Asap and its name in Lexend Exa. They are used
+	 * when installed or bundled; Starlight appends its system font stack after them. */
+	--sl-font: 'Asap Variable', 'Asap';
+	--orcapod-font-title: 'Lexend Exa';
+
+	/* Dark: near-black with a blue tint (orcapod.org's bars are #0a0a0a). */
+	--sl-color-white: #ffffff;
+	--sl-color-gray-1: #e7ecf2;
+	--sl-color-gray-2: #c8d0da;
+	--sl-color-gray-3: #8a96a6;
+	--sl-color-gray-4: #4f5b6b;
+	--sl-color-gray-5: #1d2735;
+	--sl-color-gray-6: #121925;
+	--sl-color-black: #0b0f16;
+
+	--sl-color-accent-low: #10294a;
+	--sl-color-accent: #3d8fe8;
+	--sl-color-accent-high: #a8d0ff;
+
+	--sl-color-blue-low: #10294a;
+	--sl-color-blue: #3d8fe8;
+	--sl-color-blue-high: #a8d0ff;
+}
+
+:root[data-theme='light'] {
+	/* Light: orcapod.org's background (#fcfafc) and text (#0a0a0a). */
+	--sl-color-white: #0a0a0a;
+	--sl-color-gray-1: #1b2129;
+	--sl-color-gray-2: #2b3440;
+	--sl-color-gray-3: #4a5563;
+	--sl-color-gray-4: #7d8898;
+	--sl-color-gray-5: #c3cbd6;
+	--sl-color-gray-6: #e8eef5;
+	--sl-color-gray-7: #f3f6fa;
+	--sl-color-black: #fcfafc;
+
+	--sl-color-accent-low: #d6e6fa;
+	--sl-color-accent: #1565c0;
+	--sl-color-accent-high: #0b3d73;
+
+	--sl-color-blue-low: #d6e6fa;
+	--sl-color-blue: #1565c0;
+	--sl-color-blue-high: #0b3d73;
+}
+
+/* The site's name beside the logo, as orcapod.org's navigation writes it: lower case,
+ * Lexend Exa bold. The page titles keep "Orcapod". */
+.site-title {
+	font-family: var(--orcapod-font-title), var(--__sl-font);
+	font-weight: 700;
+	text-transform: lowercase;
+}
+
+/* The logo is black on a transparent background. In dark mode it is shown inverted
+ * (white orcas, dark eyes); the file is orcapod.org's, unmodified. */
+:root:not([data-theme='light']) .site-title img {
+	filter: invert(1);
+}

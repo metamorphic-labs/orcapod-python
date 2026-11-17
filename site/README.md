@@ -93,12 +93,33 @@ site's links use the new address.
 ## What is committed
 
 `package.json`, `pnpm-lock.yaml` (exact versions), `pnpm-workspace.yaml`,
-`astro.config.mjs` (site settings, sidebar), `src/content.config.ts`,
-`src/routeData.ts` (the banner every page shows) and this file. `node_modules/`, `dist/`, `.astro/`, `src/content/docs/` and `public/` are
+`astro.config.mjs` (site settings, sidebar, logo, favicon), `src/content.config.ts`,
+`src/routeData.ts` (the banner every page shows), `src/styles/orcapod.css` (the theme),
+`src/assets/` (the logo and the favicon) and this file. `node_modules/`, `dist/`, `.astro/`, `src/content/docs/` and `public/` are
 generated.
 
 Astro's optional image optimizer, `sharp`, is not installed (`pnpm-workspace.yaml`): the
-site has no images, and its `libvips` is under a license the project does not allow.
+site's one image, the logo, is served as it is, and `libvips` is under a license the
+project does not allow.
+
+## The theme
+
+The site follows [orcapod.org](https://orcapod.org), the project's home page, with a blue
+accent of its own:
+
+- the logo (`src/assets/orcapod-icon.png`) and the favicon (`src/assets/favicon.ico`)
+  are orcapod.org's files, unmodified. The logo is black on a transparent background;
+  in dark mode it is shown inverted. The content build writes the favicon into
+  `public/` (`SITE_PUBLIC_FILES` in `../scripts/docs_site_content.py`);
+- the text is set in Asap and the site's name in Lexend Exa (bold, lower case), the
+  fonts of orcapod.org, when they are available, with the system fonts after them;
+- the light theme has orcapod.org's background (`#fcfafc`) and text (`#0a0a0a`), the
+  dark theme a near-black with a blue tint; links, the current sidebar entry, the
+  banner and note asides are blue (`#1565c0` light, `#3d8fe8` and `#a8d0ff` dark).
+  Every text colour meets WCAG AA against its background.
+
+`src/styles/orcapod.css` holds the colours and fonts (Starlight's `--sl-color-*` and
+`--sl-font` variables).
 
 ## CI and publishing
 
