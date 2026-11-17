@@ -81,7 +81,7 @@ and `SemiJoin`. In the output of `Join` and `MergeJoin` the column is `T` when a
 input's type. Any other type difference is still an error, and a data column is never
 reconciled this way.
 
-A name is a tag or a data column, never both: if one input has `x` as a tag column and another has it as a data column, `Join` (and `MergeJoin`) raises `InputValidationError` when the graph is built; rename one with `map_tags` or `map_data`.
+A plain tag and a data column never share a name across inputs: if one input has `x` as a plain tag column and another has it as a data column only, `Join` (and `MergeJoin`) raises `InputValidationError` when the graph is built; rename one with `map_tags` or `map_data`. A referential tag is the exception: it is one column in both roles, and `Join` merges a key that is referential on its inputs (or plain on one and referential on another) into a referential tag with one data column (see [Referential Tags](referential-tags.md)).
 
 Column order follows each operator's argument symmetry: commutative operators (`Join`,
 `MergeJoin`) list tag and data columns by first appearance across their inputs in canonical
@@ -295,7 +295,8 @@ for tag, data in by_subject.iter_data():
 
 The data columns of the output are exactly the data columns of the input: a function pod that
 follows `GroupBy` receives `spike_count` (and `probe_name`, when the source offers it), never a
-tag.
+plain tag. A referential group key stays a data column too (scalar, in both roles), so a
+following function can read its value (see [Referential Tags](referential-tags.md)).
 
 Ordering is deterministic by construction, because orcapod hashes the emitted lists to build
 cache keys: members are sorted by the input's non-key tag values (with the internal record id

@@ -377,10 +377,13 @@ the system tags of every joined source, and binding refuses it with `SourceSpecM
 (support is planned, ITL-1127).
 
 **Using a tag value as an input to a computation.** Tags identify a row and data is what a
-function computes on, so a function pod never receives a tag. Sometimes one value is needed
-for both: a session's start time identifies the session, and it is also what you subtract to
-get an elapsed time. Pass `tags_as_data` to get a source that keeps the tag and also offers
-its value as a data column under a name you choose:
+function computes on. A referential tag (the default for a declared tag) is both: a function
+reads it through its data role, under the same name (see
+[Referential Tags](referential-tags.md)). A plain tag is a tag only, and a function pod
+never receives it. When a plain tag's value is also needed as data (a session's start time
+identifies the session, and it is also what you subtract to get an elapsed time), or you want
+the value as a data column under another name, pass `tags_as_data` to get a source that keeps
+the tag and also offers its value as a data column under a name you choose:
 
 ```python
 from datetime import datetime, timezone

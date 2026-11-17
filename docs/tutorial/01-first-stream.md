@@ -54,10 +54,11 @@ Every column of a source is either a tag column or a data column.
   uses tags to match rows when it combines tables.
 - **Data columns** are everything else: the values that were measured or recorded.
 
-A tag column is a tag only, never also a data column. `CSVSource`, like every source built
-from a table, accepts `tag_only_columns=True`, which says exactly that and is the default in
-this version. From Orcapod v0.4 tags become referential by default (a tag that is also the
-data column of the same name), and `tag_only_columns=True` keeps them plain as they are here.
+By default a declared tag column is also a data column: `CSVSource`, like every source built
+from a table, makes its tags **referential**, one column seen both as a tag and as the data
+column of the same name (see [Referential Tags](../concepts/referential-tags.md)). This
+tutorial keeps its tags plain with `tag_only_columns=True`: a plain tag is a tag only, never
+also a data column, so the data columns below are exactly the columns that are not tags.
 
 You choose the tag columns; all remaining columns become data columns. `output_schema()`
 returns both groups, with their types:
@@ -189,7 +190,7 @@ have?
     # (Schema({'subject_id': str, 'session': str, 'probe': str, 'unit': int}), Schema({'region': str, 'depth_um': int, 'n_spikes': int}))
     print(units.as_table().num_rows)
     # 64
-```
+    ```
 
     You could argue that `region` belongs with the tags, because it says what the row is
     about. That is a real choice, and it has consequences: tags are what rows are matched on
@@ -217,7 +218,7 @@ column of `subjects.csv` a tag.
     except ValueError as err:
         print(err)
     # No data columns found in the table. At least one data column is required.
-```
+    ```
 
     The first message lists the columns that do exist, which is usually enough to spot a
     typo. The second states a rule: a stream needs at least one data column.

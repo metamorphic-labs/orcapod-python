@@ -3416,10 +3416,17 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             )
 
         joined = merged_df.to_arrow()
-        if results_schema is not None:
-            joined = arrow_utils.restore_schema_nullability(
-                joined, taginfo_schema, results_schema
-            )
+        # Polars drops field metadata and nullable flags: restore them from the
+        # pipeline table in every case (its referential marker included), and from
+        # the result table when one was read.
+        joined = arrow_utils.restore_schema_nullability(
+            joined,
+            *(
+                (taginfo_schema,)
+                if results_schema is None
+                else (taginfo_schema, results_schema)
+            ),
+        )
         # In memory, each row names its data context in the datagram context column.
         joined = joined.append_column(
             pa.field(constants.CONTEXT_KEY, pa.large_string(), nullable=False),
