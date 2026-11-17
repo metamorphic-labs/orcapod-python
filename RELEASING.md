@@ -225,8 +225,11 @@ The server URL is fixed in the workflow (`https://api.spiraldb.dev`); the reposi
 To rotate the key: add a new key to the workload with a new `kid`, replace the
 `SPIRAL_PRIVATE_KEY` secret with the new JWK, run `Run Tests` by hand on `main` and check that
 `spiral-integration` passes, then remove the old key (`spiral workloads keys rm`). A workload
-can hold several keys, so the job keeps working during the switch. Rotate at once if the key
-may have been exposed, for example printed in a log.
+can hold several keys, so the job keeps working during the switch.
+
+If the key may have been exposed (for example printed in a log), remove it from the workload
+first (`spiral workloads keys rm`), so it stops signing in at once, then add a new key and
+replace the secret as above. The job fails in between; that is the price of containment.
 
 ## Pre-releases
 
