@@ -87,7 +87,7 @@ does not make it compute again.
 | `MapData` / `map_data` | Always a data-only move: the data column is renamed and `x` stays a plain tag. |
 | Filters, `DropNulls`, `SemiJoin`, `Pick`, `Index` | Keep the reference. |
 | `Batch` | Keeps every tag, list-valued, as for plain tags: `x` becomes the same list in both roles and stays referential. Its source info is one token per member, like any data column: nothing is merged. |
-| `MergeJoin` | Not supported with referential tags yet: it raises. |
+| `MergeJoin` | Follows `Join`. Referential in both inputs: **one** scalar referential column `x`, not a two-element list (the join equated the values), with one merged token as its source info, the same fold as `Join`'s (below). Referential in one input, and a plain tag or no column of that name in the other: `x` stays referential with its own source info. A data-only column `x` in the other input is refused. A key that is `T` in one input and `T \| None` in the other is `T` in both roles. Every other colliding data column is merged into a sorted list, as before. |
 
 ```python
 units = op.sources.DictSource(
@@ -98,6 +98,25 @@ units = op.sources.DictSource(
 joined = spikes.join(units)
 print(joined.keys())
 # (('unit', 'time'), ('unit', 'area', 'time', 'amp'))
+```
+
+`MergeJoin` merges every other colliding data column into a sorted list, and keeps each
+referential tag both inputs share as one column:
+
+```python
+more = op.sources.DictSource(
+    [{"unit": 1, "time": 10, "amp": 0.75}, {"unit": 2, "time": 20, "amp": 0.125}],
+    tag_columns=["unit", "time"],
+    source_id="more_spikes",
+)
+merged = op.operators.MergeJoin()(spikes, more)
+print(merged.keys())
+# (('unit', 'time'), ('unit', 'time', 'amp'))
+# A join does not promise a row order: sort the rows before showing them.
+for tag, data in sorted(merged.iter_data(), key=lambda row: row[0]["time"]):
+    print(tag["time"], data["time"], data["amp"])
+# 10 10 [0.5, 0.75]
+# 20 20 [0.125, 0.25]
 ```
 
 ```python
@@ -142,15 +161,15 @@ print(renamed.keys())
 
 A source-info column belongs to its data column and has its shape: a scalar value has one
 token, a list one token per element. When a value is the merge of several equal elements
-that are different entries (the key of a `GroupBy`, or the key a `Join` merges from
-several referential inputs), no single member's token is true for it. Its source info is
+that are different entries (the key of a `GroupBy`, or the key a `Join` or `MergeJoin`
+merges from several referential inputs), no single member's token is true for it. Its source info is
 then one **merged token**, the fold of the members' tokens by the operation that merged
 them (the SHA-256 of their canonical JSON list, after the operation's label), as the
 system tags of a group are folded:
 
 - `GroupBy`: `group_v1:<hex>` over the members' tokens in member order (the order of the
   group's data lists, which does not depend on row order);
-- `Join`: `join_v1:<hex>` over the members' tokens sorted, so it does not depend on the
+- `Join` and `MergeJoin`: `join_v1:<hex>` over the members' tokens sorted, so it does not depend on the
   order of the inputs.
 
 It is a merged token for a group of one member too, and a merged token can itself be a
@@ -257,8 +276,8 @@ the file is checked against the stored tables when a node reads them.
 
 ## Not supported yet
 
-These raise "not supported with referential tags yet" when a referential tag reaches them:
-`MergeJoin` and `MapColumns` (`map_columns`; rename with `map_tags` and `map_data`).
+`MapColumns` (`map_columns`) raises "not supported with referential tags yet" when a
+referential tag reaches it; rename with `map_tags` and `map_data`.
 `PollingSource` keeps its tags plain. Each error names its issue and the way out: build the
 source with `tag_only_columns=True` to keep every tag plain, as in v0.3. A plain tag is not
 data, so a function that reads a tag's value (as `scale` above reads `time`) can no longer
