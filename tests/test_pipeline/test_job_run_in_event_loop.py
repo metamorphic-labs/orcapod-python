@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import _thread
 import asyncio
+import signal
 import threading
 import time
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -187,6 +188,22 @@ def test_run_async_refuses_the_sync_orchestrator() -> None:
         )
 
 
+@pytest.fixture
+def interrupt_raises_keyboard_interrupt() -> Iterator[None]:
+    """Make SIGINT raise ``KeyboardInterrupt`` for the test, as it does in a kernel (ITL-1181).
+
+    ``_thread.interrupt_main`` stands for the notebook's interrupt button. It does nothing
+    when SIGINT is ignored, as it is in a process started in the background (a shell's
+    ``&``, some CI runners and test workers), so the tests that press the button install
+    Python's default handler for their duration and restore the one they found.
+    """
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        yield
+    finally:
+        _ = signal.signal(signal.SIGINT, previous)
+
+
 N_SLOW_ROWS = 200  # more than the default thread pool runs at once
 slow_calls: list[int] = []
 
@@ -201,6 +218,7 @@ def slow_and_interrupted(x: int) -> int:
     return x
 
 
+@pytest.mark.usefixtures("interrupt_raises_keyboard_interrupt")
 def test_interrupt_while_running_inside_a_loop_stops_the_run() -> None:
     """The notebook's interrupt button stops the run; nothing keeps running after it."""
     slow_calls.clear()
@@ -306,6 +324,7 @@ def bridge_threads() -> list[threading.Thread]:
     ]
 
 
+@pytest.mark.usefixtures("interrupt_raises_keyboard_interrupt")
 @pytest.mark.parametrize("store_kind", list(STORES))
 def test_second_interrupt_returns_and_a_late_function_writes_nothing(
     store_kind: str, tmp_path: Path
@@ -384,6 +403,7 @@ POD_FORMS: dict[str, Callable[[], dict[str, Any]]] = {
 }
 
 
+@pytest.mark.usefixtures("interrupt_raises_keyboard_interrupt")
 @pytest.mark.parametrize("pod_form", list(POD_FORMS))
 def test_second_interrupt_names_an_async_function_blocking_the_loop(
     pod_form: str,
