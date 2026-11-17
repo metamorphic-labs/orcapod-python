@@ -324,7 +324,7 @@ What runs where (developer, November 16, 2026; ITL-1181):
   request is tested on Python 3.13 only, and a failure only 3.11 or 3.12 shows is first
   seen on `main`.
 - Each test job names its suite, so no two checks share a name (ITL-1212): `Tests (3.x)`
-  (`run-tests.yml`), `Objective tests (3.x)` (`run-objective-tests.yml`, `test-objective/`)
+  (`run-tests.yml`), `Specification tests (3.x)` (`run-objective-tests.yml`, `test-objective/`)
   and `PostgreSQL tests (3.x)` (`run-postgres-tests.yml`). A new test job gets its own
   `name:` with the suite and the Python version; the job id `test` stays.
 - In CI the tests run in parallel, one worker per logical CPU (pytest-xdist, `-n logical`;
