@@ -1140,8 +1140,17 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             The stream, in this node's data context.
         """
         # Stored rows are this node's: give them its data context, not the default.
+        # ``data_context`` types the Python datagrams only; the rows' Arrow context
+        # column comes from the table, and a stream fills a missing one with the
+        # default key.
+        rows = without_reference_marks(records)
+        if constants.CONTEXT_KEY not in rows.column_names:
+            rows = rows.append_column(
+                pa.field(constants.CONTEXT_KEY, pa.large_string(), nullable=False),
+                pa.array([self.data_context_key] * rows.num_rows, pa.large_string()),
+            )
         return ArrowTableStream(
-            without_reference_marks(records),
+            rows,
             tag_columns=self.keys()[0],
             reference_tags=self.declared_references(),
             data_context=self.data_context,

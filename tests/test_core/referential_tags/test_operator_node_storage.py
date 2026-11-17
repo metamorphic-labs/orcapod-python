@@ -10,14 +10,18 @@ marker never enters it.
 
 from __future__ import annotations
 
+import dataclasses
 import warnings
 from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import pyarrow as pa
 import pytest
 
 import orcapod as op
+from orcapod.contexts import DataContext
+from orcapod.core.nodes import OperatorJobNode
 from orcapod.core.operators import Join
 from orcapod.core.referential_tags import (
     REFERENTIAL_TAG_METADATA_KEY,
@@ -33,7 +37,7 @@ from orcapod.pipeline import (
     SyncPipelineOrchestrator,
 )
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
-from orcapod.system_constants import OPERATOR_DB_SCHEMA_VERSION
+from orcapod.system_constants import OPERATOR_DB_SCHEMA_VERSION, constants
 from orcapod.types import CacheMode
 
 JOB = "ops"
@@ -196,6 +200,42 @@ def test_replay_reads_the_binding_back(
     # Every row keeps the binding: ``id`` is a tag and a data column.
     for tag, data in node.iter_data():
         assert tag["id"] == data["id"]
+
+
+def test_replayed_rows_carry_the_node_data_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The context column of replayed rows is the node's, not the default.
+
+    One data context ships, so the node is given a copy of it under another key. The
+    test is about ``_stream_over_stored``, which every replay read goes through.
+    """
+    job = _join_job(_in_memory(tmp_path), [1, 2], mode=CacheMode.REPLAY)
+    node = cast(OperatorJobNode, job.nodes["joined"])
+    other = dataclasses.replace(node.data_context, context_key="std:v1:test-other")
+
+    def other_context(_: OperatorJobNode) -> DataContext:
+        return other
+
+    def other_key(_: OperatorJobNode) -> str:
+        return other.context_key
+
+    monkeypatch.setattr(OperatorJobNode, "data_context", property(other_context))
+    monkeypatch.setattr(OperatorJobNode, "data_context_key", property(other_key))
+    rows = pa.table(
+        {
+            "id": pa.array([1], pa.int64()),
+            "t": pa.array([10], pa.int64()),
+            "x": pa.array([1.0], pa.float64()),
+            "z": pa.array([1.0], pa.float64()),
+        }
+    )
+    stream = node._stream_over_stored(rows)  # pyright: ignore[reportPrivateUsage]  # the test is about it
+    table = stream.as_table(columns={"context": True})
+    assert table.column(constants.CONTEXT_KEY).to_pylist() == ["std:v1:test-other"]
+    assert [data.data_context_key for _, data in stream.iter_data()] == [
+        "std:v1:test-other"
+    ]
 
 
 @STORES
