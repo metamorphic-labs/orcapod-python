@@ -341,9 +341,6 @@ a preview on a website), the picture is still shown, without pan, zoom or select
 the **Nodes** table below the picture for each node's columns and status.
 `job.diagram().save("pipeline.html")` writes it as a page that opens in any browser.
 
-`job.pipeline.show_graph()` still draws the pipeline with Graphviz, for an image file; it
-needs the Graphviz `dot` program.
-
 ## Saving and loading
 
 `job.save(path)` writes the job to a JSON file: the graph, the database's location and how
