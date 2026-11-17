@@ -29,16 +29,16 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
 
 import griffe
+from typing_extensions import override
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_DIR = REPO_ROOT / "src"
-API_DIR = REPO_ROOT / "docs" / "api"
 PACKAGE = "orcapod"
 
 _DIRECTIVE = re.compile(r"^::: +(?P<path>[\w.]+) *$")
@@ -68,6 +68,7 @@ class _ProblemCollector(logging.Handler):
         super().__init__(level=logging.WARNING)
         self.problems: list[str] = []
 
+    @override
     def emit(self, record: logging.LogRecord) -> None:
         self.problems.append(record.getMessage())
 
@@ -102,52 +103,60 @@ def _directives(text: str) -> Iterator[str]:
             yield match.group("path")
 
 
-def _lookup(path: str) -> griffe.Object | griffe.Alias:
+def _real(obj: griffe.Object | griffe.Alias) -> griffe.Object:
+    """The object itself, for an alias (a re-export) the object it names."""
+    return obj.final_target if isinstance(obj, griffe.Alias) else obj
+
+
+def _lookup(path: str) -> griffe.Object:
     package = _package()
     if not path.startswith(PACKAGE + "."):
         raise ApiPageError(f"::: {path}: not an object of the {PACKAGE} package")
     try:
-        return package[path.removeprefix(PACKAGE + ".")]
+        found: griffe.Object | griffe.Alias = package[path.removeprefix(PACKAGE + ".")]
     except KeyError:
         raise ApiPageError(f"::: {path}: no such object") from None
+    return _real(found)
 
 
 def _page_url(page: str, base: str) -> str:
-    return f"{base.rstrip('/')}/api/{page}/" if page != "index" else f"{base.rstrip('/')}/api/"
+    return (
+        f"{base.rstrip('/')}/api/{page}/"
+        if page != "index"
+        else f"{base.rstrip('/')}/api/"
+    )
 
 
 @cache
-def _index(base: str) -> _Index:
+def _index(api_dir: Path, base: str) -> _Index:
     """Index every object documented on any API page (and its documented members)."""
     index = _Index()
-    for page_file in sorted(API_DIR.glob("*.md")):
+    for page_file in sorted(api_dir.glob("*.md")):
         url = _page_url(page_file.stem, base)
         for path in _directives(page_file.read_text(encoding="utf-8")):
             obj = _lookup(path)
             for anchor, member in _anchored(path, obj):
                 target = f"{url}#{anchor}"
-                index.urls.setdefault(anchor, target)
-                index.urls.setdefault(member.canonical_path, target)
+                _ = index.urls.setdefault(anchor, target)
+                _ = index.urls.setdefault(member.canonical_path, target)
     return index
 
 
-def _members(obj: griffe.Object | griffe.Alias) -> list[griffe.Object | griffe.Alias]:
+def _members(obj: griffe.Object) -> list[griffe.Object]:
     """The members shown for ``obj``: public, documented, declared on it, in order."""
-    if not obj.is_class:
+    if not isinstance(obj, griffe.Class):
         return []
-    shown = []
-    for name, member in obj.members.items():
-        if name.startswith("_") or not member.docstring:
-            continue
-        if member.is_alias and member.inherited:
-            continue
-        shown.append(member)
+    shown = [
+        member
+        for name, member in obj.members.items()
+        if not name.startswith("_")
+        and not isinstance(member, griffe.Alias)
+        and member.docstring
+    ]
     return sorted(shown, key=lambda m: m.lineno or 0)
 
 
-def _anchored(
-    path: str, obj: griffe.Object | griffe.Alias
-) -> Iterator[tuple[str, griffe.Object | griffe.Alias]]:
+def _anchored(path: str, obj: griffe.Object) -> Iterator[tuple[str, griffe.Object]]:
     yield path, obj
     for member in _members(obj):
         yield f"{path}.{member.name}", member
@@ -190,10 +199,13 @@ def _code(text: str) -> str:
     return f"{ticks}{pad}{text}{pad}{ticks}"
 
 
-def _parameters(obj: griffe.Object | griffe.Alias) -> list[griffe.Parameter]:
-    if obj.is_class:
+def _parameters(obj: griffe.Class | griffe.Function) -> list[griffe.Parameter]:
+    if isinstance(obj, griffe.Class):
         init = obj.all_members.get("__init__")
-        if init is None or not init.is_function:
+        if init is None:
+            return []
+        init = _real(init)
+        if not isinstance(init, griffe.Function):
             return []
         params = list(init.parameters)
     else:
@@ -203,12 +215,17 @@ def _parameters(obj: griffe.Object | griffe.Alias) -> list[griffe.Parameter]:
     return params
 
 
-def _signature(name: str, obj: griffe.Object | griffe.Alias) -> str:
+_STARS = {
+    griffe.ParameterKind.var_positional: "*",
+    griffe.ParameterKind.var_keyword: "**",
+}
+
+
+def _signature(name: str, obj: griffe.Class | griffe.Function) -> str:
     """Render the signature of a class or function as a Python code block."""
-    prefix = ""
-    if obj.is_class:
+    if isinstance(obj, griffe.Class):
         prefix = "class "
-    elif obj.is_function:
+    else:
         prefix = "async def " if "async" in obj.labels else "def "
     params = _parameters(obj)
     rendered: list[str] = []
@@ -229,21 +246,22 @@ def _signature(name: str, obj: griffe.Object | griffe.Alias) -> str:
             and kind is not griffe.ParameterKind.positional_only
         ):
             rendered.append("/")
-        star = {
-            griffe.ParameterKind.var_positional: "*",
-            griffe.ParameterKind.var_keyword: "**",
-        }.get(kind, "")
+        star = _STARS.get(kind, "") if kind is not None else ""
         text = f"{star}{param.name}"
         if param.annotation is not None:
             text += f": {param.annotation}"
-        if param.default is not None:
-            text += f" = {param.default}" if param.annotation is not None else f"={param.default}"
+        if param.default is not None and not star:
+            text += (
+                f" = {param.default}"
+                if param.annotation is not None
+                else f"={param.default}"
+            )
         rendered.append(text)
         previous_kind = kind
     if previous_kind is griffe.ParameterKind.positional_only:
         rendered.append("/")
     returns = ""
-    if obj.is_function and obj.returns is not None:
+    if isinstance(obj, griffe.Function) and obj.returns is not None:
         returns = f" -> {obj.returns}"
     one_line = f"{prefix}{name}({', '.join(rendered)}){returns}"
     if len(one_line) <= _SIGNATURE_WIDTH or not rendered:
@@ -257,73 +275,86 @@ def _signature(name: str, obj: griffe.Object | griffe.Alias) -> str:
 def _indent_continuation(text: str) -> str:
     """Indent every line after the first by two spaces, for a list item."""
     lines = text.strip().splitlines()
-    return "\n".join([lines[0], *("  " + ln if ln else "" for ln in lines[1:])]) if lines else ""
+    return (
+        "\n".join([lines[0], *("  " + ln if ln else "" for ln in lines[1:])])
+        if lines
+        else ""
+    )
+
+
+_ELEMENT_SECTIONS: tuple[tuple[type[griffe.DocstringSection], str, bool], ...] = (
+    # (section class, title, whether its items have a name to show)
+    (griffe.DocstringSectionParameters, "Parameters", True),
+    (griffe.DocstringSectionOtherParameters, "Other parameters", True),
+    (griffe.DocstringSectionAttributes, "Attributes", True),
+    (griffe.DocstringSectionReturns, "Returns", True),
+    (griffe.DocstringSectionYields, "Yields", True),
+    (griffe.DocstringSectionReceives, "Receives", True),
+    (griffe.DocstringSectionRaises, "Raises", False),
+    (griffe.DocstringSectionWarns, "Warns", False),
+)
+
+
+def _element_item(
+    element: griffe.DocstringElement, show_name: bool, index: _Index
+) -> str:
+    """One item of a parameters / returns / raises ... list."""
+    head_parts: list[str] = []
+    if show_name and isinstance(element, griffe.DocstringNamedElement) and element.name:
+        head_parts.append(f"**{element.name}**")
+    annotation = _annotation(element.annotation, index)
+    if annotation:
+        head_parts.append(f"({annotation})" if head_parts else annotation)
+    if isinstance(element, griffe.DocstringParameter) and element.default is not None:
+        head_parts.append(f"default {_code(str(element.default))}")
+    head = " ".join(head_parts)
+    description = _indent_continuation(element.description or "")
+    return f"- {head}: {description}" if head else f"- {description}"
 
 
 def _section(section: griffe.DocstringSection, index: _Index) -> str:
-    kind = section.kind
-    value = section.value
-    if kind is griffe.DocstringSectionKind.text:
-        return str(value).strip()
-    if kind is griffe.DocstringSectionKind.admonition:
-        admonition: griffe.DocstringAdmonition = value
-        title = section.title or admonition.annotation or ""
-        aside = _ASIDES.get(str(admonition.annotation or title).lower(), "note")
+    """Render one parsed docstring section as Markdown.
+
+    Raises:
+        ApiPageError: For a section kind this generator does not render.
+    """
+    if isinstance(section, griffe.DocstringSectionText):
+        return section.value.strip()
+    if isinstance(section, griffe.DocstringSectionAdmonition):
+        admonition: griffe.DocstringAdmonition = section.value
+        kind = str(admonition.annotation or "")
+        title = section.title or kind.capitalize()
+        aside = _ASIDES.get(kind.lower(), "note")
         return f":::{aside}[{title}]\n{admonition.description.strip()}\n:::"
-    if kind is griffe.DocstringSectionKind.examples:
-        out: list[str] = []
-        for example_kind, text in value:
-            if example_kind is griffe.DocstringSectionKind.examples or str(
-                example_kind
-            ).endswith("examples"):
-                out.append(f"```pycon\n{text}\n```")
-            else:
-                out.append(str(text).strip())
-        return "**Examples:**\n\n" + "\n\n".join(out)
-    titles = {
-        griffe.DocstringSectionKind.parameters: "Parameters",
-        griffe.DocstringSectionKind.other_parameters: "Other parameters",
-        griffe.DocstringSectionKind.attributes: "Attributes",
-        griffe.DocstringSectionKind.returns: "Returns",
-        griffe.DocstringSectionKind.yields: "Yields",
-        griffe.DocstringSectionKind.receives: "Receives",
-        griffe.DocstringSectionKind.raises: "Raises",
-        griffe.DocstringSectionKind.warns: "Warns",
-    }
-    if kind in titles:
-        items = []
-        for element in value:
-            name = getattr(element, "name", "") or ""
-            annotation = _annotation(getattr(element, "annotation", None), index)
-            head_parts = []
-            if name and kind not in (
-                griffe.DocstringSectionKind.raises,
-                griffe.DocstringSectionKind.warns,
-            ):
-                head_parts.append(f"**{name}**")
-            if annotation:
-                head_parts.append(
-                    f"({annotation})" if head_parts else annotation
-                )
-            default = getattr(element, "default", None)
-            if default is not None and kind is griffe.DocstringSectionKind.parameters:
-                head_parts.append(f"default {_code(str(default))}")
-            head = " ".join(head_parts)
-            description = _indent_continuation(element.description or "")
-            items.append(f"- {head}: {description}" if head else f"- {description}")
-        return f"**{titles[kind]}:**\n\n" + "\n".join(items)
-    if kind is griffe.DocstringSectionKind.deprecated:
-        return f":::caution[Deprecated {value.version or ''}]\n{value.description}\n:::"
-    raise ApiPageError(f"docstring section {kind.value!r} is not rendered")
+    if isinstance(section, griffe.DocstringSectionExamples):
+        parts = [
+            f"```python\n{text}\n```"
+            if kind is griffe.DocstringSectionKind.examples
+            else text.strip()
+            for kind, text in section.value
+        ]
+        return "**Examples:**\n\n" + "\n\n".join(parts)
+    if isinstance(section, griffe.DocstringSectionDeprecated):
+        deprecated: griffe.DocstringDeprecated = section.value
+        return (
+            f":::caution[Deprecated {deprecated.version}]\n"
+            f"{deprecated.description.strip()}\n:::"
+        )
+    for section_class, title, show_name in _ELEMENT_SECTIONS:
+        if isinstance(section, section_class):
+            elements: list[griffe.DocstringElement] = section.value  # pyright: ignore[reportAny] -- each listed class types value as a list of elements
+            items = [_element_item(e, show_name, index) for e in elements]
+            return f"**{title}:**\n\n" + "\n".join(items)
+    raise ApiPageError(f"docstring section {section.kind.value!r} is not rendered")
 
 
-def _docstring(obj: griffe.Object | griffe.Alias, index: _Index) -> str:
+def _docstring(obj: griffe.Object, index: _Index) -> str:
     if not obj.docstring:
         return ""
     return "\n\n".join(_section(s, index) for s in obj.docstring.parse())
 
 
-def _kind_label(obj: griffe.Object | griffe.Alias) -> str:
+def _kind_label(obj: griffe.Object) -> str:
     labels = set(obj.labels)
     if obj.is_class:
         return "class"
@@ -341,7 +372,7 @@ def _kind_label(obj: griffe.Object | griffe.Alias) -> str:
 
 
 def _render_object(
-    path: str, obj: griffe.Object | griffe.Alias, level: int, index: _Index
+    path: str, obj: griffe.Object, level: int, index: _Index
 ) -> list[str]:
     name = obj.name
     out = [
@@ -352,11 +383,11 @@ def _render_object(
         f"<small>{_kind_label(obj)} · <code>{obj.canonical_path}</code></small>",
         "",
     ]
-    if obj.is_class or obj.is_function:
+    if isinstance(obj, griffe.Class | griffe.Function):
         out += [_signature(name, obj), ""]
-    elif obj.is_attribute and obj.annotation is not None:
+    elif isinstance(obj, griffe.Attribute) and obj.annotation is not None:
         out += [f"Type: {_annotation(obj.annotation, index)}", ""]
-    if obj.is_class and obj.bases:
+    if isinstance(obj, griffe.Class) and obj.bases:
         bases = ", ".join(_annotation(b, index) for b in obj.bases)
         out += [f"Bases: {bases}", ""]
     doc = _docstring(obj, index)
@@ -367,11 +398,13 @@ def _render_object(
     return out
 
 
-def expand_api_page(text: str, base: str = "/") -> str:
+def expand_api_page(text: str, api_dir: Path, base: str = "/") -> str:
     """Replace every ``::: <object path>`` line of an API page with its reference.
 
     Args:
         text: The page as written under ``docs/api/``.
+        api_dir: The ``docs/api/`` folder: the objects its pages name are the ones
+            a type in a signature or parameter list can link to.
         base: The site's base path, for links between API pages.
 
     Returns:
@@ -381,7 +414,7 @@ def expand_api_page(text: str, base: str = "/") -> str:
         ApiPageError: If an object does not exist or griffe reports a problem with a
             docstring it renders.
     """
-    index = _index(base)
+    index = _index(api_dir, base)
     collector = _ProblemCollector()
     logger = logging.getLogger("griffe")
     logger.addHandler(collector)
@@ -399,12 +432,3 @@ def expand_api_page(text: str, base: str = "/") -> str:
     if collector.problems:
         raise ApiPageError("docstring problems:\n  " + "\n  ".join(collector.problems))
     return "\n".join(out).rstrip("\n") + "\n"
-
-
-def documented_paths() -> Sequence[str]:
-    """Every object path the API pages name, in page order (for tests)."""
-    return [
-        path
-        for page in sorted(API_DIR.glob("*.md"))
-        for path in _directives(page.read_text(encoding="utf-8"))
-    ]

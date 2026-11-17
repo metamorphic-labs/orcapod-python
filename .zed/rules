@@ -82,8 +82,7 @@ other ReST cross-reference roles. Use plain ``backtick`` notation to refer to na
 
 Every fenced python block in README.md, docs/index.md, docs/getting-started.md,
 docs/troubleshooting.md, docs/concepts/, docs/reference/ and docs/tutorial/ is executed by
-tests/test_docs/test_doc_samples.py, and tests/test_docs/test_mkdocs_build.py runs
-mkdocs build --strict. When writing docs:
+tests/test_docs/test_doc_samples.py. When writing docs:
 
 - Blocks on one page share a namespace and run top to bottom.
 - Every line a block prints must appear as a "# ..." comment in that block; "..." inside the
@@ -98,6 +97,31 @@ mkdocs build --strict. When writing docs:
   Do not add a second dataset or a dependency to the generator.
 - Output that the library does not guarantee to be ordered must not be shown as if it were:
   print sorted(job.nodes), and sort rows read back from a database before showing them.
+
+## Documentation site
+
+The documentation is published as an Astro Starlight site, built from docs/ (developer,
+November 16, 2026, ITL-1170; site/README.md has the commands). mkdocs is gone.
+
+- docs/ is the only source. scripts/docs_site_content.py writes the site's pages
+  (site/src/content/docs/, site/public/, both ignored by git) on every build: never edit or
+  commit them, and never copy page text into site/.
+- Write pages as before: a "# <title>" first line, mkdocs-style admonitions
+  (!!! note "Title", ??? success "Solution") and relative .md links; the script converts
+  them. A link to a missing or unpublished page or file fails the build, and the site build
+  validates every link and anchor.
+- What is published is decided in scripts/docs_site_content.py (PUBLISHED_FILES,
+  PUBLISHED_FOLDERS, EXCLUDED). A new top-level entry under docs/ fails the build until it is
+  added to one of them; docs/dev/ is never published.
+- The API reference is generated from the source by scripts/docs_site_api.py (griffe).
+  docs/api/*.md are its input: an introduction and one "::: <object path>" line per object;
+  never write a signature or a docstring there. A docstring griffe warns about (an Args:
+  entry the signature does not have) fails the build.
+- Build locally with "cd site && pnpm install && pnpm build"; CI builds the site on every pull
+  request (.github/workflows/docs-site.yml) and tests/test_docs/test_site_content.py runs the
+  content build without Node. The public repository publishes it to GitHub Pages
+  (https://nauticalab.github.io/orcapod-python/); the repository that publishes is named once,
+  in that workflow.
 
 ## Linear issue tracking
 

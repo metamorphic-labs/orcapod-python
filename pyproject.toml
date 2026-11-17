@@ -107,8 +107,9 @@ dev = [
     "pip-licenses>=5.0.0",
     "tqdm>=4.67.1",
     "typing_extensions",
-    "mkdocs-material>=9.7.5",
-    "mkdocstrings[python]>=1.0.3",
+    # The API reference of the documentation site is generated with griffe
+    # (scripts/docs_site_api.py).
+    "griffelib>=2.0.2",
     # torch for the torch.Tensor tests: the default `uv run` sync (the org-required pytest
     # and typecheck jobs) installs the dev group but no extras (ITL-871).
     "orcapod[torch]",

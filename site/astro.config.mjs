@@ -2,7 +2,7 @@
 import { spawnSync } from 'node:child_process';
 import { watch } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { defineConfig } from 'astro/config';
+import { defineConfig, passthroughImageService } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import starlightLinksValidator from 'starlight-links-validator';
 
@@ -58,6 +58,8 @@ export default defineConfig({
 	base,
 	// mkdocs rendered '--' and quotes as written; so does the site.
 	markdown: { smartypants: false },
+	// sharp is not installed (pnpm-workspace.yaml): images are served as they are.
+	image: { service: passthroughImageService() },
 	integrations: [
 		orcapodDocsContent(),
 		starlight({

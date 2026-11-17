@@ -37,29 +37,26 @@ import html
 import json
 import posixpath
 import re
-import shutil
 import sys
 import unicodedata
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOCS_DIR = REPO_ROOT / "docs"
 SITE_DIR = REPO_ROOT / "site"
 
-# The published pages, as glob patterns relative to ``docs/``. Everything else under
-# ``docs/`` (developer material under ``docs/dev/``, the tutorial data generator) is not
-# a page of the site.
-PUBLISHED_PAGES = (
-    "index.md",
-    "getting-started.md",
-    "troubleshooting.md",
-    "tutorial/*.md",
-    "concepts/*.md",
-    "reference/*.md",
-    "api/*.md",
-)
+# What the site publishes from ``docs/``: these top-level pages, and every ``*.md``
+# page directly inside these folders.
+PUBLISHED_FILES = ("index.md", "getting-started.md", "troubleshooting.md")
+PUBLISHED_FOLDERS = ("tutorial", "concepts", "reference", "api")
+# What it never publishes: developer material. Every other top-level entry of ``docs/``
+# is an error, so that publishing a new folder (or not) is a decision.
+# TODO(ITL-1169): design/, metamorphic/, plans/ and specs/ move under dev/ in the
+# repository cleanup; drop them here when it lands.
+EXCLUDED = ("dev", "design", "metamorphic", "plans", "specs")
 
 # mkdocs admonition types and the Starlight aside each becomes.
 ASIDE_TYPES = {
@@ -76,6 +73,9 @@ ASIDE_TYPES = {
 }
 
 SKIP_MARKER = "<!-- docs-test: skip -->"
+# A comment right below the title is a note to the page's authors (the API pages say
+# that they are generator input); it is not shown.
+_HEADER_COMMENT = re.compile(r"\A<!--.*?-->\n", re.DOTALL)
 
 _ADMONITION = re.compile(
     r'^(?P<indent> *)(?P<marker>!!!|\?\?\?\+?) +(?P<kind>[a-z]+)(?: +"(?P<title>[^"]*)")? *$'
@@ -181,10 +181,37 @@ def page_url(path: str, base: str = "/") -> str:
 
 
 def published_paths(docs_dir: Path) -> list[str]:
-    """Return the published pages under ``docs_dir``, sorted, relative to it."""
-    found: set[str] = set()
-    for pattern in PUBLISHED_PAGES:
-        found.update(p.relative_to(docs_dir).as_posix() for p in docs_dir.glob(pattern))
+    """Return the published pages under ``docs_dir``, sorted, relative to it.
+
+    Raises:
+        ContentError: If ``docs_dir`` holds a top-level entry that is neither published
+            nor excluded, or a published folder holds a folder.
+    """
+    unknown = sorted(
+        entry.name
+        for entry in docs_dir.iterdir()
+        if not entry.name.startswith(".")
+        and entry.name not in (*PUBLISHED_FILES, *PUBLISHED_FOLDERS, *EXCLUDED)
+    )
+    nested = sorted(
+        f"{folder}/{entry.name}"
+        for folder in PUBLISHED_FOLDERS
+        if (docs_dir / folder).is_dir()
+        for entry in (docs_dir / folder).iterdir()
+        if entry.is_dir() and not entry.name.startswith((".", "__"))
+    )
+    if unknown or nested:
+        raise ContentError(
+            "docs/ holds entries that are neither published nor excluded: "
+            + ", ".join(unknown + nested)
+            + " (add each to PUBLISHED_FILES, PUBLISHED_FOLDERS or EXCLUDED in"
+            + " scripts/docs_site_content.py)"
+        )
+    found = [name for name in PUBLISHED_FILES if (docs_dir / name).is_file()]
+    for folder in PUBLISHED_FOLDERS:
+        found += [
+            p.relative_to(docs_dir).as_posix() for p in (docs_dir / folder).glob("*.md")
+        ]
     return sorted(found)
 
 
@@ -273,14 +300,19 @@ def convert_admonitions(lines: Sequence[str]) -> list[str]:
         kind = match.group("kind")
         title = match.group("title")
         end = _admonition_body(lines, i + 1, indent)
-        body = [
-            raw[indent + 4 :] if raw.strip() else "" for raw in lines[i + 1 : end]
-        ]
+        body = [raw[indent + 4 :] if raw.strip() else "" for raw in lines[i + 1 : end]]
         body = convert_admonitions(body)
         pad = " " * indent
         if match.group("marker").startswith("???"):
             summary = html.escape(title if title else kind.capitalize())
-            block = [f"<details>", f"<summary>{summary}</summary>", "", *body, "", "</details>"]
+            block = [
+                "<details>",
+                f"<summary>{summary}</summary>",
+                "",
+                *body,
+                "",
+                "</details>",
+            ]
         else:
             if kind not in ASIDE_TYPES:
                 raise ContentError(f"admonition type {kind!r} has no Starlight aside")
@@ -296,9 +328,7 @@ def convert_admonitions(lines: Sequence[str]) -> list[str]:
     return out
 
 
-def _convert_link_targets(
-    line: str, resolve: Callable[[str], str]
-) -> str:
+def _convert_link_targets(line: str, resolve: Callable[[str], str]) -> str:
     """Rewrite the targets of inline links on ``line``, outside inline code spans."""
     pieces: list[str] = []
     pos = 0
@@ -326,11 +356,11 @@ class LinkResolver:
     """
 
     def __init__(self, docs_dir: Path, pages: Iterable[Page], base: str) -> None:
-        self._docs_dir = docs_dir
-        self._anchors = {
+        self._docs_dir: Path = docs_dir
+        self._anchors: dict[str, dict[str, str]] = {
             p.path: heading_anchors(split_title(p.text)[1]) for p in pages
         }
-        self._base = base
+        self._base: str = base
         self.assets: set[str] = set()
 
     def _fragment(self, page: str, fragment: str) -> str:
@@ -354,7 +384,9 @@ class LinkResolver:
             raise ContentError(f"link {target!r} leaves docs/")
         if resolved.endswith(".md"):
             if resolved not in self._anchors:
-                raise ContentError(f"link {target!r}: {resolved} is not a published page")
+                raise ContentError(
+                    f"link {target!r}: {resolved} is not a published page"
+                )
             if fragment:
                 fragment = self._fragment(resolved, fragment)
             return page_url(resolved, self._base) + sep + fragment
@@ -371,6 +403,7 @@ def convert_page(page: Page, resolver: LinkResolver) -> str:
         ContentError: If the page cannot be converted.
     """
     title, body = split_title(page.text)
+    body = _HEADER_COMMENT.sub("", body).lstrip("\n")
     lines = [line for line in body.splitlines() if line.strip() != SKIP_MARKER]
     lines = convert_admonitions(lines)
     lines = _map_lines_outside_code(
@@ -388,8 +421,8 @@ def build_content(
 ) -> None:
     """Write the converted ``pages`` to ``out_dir`` and linked files to ``public_dir``.
 
-    Both directories are emptied first, so a page removed from ``docs/`` leaves the
-    site.
+    Each directory ends up holding exactly what this build writes, so a page removed
+    from ``docs/`` leaves the site.
 
     Raises:
         ContentError: If a page cannot be converted; its path is in the message.
@@ -404,45 +437,72 @@ def build_content(
             converted[page.path] = convert_page(page, resolver)
         except ContentError as exc:
             raise ContentError(f"docs/{page.path}: {exc}") from exc
-    for directory in (out_dir, public_dir):
-        if directory.exists():
-            shutil.rmtree(directory)
-        directory.mkdir(parents=True)
-    for path, text in converted.items():
-        target = out_dir / path
+    _sync_tree(out_dir, {path: text.encode() for path, text in converted.items()})
+    _sync_tree(
+        public_dir,
+        {asset: (docs_dir / asset).read_bytes() for asset in sorted(resolver.assets)},
+    )
+
+
+def _sync_tree(directory: Path, files: dict[str, bytes]) -> None:
+    """Make ``directory`` hold exactly ``files``, writing only what changed.
+
+    A file that is unchanged is not rewritten, so ``astro dev`` reloads only the
+    pages an edit changed.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    for existing in sorted(directory.rglob("*"), reverse=True):
+        rel = existing.relative_to(directory).as_posix()
+        if existing.is_file() and rel not in files:
+            existing.unlink()
+        elif existing.is_dir() and not any(existing.iterdir()):
+            existing.rmdir()
+    for rel, data in files.items():
+        target = directory / rel
+        if target.is_file() and target.read_bytes() == data:
+            continue
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
-    for asset in sorted(resolver.assets):
-        target = public_dir / asset
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(docs_dir / asset, target)
+        _ = target.write_bytes(data)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--docs", type=Path, default=DOCS_DIR)
-    parser.add_argument(
+    parser = argparse.ArgumentParser(
+        description="Build the documentation site content."
+    )
+    _ = parser.add_argument("--docs", type=Path, default=DOCS_DIR)
+    _ = parser.add_argument(
         "--out", type=Path, default=SITE_DIR / "src" / "content" / "docs"
     )
-    parser.add_argument("--public", type=Path, default=SITE_DIR / "public")
-    parser.add_argument("--base", default="/")
+    _ = parser.add_argument("--public", type=Path, default=SITE_DIR / "public")
+    _ = parser.add_argument("--base", default="/")
     args = parser.parse_args(argv)
+    docs_dir = cast(Path, args.docs)
+    out_dir = cast(Path, args.out)
+    public_dir = cast(Path, args.public)
+    base = cast(str, args.base)
 
-    from docs_site_api import expand_api_page  # the API generator imports griffe
+    # Run as a script, scripts/ is on sys.path; the API generator imports griffe, so
+    # it is imported only when the content is built.
+    from docs_site_api import (  # pyright: ignore[reportImplicitRelativeImport]
+        ApiPageError,
+        expand_api_page,
+    )
 
-    docs_dir: Path = args.docs
     pages: list[Page] = []
-    for path in published_paths(docs_dir):
-        text = (docs_dir / path).read_text(encoding="utf-8")
-        if path.startswith("api/"):
-            text = expand_api_page(text, base=args.base)
-        pages.append(Page(path, text))
     try:
-        build_content(pages, docs_dir, args.out, args.public, args.base)
+        for path in published_paths(docs_dir):
+            text = (docs_dir / path).read_text(encoding="utf-8")
+            if path.startswith("api/"):
+                try:
+                    text = expand_api_page(text, docs_dir / "api", base=base)
+                except ApiPageError as exc:
+                    raise ContentError(f"docs/{path}: {exc}") from exc
+            pages.append(Page(path, text))
+        build_content(pages, docs_dir, out_dir, public_dir, base)
     except ContentError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    print(f"wrote {len(pages)} pages to {args.out}")
+    print(f"wrote {len(pages)} pages to {out_dir}")
     return 0
 
 
