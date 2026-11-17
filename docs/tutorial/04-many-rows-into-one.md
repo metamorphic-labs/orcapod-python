@@ -81,11 +81,15 @@ print([round(r, 2) for r in data.as_dict()["rate_hz"]])
 # [2.48, 5.43, 11.03, 9.98, 3.58, 4.98, 2.25, 8.52]
 ```
 
-These are the eight rates of `mouse_01`'s first session, in the order of the tags that were
-dropped: probe `imec0` units 0 to 3, then probe `imec1` units 0 to 3 (compare the first rows
-of `rates` in Part 2). The members of a group are always in this order, whatever order the
-input rows arrived in, but the list itself no longer says which probe or unit each rate
-came from. If a later step needs that, it has to be a data column before you group; see
+These are the eight rates of `mouse_01`'s first session, ordered by the tags that were
+dropped, taken in name order: by `probe`, then by `unit`. So probe `imec0` units 0 to 3,
+then probe `imec1` units 0 to 3 (compare the first rows of `rates` in Part 2). The members
+of a group are always in this order, whatever order the input rows arrived in and however
+the input's columns are arranged. They are never ordered by a data value. To order them
+by other tags first, name those tags: `group_by([...], member_order=["unit"])`.
+
+The list itself no longer says which probe or unit each rate came from. If a later step
+needs that, it has to be a data column before you group; see
 [GroupBy](../concepts/operators.md#groupby).
 
 `group_by` is an operator, so it computed nothing. Every number in those lists was already
@@ -116,6 +120,10 @@ print(session_means.as_pandas_df())
 ```
 
 That is the result this tutorial set out to compute: the mean firing rate of every session.
+The rows come out sorted by the group keys, taken in name order: `session`, then
+`subject_id`. That is why every animal's `s1` comes before any `s2`. The order you write
+the keys in does not change it: `group_by(["session", "subject_id"])` is the same
+operation.
 The knockout animals, `mouse_03` and `mouse_04`, fire less, as the generator intended.
 
 The grouped stream has one data column, `rate_hz`, and that is exactly the parameter of
@@ -195,6 +203,9 @@ and `group_by` cannot use those.
 - You can only group by tag columns.
 - `group_by` keeps only the tags you group by; the other tags are dropped. `batch` keeps
   every tag, as a list.
+- The members of a group are ordered by the dropped tags in name order, or by the tags you
+  name in `member_order`. They are never ordered by a data value. Groups come out sorted by
+  their keys in name order.
 
 ## Exercises
 
