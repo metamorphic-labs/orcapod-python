@@ -63,8 +63,8 @@ Do these on `metamorphic-labs` `main` before anything is pushed:
 
    Release dates are UTC days: the release revision records the date of the local clock,
    so run the script with `TZ=UTC` and check that the date it records equals the date in
-   the `CHANGELOG.md` heading. It appends the release revision to the `golden` history of the current data context's
-   manifest, writes its digest under `releases` in
+   the `CHANGELOG.md` heading. It appends the release revision to the `golden` history of
+   the current data context's manifest, writes its digest under `releases` in
    `src/orcapod/contexts/released_manifests.json`, and at the data context's first release
    sets `released_in` and the `manifest` pin. It computes no hash and refuses a version
    already released. Commit both files with the release pull request; the release is tagged
