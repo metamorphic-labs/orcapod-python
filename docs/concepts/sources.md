@@ -94,8 +94,8 @@ pyspiral keeps the login in its per-user directory (`~/Library/Application Suppo
 on macOS, `~/.config/pyspiral/` on Linux):
 
 ```bash
-pip install "orcapod[spiraldb]"
-spiral login
+uv add "orcapod[spiraldb]"      # or, without uv: pip install "orcapod[spiraldb]"
+uv run spiral login
 ```
 
 Log in before you build a source. Without a saved login, pyspiral starts a sign-in in the

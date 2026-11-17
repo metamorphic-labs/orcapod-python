@@ -4,6 +4,19 @@ This guide walks you through the core workflow in Orcapod: creating a data sourc
 inspecting its stream, applying a transformation with a function pod, and examining
 the results.
 
+## Installing
+
+Install Orcapod with [uv](https://docs.astral.sh/uv/), the recommended way: start a project
+with `uv init` (in a new directory), add Orcapod to it, and run your scripts with `uv run`:
+
+```bash
+uv init
+uv add orcapod
+uv run python my_pipeline.py
+```
+
+In an environment not managed by uv, `pip install orcapod` installs it instead.
+
 ## Creating a source
 
 A **source** is the entry point for data in an Orcapod pipeline. The simplest way to

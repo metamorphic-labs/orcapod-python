@@ -265,8 +265,8 @@ enable_file_hash_caching(db_path=Path("shared/nfs/cache.db"))
 
 ### Using the Postgres backend
 
-Requires `psycopg` (install with `pip install 'orcapod[postgresql]'`) and a reachable
-Postgres server:
+Requires `psycopg` (install with `uv add "orcapod[postgresql]"`, or
+`pip install "orcapod[postgresql]"`) and a reachable Postgres server:
 
 <!-- docs-test: skip -->
 ```python
