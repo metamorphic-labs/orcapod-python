@@ -1621,6 +1621,12 @@ class DeltaTableDatabase:
             _path_prefix=_path_prefix,
         )
 
+    @property
+    def keeps_field_metadata(self) -> bool:
+        """Whether this database keeps Arrow field metadata: it does, on every write
+        path including schema evolution (ITL-1019)."""
+        return True
+
     def flush(self) -> None:
         """Flush all pending batches.
 
