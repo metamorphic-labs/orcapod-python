@@ -837,8 +837,16 @@ class _FunctionPodBase(TraceableBase):
         # at least one data column. ``process`` then raises its own error.
         if dropped and kept:
             # A missing column or a type mismatch is raised before a step is added.
+            # A fall-through pod checks its fall-through tags too, which its
+            # validation requires (CodeRabbit on PR #342); a plain pod checks the
+            # parameters only, its data-tags being added by its fall-through variant.
+            checked = (
+                kept
+                if isinstance(self, FallThroughPod)
+                else [name for name in kept if name in parameters]
+            )
             self._validate_input_schema(
-                Schema({name: data_schema[name] for name in kept if name in parameters})
+                Schema({name: data_schema[name] for name in checked})
             )
             from orcapod.core.operators import SelectDataColumns
 
@@ -1108,6 +1116,18 @@ def function_zero_row_table(
     # tags with its source info in the data, as rows lay it out (ITL-1023).
     if fall_through := [name for name in tag_keys if name in data.column_names]:
         data = data.drop_columns(fall_through)
+        # Its source info is the input's, of the input's type (a list after
+        # ``Batch``), not a function output's scalar token (CodeRabbit on PR #342).
+        for name in fall_through:
+            source = f"{constants.SOURCE_PREFIX}{name}"
+            if source in data.column_names and source in input_table.column_names:
+                index = data.column_names.index(source)
+                field = data.schema.field(source)
+                data = data.set_column(
+                    index,
+                    field.with_type(input_table.schema.field(source).type),
+                    input_table.column(source),
+                )
     return arrow_utils.hstack_tables(tags, data)
 
 

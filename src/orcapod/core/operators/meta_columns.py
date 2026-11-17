@@ -17,7 +17,7 @@ from collections.abc import Collection, Sequence
 from typing import TYPE_CHECKING
 
 from orcapod.channels import WritableChannel
-from orcapod.core.data_tags import stream_data_tags
+from orcapod.core.data_tags import stream_data_tags, with_data_tags_first
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
 from orcapod.system_constants import constants
@@ -134,7 +134,9 @@ class WithoutMetaWriter:
     """An output channel writer that sends every row without its Data meta columns.
 
     The async counterpart of ``without_input_meta``: an operator whose
-    ``async_execute`` passes rows on wraps its output in it.
+    ``async_execute`` passes rows on wraps its output in it. It also puts each
+    row's data-tags first among its data columns, in tag order, the order of the
+    operator's sync result (ITL-1205); a row without data-tags passes unchanged.
     """
 
     def __init__(self, output: WritableChannel[tuple[TagProtocol, DataProtocol]]):
@@ -143,7 +145,9 @@ class WithoutMetaWriter:
     async def send(self, item: tuple[TagProtocol, DataProtocol]) -> None:
         """Send ``item`` without its Data meta columns."""
         tag, data = item
-        await self._output.send((tag, without_data_meta(data)))
+        await self._output.send(
+            (tag, with_data_tags_first(tag, without_data_meta(data)))
+        )
 
     async def close(self) -> None:
         """Close the wrapped writer."""

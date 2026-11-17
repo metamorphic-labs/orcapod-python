@@ -710,12 +710,9 @@ class Datagram(ContentIdentifiableBase):
                 raise ValueError(f"Columns not found: {missing}")
             schema = self._ensure_python_schema()
             new_d = self.copy(include_cache=False)
-            new_d._data_dict = {
-                k: v for k, v in self._data_dict.items() if k in column_names
-            }
-            new_d._data_python_schema = Schema(
-                {k: v for k, v in schema.items() if k in column_names}
-            )
+            # In the order given, as documented and as the Arrow branch does.
+            new_d._data_dict = {k: self._data_dict[k] for k in column_names}
+            new_d._data_python_schema = Schema({k: schema[k] for k in column_names})
             new_d._data_arrow_schema = None
             return new_d
 

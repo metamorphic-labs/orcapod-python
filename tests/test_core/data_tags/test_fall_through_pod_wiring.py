@@ -90,3 +90,18 @@ def test_a_fall_through_pod_refuses_an_input_without_its_data_tags() -> None:
     fall_through = FallThroughPod(_plain(half), ["t"])
     with pytest.raises(ValueError, match="fall through"):
         fall_through(_source(tag_only_columns=True))
+
+
+def test_a_fall_through_pod_called_directly_drops_an_extra_column() -> None:
+    """An extra data column is dropped as for the plain pod's call (CodeRabbit, #342)."""
+
+    @op.function_pod(output_keys=["half"])
+    def half(amp: float) -> float:
+        return amp / 2
+
+    rows = [{"t": 10, "amp": 0.5, "noise": 1.0}, {"t": 20, "amp": 0.25, "noise": 2.0}]
+    source = op.sources.DictSource(rows, tag_columns=["t"], source_id="noisy")
+    fall_through = FallThroughPod(_plain(half), ["t"])
+    out = fall_through(source)
+    assert out.keys() == (("t",), ("t", "half"))
+    assert out.content_hash() == half.pod(source).content_hash()

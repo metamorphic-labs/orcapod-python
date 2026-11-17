@@ -40,6 +40,8 @@ from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
     import pyarrow as pa
+
+    from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
 else:
     pa = LazyModule("pyarrow")
 
@@ -81,6 +83,28 @@ def materialization_diagnostic_off() -> Iterator[None]:
         yield
     finally:
         _diagnostic_off.reset(token)
+
+
+def with_data_tags_first(tag: TagProtocol, data: DataProtocol) -> DataProtocol:
+    """Return a row's ``data`` with its data-tags first, in tag order (ITL-1205).
+
+    The row form of ``data_tags_first``: an operator's async path that passes rows
+    on gives each row the order its sync path gives. A row without data-tags, or one
+    already in that order, is returned as it is.
+
+    Args:
+        tag: The row's tag; only its names, in order, are read.
+        data: The row's data.
+
+    Returns:
+        ``data`` itself, or a copy with the same columns, values and source info, its
+        data-tags first.
+    """
+    names = tuple(data.keys())
+    tags = tuple(name for name in tag.keys() if name in names)
+    if names[: len(tags)] == tags:
+        return data
+    return data.select(*tags, *(name for name in names if name not in tags))
 
 
 def data_tags_first(tag_schema: Mapping[str, Any], data_schema: Schema) -> Schema:  # pyright: ignore[reportExplicitAny]  # only the names of the tag schema are read

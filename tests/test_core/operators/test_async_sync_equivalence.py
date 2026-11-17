@@ -160,6 +160,20 @@ def source_mid(with_data_tags: bool = True) -> ArrowTableSource:
     )
 
 
+def source_two(with_data_tags: bool = True) -> ArrowTableSource:
+    """Tags ``k`` and ``u``, each unique per row, and data ``a`` (ITL-1205)."""
+    return _source(
+        {
+            "k": pa.array([1, 2, 3], pa.int16()),
+            "u": pa.array([7, 8, 9], pa.int32()),
+            "a": pa.array([1.5, 2.5, 3.5], pa.float32()),
+        },
+        tags=("k", "u"),
+        source_id="two",
+        with_data_tags=with_data_tags,
+    )
+
+
 def source_b(nested: bool = True, with_data_tags: bool = False) -> ArrowTableSource:
     """Tag ``k: int16``; scalar data columns, plus list columns when ``nested``."""
     columns: dict[str, Column] = {
@@ -671,6 +685,40 @@ CASES = [
     ),
     Case("ref_mid_tag_by", lambda: TagBy("y"), lambda: (source_mid(),)),
     Case("ref_mid_drop_nulls", lambda: DropNulls(), lambda: (source_mid(),)),
+    # A data-tag that loses its tag role moves behind the remaining data-tags:
+    # the async path puts every row's data-tags first, as the sync path does
+    # (ITL-1205; CodeRabbit on PR #342).
+    Case(
+        "ref_drop_first_tag_columns",
+        lambda: DropTagColumns(["k"]),
+        lambda: (source_two(),),
+    ),
+    Case(
+        "ref_select_second_tag_columns",
+        lambda: SelectTagColumns(["u"]),
+        lambda: (source_two(),),
+    ),
+    Case(
+        "ref_map_tags_drop_unmapped",
+        lambda: MapTags({"u": "uu"}, drop_unmapped=True),
+        lambda: (source_two(),),
+    ),
+    Case(
+        "ref_map_data_first",
+        lambda: MapData({"k": "kk"}),
+        lambda: (source_two(),),
+    ),
+    # Downstream of a demoted data-tag: a join and a group on the remaining one.
+    Case(
+        "ref_join_after_demoted",
+        Join,
+        lambda: (DropTagColumns(["u"])(source_two()), source_b(with_data_tags=True)),
+    ),
+    Case(
+        "ref_group_by_after_demoted",
+        lambda: GroupBy(["u"]),
+        lambda: (DropTagColumns(["k"])(source_two()),),
+    ),
     # AddTags keeps the input's data-tags; the new tags are plain (ITL-1196).
     Case(
         "ref_add_tags",

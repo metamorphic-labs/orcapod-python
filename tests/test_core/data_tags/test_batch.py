@@ -16,6 +16,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+import pyarrow as pa
 import pytest
 
 import orcapod as op
@@ -285,3 +286,24 @@ def test_a_job_with_batch_runs_and_a_second_run_computes_nothing(
         1,
         9,
     ]
+
+
+def test_a_fall_through_list_keeps_its_source_info_type_with_no_rows() -> None:
+    """With no rows, a batched data-tag's source info is still a list (CodeRabbit, #342)."""
+
+    @op.function_pod(output_keys=["total"])
+    def total(amp: list[float]) -> float:
+        return sum(amp)
+
+    def source_info_type(rows_kept: bool) -> pa.DataType:
+        source = op.sources.DictSource(
+            [{"t": 10, "amp": 0.5}, {"t": 20, "amp": 0.25}],
+            tag_columns=["t"],
+            source_id="s",
+        )
+        stream = source if rows_kept else PolarsFilter(constraints={"t": 999})(source)
+        out = total.pod(Batch(batch_size=2)(stream))
+        return out.as_table(columns={"source": True}).schema.field("_source_t").type
+
+    assert source_info_type(False) == source_info_type(True)
+    assert pa.types.is_large_list(source_info_type(False))
