@@ -96,7 +96,12 @@ class SelectTagColumns(UnaryOperator):
             return stream
 
         table = stream.as_table(
-            columns={"source": True, "system_tags": True, "sort_by_tags": False}
+            columns={
+                "source": True,
+                "system_tags": True,
+                "context": True,
+                "sort_by_tags": False,
+            }
         )
 
         # A dropped data-tag leaves its column as plain data (specification
@@ -110,6 +115,7 @@ class SelectTagColumns(UnaryOperator):
             modified_table,
             tag_columns=new_tag_columns,
             data_tags=[c for c in data_tags if c in new_tag_columns],
+            data_context=stream.data_context_key,
         )
 
     def validate_unary_input(self, stream: StreamProtocol) -> None:
@@ -227,7 +233,12 @@ class SelectDataColumns(UnaryOperator):
             return stream
 
         table = stream.as_table(
-            columns={"source": True, "system_tags": True, "sort_by_tags": False},
+            columns={
+                "source": True,
+                "system_tags": True,
+                "context": True,
+                "sort_by_tags": False,
+            },
         )
         # make sure to drop associated source fields
         associated_source_fields = [
@@ -245,6 +256,7 @@ class SelectDataColumns(UnaryOperator):
             modified_table,
             tag_columns=tag_columns,
             data_tags=[c for c in data_tags if c not in data_columns_to_drop],
+            data_context=stream.data_context_key,
         )
 
     def validate_unary_input(self, stream: StreamProtocol) -> None:
@@ -378,7 +390,12 @@ class DropTagColumns(UnaryOperator):
             return stream
 
         table = stream.as_table(
-            columns={"source": True, "system_tags": True, "sort_by_tags": False}
+            columns={
+                "source": True,
+                "system_tags": True,
+                "context": True,
+                "sort_by_tags": False,
+            }
         )
 
         # A dropped data-tag leaves its column as plain data (specification
@@ -392,6 +409,7 @@ class DropTagColumns(UnaryOperator):
             modified_table,
             tag_columns=new_tag_columns,
             data_tags=[c for c in data_tags if c in new_tag_columns],
+            data_context=stream.data_context_key,
         )
 
     def validate_unary_input(self, stream: StreamProtocol) -> None:
@@ -516,7 +534,12 @@ class DropDataColumns(UnaryOperator):
             f"{constants.SOURCE_PREFIX}{c}" for c in columns_to_drop
         ]
         table = stream.as_table(
-            columns={"source": True, "system_tags": True, "sort_by_tags": False}
+            columns={
+                "source": True,
+                "system_tags": True,
+                "context": True,
+                "sort_by_tags": False,
+            }
         )
         # A data-tag whose data column is removed keeps its column as a plain
         # tag with the same values (specification section 7.2).
@@ -530,6 +553,7 @@ class DropDataColumns(UnaryOperator):
             modified_table,
             tag_columns=tag_columns,
             data_tags=[c for c in data_tags if c not in columns_to_drop],
+            data_context=stream.data_context_key,
         )
 
     def validate_unary_input(self, stream: StreamProtocol) -> None:
@@ -748,7 +772,12 @@ class _TagAndDataColumnsOperator(UnaryOperator, ABC):
         tag_columns, data_columns = self._user_columns(stream)
         tags_removed, data_removed = self._removals(tag_columns, data_columns)
         table = stream.as_table(
-            columns={"source": True, "system_tags": True, "sort_by_tags": False}
+            columns={
+                "source": True,
+                "system_tags": True,
+                "context": True,
+                "sort_by_tags": False,
+            }
         )
         removed = {
             *tags_removed,

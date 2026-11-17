@@ -2531,6 +2531,62 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
 
         return output
 
+    def _empty_data_cache_hit(
+        self, tag: TagProtocol, data: EmptyData, base_entry_id: bytes
+    ) -> tuple[TagProtocol, DataProtocol]:
+        """Return the stored result for an ``EmptyData`` input, or raise.
+
+        An ``EmptyData`` input stands for an upstream ephemeral result that is gone:
+        no computation can run, only the result cache answers. A node whose pod lets
+        data-tags fall through (ITL-1023) refuses the hit: the result store holds
+        the function's plain output, and the data columns of the data-tags come
+        from the input row, which is gone with their source info. Returning the
+        plain output would give a row without the data columns the node declares
+        (CodeRabbit on PR #342); the refusal is the same error as a miss.
+
+        Args:
+            tag: The input row's tag.
+            data: The ``EmptyData`` input.
+            base_entry_id: The row's base entry id.
+
+        Returns:
+            The tag and the stored result.
+
+        Raises:
+            EphemeralResultMissingError: On a cache miss, and on every input of a
+                node that lets data-tags fall through.
+        """
+        if passed := fall_through_tags(self._function_pod):
+            raise EphemeralResultMissingError(
+                tag=tag,
+                cached_content_hash=data.cached_content_hash,
+                node_identity_path=self.node_identity_path,
+                message=(
+                    "EmptyData input for a node that lets the data-tags "
+                    f"{list(passed)} fall through: their data columns come from the "
+                    "input row, which is gone with the ephemeral upstream result, "
+                    "so the stored result alone cannot give the node's output. "
+                    "Recompute the upstream node."
+                ),
+            )
+        if self._cached_function_pod is not None:
+            cached = self._cached_function_pod.lookup_cached_data(data)
+            if cached is not None:
+                self._cached_output_datas[base_entry_id] = (tag, cached)
+                self._cached_output_table = None
+                self._cached_content_hash_column = None
+                return tag, cached
+        raise EphemeralResultMissingError(
+            tag=tag,
+            cached_content_hash=data.cached_content_hash,
+            node_identity_path=self.node_identity_path,
+            message=(
+                "Downstream cache miss for EmptyData input — "
+                "ephemeral result is gone and downstream has not yet computed "
+                "a result for this input hash."
+            ),
+        )
+
     def _process_data_internal(
         self,
         tag: TagProtocol,
@@ -2584,23 +2640,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         if base_entry_id is None:
             base_entry_id = self.compute_base_entry_id(tag, data)
         if isinstance(data, EmptyData):
-            if self._cached_function_pod is not None:
-                cached = self._cached_function_pod.lookup_cached_data(data)
-                if cached is not None:
-                    self._cached_output_datas[base_entry_id] = (tag, cached)
-                    self._cached_output_table = None
-                    self._cached_content_hash_column = None
-                    return tag, cached
-            raise EphemeralResultMissingError(
-                tag=tag,
-                cached_content_hash=data.cached_content_hash,
-                node_identity_path=self.node_identity_path,
-                message=(
-                    "Downstream cache miss for EmptyData input — "
-                    "ephemeral result is gone and downstream has not yet computed "
-                    "a result for this input hash."
-                ),
-            )
+            return self._empty_data_cache_hit(tag, data, base_entry_id)
 
         ephemeral_result = bool(self._node_config.is_result_ephemeral)
 
@@ -2738,23 +2778,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         if base_entry_id is None:
             base_entry_id = self.compute_base_entry_id(tag, data)
         if isinstance(data, EmptyData):
-            if self._cached_function_pod is not None:
-                cached = self._cached_function_pod.lookup_cached_data(data)
-                if cached is not None:
-                    self._cached_output_datas[base_entry_id] = (tag, cached)
-                    self._cached_output_table = None
-                    self._cached_content_hash_column = None
-                    return tag, cached
-            raise EphemeralResultMissingError(
-                tag=tag,
-                cached_content_hash=data.cached_content_hash,
-                node_identity_path=self.node_identity_path,
-                message=(
-                    "Downstream cache miss for EmptyData input — "
-                    "ephemeral result is gone and downstream has not yet computed "
-                    "a result for this input hash."
-                ),
-            )
+            return self._empty_data_cache_hit(tag, data, base_entry_id)
 
         ephemeral_result = bool(self._node_config.is_result_ephemeral)
 

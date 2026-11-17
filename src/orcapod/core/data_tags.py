@@ -114,7 +114,7 @@ def data_tags_first(tag_schema: Mapping[str, Any], data_schema: Schema) -> Schem
     its data columns, in tag order, then the other data columns in their own order.
     A table built from rows lays a data-tag out among the tags, so this is the order
     of every row; ``ArrowTableStream`` keys and every operator's prediction follow it.
-    No hash depends on the order of a schema's fields.
+    No schema, row or table hash depends on the order of a stream's columns.
 
     Args:
         tag_schema: The tag schema; only its names, in order, are read.

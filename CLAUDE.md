@@ -985,7 +985,9 @@ data. The rules:
   its other data columns in table order. A table built from rows lays a data-tag out among
   the tags, so this is every row's order, on every path. `ArrowTableStream` applies it to
   its keys (its table keeps its column order) and every operator's prediction applies it
-  through `data_tags.data_tags_first`. No hash depends on the order of columns.
+  through `data_tags.data_tags_first`. No hash of a stream, schema, row or table depends on
+  the order of a stream's columns, so the order moves none; a library value's own hash (a
+  polars or pandas DataFrame in a cell) does include that value's column order.
 - **Type strictness** (developer, November 10, 2026): Orcapod is type strict. It never
   expands or converts a type implicitly; the only exception is normalization to large variants.
   Inputs that disagree on a column's type are an error naming the column and both types, on
