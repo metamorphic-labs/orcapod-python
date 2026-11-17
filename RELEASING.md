@@ -58,11 +58,13 @@ Do these on `metamorphic-labs` `main` before anything is pushed:
    last change (see *Golden hash values* below):
 
    ```
-   uv run python tests/test_hashing/golden/generate_golden_hashes.py --release X.Y.Z
+   TZ=UTC uv run python tests/test_hashing/golden/generate_golden_hashes.py --release X.Y.Z
    ```
 
-   It appends the release revision to the `golden` history of the current data context's
-   manifest, writes its digest under `releases` in
+   Release dates are UTC days: the release revision records the date of the local clock,
+   so run the script with `TZ=UTC` and check that the date it records equals the date in
+   the `CHANGELOG.md` heading. It appends the release revision to the `golden` history of
+   the current data context's manifest, writes its digest under `releases` in
    `src/orcapod/contexts/released_manifests.json`, and at the data context's first release
    sets `released_in` and the `manifest` pin. It computes no hash and refuses a version
    already released. Commit both files with the release pull request; the release is tagged
@@ -81,7 +83,7 @@ Do these on `metamorphic-labs` `main` before anything is pushed:
    after it is deleted.
 
 Per-release checklists live in `docs/dev/plans/` (for example
-`2026-11-09-v0.2-release-checklist.md`).
+`2026-11-09-v0.2-release-checklist.md`, `2026-11-15-v0.3-release-checklist.md`).
 
 ## Pre-push checklist
 
@@ -144,6 +146,8 @@ workflow until the tag is deleted.
    **[Actions → Release → Run workflow](https://github.com/nauticalab/orcapod-python/actions/workflows/release.yml)**
    in the GitHub UI, enter the version (e.g. `0.3.0`), optionally enter a branch name
    (defaults to `main`), and click **Run workflow**. A leading `v` is stripped automatically.
+   Leave the `skip_tests` checkbox (labelled *Skip the test jobs …*) unchecked; it is an
+   exception, described in *Skipping the release tests* below.
 
 3. **CI takes over** — the workflow runs the following jobs automatically:
 
@@ -153,7 +157,7 @@ workflow until the tag is deleted.
                                                  └─ linear-sync ──────────────────────┴─ linear-complete
    ```
 
-   - Pre-flight: branch validation, then tests on Python 3.11, 3.12 and 3.13 and license check (parallel after validation)
+   - Pre-flight: branch validation, then tests on Python 3.11, 3.12 and 3.13 and license check (parallel after validation); the tests are skipped only with `skip_tests`
    - Build: normalises version (strips a leading `v`), creates the local tag, builds wheel + sdist with `uv build`, aborts if the tag already exists on origin, pushes the tag, uploads `dist/` as an artifact
    - TestPyPI: in the `testpypi` environment, `uv publish --publish-url https://test.pypi.org/legacy/ dist/*` with an OIDC token (`id-token: write`) — a staging upload
    - PyPI: in the `pypi` environment, after TestPyPI succeeds, `uv publish dist/*` with an OIDC token, then creates the GitHub Release for the tag with generated release notes and the dist files attached
@@ -167,6 +171,38 @@ workflow until the tag is deleted.
    ```
 
    `metamorphic-labs` then holds the same tag on the same commit.
+
+## Skipping the release tests
+
+The Release workflow has a boolean input, `skip_tests` (a checkbox in the Run workflow form,
+labelled *Skip the test jobs …*, default unchecked; developer, November 16, 2026, ITL-1188).
+Checked, the `test` jobs (Python 3.11, 3.12 and 3.13) do not run; everything else does: branch validation,
+the license check, the build with its golden checks, the tag, TestPyPI, PyPI and the GitHub
+Release. Unchecked, the workflow is exactly what it was before the input existed.
+
+This is an exception, for a pinch: the release tests take a long time and repeat what the
+development repository already ran. Use it only when all of these hold:
+
+- The exact commit being released (the tip of the **Branch** input on `nauticalab`) has
+  green required CI on `metamorphic-labs/orcapod-python`: the `Run Tests` workflow on that
+  commit passed on Python 3.11, 3.12 and 3.13. Check the commit id, not the branch name.
+- The pre-push checklist above holds, the full suite included.
+- The developer chose it for this run. An agent never runs the Release workflow, with or
+  without the option.
+
+What the workflow guarantees:
+
+- Only the input skips the tests. A test job that failed or was cancelled still stops the
+  build and everything after it, as do a failed validation, license check or build.
+- A run with the tests skipped says so: the build job writes a `Tests skipped` warning
+  annotation and a run summary section naming who started the run (`github.actor`).
+
+Every job after the tests carries its own condition. A GitHub job whose need was skipped is
+itself skipped, and so is every job after it, unless its `if` names a status function; so
+`build`, `publish-testpypi`, `publish-pypi`, `linear-sync` and `linear-complete` each check
+the results of the jobs they need (`!cancelled() && needs.<job>.result == 'success'`), and
+`build` accepts a skipped `test` only when `skip_tests` is set. A new job after the tests
+needs the same.
 
 ## One-time setup (only the developer can do this)
 
@@ -188,6 +224,46 @@ environments:
    check has a fixed anchor (ITL-946). Done on 2026-11-15.
 5. Optional: set `CODECOV_TOKEN` there. The Codecov, SpiralDB and Linear jobs run only on
    `metamorphic-labs` and are skipped on `nauticalab`.
+
+### SpiralDB integration job
+
+The `spiral-integration` job of `Run Tests` runs on every push to `main` and by hand
+(`workflow_dispatch`) on `metamorphic-labs/orcapod-python`, never on pull requests. It runs
+beside the test jobs, not after them, so its result comes in minutes. It authenticates to SpiralDB with a workload private key (ITL-1185): pyspiral reads
+`SPIRAL_CLIENT_ID` (the workload id) and `SPIRAL_PRIVATE_KEY` (the private key as a JSON Web
+Key) from the environment, signs a client assertion with the key, and requests a token from
+`https://auth.spiraldb.com/oauth/token` with the `client_credentials` grant. It requests no
+GitHub OIDC token: pyspiral's workload identity path posts a token exchange that the server
+rejects. Client secrets are not used: the server no longer issues them. The job fails at its
+first step, naming each missing setting, when one of the three below is not set or the key
+is not a private JWK naming its `kid`. No agent creates, reads or sets any of them.
+
+On `metamorphic-labs/orcapod-python` and in SpiralDB, the developer sets:
+
+1. The SpiralDB workload the job runs as (today `orcapod-gha`) holds the **editor** role on
+   the test project ("Orcapod testing"): the tests create, write, read and drop tables there.
+2. A key pair registered for that workload. pyspiral's own CLI has no command for this; use
+   Studio or the newer SpiralDB CLI, in an environment of its own and never installed beside
+   pyspiral (both provide a top-level `spiral` module):
+   `spiral workloads keys add <workload id> --kid <key id> --output -` prints the private key
+   as a JWK that names its `kid`. A PEM key is not accepted.
+3. Repository secrets (`Settings → Secrets and variables → Actions → Secrets`):
+   `SPIRAL_CLIENT_ID`, the workload id (`work_...`), and `SPIRAL_PRIVATE_KEY`, the private JWK
+   as one line of JSON. Keep the key file out of the repository and delete it once the secret
+   is set.
+4. Repository variable (`… → Variables`): `SPIRAL_PROJECT_ID`, the id of the test project.
+
+The server URL is fixed in the workflow (`https://api.spiraldb.dev`); the repository variable
+`SPIRAL_SERVER_URL` and the secret `SPIRAL_WORKLOAD_ID` are not read and can be deleted.
+
+To rotate the key: add a new key to the workload with a new `kid`, replace the
+`SPIRAL_PRIVATE_KEY` secret with the new JWK, run `Run Tests` by hand on `main` and check that
+`spiral-integration` passes, then remove the old key (`spiral workloads keys rm`). A workload
+can hold several keys, so the job keeps working during the switch.
+
+If the key may have been exposed (for example printed in a log), remove it from the workload
+first (`spiral workloads keys rm`), so it stops signing in at once, then add a new key and
+replace the secret as above. The job fails in between; that is the price of containment.
 
 ## Pre-releases
 
@@ -217,8 +293,8 @@ workflow.
 4. Set **Branch** to `hotfix/0.1.x`
 5. Click **Run workflow**
 
-The workflow will confirm the branch exists, run tests against it, create the `v0.1.1`
-tag at its tip, and publish to TestPyPI and PyPI — identical to a normal release.
+The workflow will confirm the branch exists, run tests against it (unless `skip_tests` is
+set; see *Skipping the release tests*), create the `v0.1.1` tag at its tip, and publish to TestPyPI and PyPI — identical to a normal release.
 
 ## If a Run Fails Part-Way
 

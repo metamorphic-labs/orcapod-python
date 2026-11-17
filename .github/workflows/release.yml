@@ -12,6 +12,13 @@ on:
         required: false
         type: string
         default: main
+      skip_tests:
+        description: >-
+          Skip the test jobs (an exception: only when this exact commit has green required CI
+          on metamorphic-labs; see RELEASING.md). Validation, license check and build still run.
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   validate-branch:
@@ -34,6 +41,9 @@ jobs:
   test:
     name: Test (Python ${{ matrix.python-version }})
     needs: [validate-branch]
+    # No status function here, so GitHub prepends success(): the tests run only after a
+    # successful validation, and not at all when skip_tests is set (ITL-1188).
+    if: ${{ !inputs.skip_tests }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -56,7 +66,7 @@ jobs:
         run: uv sync --locked --all-extras --dev --python ${{ matrix.python-version }}
 
       - name: Run tests
-        run: uv run --python ${{ matrix.python-version }} pytest -m "not postgres" --tb=short -q
+        run: uv run --python ${{ matrix.python-version }} pytest -n logical -m "not postgres" --tb=short -q
 
   license-check:
     needs: [validate-branch]
@@ -66,7 +76,23 @@ jobs:
 
   build:
     name: Build distribution
-    needs: [test, license-check]
+    needs: [validate-branch, test, license-check]
+    # A job whose need was skipped is itself skipped unless its `if` names a status
+    # function, and that holds for every later job too, so each job below states its
+    # condition itself (ITL-1188). The build runs only when validation and the license check
+    # succeeded and the tests succeeded, or were skipped because skip_tests was set. A
+    # failed or cancelled test job stops the release in both modes; !cancelled() keeps a
+    # cancelled run from starting it.
+    if: >-
+      ${{
+        !cancelled()
+        && needs.validate-branch.result == 'success'
+        && needs.license-check.result == 'success'
+        && (
+          needs.test.result == 'success'
+          || (needs.test.result == 'skipped' && inputs.skip_tests)
+        )
+      }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -74,6 +100,20 @@ jobs:
     outputs:
       version: ${{ steps.normalize.outputs.version }}
     steps:
+      - name: Report skipped tests
+        if: ${{ inputs.skip_tests }}
+        env:
+          ACTOR: ${{ github.actor }}
+        run: |
+          echo "::warning title=Tests skipped::The release tests were skipped (skip_tests: true, chosen by ${ACTOR})."
+          {
+            echo "### :warning: Tests skipped"
+            echo
+            echo "The release tests (Python 3.11, 3.12, 3.13) did not run in this release:"
+            echo "\`skip_tests\` was set to \`true\` by **${ACTOR}**."
+            echo "Validation, the license check and the build ran as usual."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Normalize version
         id: normalize
         run: |
@@ -131,6 +171,8 @@ jobs:
   publish-testpypi:
     name: Publish → TestPyPI
     needs: build
+    # Explicit, because a skipped test job would otherwise skip this job too (see build).
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:
@@ -154,6 +196,13 @@ jobs:
   publish-pypi:
     name: Publish → PyPI
     needs: [build, publish-testpypi]
+    # Explicit, because a skipped test job would otherwise skip this job too (see build).
+    if: >-
+      ${{
+        !cancelled()
+        && needs.build.result == 'success'
+        && needs.publish-testpypi.result == 'success'
+      }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:
@@ -185,7 +234,13 @@ jobs:
   linear-sync:
     name: Sync Linear release
     needs: build
-    if: github.repository == 'metamorphic-labs/orcapod-python'
+    # Explicit status check, because a skipped test job would otherwise skip this job too.
+    if: >-
+      ${{
+        github.repository == 'metamorphic-labs/orcapod-python'
+        && !cancelled()
+        && needs.build.result == 'success'
+      }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -205,7 +260,15 @@ jobs:
   linear-complete:
     name: Complete Linear release
     needs: [build, publish-pypi, linear-sync]
-    if: github.repository == 'metamorphic-labs/orcapod-python'
+    # Explicit status check, because a skipped test job would otherwise skip this job too.
+    if: >-
+      ${{
+        github.repository == 'metamorphic-labs/orcapod-python'
+        && !cancelled()
+        && needs.build.result == 'success'
+        && needs.publish-pypi.result == 'success'
+        && needs.linear-sync.result == 'success'
+      }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
