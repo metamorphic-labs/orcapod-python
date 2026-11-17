@@ -23,7 +23,7 @@ source = DictSource(
     tag_columns=["trial"],
     source_id="trials",
 )
-for tag, data in scale.pod(source).iter_data():
+for tag, data in scale.pod(source):
     print(tag["trial"], data["scaled"].dtype, data["scaled"].shape)
 # t1 float32 (2, 3)
 ```
@@ -246,7 +246,7 @@ big = np.asfortranarray(np.arange(6, dtype=">f4").reshape(2, 3))
 kept = DictSource(
     data=[{"trial": "t1", "signal": big}], tag_columns=["trial"], source_id="kept"
 )
-for tag, data in kept.iter_data():
+for tag, data in kept:
     print(data["signal"].dtype.str, data["signal"].flags.f_contiguous)
 # >f4 True
 ```
@@ -299,7 +299,7 @@ tensors = DictSource(
     tag_columns=["trial"],
     source_id="tensor_trials",
 )
-for tag, data in scale_tensor.pod(tensors).iter_data():
+for tag, data in scale_tensor.pod(tensors):
     print(tag["trial"], data["scaled"].dtype, tuple(data["scaled"].shape))
 # t1 torch.float32 (2, 3)
 ```

@@ -103,11 +103,11 @@ What a source gives you is a **stream**: an ordered, read-only sequence of rows,
 pair of (tag, data). Every step you add later takes streams in and gives a stream back, so
 the four ways of looking at a stream shown in this part work at every stage of a pipeline.
 
-You have seen `output_schema()` and `keys()`. To walk through the rows, use `iter_data()`.
-Each row comes as two objects; call `.as_dict()` on either to get a plain dictionary:
+You have seen `output_schema()` and `keys()`. To walk through the rows, loop over the stream
+(the same as calling its `iter_data()` method). Each row comes as two objects; call `.as_dict()` on either to get a plain dictionary:
 
 ```python
-for tag, data in sessions.iter_data():
+for tag, data in sessions:
     print(tag.as_dict(), "->", data.as_dict())
 # {'subject_id': 'mouse_01', 'session': 's1'} -> {'date': datetime.date(2026, 10, 5), 'duration_s': 60.0}
 # {'subject_id': 'mouse_01', 'session': 's2'} -> {'date': datetime.date(2026, 10, 12), 'duration_s': 120.0}
