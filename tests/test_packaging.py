@@ -350,7 +350,8 @@ def inc(x: int) -> int:
 
 job = PipelineJob(name="demo", database=InMemoryArrowDatabase())
 with job:
-    inc.pod(DictSource([{"k": 1, "x": 10}], tag_columns=["k"]), label="rates")
+    units = DictSource([{"k": 1, "x": 10}], tag_columns=["k"], tag_only_columns=True)
+    inc.pod(units, label="rates")
 diagram = job.diagram()
 assert diagram.to_svg().startswith("<svg")
 assert "op-dag" in diagram.to_html()
