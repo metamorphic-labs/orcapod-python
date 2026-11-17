@@ -122,6 +122,13 @@ accent of its own:
   banner and note asides are blue (`#1565c0` light, `#3d8fe8` and `#a8d0ff` dark).
   Every text colour meets WCAG AA against its background.
 
+The home page opens with a hero (Starlight's `splash` template, so it has no sidebar):
+the logo, the name in Lexend Exa, a tagline and three buttons (Get started, Tutorial,
+GitHub). `docs/index.md` stays a plain page; the content build adds the hero as its front
+matter (`HOME_HERO` in `../scripts/docs_site_content.py`), and its buttons are links
+checked like any other. The hero's logo is the header's file: Astro could only resize
+orcapod.org's 3001 x 3001 full logo with `sharp`, which the site does not install.
+
 `src/styles/orcapod.css` holds the colours and fonts (Starlight's `--sl-color-*` and
 `--sl-font` variables).
 

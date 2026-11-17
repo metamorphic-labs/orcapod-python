@@ -23,6 +23,24 @@ and Lexend Exa (bold), bundled from the `@fontsource-variable/asap` and
 November 17, 2026) and served by the site itself. The blue accent
 family (hue about 212) is the site's own.
 
+The home page has a hero (developer request, November 17, 2026): Starlight's `splash`
+template with the logo, the name, the tagline "A Python library for building highly
+reproducible scientific data pipelines." (the first sentence of `docs/index.md`,
+shortened) and three buttons, Get started, Tutorial and GitHub. Choices:
+
+- `splash`, as Starlight's own landing pages: the home page has no sidebar and no table
+  of contents; at phone width it has no menu button, and the buttons, the search and
+  the page's "Next steps" lead on.
+- The image is `iconOutlined.png`, the header's logo, inverted in dark mode as there, and
+  the title beside it is the name in Lexend Exa bold, lower case: together they read as
+  orcapod.org's full logo. The full logo (`orcapodlogofull.png`, 3001 x 3001, 203 KB)
+  would repeat the name under the title, and Astro resizes images only with `sharp`,
+  which the site does not install (libvips is LGPL-3.0-or-later), so it would be served
+  at full size. Astro's passthrough service writes the hero's copy of the 80 KB icon at
+  a URL of its own, so the home page loads it twice (160 KB).
+- `docs/index.md` is unchanged: `scripts/docs_site_content.py` writes the hero into the
+  generated page's front matter (`HOME_HERO`), and resolves its buttons like any link.
+
 | | Light | Dark |
 |---|---|---|
 | Background | `#fcfafc` | `#0b0f16` |
@@ -42,7 +60,10 @@ Taken from a local `pnpm build`, served statically, with headless Chrome at 1280
 (colour scheme set through the DevTools protocol, after `document.fonts.ready`), scaled to
 960 x 675. They show the bundled brand fonts.
 
-- `home-light.png`, `home-dark.png`: header, banner, sidebar, a code block.
+- `home-light.png`, `home-dark.png`: the home page before the hero: header, banner,
+  sidebar, a code block.
+- `home-hero-light.png`, `home-hero-dark.png`: the home page with the hero, 1280 wide;
+  `home-hero-phone-light.png`, `home-hero-phone-dark.png`: at 390 x 844 (a phone).
 - `concept-function-pods-light.png`, `concept-function-pods-dark.png`: code, a caution and
   a note aside.
 - `in-development-notice-light.png`, `in-development-notice-dark.png`: the "In

@@ -73,3 +73,16 @@
 :root:not([data-theme='light']) .site-title img {
 	filter: invert(1);
 }
+
+/* The home page's hero (HOME_HERO in scripts/docs_site_content.py): the title is the name,
+ * set as orcapod.org's wordmark (Lexend Exa bold, lower case); the logo is the header's,
+ * inverted in dark mode in the same way. */
+.hero h1 {
+	font-family: var(--orcapod-font-title), var(--__sl-font);
+	font-weight: 700;
+	text-transform: lowercase;
+}
+
+:root:not([data-theme='light']) .hero > img {
+	filter: invert(1);
+}

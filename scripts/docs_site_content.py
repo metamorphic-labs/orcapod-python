@@ -19,6 +19,11 @@ The conversion is mechanical and deterministic. For each published page:
   ``docs/`` (``workshop_data.py``) copies the file to the site's static files.
 - The ``<!-- docs-test: skip -->`` markers of the sample tests are removed.
 
+The home page (``docs/index.md``) also gets the site's hero (``HOME_HERO``): Starlight's
+``splash`` template with the logo, a tagline and buttons, written as its front matter.
+``docs/index.md`` itself stays a plain Markdown page. The hero's links are resolved like
+the page's own, so a button to a page that is not published fails the build.
+
 A link to a page or file that does not exist, or to a page that is not published, is an
 error: the build fails, as ``mkdocs build --strict`` did. The API pages
 (``docs/api/*.md``) are converted the same way, after ``docs_site_api.py`` has replaced
@@ -189,6 +194,62 @@ class Page:
 
     path: str
     text: str
+
+
+@dataclass(frozen=True)
+class HeroAction:
+    """A button of the home page's hero.
+
+    Attributes:
+        text: The button's label.
+        target: A page, as a link from the home page (``getting-started.md``), or an
+            external URL.
+        variant: Starlight's button style: ``primary``, ``secondary`` or ``minimal``.
+        icon: The name of a Starlight icon shown beside the label, if any.
+    """
+
+    text: str
+    target: str
+    variant: str
+    icon: str | None = None
+
+
+@dataclass(frozen=True)
+class Hero:
+    """The home page's hero (Starlight's ``hero`` front matter, ``splash`` template).
+
+    The title is the page's title.
+
+    Attributes:
+        tagline: The line below the title.
+        image: The image shown beside the title (a file under ``site/src/assets``).
+        actions: The buttons, in order.
+    """
+
+    tagline: str
+    image: Path
+    actions: tuple[HeroAction, ...]
+
+
+# The home page and its hero. The image is the header's logo (orcapod.org's
+# iconOutlined.png), so the browser loads it once; the title beside it is the name, which
+# the theme sets as orcapod.org's wordmark (Lexend Exa, lower case). The tagline is the
+# first sentence of docs/index.md, shortened.
+HOME_PAGE = "index.md"
+HOME_HERO = Hero(
+    tagline="A Python library for building highly reproducible scientific data pipelines.",
+    image=SITE_DIR / "src" / "assets" / "orcapod-icon.png",
+    actions=(
+        HeroAction("Get started", "getting-started.md", "primary", "right-arrow"),
+        HeroAction("Tutorial", "tutorial/index.md", "secondary"),
+        HeroAction(
+            "GitHub",
+            "https://github.com/metamorphic-labs/orcapod-python",
+            "minimal",
+            "github",
+        ),
+    ),
+)
 
 
 class SiteSettingsError(Exception):
@@ -540,8 +601,57 @@ class LinkResolver:
         return self._base.rstrip("/") + "/" + resolved + sep + fragment
 
 
-def convert_page(page: Page, resolver: LinkResolver) -> str:
+def hero_front_matter(
+    hero: Hero, resolver: LinkResolver, page_dir: Path
+) -> dict[str, object]:
+    """Return the front matter that gives the home page ``hero``.
+
+    Args:
+        hero: The hero.
+        resolver: Resolves the buttons' targets, as links from the home page.
+        page_dir: The directory the home page is written to; the image path is relative
+            to it, as Starlight requires.
+
+    Raises:
+        ContentError: If a button's target is not a published page, or the image does
+            not exist.
+    """
+    if not hero.image.is_file():
+        raise ContentError(f"the hero image {hero.image} does not exist")
+    actions: list[dict[str, str]] = []
+    for action in hero.actions:
+        entry = {
+            "text": action.text,
+            "link": resolver.resolve(HOME_PAGE, action.target),
+            "variant": action.variant,
+        }
+        if action.icon is not None:
+            entry["icon"] = action.icon
+        actions.append(entry)
+    image = Path(os.path.relpath(hero.image, page_dir)).as_posix()
+    return {
+        "template": "splash",
+        "hero": {
+            "tagline": hero.tagline,
+            # Decorative: the title beside it names the project.
+            "image": {"file": image, "alt": ""},
+            "actions": actions,
+        },
+    }
+
+
+def convert_page(
+    page: Page,
+    resolver: LinkResolver,
+    front_matter: Mapping[str, object] | None = None,
+) -> str:
     """Return the Starlight form of ``page``.
+
+    Args:
+        page: The page.
+        resolver: Resolves the page's links.
+        front_matter: Front matter written after the title (each value as JSON, which
+            YAML reads as it is).
 
     Raises:
         ContentError: If the page cannot be converted.
@@ -556,8 +666,12 @@ def convert_page(page: Page, resolver: LinkResolver) -> str:
             line, lambda target: resolver.resolve(page.path, target)
         ),
     )
-    front_matter = ["---", f"title: {json.dumps(title, ensure_ascii=False)}", "---", ""]
-    return "\n".join(front_matter + lines).rstrip("\n") + "\n"
+    header = ["---", f"title: {json.dumps(title, ensure_ascii=False)}"]
+    header += [
+        f"{key}: {json.dumps(value, ensure_ascii=False)}"
+        for key, value in (front_matter or {}).items()
+    ]
+    return "\n".join([*header, "---", "", *lines]).rstrip("\n") + "\n"
 
 
 def build_content(
@@ -567,6 +681,7 @@ def build_content(
     public_dir: Path,
     base: str,
     site_files: Mapping[str, bytes] | None = None,
+    hero: Hero | None = None,
 ) -> None:
     """Write the converted ``pages`` to ``out_dir`` and linked files to ``public_dir``.
 
@@ -581,18 +696,27 @@ def build_content(
         base: The site's base path.
         site_files: The site's own static files (published path to content), written
             into ``public_dir`` beside the linked files.
+        hero: The home page's hero, if it has one.
 
     Raises:
-        ContentError: If a page cannot be converted; its path is in the message.
+        ContentError: If a page cannot be converted (its path is in the message), or
+            ``hero`` is given and there is no home page.
     """
     converted: dict[str, str] = {}
     try:
         resolver = LinkResolver(docs_dir, pages, base)
     except ContentError as exc:
         raise ContentError(f"a page has no title: {exc}") from exc
+    if hero is not None and HOME_PAGE not in {page.path for page in pages}:
+        raise ContentError(f"the hero needs a home page, docs/{HOME_PAGE}")
     for page in pages:
         try:
-            converted[page.path] = convert_page(page, resolver)
+            front_matter = (
+                hero_front_matter(hero, resolver, out_dir.resolve())
+                if hero is not None and page.path == HOME_PAGE
+                else None
+            )
+            converted[page.path] = convert_page(page, resolver, front_matter)
         except ContentError as exc:
             raise ContentError(f"docs/{page.path}: {exc}") from exc
     _sync_tree(out_dir, {path: text.encode() for path, text in converted.items()})
@@ -636,6 +760,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     _ = parser.add_argument("--public", type=Path, default=SITE_DIR / "public")
     _ = parser.add_argument(
         "--base", default="/", help="the site's base path (normalize_site_base)"
+    )
+    _ = parser.add_argument(
+        "--no-hero",
+        action="store_true",
+        help="build the home page as a plain page, without the site's hero",
     )
     _ = parser.add_argument(
         "--site-settings",
@@ -683,7 +812,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         site_files = {
             path: source.read_bytes() for path, source in SITE_PUBLIC_FILES.items()
         }
-        build_content(pages, docs_dir, out_dir, public_dir, base, site_files)
+        hero = None if cast(bool, args.no_hero) else HOME_HERO
+        build_content(pages, docs_dir, out_dir, public_dir, base, site_files, hero)
     except ContentError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

@@ -27,8 +27,9 @@ SCRIPT = REPO_ROOT / "scripts" / "docs_site_content.py"
 
 
 def run_build(
-    docs: Path, tmp_path: Path, base: str = "/"
+    docs: Path, tmp_path: Path, base: str = "/", hero: bool = False
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+    """Run the content build; without ``hero``, the home page is built as a plain page."""
     out = tmp_path / "out"
     public = tmp_path / "public"
     proc = subprocess.run(
@@ -43,6 +44,7 @@ def run_build(
             str(public),
             "--base",
             base,
+            *([] if hero else ["--no-hero"]),
         ],
         capture_output=True,
         text=True,
@@ -69,10 +71,19 @@ def build_ok(tmp_path: Path, pages: dict[str, str], base: str = "/") -> Path:
     return out
 
 
-def build_fails(tmp_path: Path, pages: dict[str, str]) -> str:
-    proc, _, _ = run_build(make_docs(tmp_path, pages), tmp_path)
+def build_fails(tmp_path: Path, pages: dict[str, str], hero: bool = False) -> str:
+    proc, _, _ = run_build(make_docs(tmp_path, pages), tmp_path, hero=hero)
     assert proc.returncode != 0, "the build should have failed"
     return proc.stderr
+
+
+def front_matter(text: str) -> dict[str, object]:
+    """The front matter of a generated page: each line ``key: <JSON>``."""
+    lines = text.split("---\n")[1].splitlines()
+    return {
+        key: json.loads(value)
+        for key, _, value in (line.partition(": ") for line in lines)
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -82,9 +93,11 @@ def build_fails(tmp_path: Path, pages: dict[str, str]) -> str:
 
 def test_the_documentation_builds(tmp_path: Path):
     """Every page converts, every link resolves, every API object and docstring renders."""
-    proc, out, public = run_build(REPO_ROOT / "docs", tmp_path, "/orcapod-python/")
+    proc, out, public = run_build(
+        REPO_ROOT / "docs", tmp_path, "/orcapod-python/", hero=True
+    )
     assert proc.returncode == 0, proc.stderr
-    assert (out / "index.md").is_file()
+    assert front_matter((out / "index.md").read_text())["template"] == "splash"
     assert (out / "api" / "operators.md").is_file()
     assert (public / "tutorial" / "workshop_data.py").is_file()
     assert not (out / "dev").exists()
@@ -94,8 +107,8 @@ def test_the_documentation_builds(tmp_path: Path):
 
 
 def test_the_build_is_deterministic(tmp_path: Path):
-    first, out_a, _ = run_build(REPO_ROOT / "docs", tmp_path / "a")
-    second, out_b, _ = run_build(REPO_ROOT / "docs", tmp_path / "b")
+    first, out_a, _ = run_build(REPO_ROOT / "docs", tmp_path / "a", hero=True)
+    second, out_b, _ = run_build(REPO_ROOT / "docs", tmp_path / "b", hero=True)
     assert first.returncode == 0 and second.returncode == 0
     files_a = sorted(p.relative_to(out_a) for p in out_a.rglob("*.md"))
     files_b = sorted(p.relative_to(out_b) for p in out_b.rglob("*.md"))
@@ -118,6 +131,81 @@ def test_title_line_becomes_front_matter(tmp_path: Path):
 
 def test_a_page_without_a_title_fails(tmp_path: Path):
     assert "title" in build_fails(tmp_path, {"index.md": "Body.\n"})
+
+
+# ---------------------------------------------------------------------------
+# The home page's hero
+# ---------------------------------------------------------------------------
+
+HERO_PAGES = {
+    "index.md": "# Orcapod\n\nBody.\n",
+    "getting-started.md": "# Getting Started\n",
+    "tutorial/index.md": "# Tutorial\n",
+}
+
+
+def test_the_home_page_gets_the_hero(tmp_path: Path):
+    """Splash template, the header's logo, buttons that resolve under the base."""
+    docs = make_docs(tmp_path, HERO_PAGES)
+    proc, out, _ = run_build(docs, tmp_path, "/orcapod-python/", hero=True)
+    assert proc.returncode == 0, proc.stderr
+    home = (out / "index.md").read_text()
+    assert home.endswith("---\n\nBody.\n")
+    meta = front_matter(home)
+    assert meta["title"] == "Orcapod"
+    assert meta["template"] == "splash"
+    hero = cast(dict[str, object], meta["hero"])
+    tagline = (
+        "A Python library for building highly reproducible scientific data pipelines."
+    )
+    assert hero["tagline"] == tagline
+    image = cast(dict[str, str], hero["image"])
+    assert image["alt"] == ""
+    logo = REPO_ROOT / "site" / "src" / "assets" / "orcapod-icon.png"
+    assert (out / image["file"]).resolve() == logo
+    assert hero["actions"] == [
+        {
+            "text": "Get started",
+            "link": "/orcapod-python/getting-started/",
+            "variant": "primary",
+            "icon": "right-arrow",
+        },
+        {
+            "text": "Tutorial",
+            "link": "/orcapod-python/tutorial/",
+            "variant": "secondary",
+        },
+        {
+            "text": "GitHub",
+            "link": "https://github.com/metamorphic-labs/orcapod-python",
+            "variant": "minimal",
+            "icon": "github",
+        },
+    ]
+    # Only the home page has it.
+    assert "hero" not in front_matter((out / "getting-started.md").read_text())
+
+
+def test_the_tagline_is_the_home_page_s_own_wording():
+    """The tagline shortens the first sentence of docs/index.md; it claims nothing new."""
+    home = (REPO_ROOT / "docs" / "index.md").read_text(encoding="utf-8")
+    first = " ".join(home.split())
+    assert (
+        "Python library for building highly reproducible scientific data pipelines."
+        in first
+    )
+
+
+def test_a_hero_button_to_an_unpublished_page_fails(tmp_path: Path):
+    pages = {"index.md": "# Orcapod\n", "tutorial/index.md": "# Tutorial\n"}
+    stderr = build_fails(tmp_path, pages, hero=True)
+    assert "docs/index.md" in stderr
+    assert "getting-started.md is not a published page" in stderr
+
+
+def test_the_hero_needs_a_home_page(tmp_path: Path):
+    pages = {"getting-started.md": "# Getting Started\n", "tutorial/index.md": "# T\n"}
+    assert "the hero needs a home page" in build_fails(tmp_path, pages, hero=True)
 
 
 def test_admonitions_become_asides(tmp_path: Path):
