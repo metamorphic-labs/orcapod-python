@@ -132,6 +132,11 @@ November 16, 2026, ITL-1170; site/README.md has the commands). mkdocs is gone.
   content build without Node. That workflow only builds: publishing to GitHub Pages
   (https://metamorphic-labs.github.io/orcapod-python/) is a separate step the developer
   enables. An agent never adds a deploy job or changes a Pages setting.
+- The site's address is never hard-coded: DOCS_SITE_URL (origin) and DOCS_SITE_BASE
+  (base path) come from the environment, in CI from the repository variables of the same
+  names, with the address above when unset or empty; site_settings in
+  scripts/docs_site_content.py is the one place that reads and checks them. An agent never
+  creates or changes those variables.
 
 ## Linear issue tracking
 

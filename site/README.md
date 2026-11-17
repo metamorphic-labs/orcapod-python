@@ -1,7 +1,8 @@
 # The Orcapod documentation site
 
 An [Astro Starlight](https://starlight.astro.build) site, built from `../docs/` and the
-source code. It is to be published at <https://metamorphic-labs.github.io/orcapod-python/>.
+source code. It is to be published at <https://metamorphic-labs.github.io/orcapod-python/>,
+the default address (see [The site's address](#the-sites-address)).
 
 ## Build and preview
 
@@ -13,7 +14,7 @@ environment (`uv sync --dev` at the repository root).
 cd site
 pnpm install --frozen-lockfile   # once, and after package.json or the lockfile changes
 pnpm build                       # build the site into site/dist
-pnpm preview                     # serve site/dist at http://localhost:4321/orcapod-python/
+pnpm preview                     # serve site/dist at http://localhost:4321<base>, by default /orcapod-python/
 pnpm dev                         # live preview while editing docs/ or the source
 ```
 
@@ -60,10 +61,30 @@ reference when that object is documented.
 Planned with the v0.4 content update (ITL-1170): API pages generated from each public
 module's `__all__` instead of these lists.
 
+## The site's address
+
+The site's origin and base path are taken from two environment variables, each used only
+when it is set and not empty: `DOCS_SITE_URL`, the origin (`https://docs.example.org`; an
+`http` or `https` URL with no path), and `DOCS_SITE_BASE`, the base path (`/`,
+`/orcapod-python/`; a leading and a trailing `/` are added where missing). Unset or empty,
+they are `https://metamorphic-labs.github.io` and `/orcapod-python/`. One place decides
+them, `site_settings` in `../scripts/docs_site_content.py`: `astro.config.mjs` reads them
+with `--site-settings` and passes the base back to the content build, and a value that
+script refuses (a base with a scheme, a query, `..` or whitespace; a site URL that is not
+`http` or `https`, or that has a path) fails the build.
+
+```sh
+DOCS_SITE_URL=https://docs.example.org DOCS_SITE_BASE=/ pnpm build
+```
+
+In CI, the build step takes them from the repository variables of the same names
+(Settings > Secrets and variables > Actions > Variables). A custom domain is
+`DOCS_SITE_URL=https://<domain>` with `DOCS_SITE_BASE=/`.
+
 ## What is committed
 
 `package.json`, `pnpm-lock.yaml` (exact versions), `pnpm-workspace.yaml`,
-`astro.config.mjs` (site settings, base path, sidebar), `src/content.config.ts` and
+`astro.config.mjs` (site settings, sidebar), `src/content.config.ts` and
 this file. `node_modules/`, `dist/`, `.astro/`, `src/content/docs/` and `public/` are
 generated.
 

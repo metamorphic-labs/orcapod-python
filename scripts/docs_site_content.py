@@ -23,9 +23,16 @@ error: the build fails, as ``mkdocs build --strict`` did. The API pages
 (``docs/api/*.md``) are converted the same way, after ``docs_site_api.py`` has replaced
 each ``::: <object path>`` line with the reference generated from the source.
 
+The site's address is decided here too (``site_settings``): the origin
+(``DOCS_SITE_URL``) and the base path (``DOCS_SITE_BASE``) come from the environment,
+with ``https://metamorphic-labs.github.io`` and ``/orcapod-python/`` when a variable is
+unset or empty. ``--site-settings`` prints them as JSON; ``site/astro.config.mjs`` reads
+them from there and passes the base back with ``--base``.
+
 Usage:
 
     uv run python scripts/docs_site_content.py
+    uv run python scripts/docs_site_content.py --site-settings
 
 The Astro build runs it (``site/astro.config.mjs``); there is no need to run it by hand.
 """
@@ -35,18 +42,29 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import os
 import posixpath
 import re
 import sys
 import unicodedata
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
+from urllib.parse import urlsplit
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOCS_DIR = REPO_ROOT / "docs"
 SITE_DIR = REPO_ROOT / "site"
+
+# The site's address: an origin and a base path, each taken from its environment
+# variable when that is set and not empty (a repository variable that is not defined
+# expands to an empty string in a workflow), else the default: the GitHub Pages
+# project page https://metamorphic-labs.github.io/orcapod-python/.
+SITE_URL_VARIABLE = "DOCS_SITE_URL"
+SITE_BASE_VARIABLE = "DOCS_SITE_BASE"
+DEFAULT_SITE_URL = "https://metamorphic-labs.github.io"
+DEFAULT_SITE_BASE = "/orcapod-python/"
 
 # What the site publishes from ``docs/``: these top-level pages, and every ``*.md``
 # page directly inside these folders.
@@ -156,6 +174,105 @@ class Page:
 
     path: str
     text: str
+
+
+class SiteSettingsError(Exception):
+    """The site's origin or base path is not one the site can be built for."""
+
+
+def normalize_site_url(value: str) -> str:
+    """Return the site's origin, ``<scheme>://<host>[:<port>]``, from ``value``.
+
+    Args:
+        value: An ``http`` or ``https`` URL with no path (a trailing ``/`` is allowed),
+            query or fragment, e.g. ``https://docs.example.org``.
+
+    Returns:
+        The origin, without a trailing slash.
+
+    Raises:
+        SiteSettingsError: If ``value`` is not such a URL.
+    """
+    if any(char.isspace() for char in value):
+        raise SiteSettingsError(f"{value!r} contains whitespace")
+    if "?" in value or "#" in value:
+        raise SiteSettingsError(f"{value!r} has a query or a fragment")
+    parts = urlsplit(value)
+    scheme = parts.scheme.lower()
+    if scheme not in ("http", "https") or not parts.netloc:
+        raise SiteSettingsError(f"{value!r} is not an http or https URL with a host")
+    try:
+        _ = parts.port
+    except ValueError as exc:
+        raise SiteSettingsError(f"{value!r} has an invalid port") from exc
+    if parts.username is not None or parts.hostname is None:
+        raise SiteSettingsError(f"{value!r} is not an origin (a host and a port only)")
+    if parts.path not in ("", "/"):
+        raise SiteSettingsError(
+            f"{value!r} has a path; the path goes into {SITE_BASE_VARIABLE}"
+        )
+    return f"{scheme}://{parts.netloc}"
+
+
+def normalize_site_base(value: str) -> str:
+    """Return the site's base path from ``value``, starting and ending with ``/``.
+
+    Args:
+        value: A path, e.g. ``/orcapod-python/``, ``orcapod-python`` or ``/``.
+
+    Returns:
+        The path with a leading and a trailing ``/`` added where missing.
+
+    Raises:
+        SiteSettingsError: If ``value`` holds whitespace, a scheme, a query, a fragment,
+            a backslash, an empty segment (``//``), or a ``.`` or ``..`` segment.
+    """
+    if any(char.isspace() for char in value):
+        raise SiteSettingsError(f"{value!r} contains whitespace")
+    if _SCHEME.match(value):
+        raise SiteSettingsError(f"{value!r} has a scheme; a base is a path only")
+    for char in "?#\\":
+        if char in value:
+            raise SiteSettingsError(
+                f"{value!r} contains {char!r}; a base is a path only"
+            )
+    if value in ("", "/"):
+        return "/"
+    segments = value.removeprefix("/").removesuffix("/").split("/")
+    for segment in segments:
+        if segment in ("", ".", ".."):
+            raise SiteSettingsError(
+                f"{value!r} has an empty, '.' or '..' segment; a base is a plain path"
+            )
+    return "/" + "/".join(segments) + "/"
+
+
+def site_settings(environ: Mapping[str, str]) -> dict[str, str]:
+    """Return the site's address, ``{"site": <origin>, "base": <base path>}``.
+
+    Each part comes from its environment variable (``DOCS_SITE_URL``,
+    ``DOCS_SITE_BASE``) when that is set and not empty, else from its default
+    (``DEFAULT_SITE_URL``, ``DEFAULT_SITE_BASE``), normalized by
+    ``normalize_site_url`` and ``normalize_site_base``.
+
+    Args:
+        environ: The environment to read, e.g. ``os.environ``.
+
+    Raises:
+        SiteSettingsError: If a variable holds a value the site cannot be built for;
+            the message names the variable.
+    """
+    url = environ.get(SITE_URL_VARIABLE) or DEFAULT_SITE_URL
+    base = environ.get(SITE_BASE_VARIABLE) or DEFAULT_SITE_BASE
+    try:
+        site = normalize_site_url(url)
+    except SiteSettingsError as exc:
+        raise SiteSettingsError(f"{SITE_URL_VARIABLE}: {exc}") from exc
+    try:
+        base = normalize_site_base(base)
+    except SiteSettingsError as exc:
+        raise SiteSettingsError(f"{SITE_BASE_VARIABLE}: {exc}") from exc
+    return {"site": site, "base": base}
 
 
 def page_url(path: str, base: str = "/") -> str:
@@ -474,12 +591,34 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--out", type=Path, default=SITE_DIR / "src" / "content" / "docs"
     )
     _ = parser.add_argument("--public", type=Path, default=SITE_DIR / "public")
-    _ = parser.add_argument("--base", default="/")
+    _ = parser.add_argument(
+        "--base", default="/", help="the site's base path (normalize_site_base)"
+    )
+    _ = parser.add_argument(
+        "--site-settings",
+        action="store_true",
+        help=(
+            f"print the site's address from {SITE_URL_VARIABLE} and "
+            f"{SITE_BASE_VARIABLE} as JSON and exit"
+        ),
+    )
     args = parser.parse_args(argv)
+    if cast(bool, args.site_settings):
+        try:
+            settings = site_settings(os.environ)
+        except SiteSettingsError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps(settings))
+        return 0
     docs_dir = cast(Path, args.docs)
     out_dir = cast(Path, args.out)
     public_dir = cast(Path, args.public)
-    base = cast(str, args.base)
+    try:
+        base = normalize_site_base(cast(str, args.base))
+    except SiteSettingsError as exc:
+        print(f"error: --base: {exc}", file=sys.stderr)
+        return 1
 
     # Run as a script, scripts/ is on sys.path; the API generator imports griffe, so
     # it is imported only when the content is built.

@@ -7,9 +7,26 @@ import starlight from '@astrojs/starlight';
 import starlightLinksValidator from 'starlight-links-validator';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
-// To be published as a GitHub Pages project page: https://metamorphic-labs.github.io/orcapod-python/
-const site = 'https://metamorphic-labs.github.io';
-const base = '/orcapod-python/';
+
+/**
+ * The site's address: DOCS_SITE_URL (origin) and DOCS_SITE_BASE (base path) from the
+ * environment, or the defaults (https://metamorphic-labs.github.io/orcapod-python/).
+ * The rule is site_settings in scripts/docs_site_content.py; a value it refuses fails
+ * the build.
+ */
+function siteSettings() {
+	const result = spawnSync(
+		'uv',
+		['run', 'python', 'scripts/docs_site_content.py', '--site-settings'],
+		{ cwd: repoRoot, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'inherit'] },
+	);
+	if (result.status !== 0) {
+		throw new Error('invalid site address (DOCS_SITE_URL, DOCS_SITE_BASE; scripts/docs_site_content.py)');
+	}
+	return JSON.parse(result.stdout);
+}
+
+const { site, base } = siteSettings();
 
 /** Write src/content/docs and public from ../docs (pages and generated API reference). */
 function buildContent() {

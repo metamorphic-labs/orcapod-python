@@ -4,7 +4,7 @@ The Starlight site under ``site/`` is built from ``docs/`` by that script, which
 converts every published page and generates the API reference from the source. It
 fails on a broken link, a page that is neither published nor excluded, an object an API
 page names that does not exist, or a docstring griffe reports a problem with; these
-tests hold it to that, without Node. The site build itself (``pnpm build`` in
+tests hold it to that, and to the site's address (``--site-settings``), without Node. The site build itself (``pnpm build`` in
 ``site/``, which also validates every link and anchor) runs in the ``docs-site``
 workflow.
 
@@ -13,9 +13,12 @@ Every test drives the script as a command, the way the site build runs it.
 
 from __future__ import annotations
 
+import json
+import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -326,3 +329,120 @@ def test_a_removed_page_leaves_the_site(tmp_path: Path):
     assert proc.returncode == 0, proc.stderr
     assert not (out / "concepts").exists()
     assert (out / "index.md").is_file()
+
+
+# ---------------------------------------------------------------------------
+# The site's address
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("base", "prefix"), [("/", ""), ("/other/", "/other")])
+def test_links_and_anchors_follow_the_base(tmp_path: Path, base: str, prefix: str):
+    pages = {
+        "index.md": (
+            "# Home\n\n"
+            "[s](concepts/sources.md#derivedsource-tags_as_data) [h](#top)"
+            " [d](tutorial/data.py)\n"
+        ),
+        "concepts/sources.md": (
+            "# Sources\n\n[home](../index.md)\n\n## `DerivedSource` -- tags_as_data\n"
+        ),
+        "tutorial/data.py": "x = 1\n",
+    }
+    home = (build_ok(tmp_path, pages, base=base) / "index.md").read_text()
+    assert f"[s]({prefix}/concepts/sources/#derivedsource----tags_as_data)" in home
+    assert "[h](#top)" in home
+    assert f"[d]({prefix}/tutorial/data.py)" in home
+    sources = (tmp_path / "out" / "concepts" / "sources.md").read_text()
+    assert f"[home]({prefix}/)" in sources
+
+
+@pytest.mark.parametrize("given", ["other", "/other", "other/", "/other/"])
+def test_the_base_is_normalized(tmp_path: Path, given: str):
+    pages = {"index.md": "# H\n\n[s](concepts/a.md)\n", "concepts/a.md": "# A\n"}
+    home = (build_ok(tmp_path, pages, base=given) / "index.md").read_text()
+    assert "[s](/other/concepts/a/)" in home
+
+
+def test_an_invalid_base_fails(tmp_path: Path):
+    proc, _, _ = run_build(make_docs(tmp_path, {"index.md": "# H\n"}), tmp_path, "/../")
+    assert proc.returncode != 0
+    assert "--base" in proc.stderr
+
+
+def site_settings(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    environ = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("DOCS_SITE_URL", "DOCS_SITE_BASE")
+    }
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), "--site-settings"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        env={**environ, **env},
+    )
+
+
+def settings_ok(env: dict[str, str]) -> dict[str, str]:
+    proc = site_settings(env)
+    assert proc.returncode == 0, proc.stderr
+    return cast(dict[str, str], json.loads(proc.stdout))
+
+
+@pytest.mark.parametrize(
+    "env", [{}, {"DOCS_SITE_URL": "", "DOCS_SITE_BASE": ""}], ids=["unset", "empty"]
+)
+def test_the_default_address(env: dict[str, str]):
+    assert settings_ok(env) == {
+        "site": "https://metamorphic-labs.github.io",
+        "base": "/orcapod-python/",
+    }
+
+
+def test_a_custom_domain():
+    env = {"DOCS_SITE_URL": "https://docs.example.org", "DOCS_SITE_BASE": "/"}
+    assert settings_ok(env) == {"site": "https://docs.example.org", "base": "/"}
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({"DOCS_SITE_URL": "https://docs.example.org/"}, "https://docs.example.org"),
+        ({"DOCS_SITE_URL": "HTTP://localhost:8080"}, "http://localhost:8080"),
+        ({"DOCS_SITE_BASE": "docs"}, "/docs/"),
+        ({"DOCS_SITE_BASE": "/a/b"}, "/a/b/"),
+    ],
+)
+def test_the_address_is_normalized(env: dict[str, str], expected: str):
+    settings = settings_ok(env)
+    assert expected in (settings["site"], settings["base"])
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"DOCS_SITE_URL": "ftp://docs.example.org"},
+        {"DOCS_SITE_URL": "docs.example.org"},
+        {"DOCS_SITE_URL": "https://docs.example.org/orcapod/"},
+        {"DOCS_SITE_URL": "https://docs.example.org?x=1"},
+        {"DOCS_SITE_URL": "https://user@docs.example.org"},
+        {"DOCS_SITE_URL": "https://docs.example.org:port"},
+        {"DOCS_SITE_URL": " https://docs.example.org"},
+        {"DOCS_SITE_BASE": "https://docs.example.org/"},
+        {"DOCS_SITE_BASE": "/docs?x=1"},
+        {"DOCS_SITE_BASE": "/docs#top"},
+        {"DOCS_SITE_BASE": "/a/../b/"},
+        {"DOCS_SITE_BASE": "/a//b/"},
+        {"DOCS_SITE_BASE": "/my docs/"},
+        {"DOCS_SITE_BASE": "/docs/\n"},
+    ],
+)
+def test_an_invalid_address_is_refused(env: dict[str, str]):
+    proc = site_settings(env)
+    assert proc.returncode != 0
+    assert proc.stdout == ""
+    (variable,) = env
+    assert variable in proc.stderr
