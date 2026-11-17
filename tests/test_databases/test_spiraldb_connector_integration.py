@@ -6,9 +6,13 @@ They require a valid auth mechanism, either:
 
 - Local dev: a saved ``spiral login`` (pyspiral keeps it in
   ``~/Library/Application Support/pyspiral/`` on macOS, ``~/.config/pyspiral/`` on Linux)
-- CI (GitHub Actions): ``SPIRAL_WORKLOAD_ID`` env var pointing to a workload
-  that has editor access on the dev project and is bound to this repository via
-  GitHub OIDC (see internal CI/runbook docs for the exact workload/policy IDs).
+- CI (GitHub Actions, the ``spiral-integration`` job of ``Run Tests``): a
+  workload private key in the ``SPIRAL_CLIENT_ID`` (workload id) and
+  ``SPIRAL_PRIVATE_KEY`` (private JWK naming its ``kid``) env vars, which pyspiral
+  reads to request a token from ``https://auth.spiraldb.com``. The workload holds
+  the editor role on the test project. The developer sets both repository
+  secrets; setup and key rotation are in ``RELEASING.md`` ("SpiralDB integration
+  job").
 
 If the env var is set but credentials are absent, the tests fail rather than
 skip — the operator is expected to ensure auth is in place when enabling

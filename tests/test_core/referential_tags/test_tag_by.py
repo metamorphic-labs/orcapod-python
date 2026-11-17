@@ -148,6 +148,24 @@ def test_the_schema_is_predicted(all_info: bool) -> None:
     assert data_schema == source.output_schema()[1]
 
 
+def test_the_data_order_is_the_inputs_and_the_predicted_one() -> None:
+    """The named columns stay where they are: tagging reorders no data column.
+
+    The order of ``keys()`` and of the data schema of the computed stream
+    (``static_process``) equals the input's and the predicted one, also when the
+    names are given in another order than the data (CodeRabbit on PR #420).
+    """
+    source = _referential()
+    tag_by = TagBy(["label", "trial"])
+    computed = tag_by.static_process(source)
+    _, input_data = source.keys()
+    assert input_data == ("unit", "trial", "amp", "label")
+    assert computed.keys() == (("unit", "label", "trial"), input_data)
+    assert list(computed.output_schema()[1]) == list(input_data)
+    assert list(tag_by.output_schema(source)[1]) == list(input_data)
+    assert source.tag_by("label", "trial").keys() == computed.keys()
+
+
 def test_zero_rows_have_the_types_of_rows() -> None:
     source = _plain()
     tagged = source.tag_by("trial")
