@@ -363,10 +363,14 @@ by hand (*If a Run Fails Part-Way*).
 `main`'s unreleased pull requests; naming it after the hotfix would mark them shipped in the
 hotfix. The Linear jobs check out the workflow's ref (`main`), not the **Branch** input, so they
 never scan the hotfix branch: on a hotfix run `linear-sync` creates an empty `vX.Y.Z` release (or
-none) and `linear-complete` completes it or fails, neither of which affects publishing. Attach
-the hotfix's issues to that release by hand in Linear if it should list them. Syncing the hotfix
-commits themselves would need the Linear jobs to check out the **Branch** input, a change to
-`release.yml`.
+none) and `linear-complete` completes it or fails, neither of which affects publishing. The
+release is empty only if the latest push-to-`main` sync (`release-sync.yml`) succeeded:
+`linear-sync` scans from the last synced commit, so after a failed or still-running push sync
+it attaches those unsynced `main` commits to `vX.Y.Z` (no concurrency guard orders the two
+workflows). Check that sync's latest run before a hotfix run; if it did not succeed, remove
+those commits from `vX.Y.Z` by hand afterwards. Attach the hotfix's own issues to the release
+by hand in Linear if it should list them. Syncing the hotfix commits themselves would need the
+Linear jobs to check out the **Branch** input, a change to `release.yml`.
 
 Setup: the `LINEAR_ACCESS_KEY` repository secret, holding the access key of the pipeline meant
 for this repository's releases.
