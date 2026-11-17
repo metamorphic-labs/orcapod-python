@@ -168,6 +168,17 @@ def test_the_data_order_is_the_inputs_and_the_predicted_one() -> None:
     assert source.tag_by("label", "trial").keys() == computed.keys()
 
 
+def test_each_row_keeps_its_data_context_key() -> None:
+    """The context column passes through: no row takes the default key instead."""
+    source = _plain()
+    before = source.as_table(columns={"context": True})
+    after = TagBy(["trial"]).static_process(source).as_table(columns={"context": True})
+    assert (
+        after.column(constants.CONTEXT_KEY).to_pylist()
+        == before.column(constants.CONTEXT_KEY).to_pylist()
+    )
+
+
 def test_zero_rows_have_the_types_of_rows() -> None:
     source = _plain()
     tagged = source.tag_by("trial")

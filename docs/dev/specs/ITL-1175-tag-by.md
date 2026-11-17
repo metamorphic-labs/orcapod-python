@@ -102,9 +102,9 @@ stays with `DerivedSource(tags_as_data=...)`.
   issue's out-of-scope "plain tag from a data column" reachable in two steps.
   Recommendation: allow (existing slice behaviour, warned). Conservative variant: none
   that is small; it would need tracking where a tag came from.
-- Jobs: an operator node runs it in the default cache mode; `LOG` / `REPLAY` refuse
-  referential tags as for every operator (slice limitation, unchanged). A function node
-  downstream stores the marker (ITL-1019). Saved jobs: `to_config` / `from_config`, and
+- Jobs: an operator node runs it in every cache mode; in `LOG` mode it stores its output
+  with the new tag marked (operator storage of referential tags came with #407, ITL-1019;
+  tested). A function node downstream stores the marker (ITL-1019). Saved jobs: `to_config` / `from_config`, and
   the class is registered in `pipeline/serialization.py`.
 
 ## Open choice: may a computed column key a join?
