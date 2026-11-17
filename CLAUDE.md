@@ -133,14 +133,23 @@ November 16, 2026, ITL-1170; `site/README.md` has the commands). mkdocs is gone.
   entry the signature does not have) fails the build.
 - Build locally with `cd site && pnpm install && pnpm build`; CI builds the site on every pull
   request (`.github/workflows/docs-site.yml`) and `tests/test_docs/test_site_content.py` runs
-  the content build without Node. That workflow only builds: publishing to GitHub Pages
-  (`https://metamorphic-labs.github.io/orcapod-python/`) is a separate step the developer
-  enables. An agent never adds a deploy job or changes a Pages setting.
+  the content build without Node.
+- The same workflow publishes the site to GitHub Pages
+  (`https://metamorphic-labs.github.io/orcapod-python/`; developer, November 17, 2026): its
+  `deploy` job runs on a push to `main` and on a manual run from `main` (Actions >
+  Documentation site > Run workflow), in this repository only, never on a pull request, and
+  only a run that deploys uploads the built site. It needs Settings > Pages > Source =
+  GitHub Actions; it deploys in the `github-pages` environment. Every page shows a banner
+  saying the site documents the development version (`site/src/routeData.ts`); it never
+  names the current release, and links to PyPI and the changelog instead. An agent never
+  runs the deploy by hand or changes a Pages setting or the `github-pages` environment.
 - The site's address is never hard-coded: `DOCS_SITE_URL` (origin) and `DOCS_SITE_BASE`
   (base path) come from the environment, in CI from the repository variables of the same
   names, with the address above when unset or empty; `site_settings` in
-  `scripts/docs_site_content.py` is the one place that reads and checks them. An agent never
-  creates or changes those variables.
+  `scripts/docs_site_content.py` is the one place that reads and checks them. A custom
+  domain is set in both places the developer controls: the variables
+  (`DOCS_SITE_URL=https://<domain>`, `DOCS_SITE_BASE=/`) and Settings > Pages > Custom
+  domain. An agent never creates or changes those variables.
 
 ## Linear issue tracking
 
