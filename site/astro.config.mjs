@@ -84,6 +84,8 @@ export default defineConfig({
 			description:
 				'Intuitive and powerful library for highly reproducible scientific data pipelines',
 			plugins: [starlightLinksValidator()],
+			// The banner on every page: the site documents main, not a release.
+			routeMiddleware: './src/routeData.ts',
 			sidebar: [
 				{ label: 'Home', link: '/' },
 				page('Getting Started', 'getting-started'),
