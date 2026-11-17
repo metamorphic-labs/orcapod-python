@@ -23,7 +23,7 @@ import pytest
 
 import orcapod as op
 from orcapod.core.data_tags import stream_data_tags
-from orcapod.core.operators import PolarsFilter, TagBy
+from orcapod.core.operators import AddTags, PolarsFilter, TagBy
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.pipeline import (
@@ -121,6 +121,7 @@ def test_the_order_moves_no_hash() -> None:
 OPERATORS: list[tuple[str, Callable[[], Any]]] = [  # pyright: ignore[reportExplicitAny]  # operator factories
     ("polars_filter", lambda: PolarsFilter(constraints={"x": 2})),
     ("tag_by", lambda: TagBy("y")),
+    ("add_tags", lambda: AddTags({"cohort": "A"})),
 ]
 
 

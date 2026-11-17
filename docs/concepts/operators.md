@@ -688,6 +688,9 @@ except InputValidationError as error:
 The names and values, in order, are the operator's identity, so two different values are two
 operators, with different hashes and stored tables.
 
+On a stream with [data-tags](data-tags.md), the data-tags stay data-tags and the new tags are
+plain: a constant tag is never a data value.
+
 ### Pick and Index
 
 `Pick(column, key)` extracts one entry from a struct- or dict-typed data column, and

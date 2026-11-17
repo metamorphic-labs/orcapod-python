@@ -179,6 +179,7 @@ your own classes and logical types (`Path`, `UUID`, arrays) are refused.
 | `MapTags` / `map_tags` | Renames the column in both roles; `tag_only=True` renames the tag only and leaves a plain tag. |
 | `MapData` / `map_data` | Always a data-only move: the data column is renamed and `x` stays a plain tag. |
 | Filters, `DropNulls`, `SemiJoin`, `Pick`, `Index` | Keep the data-tag. |
+| `AddTags` / `add_tags` | Keeps every data-tag; the new tags, constants, are plain tags. A new tag named like any column, a data-tag included, is refused. |
 | `Batch` | Keeps every tag, list-valued, as for plain tags: `x` becomes the same list in both roles and stays a data-tag. Its source info is one token per member, like any data column: nothing is merged. |
 | `MergeJoin` | Follows `Join`. A data-tag in both inputs: **one** scalar data-tag column `x`, not a two-element list (the join equated the values), with one merged token as its source info, the same fold as `Join`'s (below). A data-tag in one input, and a plain tag or no column of that name in the other: `x` stays a data-tag with its own source info. A data-only column `x` in the other input is refused. A key that is `T` in one input and `T \| None` in the other is `T` in both roles. Every other colliding data column is merged into a sorted list, as before. |
 

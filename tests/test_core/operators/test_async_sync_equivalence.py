@@ -671,6 +671,13 @@ CASES = [
     ),
     Case("ref_mid_tag_by", lambda: TagBy("y"), lambda: (source_mid(),)),
     Case("ref_mid_drop_nulls", lambda: DropNulls(), lambda: (source_mid(),)),
+    # AddTags keeps the input's data-tags; the new tags are plain (ITL-1196).
+    Case(
+        "ref_add_tags",
+        lambda: AddTags({"cohort": "A", "run": 3}),
+        lambda: (source_a(with_data_tags=True),),
+    ),
+    Case("ref_mid_add_tags", lambda: AddTags({"cohort": "A"}), lambda: (source_mid(),)),
     # Every accepted value type, after the input's two tags (ITL-1196).
     Case(
         "add_tags",
