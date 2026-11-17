@@ -265,10 +265,10 @@ def require_database_keeps_marker(database: object, references: Iterable[str]) -
     so a referential tag is never stored unmarked. A database is accepted only when it
     states that it keeps Arrow field metadata
     (``FieldMetadataKeepingDatabaseProtocol.keeps_field_metadata``); one that does not
-    have the member is refused, so an unknown database never passes by default. A
-    database that can check rows before writing them
-    (``RecordValidatingDatabaseProtocol``) is also asked, and the reason it gives is
-    part of the error.
+    have the member is refused, so an unknown database never passes by default. The
+    statement decides: a database that states it is not probed. One that does not,
+    and can check rows before writing them (``RecordValidatingDatabaseProtocol``), is
+    asked why, and the reason it gives is part of the error.
 
     Args:
         database: The database a node will store its referential tags in.
@@ -276,8 +276,7 @@ def require_database_keeps_marker(database: object, references: Iterable[str]) -
 
     Raises:
         InputValidationError: If the database does not state that it keeps field
-            metadata, or refuses marked rows, naming the database class and the two
-            ways out.
+            metadata, naming the database class and the two ways out.
     """
     from orcapod.protocols.database_protocols import (
         RecordValidatingDatabaseProtocol,
@@ -285,10 +284,11 @@ def require_database_keeps_marker(database: object, references: Iterable[str]) -
     )
 
     references = tuple(references)
-    if not references:
+    if not references or keeps_field_metadata(database):
         return
-    reason: str | None = None
+    reason = "it does not state that it keeps field metadata (keeps_field_metadata)"
     if isinstance(database, RecordValidatingDatabaseProtocol):
+        # Only for the error: the reason the database gives for refusing marked rows.
         probe = mark_references(
             pa.table({name: pa.array([], type=pa.null()) for name in references}),
             references,
@@ -297,10 +297,6 @@ def require_database_keeps_marker(database: object, references: Iterable[str]) -
             database.validate_records(probe)
         except ValueError as exc:
             reason = str(exc)
-    if reason is None and keeps_field_metadata(database):
-        return
-    if reason is None:
-        reason = "it does not state that it keeps field metadata (keeps_field_metadata)"
     raise InputValidationError(
         f"{type(database).__name__} cannot store the referential tags "
         f"{list(references)}: a stored referential tag carries Arrow field "

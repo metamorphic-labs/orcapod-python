@@ -268,3 +268,37 @@ def test_a_referential_job_runs_on_spiraldb(spiral: None) -> None:
     job.run()
     records = job.nodes["double"].get_all_records()
     assert records is not None and stored_references(records.schema) == ("unit",)
+
+
+def test_spiraldb_retry_publishes_a_marker_whose_write_failed(
+    spiral: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rows stored but the marker not: a retry that finds every id stored repairs it."""
+    db = ConnectorArrowDatabase(SpiralDBConnector("p"))
+    path = ("node", "table")
+    real_set_metadata = fake_pyspiral.FakeTable.set_metadata
+
+    def failing_set_metadata(self: Any, metadata: dict[str, bytes]) -> None:
+        # Only the Arrow metadata entry (the marker), written after the rows, fails.
+        if "__arrow_metadata__" in metadata:
+            raise RuntimeError("metadata service unavailable")
+        real_set_metadata(self, metadata)
+
+    monkeypatch.setattr(fake_pyspiral.FakeTable, "set_metadata", failing_set_metadata)
+    with pytest.raises(RuntimeError, match="metadata service unavailable"):
+        db.add_records(
+            path,
+            _rows([1, 2]),
+            record_id_column="rid",
+            skip_duplicates=True,
+            flush=True,
+        )
+    monkeypatch.setattr(fake_pyspiral.FakeTable, "set_metadata", real_set_metadata)
+
+    # The retry finds every id stored already, and still publishes the marker.
+    db.add_records(
+        path, _rows([1, 2]), record_id_column="rid", skip_duplicates=True, flush=True
+    )
+    table = ConnectorArrowDatabase(SpiralDBConnector("p")).get_all_records(path)
+    assert table is not None and table.num_rows == 2
+    assert stored_references(table.schema) == ("unit",)
