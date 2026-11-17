@@ -261,8 +261,10 @@ Developer decisions, November 16, 2026 (ITL-1193); the full procedure is `RELEAS
 - An agent never runs the Release workflow, creates or pushes a tag, or touches a setting,
   secret, environment, ruleset or the visibility of the repository. The `v0.2.0` tag stays as
   it is.
-- Linear, Codecov and SpiralDB jobs run only when
-  `github.repository == 'metamorphic-labs/orcapod-python'`; `lint.yml` runs on both repositories (ITL-1181).
+- The jobs that use a secret (Linear, Codecov, SpiralDB) run only when
+  `github.repository == 'metamorphic-labs/orcapod-python'`, so a fork's run skips them;
+  `lint.yml` runs on every repository (ITL-1181). Every workflow sets a read-only token
+  (`permissions: contents: read`); a job that needs more grants it to itself.
 
 ## Lint, format and type checks
 
