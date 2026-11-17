@@ -915,6 +915,22 @@ class SpiralDBConnector:
                     tbl.set_metadata(meta_kv)
                 tbl.write(rows)
             except BaseException:
+                # The Arrow metadata went in before the rows: remove it again while the
+                # table still has no value columns (no row carries it), so a later
+                # unmarked write does not read back with it.
+                if meta_kv is not None:
+                    try:
+                        if set(tbl.schema().to_arrow().names) <= set(pk_cols):
+                            tbl.drop_metadata([_ARROW_METADATA_KEY])
+                    except Exception as cleanup_exc:
+                        logger.warning(
+                            "Could not remove the Arrow metadata of %s after a failed "
+                            "first write (%s: %s); a later write without metadata "
+                            "reads back with it.",
+                            qualified,
+                            type(cleanup_exc).__name__,
+                            cleanup_exc,
+                        )
                 # Remove the record only while the table still has no value columns:
                 # once another writer's rows have landed, they rely on it.
                 if wrote_record:

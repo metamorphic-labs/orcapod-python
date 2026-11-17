@@ -32,6 +32,7 @@ from orcapod.databases import (
 from orcapod.databases.extension_aware_database import ExtensionAwareDatabase
 from orcapod.databases.sqlite_connector import SQLiteConnector
 from orcapod.errors import InputValidationError
+from orcapod.protocols.db_connector_protocol import ColumnInfo
 from orcapod.pipeline import PipelineJob
 from orcapod.protocols.database_protocols import (
     FieldMetadataKeepingDatabaseProtocol,
@@ -341,3 +342,28 @@ def test_spiraldb_marks_no_stored_row_it_skips(spiral: None) -> None:
     db.add_records(path, rows, record_id_column="rid", skip_duplicates=True, flush=True)
     table = ConnectorArrowDatabase(SpiralDBConnector("p")).get_all_records(path)
     assert table is not None and stored_references(table.schema) == ()
+
+
+def test_spiraldb_failed_first_write_leaves_no_marker(
+    spiral: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A first write whose rows fail removes the metadata it published before them."""
+    connector = SpiralDBConnector("p")
+    connector.create_table_if_not_exists(
+        "t", [ColumnInfo("rid", pa.large_binary())], pk_column="rid"
+    )
+    real_write = fake_pyspiral.FakeTable.write
+
+    def failing_write(self: Any, *args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("write failed")
+
+    monkeypatch.setattr(fake_pyspiral.FakeTable, "write", failing_write)
+    with pytest.raises(RuntimeError, match="write failed"):
+        connector.upsert_records("t", _rows([1]), id_column="rid")
+    monkeypatch.setattr(fake_pyspiral.FakeTable, "write", real_write)
+
+    rows = _rows([1])
+    unmarked = rows.cast(pa.schema([field.remove_metadata() for field in rows.schema]))
+    connector.upsert_records("t", unmarked, id_column="rid")
+    table = pa.Table.from_batches(list(connector.iter_batches('SELECT * FROM "t"')))
+    assert stored_references(table.schema) == ()
