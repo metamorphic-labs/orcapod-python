@@ -112,7 +112,8 @@ more = op.sources.DictSource(
 merged = op.operators.MergeJoin()(spikes, more)
 print(merged.keys())
 # (('unit', 'time'), ('unit', 'time', 'amp'))
-for tag, data in merged.iter_data():
+# A join does not promise a row order: sort the rows before showing them.
+for tag, data in sorted(merged.iter_data(), key=lambda row: row[0]["time"]):
     print(tag["time"], data["time"], data["amp"])
 # 10 10 [0.5, 0.75]
 # 20 20 [0.125, 0.25]
