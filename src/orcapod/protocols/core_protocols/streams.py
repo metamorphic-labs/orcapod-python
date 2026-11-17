@@ -421,6 +421,20 @@ class StreamWithOperationsProtocol(StreamProtocol, Protocol):
         """
         ...
 
+    def add_tags(
+        self,
+        tags: Mapping[str, bool | int | float | str | bytes] | None = None,
+        /,
+        *,
+        label: str | None = None,
+        **values: bool | int | float | str | bytes,
+    ) -> "StreamProtocol":
+        """
+        Add tags with constant values to every row: the same value on every row,
+        after the existing tags. Data columns are unchanged.
+        """
+        ...
+
     def select_tag_columns(
         self,
         tag_columns: str | Collection[str],

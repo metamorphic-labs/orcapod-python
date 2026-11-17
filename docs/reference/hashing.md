@@ -1172,7 +1172,8 @@ in any data-level preimage; they serve logging, observability, and result inspec
 **Provisional.** The value hashes of the library value types, `numpy.ndarray` (this section),
 `torch.Tensor` ([below](#torch-tensor-value-hash)), polars `DataFrame` and `Series`
 ([1e](#1e-polars-dataframe-and-series-values)) and pandas `DataFrame` and `Series`, and their
-logical type identifiers, are provisional in v0.3 and may change in v0.4. Using one issues
+logical type identifiers, are provisional until the library value type audit (after
+0.4.0rc1) and may change then. Using one issues
 `ProvisionalHashWarning` once per type per process (see
 [Provisional value hashes](../concepts/arrays.md#provisional-value-hashes)). The types are
 declared in the `provisional` list of `orcapod/contexts/logical_types.json`, by extension name;

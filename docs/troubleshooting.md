@@ -239,10 +239,14 @@ version to regenerate them.
 ## Messages you can ignore
 
 - `WARN deltalake_core::writer::stats] Skipping column ... because it's a binary field.`
-  whenever a `DeltaTableDatabase` is written to: one line per binary column (record ids and
-  hashes) per commit. The deltalake library keeps no minimum and maximum statistics for binary
-  columns and says so on every write; nothing is wrong with the table. To hide only this line,
-  set `RUST_LOG` in the environment before Python starts, keeping deltalake's other warnings:
+  whenever a `DeltaTableDatabase` writes to a table that an earlier version of Orcapod
+  created: one line per binary column (record ids and hashes) per commit. The deltalake
+  library keeps no minimum and maximum statistics for binary columns and says so on every
+  write; nothing is wrong with the table. A table that `DeltaTableDatabase` creates now names
+  the columns it keeps statistics for (the `delta.dataSkippingStatsColumns` table property),
+  and writes to it log nothing. Orcapod never changes the property of an existing table. To
+  hide only this line for an older table, set `RUST_LOG` in the environment before Python
+  starts, keeping deltalake's other warnings:
 
   ```
   RUST_LOG="warn,deltalake_core::writer::stats=error" python my_pipeline.py
