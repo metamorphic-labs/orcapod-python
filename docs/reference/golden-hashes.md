@@ -162,9 +162,8 @@ edit and the generator refuses to write over it.
 ### Releasing (the release pull request)
 
 1. Precondition, in place since 2026-11-15 (developer decision): the repository ruleset
-   `protect-release-tags` on both `metamorphic-labs/orcapod-python` and
-   `nauticalab/orcapod-python` targets `refs/tags/v*` with the rules deletion, update and
-   non-fast-forward and no bypass actors. A `v*` tag can be created (the Release workflow
+   `protect-release-tags` on `metamorphic-labs/orcapod-python`, where releases are cut, targets
+   `refs/tags/v*` with the rules deletion, update and non-fast-forward and no bypass actors. A `v*` tag can be created (the Release workflow
    pushes it) but never moved or deleted. Agents never change repository settings.
 2. Run `TZ=UTC uv run python tests/test_hashing/golden/generate_golden_hashes.py --release X.Y.Z`
    (release dates are UTC days, and the revision's date is read from the local clock).

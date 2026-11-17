@@ -20,6 +20,11 @@ on:
         type: boolean
         default: false
 
+# Read-only token, whatever the repository default is (ITL-1193); the build
+# and publish jobs grant themselves what they need.
+permissions:
+  contents: read
+
 jobs:
   validate-branch:
     name: Validate release branch

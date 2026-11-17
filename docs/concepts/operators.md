@@ -1,7 +1,7 @@
 # Operators
 
 Operators are structural transforms that reshape [streams](streams.md) without inspecting or
-synthesizing data values. They join, filter, batch, group, rename, and select columns --
+synthesizing data values. They join, filter, batch, group, rename, select columns and add tags --
 operations that affect the *structure* of the data (which rows exist, which columns are
 present, how columns are named) but never compute new values from data content. This is the
 key distinction from [function pods](function-pods.md), which do the opposite: they transform
@@ -16,7 +16,7 @@ This separation is a core Orcapod design principle:
 | Inspects data content | Never, except filters (see below) | Yes |
 | Inspects / uses tags | Yes | No |
 | Can rename columns | Yes | No |
-| Synthesizes new values | No | Yes |
+| Adds or synthesizes data | Never (may add a tag) | Yes |
 | Stream arity | Configurable (1, 2, or N inputs) | Single in, single out |
 
 This boundary ensures that structural operations (joins, filters) and value computations
@@ -32,6 +32,10 @@ content.
 One rule holds for every operator: **no data element comes from a tag value**. An operator may
 use tags to join, filter, group or order rows, but it never turns a tag column into a data
 column, so a function pod never receives tag content.
+
+An operator may add a tag, never data. A tag labels rows; it is not a data value, so
+[`AddTags`](#addtags) can add tags with constant values while every data column passes through
+unchanged.
 
 The filters are the operators that read data columns: `PolarsFilter` evaluates its predicate
 on values, and `DropNulls` reads only whether a value is present (its validity), never the
@@ -640,6 +644,46 @@ print(complete.pipeline_hash() == by_name.pipeline_hash())
 # False
 ```
 
+### AddTags
+
+`AddTags` adds tags that hold one constant value on every row, for example to label a stream
+before joining it with others or grouping it. Streams offer it as `add_tags`, with the tags as
+keyword arguments or as one dict (the only positional argument), as `map_tags` takes its renames:
+
+```python
+labelled = sessions.add_tags(cohort="A", run=3)
+print(labelled.keys())  # (('subject_id', 'session', 'cohort', 'run'), ('age', 'weight'))
+for tag, data in labelled.iter_data():
+    print(tag.as_dict(), "->", data.as_dict())
+# {'subject_id': 'mouse_01', 'session': 1, 'cohort': 'A', 'run': 3} -> {'age': 12, 'weight': 25.3}
+# {'subject_id': 'mouse_02', 'session': 2, 'cohort': 'A', 'run': 3} -> {'age': 8, 'weight': 22.1}
+```
+
+The new tags follow the input's tags, in the order given. Data columns, their source info and
+the system tags are unchanged. A value's type is the tag's type, with no inference: a `bool`
+becomes Arrow `bool`, an `int` `int64`, a `float` `double`, a `str` `large_string` and a `bytes`
+`large_binary`, and every new tag is non-nullable:
+
+```python
+print(labelled.output_schema()[0])
+# Schema({'subject_id': str, 'session': int, 'cohort': str, 'run': int})
+```
+
+Any other value is refused, `None`, `Decimal`, `datetime` and `date` among them, and so is an
+`int` outside the `int64` range or a float that is NaN or infinite. A name that is already a tag
+or data column of the stream raises `InputValidationError` when the operator is called:
+
+```python
+try:
+    sessions.add_tags(age=1)
+except InputValidationError as error:
+    print(error)
+# add_tags: cannot add a tag with an existing column's name: 'age' is a data column
+```
+
+The names and values, in order, are the operator's identity, so two different values are two
+operators, with different hashes and stored tables.
+
 ### Pick and Index
 
 `Pick(column, key)` extracts one entry from a struct- or dict-typed data column, and
@@ -744,7 +788,7 @@ operators or function pods.
 Every stream also exposes the operators as methods, which reads well when chaining:
 `join`, `semi_join`, `batch`, `group_by`, `select_tag_columns`, `select_data_columns`,
 `drop_tag_columns`, `drop_data_columns`, `select_columns`, `drop_columns`, `map_tags`,
-`map_data`, `map_columns`, `polars_filter`, `drop_nulls`, `pick` and `index`.
+`map_data`, `map_columns`, `add_tags`, `polars_filter`, `drop_nulls`, `pick` and `index`.
 
 ```python
 import polars as pl

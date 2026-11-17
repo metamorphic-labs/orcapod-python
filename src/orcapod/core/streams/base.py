@@ -558,6 +558,49 @@ class StreamBase(TraceableBase):
 
         return DropNulls(columns)(self, label=label)
 
+    def add_tags(
+        self,
+        tags: Mapping[str, bool | int | float | str | bytes] | None = None,
+        /,
+        *,
+        label: str | None = None,
+        **values: bool | int | float | str | bytes,
+    ) -> StreamBase:
+        """Add tags with constant values to every row. See ``orcapod.core.operators.AddTags``.
+
+        The tags are one dict, the only positional argument (``add_tags({"cohort":
+        "A"})``), or keyword arguments (``add_tags(cohort="A", run=3)``), not both. A
+        tag named ``label``, or a name that is not a Python identifier, is given
+        through the dict. Each new tag holds the same value on every row and follows
+        the existing tags, in the order given. A value is a ``bool``, ``int``,
+        ``float``, ``str`` or ``bytes``, and its type is the tag's type. Data
+        columns, their values and their source info are unchanged.
+
+        Args:
+            tags: Each new tag's name mapped to its value.
+            label: Optional node label for the pipeline graph.
+            **values: Each new tag's name mapped to its value, as keyword
+                arguments.
+
+        Returns:
+            The stream with the new tag columns.
+
+        Raises:
+            TypeError: When both a dict and keyword tags are given, a name is not
+                a string, or a value's type is not accepted.
+            ValueError: When no tag is given, or a value is out of range.
+            InputValidationError: When a name is reserved, or already a tag or
+                data column of this stream.
+        """
+        from orcapod.core.operators import AddTags
+
+        if tags is not None and values:
+            raise TypeError(
+                "give the tags either as one dict (add_tags({'cohort': 'A'})) or as "
+                "keyword arguments (add_tags(cohort='A')), not both"
+            )
+        return AddTags(dict(tags if tags is not None else values))(self, label=label)
+
     def select_tag_columns(
         self,
         tag_columns: str | Collection[str],
