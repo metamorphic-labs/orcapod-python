@@ -7,8 +7,10 @@ listing, its HTML parsed with ``html.parser``, and its layout. No browser is nee
 from __future__ import annotations
 
 import base64
+import importlib.resources
 import json
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -124,6 +126,19 @@ def test_a_pipeline_blueprint_has_no_status() -> None:
     assert model["kind"] == "pipeline"
     assert {node["status"] for node in model["nodes"]} == {""}
     assert all(node["facts"] == [] for node in model["nodes"])
+
+
+def test_an_empty_job_is_a_job() -> None:
+    """The kind comes from the object drawn: a job with no nodes is still a job."""
+    job = PipelineJob(name="empty", database=InMemoryArrowDatabase())
+    with job:
+        pass
+    model = job.diagram().to_dict()
+    assert (model["kind"], model["title"], model["nodes"]) == ("job", "Job 'empty'", [])
+    pipeline = Pipeline(name="empty")
+    with pipeline:
+        pass
+    assert pipeline.diagram().to_dict()["kind"] == "pipeline"
 
 
 def test_side_effect_nodes_are_their_own_kind() -> None:
@@ -427,10 +442,80 @@ def test_importing_orcapod_does_not_warn() -> None:
 def test_the_script_offers_keyboard_pan_and_zoom() -> None:
     """Checked in a browser by hand; here only that the script carries the handlers."""
     script = _job().diagram().to_html().rsplit("<script>", 1)[1]
-    assert "view.tabIndex=0" in script
+    assert "view.tabIndex = 0;" in script
     for key in ("ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"):
-        assert f"k==='{key}'" in script
+        assert f"k === '{key}'" in script
     assert "focusin" in script  # a node reached with Tab is brought into view
+
+
+def _asset_file(name: str) -> str:
+    """An asset file's text, found as an installed package finds it."""
+    files = importlib.resources.files("orcapod.pipeline")
+    resource = files.joinpath("diagram_assets").joinpath(name)
+    assert resource.is_file(), name
+    return resource.read_text(encoding="utf-8")
+
+
+def test_the_style_sheet_and_script_are_package_files_embedded_inline() -> None:
+    """Both are resources of the package and every output embeds them, compacted."""
+    css, js = _asset_file("diagram.css"), _asset_file("diagram.js")
+    document = _job().diagram().to_html()
+    style = document.split("<style>", 1)[1].split("</style>", 1)[0]
+    script = document.rsplit("<script>", 1)[1].removesuffix("</script>")
+    # Every line of the output is a line of the file; comments are dropped.
+    css_lines = [line.strip() for line in css.splitlines()]
+    js_lines = [line.strip() for line in js.splitlines()]
+    assert all(line in css_lines for line in style.splitlines())
+    assert all(line in js_lines for line in script.splitlines())
+    assert "/*" not in style
+    assert not any(line.startswith("//") for line in script.splitlines())
+    assert "" not in style.splitlines() + script.splitlines()
+    assert ".op-dag .op-dag-tools {" in style
+    assert script.startswith("(function () {") and script.endswith("})();")
+    assert document == _job().diagram().to_html()  # deterministic
+    assert "http" not in style + script  # nothing is fetched
+
+
+@pytest.mark.parametrize("name", ["diagram.css", "diagram.js"])
+def test_an_asset_cannot_end_its_element(name: str) -> None:
+    """No ``</script``, ``</style`` or ``<!--`` in either file, in any letter case."""
+    text = _asset_file(name).lower()
+    for unsafe in ("</script", "</style", "<!--"):
+        assert unsafe not in text
+
+
+def test_an_asset_that_could_end_its_element_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """The loader refuses a file that would close its element, so an edit cannot."""
+    from orcapod.pipeline import diagram as module
+
+    assets = tmp_path / "diagram_assets"
+    assets.mkdir()
+    (assets / "diagram.js").write_text("var a = '</SCRIPT >';\n", encoding="utf-8")
+    (assets / "diagram.css").write_text("/* <!-- */\n", encoding="utf-8")
+    monkeypatch.setattr(module.importlib.resources, "files", lambda _: tmp_path)
+    module._asset.cache_clear()
+    try:
+        with pytest.raises(ValueError, match="</SCRIPT"):
+            module._asset("diagram.js")
+        with pytest.raises(ValueError, match="<!--"):
+            module._asset("diagram.css")
+    finally:
+        monkeypatch.undo()
+        module._asset.cache_clear()
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not on PATH")
+def test_the_embedded_script_parses(tmp_path: Any) -> None:
+    """The compacted script is valid JavaScript (checked when Node.js is installed)."""
+    document = _job().diagram().to_html()
+    path = tmp_path / "diagram.js"
+    path.write_text(document.rsplit("<script>", 1)[1].removesuffix("</script>"))
+    done = subprocess.run(
+        ["node", "--check", str(path)], capture_output=True, text=True, check=False
+    )
+    assert done.returncode == 0, done.stderr
 
 
 def test_an_uncompiled_pipeline_displays_as_text() -> None:

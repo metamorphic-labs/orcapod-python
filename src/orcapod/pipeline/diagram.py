@@ -26,8 +26,10 @@ script as JSON with ``<``, ``>`` and ``&`` escaped, read with ``textContent`` on
 from __future__ import annotations
 
 import base64
+import functools
 import heapq
 import html
+import importlib.resources
 import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
@@ -263,14 +265,13 @@ def _topological_labels(
 
 
 def _is_job(pipeline: _Drawable) -> bool:
-    """Whether the graph is a job's: its nodes are job nodes, which hold run state."""
-    from orcapod.core.nodes.source_node import SourceJobNode
-    from orcapod.core.nodes.staleness import RunHoldingNode
+    """Whether the diagram is a job's: decided by the object drawn, not by its nodes.
 
-    return any(
-        isinstance(node, (RunHoldingNode, SourceJobNode))
-        for node in pipeline.dag.nodes()
-    )
+    An empty compiled job has no nodes, and is still a job.
+    """
+    from orcapod.pipeline.job import PipelineJob
+
+    return isinstance(pipeline, PipelineJob)
 
 
 def _build_model(
@@ -852,155 +853,64 @@ def _table(nodes: Sequence[_Node], inputs: Mapping[int, Sequence[str]]) -> str:
     )
 
 
-_STYLE = """
-.op-dag{position:relative;border:1px solid rgba(127,127,127,.35);border-radius:6px;
-padding:6px 8px;max-width:100%;box-sizing:border-box;overflow:hidden}
-.op-dag .op-dag-head{font:600 13px system-ui,sans-serif;margin:0 0 4px;padding-right:96px}
-.op-dag .op-dag-sep{display:none}
-.op-dag .op-dag-preview{font-weight:500;font-size:11px;border:1px solid currentColor;border-radius:3px;padding:0 4px;margin-left:4px;opacity:.7;vertical-align:1px}
-.op-dag .op-dag-view{overflow:auto;max-height:560px}
-.op-dag.op-dag-live .op-dag-view{overflow:hidden;cursor:grab;height:var(--op-dag-h,auto);
-touch-action:none}
-.op-dag .op-dag-node{cursor:pointer}
-.op-dag .op-dag-node:focus{outline:none}
-.op-dag .op-dag-view:focus{outline:none}
-.op-dag .op-dag-view:focus-visible{outline:2px solid currentColor;outline-offset:-2px}
-.op-dag .op-dag-node:focus-visible rect:first-of-type,
-.op-dag .op-dag-node.op-dag-selected rect:first-of-type{stroke-width:3.4}
-.op-dag .op-dag-edges g.op-dag-lit path:first-of-type{stroke-opacity:1;stroke-width:2.4}
-.op-dag .op-dag-tools{position:absolute;top:5px;right:8px;display:flex;gap:4px}
-.op-dag.op-dag-has-other .op-dag-head{padding-right:190px}
-.op-dag .op-dag-collapse{font:12px system-ui,sans-serif;display:flex;align-items:center;
-gap:3px;margin-right:6px;cursor:pointer}
-.op-dag .op-dag-collapse input{margin:0}
-.op-dag .op-dag-tools button{font:12px system-ui,sans-serif;padding:1px 8px;border-radius:4px;
-border:1px solid rgba(127,127,127,.5);background:transparent;color:inherit;cursor:pointer}
-.op-dag .op-dag-panel{display:none;font:12px system-ui,sans-serif;margin-top:6px;
-padding-top:6px;border-top:1px solid rgba(127,127,127,.35)}
-.op-dag .op-dag-panel.op-dag-open{display:block}
-.op-dag .op-dag-panel dl{display:grid;grid-template-columns:max-content 1fr;gap:2px 12px;
-margin:4px 0 0}
-.op-dag .op-dag-panel dt{opacity:.7;white-space:nowrap;float:none;width:auto;margin:0;padding:0}
-.op-dag .op-dag-panel dd{margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
-overflow-wrap:anywhere}
-.op-dag .op-dag-table{font:12px system-ui,sans-serif;margin-top:6px}
-.op-dag.op-dag-live .op-dag-table{display:none}
-.op-dag .op-dag-table td,.op-dag .op-dag-table th{text-align:left;vertical-align:top;
-padding:1px 8px}
-"""
+# The style sheet and the script of the notebook view are package files beside this
+# module, ``diagram_assets/diagram.css`` and ``diagram_assets/diagram.js``, written as
+# ordinary source with their comments. Each output embeds them inline (a notebook
+# cannot fetch a package file), compacted by ``_compact``.
+_ASSETS = "diagram_assets"
+# Text that would end the ``<style>`` or ``<script>`` element an asset is embedded in,
+# or start an HTML comment there; an asset holding one is refused.
+_UNSAFE_IN_ELEMENT = re.compile(r"</(?:style|script)|<!--", re.IGNORECASE)
+_CSS_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
 
-# An enhancement only: the SVG is complete without it. It finds its own container (the
-# element just before it; or, where scripts run without ``document.currentScript``, as
-# in the classic Notebook, the last container not set up yet), reads the model from the
-# JSON block and adds pan (drag), zoom (buttons, Ctrl or Cmd with the wheel), fit, a
-# details panel built with ``textContent`` only and, when the output holds the other
-# layout, a collapse checkbox that switches to it (keeping the selected node if it is in
-# both).
-_SCRIPT = r"""
-(function(){
-var s=document.currentScript,root=s&&s.previousElementSibling;
-if(!root||!root.classList||!root.classList.contains('op-dag')){
-var all=document.querySelectorAll('.op-dag:not([data-op-dag-ready])');root=all[all.length-1];}
-if(!root||root.hasAttribute('data-op-dag-ready'))return;
-root.setAttribute('data-op-dag-ready','');
-var img=root.querySelector('img.op-dag-picture');if(!img)return;
-function decode(b64){return new TextDecoder().decode(
-Uint8Array.from(atob(b64),function(c){return c.charCodeAt(0);}));}
-var views=[{model:JSON.parse(root.querySelector('script.op-dag-model').textContent),
-picture:img.getAttribute('src').split(',')[1]}];
-var otherBlock=root.querySelector('script.op-dag-other'),
-other=otherBlock&&JSON.parse(otherBlock.textContent);
-if(other)views.push({model:other.model,picture:other.picture});
-var view=root.querySelector('.op-dag-view'),panel=root.querySelector('.op-dag-panel'),
-count=root.querySelector('.op-dag-count');
-var cur=0,model=views[0].model,svg=img,selected=null,W=1,H=1,vb={x:0,y:0,w:1,h:1};
-var tools=document.createElement('div');tools.className='op-dag-tools';
-if(other){root.classList.add('op-dag-has-other');
-var label=document.createElement('label');label.className='op-dag-collapse';
-label.title='Fold the steps that only join, choose or rename columns into the edges';
-var box=document.createElement('input');box.type='checkbox';box.checked=!other.collapse;
-label.appendChild(box);label.appendChild(document.createTextNode('collapse'));
-tools.appendChild(label);box.addEventListener('change',function(){show(1-cur);});}
-[['in','+','Zoom in'],['out','−','Zoom out'],['fit','fit','Fit to view']].forEach(
-function(b){var e=document.createElement('button');e.type='button';
-e.setAttribute('data-op-dag-act',b[0]);e.textContent=b[1];e.title=b[2];
-e.setAttribute('aria-label',b[2]);tools.appendChild(e);});
-root.appendChild(tools);
-function apply(){svg.setAttribute('viewBox',[vb.x,vb.y,vb.w,vb.h].join(' '));}
-function fit(){var r=view.getBoundingClientRect(),rw=r.width||W,rh=r.height||H;
-var k=Math.max(W/rw,H/rh,1);vb.w=rw*k;vb.h=rh*k;vb.x=(W-vb.w)/2;vb.y=(H-vb.h)/2;apply();}
-function zoom(f,cx,cy){var r=view.getBoundingClientRect();
-var px=cx===undefined?.5:(cx-r.left)/r.width,py=cy===undefined?.5:(cy-r.top)/r.height;
-var nw=vb.w*f,nh=vb.h*f;vb.x+=(vb.w-nw)*px;vb.y+=(vb.h-nh)*py;vb.w=nw;vb.h=nh;apply();}
-tools.addEventListener('click',function(ev){
-var a=ev.target.getAttribute('data-op-dag-act');
-if(a==='in')zoom(1/1.25);else if(a==='out')zoom(1.25);else if(a==='fit')fit();});
-view.addEventListener('wheel',function(ev){if(!(ev.ctrlKey||ev.metaKey))return;
-ev.preventDefault();zoom(ev.deltaY>0?1.1:1/1.1,ev.clientX,ev.clientY);},{passive:false});
-var drag=null;
-view.addEventListener('pointerdown',function(ev){
-if(ev.target.closest&&ev.target.closest('.op-dag-node'))return;
-drag={x:ev.clientX,y:ev.clientY,vx:vb.x,vy:vb.y};
-view.setPointerCapture(ev.pointerId);view.style.cursor='grabbing';});
-view.addEventListener('pointermove',function(ev){if(!drag)return;
-var k=vb.w/(view.getBoundingClientRect().width||W);
-vb.x=drag.vx-(ev.clientX-drag.x)*k;vb.y=drag.vy-(ev.clientY-drag.y)*k;apply();});
-function stop(){drag=null;view.style.cursor='';}
-view.addEventListener('pointerup',stop);view.addEventListener('pointercancel',stop);
-view.tabIndex=0;view.setAttribute('role','group');view.setAttribute('aria-label',
-'Pipeline diagram: arrow keys move it, + and \u2212 zoom, 0 fits; Tab reaches the nodes');
-function pan(dx,dy){vb.x+=dx*vb.w;vb.y+=dy*vb.h;apply();}
-view.addEventListener('keydown',function(ev){if(ev.altKey||ev.ctrlKey||ev.metaKey)return;
-var k=ev.key,step=ev.shiftKey?.5:.1;
-if(k==='ArrowLeft')pan(-step,0);else if(k==='ArrowRight')pan(step,0);
-else if(k==='ArrowUp')pan(0,-step);else if(k==='ArrowDown')pan(0,step);
-else if(k==='+'||k==='=')zoom(1/1.25);else if(k==='-'||k==='\u2212')zoom(1.25);
-else if(k==='0')fit();else return;ev.preventDefault();});
-view.addEventListener('focusin',function(ev){var g=ev.target.closest&&ev.target.closest('.op-dag-node');
-if(!g)return;var b=g.getBoundingClientRect(),r=view.getBoundingClientRect();
-if(b.left<r.left||b.top<r.top||b.right>r.right||b.bottom>r.bottom){
-var k=vb.w/(r.width||W);vb.x+=((b.left+b.right)/2-(r.left+r.right)/2)*k;
-vb.y+=((b.top+b.bottom)/2-(r.top+r.bottom)/2)*k;apply();}});
-function schema(cols){return cols.map(function(c){return c[0]+': '+c[1];}).join(', ')||'none';}
-function row(dl,name,text){var dt=document.createElement('dt'),dd=document.createElement('dd');
-dt.textContent=name;dd.textContent=text;dl.appendChild(dt);dl.appendChild(dd);}
-function select(i){var n=model.nodes[i],inputs=[];selected=n.label;
-model.edges.forEach(function(e){if(e.target===i)inputs.push(model.nodes[e.source].label);});
-svg.querySelectorAll('.op-dag-node').forEach(function(g){
-g.classList.toggle('op-dag-selected',+g.getAttribute('data-index')===i);});
-svg.querySelectorAll('.op-dag-edges > g').forEach(function(g){
-g.classList.toggle('op-dag-lit',+g.getAttribute('data-source')===i||
-+g.getAttribute('data-target')===i);});
-panel.textContent='';var head=document.createElement('div');head.style.fontWeight='600';
-head.textContent=n.label+' — '+[n.kind_text,n.detail,n.status].filter(Boolean).join(' · ');
-panel.appendChild(head);var dl=document.createElement('dl');
-row(dl,'tags',schema(n.tag_schema));row(dl,'data',schema(n.data_schema));
-row(dl,'inputs',inputs.join(', ')||'none');
-n.facts.forEach(function(f){row(dl,f[0],f[1]);});
-panel.appendChild(dl);panel.classList.add('op-dag-open');}
-function show(v){cur=v;model=views[v].model;
-var el=document.importNode(new DOMParser().parseFromString(
-decode(views[v].picture),'image/svg+xml').documentElement,true);
-var bg=el.querySelector('.op-dag-bg');if(bg)bg.parentNode.removeChild(bg);
-el.removeAttribute('color');
-W=+el.getAttribute('width');H=+el.getAttribute('height');
-var cw=view.clientWidth||W,k0=Math.max(W/cw,1);
-root.style.setProperty('--op-dag-h',Math.round(Math.min(Math.max(H/k0,120),560))+'px');
-el.removeAttribute('width');el.removeAttribute('height');
-el.style.width='100%';el.style.height='100%';el.style.maxWidth='none';
-svg.parentNode.replaceChild(el,svg);svg=el;
-if(count)count.textContent=String(model.nodes.length);
-svg.querySelectorAll('.op-dag-node').forEach(function(g){var i=+g.getAttribute('data-index');
-g.addEventListener('click',function(){select(i);});
-g.addEventListener('keydown',function(ev){
-if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();select(i);}});});
-var keep=-1;model.nodes.forEach(function(n,i){if(n.label===selected)keep=i;});
-if(keep>=0)select(keep);
-else{selected=null;panel.textContent='';panel.classList.remove('op-dag-open');}
-root.classList.add('op-dag-live');fit();}
-show(0);
-})();
-"""
+
+def _compact(text: str, *, css: bool) -> str:
+    """An asset as embedded: comments, indentation and blank lines removed.
+
+    A deterministic text step, not a minifier: every remaining line is kept as written,
+    and line breaks are kept, so a script's statements end where they did. CSS comments
+    are ``/* ... */`` blocks; script comments are whole lines starting with ``//`` (the
+    only kind ``diagram.js`` uses).
+
+    Args:
+        text: The file's text.
+        css: Whether it is the style sheet; otherwise the script.
+
+    Returns:
+        The lines left, stripped, joined with line breaks.
+    """
+    if css:
+        text = _CSS_COMMENT.sub("", text)
+    lines = (line.strip() for line in text.splitlines())
+    return "\n".join(
+        line for line in lines if line and (css or not line.startswith("//"))
+    )
+
+
+@functools.cache
+def _asset(name: str) -> str:
+    """The embedded text of one asset file, read once per process, on first use.
+
+    Args:
+        name: ``"diagram.css"`` or ``"diagram.js"``.
+
+    Returns:
+        The compacted text.
+
+    Raises:
+        ValueError: If the file holds text that would end its element or start an HTML
+            comment (it never does as shipped; this keeps an edit from breaking out).
+    """
+    text = (
+        importlib.resources.files("orcapod.pipeline")
+        .joinpath(_ASSETS)
+        .joinpath(name)
+        .read_text(encoding="utf-8")
+    )
+    found = _UNSAFE_IN_ELEMENT.search(text)
+    if found is not None:
+        raise ValueError(f"{name} contains {found.group(0)!r}, unsafe inline")
+    return _compact(text, css=name.endswith(".css"))
 
 
 def _inputs(nodes: Sequence[_Node], edges: Sequence[_Edge]) -> dict[int, list[str]]:
@@ -1264,7 +1174,7 @@ class PipelineDiagram:
             f"{_json_for_script(other)}</script>"
         )
         return (
-            f'<div class="op-dag"><style>{_STYLE}</style>'
+            f'<div class="op-dag"><style>{_asset("diagram.css")}</style>'
             f'<div class="op-dag-head">{_escape(self.title)} · '
             f'<span class="op-dag-count">{len(self._nodes)}</span> nodes '
             f"{_PREVIEW_TAG}</div>"
@@ -1273,7 +1183,7 @@ class PipelineDiagram:
             f"{_table(self._nodes, self._inputs())}"
             '<script type="application/json" class="op-dag-model">'
             f"{_json_for_script(self.to_dict())}</script>"
-            f"{other_block}</div><script>{_SCRIPT}</script>"
+            f"{other_block}</div><script>{_asset('diagram.js')}</script>"
         )
 
     def save(self, path: str | Path) -> None:

@@ -5,8 +5,10 @@
 **Status:** Approved by the coordinator for the workshop version (2026-11-17); the
 developer approved a vendored library in principle for the follow-up (section 8).
 
-Implementation: `src/orcapod/pipeline/diagram.py`, `Pipeline.diagram()` /
-`PipelineJob.diagram()` and the rich display in `src/orcapod/pipeline/base.py`, tests in
+Implementation: `src/orcapod/pipeline/diagram.py`, its style sheet and script in
+`src/orcapod/pipeline/diagram_assets/` (`diagram.css`, `diagram.js`; section 3),
+`Pipeline.diagram()` / `PipelineJob.diagram()` and the rich display in
+`src/orcapod/pipeline/base.py`, tests in
 `tests/test_pipeline/test_diagram.py`. Screenshots of the tutorial job (before and after a
 run, light and dark, a node selected, scripts removed, folded, top to bottom, and `partial`
 after a run where `firing_rate` failed for one unit) are in `itl-1197-pipeline-diagram/`,
@@ -101,6 +103,24 @@ outputs; classic Notebook 6 evaluates scripts through jQuery (no
 `document.currentScript`: the script falls back to the last un-initialised container);
 VS Code and Colab run output scripts in their webview/iframe.
 
+The style sheet and the script are source files shipped as package data beside the
+module (developer review, November 17, 2026): `src/orcapod/pipeline/diagram_assets/diagram.css`
+and `diagram.js`, formatted one rule or statement per line, with their explanatory
+comments. The wheel (`packages = ["src/orcapod"]`) and the sdist (`only-include`
+`src/orcapod`) carry them with no configuration change. `diagram._asset` reads each through
+`importlib.resources.files("orcapod.pipeline")` on first use (cached per process; never at
+import) and every output still embeds both inline, because a notebook output cannot fetch
+a package file. Embedded compacted by `diagram._compact`, a deterministic text step and not
+a minifier: CSS `/* */` comments, script comment lines (whole lines starting with `//`, the
+only comment form `diagram.js` uses), indentation and blank lines are dropped; every other
+line is kept as written and line breaks stay, so statements end where they did. The
+tutorial job's HTML grows from 34,035 to 35,052 bytes (the readable spacing); as written,
+with comments and indentation, it would carry 4,405 bytes more per output (39,457). The over-`max_nodes` listing
+(no style sheet, no script) is unchanged at 932 bytes. Nothing from the user is ever
+written into either file; the script reads the model from the JSON blocks with
+`textContent`. `_asset` refuses a file holding `</style`, `</script` or `<!--` (any letter
+case), so an edit cannot end its element.
+
 Checked by hand in JupyterLab 4.6.6 (headless server, headless Chrome; screenshots
 `itl-1197-pipeline-diagram/jupyterlab-*.png`): for an untrusted notebook its sanitizer
 removes inline `<svg>` (keeping only its text, so the hover texts showed as a wall of
@@ -128,6 +148,11 @@ set/dict iteration order or hash() in the output; marker id from a SHA-256 of th
 
 - Model: tutorial-like job: nodes, kinds, labels, edges, schemas; statuses before run,
   after run, failed rows, stale after rebind/clear_cache, held rows on a rerun, loaded only.
+- Kind: from the object drawn (`isinstance(pipeline, PipelineJob)`), so an empty
+  compiled job is `Job '...'` with `kind="job"` (ITL-1214, Copilot review).
+- Assets: both files resolve through `importlib.resources`, are embedded compacted, hold
+  no `</script`, `</style` or `<!--`, and the loader refuses one that does; the embedded
+  script passes `node --check` when Node.js is on `PATH`.
 - Determinism: two diagrams of the same pipeline are byte-identical; recording order of
   independent branches does not change the output.
 - Escaping: label, column name, pipeline name and error message containing
