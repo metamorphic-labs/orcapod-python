@@ -36,11 +36,12 @@ from orcapod.pipeline import (
     SyncPipelineOrchestrator,
 )
 from orcapod.pipeline.serialization import resolve_operator_from_config
+from orcapod.core.streams.base import StreamBase
 from orcapod.protocols.core_protocols import StreamProtocol
 
 # ``x`` and ``y`` order the members differently; ``y`` and ``b`` hold nulls; rows 1 and
 # 2 share every tag, so only the record id tells them apart.
-COLUMNS: dict[str, pa.Array] = {
+COLUMNS: dict[str, pa.Array[Any]] = {
     "g": pa.array([1, 1, 1, 1, 1, 1], pa.int64()),
     "k": pa.array([1, 1, 1, 2, 2, 2], pa.int64()),
     "x": pa.array([2, 1, 1, 1, 2, 1], pa.int64()),
@@ -72,7 +73,7 @@ def _table(layout: tuple[str, ...]) -> pa.Table:
 
 def _input(
     mode: str, kind: str, tag_order: tuple[str, ...], layout: tuple[str, ...]
-) -> StreamProtocol:
+) -> StreamBase:
     table = _table(layout)
     if kind == "raw":
         data_tags = {
@@ -110,8 +111,8 @@ def _fingerprint(stream: StreamProtocol, *, content_hash: bool) -> dict[str, Any
 
 
 def _group_twice(
-    stream: StreamProtocol, member_order: list[str] | None
-) -> tuple[StreamProtocol, StreamProtocol]:
+    stream: StreamBase, member_order: list[str] | None
+) -> tuple[StreamBase, StreamBase]:
     once = stream.group_by(["g", "k"], member_order=member_order)
     # The grouped stream's only non-key tag is ``k``.
     twice = once.group_by(["g"], member_order=["k"] if member_order else None)
@@ -225,7 +226,7 @@ def test_groups_are_emitted_by_their_keys_in_name_order() -> None:
 # ── the order itself ────────────────────────────────────────────────────────
 
 
-def _a_lists(stream: StreamProtocol) -> dict[int, list[float]]:
+def _a_lists(stream: StreamProtocol) -> dict[object, object]:
     return {tag["k"]: data["a"] for tag, data in stream.iter_data()}
 
 
