@@ -195,29 +195,38 @@ environments:
 
 The `spiral-integration` job of `Run Tests` runs on every push to `main` and by hand
 (`workflow_dispatch`) on `metamorphic-labs/orcapod-python`, never on pull requests. It
-authenticates to SpiralDB with workload client credentials (ITL-1185): pyspiral reads
-`SPIRAL_CLIENT_ID` and `SPIRAL_CLIENT_SECRET` from the environment and requests a token with
-the `client_credentials` grant. It requests no GitHub OIDC token: the SpiralDB server no
-longer accepts the OIDC token exchange. The job fails at its first step, naming each missing
-setting, when one of the three below is not set. No agent creates, reads or sets any of them.
+authenticates to SpiralDB with a workload private key (ITL-1185): pyspiral reads
+`SPIRAL_CLIENT_ID` (the workload id) and `SPIRAL_PRIVATE_KEY` (the private key as a JSON Web
+Key) from the environment, signs a client assertion with the key, and requests a token from
+`https://auth.spiraldb.com/oauth/token` with the `client_credentials` grant. It requests no
+GitHub OIDC token: pyspiral's workload identity path posts a token exchange that the server
+rejects. Client secrets are not used: the server no longer issues them. The job fails at its
+first step, naming each missing setting, when one of the three below is not set or the key
+is not a private JWK naming its `kid`. No agent creates, reads or sets any of them.
 
 On `metamorphic-labs/orcapod-python` and in SpiralDB, the developer sets:
 
 1. The SpiralDB workload the job runs as (today `orcapod-gha`) holds the **editor** role on
    the test project ("Orcapod testing"): the tests create, write, read and drop tables there.
-2. Repository secrets (`Settings → Secrets and variables → Actions → Secrets`):
-   `SPIRAL_CLIENT_ID` and `SPIRAL_CLIENT_SECRET`, both from
-   `spiral workloads issue-creds <workload id>`. The secret is shown once, when it is issued.
-3. Repository variable (`… → Variables`): `SPIRAL_PROJECT_ID`, the id of the test project.
+2. A key pair registered for that workload. pyspiral's own CLI has no command for this; use
+   Studio or the newer SpiralDB CLI, in an environment of its own and never installed beside
+   pyspiral (both provide a top-level `spiral` module):
+   `spiral workloads keys add <workload id> --kid <key id> --output -` prints the private key
+   as a JWK that names its `kid`. A PEM key is not accepted.
+3. Repository secrets (`Settings → Secrets and variables → Actions → Secrets`):
+   `SPIRAL_CLIENT_ID`, the workload id (`work_...`), and `SPIRAL_PRIVATE_KEY`, the private JWK
+   as one line of JSON. Keep the key file out of the repository and delete it once the secret
+   is set.
+4. Repository variable (`… → Variables`): `SPIRAL_PROJECT_ID`, the id of the test project.
 
 The server URL is fixed in the workflow (`https://api.spiraldb.dev`); the repository variable
 `SPIRAL_SERVER_URL` and the secret `SPIRAL_WORKLOAD_ID` are not read and can be deleted.
 
-To rotate the secret: issue new credentials for the workload
-(`spiral workloads issue-creds <workload id>`), replace both repository secrets with the new
-pair, run `Run Tests` by hand on `main` and check that `spiral-integration` passes, then revoke
-the old pair (`spiral workloads revoke-creds <old client id>`). Rotate at once if a secret may
-have been exposed, for example printed in a log.
+To rotate the key: add a new key to the workload with a new `kid`, replace the
+`SPIRAL_PRIVATE_KEY` secret with the new JWK, run `Run Tests` by hand on `main` and check that
+`spiral-integration` passes, then remove the old key (`spiral workloads keys rm`). A workload
+can hold several keys, so the job keeps working during the switch. Rotate at once if the key
+may have been exposed, for example printed in a log.
 
 ## Pre-releases
 

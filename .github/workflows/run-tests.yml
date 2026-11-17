@@ -53,16 +53,18 @@ jobs:
     # resources on every review cycle. Runs only on the development repository: the public
     # repository has no SpiralDB credentials, so the job is skipped there (ITL-1007).
     #
-    # Authentication (ITL-1185): workload client credentials. pyspiral reads SPIRAL_CLIENT_ID
-    # and SPIRAL_CLIENT_SECRET from the environment and requests a token with the
-    # client_credentials grant. The SpiralDB server no longer accepts the OIDC token exchange,
-    # so the job requests no GitHub OIDC token (no id-token permission). Requires the
-    # SPIRAL_CLIENT_ID and SPIRAL_CLIENT_SECRET secrets and the SPIRAL_PROJECT_ID repository
+    # Authentication (ITL-1185): a workload private key. pyspiral reads SPIRAL_CLIENT_ID (the
+    # workload id) and SPIRAL_PRIVATE_KEY (the workload's private key as a JWK naming its
+    # kid), signs a client assertion and requests a token from https://auth.spiraldb.com with
+    # the client_credentials grant. The job requests no GitHub OIDC token (no id-token
+    # permission): pyspiral's OIDC path posts a token exchange the server rejects. Requires
+    # the SPIRAL_CLIENT_ID and SPIRAL_PRIVATE_KEY secrets and the SPIRAL_PROJECT_ID repository
     # variable; fails loudly, naming each missing setting, so missing settings don't silently
-    # drop coverage. Setup and secret rotation: RELEASING.md, "SpiralDB integration job".
-    # The two secrets are given only to the two steps that read them, not to the job, so
-    # no third-party action sees them. Never add a step that prints the environment (env,
-    # printenv, set -x) to this job.
+    # drop coverage. Setup and key rotation: RELEASING.md, "SpiralDB integration job".
+    # The two secrets are given only to the two steps that read them, not to the job, so no
+    # third-party action sees them. The key is passed only through the environment, never on a
+    # command line. Never add a step that prints the environment (env, printenv, set -x) or
+    # the key to this job.
     if: >-
       github.repository == 'metamorphic-labs/orcapod-python'
       && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
@@ -76,20 +78,31 @@ jobs:
 
     steps:
       - name: Check SpiralDB settings
-        # Tests only whether each setting is empty and prints only the names of the
-        # missing ones, never a value.
+        # Prints only the names of missing settings and of missing JWK members, never a value.
         env:
           SPIRAL_CLIENT_ID: ${{ secrets.SPIRAL_CLIENT_ID }}
-          SPIRAL_CLIENT_SECRET: ${{ secrets.SPIRAL_CLIENT_SECRET }}
+          SPIRAL_PRIVATE_KEY: ${{ secrets.SPIRAL_PRIVATE_KEY }}
         run: |
           missing=""
           [ -n "$SPIRAL_CLIENT_ID" ] || missing="$missing SPIRAL_CLIENT_ID (secret)"
-          [ -n "$SPIRAL_CLIENT_SECRET" ] || missing="$missing SPIRAL_CLIENT_SECRET (secret)"
+          [ -n "$SPIRAL_PRIVATE_KEY" ] || missing="$missing SPIRAL_PRIVATE_KEY (secret)"
           [ -n "$SPIRAL_PROJECT_ID" ] || missing="$missing SPIRAL_PROJECT_ID (repository variable)"
           if [ -n "$missing" ]; then
             echo "::error::SpiralDB integration tests cannot run; not set:$missing. See RELEASING.md, 'SpiralDB integration job'."
             exit 1
           fi
+          python3 - <<'PY'
+          import json, os, sys
+          try:
+              key = json.loads(os.environ["SPIRAL_PRIVATE_KEY"])
+          except ValueError:
+              key = None
+          if not isinstance(key, dict):
+              sys.exit("::error::SPIRAL_PRIVATE_KEY is not a JSON Web Key (a PEM key is not accepted). See RELEASING.md, 'SpiralDB integration job'.")
+          absent = [m for m in ("kty", "kid", "d") if not key.get(m)]
+          if absent:
+              sys.exit("::error::SPIRAL_PRIVATE_KEY lacks the JWK member(s) " + ", ".join(absent) + " (a private key JWK naming its registered kid is required). See RELEASING.md, 'SpiralDB integration job'.")
+          PY
 
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
@@ -112,7 +125,7 @@ jobs:
       - name: Run SpiralDB integration tests
         env:
           SPIRAL_CLIENT_ID: ${{ secrets.SPIRAL_CLIENT_ID }}
-          SPIRAL_CLIENT_SECRET: ${{ secrets.SPIRAL_CLIENT_SECRET }}
+          SPIRAL_PRIVATE_KEY: ${{ secrets.SPIRAL_PRIVATE_KEY }}
         run: uv run --python "3.11" pytest tests/test_databases/test_spiraldb_connector_integration.py -v
 
   license-check:
