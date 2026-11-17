@@ -64,22 +64,6 @@ _KIND_TEXT: dict[str, str] = {
     "side_effect": "side-effect pod",
 }
 
-# The operators ``collapse=True`` folds: they only choose, rename or combine columns.
-_COLLAPSIBLE_OPERATORS = frozenset(
-    {
-        "Join",
-        "SelectDataColumns",
-        "SelectTagColumns",
-        "SelectColumns",
-        "DropDataColumns",
-        "DropTagColumns",
-        "DropColumns",
-        "MapData",
-        "MapTags",
-        "MapColumns",
-    }
-)
-
 
 @dataclass(frozen=True)
 class _Node:
@@ -143,9 +127,54 @@ def _node_detail(node: Any) -> str:
 
 
 def _producer_name(node: Any) -> str | None:
-    """The operator's or function's name, or ``None``."""
-    name = getattr(getattr(node, "producer", None), "label", None)
+    """The operator's class name or the function's name, or ``None``.
+
+    An operator is named by its class, never by its label, which the user chooses
+    (``Join(label="joined")`` is a ``Join``).
+    """
+    producer = getattr(node, "producer", None)
+    if producer is None:
+        return None
+    if node.node_type == "operator":
+        return type(producer).__name__
+    name = getattr(producer, "label", None)
     return name if isinstance(name, str) else None
+
+
+def _collapsible(node: Any) -> bool:
+    """Whether a node's operator only joins, chooses or renames columns.
+
+    ``collapse=True`` folds such a node into the edge it lies on. Decided by the
+    operator's class, never by a label, which the user chooses.
+    """
+    from orcapod.core.operators import (
+        DropColumns,
+        DropDataColumns,
+        DropTagColumns,
+        Join,
+        MapColumns,
+        MapData,
+        MapTags,
+        SelectColumns,
+        SelectDataColumns,
+        SelectTagColumns,
+    )
+
+    return node.node_type == "operator" and isinstance(
+        getattr(node, "producer", None),
+        (
+            Join,
+            SelectDataColumns,
+            SelectTagColumns,
+            SelectColumns,
+            DropDataColumns,
+            DropTagColumns,
+            DropColumns,
+            MapData,
+            MapTags,
+            MapColumns,
+        ),
+    )
 
 
 def _run_facts(summary: NodeRunSummary | None) -> tuple[tuple[str, str], ...]:
@@ -164,13 +193,22 @@ def _run_facts(summary: NodeRunSummary | None) -> tuple[tuple[str, str], ...]:
     return tuple(facts)
 
 
-def _job_status(node: Any, summary: NodeRunSummary | None) -> str:
+def _job_status(
+    node: Any, summary: NodeRunSummary | None, upstream_statuses: Iterable[str]
+) -> str:
     """A job node's run state, from what it holds in memory; never reads or computes.
 
     Sources are ``bound`` or ``unbound``. Any other node is ``not run`` (no run in this
     process, or cleared), ``stale`` (an input changed since its run), ``failed`` (the
     job's last run had failed rows for it), ``held`` (current, and the last run kept it
-    without running it), ``current`` or ``loaded only`` (filled by a load-only run).
+    without running it), ``current``, ``loaded only`` (filled by a load-only run) or
+    ``partial`` (it ran, without the failed rows of a node above it, so the next run
+    computes it again).
+
+    Args:
+        node: The job node.
+        summary: What the job's last run did with the node, if it ran in it.
+        upstream_statuses: The statuses of the nodes it reads from.
     """
     if node.node_type == "source":
         return "bound" if getattr(node, "bound_source", None) is not None else "unbound"
@@ -184,6 +222,8 @@ def _job_status(node: Any, summary: NodeRunSummary | None) -> str:
         return "held" if summary is not None and summary.held else "current"
     if node.holds_current_run(load_only=True):
         return "loaded only"
+    if any(status in ("failed", "partial") for status in upstream_statuses):
+        return "partial"
     return "not run"
 
 
@@ -253,9 +293,7 @@ def _build_model(
         folded = {
             label
             for label, node in by_label.items()
-            if node.node_type == "operator"
-            and _producer_name(node) in _COLLAPSIBLE_OPERATORS
-            and len(succs[label]) == 1
+            if _collapsible(node) and len(succs[label]) == 1
         }
 
     shown = [
@@ -281,6 +319,17 @@ def _build_model(
                 edges[key] = tuple(dict.fromkeys((*edges.get(key, ()), *via)))
                 folded_into.setdefault(label, []).extend(via)
 
+    # Every node's status, folded ones too, in topological order: a node's status can
+    # depend on the statuses of the nodes it reads from.
+    statuses: dict[str, str] = {}
+    if is_job:
+        for label in _topological_labels(preds, succs):
+            statuses[label] = _job_status(
+                by_label[label],
+                summaries.get(label),
+                (statuses[upstream] for upstream in preds[label]),
+            )
+
     nodes: list[_Node] = []
     for label in shown:
         node = by_label[label]
@@ -298,7 +347,7 @@ def _build_model(
                 detail=_node_detail(node),
                 tag_schema=_schema_pairs(tag_schema),
                 data_schema=_schema_pairs(data_schema),
-                status=_job_status(node, summary) if is_job else "",
+                status=statuses.get(label, ""),
                 facts=facts,
             )
         )
@@ -582,12 +631,13 @@ _STATUS_COLOUR: dict[str, str] = {
     "bound": "#2e9e5b",
     "loaded only": "#3b8fd1",
     "stale": "#d08a16",
+    "partial": "#d08a16",
     "failed": "#d63c3c",
     "not run": "#8a8a8a",
     "unbound": "#8a8a8a",
 }
 # Statuses drawn with a dashed outline, so they are not told by colour alone.
-_DASHED_STATUSES = frozenset({"not run", "stale", "unbound"})
+_DASHED_STATUSES = frozenset({"not run", "stale", "partial", "unbound"})
 _ARROW = 7.0
 
 
@@ -676,7 +726,7 @@ def _svg(
     width, height = _num(layout.width), _num(layout.height)
     colour = ' color="#1f1f1f"' if standalone else ' style="max-width:100%;height:auto"'
     parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" class="op-dag-svg" role="img" '
+        f'<svg xmlns="http://www.w3.org/2000/svg" class="op-dag-svg" role="group" '
         f'width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
         'font-family="system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif"'
         f"{colour}>",

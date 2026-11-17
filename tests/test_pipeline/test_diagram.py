@@ -185,6 +185,13 @@ def test_failed_rows_show_as_failed_with_the_first_error() -> None:
         "last run": "4 rows, 3 computed, 1 failed",
         "first error": "ValueError: x is 20",
     }
+    # The nodes below ran on the rows that did not fail: partial, not "not run".
+    assert _statuses(diagram)["GroupBy"] == "partial"
+    assert _statuses(diagram)["sums"] == "partial"
+    assert _facts(diagram, "sums") == {"last run": "2 rows, 2 computed"}
+    assert "partial" in job.diagram(collapse=True).to_text()
+    job.run()
+    assert set(_statuses(job.diagram()).values()) == {"bound", "current"}
 
 
 def test_an_unbound_source_and_a_load_only_run() -> None:
@@ -235,6 +242,28 @@ def test_making_a_diagram_calls_no_function_and_reads_nothing(
         assert "op-dag-picture" in bundle["text/html"]
         _ = target.diagram(collapse=True).to_html()
     assert CALLS == []
+
+
+def test_a_tags_as_data_source_is_drawn_without_reading_its_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A source over a job node that has stored nothing yet: its columns are predicted."""
+    origin = _job()
+    derived = origin.nodes["rates"].as_source(tags_as_data={"k": "k_copy"})
+    job = PipelineJob(name="second", database=InMemoryArrowDatabase())
+    with job:
+        derived.select_data_columns(["k_copy"])
+    database_methods = [
+        name
+        for name in dir(InMemoryArrowDatabase)
+        if not name.startswith("_") and callable(getattr(InMemoryArrowDatabase, name))
+    ]
+    _forbid(monkeypatch, InMemoryArrowDatabase, database_methods)
+    for _ in range(2):
+        nodes = job.diagram().to_dict()["nodes"]
+        selected = next(n for n in nodes if n["kind"] == "operator")
+        assert selected["data_schema"] == [["k_copy", "int"]]
+        _ = job._repr_mimebundle_()
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +422,14 @@ def test_a_notebook_that_strips_scripts_and_svg_still_shows_the_picture() -> Non
     inline = ET.fromstring(_job().diagram().to_svg())
     assert inline.get("color") is None
     assert inline.find(f"{SVG_NS}rect[@class='op-dag-bg']") is None
+    # The image has its alternative text; the inline picture holds focusable node
+    # buttons, so it is a group of controls, not one image (ARIA).
+    collector = _Collector()
+    collector.feed(document)
+    assert any(name == "alt" and value for name, value in collector.attributes)
+    assert inline.get("role") == "group"
+    buttons = [g for g in inline.iter(f"{SVG_NS}g") if g.get("role") == "button"]
+    assert len(buttons) == 4
 
 
 # ---------------------------------------------------------------------------
@@ -420,6 +457,23 @@ def test_collapse_folds_column_steps_and_joins_into_edges() -> None:
     assert edges[("rates", "GroupBy")] == []
     assert _facts(folded, "rates")["folded steps"] == "Join, SelectDataColumns"
     assert 'stroke-dasharray="5 3"' in folded.to_svg()
+
+
+def test_collapse_goes_by_the_operator_class_not_its_label() -> None:
+    from orcapod.core.operators import DropNulls, Join
+
+    job = PipelineJob(name="labels", database=InMemoryArrowDatabase())
+    with job:
+        joined: Any = Join(label="joined")(_units(), _scales())
+        kept: Any = DropNulls(label="Join")(joined)
+        inc.pod(kept, label="rates")
+    nodes = {n["label"]: n for n in job.diagram().to_dict()["nodes"]}
+    assert nodes["joined"]["detail"] == "Join"
+    assert nodes["Join"]["detail"] == "DropNulls"
+
+    labels = [n["label"] for n in job.diagram(collapse=True).to_dict()["nodes"]]
+    assert "joined" not in labels  # a Join, whatever its label
+    assert "Join" in labels  # a DropNulls is never folded
 
 
 def test_max_nodes_shows_the_listing_instead() -> None:

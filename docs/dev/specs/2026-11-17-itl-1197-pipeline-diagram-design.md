@@ -26,11 +26,15 @@ run, light and dark, a node selected, scripts removed, folded, top to bottom) ar
 - Job status, all from memory: source `bound`/`unbound` (`bound_source`); other nodes
   `not run` (`last_modified is None`), `stale` (`is_stale`), `failed` (job.last_run entry
   with failed rows), `current` (`holds_current_run()`), `held` (current and the last run
-  held it, `NodeRunSummary.held`), `loaded only` (`holds_current_run(load_only=True)`).
+  held it, `NodeRunSummary.held`), `loaded only` (`holds_current_run(load_only=True)`),
+  `partial` (ran, not current, and a node it reads from is `failed` or `partial`: it holds
+  the results of the rows that did not fail; Copilot review of #424).
   Row counts from `job.last_run` (function nodes: rows, computed, reused, failed, held,
   not stored). Operators: status only (no count without reading).
 - Never: `as_table`, `iter_data`, `head`, `check_for_new_data`, any database call, any
-  user function. `last_modified`, `is_stale`, `holds_current_run` read attributes only.
+  user function. A `DerivedSource` with `tags_as_data` used to read its origin's rows to
+  give `output_schema()`; it now derives them from the origin's zero-row table (fixed in
+  this PR, found by the Copilot review). `last_modified`, `is_stale`, `holds_current_run` read attributes only.
 
 ## 2. Public API
 
@@ -47,7 +51,8 @@ run, light and dark, a node selected, scripts removed, folded, top to bottom) ar
 - collapse: the automatic join and select (ITL-807) are by design indistinguishable from
   hand-written ones, so `collapse=True` folds by kind: Join, Select*/Drop*/Map* operators
   with exactly one consumer are folded into the edge (dashed) and listed in the consumer's
-  details. Default False (the tutorial teaches the node names, SelectDataColumns_1 etc.).
+  details. Decided by the operator's class, never its label (a user's `Join(label="joined")`
+  is folded, a `DropNulls(label="Join")` is not); an operator's detail is its class name. Default False (the tutorial teaches the node names, SelectDataColumns_1 etc.).
 
 ## 3. Rendering approach
 
@@ -111,7 +116,9 @@ set/dict iteration order or hash() in the output; marker id from a SHA-256 of th
 Text and edges use `currentColor` (the notebook's own text colour), kinds a solid stroke
 with a 14% fill: readable on light and dark themes in JupyterLab, VS Code, Colab without
 theme detection. Kind and status are also written as text and drawn as shape/dash (not run,
-stale, unbound dashed), never colour alone. `role="img"` + `<title>` on the SVG, nodes
+stale, partial, unbound dashed), never colour alone. `role="group"` + `<title>` on the
+inline SVG (it holds the node controls; the `<img>` fallback carries image semantics and
+`alt`), nodes
 `role="button"`, `tabindex=0`, `aria-label`, Enter/Space selects; panel `aria-live`.
 
 ## 7. Thursday version vs later

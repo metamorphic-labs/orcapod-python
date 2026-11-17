@@ -303,6 +303,8 @@ function of a function pod, the class of a bound source), and for a job its stat
 - `failed`: the job's last run had rows whose function raised; select the node to see the
   first error.
 - `loaded only`: filled by `job.run(load_only=True)`.
+- `partial`: it ran, but a node above it had failed rows, so it holds the results of the
+  rows that did not fail; the next run computes it again.
 - `bound` or `unbound`, for a source slot.
 
 A selected node also shows the row counts of the job's last run (`job.last_run`).
@@ -312,7 +314,8 @@ The options:
 - `direction="TB"` lays the graph out top to bottom instead of left to right.
 - `collapse=True` folds the steps that only choose, rename or join columns (joins, column
   selections, drops and maps, among them the join and select a function pod adds for you)
-  into the edge they lie on: the edge is dashed, and the node it leads to lists them.
+  into the edge they lie on: the edge is dashed, and the node it leads to lists them. A step
+  is folded by what its operator is, whatever label it was given.
 - `max_nodes` (400 by default): a larger graph is shown as the text listing instead.
 
 Drawing a diagram never computes anything. Like `head()`, it reads only what is already
