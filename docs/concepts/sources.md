@@ -44,8 +44,10 @@ Two construction rules apply to every source and are the most common first error
 
 - Every name in `tag_columns` must be a column of the data, otherwise the source raises
   `ValueError: tag_columns not found in table`.
-- At least one column must be left over as a data column, otherwise it raises
-  `ValueError: No data columns found in the table`.
+- At least one data column must remain, otherwise the source raises
+  `ValueError: No data columns found in the table`. A data-tag is also a data column, so
+  this happens only when every tag is kept plain (`tag_only_columns`) and no other column
+  is left.
 
 **Data-tags and plain tags: `tag_only_columns`.** The sources built from a table
 (`ArrowTableSource`, `DictSource`, `DataFrameSource`, `CSVSource`, `DeltaTableSource` and the

@@ -31,7 +31,9 @@ content.
 
 One rule holds for every operator: **no data element comes from a tag value**. An operator may
 use tags to join, filter, group or order rows, but it never turns a tag column into a data
-column, so a function pod never receives tag content.
+column, so a function pod never receives the content of a plain tag. A
+[data-tag](data-tags.md) is different: it is a tag and a data column at once, so a function
+reads its data role.
 
 An operator may add a tag, never data. A tag labels rows; it is not a data value, so
 [`AddTags`](#addtags) can add tags with constant values while every data column passes through

@@ -20,6 +20,13 @@ class NoOpArrowDatabase:
     dependency is required by an interface but persistence is unwanted —
     e.g. dry-run pipelines, testing that code paths execute without I/O,
     or benchmarking pure compute overhead.
+
+    It keeps no Arrow field metadata (``keeps_field_metadata`` is ``False``), so a
+    node that would store a data-tag refuses it (``InputValidationError`` when the
+    database is attached): a function node over a stream with data-tags, or an
+    operator node with data-tags in ``LOG`` or ``REPLAY`` mode (ITL-1019). Keep the
+    tags plain (``tag_only_columns``) or use the cache mode ``OFF`` to dry-run such a
+    node.
     """
 
     def __init__(

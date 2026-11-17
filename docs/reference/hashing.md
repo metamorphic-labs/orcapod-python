@@ -888,14 +888,15 @@ When a source is built by `SourceStreamBuilder`, four hash-related operations ha
 sequence before the stream is returned:
 
 1. **Site 3 — Schema hash:** computed from `(tag_schema, data_schema)`; embedded in system tag column names.
-2. **Site 4 — Default `source_id`:** `<source kind>:<algorithm label>:<hex>` of the raw table hash if no explicit `source_id` is given.
+2. **Site 4 — Default `source_id`:** `<source kind>:<algorithm label>:<hex>` of the raw table hash if no explicit `source_id` is given, for an in-memory source (`arrow_table`, `dict`, `list`, `data_frame`); a file or database source's default names its location instead (`csv:<path>`, `delta_table:<path>`, and so on; see "Default source ids and row identifiers").
 3. **Site 5 — Per-row `record_id`:** the row identifier (`row_<n>` or the key's canonical JSON), stored per row as text.
 4. Two system tag columns, `_tag_source_id::{schema_hash}` and `_tag_record_id::{schema_hash}`, are appended to every row.
 
 `tag_only_columns` (the tags kept plain; `True` for all of them) enters these sites only
 through the schema: a data-tag is also a data column, so it is in the data schema and
-the schema hash, while the default `source_id` (the table hash) and the record ids are those
-of the same source with every tag plain. Every golden fixture that builds a source with tag
+the schema hash, while the default `source_id` (the table hash of an in-memory source, or the
+location of a file or database source) and the record ids are those of the same source with
+every tag plain. Every golden fixture that builds a source with tag
 columns passes `tag_only_columns=True`, so the golden values of data context `v1` pin plain
 tags, unchanged now that tags are data-tags by default.
 
@@ -998,8 +999,9 @@ tag columns too, so those calls are as wide as the joins make them (ITL-1132).
 > in member order (the procedure `group_v1` names for its system tags), and
 > `join_v1:<hex>` for a key that is a data-tag on several inputs of a `Join`, over the members'
 > tokens sorted (a missing token last), because a join meets its inputs in an order that
-> is not canonical. The token holds no `::`, so it never reads as a row's token. No hash
-> reads source info.
+> is not canonical. The token holds no `::`, so it never reads as a row's token. Source
+> info enters no content or pipeline hash; an operator node's record hash, which includes
+> the source-info columns (ITL-1019), takes a merged token as it takes any token.
 
 > **Why fold rather than list-wrap.** A many-to-one operator turns user tag and data columns
 > into `list[T]`, but system tag columns must stay scalar: `_build_record_id_preimage`

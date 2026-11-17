@@ -88,7 +88,9 @@ for tag, data in result.iter_data():
 # {'subject_id': 'mouse_02'} -> {'bmi': 2209.9999999999995}
 ```
 
-The function pod preserves tags and replaces data columns with the function's output.
+The function pod preserves tags and replaces data columns with the function's output. A
+data-tag is the exception: called as `pod(stream)`, the pod lets it fall through, so it stays
+both a tag and a data column of the output (see [Data-tags](data-tags.md)).
 
 !!! tip
     Calling a function pod, `compute_bmi.pod(source)`, is the convenient form of
@@ -892,7 +894,8 @@ a development checkout gives a development version). It is informational: loadin
 depends on it. Adding the field moved the file format version from `0.1.0` to `0.2.0`, and
 stating every tag binding (data-tags) moved it to `0.3.0`, the version written now. A
 `0.1.0` file, written by v0.2.0, and a `0.2.0` file, written by v0.3.0, still load, with every
-source tag plain as they were written; any other version is rejected.
+source tag plain as they were written, within the schema limits described below (a file with
+name-only extension type text cannot be loaded); any other version is rejected.
 The reverse does not hold: v0.2.0 cannot load a file saved by v0.3.0, because hashes differ
 between the two releases.
 
