@@ -43,12 +43,14 @@ if TYPE_CHECKING:
     import pyarrow as pa
     import pyarrow.compute as pc
     import pyarrow.dataset as pa_ds
+    import pyarrow.fs as pa_fs
     from upath import UPath
 else:
     deltalake = LazyModule("deltalake")
     pa = LazyModule("pyarrow")
     pl = LazyModule("polars")
     pc = LazyModule("pyarrow.compute")
+    pa_ds = LazyModule("pyarrow.dataset")
 
 # Module-level logger
 logger = logging.getLogger(__name__)
@@ -438,6 +440,9 @@ class _CommittedSnapshot:
             reads them, or ``None`` until first needed.
         files: The data files ``rows`` was read from (set together with ``rows``).
         dataset_schema: The schema of the dataset ``rows`` was read from.
+        dataset_format: The file format of that dataset, which reads a data file
+            the way the whole table is read (ITL-1173).
+        dataset_filesystem: The filesystem the dataset's ``files`` are paths in.
     """
 
     version: int
@@ -445,6 +450,8 @@ class _CommittedSnapshot:
     rows: KeyIndex | None = None
     files: frozenset[str] = frozenset()
     dataset_schema: "pa.Schema | None" = None
+    dataset_format: "pa_ds.FileFormat | None" = None
+    dataset_filesystem: "pa_fs.FileSystem | None" = None
 
 
 class DeltaTableDatabase:
@@ -480,6 +487,7 @@ class DeltaTableDatabase:
         _shared_delta_table_cache: "dict[str, deltalake.DeltaTable] | None" = None,
         _shared_snapshots: "dict[str, _CommittedSnapshot] | None" = None,
         _shared_pending_indexes: "dict[str, KeyIndex] | None" = None,
+        _shared_absent_tables: "set[str] | None" = None,
     ):
         self._root_uri, self._storage_options = parse_base_path(
             base_path, storage_options
@@ -530,6 +538,14 @@ class DeltaTableDatabase:
         # Indexes over each pending batch, valid while it is the key's batch.
         self._pending_indexes: dict[str, KeyIndex] = (
             _shared_pending_indexes if _shared_pending_indexes is not None else {}
+        )
+        # Record keys whose table was found absent (ITL-1173), so lookups do not try
+        # to open it again on every row. Family-wide like the loaded tables, and
+        # forgotten on any flush of the family and on a flush of the key: a table
+        # another process creates is seen after this database's next flush, as rows
+        # it appends to a loaded table are. ``table_exists`` always checks again.
+        self._absent_tables: set[str] = (
+            _shared_absent_tables if _shared_absent_tables is not None else set()
         )
 
     def _clear_pending(self):
@@ -637,6 +653,8 @@ class DeltaTableDatabase:
         # Check cache first
         if dt := self._delta_table_cache.get(record_key):
             return dt
+        if record_key in self._absent_tables:
+            return None
 
         try:
             # Try to load existing table
@@ -647,7 +665,8 @@ class DeltaTableDatabase:
             logger.debug(f"Loaded existing Delta table for {record_key}")
             return delta_table
         except deltalake.exceptions.TableNotFoundError:
-            # Table doesn't exist
+            # Table doesn't exist: remembered until the next flush (ITL-1173).
+            self._absent_tables.add(record_key)
             return None
         except Exception as e:
             # The table exists but could not be loaded: never report it as absent.
@@ -802,6 +821,8 @@ class DeltaTableDatabase:
         Returns:
             ``True`` if a table exists at the given path, ``False`` otherwise.
         """
+        # Checks again even when the table was found absent before (ITL-1173).
+        self._absent_tables.discard(self._get_record_key(record_path))
         return self._get_delta_table(record_path) is not None
 
     def _ensure_record_id_column(
@@ -898,7 +919,7 @@ class DeltaTableDatabase:
     @staticmethod
     def _scan_rows(
         delta_table: deltalake.DeltaTable,
-    ) -> tuple[pa.Table, frozenset[str], pa.Schema]:
+    ) -> tuple[pa.Table, "pa_ds.FileSystemDataset"]:
         """Read every row of ``delta_table`` as ``get_all_records`` reads it.
 
         Args:
@@ -906,8 +927,7 @@ class DeltaTableDatabase:
 
         Returns:
             The rows (view types normalized: PyArrow has no comparison kernels for
-            ``string_view``, ENG-601), the data
-            files they were read from and the dataset's schema.
+            ``string_view``, ENG-601) and the dataset they were read from.
 
         Raises:
             Exception: The backend's error when the table's data cannot be read.
@@ -920,7 +940,17 @@ class DeltaTableDatabase:
         table = from_delta_layout(
             arrow_utils.normalize_table_view_types(dataset.to_table())
         )
-        return table.combine_chunks(), frozenset(dataset.files), dataset.schema
+        return table.combine_chunks(), dataset
+
+    @staticmethod
+    def _describe_read(
+        snapshot: _CommittedSnapshot, dataset: "pa_ds.FileSystemDataset"
+    ) -> None:
+        """Record in ``snapshot`` the dataset its rows were read from."""
+        snapshot.files = frozenset(dataset.files)
+        snapshot.dataset_schema = dataset.schema
+        snapshot.dataset_format = dataset.format
+        snapshot.dataset_filesystem = dataset.filesystem
 
     def _stored_ids(self, record_path: tuple[str, ...]) -> set[bytes]:
         """Return the record ids stored at ``record_path`` (in the loaded version).
@@ -954,15 +984,14 @@ class DeltaTableDatabase:
         snapshot = self._snapshot(self._get_record_key(record_path), delta_table)
         if snapshot.rows is None:
             try:
-                table, files, schema = self._scan_rows(delta_table)
+                table, dataset = self._scan_rows(delta_table)
             except TypeIdentityError:
                 # The table is intact; the registered class differs (ITL-881).
                 raise
             except Exception as e:
                 raise self._read_failed(record_path) from e
             snapshot.rows = KeyIndex(table)
-            snapshot.files = files
-            snapshot.dataset_schema = schema
+            self._describe_read(snapshot, dataset)
         return snapshot.rows
 
     def add_record(
@@ -1637,6 +1666,8 @@ class DeltaTableDatabase:
             RuntimeError: If batches failed with other errors only, naming the
                 failed batches, with the first failure as its ``__cause__``.
         """
+        # A flush is where this database looks at the store again (ITL-1173).
+        self._absent_tables.clear()
         errors: list[tuple[str, Exception]] = []
         for record_key in list(self._pending_batches.keys()):
             try:
@@ -1678,6 +1709,7 @@ class DeltaTableDatabase:
         without applying any instance-level prefix.
         """
         logger.debug("Flushing triggered!!")
+        self._absent_tables.discard(record_key)
 
         if (
             record_key not in self._pending_batches
@@ -1731,6 +1763,9 @@ class DeltaTableDatabase:
                     table_uri, abs_path_components
                 ) from load_error
 
+            # Set when the rows were appended through ``delta_table``, which the
+            # writer then moves to the version it committed (ITL-1173).
+            appended = False
             if delta_table is None:
                 # TODO: reconsider mode="overwrite" here
                 deltalake.write_deltalake(
@@ -1788,12 +1823,12 @@ class DeltaTableDatabase:
                     # Every pending id is new in the version just loaded and the rows
                     # have the stored schema: append (ITL-919). A MERGE reads the whole
                     # stored table on each commit; it remains for every other batch.
+                    # Written through the table just loaded: given a URI, the writer
+                    # would load the table again (ITL-1173).
                     deltalake.write_deltalake(
-                        table_uri,
-                        combined_table,
-                        mode="append",
-                        storage_options=self._storage_options or None,
+                        delta_table, combined_table, mode="append"
                     )
+                    appended = True
                 else:
                     # Some pending ids are stored already: insert only the others.
                     delta_table.merge(
@@ -1819,8 +1854,12 @@ class DeltaTableDatabase:
 
         # The rows are committed: nothing below may put them back in the queue.
         try:
-            committed = deltalake.DeltaTable(
-                table_uri, storage_options=self._storage_options or None
+            committed = (
+                delta_table
+                if appended and delta_table is not None
+                else deltalake.DeltaTable(
+                    table_uri, storage_options=self._storage_options or None
+                )
             )
             self._delta_table_cache[record_key] = committed
             self._snapshots[record_key] = self._extend_snapshot(
@@ -1955,9 +1994,12 @@ class DeltaTableDatabase:
         When ``committed`` is the version right after ``base`` (no other writer
         committed in between), its ids are ``base``'s plus the inserted ones, and
         its rows, if ``base`` has them, are ``base``'s plus the rows of the data
-        files the commit added, read as ``get_all_records`` reads them. Anything
-        else (a skipped version, a removed file, a changed schema) leaves that
-        part to be read again on first use.
+        files the commit added, read as ``get_all_records`` reads them. Only those
+        files are read, with the format and filesystem of the dataset ``base``'s
+        rows came from (ITL-1173); a partitioned table, whose partition values are
+        not in its files, reads its dataset instead. Anything else (a skipped
+        version, a removed file, a changed schema) leaves that part to be read
+        again on first use.
 
         Args:
             base: The snapshot of the version the commit built on.
@@ -1972,8 +2014,66 @@ class DeltaTableDatabase:
             return _CommittedSnapshot(version)
         assert base.ids is not None
         snapshot = _CommittedSnapshot(version, ids=base.ids | inserted_ids)
-        if base.rows is None:
+        if (
+            base.rows is None
+            or base.dataset_schema is None
+            or base.dataset_format is None
+            or base.dataset_filesystem is None
+        ):
             return snapshot
+        if committed.metadata().partition_columns:
+            # A partition value is not in the data file: read the table's dataset.
+            return self._extend_snapshot_from_dataset(base, snapshot, committed)
+        # Read only the files this commit added, as the table's dataset reads them,
+        # never building that dataset over every file (ITL-1173).
+        paths = cast(
+            list[str],
+            # A record batch in deltalake 1.0.2, a table from 1.5.0: pa.table takes both.
+            pa.table(committed.get_add_actions(flatten=False))
+            .column("path")
+            .to_pylist(),
+        )
+        files = frozenset(paths)
+        # The schema deltalake gives the table's dataset (``to_pyarrow_dataset``).
+        schema = pa.schema(
+            committed.schema().to_arrow(as_large_types=True)  # pyright: ignore[reportArgumentType]  # an arro3 schema; pyarrow reads it through the Arrow C interface
+        )
+        if not base.files <= files or not schema.equals(base.dataset_schema):
+            return snapshot
+        added = [path for path in paths if path not in base.files]
+        dataset = pa_ds.FileSystemDataset(
+            [
+                base.dataset_format.make_fragment(
+                    path, filesystem=base.dataset_filesystem
+                )
+                for path in added
+            ],
+            base.dataset_schema,
+            base.dataset_format,
+            base.dataset_filesystem,
+        )
+        new_rows = from_delta_layout(
+            arrow_utils.normalize_table_view_types(dataset.to_table())
+        )
+        return self._append_rows(base, snapshot, new_rows, files)
+
+    def _extend_snapshot_from_dataset(
+        self,
+        base: _CommittedSnapshot,
+        snapshot: _CommittedSnapshot,
+        committed: deltalake.DeltaTable,
+    ) -> _CommittedSnapshot:
+        """Extend ``base``'s rows into ``snapshot`` by reading ``committed``'s dataset.
+
+        Args:
+            base: The snapshot of the version the commit built on, with its rows.
+            snapshot: The new snapshot, with its ids.
+            committed: The table reloaded after the commit.
+
+        Returns:
+            ``snapshot``, with the rows when they could be extended.
+        """
+        assert base.rows is not None
         dataset = cast(
             "pa_ds.FileSystemDataset",
             delta_to_pyarrow_dataset(committed, as_large_types=True),
@@ -1998,13 +2098,40 @@ class DeltaTableDatabase:
             else dataset.schema.empty_table()
         )
         new_rows = from_delta_layout(new_rows)
+        snapshot = self._append_rows(base, snapshot, new_rows, files)
+        if snapshot.rows is not None:
+            self._describe_read(snapshot, dataset)
+        return snapshot
+
+    @staticmethod
+    def _append_rows(
+        base: _CommittedSnapshot,
+        snapshot: _CommittedSnapshot,
+        new_rows: pa.Table,
+        files: frozenset[str],
+    ) -> _CommittedSnapshot:
+        """Give ``snapshot`` ``base``'s rows followed by ``new_rows``, read from ``files``.
+
+        Args:
+            base: The snapshot of the version the commit built on, with its rows.
+            snapshot: The new snapshot, with its ids.
+            new_rows: The rows of the data files the commit added.
+            files: Every data file of the new version.
+
+        Returns:
+            ``snapshot``, without rows when ``new_rows`` has another schema than
+            ``base``'s rows.
+        """
+        assert base.rows is not None
         if not new_rows.schema.equals(base.rows.table.schema):
             return snapshot
         rows = base.rows
         rows.append(new_rows, compact_tail(pa.concat_tables([rows.table, new_rows])))
         snapshot.rows = rows
         snapshot.files = files
-        snapshot.dataset_schema = dataset.schema
+        snapshot.dataset_schema = base.dataset_schema
+        snapshot.dataset_format = base.dataset_format
+        snapshot.dataset_filesystem = base.dataset_filesystem
         return snapshot
 
     @staticmethod
@@ -2140,6 +2267,7 @@ class DeltaTableDatabase:
             _shared_delta_table_cache=root_instance._delta_table_cache,
             _shared_snapshots=root_instance._snapshots,
             _shared_pending_indexes=root_instance._pending_indexes,
+            _shared_absent_tables=root_instance._absent_tables,
         )
 
     def list_sources(self) -> list[tuple[str, ...]]:

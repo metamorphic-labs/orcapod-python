@@ -138,9 +138,12 @@ def matching_rows(
     """Return the rows of ``key_index.table`` where every column equals its value.
 
     The pairs that can use a hash index select the rows at the intersection of their
-    indexes' positions. When every pair can, those rows are the result; when only some
-    can, just those rows are filtered by ``expression``; when none can, the whole table
-    is. Rows come back in table order.
+    indexes' positions: the positions of the pair with the fewest rows, kept where the
+    other indexed pairs' columns hold their values, so a lookup costs time in the
+    smallest match, not in the rows a common value occupies. When every pair can use
+    an index, those rows are the result; when only some can, just those rows are
+    filtered by ``expression``; when none can, the whole table is. Rows come back in
+    table order.
 
     Args:
         key_index: The indexes of the table to search.
@@ -160,11 +163,23 @@ def matching_rows(
     if not indexed:
         return table.filter(expression)
 
-    matches: set[int] | None = None
-    for column, value in indexed:
-        found = key_index.column(column).get(value, [])
-        matches = set(found) if matches is None else matches.intersection(found)
-    candidates = rows_at(table, sorted(matches or ()))
+    # Start from the condition with the fewest rows and check the others on those rows
+    # only: a condition most rows meet (the data context column holds one value in
+    # every row) must not cost a walk over its positions on every lookup (ITL-1173).
+    found = sorted(
+        (
+            (column, value, key_index.column(column).get(value, []))
+            for column, value in indexed
+        ),
+        key=lambda condition: len(condition[2]),
+    )
+    positions: Sequence[int] = found[0][2]
+    for column, value, _ in found[1:]:
+        if not positions:
+            break
+        values = rows_at(table.select([column]), positions).column(column).to_pylist()
+        positions = [p for p, v in zip(positions, values, strict=True) if v == value]
+    candidates = rows_at(table, positions)
     if len(indexed) == len(pairs):
         return candidates
     return candidates.filter(expression)
