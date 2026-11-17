@@ -1,6 +1,6 @@
 # Operators
 
-Operators perform structural transformations on streams without inspecting or synthesizing data values.
+Operators perform structural transformations on streams without inspecting or synthesizing data values. An operator may add a tag (`AddTags`), never data.
 
 ::: orcapod.core.operators.Join
 
@@ -29,6 +29,8 @@ Operators perform structural transformations on streams without inspecting or sy
 ::: orcapod.core.operators.MapData
 
 ::: orcapod.core.operators.MapColumns
+
+::: orcapod.core.operators.AddTags
 
 ::: orcapod.core.operators.PolarsFilter
 

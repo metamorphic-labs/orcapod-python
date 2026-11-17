@@ -1,3 +1,4 @@
+from .add_tags import AddTags
 from .batch import Batch
 from .column_selection import (
     DropColumns,
@@ -35,6 +36,7 @@ __all__ = [
     "DropColumns",
     "PolarsFilter",
     "DropNulls",
+    "AddTags",
     "Pick",
     "Index",
     "TagBy",

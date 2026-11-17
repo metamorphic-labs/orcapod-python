@@ -189,6 +189,7 @@ def _build_operator_registry() -> dict[str, type]:
         Dict mapping class name strings to operator classes.
     """
     from orcapod.core.operators import (
+        AddTags,
         Batch,
         DropColumns,
         DropDataColumns,
@@ -226,6 +227,7 @@ def _build_operator_registry() -> dict[str, type]:
         "PolarsFilter": PolarsFilter,
         "DropNulls": DropNulls,
         "TagBy": TagBy,
+        "AddTags": AddTags,
     }
 
 

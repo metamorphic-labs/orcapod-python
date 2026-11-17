@@ -26,7 +26,7 @@ pip install orcapod
 ```
 
 If your workshop organiser asked you to install the development version instead, replace
-`orcapod` with `git+https://github.com/nauticalab/orcapod-python.git` in either command.
+`orcapod` with `git+https://github.com/metamorphic-labs/orcapod-python.git` in either command.
 
 The tutorial needs nothing beyond this. Orcapod already depends on `pandas`, `polars` and
 `pyarrow`, which the samples use.
@@ -90,7 +90,7 @@ Download [`workshop_data.py`](workshop_data.py) into your working directory, or 
 the command line:
 
 ```bash
-curl -fO https://raw.githubusercontent.com/nauticalab/orcapod-python/main/docs/tutorial/workshop_data.py
+curl -fO https://raw.githubusercontent.com/metamorphic-labs/orcapod-python/main/docs/tutorial/workshop_data.py
 ```
 
 Then run it:
