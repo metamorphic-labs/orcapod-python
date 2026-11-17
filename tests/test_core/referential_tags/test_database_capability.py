@@ -314,7 +314,9 @@ def test_spiraldb_write_of_stored_rows_keeps_the_stored_metadata(spiral: None) -
     other = rows.cast(
         pa.schema(
             [
-                field.with_metadata({"note": "other"} if field.name == "y" else None)
+                field.with_metadata({"note": "other"})
+                if field.name == "y"
+                else field.remove_metadata()
                 for field in rows.schema
             ]
         )
