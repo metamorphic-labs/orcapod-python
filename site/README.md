@@ -21,6 +21,11 @@ pnpm dev                         # live preview while editing docs/ or the sourc
 excluded, an object an API page names that does not exist, or a docstring problem.
 Search works in `pnpm preview`, not in `pnpm dev`.
 
+Only one preview server runs per project. If `pnpm preview` reports that another one is
+already running, use that one (`pnpm astro preview status` names its address), stop it
+with `pnpm astro preview stop` (or Ctrl-C in its terminal), or start a second one on
+another port with `pnpm preview --port 4322 --ignore-lock`.
+
 ## How the site is made
 
 `docs/` is the only source of the pages: the documentation tests execute its samples as
