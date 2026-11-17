@@ -369,8 +369,8 @@ class LinkResolver:
         """Return the site URL for ``target`` as written on ``page``.
 
         Raises:
-            ContentError: If the target is a page that is not published or a file that
-                does not exist.
+            ContentError: If the target is a page that is not published, a file that
+                does not exist, or a file in an excluded folder.
         """
         if target.startswith("#"):
             return "#" + self._fragment(page, target[1:])
@@ -390,6 +390,8 @@ class LinkResolver:
             return page_url(resolved, self._base) + sep + fragment
         if not (self._docs_dir / resolved).is_file():
             raise ContentError(f"link {target!r}: docs/{resolved} does not exist")
+        if resolved.split("/", 1)[0] in EXCLUDED:
+            raise ContentError(f"link {target!r}: docs/{resolved} is not published")
         self.assets.add(resolved)
         return self._base.rstrip("/") + "/" + resolved + sep + fragment
 

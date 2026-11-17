@@ -233,6 +233,13 @@ def _signature(name: str, obj: griffe.Class | griffe.Function) -> str:
     previous_kind = None
     for param in params:
         kind = param.kind
+        # The positional-only separator closes the positional-only parameters, so it
+        # comes before the keyword-only separator: ``a, /, *, b``.
+        if (
+            previous_kind is griffe.ParameterKind.positional_only
+            and kind is not griffe.ParameterKind.positional_only
+        ):
+            rendered.append("/")
         if (
             kind is griffe.ParameterKind.keyword_only
             and not seen_keyword_only
@@ -241,11 +248,6 @@ def _signature(name: str, obj: griffe.Class | griffe.Function) -> str:
             rendered.append("*")
         if kind is griffe.ParameterKind.keyword_only:
             seen_keyword_only = True
-        if (
-            previous_kind is griffe.ParameterKind.positional_only
-            and kind is not griffe.ParameterKind.positional_only
-        ):
-            rendered.append("/")
         star = _STARS.get(kind, "") if kind is not None else ""
         text = f"{star}{param.name}"
         if param.annotation is not None:

@@ -264,6 +264,19 @@ def test_excluded_folders_are_not_published(tmp_path: Path):
     assert not (out / "dev").exists()
 
 
+def test_a_linked_file_in_an_excluded_folder_fails(tmp_path: Path):
+    pages = {
+        "concepts/a.md": "# A\n\n[notes](../dev/notes.txt)\n",
+        "dev/notes.txt": "developer notes\n",
+    }
+    docs = make_docs(tmp_path, pages)
+    proc, _, public = run_build(docs, tmp_path)
+    assert proc.returncode != 0, "the build should have failed"
+    assert "docs/concepts/a.md" in proc.stderr
+    assert "dev/notes.txt is not published" in proc.stderr
+    assert not (public / "dev").exists()
+
+
 def test_an_unknown_top_level_entry_fails(tmp_path: Path):
     stderr = build_fails(tmp_path, {"index.md": "# H\n", "guides/a.md": "# A\n"})
     assert "guides" in stderr
@@ -286,6 +299,16 @@ def test_api_page_is_generated_from_the_source(tmp_path: Path):
     assert '<a id="orcapod.types.Schema.merge"></a>' in text
     assert "**Raises:**" in text
     assert "Intro." in text
+
+
+def test_positional_only_separator_comes_before_keyword_only(tmp_path: Path):
+    # ``map_tags(self, name_map=None, /, *, drop_unmapped=False, ...)``
+    pages = {
+        "api/streams.md": "# Streams\n\n::: orcapod.core.streams.base.StreamBase.map_tags\n"
+    }
+    text = (build_ok(tmp_path, pages) / "api" / "streams.md").read_text()
+    assert "name_map: Mapping[str, str] | None = None,\n    /,\n    *,\n" in text
+    assert "*,\n    /," not in text
 
 
 def test_api_page_naming_a_missing_object_fails(tmp_path: Path):
