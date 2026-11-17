@@ -81,6 +81,13 @@ class TestValues:
         }
         assert dict(data_schema) == dict(_readings().output_schema()[1])
 
+    def test_predicted_order_with_system_tags_matches_the_table(self) -> None:
+        out = _readings().add_tags(cohort="A", run=3)
+        predicted = list(out.output_schema(columns={"system_tags": True})[0])
+        table = out.as_table(columns={"system_tags": True})
+        assert predicted[:3] == ["subject", "cohort", "run"]
+        assert predicted == [n for n in table.column_names if n in predicted]
+
     def test_data_system_tags_and_source_info_are_unchanged(self) -> None:
         source = _readings()
         out = source.add_tags(cohort="A")
@@ -141,6 +148,15 @@ class TestIdentity:
         a = _readings().add_tags(cohort="A")
         b = _readings().add_tags(cohort="B")
         assert a.pipeline_hash() != b.pipeline_hash()
+
+
+def test_tags_are_read_only() -> None:
+    op = AddTags({"cohort": "A"})
+    with pytest.raises(TypeError):
+        op.tags["cohort"] = "B"  # pyright: ignore[reportIndexIssue]  # the refusal under test
+    with pytest.raises(AttributeError):
+        op.tags = {"cohort": "B"}  # pyright: ignore[reportAttributeAccessIssue]  # the refusal under test
+    assert dict(op.tags) == {"cohort": "A"}
 
 
 class TestRefusals:
@@ -226,3 +242,9 @@ class TestConfig:
             bytes,
         ]
         assert restored.content_hash() == op.content_hash()
+
+    def test_unknown_saved_type(self) -> None:
+        config = AddTags({"cohort": "A"}).to_config()
+        config["config"]["tags"][0]["type"] = "date"
+        with pytest.raises(ValueError, match="'date'"):
+            AddTags.from_config(config)

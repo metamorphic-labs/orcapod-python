@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from orcapod.channels import ReadableChannel, WritableChannel
@@ -14,6 +15,7 @@ from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
+from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, ContentHash, Schema
 from orcapod.utils import schema_utils
 from orcapod.utils.lazy_module import LazyModule
@@ -121,7 +123,7 @@ class AddTags(UnaryOperator):
         schema_utils.require_names_not_meta(list(tags))
         schema_utils.require_names_not_system(list(tags))
         schema_utils.require_names_without_separator(list(tags))
-        self.tags: dict[str, TagConstant] = {
+        self._tags: dict[str, TagConstant] = {
             name: _checked_value(name, value) for name, value in tags.items()
         }
         # The one-row table of the values, per type converter (the async path
@@ -129,8 +131,17 @@ class AddTags(UnaryOperator):
         self._one_row: dict[int, tuple[TypeConverterProtocol, pa.Table]] = {}
         super().__init__(**kwargs)
 
+    @property
+    def tags(self) -> Mapping[str, TagConstant]:
+        """The new tags, names mapped to values, in order; read-only.
+
+        Read-only so the identity, the saved config and the cached constants
+        can never disagree.
+        """
+        return MappingProxyType(self._tags)
+
     def identity_structure(self) -> Any:
-        return (self.__class__.__name__, tuple(self.tags.items()))
+        return (self.__class__.__name__, tuple(self._tags.items()))
 
     def to_config(self) -> dict[str, Any]:
         """Serialize this AddTags operator to a config dict.
@@ -150,7 +161,7 @@ class AddTags(UnaryOperator):
                     "type": type(value).__name__,
                     "value": value.hex() if isinstance(value, bytes) else value,
                 }
-                for name, value in self.tags.items()
+                for name, value in self._tags.items()
             ]
         }
         return config
@@ -197,8 +208,8 @@ class AddTags(UnaryOperator):
         cached = self._one_row.get(id(converter))
         if cached is None or cached[0] is not converter:
             one_row = converter.python_dicts_to_arrow_table(
-                [dict(self.tags)],
-                python_schema={name: type(value) for name, value in self.tags.items()},
+                [dict(self._tags)],
+                python_schema={name: type(value) for name, value in self._tags.items()},
             )
             cached = (converter, one_row)
             self._one_row[id(converter)] = cached
@@ -224,9 +235,9 @@ class AddTags(UnaryOperator):
         """
         names = table.column_names
         position = max((names.index(k) for k in tag_keys), default=-1) + 1
-        constants = self._constants(converter, table.num_rows)
+        new_columns = self._constants(converter, table.num_rows)
         for offset, (field, column) in enumerate(
-            zip(constants.schema, constants.columns, strict=True)
+            zip(new_columns.schema, new_columns.columns, strict=True)
         ):
             table = table.add_column(position + offset, field, column)
         return table
@@ -247,7 +258,7 @@ class AddTags(UnaryOperator):
             f"{name!r} is a tag column"
             if name in tag_keys
             else f"{name!r} is a data column"
-            for name in self.tags
+            for name in self._tags
             if name in tag_keys or name in data_keys
         ]
         if taken:
@@ -271,8 +282,16 @@ class AddTags(UnaryOperator):
         tag_schema, data_schema = stream.output_schema(
             columns=columns, all_info=all_info
         )
-        new_tags = {name: type(value) for name, value in self.tags.items()}
-        return Schema({**tag_schema, **new_tags}), data_schema
+        # The new tags go after the user tags and before any system tags, as in
+        # the table (``_with_constants``).
+        user_tags = {
+            k: v
+            for k, v in tag_schema.items()
+            if not k.startswith(constants.SYSTEM_TAG_PREFIX)
+        }
+        system_tags = {k: v for k, v in tag_schema.items() if k not in user_tags}
+        new_tags = {name: type(value) for name, value in self._tags.items()}
+        return Schema({**user_tags, **new_tags, **system_tags}), data_schema
 
     def unary_static_process(self, stream: StreamProtocol) -> StreamProtocol:
         """Return the stream's rows with the new tags added.
@@ -291,7 +310,7 @@ class AddTags(UnaryOperator):
         )
         return ArrowTableStream(
             self._with_constants(table, tag_keys, data_context.type_converter),
-            tag_columns=[*tag_keys, *self.tags],
+            tag_columns=[*tag_keys, *self._tags],
             data_context=data_context,
         )
 
@@ -326,10 +345,15 @@ class AddTags(UnaryOperator):
                         tag_keys, [k for k in data.keys() if not is_meta_column(k)]
                     )
                     checked = True
-                tag_table = self._with_constants(
-                    tag.as_table(columns={"system_tags": True}),
-                    tag_keys,
-                    tag.converter,  # pyright: ignore[reportAttributeAccessIssue]  # every concrete Tag provides its converter
+                converter = tag.converter  # pyright: ignore[reportAttributeAccessIssue]  # every concrete Tag provides its converter
+                row_table = tag.as_table(columns={"system_tags": True})
+                # A tag with no columns (a raw stream without tags or system
+                # tags) is a table with no rows: the row's new tags alone are its
+                # one row.
+                tag_table = (
+                    self._with_constants(row_table, tag_keys, converter)
+                    if row_table.num_columns
+                    else self._constants(converter, 1)
                 )
                 await output.send(
                     (Tag(tag_table, data_context=tag.data_context_key), data)

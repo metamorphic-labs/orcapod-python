@@ -695,6 +695,26 @@ def test_async_rows_equal_sync_rows_when_an_input_has_no_rows(case: Case) -> Non
     assert_equivalent(expected, actual)
 
 
+def test_add_tags_on_a_raw_stream_without_tags() -> None:
+    """A raw stream with no tags and no system tags: one tagged row per row on both paths.
+
+    Each row's tag table has no columns, so no rows (ITL-1196); the async path must
+    still give every row its new tags. Outside the matrix, whose pairing needs tags.
+    """
+    stream = ArrowTableStream(pa.table({"x": pa.array([1, 2], pa.int8())}))
+    expected = sync_rows(AddTags({"cohort": "A"}), stream)
+    actual = async_rows(AddTags({"cohort": "A"}), stream)
+    assert [tag.as_dict() for tag, _ in actual] == [{"cohort": "A"}, {"cohort": "A"}]
+    assert [data.as_dict() for _, data in actual] == [{"x": 1}, {"x": 2}]
+    assert len(actual) == len(expected)
+    for (tag, data), (sync_tag, sync_data) in zip(actual, expected, strict=True):
+        assert tag.arrow_schema(columns={"system_tags": True}) == sync_tag.arrow_schema(
+            columns={"system_tags": True}
+        )
+        assert tag.content_hash() == sync_tag.content_hash()
+        assert data.content_hash() == sync_data.content_hash()
+
+
 def test_drop_nulls_without_tag_columns() -> None:
     """A stream without tag columns: the async path drops the same rows, in order.
 
