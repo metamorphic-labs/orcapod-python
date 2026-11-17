@@ -48,11 +48,59 @@ that only the parallel run shows (measured by the previous worker on ITL-1181).
 
 ## Results on this pull request
 
-TBD
+A GitHub runner for a private repository has two logical CPUs and one physical core, so
+`-n auto` (physical cores) started one worker on the first round; `-n logical` starts two.
+Test time is pytest's own figure; a job adds two to three minutes of setup. Runner speed
+varies between rounds by up to a third (the same serial job took 1580 s and 1195 s).
+
+| Job | Before (PR #416, serial) | Round 1 (1 worker) | Round 2 (2 workers) |
+|---|---|---|---|
+| `pytest / pytest (3.11)` (required) | 17.7 min job | 852 s | 697 s |
+| `pytest / pytest (3.12)` (required) | 12.2 min job | 1071 s | 669 s |
+| `pytest / pytest (3.13)` (required) | 13.8 min job | 799 s | 835 s |
+| `test (3.13)`, coverage | 20.7 min job (C tracer) | 737 s (`sysmon`) | 848 s (`sysmon`) |
+| `test (3.11)` / `test (3.12)`, coverage | 25.2 / 28.8 min jobs | not run on a pull request | not run on a pull request |
+
+A round (push to the last test check): 30 minutes on PR #416, 16 minutes on round 2 of this
+pull request. Most of the gain is the coverage jobs: one job instead of three, and
+`sysmon` halves the 3.13 job (serial, C tracer: 1580 s and 1195 s; parallel, `sysmon`:
+737 s and 848 s). Two workers on one physical core gain 15 to 35 % on the required check.
+A public repository's runners have four logical CPUs, so the gain grows there.
+
+Coverage, measured once on this pull request against a temporary serial job on Python 3.13
+with the C tracer (today's configuration): 3,306 of 27,404 statements missed serially and
+3,307 in the parallel `sysmon` job, both 88 %. The one line is
+`src/orcapod/hashing/cache_population.py:393`, a timing-dependent branch; no file differs
+otherwise.
+
+The pull-request job on Python 3.11 with the C tracer instead of 3.13 with `sysmon`
+(temporary job): 1256 s (round 1, one worker) and 1849 s (round 2, two workers) of test time, against
+737 s and 848 s; about twice as long, 21 to 31 minutes per round instead of 12 to 14.
+
+ITL-1192 (`test_second_interrupt_returns_and_a_late_function_writes_nothing[delta]`, the
+warning naming nodes `stuck`, `after`) failed once in round 2, in the temporary 3.11 job
+(two workers with the C tracer, the most loaded job); it failed before this change too,
+serially, on 3.13. More load per CPU makes the race more likely; the fix is ITL-1192.
 
 ## Check names
 
-TBD
+A pull request reports, while the organization ruleset applies (private repository):
+
+- Python — Required CI: `resolve-matrix / resolve`, `pytest / pytest (3.11)`,
+  `pytest / pytest (3.12)`, `pytest / pytest (3.13)`, `ruff / ruff`,
+  `typecheck / typecheck`, `license-check / license-check` (the required ones).
+- Run Tests: `license-check / License check`, `Dependency review`, `test (3.13)`,
+  `spiral-integration` (skipped on a pull request).
+- Lint and type check: `Ruff and basedpyright` (new here; skipped before this change).
+- Run Objective Tests: `test (3.11)`, `test (3.12)`, `test (3.13)`.
+- Run PostgreSQL Tests: `test (3.11)`, `test (3.12)`, `test (3.13)`.
+- `codecov/patch`, `codecov/project`, `CodeRabbit`.
+
+Before this change the pull request also reported Run Tests `test (3.11)` and
+`test (3.12)`. After the repository is public (ITL-1193) the Python — Required CI checks are
+gone and the rest remain; the developer then chooses which to require. Tests then run on a
+pull request on Python 3.13 only (`test (3.13)`), and a failure only 3.11 or 3.12 shows is
+first seen on `main`.
 
 ## Reserve plan: a full-only list (not implemented)
 

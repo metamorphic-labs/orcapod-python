@@ -37,7 +37,7 @@ def module_path(classname: str) -> str:
 
 def main(paths: list[str], top: int = 19) -> None:
     """Print the ``top`` slowest unprotected files over the reports at ``paths``."""
-    seconds: collections.Counter[str] = collections.Counter()
+    seconds: collections.defaultdict[str, float] = collections.defaultdict(float)
     total = 0.0
     for path in paths:
         for case in ET.parse(path).getroot().iter("testcase"):
@@ -47,7 +47,7 @@ def main(paths: list[str], top: int = 19) -> None:
     print(f"{len(paths)} report(s), {total / len(paths):.0f} s of test time per report")
     running = 0.0
     shown = 0
-    for name, spent in seconds.most_common():
+    for name, spent in sorted(seconds.items(), key=lambda item: -item[1]):
         if any(marker in name for marker in PROTECTED):
             continue
         running += spent

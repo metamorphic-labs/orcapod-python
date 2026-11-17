@@ -140,36 +140,6 @@ jobs:
         # Serial (-n 0): the integration tests share one SpiralDB project (ITL-1181).
         run: uv run --python "3.11" pytest -n 0 tests/test_databases/test_spiraldb_connector_integration.py -v
 
-  # TEMPORARY (ITL-1181): measurements for the pull request; removed before it merges.
-  # serial-ctrace is today's configuration (serial, default tracer), whose coverage total the
-  # parallel test (3.13) job's must equal; xdist-ctrace is the cost of a pull-request job on
-  # Python 3.11 instead of 3.13.
-  measure:
-    name: measure (${{ matrix.label }})
-    if: github.event_name == 'pull_request'
-    needs: license-check
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { label: "3.13 serial ctrace", python-version: "3.13", workers: "0" }
-          - { label: "3.11 xdist ctrace", python-version: "3.11", workers: "logical" }
-    env:
-      COVERAGE_CORE: ctrace
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-        with:
-          fetch-depth: 0
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
-        with:
-          python-version: ${{ matrix.python-version }}
-      - run: sudo apt-get update && sudo apt-get install -y graphviz
-      - run: uv sync --locked --all-extras --dev --python ${{ matrix.python-version }}
-      - name: Run tests
-        run: uv run --python ${{ matrix.python-version }} pytest -n ${{ matrix.workers }} -q -rsxX --durations=20 -m "not postgres" --cov=src --cov-report=term-missing
-
   license-check:
     uses: ./.github/workflows/_license-check.yml
 
