@@ -186,7 +186,7 @@ def _run_facts(summary: NodeRunSummary | None) -> tuple[tuple[str, str], ...]:
         value = getattr(summary, name)
         if value:
             counts.append(f"{value} {name.replace('_', ' ')}")
-    facts = [("last run", ", ".join(counts))]
+    facts = [("job's last run", ", ".join(counts))]
     if summary.first_error is not None:
         error = summary.first_error
         facts.append(("first error", f"{type(error).__name__}: {error}"))
@@ -199,11 +199,11 @@ def _job_status(
     """A job node's run state, from what it holds in memory; never reads or computes.
 
     Sources are ``bound`` or ``unbound``. Any other node is ``not run`` (no run in this
-    process, or cleared), ``stale`` (an input changed since its run), ``failed`` (the
-    job's last run had failed rows for it), ``held`` (current, and the last run kept it
-    without running it), ``current``, ``loaded only`` (filled by a load-only run) or
-    ``partial`` (it ran, without the failed rows of a node above it, so the next run
-    computes it again).
+    process, or cleared), ``stale`` (an input changed since its run), ``failed`` (its
+    last run, by the job or its own ``run()``, had failed rows), ``held`` (current, and
+    the job's last run kept it without running it), ``current``, ``loaded only``
+    (filled by a load-only run) or ``partial`` (it ran, without the failed rows of a
+    node above it, so the next run computes it again).
 
     Args:
         node: The job node.
@@ -216,7 +216,9 @@ def _job_status(
         return "not run"
     if node.is_stale:
         return "stale"
-    if summary is not None and summary.failed:
+    # The node's own count, not the job's summary: a node's own ``run()`` changes it
+    # and leaves ``job.last_run`` as it was.
+    if getattr(node, "last_run_failed", 0):
         return "failed"
     if node.holds_current_run():
         return "held" if summary is not None and summary.held else "current"

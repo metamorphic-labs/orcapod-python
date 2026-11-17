@@ -1800,6 +1800,16 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         """
         return self._run_not_stored
 
+    @property
+    def last_run_failed(self) -> int:
+        """Rows of the node's last completed run whose function raised.
+
+        Set by every run of the node, by the job's run as by the node's own ``run()``
+        (error policy ``"continue"``); 0 before a run and after ``clear_cache()``. A
+        node with failed rows is not current: the next run retries them.
+        """
+        return self._run_failed
+
     def _stored_entry(
         self, entry_id: bytes
     ) -> tuple[TagProtocol, DataProtocol | None] | None:

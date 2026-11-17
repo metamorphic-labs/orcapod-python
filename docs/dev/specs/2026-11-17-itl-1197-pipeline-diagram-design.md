@@ -24,9 +24,10 @@ run, light and dark, a node selected, scripts removed, folded, top to bottom) ar
   `node.output_schema()` (predicted, never computed), its inputs, and for a job: status,
   last-run counts, first error, folded steps.
 - Job status, all from memory: source `bound`/`unbound` (`bound_source`); other nodes
-  `not run` (`last_modified is None`), `stale` (`is_stale`), `failed` (job.last_run entry
-  with failed rows), `current` (`holds_current_run()`), `held` (current and the last run
-  held it, `NodeRunSummary.held`), `loaded only` (`holds_current_run(load_only=True)`),
+  `not run` (`last_modified is None`), `stale` (`is_stale`), `failed` (the node's own
+  `last_run_failed`, set by a job run and by the node's own `run()`), `current`
+  (`holds_current_run()`), `held` (current and the last run held it,
+  `NodeRunSummary.held`), `loaded only` (`holds_current_run(load_only=True)`),
   `partial` (ran, not current, and a node it reads from is `failed` or `partial`: it holds
   the results of the rows that did not fail; Copilot review of #424).
   Row counts from `job.last_run` (function nodes: rows, computed, reused, failed, held,

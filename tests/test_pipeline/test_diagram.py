@@ -147,13 +147,13 @@ def test_job_status_follows_the_run() -> None:
     }
     job.run()
     assert set(_statuses(job.diagram()).values()) == {"bound", "current"}
-    assert _facts(job.diagram(), "rates") == {"last run": "4 rows, 4 computed"}
+    assert _facts(job.diagram(), "rates") == {"job's last run": "4 rows, 4 computed"}
 
     # A second run holds every node: nothing is run again.
     job.run()
     statuses = _statuses(job.diagram())
     assert statuses["rates"] == "held"
-    assert _facts(job.diagram(), "rates") == {"last run": "4 rows, 4 held"}
+    assert _facts(job.diagram(), "rates") == {"job's last run": "4 rows, 4 held"}
 
     # A cleared node reads as never run; its successors are stale.
     job.nodes["rates"].clear_cache()
@@ -182,16 +182,43 @@ def test_failed_rows_show_as_failed_with_the_first_error() -> None:
     diagram = job.diagram()
     assert _statuses(diagram)["rates"] == "failed"
     assert _facts(diagram, "rates") == {
-        "last run": "4 rows, 3 computed, 1 failed",
+        "job's last run": "4 rows, 3 computed, 1 failed",
         "first error": "ValueError: x is 20",
     }
     # The nodes below ran on the rows that did not fail: partial, not "not run".
     assert _statuses(diagram)["GroupBy"] == "partial"
     assert _statuses(diagram)["sums"] == "partial"
-    assert _facts(diagram, "sums") == {"last run": "2 rows, 2 computed"}
+    assert _facts(diagram, "sums") == {"job's last run": "2 rows, 2 computed"}
     assert "partial" in job.diagram(collapse=True).to_text()
     job.run()
     assert set(_statuses(job.diagram()).values()) == {"bound", "current"}
+
+
+def test_a_node_s_own_run_sets_its_status_not_the_job_s_last_run() -> None:
+    # A failed run of the node alone: the job has no summary, the node failed.
+    FAIL_ON.add(20)
+    try:
+        job = _job()
+        with pytest.warns(Warning):
+            job.nodes["rates"].run()
+        assert job.last_run is None
+        assert job.nodes["rates"].last_run_failed == 1
+        assert _statuses(job.diagram())["rates"] == "failed"
+
+        # A job run that failed, then a node run that succeeds: current again,
+        # although the job's last run still lists the failure.
+        retried = _job()
+        with pytest.warns(Warning):
+            retried.run()
+    finally:
+        FAIL_ON.clear()
+    retried.nodes["rates"].run()
+    assert retried.nodes["rates"].last_run_failed == 0
+    diagram = retried.diagram()
+    assert _statuses(diagram)["rates"] == "current"
+    assert _facts(diagram, "rates")["job's last run"] == "4 rows, 3 computed, 1 failed"
+    retried.nodes["rates"].clear_cache()
+    assert retried.nodes["rates"].last_run_failed == 0
 
 
 def test_an_unbound_source_and_a_load_only_run() -> None:

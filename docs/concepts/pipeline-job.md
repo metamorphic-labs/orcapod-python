@@ -300,8 +300,8 @@ function of a function pod, the class of a bound source), and for a job its stat
 - `held`: current, and the job's last run kept it without running it again.
 - `stale`: something it depends on changed after its run (a source was bound again, a node
   above it was cleared); the next run computes it again.
-- `failed`: the job's last run had rows whose function raised; select the node to see the
-  first error.
+- `failed`: its last run (the job's, or the node's own `run()`) had rows whose function
+  raised; select the node to see the first error of the job's last run.
 - `loaded only`: filled by `job.run(load_only=True)`.
 - `partial`: it ran, but a node above it had failed rows, so it holds the results of the
   rows that did not fail; the next run computes it again.
