@@ -13,6 +13,7 @@ from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagPr
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, ContentHash, Schema
 from orcapod.utils.lazy_module import LazyModule
+from orcapod.utils.schema_utils import column_names
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -32,9 +33,7 @@ def _canonical_columns(columns: str | Collection[str]) -> tuple[str, ...]:
     columns give one hash; an already sorted list keeps the hash it had before
     (ITL-942 F). A tuple is stored, never the caller's own collection.
     """
-    if isinstance(columns, str):
-        return (columns,)
-    return tuple(sorted(set(columns)))
+    return tuple(sorted(set(column_names(columns))))
 
 
 def require_a_data_column(remaining: Collection[str]) -> None:

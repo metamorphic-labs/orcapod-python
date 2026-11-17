@@ -19,6 +19,7 @@ from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, ContentHash, DataType, Schema
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
+from orcapod.utils.schema_utils import column_names
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -106,7 +107,7 @@ class DropNulls(UnaryOperator):
             # applied to; resolved per input, never stored.
             self.columns = None
         else:
-            names = (columns,) if isinstance(columns, str) else tuple(columns)
+            names = column_names(columns)
             if not names:
                 raise ValueError(
                     "DropNulls needs at least one column name; got an empty"
