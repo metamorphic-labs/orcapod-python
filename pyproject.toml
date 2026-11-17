@@ -45,7 +45,7 @@ Issues = "https://github.com/metamorphic-labs/orcapod-python/issues"
 
 [project.optional-dependencies]
 redis = ["redis>=6.2.0"]
-ray = ["ray[default]==2.48.0", "ipywidgets>=8.1.7"]
+ray = ["ray[default]>=2.60.0,<3", "ipywidgets>=8.1.7"]
 postgresql = ["psycopg[binary]>=3.0"]
 spiraldb = [
     "pyspiral>=0.16.33",
@@ -101,7 +101,7 @@ dev = [
     "pytest-cov>=6.1.1",
     "pytest-xdist>=3.6",
     "psycopg[binary]>=3.0",
-    "ray[default]==2.48.0",
+    "ray[default]>=2.60.0,<3",
     "redis>=6.2.0",
     "ruff>=0.14.4",
     "testcontainers[postgres]>=4.0.0",
