@@ -946,11 +946,12 @@ class SpiralDBConnector:
         novel = records.filter(mask)
         if len(novel) > 0:
             write_rows(novel)
-        elif meta_kv is not None:
-            # Every row is stored already. Publish the metadata anyway: a write whose
-            # rows landed but whose metadata did not is repaired by its retry, so stored
-            # rows are never left without the metadata (a referential tag's marker,
-            # ITL-1019) that states them. The entry is an upsert of the same blob.
+        elif meta_kv is not None and _ARROW_METADATA_KEY not in tbl.get_metadata():
+            # Every row is stored already, but the table has no metadata entry: a write
+            # whose rows landed and whose metadata did not. Its retry publishes it, so
+            # stored rows are never left without the metadata (a referential tag's
+            # marker, ITL-1019) that states them. A stored entry is never replaced by
+            # a write that stores no row.
             tbl.set_metadata(meta_kv)
 
     @property

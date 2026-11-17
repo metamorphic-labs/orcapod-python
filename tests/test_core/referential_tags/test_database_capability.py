@@ -302,3 +302,25 @@ def test_spiraldb_retry_publishes_a_marker_whose_write_failed(
     table = ConnectorArrowDatabase(SpiralDBConnector("p")).get_all_records(path)
     assert table is not None and table.num_rows == 2
     assert stored_references(table.schema) == ("unit",)
+
+
+def test_spiraldb_write_of_stored_rows_keeps_the_stored_metadata(spiral: None) -> None:
+    """A write that stores no row never replaces a metadata entry already stored."""
+    db = ConnectorArrowDatabase(SpiralDBConnector("p"))
+    path = ("node", "table")
+    db.add_records(path, _rows([1, 2]), record_id_column="rid", flush=True)
+    # The same rows, with other field metadata: ``unit`` unmarked, ``y`` annotated.
+    rows = _rows([1, 2])
+    other = rows.cast(
+        pa.schema(
+            [
+                field.with_metadata({"note": "other"} if field.name == "y" else None)
+                for field in rows.schema
+            ]
+        )
+    )
+    db.add_records(
+        path, other, record_id_column="rid", skip_duplicates=True, flush=True
+    )
+    table = ConnectorArrowDatabase(SpiralDBConnector("p")).get_all_records(path)
+    assert table is not None and stored_references(table.schema) == ("unit",)
