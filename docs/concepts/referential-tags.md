@@ -116,8 +116,10 @@ A nullable column (`T | None`) is refused: drop the rows with a null first,
 `s.drop_nulls("x").tag_by("x")`, which narrows it to `T`. Lists, sets, dicts, structs,
 your own classes and logical types (`Path`, `UUID`, arrays) are refused.
 
-`tag_by` is one of three moves between the roles of a column. The other two, which turn
-a referential tag into plain data or into a plain tag, are the subject of ITL-1195.
+`tag_by` adds the tag role; the drop operators remove a role. For a referential tag `x`,
+dropping the tag (`drop_tag_columns(["x"])`) leaves `x` plain data, dropping the data
+(`drop_data_columns(["x"])`) leaves `x` a plain tag, and dropping the column
+(`drop_columns(["x"])`) removes it from both roles.
 
 ## Operators
 

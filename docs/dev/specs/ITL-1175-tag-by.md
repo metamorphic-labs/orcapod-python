@@ -17,8 +17,11 @@ records what changed.
   duration are not in it: the type converter reads them as no Python type (`Any`), and
   `Any` is refused. The source path is not changed here; the inconsistency is reported
   in the PR.
-- Removing the data role afterwards is the subject of ITL-1195 (explicit operators); the
-  docs leave a placeholder for it instead of describing the implicit path.
+- Removing a role afterwards (developer, November 16, 2026, ITL-1195): no new operators.
+  For a referential tag, dropping the tag leaves plain data, dropping the data leaves a
+  plain tag, dropping the column removes both roles. So `tag_by("x")` followed by
+  `drop_data_columns(["x"])` leaving a plain tag is intended behaviour. The docs
+  describe the three moves by role in one paragraph; final wording comes with ITL-1195.
 
 ## Public API
 
