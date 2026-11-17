@@ -2,9 +2,10 @@
 
 The log is one file per entry, ``docs/dev/design_issues/<LINEAR-ISSUE-ID>-<ENTRY-ID>.md``
 (see ``docs/dev/design_issues/README.md``). This script reads the log as a whole. The log
-was at the top-level ``design_issues/`` until ITL-1169, and the development documents
-(specs, plans, scripts) were in a top-level ``superpowers/``; both now live under
-``docs/dev/``. A file still at either old location is an error in every mode.
+was at the top-level ``design_issues/`` until ITL-1169 and in a single
+``DESIGN_ISSUES.md`` before ITL-968, and the development documents (specs, plans,
+scripts) were in a top-level ``superpowers/``; all of them now live under ``docs/dev/``.
+A file still at any old location is an error in every mode.
 
 Usage:
 
@@ -31,6 +32,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LOG_DIR = REPO_ROOT / "docs" / "dev" / "design_issues"
 OLD_LOG_DIR = REPO_ROOT / "design_issues"
+OLD_LOG_FILE = REPO_ROOT / "DESIGN_ISSUES.md"
 DEV_DOCS_DIR = REPO_ROOT / "docs" / "dev"
 OLD_DEV_DOCS_DIR = REPO_ROOT / "superpowers"
 
@@ -304,22 +306,29 @@ def load_entries(entries_dir: Path) -> tuple[list[tuple[Path, Entry]], list[str]
 
 
 def files_at_old_location() -> list[str]:
-    """List the files left at an old location that ITL-1169 moved under ``docs/dev/``.
+    """List the files left at an old location of the log or the development documents.
 
-    The old locations are the top-level ``design_issues/`` (the log, now
-    ``docs/dev/design_issues/``) and the top-level ``superpowers/`` (specs, plans and
-    scripts, now at the same relative place under ``docs/dev/``). Dotfiles (such as
-    ``.DS_Store``) are not counted.
+    The old locations, all at the repository root, are the single-file log
+    ``DESIGN_ISSUES.md`` (split in ITL-968), the top-level ``design_issues/`` (the log, now
+    ``docs/dev/design_issues/``, ITL-1169) and the top-level ``superpowers/`` (specs, plans
+    and scripts, now at the same relative place under ``docs/dev/``, ITL-1169). Dotfiles
+    (such as ``.DS_Store``) are not counted.
 
     Returns:
         One message per file found, naming where it belongs; empty if there is none.
     """
     log = LOG_DIR.relative_to(REPO_ROOT).as_posix()
-    problems = [
+    problems: list[str] = []
+    if OLD_LOG_FILE.is_file():
+        problems.append(
+            f"{OLD_LOG_FILE}: the design issues log is one file per entry in {log}/ "
+            "(ITL-968, ITL-1169); move its entries there and delete this file"
+        )
+    problems.extend(
         f"{path}: the design issues log moved to {log}/ (ITL-1169); "
         f"move this file there (git mv design_issues/{path.name} {log}/)"
         for path in _visible_files(OLD_LOG_DIR, recursive=False)
-    ]
+    )
     for path in _visible_files(OLD_DEV_DOCS_DIR, recursive=True):
         old = path.relative_to(REPO_ROOT).as_posix()
         new = (DEV_DOCS_DIR / path.relative_to(OLD_DEV_DOCS_DIR)).relative_to(REPO_ROOT)

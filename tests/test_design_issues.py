@@ -97,6 +97,15 @@ def test_check_refuses_entries_at_the_old_location(repo_copy: Path) -> None:
     assert "docs/dev/design_issues" in result.stderr
 
 
+def test_check_refuses_a_restored_single_file_log(repo_copy: Path) -> None:
+    """A ``DESIGN_ISSUES.md`` at the repository root fails beside a valid log."""
+    (repo_copy / "DESIGN_ISSUES.md").write_text("# Design issues\n", encoding="utf-8")
+    result = _run(repo_copy / "scripts" / SCRIPT.name, "--check")
+    assert result.returncode == 1
+    assert "DESIGN_ISSUES.md" in result.stderr
+    assert "docs/dev/design_issues" in result.stderr
+
+
 def test_check_refuses_a_top_level_superpowers_directory(repo_copy: Path) -> None:
     """Development documents live under ``docs/dev/`` (ITL-1169): a file left in a
     top-level ``superpowers/`` fails, naming where it belongs."""
