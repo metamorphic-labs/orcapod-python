@@ -99,6 +99,10 @@ _ADMONITION = re.compile(
 _FENCE = re.compile(r"^ *(?P<fence>`{3,}|~{3,})")
 _DIRECTIVE_COLONS = re.compile(r"^ *(:{3,})")
 _INLINE_LINK = re.compile(r"(\]\()(?P<target>[^)\s]+)(?P<rest>(?: +\"[^\"]*\")?\))")
+# A reference definition, ``[label]: target "title"`` (not a footnote, ``[^1]: text``).
+_REFERENCE_DEFINITION = re.compile(
+    r"^(?P<lead> {0,3}\[(?!\^)[^\]]+\]:[ \t]*)(?P<target><[^<>\s]*>|[^<\s]\S*)(?P<rest>.*)$"
+)
 _INLINE_CODE = re.compile(r"(`+)(?:.*?)\1")
 _SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
 
@@ -136,7 +140,9 @@ def heading_anchors(markdown: str) -> dict[str, str]:
     """
     anchors: dict[str, str] = {}
     seen_mkdocs: set[str] = set()
-    seen_starlight: dict[str, int] = {}
+    # github-slugger's occurrences: every anchor it has given, and for a repeated
+    # slug the last number it appended.
+    occurrences: dict[str, int] = {}
     fence: str | None = None
     for line in markdown.splitlines():
         if fence is not None:
@@ -158,9 +164,12 @@ def heading_anchors(markdown: str) -> dict[str, str]:
             candidate = f"{mk}_{n}"
         seen_mkdocs.add(candidate)
         sl = starlight_slug(text)
-        count = seen_starlight.get(sl, 0)
-        seen_starlight[sl] = count + 1
-        anchors[candidate] = f"{sl}-{count}" if count else sl
+        anchor = sl
+        while anchor in occurrences:
+            occurrences[sl] += 1
+            anchor = f"{sl}-{occurrences[sl]}"
+        occurrences[anchor] = 0
+        anchors[candidate] = anchor
     return anchors
 
 
@@ -444,7 +453,19 @@ def convert_admonitions(lines: Sequence[str]) -> list[str]:
 
 
 def _convert_link_targets(line: str, resolve: Callable[[str], str]) -> str:
-    """Rewrite the targets of inline links on ``line``, outside inline code spans."""
+    """Rewrite the link targets on ``line``.
+
+    The target of a reference definition (``[label]: target``), or the targets of the
+    inline links outside inline code spans.
+    """
+    definition = _REFERENCE_DEFINITION.match(line)
+    if definition is not None:
+        target = definition.group("target")
+        if target.startswith("<"):
+            target = "<" + resolve(target[1:-1]) + ">"
+        else:
+            target = resolve(target)
+        return definition.group("lead") + target + definition.group("rest")
     pieces: list[str] = []
     pos = 0
     for code in _INLINE_CODE.finditer(line):

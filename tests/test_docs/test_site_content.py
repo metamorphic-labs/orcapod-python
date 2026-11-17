@@ -213,6 +213,40 @@ def test_mkdocs_anchors_become_starlight_anchors(tmp_path: Path):
     assert "[b](#same-page-twice-1)" in home
 
 
+def test_a_repeated_heading_does_not_take_an_existing_anchor(tmp_path: Path):
+    # github-slugger gives the third heading ``repeat-1-1``: ``repeat-1`` is taken.
+    page = (
+        "# P\n\n[b](#repeat_1) [c](#repeat-1)\n\n"
+        "## Repeat\n\n## Repeat\n\n## Repeat-1\n"
+    )
+    text = (build_ok(tmp_path, {"index.md": page}) / "index.md").read_text()
+    assert "[b](#repeat-1) [c](#repeat-1-1)" in text
+
+
+def test_reference_definitions_are_rewritten(tmp_path: Path):
+    pages = {
+        "index.md": (
+            "# Home\n\nSee [s][src] and [d][data].\n\n"
+            '[src]: concepts/sources.md#top "Sources"\n'
+            "  [data]: <tutorial/data.py>\n"
+            "[ext]: https://example.org/a.md\n"
+            "\n```markdown\n[x]: nope.md\n```\n"
+        ),
+        "concepts/sources.md": "# Sources\n\n## Top\n",
+        "tutorial/data.py": "x = 1\n",
+    }
+    text = (build_ok(tmp_path, pages, base="/b/") / "index.md").read_text()
+    assert '[src]: /b/concepts/sources/#top "Sources"\n' in text
+    assert "  [data]: </b/tutorial/data.py>\n" in text
+    assert "[ext]: https://example.org/a.md\n" in text
+    assert "[x]: nope.md" in text
+
+
+def test_a_broken_reference_definition_fails(tmp_path: Path):
+    stderr = build_fails(tmp_path, {"index.md": "# H\n\n[x]: missing.md\n"})
+    assert "is not a published page" in stderr
+
+
 def test_links_in_code_are_not_rewritten(tmp_path: Path):
     page = "# P\n\n`[x](nope.md)`\n\n```markdown\n[y](nope.md)\n```\n"
     text = (build_ok(tmp_path, {"index.md": page}) / "index.md").read_text()
