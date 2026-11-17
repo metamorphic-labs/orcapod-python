@@ -348,9 +348,16 @@ def _build_model(
     nodes: list[_Node] = []
     for label in shown:
         node = by_label[label]
-        tag_schema, data_schema = node.output_schema()
         summary = summaries.get(label)
         facts = _run_facts(summary) if is_job else ()
+        try:
+            tag_schema, data_schema = node.output_schema()
+        except ValueError as error:
+            # A loaded node whose saved column types cannot be restored (a class only
+            # the writer registered) refuses to give its schema; the diagram still
+            # draws the graph and says why the columns are missing.
+            tag_schema, data_schema = {}, {}
+            facts = (*facts, ("schema", f"not available: {error}"))
         steps = list(dict.fromkeys(folded_into.get(label, [])))
         if steps:
             facts = (*facts, ("folded steps", ", ".join(steps)))
@@ -660,6 +667,9 @@ _ARROW = 7.0
 # parse, so each is shown as U+FFFD. An error message with terminal colours (ESC) is
 # the usual source.
 _XML_INVALID = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
+
+
+_SURROGATE = re.compile("[\ud800-\udfff]")
 
 
 def _escape(text: str) -> str:
@@ -987,7 +997,9 @@ def _inputs(nodes: Sequence[_Node], edges: Sequence[_Edge]) -> dict[int, list[st
 
 def _json_for_script(value: object) -> str:
     """JSON that is safe inside a ``<script>`` element: no ``<``, ``>`` or ``&`` in it."""
-    text = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    # ASCII only: a lone surrogate in a label stays an escape, so the page can be saved
+    # as UTF-8.
+    text = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     return text.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
 
 
@@ -1146,7 +1158,8 @@ class PipelineDiagram:
             if node.index in inputs:
                 line += " <- " + ", ".join(inputs[node.index])
             lines.append(line)
-        return "\n".join(lines)
+        # A lone surrogate cannot be printed or saved as UTF-8: shown as U+FFFD.
+        return _SURROGATE.sub("\ufffd", "\n".join(lines))
 
     def to_svg(self) -> str:
         """The picture alone, as an SVG element.

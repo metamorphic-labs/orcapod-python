@@ -573,6 +573,60 @@ def test_control_characters_in_labels_and_errors_keep_the_svg_valid() -> None:
     assert label in [node["label"] for node in model["nodes"]]
 
 
+def test_a_lone_surrogate_in_a_label_can_be_saved(tmp_path: Any) -> None:
+    label = "bad\ud800label"
+    job = PipelineJob(name="surrogate", database=InMemoryArrowDatabase())
+    with job:
+        inc.pod(_units(), label=label)
+    diagram = job.diagram()
+    document = diagram.to_html()
+    _ = document.encode("utf-8")  # no lone surrogate left: it can be written
+    _ = diagram.to_text().encode("utf-8")
+    assert "bad\ufffdlabel" in diagram.to_text()
+    diagram.save(tmp_path / "page.html")
+    model_text = document.split('class="op-dag-model">', 1)[1].split("</script>", 1)[0]
+    assert label in [node["label"] for node in json.loads(model_text)["nodes"]]
+
+
+def test_a_loaded_node_whose_types_cannot_be_restored_is_drawn(tmp_path: Any) -> None:
+    """A class only the writer registered: the node's schema is refused, not the graph."""
+    script = tmp_path / "save_unknown.py"
+    script.write_text(
+        "from dataclasses import dataclass\n"
+        "from pathlib import Path\n"
+        "import sys\n"
+        "from orcapod import PipelineJob, function_pod\n"
+        "from orcapod.databases import DeltaTableDatabase\n"
+        "from orcapod.sources import DictSource\n"
+        "@dataclass\n"
+        "class WriterOnly:\n"
+        "    value: int\n"
+        "@function_pod(output_keys='payload')\n"
+        "def make_payload(x: int) -> WriterOnly:\n"
+        "    return WriterOnly(x)\n"
+        "root = Path(sys.argv[1])\n"
+        "job = PipelineJob(name='unknown', database=DeltaTableDatabase(root / 'store'))\n"
+        "with job:\n"
+        "    source = DictSource([{'id': 1, 'x': 2}], tag_columns=['id'],\n"
+        "                        tag_only_columns=True, source_id='numbers')\n"
+        "    make_payload.pod(source, label='producer')\n"
+        "job.run()\n"
+        "job.save(root / 'job.json')\n"
+    )
+    subprocess.run([sys.executable, str(script), str(tmp_path)], check=True)
+    loaded = PipelineJob.load(tmp_path / "job.json")
+    with pytest.raises(ValueError, match="producer"):
+        loaded.nodes["producer"].output_schema()
+    diagram = loaded.diagram()
+    nodes = {node["label"]: node for node in diagram.to_dict()["nodes"]}
+    assert set(nodes) == {"numbers", "producer"}
+    assert nodes["producer"]["tag_schema"] == []
+    assert nodes["producer"]["data_schema"] == []
+    assert _facts(diagram, "producer")["schema"].startswith("not available: ")
+    assert nodes["numbers"]["data_schema"] == [["x", "int"]]
+    _ = diagram.to_html()
+
+
 def test_a_notebook_that_strips_scripts_and_svg_still_shows_the_picture() -> None:
     """An untrusted JupyterLab output keeps an image but drops inline SVG and styles."""
     document = _job().diagram().to_html()
