@@ -56,7 +56,7 @@ class TagBy(UnaryOperator):
     the data columns keep their names, order, types, values and source info,
     the system tags keep their names and values (rule 1, name-preserving), and
     no row is added, removed or reordered. The new tags follow the input's user
-    tags, in the order given, and the column is stored once, among the tags.
+    tags, in the order given, and the column is stored once, where it was.
 
     The operator creates no value and moves none: every output data column is the
     input data column of that name, and no tag becomes data. A data column that a
@@ -192,7 +192,11 @@ class TagBy(UnaryOperator):
     def unary_static_process(self, stream: StreamProtocol) -> StreamProtocol:
         """Re-wrap the input's rows with the named columns among the tags.
 
-        The same arrays, laid out with the tags first: no cast, no value changed.
+        The input's table as it is laid out: no column moved, no cast, no value
+        changed. The data columns are taken in table order, so leaving each named
+        column where it is keeps the input's data order (the predicted one); the
+        tag order is the ``tag_columns`` given. The rows keep the input's data
+        context.
 
         Args:
             stream: The input stream.
@@ -204,10 +208,9 @@ class TagBy(UnaryOperator):
         table = stream.as_table(
             columns={"source": True, "system_tags": True, "sort_by_tags": False}
         )
-        new_tag_columns = [*tag_columns, *self.columns]
-        rest = [name for name in table.column_names if name not in new_tag_columns]
         return ArrowTableStream(
-            table.select([*new_tag_columns, *rest]),
-            tag_columns=new_tag_columns,
+            table,
+            tag_columns=[*tag_columns, *self.columns],
             reference_tags=[*stream_references(stream), *self.columns],
+            data_context=stream.data_context_key,
         )

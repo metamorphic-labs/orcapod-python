@@ -67,8 +67,10 @@ built, sync and async alike):
   name-preserving: same column names, same values; record ids unchanged).
 - Data: unchanged: same names, order, types, nullability, values; each column keeps its
   own source-info token. No token is created or merged.
-- Table layout: the column is stored once and moves into the user tag group (row order:
-  user tags, system tags, data, source info), as a source places a referential tag.
+- Table layout: the column is stored once and stays where it is, as a source leaves a
+  referential tag at its place in the table: the data order is the input's (the
+  predicted one). (The first version moved it into the user tag group, which put the
+  new tags first among the data columns, unlike the prediction: CodeRabbit on PR #420.)
 - Schema prediction (`unary_output_schema`): the tag schema gains the named columns, with
   their data types, after the user tags and before the system tags; the data schema is
   unchanged. Verified against `static_process(...).output_schema(...)`.
