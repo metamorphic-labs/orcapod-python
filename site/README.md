@@ -1,8 +1,8 @@
 # The Orcapod documentation site
 
 An [Astro Starlight](https://starlight.astro.build) site, built from `../docs/` and the
-source code. It is to be published at <https://metamorphic-labs.github.io/orcapod-python/>,
-the default address (see [The site's address](#the-sites-address)).
+source code. It is published from `main` at
+<https://metamorphic-labs.github.io/orcapod-python/>, the default address (see [The site's address](#the-sites-address)).
 
 ## Build and preview
 
@@ -78,14 +78,23 @@ DOCS_SITE_URL=https://docs.example.org DOCS_SITE_BASE=/ pnpm build
 ```
 
 In CI, the build step takes them from the repository variables of the same names
-(Settings > Secrets and variables > Actions > Variables). A custom domain is
-`DOCS_SITE_URL=https://<domain>` with `DOCS_SITE_BASE=/`.
+(Settings > Secrets and variables > Actions > Variables).
+
+A custom domain is set in two places, both repository settings:
+
+1. the variables: `DOCS_SITE_URL=https://<domain>` and `DOCS_SITE_BASE=/`;
+2. Settings > Pages > Custom domain: `<domain>`, with the DNS record GitHub asks for
+   (a `CNAME` to `metamorphic-labs.github.io` for a subdomain). A site deployed by
+   GitHub Actions needs no `CNAME` file.
+
+Then run the deploy by hand (see [CI and publishing](#ci-and-publishing)) so that the
+site's links use the new address.
 
 ## What is committed
 
 `package.json`, `pnpm-lock.yaml` (exact versions), `pnpm-workspace.yaml`,
-`astro.config.mjs` (site settings, sidebar), `src/content.config.ts` and
-this file. `node_modules/`, `dist/`, `.astro/`, `src/content/docs/` and `public/` are
+`astro.config.mjs` (site settings, sidebar), `src/content.config.ts`,
+`src/routeData.ts` (the banner every page shows) and this file. `node_modules/`, `dist/`, `.astro/`, `src/content/docs/` and `public/` are
 generated.
 
 Astro's optional image optimizer, `sharp`, is not installed (`pnpm-workspace.yaml`): the
@@ -94,5 +103,20 @@ site has no images, and its `libvips` is under a license the project does not al
 ## CI and publishing
 
 `.github/workflows/docs-site.yml` builds the site on every pull request and push to `main`,
-and checks the npm packages' licenses (`../scripts/check_site_licenses.py`). It publishes
-nothing: publishing to GitHub Pages is a separate step the developer enables.
+and checks the npm packages' licenses (`../scripts/check_site_licenses.py`).
+
+The same workflow publishes the site to GitHub Pages. Its `deploy` job
+([`actions/deploy-pages`](https://github.com/actions/deploy-pages)) runs after the build:
+
+- on every push to `main`;
+- by hand: Actions > Documentation site > Run workflow, with the branch `main` (or
+  `gh workflow run docs-site.yml --ref main`);
+- never on a pull request, from another branch, or in a fork.
+
+Only a run that deploys uploads the built site (`site/dist`) as the Pages artifact. The
+job deploys in the `github-pages` environment and needs Settings > Pages > Source =
+GitHub Actions. Two deploys never run at once, and a running one is never cancelled.
+
+The site documents the development version: what is on `main`, not the latest release.
+Every page says so in a banner (`src/routeData.ts`), which links to PyPI and the changelog
+and never names a release.

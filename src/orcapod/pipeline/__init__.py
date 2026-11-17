@@ -1,6 +1,7 @@
 from .async_orchestrator import AsyncPipelineOrchestrator
 from .composite_observer import CompositeObserver
 from .dag import OrcaDAG, GraphProtocol
+from .diagram import PipelineDiagram
 from .execution_context import ExecutionContext
 from .graph import Pipeline
 from .job import PipelineJob
@@ -27,6 +28,7 @@ __all__ = [
     "PIPELINE_FORMAT_VERSION",
     "PIPELINE_JOB_FORMAT_VERSION",
     "Pipeline",
+    "PipelineDiagram",
     "PipelineJob",
     "RunSummary",
     "StatusObserver",

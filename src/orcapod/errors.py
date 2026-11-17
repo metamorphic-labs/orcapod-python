@@ -551,6 +551,23 @@ class ProvisionalHashWarning(UserWarning):
     """
 
 
+class InDevelopmentWarning(UserWarning):
+    """A feature still in development was used: it may change in any release.
+
+    Its interface, behaviour and appearance may change in any release without a
+    deprecation period. The warning is issued once per feature per process, the first
+    time the feature is used; the message names the feature. Today: the pipeline
+    diagram (``Pipeline.diagram()``, ``PipelineJob.diagram()``, ``PipelineDiagram`` and
+    the notebook display of a pipeline or job; ITL-1197). A feature that is no longer
+    in development stops issuing it.
+
+    To silence it, call ``warnings.filterwarnings("ignore",
+    category=InDevelopmentWarning)`` after importing Orcapod. Python's ``-W`` option
+    and ``PYTHONWARNINGS`` cannot name this class: they are read before installed
+    packages can be imported.
+    """
+
+
 class SemiJoinIgnoredColumnWarning(UserWarning):
     """``SemiJoin`` inputs share a column name that is not a match key.
 
