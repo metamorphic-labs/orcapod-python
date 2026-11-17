@@ -238,14 +238,20 @@ resolves several issues uses its primary issue's id).
 
 ## Releasing and the public repository
 
-Developer decisions, November 12, 2026 (ITL-1007); the full procedure is RELEASING.md.
+Developer decisions, November 16, 2026 (ITL-1193); the full procedure is RELEASING.md.
 
-- All development, review and CI happen on metamorphic-labs/orcapod-python. The public
-  nauticalab/orcapod-python receives main only at release points, by **fast-forward push**
-  (never a squash, never a pull request), and runs the Release workflow.
-- An agent never pushes to nauticalab, adds a remote for it, creates or pushes a tag, runs the
-  Release workflow, or touches a setting, secret or environment there. The push happens only on
-  the developer's explicit go. The v0.2.0 tag is never pushed.
+- metamorphic-labs/orcapod-python is the one repository: development, review, CI and
+  releases. The developer cuts a release by running the Release workflow there, from main.
+  nauticalab/orcapod-python cut the releases up to 0.3.0 and is being retired (made
+  private): never push to it, add a remote for it, or point a link at it as the project's home.
+- The repository is public. Nothing private goes into a commit, branch name, pull request,
+  issue, review or comment: no internal hostname, address or path, no content of another
+  private repository, no credential or secret value, no Linear text that is not about this
+  repository, and nothing about the full EDI dataset (its location, storage, projects or
+  tables).
+- An agent never runs the Release workflow, creates or pushes a tag, or touches a setting,
+  secret, environment, ruleset or the visibility of the repository. The v0.2.0 tag stays as
+  it is.
 - Linear, Codecov and SpiralDB jobs run only when
   github.repository == 'metamorphic-labs/orcapod-python'; lint.yml runs only on nauticalab.
 

@@ -6,6 +6,10 @@ on:
   pull_request:
   workflow_dispatch: # Allows manual triggering
 
+# Read-only token, whatever the repository default is (ITL-1193).
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest

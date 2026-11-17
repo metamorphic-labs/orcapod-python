@@ -21,7 +21,7 @@ uv add orcapod
 
 0.3.0 is the first release on PyPI since 0.1.4; 0.2.0 was never published to PyPI. Tables
 written by 0.2.0 or earlier are not read by 0.3.0: see
-[Upgrading from 0.2.0](https://github.com/nauticalab/orcapod-python/blob/main/CHANGELOG.md#upgrading-from-020)
+[Upgrading from 0.2.0](https://github.com/metamorphic-labs/orcapod-python/blob/main/CHANGELOG.md#upgrading-from-020)
 (it also covers 0.1.4).
 
 Optional features are installed as extras:
@@ -92,19 +92,19 @@ session.
 
 ## Documentation
 
-- [Getting Started](https://github.com/nauticalab/orcapod-python/blob/main/docs/getting-started.md):
+- [Getting Started](https://github.com/metamorphic-labs/orcapod-python/blob/main/docs/getting-started.md):
   sources, streams and function pods, step by step.
-- [Tutorial](https://github.com/nauticalab/orcapod-python/blob/main/docs/tutorial/index.md):
+- [Tutorial](https://github.com/metamorphic-labs/orcapod-python/blob/main/docs/tutorial/index.md):
   a self-paced course in eleven short parts, from a first stream to a stored, re-runnable
   pipeline over files, with exercises.
-- [Concepts](https://github.com/nauticalab/orcapod-python/tree/main/docs/concepts): sources,
+- [Concepts](https://github.com/metamorphic-labs/orcapod-python/tree/main/docs/concepts): sources,
   streams, function pods, operators, pipelines and jobs, identity and hashing, file types,
   arrays and your own data types.
-- Reference: [Hashing](https://github.com/nauticalab/orcapod-python/blob/main/docs/reference/hashing.md)
-  and [Golden hashes](https://github.com/nauticalab/orcapod-python/blob/main/docs/reference/golden-hashes.md).
-- [Troubleshooting](https://github.com/nauticalab/orcapod-python/blob/main/docs/troubleshooting.md):
+- Reference: [Hashing](https://github.com/metamorphic-labs/orcapod-python/blob/main/docs/reference/hashing.md)
+  and [Golden hashes](https://github.com/metamorphic-labs/orcapod-python/blob/main/docs/reference/golden-hashes.md).
+- [Troubleshooting](https://github.com/metamorphic-labs/orcapod-python/blob/main/docs/troubleshooting.md):
   common errors, their causes and fixes.
-- [CHANGELOG](https://github.com/nauticalab/orcapod-python/blob/main/CHANGELOG.md): what
+- [CHANGELOG](https://github.com/metamorphic-labs/orcapod-python/blob/main/CHANGELOG.md): what
   changed in each release, with upgrade notes.
 
 ## Status
@@ -114,7 +114,7 @@ Orcapod is before version 1.0. In 0.3.0:
 - **Hash values are frozen for data context v1.** Hashes name stored tables and find stored
   results again, so a hash value released in 0.3.0 does not change in a later release of the
   same data context; CI checks this. See
-  [Golden hashes](https://github.com/nauticalab/orcapod-python/blob/main/docs/reference/golden-hashes.md).
+  [Golden hashes](https://github.com/metamorphic-labs/orcapod-python/blob/main/docs/reference/golden-hashes.md).
 - **Library value types are provisional.** The hashes of `numpy.ndarray`, `torch.Tensor`, and
   pandas and polars `DataFrame` and `Series` values may change in 0.4, and results computed
   from them may then be computed again. Using one issues `ProvisionalHashWarning` once per
@@ -122,7 +122,7 @@ Orcapod is before version 1.0. In 0.3.0:
 - **Stores from earlier versions are not read as current.** Tables written by 0.1.x or 0.2.0
   are neither read as results nor modified, and results stored by a development build of 0.3
   are not found again: 0.3.0 computes them again. Read
-  [Upgrading from 0.2.0](https://github.com/nauticalab/orcapod-python/blob/main/CHANGELOG.md#upgrading-from-020)
+  [Upgrading from 0.2.0](https://github.com/metamorphic-labs/orcapod-python/blob/main/CHANGELOG.md#upgrading-from-020)
   before running a job over an old store, in particular one with side-effect nodes.
 - **Connector databases cannot hold function nodes yet.** A job over a SQLite, PostgreSQL or
   SpiralDB database refuses every function node when it is built. Use `InMemoryArrowDatabase`
@@ -154,11 +154,11 @@ uv run pytest tests/
 The PostgreSQL integration tests are skipped unless asked for
 (`uv run pytest -m postgres --postgres`) and need a running PostgreSQL server, reached
 through the standard `PG*` environment variables; see
-[the workflow that runs them](https://github.com/nauticalab/orcapod-python/blob/main/.github/workflows/run-postgres-tests.yml).
+[the workflow that runs them](https://github.com/metamorphic-labs/orcapod-python/blob/main/.github/workflows/run-postgres-tests.yml).
 Releases are cut by the GitHub Actions Release workflow; see
-[RELEASING.md](https://github.com/nauticalab/orcapod-python/blob/main/RELEASING.md).
+[RELEASING.md](https://github.com/metamorphic-labs/orcapod-python/blob/main/RELEASING.md).
 
 ## License
 
 Orcapod is released under the
-[MIT License](https://github.com/nauticalab/orcapod-python/blob/main/LICENSE).
+[MIT License](https://github.com/metamorphic-labs/orcapod-python/blob/main/LICENSE).

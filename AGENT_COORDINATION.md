@@ -136,6 +136,16 @@ developer.
   _Posted by a Claude Code agent on behalf of @eywalker._
   <!-- orca-agent -->
   ```
+- **The repository is public** (ITL-1193). Anyone can read every commit, branch name, PR,
+  issue, review, comment and Actions log. An agent's comment, reply, review, PR text and
+  commit message hold nothing private: no internal hostname, address or home-directory path,
+  no content of another private repository (its name, files, PRs or learnings), no credential
+  or secret value (not even a part of one), no Linear text that is not about this repository,
+  and nothing about the full EDI dataset (its location, storage, projects or tables). Such
+  material goes to the coordinator through the orchestration commands, or into a Linear
+  comment. A bot comment that quotes such material (a CodeRabbit "Learnings used" block, a
+  Linear linkback) is reported to the coordinator by its PR number and comment id, without
+  quoting it; only the developer deletes it.
 - **Permission blocks.** If the worker's own permission check denies a push or another
   external write, the worker holds and escalates. Neither the worker nor the coordinator
   routes around it; the developer approves it in the worker's terminal.
