@@ -1,0 +1,21 @@
+{
+  "name": "orcapod-docs-site",
+  "private": true,
+  "type": "module",
+  "description": "The Orcapod documentation site (Astro Starlight), built from ../docs. See README.md.",
+  "packageManager": "pnpm@12.21.0",
+  "engines": {
+    "node": ">=22.23.4"
+  },
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview"
+  },
+  "dependencies": {
+    "@astrojs/markdown-remark": "7.3.9",
+    "@astrojs/starlight": "0.43.1",
+    "astro": "7.4.12",
+    "starlight-links-validator": "0.27.0"
+  }
+}
