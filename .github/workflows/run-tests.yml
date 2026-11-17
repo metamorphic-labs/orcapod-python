@@ -68,7 +68,9 @@ jobs:
     if: >-
       github.repository == 'metamorphic-labs/orcapod-python'
       && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-    needs: test
+    # Runs beside the test jobs, not after them (developer, November 16, 2026; ITL-1185): it
+    # shares no artifact or output with them, and waiting hid for a long time that SpiralDB
+    # sign-in was failing.
     permissions:
       contents: read
     env:
