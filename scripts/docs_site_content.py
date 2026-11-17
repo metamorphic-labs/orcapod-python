@@ -54,9 +54,7 @@ PUBLISHED_FILES = ("index.md", "getting-started.md", "troubleshooting.md")
 PUBLISHED_FOLDERS = ("tutorial", "concepts", "reference", "api")
 # What it never publishes: developer material. Every other top-level entry of ``docs/``
 # is an error, so that publishing a new folder (or not) is a decision.
-# TODO(ITL-1169): design/, metamorphic/, plans/ and specs/ move under dev/ in the
-# repository cleanup; drop them here when it lands.
-EXCLUDED = ("dev", "design", "metamorphic", "plans", "specs")
+EXCLUDED = ("dev",)
 
 # mkdocs admonition types and the Starlight aside each becomes.
 ASIDE_TYPES = {
