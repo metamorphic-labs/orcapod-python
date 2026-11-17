@@ -103,7 +103,8 @@ All of these hold before the developer runs the Release workflow:
 5. **The version is free**: the tag does not exist on `metamorphic-labs`, and the version is
    on neither PyPI nor TestPyPI.
 6. **The Linear release is named** (see *Linear Release System*): the open release of the
-   Linear release pipeline has the version `vX.Y.Z`.
+   Linear release pipeline has the version `vX.Y.Z`. Not for a hotfix run, which leaves the open
+   release as it is.
 
 ## Golden hash values
 
@@ -350,13 +351,22 @@ comes with a completed release is made by Linear, as the workspace configures it
 **Before the first run, and every run after it: name the open release.** Every push to `main`
 adds its pull request to the open release, which has no version, and moves the scan start to
 that commit. A release of `main`'s tip therefore finds no new commit: without a release named
-`vX.Y.Z`, `linear-sync` creates an empty `vX.Y.Z` release (or none at all, if the CLI creates
-nothing for an empty range), the open release holding the merged pull requests is left as it is,
-and `linear-complete` completes the empty release or fails to find one. So, before running the
+`vX.Y.Z`, `linear-sync` creates an empty `vX.Y.Z` release (or none, if the CLI creates nothing
+for an empty range), the open release holding the merged pull requests is left as it is, and
+`linear-complete` completes the empty release or fails to find one. So, before running the
 Release workflow, the developer sets the version of the pipeline's open release to `vX.Y.Z` in
 Linear (pre-release checklist, item 6); `linear-sync` then targets it and `linear-complete`
 completes it. If a Linear job fails anyway, the release is published; finish the Linear release
 by hand (*If a Run Fails Part-Way*).
+
+**A hotfix run is different: never rename the open release for it.** The open release holds
+`main`'s unreleased pull requests; naming it after the hotfix would mark them shipped in the
+hotfix. The Linear jobs check out the workflow's ref (`main`), not the **Branch** input, so they
+never scan the hotfix branch: on a hotfix run `linear-sync` creates an empty `vX.Y.Z` release (or
+none) and `linear-complete` completes it or fails, neither of which affects publishing. Attach
+the hotfix's issues to that release by hand in Linear if it should list them. Syncing the hotfix
+commits themselves would need the Linear jobs to check out the **Branch** input, a change to
+`release.yml`.
 
 Setup: the `LINEAR_ACCESS_KEY` repository secret, holding the access key of the pipeline meant
 for this repository's releases.
