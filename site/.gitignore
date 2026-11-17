@@ -1,0 +1,7 @@
+# Dependencies and build output
+node_modules/
+dist/
+.astro/
+# Generated from ../docs by ../scripts/docs_site_content.py on every build
+src/content/docs/
+public/
