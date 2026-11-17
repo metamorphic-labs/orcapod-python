@@ -215,6 +215,7 @@ docs/dev/*
 !docs/dev/design_issues
 !docs/dev/notes
 !docs/dev/orcapod-design.md
+!docs/dev/security-exceptions.md
 
 # General JSON files at project root
 /*.json

@@ -336,6 +336,10 @@ What runs where (developer, November 16, 2026; ITL-1181):
   needs a reason.
 - The Graphviz `dot` binary is optional. The tests that render a graph to an image skip
   when `dot` is not on `PATH` and run when it is.
+- A security advisory that a CI check accepts (`allow-ghsas` of the dependency review) is
+  listed in `docs/dev/security-exceptions.md`, the one list of exceptions: one is added only
+  with the developer's approval and a Linear issue with a due date, and the list is
+  reviewed at every release.
 
 ## Logical type identifiers
 

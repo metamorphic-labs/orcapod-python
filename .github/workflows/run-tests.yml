@@ -173,3 +173,8 @@ jobs:
             LGPL-2.0-only, LGPL-2.0-or-later,
             LGPL-2.1-only, LGPL-2.1-or-later,
             LGPL-3.0-only, LGPL-3.0-or-later
+          # Accepted exceptions, each listed in docs/dev/security-exceptions.md.
+          # GHSA-fc5q-39xc-vjpf (picomatch): build-time only (the documentation site's
+          # toolchain, site/pnpm-lock.yaml); no patched version as of 2026-11-17.
+          # Tracked by ITL-1207: remove when a fix is published.
+          allow-ghsas: GHSA-fc5q-39xc-vjpf

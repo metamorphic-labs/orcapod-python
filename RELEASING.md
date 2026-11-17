@@ -105,6 +105,8 @@ All of these hold before the developer runs the Release workflow:
 6. **The Linear release is named** (see *Linear Release System*): the open release of the
    Linear release pipeline has the version `vX.Y.Z`, and nothing merges into `main` until
    `linear-complete` has finished. Not for a hotfix run, which leaves the open release as it is.
+7. **The security exceptions are reviewed**: every exception in
+   `docs/dev/security-exceptions.md` whose advisory has a published fix is removed.
 
 ## Golden hash values
 
