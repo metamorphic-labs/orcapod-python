@@ -480,6 +480,7 @@ class DeltaTableDatabase:
         _shared_delta_table_cache: "dict[str, deltalake.DeltaTable] | None" = None,
         _shared_snapshots: "dict[str, _CommittedSnapshot] | None" = None,
         _shared_pending_indexes: "dict[str, KeyIndex] | None" = None,
+        _shared_absent_tables: "set[str] | None" = None,
     ):
         self._root_uri, self._storage_options = parse_base_path(
             base_path, storage_options
@@ -530,6 +531,14 @@ class DeltaTableDatabase:
         # Indexes over each pending batch, valid while it is the key's batch.
         self._pending_indexes: dict[str, KeyIndex] = (
             _shared_pending_indexes if _shared_pending_indexes is not None else {}
+        )
+        # Record keys whose table was found absent (ITL-1173), so lookups do not try
+        # to open it again on every row. Family-wide like the loaded tables, and
+        # forgotten on any flush of the family and on a flush of the key: a table
+        # another process creates is seen after this database's next flush, as rows
+        # it appends to a loaded table are. ``table_exists`` always checks again.
+        self._absent_tables: set[str] = (
+            _shared_absent_tables if _shared_absent_tables is not None else set()
         )
 
     def _clear_pending(self):
@@ -637,6 +646,8 @@ class DeltaTableDatabase:
         # Check cache first
         if dt := self._delta_table_cache.get(record_key):
             return dt
+        if record_key in self._absent_tables:
+            return None
 
         try:
             # Try to load existing table
@@ -647,7 +658,8 @@ class DeltaTableDatabase:
             logger.debug(f"Loaded existing Delta table for {record_key}")
             return delta_table
         except deltalake.exceptions.TableNotFoundError:
-            # Table doesn't exist
+            # Table doesn't exist: remembered until the next flush (ITL-1173).
+            self._absent_tables.add(record_key)
             return None
         except Exception as e:
             # The table exists but could not be loaded: never report it as absent.
@@ -802,6 +814,8 @@ class DeltaTableDatabase:
         Returns:
             ``True`` if a table exists at the given path, ``False`` otherwise.
         """
+        # Checks again even when the table was found absent before (ITL-1173).
+        self._absent_tables.discard(self._get_record_key(record_path))
         return self._get_delta_table(record_path) is not None
 
     def _ensure_record_id_column(
@@ -1637,6 +1651,8 @@ class DeltaTableDatabase:
             RuntimeError: If batches failed with other errors only, naming the
                 failed batches, with the first failure as its ``__cause__``.
         """
+        # A flush is where this database looks at the store again (ITL-1173).
+        self._absent_tables.clear()
         errors: list[tuple[str, Exception]] = []
         for record_key in list(self._pending_batches.keys()):
             try:
@@ -1678,6 +1694,7 @@ class DeltaTableDatabase:
         without applying any instance-level prefix.
         """
         logger.debug("Flushing triggered!!")
+        self._absent_tables.discard(record_key)
 
         if (
             record_key not in self._pending_batches
@@ -2140,6 +2157,7 @@ class DeltaTableDatabase:
             _shared_delta_table_cache=root_instance._delta_table_cache,
             _shared_snapshots=root_instance._snapshots,
             _shared_pending_indexes=root_instance._pending_indexes,
+            _shared_absent_tables=root_instance._absent_tables,
         )
 
     def list_sources(self) -> list[tuple[str, ...]]:
