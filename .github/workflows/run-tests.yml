@@ -11,8 +11,15 @@ jobs:
     needs: license-check
     runs-on: ubuntu-latest
     strategy:
+      # A pull request runs one job, on Python 3.13, whose coverage is the one reported; a
+      # push (main) runs all three versions (developer, November 16, 2026; ITL-1181). A
+      # failure only Python 3.11 or 3.12 shows is first seen on main.
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        python-version: ${{ fromJSON(github.event_name == 'pull_request' && '["3.13"]' || '["3.11", "3.12", "3.13"]') }}
+    env:
+      # sys.monitoring (Python 3.12+) measures coverage at a fraction of the default
+      # tracer's cost; Python 3.11 has no sys.monitoring and keeps the C tracer.
+      COVERAGE_CORE: ${{ matrix.python-version == '3.11' && 'ctrace' || 'sysmon' }}
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -39,7 +46,9 @@ jobs:
         run: uv run --python ${{ matrix.python-version }} python scripts/check_golden_tags.py
 
       - name: Run tests
-        run: uv run --python ${{ matrix.python-version }} pytest -v -rsxX --durations=20 -m "not postgres" --cov=src --cov-report=term-missing --cov-report=xml
+        # In parallel on every core of the runner (pytest-xdist; ITL-1181); pytest-cov
+        # combines the workers' coverage into one report.
+        run: uv run --python ${{ matrix.python-version }} pytest -n logical -v -rsxX --durations=20 -m "not postgres" --cov=src --cov-report=term-missing --cov-report=xml
 
       - name: Upload coverage reports to Codecov
         if: github.repository == 'metamorphic-labs/orcapod-python'
@@ -128,7 +137,8 @@ jobs:
         env:
           SPIRAL_CLIENT_ID: ${{ secrets.SPIRAL_CLIENT_ID }}
           SPIRAL_PRIVATE_KEY: ${{ secrets.SPIRAL_PRIVATE_KEY }}
-        run: uv run --python "3.11" pytest tests/test_databases/test_spiraldb_connector_integration.py -v
+        # Serial (-n 0): the integration tests share one SpiralDB project (ITL-1181).
+        run: uv run --python "3.11" pytest -n 0 tests/test_databases/test_spiraldb_connector_integration.py -v
 
   license-check:
     uses: ./.github/workflows/_license-check.yml
