@@ -362,15 +362,15 @@ by hand (*If a Run Fails Part-Way*).
 **A hotfix run is different: never rename the open release for it.** The open release holds
 `main`'s unreleased pull requests; naming it after the hotfix would mark them shipped in the
 hotfix. The Linear jobs check out the workflow's ref (`main`), not the **Branch** input, so they
-never scan the hotfix branch: on a hotfix run `linear-sync` creates an empty `vX.Y.Z` release (or
-none) and `linear-complete` completes it or fails, neither of which affects publishing. The
-release is empty only if the latest push-to-`main` sync (`release-sync.yml`) succeeded:
-`linear-sync` scans from the last synced commit, so after a failed or still-running push sync
-it attaches those unsynced `main` commits to `vX.Y.Z` (no concurrency guard orders the two
-workflows). Check that sync's latest run before a hotfix run; if it did not succeed, remove
-those commits from `vX.Y.Z` by hand afterwards. Attach the hotfix's own issues to the release
-by hand in Linear if it should list them. Syncing the hotfix commits themselves would need the
-Linear jobs to check out the **Branch** input, a change to `release.yml`.
+never scan the hotfix branch: `linear-sync` creates a `vX.Y.Z` release (or none) holding the
+`main` commits that no push-to-`main` sync (`release-sync.yml`) has taken yet, usually none, and
+`linear-complete` completes it or fails; neither affects publishing. No concurrency guard orders
+the two workflows, so **after every hotfix run, inspect the `vX.Y.Z` Linear release** and, for
+any `main` pull request it lists: move it and its issues to the open release by hand (the next
+push sync starts after the commit the hotfix sync recorded, so it will not pick them up), and
+put back the status of any of its issues that the completed release moved. Attach the hotfix's
+own issues to `vX.Y.Z` by hand if it should list them. Syncing the hotfix commits themselves
+would need the Linear jobs to check out the **Branch** input, a change to `release.yml`.
 
 Setup: the `LINEAR_ACCESS_KEY` repository secret, holding the access key of the pipeline meant
 for this repository's releases.
