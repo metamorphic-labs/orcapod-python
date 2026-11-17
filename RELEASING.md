@@ -58,11 +58,13 @@ Do these on `metamorphic-labs` `main` before anything is pushed:
    last change (see *Golden hash values* below):
 
    ```
-   uv run python tests/test_hashing/golden/generate_golden_hashes.py --release X.Y.Z
+   TZ=UTC uv run python tests/test_hashing/golden/generate_golden_hashes.py --release X.Y.Z
    ```
 
-   It appends the release revision to the `golden` history of the current data context's
-   manifest, writes its digest under `releases` in
+   Release dates are UTC days: the release revision records the date of the local clock,
+   so run the script with `TZ=UTC` and check that the date it records equals the date in
+   the `CHANGELOG.md` heading. It appends the release revision to the `golden` history of
+   the current data context's manifest, writes its digest under `releases` in
    `src/orcapod/contexts/released_manifests.json`, and at the data context's first release
    sets `released_in` and the `manifest` pin. It computes no hash and refuses a version
    already released. Commit both files with the release pull request; the release is tagged
@@ -80,8 +82,8 @@ Do these on `metamorphic-labs` `main` before anything is pushed:
    not exist on PyPI or TestPyPI; neither index allows a version to be uploaded twice, even
    after it is deleted.
 
-Per-release checklists live in `superpowers/plans/` (for example
-`2026-11-09-v0.2-release-checklist.md`).
+Per-release checklists live in `docs/dev/plans/` (for example
+`2026-11-09-v0.2-release-checklist.md`, `2026-11-15-v0.3-release-checklist.md`).
 
 ## Pre-push checklist
 
@@ -275,5 +277,5 @@ does not block or fail the release (no publish job depends on them). They call
 Because the Release workflow runs on `nauticalab`, these jobs do not run for a release at all
 today; completing the Linear release is a manual step until the developer decides otherwise
 (the issue ITL-1007 notes this "needs more thought"). Setup on `metamorphic-labs`: the
-`LINEAR_ACCESS_KEY` repo secret (the key `metamorphic-brain/axon` uses) and a Linear release
+`LINEAR_ACCESS_KEY` repo secret (the organisation's Linear access key) and a Linear release
 configured in the workspace.

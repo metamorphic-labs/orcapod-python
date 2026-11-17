@@ -29,7 +29,6 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from orcapod.errors import InputValidationError
 from orcapod.types import SourceInfoValue
-from orcapod.utils import arrow_utils
 
 from orcapod.utils.lazy_module import LazyModule
 
@@ -383,19 +382,17 @@ def source_reference_tags(
 
 def merge_source_info(
     values: Sequence[SourceInfoValue],
-    combine: Callable[
-        [Sequence[str | None]], str
-    ] = arrow_utils.fold_source_info_tokens,
+    combine: Callable[[Sequence[str | None]], str],
 ) -> SourceInfoValue:
     """Merge the source info of several equal values into the source info of one.
 
     The values merged are equal, so their source info has one shape: a token, or a
     list of them nested as deep as the data column (provenance keeps the shape of its
     data column; developer decision, November 13, 2026, ITL-1017). The result has
-    that shape, and each of its tokens is ``combine`` of the tokens at that position:
-    by default one merged token (``arrow_utils.fold_source_info_tokens``). This is
-    what a ``Join`` does with the column of a tag that is referential on several of
-    its inputs, and does not assume the column is a tag.
+    that shape, and each of its tokens is ``combine`` of the tokens at that position;
+    the operation that merges passes its own fold (``Join``: the ``join_v1`` fold).
+    This is what a ``Join`` does with the column of a tag that is referential on
+    several of its inputs, and does not assume the column is a tag.
 
     Args:
         values: The source info of each merged value, all of one shape.

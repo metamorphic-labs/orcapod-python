@@ -78,9 +78,9 @@ def _source(value: Any, annotation: Any) -> DictSource:
     return DictSource(
         [{"id": 1, "v": value}],
         tag_columns=["id"],
-        tag_only_columns=True,
         data_schema={"id": int, "v": annotation},
         source_id="v",
+        tag_only_columns=True,
     )
 
 
@@ -170,7 +170,7 @@ class TestRaisedAtRead:
             }
         )
         source = ArrowTableSource(
-            table, tag_columns=["id"], tag_only_columns=True, source_id="v"
+            table, tag_columns=["id"], source_id="v", tag_only_columns=True
         )
         with pytest.raises(ValueError, match=r"(?s)Column 'v'.*ITL-1144"):
             _read_v(source)
@@ -181,9 +181,9 @@ def _members(annotation: Any, first: Any, second: Any) -> DictSource:
     return DictSource(
         [{"g": 1, "k": 1, "m": first}, {"g": 1, "k": 2, "m": second}],
         tag_columns=["g", "k"],
-        tag_only_columns=True,
         data_schema={"g": int, "k": int, "m": annotation},
         source_id="m",
+        tag_only_columns=True,
     )
 
 
@@ -283,8 +283,8 @@ class TestNoneWhereTheTypeDoesNotAllowOne:
             DictSource(
                 [{"id": 1, "n": 1}],
                 tag_columns=["id"],
-                tag_only_columns=True,
                 source_id="n",
+                tag_only_columns=True,
             )
         )
         with pytest.raises(OutputTypeError):
@@ -368,7 +368,7 @@ def test_a_null_dict_entry_raises_at_read() -> None:
         }
     )
     source = ArrowTableSource(
-        table, tag_columns=["id"], tag_only_columns=True, source_id="v"
+        table, tag_columns=["id"], source_id="v", tag_only_columns=True
     )
     with pytest.raises(ValueError, match=r"(?s)Column 'v'.*ITL-1144"):
         _read_v(source)

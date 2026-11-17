@@ -87,7 +87,7 @@ def _source() -> ArrowTableSource:
         schema=schema,
     )
     return ArrowTableSource(
-        table, tag_columns=["id"], tag_only_columns=True, source_id="src"
+        table, tag_columns=["id"], source_id="src", tag_only_columns=True
     )
 
 
@@ -104,7 +104,7 @@ def _unrelated() -> ArrowTableSource:
         schema=schema,
     )
     return ArrowTableSource(
-        table, tag_columns=["j"], tag_only_columns=True, source_id="unrelated"
+        table, tag_columns=["j"], source_id="unrelated", tag_only_columns=True
     )
 
 
@@ -121,7 +121,7 @@ def _partner() -> ArrowTableSource:
         schema=schema,
     )
     return ArrowTableSource(
-        table, tag_columns=["id"], tag_only_columns=True, source_id="partner"
+        table, tag_columns=["id"], source_id="partner", tag_only_columns=True
     )
 
 
@@ -146,8 +146,8 @@ PASS_THROUGH: dict[str, Callable[[StreamProtocol], StreamProtocol]] = {
     "select_data": lambda s: SelectDataColumns(list(s.keys()[1]))(s),
     "drop_tags": lambda s: DropTagColumns(["absent"], strict=False)(s),
     "drop_data": lambda s: DropDataColumns(["absent"], strict=False)(s),
-    "map_tags": lambda s: MapTags({"absent": "renamed"})(s),
-    "map_data": lambda s: MapData({"absent": "renamed"})(s),
+    "map_tags": lambda s: MapTags({"absent": "renamed"}, strict=False)(s),
+    "map_data": lambda s: MapData({"absent": "renamed"}, strict=False)(s),
     "filter": lambda s: PolarsFilter()(s),
     "join_one": lambda s: Join()(s),
     "semi_join_disjoint": lambda s: SemiJoin()(s, _unrelated()),
@@ -174,7 +174,9 @@ def _upstream(kind: str) -> tuple[StreamProtocol, StreamProtocol]:
     if kind == "pod_chain":
         return _double_pod().process(first), first
     if kind == "operator_chain":
-        return MapData({"absent": "renamed"})(SelectDataColumns(["y"])(first)), first
+        return MapData({"absent": "renamed"}, strict=False)(
+            SelectDataColumns(["y"])(first)
+        ), first
     raise AssertionError(kind)
 
 
@@ -263,8 +265,8 @@ def test_the_reported_reproduction() -> None:
     source = DictSource(
         [{"k": i, "x": i} for i in range(3)],
         tag_columns=["k"],
-        tag_only_columns=True,
         source_id="s",
+        tag_only_columns=True,
     )
     selected = SelectDataColumns(["y"])(plus_one.pod(source))
     assert selected.as_table().num_rows == 3

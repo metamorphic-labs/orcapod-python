@@ -168,17 +168,17 @@ def _build_source_registry() -> dict[str, type]:
     from orcapod.core.sources.postgresql_table_source import PostgreSQLTableSource
 
     return {
-        "csv": CSVSource,
-        "delta_table": DeltaTableSource,
+        CSVSource.SOURCE_KIND: CSVSource,
+        DeltaTableSource.SOURCE_KIND: DeltaTableSource,
         DictSource.SOURCE_KIND: DictSource,
         ListSource.SOURCE_KIND: ListSource,
         DataFrameSource.SOURCE_KIND: DataFrameSource,
         ArrowTableSource.SOURCE_KIND: ArrowTableSource,
-        "cached": CachedSource,
-        "derived": DerivedSource,
-        "spiraldb_table": SpiralDBTableSource,
-        "sqlite_table": SQLiteTableSource,
-        "postgresql_table": PostgreSQLTableSource,
+        CachedSource.SOURCE_KIND: CachedSource,
+        DerivedSource.SOURCE_KIND: DerivedSource,
+        SpiralDBTableSource.SOURCE_KIND: SpiralDBTableSource,
+        SQLiteTableSource.SOURCE_KIND: SQLiteTableSource,
+        PostgreSQLTableSource.SOURCE_KIND: PostgreSQLTableSource,
     }
 
 
@@ -196,6 +196,7 @@ def _build_operator_registry() -> dict[str, type]:
         DropTagColumns,
         GroupBy,
         Join,
+        MapColumns,
         MapData,
         MapTags,
         MergeJoin,
@@ -220,6 +221,7 @@ def _build_operator_registry() -> dict[str, type]:
         "DropColumns": DropColumns,
         "MapTags": MapTags,
         "MapData": MapData,
+        "MapColumns": MapColumns,
         "PolarsFilter": PolarsFilter,
         "DropNulls": DropNulls,
     }

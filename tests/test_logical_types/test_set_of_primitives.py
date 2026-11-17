@@ -70,8 +70,8 @@ def _source() -> DictSource:
     return DictSource(
         [{"k": 0, "i": 0}],
         tag_columns=["k"],
-        tag_only_columns=True,
         source_id="one_row",
+        tag_only_columns=True,
     )
 
 
@@ -165,8 +165,8 @@ def test_identifier_bytes(declared: Any, value: Any, name: str) -> None:
     source = DictSource(
         [{"k": 0, "s": value}],
         tag_columns=["k"],
-        tag_only_columns=True,
         data_schema={"k": int, "s": declared},
+        tag_only_columns=True,
     )
     arrow_type = source.as_table().schema.field("s").type
     assert arrow_type.extension_name == name
@@ -179,8 +179,8 @@ def test_a_list_of_sets_embeds_the_inner_set_identifier() -> None:
     source = DictSource(
         [{"k": 0, "s": [{2, 1}]}],
         tag_columns=["k"],
-        tag_only_columns=True,
         data_schema={"k": int, "s": list[set[int]]},
+        tag_only_columns=True,
     )
     arrow_type = source.as_table().schema.field("s").type
     assert arrow_type.extension_name == "list[set[int64]]"
@@ -218,9 +218,9 @@ def _row_hash(declared: Any, value: Any) -> Any:
     source = DictSource(
         [{"k": 0, "s": value}],
         tag_columns=["k"],
-        tag_only_columns=True,
         data_schema={"k": int, "s": declared},
         source_id="row_hash",
+        tag_only_columns=True,
     )
     _, data = next(iter(source.iter_data()))
     return data.content_hash()
@@ -334,6 +334,7 @@ _REGISTRATION_ORDER = textwrap.dedent(
         source = DictSource(
             [{"k": 0, "v": {1}}],
             tag_columns=["k"],
+            tag_only_columns=True,
             data_schema={"k": int, "v": declared[name]},
             source_id="one_row",
         )
@@ -388,6 +389,7 @@ _TWO_WIDTHS = textwrap.dedent(
         source = DictSource(
             [{"k": 0, "v": value}],
             tag_columns=["k"],
+            tag_only_columns=True,
             data_schema={"k": int, "v": annotation},
             source_id="one_row",
         )
@@ -449,6 +451,7 @@ _LOAD_THEN_DECLARE = textwrap.dedent(
     source = DictSource(
         [{"k": 0, "v": {1, 300}}],
         tag_columns=["k"],
+        tag_only_columns=True,
         data_schema={"k": int, "v": set[int]},
         source_id="one_row",
     )
@@ -534,7 +537,7 @@ _READ_STORED_COLUMN = textwrap.dedent(
             "notes": getattr(exc, "__notes__", []),
         }))
         sys.exit(0)
-    source = ArrowTableSource(table, tag_columns=["k"], source_id="stored")
+    source = ArrowTableSource(table, tag_columns=["k"], tag_only_columns=True, source_id="stored")
     _, data = next(iter(source.iter_data()))
     value = data.as_dict()["c"]
     print(json.dumps({
@@ -664,6 +667,7 @@ _TWO_WIDTHS_IN_A_LIST = textwrap.dedent(
         source = DictSource(
             [{"k": 0, "v": value}],
             tag_columns=["k"],
+            tag_only_columns=True,
             data_schema={"k": int, "v": annotation},
             source_id="one_row",
         )
@@ -716,9 +720,9 @@ def test_a_list_of_sets_inside_a_dict_value_is_refused() -> None:
         DictSource(
             [{"k": 0, "v": {"a": [{2, 1}]}}],
             tag_columns=["k"],
-            tag_only_columns=True,
             data_schema={"k": int, "v": dict[str, list[set[int]]]},
             source_id="one_row",
+            tag_only_columns=True,
         )
 
 

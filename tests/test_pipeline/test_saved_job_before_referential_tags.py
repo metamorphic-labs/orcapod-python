@@ -1,10 +1,11 @@
 """A job saved before referential tags loads with its v0.3 meaning (ITL-1023).
 
-The fixture ``fixtures/saved_job_f51ce67c`` was written by Orcapod at commit f51ce67c
-(``main`` before referential tags; job format ``0.1.0``): a ``CSVSource`` with tag
-``subject`` feeding one function node, run on a Delta store. Files at formats ``0.1.0``
-and ``0.2.0`` hold v0.3 sources, whose declared tags are tag-only; loading must rebuild
-them that way, so every saved hash is reproduced.
+The fixture ``fixtures/saved_job_37716c76`` was written by Orcapod at commit 37716c76
+(``main`` before referential tags, after the v1 hash definition of ITL-1154; job format
+``0.2.0``, the format v0.3.0 writes) by ``fixtures/make_saved_job_37716c76.py``: a
+``CSVSource`` with tag ``subject`` feeding one function node, run on a Delta store. Files
+at formats ``0.1.0`` and ``0.2.0`` hold v0.3 sources, whose declared tags are tag-only;
+loading must rebuild them that way, so every saved hash is reproduced.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from orcapod.pipeline.serialization import (
 )
 from orcapod.sources import CSVSource
 
-FIXTURE = Path(__file__).parent / "fixtures" / "saved_job_f51ce67c"
+FIXTURE = Path(__file__).parent / "fixtures" / "saved_job_37716c76"
 
 
 @pytest.fixture
@@ -45,11 +46,10 @@ def test_format_versions() -> None:
 
 
 def test_a_v03_job_loads_with_unchanged_hashes(saved: dict[str, Any]) -> None:
-    assert saved["orcapod_pipeline_job_version"] == "0.1.0"
-    # Saved before the database rename (ITL-1082): the file names its store under
-    # ``bindings.store``, which a load reads only through an explicit database.
+    assert saved["orcapod_pipeline_job_version"] == "0.2.0"
     job = PipelineJob.load(
-        "job.json", database=resolve_database_from_config(saved["bindings"]["store"])
+        "job.json",
+        database=resolve_database_from_config(saved["bindings"]["database"]),
     )
     nodes = saved["pipeline"]["nodes"]
     older = next(node for node in nodes.values() if node["label"] == "older")

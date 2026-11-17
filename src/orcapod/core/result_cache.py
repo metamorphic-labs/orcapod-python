@@ -41,6 +41,11 @@ else:
 logger = logging.getLogger(__name__)
 
 
+def pod_timestamp_type() -> pa.DataType:
+    """The Arrow type of a result row's ``__pod_ts`` column: UTC microseconds."""
+    return pa.timestamp("us", tz="UTC")
+
+
 class ResultCache:
     """Shared result caching backed by an ``ArrowDatabaseProtocol``.
 
@@ -51,7 +56,7 @@ class ResultCache:
     The match strategy is extensible: the default lookup matches on
     ``INPUT_DATA_HASH_COL`` only, but callers can supply additional
     constraints (e.g. function variation columns) to narrow the match.
-    This is the hook for future match-tier support (see design_issues/ P6).
+    This is the hook for future match-tier support (see docs/dev/design_issues/ P6).
 
     Args:
         result_database: The database to store/retrieve cached results.
@@ -329,7 +334,7 @@ class ResultCache:
 
         data_table = data_table.append_column(
             constants.POD_TIMESTAMP,
-            pa.array([datetime.now(timezone.utc)], type=pa.timestamp("us", tz="UTC")),
+            pa.array([datetime.now(timezone.utc)], type=pod_timestamp_type()),
         )
         data_table = with_data_context(data_table, data_context_key)
 

@@ -53,10 +53,16 @@ def _dict_sources() -> tuple[DictSource, DictSource]:
     """Two sources on tag ``k`` with data columns ``a`` and ``b``."""
     return (
         DictSource(
-            data=[{"k": 1, "a": 1}, {"k": 2, "a": 2}], tag_columns=["k"], source_id="sa"
+            data=[{"k": 1, "a": 1}, {"k": 2, "a": 2}],
+            tag_columns=["k"],
+            source_id="sa",
+            tag_only_columns=True,
         ),
         DictSource(
-            data=[{"k": 1, "b": 1}, {"k": 2, "b": 2}], tag_columns=["k"], source_id="sb"
+            data=[{"k": 1, "b": 1}, {"k": 2, "b": 2}],
+            tag_columns=["k"],
+            source_id="sb",
+            tag_only_columns=True,
         ),
     )
 
@@ -264,5 +270,10 @@ def test_raw_inputs_keep_their_other_columns() -> None:
     left = meta_stream("x", "vx", [f"{META}m"])
     right = meta_stream("y", "vy", [f"{META}m"])
     table = Join()(left, right).as_table()
-    assert table.column_names == ["k", "vx", "vy"]
-    assert table.schema.types == [pa.int16(), pa.int8(), pa.int8()]
+    # The data columns follow Join's canonical input order (by pipeline hash), so only
+    # the set of columns and their types are checked.
+    assert dict(zip(table.column_names, table.schema.types)) == {
+        "k": pa.int16(),
+        "vx": pa.int8(),
+        "vy": pa.int8(),
+    }

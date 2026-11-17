@@ -31,13 +31,13 @@ ROWS = [
     {"subject": "m2", "session": 1, "v": 0.9},
 ]
 
-# Pinned from a run of this input at c78ba80a, before ITL-1070 was merged: the folded
-# token of the referential key must not move.
+# Pinned from a run of this input at c78ba80a, before ITL-1070 was merged, and
+# re-pinned when the token became the ``group_v1`` fold of the members' tokens in
+# member order (ITL-1154 refresh): the folded token of the referential key must not
+# move. ``m2`` has one member, so its digest is the one pinned before.
 SUBJECT_TOKENS = {
-    "m1": "merged:source_fold_v1:"
-    "0e4f6dafc12b16f4daf438baa263f3a2bcefba8c5248dbccc3bd0dfd9c242b13",
-    "m2": "merged:source_fold_v1:"
-    "ec856d114f3bb89b2f626c9b1bc2a195e133da8c9b828d54f99a77dfa4332b40",
+    "m1": "group_v1:dc09a0e68d7b52eac555beced397606aea786ac869a0af46465a376874bb07c7",
+    "m2": "group_v1:ec856d114f3bb89b2f626c9b1bc2a195e133da8c9b828d54f99a77dfa4332b40",
 }
 # Members ordered by ``session``: row_1 (session 1) before row_0 (session 2).
 SESSION = {"m1": [1, 2], "m2": [1]}

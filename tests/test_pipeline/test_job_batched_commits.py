@@ -316,6 +316,7 @@ def test_a_node_cancelled_by_a_failure_commits_its_ephemeral_results(
             data=[{"k": i, "x": i} for i in range(CANCEL_ROWS)],
             tag_columns=["k"],
             source_id="src",
+            tag_only_columns=True,
         )
         upstream = FunctionPod.from_fn(
             double_until_last,
@@ -363,6 +364,7 @@ def test_a_failing_observer_does_not_skip_the_failed_nodes_commit(
             data=[{"k": i, "x": i} for i in range(CANCEL_ROWS)],
             tag_columns=["k"],
             source_id="src",
+            tag_only_columns=True,
         )
         pod = FunctionPod.from_fn(
             double_until_last,

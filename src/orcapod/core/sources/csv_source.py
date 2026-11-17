@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import os
 from collections.abc import Collection
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import Any, ClassVar, TYPE_CHECKING
 
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource, saved_tag_only_columns
 from orcapod.core.referential_tags import TagOnlyColumns, source_reference_tags
+from orcapod.core.sources.source_ids import location_source_id
 from orcapod.core.sources.reload import keep_nullable_columns, same_rows
 from orcapod.core.sources.stream_builder import (
+    normalize_record_id_columns,
     SourceStreamBuilder,
     SourceStreamResult,
 )
@@ -38,12 +40,18 @@ class CSVSource(RootSource):
 
     At the start of every run (``check_for_new_data``, ITL-1102) the source looks at
     the file's modification time and size. When either changed, it reads the file
-    again and, if the rows changed (in order without a ``record_id_column``: row
+    again and, if the rows changed (in order without a ``record_id_columns``: row
     positions are record ids; in any order with one), holds the new rows and
-    moves its modified time. Record ids keep their rule: the ``record_id_column``
+    moves its modified time. Record ids keep their rule: the ``record_id_columns``
     value, or the row's position.
+
+    Referential tags (ITL-1023): every declared tag column is referential by default,
+    also a data column of the same name. ``tag_only_columns`` (keyword-only) names the
+    tags kept plain (tag only, not data, as in v0.3); ``True`` keeps all of them plain.
     """
 
+    SOURCE_KIND: ClassVar[str] = "csv"
+    """Config type key and default source-id kind of this source (one vocabulary)."""
     TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = True
 
     def __init__(
@@ -51,14 +59,15 @@ class CSVSource(RootSource):
         file_path: str,
         tag_columns: str | Collection[str] = (),
         system_tag_columns: Collection[str] = (),
-        record_id_column: str | None = None,
+        record_id_columns: str | Collection[str] | None = None,
         source_id: str | None = None,
         schema: pa.Schema | None = None,
+        *,
         tag_only_columns: TagOnlyColumns = (),
         **kwargs: Any,
     ) -> None:
         if source_id is None:
-            source_id = file_path
+            source_id = location_source_id(self.SOURCE_KIND, str(file_path))
         super().__init__(source_id=source_id, **kwargs)
 
         self._file_path = file_path
@@ -68,7 +77,8 @@ class CSVSource(RootSource):
         self._schema = schema
         self._tag_columns: Collection[str] = _normalize_column_list(tag_columns)
         self._system_tag_columns: Collection[str] = system_tag_columns
-        self._record_id_column = record_id_column
+        self._record_id_columns = normalize_record_id_columns(record_id_columns)
+        self._key_columns = self._record_id_columns or ()
         self._file_state = _file_state(self._access_path)
         table = self._read_table()
         # The rows as read, columns and types included: a check compares a new read
@@ -106,7 +116,7 @@ class CSVSource(RootSource):
                 self._tag_columns, self._tag_only_columns
             ),
             source_id=self._source_id,
-            record_id_column=self._record_id_column,
+            record_id_columns=self._record_id_columns or (),
             system_tag_columns=self._system_tag_columns,
         )
 
@@ -116,10 +126,10 @@ class CSVSource(RootSource):
 
         Only the file's modification time and size are read when neither changed. A
         file written again with the same rows (in another order too, given a
-        ``record_id_column``) leaves the held rows and
+        ``record_id_columns``) leaves the held rows and
         the modified time as they are. The rows are compared as read from the file,
         every column included (a ``system_tag_columns`` column too), in order unless a
-        ``record_id_column`` gives the record ids
+        ``record_id_columns`` gives the record ids
         (``same_rows``).
 
         Returns:
@@ -144,7 +154,7 @@ class CSVSource(RootSource):
                 "Build a new CSVSource to read it"
             )
         # Row positions are record ids without a record_id_column: order counts.
-        if same_rows(self._table, table, ordered=self._record_id_column is None):
+        if same_rows(self._table, table, ordered=not self._record_id_columns):
             self._file_state = state
             return False
         stream = self._build(table).stream
@@ -157,12 +167,14 @@ class CSVSource(RootSource):
     def to_config(self, db_registry=None) -> dict[str, Any]:
         """Serialize this source's configuration to a JSON-compatible dict."""
         return {
-            "source_type": "csv",
+            "source_type": self.SOURCE_KIND,
             "file_path": self._file_path,
             "tag_columns": list(self._tag_columns),
             **self._tag_only_config(),
             "system_tag_columns": list(self._system_tag_columns),
-            "record_id_column": self._record_id_column,
+            "record_id_columns": None
+            if self._record_id_columns is None
+            else list(self._record_id_columns),
             "source_id": self.source_id,
             **self._identity_config(),
         }
@@ -175,6 +187,6 @@ class CSVSource(RootSource):
             tag_columns=config.get("tag_columns", ()),
             tag_only_columns=saved_tag_only_columns(config),
             system_tag_columns=config.get("system_tag_columns", ()),
-            record_id_column=config.get("record_id_column"),
+            record_id_columns=config.get("record_id_columns"),
             source_id=config.get("source_id"),
         )

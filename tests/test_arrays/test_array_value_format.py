@@ -1,6 +1,6 @@
 """Array values: ``.npy`` storage, what reads back, the hash and refusals (ITL-981).
 
-Design: ``superpowers/specs/2026-11-12-itl-981-library-value-types-design.md``.
+Design: ``docs/dev/specs/2026-11-12-itl-981-library-value-types-design.md``.
 Tests go through sources, streams, function pods and the default data context's
 semantic hasher. The strict hash and the ignore list have their own file,
 ``test_array_strict_hash.py``.
@@ -427,7 +427,7 @@ def test_dtype_shape_bits_and_kept_layout_change_the_hash(
 
 
 def test_table_token_carries_the_identifier_and_the_digest() -> None:
-    """A table token carries the type identifier (name and ignore list) and the value digest, no label."""
+    """A table token carries the type identifier (name and ignore list) and the labelled value hash."""
     # The Arrow hasher folds the identifier text in front of the handler's digest.
     from orcapod.hashing.arrow_hashers import StarfixArrowHasher
 
@@ -440,7 +440,7 @@ def test_table_token_carries_the_identifier_and_the_digest() -> None:
     # Non-public helper: this test is about the token the hasher builds for a cell.
     processed = hasher._process_table_columns(table.select(["x"]))  # pyright: ignore[reportPrivateUsage]
     token = processed.column("x")[0].as_py()
-    assert token == IDENTIFIER_TEXT + b"::" + semantic_hash(array).digest
+    assert token == IDENTIFIER_TEXT + b"::" + semantic_hash(array).to_prefixed_digest()
 
 
 # ---------------------------------------------------------------------------

@@ -296,6 +296,7 @@ class TestSelectTagColumnsStreaming:
             ),
             tag_columns=["region", "animal"],
             infer_nullable=True,
+            tag_only_columns=True,
         )
         op = SelectTagColumns(columns=["region"])
         results = await run_unary(op, src)
@@ -389,6 +390,7 @@ class TestSelectDataColumnsStreaming:
             ),
             tag_columns=["animal"],
             infer_nullable=True,
+            tag_only_columns=True,
         )
         op = SelectDataColumns(columns=["weight"])
         results = await run_unary(op, src)
@@ -543,6 +545,7 @@ class TestDropDataColumnsStreaming:
             ),
             tag_columns=["animal"],
             infer_nullable=True,
+            tag_only_columns=True,
         )
         op = DropDataColumns(columns=["legs"])
         results = await run_unary(op, src)
@@ -595,7 +598,7 @@ class TestMapTagsStreaming:
     @pytest.mark.asyncio
     async def test_no_matching_rename_passthrough(self):
         stream = make_two_tag_stream()
-        op = MapTags(name_map={"nonexistent": "nope"})
+        op = MapTags(name_map={"nonexistent": "nope"}, strict=False)
         results = await run_unary(op, stream)
 
         assert len(results) == 3
@@ -700,6 +703,7 @@ class TestMapDataStreaming:
             ),
             tag_columns=["animal"],
             infer_nullable=True,
+            tag_only_columns=True,
         )
         op = MapData(name_map={"weight": "mass"})
         results = await run_unary(op, src)
@@ -712,7 +716,7 @@ class TestMapDataStreaming:
     @pytest.mark.asyncio
     async def test_no_matching_rename_passthrough(self):
         stream = make_simple_stream()
-        op = MapData(name_map={"nonexistent": "nope"})
+        op = MapData(name_map={"nonexistent": "nope"}, strict=False)
         results = await run_unary(op, stream)
 
         assert len(results) == 3
@@ -2054,7 +2058,9 @@ def _make_source(tag_col: str, data_col: str, data: dict) -> ArrowTableStream:
             data_col: pa.array(data[data_col], type=pa.int64()),
         }
     )
-    return ArrowTableSource(table, tag_columns=[tag_col], infer_nullable=True)
+    return ArrowTableSource(  # pyright: ignore[reportReturnType]  # the helpers below take this source as their stream
+        table, tag_columns=[tag_col], infer_nullable=True, tag_only_columns=True
+    )
 
 
 async def run_binary_validated(

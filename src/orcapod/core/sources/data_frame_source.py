@@ -7,6 +7,9 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from orcapod.core.sources.base import RootSource
 from orcapod.core.referential_tags import TagOnlyColumns, source_reference_tags
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
+from orcapod.core.sources.stream_builder import (
+    normalize_record_id_columns,
+)
 from orcapod.utils import arrow_utils, polars_data_utils
 from orcapod.utils.schema_utils import _normalize_column_list
 from orcapod.utils.lazy_module import LazyModule
@@ -27,6 +30,10 @@ class DataFrameSource(RootSource):
 
     The DataFrame is converted to an Arrow table and enriched by
     ``SourceStreamBuilder`` (source-info, schema-hash, system tags).
+
+    Referential tags (ITL-1023): every declared tag column is referential by default,
+    also a data column of the same name. ``tag_only_columns`` (keyword-only) names the
+    tags kept plain (tag only, not data, as in v0.3); ``True`` keeps all of them plain.
     """
 
     TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = True
@@ -41,7 +48,9 @@ class DataFrameSource(RootSource):
         system_tag_columns: Collection[str] = (),
         source_id: str | None = None,
         schema: pa.Schema | None = None,
+        *,
         tag_only_columns: TagOnlyColumns = (),
+        record_id_columns: str | Collection[str] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(source_id=source_id, **kwargs)
@@ -77,6 +86,7 @@ class DataFrameSource(RootSource):
                 arrow_utils.infer_schema_nullable(arrow_table)
             )
 
+        self._key_columns = normalize_record_id_columns(record_id_columns) or ()
         builder = SourceStreamBuilder(self.data_context, self.orcapod_config)
         result = builder.build(
             arrow_table,
@@ -84,6 +94,7 @@ class DataFrameSource(RootSource):
             reference_tags=source_reference_tags(tag_columns, tag_only_columns),
             source_id=self._source_id,
             source_kind=self.SOURCE_KIND,
+            record_id_columns=self._key_columns,
             system_tag_columns=system_tag_columns,
         )
 

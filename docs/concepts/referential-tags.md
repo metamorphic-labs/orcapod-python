@@ -125,7 +125,8 @@ for tag, data in batched.iter_data():
 to drop with `drop_tag_columns` afterwards (that raises, since the tag is gone). A
 referential non-key column loses its tag role there, but keeps its data column, a list
 like every other data column. So after the grouping it is data only, and is renamed with
-`map_data`; `map_tags` would find no tag of that name and rename nothing.
+`map_data`; `map_tags` refuses it, since it is no longer a tag, and the error says to use
+`map_data`.
 
 ```python
 by_unit = spikes.group_by(["unit"])
@@ -143,11 +144,19 @@ A source-info column belongs to its data column and has its shape: a scalar valu
 token, a list one token per element. When a value is the merge of several equal elements
 that are different entries (the key of a `GroupBy`, or the key a `Join` merges from
 several referential inputs), no single member's token is true for it. Its source info is
-then one **merged token**, `merged:source_fold_v1:<hex>`: the SHA-256 digest of the
-members' tokens, sorted, so it does not depend on row or input order. It is a merged
-token for a group of one member too, and a merged token can itself be a member of a
-later merge. No content hash, pipeline hash, record id or function result identity reads
-source info, so these tokens move no stored result.
+then one **merged token**, the fold of the members' tokens by the operation that merged
+them (the SHA-256 of their canonical JSON list, after the operation's label), as the
+system tags of a group are folded:
+
+- `GroupBy`: `group_v1:<hex>` over the members' tokens in member order (the order of the
+  group's data lists, which does not depend on row order);
+- `Join`: `join_v1:<hex>` over the members' tokens sorted, so it does not depend on the
+  order of the inputs.
+
+It is a merged token for a group of one member too, and a merged token can itself be a
+member of a later merge. A merged token holds no `::`, so it never reads as a row's
+`<source id>::<record id>::<column>`. No content hash, pipeline hash, record id or
+function result identity reads source info, so these tokens move no stored result.
 
 ```python
 sessions = op.sources.DictSource(
@@ -157,7 +166,7 @@ sessions = op.sources.DictSource(
 )
 grouped = sessions.group_by(["subject"]).as_table(columns={"source": True})
 print(grouped.column("_source_subject").to_pylist())
-# ['merged:source_fold_v1:...']
+# ['group_v1:...']
 print(grouped.column("_source_v").to_pylist())
 # [['sessions::row_0::v', 'sessions::row_1::v']]
 ```
@@ -249,7 +258,7 @@ the file is checked against the stored tables when a node reads them.
 ## Not supported yet
 
 These raise "not supported with referential tags yet" when a referential tag reaches them:
-`MergeJoin`.
+`MergeJoin` and `MapColumns` (`map_columns`; rename with `map_tags` and `map_data`).
 `PollingSource` keeps its tags plain. Each error names its issue and the way out: build the
 source with `tag_only_columns=True` to keep every tag plain, as in v0.3. A plain tag is not
 data, so a function that reads a tag's value (as `scale` above reads `time`) can no longer
