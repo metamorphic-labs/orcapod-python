@@ -164,6 +164,28 @@ class TestStatisticsRule:
         )
         assert statistics_columns(schema) == ["c"]
 
+    @pytest.mark.parametrize(
+        ("name", "other"),
+        [
+            ("v", pa.struct([("v", pa.large_binary())])),
+            ("v", pa.struct([("v", pa.int64())])),
+            ("v", pa.large_list(pa.struct([("v", pa.large_binary())]))),
+            ("item", pa.large_list(pa.int64())),
+            ("element", pa.large_list(pa.large_binary())),
+            ("list", pa.large_list(pa.int64())),
+            ("key", pa.map_(pa.large_string(), pa.int64())),
+            ("value", pa.map_(pa.large_string(), pa.large_binary())),
+            ("key_value", pa.map_(pa.large_string(), pa.int64())),
+        ],
+        ids=lambda x: str(x),
+    )
+    def test_name_of_a_nested_part_is_left_out(
+        self, name: str, other: pa.DataType
+    ) -> None:
+        """delta-rs matches a listed name against nested leaf names too."""
+        schema = pa.schema([(name, pa.int64()), ("rec", other), ("c", pa.int64())])
+        assert statistics_columns(schema) == ["c"]
+
     def test_names_are_quoted(self) -> None:
         schema = pa.schema([("a.b", pa.int64()), ("s::t", pa.int64())])
         assert statistics_configuration(schema) == {
@@ -371,6 +393,40 @@ class TestEveryColumnKind:
             STATS_COLUMNS_PROPERTY: "`v`,`__data_context`"
         }
         assert len(stored_ids(db)) == 6
+
+    def test_names_of_nested_parts_are_left_out_and_written(
+        self, tmp_path: Path, capfd: pytest.CaptureFixture[str]
+    ) -> None:
+        """A top-level name that is also a nested binary field's name logs nothing."""
+        db = DeltaTableDatabase(tmp_path)
+
+        def table(ids: range) -> pa.Table:
+            n = len(ids)
+            columns: dict[str, pa.Array[Any]] = {
+                DeltaTableDatabase.RECORD_ID_COLUMN: pa.array(
+                    [f"id{i}".encode() for i in ids], pa.large_binary()
+                ),
+                "v": pa.array(list(ids), pa.int64()),
+                "rec": pa.array(
+                    [{"v": b"x"}] * n, pa.struct([("v", pa.large_binary())])
+                ),
+                "element": pa.array([1] * n, pa.int64()),
+                "hashes": pa.array([[b"x"]] * n, pa.large_list(pa.large_binary())),
+                "value": pa.array([1] * n, pa.int64()),
+                "pairs": pa.array(
+                    [[("k", b"x")]] * n, pa.map_(pa.large_string(), pa.large_binary())
+                ),
+                "c": pa.array([1] * n, pa.int64()),
+            }
+            return pa.Table.from_arrays(list(columns.values()), names=list(columns))
+
+        capfd.readouterr()
+        db.add_records(PATH, table(range(0, 3)), flush=True)
+        db.add_records(PATH, table(range(3, 6)), flush=True)
+        db.add_records(PATH, table(range(5, 9)), skip_duplicates=False, flush=True)
+        assert stats_warnings(capfd) == []
+        assert configuration(tmp_path / "t") == {STATS_COLUMNS_PROPERTY: "`c`"}
+        assert len(stored_ids(db)) == 9
 
 
 def _delta_schema(table_path: Path) -> pa.Schema:

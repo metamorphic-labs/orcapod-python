@@ -16,7 +16,13 @@ structs, ``null`` and the rest. A column whose name holds a comma or a backtick 
 out too: delta-rs splits the property on commas before it reads quoting, and it cannot
 MERGE into a table with a backtick in a column name whether or not the column is listed
 (a delta-rs limitation, seen with 1.0.2). Each listed name is put in backticks, so a
-dot, a space or ``::`` in it is part of the name. The list is
+dot, a space or ``::`` in it is part of the name. delta-rs 1.0.2 matches each listed name
+against the last name of every column path in the file, nested ones included: listing
+``v`` also selects ``rec.v`` of a struct ``rec``, and warns when that field is binary. So a
+top-level column is left out when its name is also the name of a nested field anywhere in
+the schema, or of a part delta-rs gives a nested column in Parquet (``element`` and
+``list`` when the schema has a list, ``key_value``, ``key`` and ``value`` when it has a
+map). The list is
 deliberately an allowlist: delta-rs 1.0.2 refuses the whole write when the property
 names a list, a map, a struct with a binary field or a missing column, and still warns
 for a named binary column.
@@ -27,7 +33,8 @@ instead.
 
 The property is set once, when the table is created, and Orcapod never changes it. A
 column added later by schema evolution is not in the list: delta-rs makes no statistics
-for it and logs nothing for it. A table created before this change has no property and is
+for it and logs nothing for it, unless it has a nested binary field named like a listed
+column (then delta-rs warns for that field). A table created before this change has no property and is
 read and appended to as before, unaltered; delta-rs keeps logging its warnings (see
 ``docs/troubleshooting.md``). The property is Delta table metadata only: it changes no
 stored value, column, hash, path or layout.
@@ -78,6 +85,37 @@ def _has_statistics(arrow_type: pa.DataType) -> bool:
     )
 
 
+def _nested_names(arrow_type: pa.DataType) -> set[str]:
+    """Return every name a nested part of a column of ``arrow_type`` has, at any depth.
+
+    Args:
+        arrow_type: A column's type as it is written to Delta.
+
+    Returns:
+        The names of the fields inside the type (struct fields, list items, map keys
+        and values) and the names delta-rs gives those parts in Parquet: ``list`` and
+        ``element`` for a list, ``key_value``, ``key`` and ``value`` for a map. Empty
+        for a type with no nested part.
+    """
+    if isinstance(arrow_type, pa.ExtensionType):
+        arrow_type = arrow_type.storage_type
+    names: set[str] = set()
+    t = pa.types
+    if (
+        t.is_list(arrow_type)
+        or t.is_large_list(arrow_type)
+        or t.is_fixed_size_list(arrow_type)
+    ):
+        names |= {"list", "element"}
+    if t.is_map(arrow_type):
+        names |= {"key_value", "key", "value"}
+    for i in range(arrow_type.num_fields):
+        child = arrow_type.field(i)
+        names.add(child.name)
+        names |= _nested_names(child.type)
+    return names
+
+
 def statistics_columns(schema: pa.Schema) -> list[str]:
     """Return the names of the columns a new table keeps statistics for, in schema order.
 
@@ -85,15 +123,20 @@ def statistics_columns(schema: pa.Schema) -> list[str]:
         schema: The schema of the rows that create the table, as written to Delta.
 
     Returns:
-        The top-level columns whose type delta-rs makes statistics for and whose name
-        holds no comma and no backtick.
+        The top-level columns whose type delta-rs makes statistics for, whose name holds
+        no comma and no backtick, and whose name is no nested part's name
+        (``_nested_names``) in any column of ``schema``.
     """
+    nested: set[str] = set()
+    for field in schema:
+        nested |= _nested_names(field.type)
     return [
         field.name
         for field in schema
         if _has_statistics(field.type)
         and "," not in field.name
         and "`" not in field.name
+        and field.name not in nested
     ]
 
 
