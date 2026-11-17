@@ -103,8 +103,8 @@ All of these hold before the developer runs the Release workflow:
 5. **The version is free**: the tag does not exist on `metamorphic-labs`, and the version is
    on neither PyPI nor TestPyPI.
 6. **The Linear release is named** (see *Linear Release System*): the open release of the
-   Linear release pipeline has the version `vX.Y.Z`. Not for a hotfix run, which leaves the open
-   release as it is.
+   Linear release pipeline has the version `vX.Y.Z`, and nothing merges into `main` until
+   `linear-complete` has finished. Not for a hotfix run, which leaves the open release as it is.
 
 ## Golden hash values
 
@@ -357,7 +357,11 @@ the open release holding the merged pull requests is left as it is, and `linear-
 to find `vX.Y.Z`. So, before running the
 Release workflow, the developer sets the version of the pipeline's open release to `vX.Y.Z` in
 Linear (pre-release checklist, item 6); `linear-sync` then targets it and `linear-complete`
-completes it. If a Linear job fails anyway, the release is published; finish the Linear release
+completes it. From the rename until `linear-complete` has finished, merge nothing into `main`:
+a push sync in between adds its pull request to the renamed release, which would mark it
+shipped in `vX.Y.Z` although the build does not contain it. If one slips in, move it and its
+issues back to the next open release by hand, and put back the status of any issue the
+completed release moved. If a Linear job fails anyway, the release is published; finish the Linear release
 by hand (*If a Run Fails Part-Way*).
 
 **A hotfix run is different: never rename the open release for it.** The open release holds
@@ -368,10 +372,11 @@ never scan the hotfix branch. When the push-to-`main` sync (`release-sync.yml`) 
 does not affect publishing. When it has not (it failed, or is still running), `linear-sync`
 creates `vX.Y.Z` holding those unsynced `main` commits and `linear-complete` completes it. No
 concurrency guard orders the two workflows, so **after every hotfix run, check Linear for a
-`vX.Y.Z` release**. If there is one, for any `main` pull request it lists: move it and its issues
-to the open release by hand (the next push sync starts after the commit the hotfix sync
-recorded, so it will not pick them up), and put back the status of any of its issues that the
-completed release moved. Create or edit `vX.Y.Z` by hand if it should list the hotfix's own
+`vX.Y.Z` release**. If there is one, for every `main` pull request and every issue it lists (the
+CLI picks up issue ids from commit messages as well as pull requests, so an issue can be listed
+without its pull request): move it to the open release by hand (the next push sync starts
+after the commit the hotfix sync recorded, so it will not pick them up), and put back the
+status of any issue that the completed release moved. Create or edit `vX.Y.Z` by hand if it should list the hotfix's own
 issues. Syncing the hotfix commits themselves
 would need the Linear jobs to check out the **Branch** input, a change to `release.yml`.
 
