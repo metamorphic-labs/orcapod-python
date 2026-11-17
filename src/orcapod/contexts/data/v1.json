@@ -249,6 +249,15 @@
                 "added": {},
                 "previous": "0a789cf9e8d1df9fb762d6dc2fabffcd3383cd6a21ef147e8c6583f963280c2e",
                 "digest": "6cdd29cdc6fa98df322931e2ab0ff9df151fdb47d3381adecd9f58fd55d2fb22"
+            },
+            {
+                "date": "2026-11-17",
+                "release": null,
+                "added": {
+                    "pipeline-02.json": "6d01f7186e09e8383c62f97e4063d1030a19e465248d85c401b966e62b587f0a"
+                },
+                "previous": "6cdd29cdc6fa98df322931e2ab0ff9df151fdb47d3381adecd9f58fd55d2fb22",
+                "digest": "19e2f1fcfd66a085a398d6bd8c80246e9f051f858877747260078cf5e3000ac6"
             }
         ]
     },
