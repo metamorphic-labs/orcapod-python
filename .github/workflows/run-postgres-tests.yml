@@ -6,9 +6,19 @@ on:
   pull_request:
   workflow_dispatch: # Allows manual triggering
 
+# Read-only token, whatever the repository default is (ITL-1193).
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    # id-token: write lets the Codecov upload authenticate by GitHub OIDC, with no stored
+    # token (ITL-1193). A fork's pull request gets no OIDC token: the action detects the fork
+    # and uploads tokenless instead.
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
@@ -59,4 +69,7 @@ jobs:
         if: github.repository == 'metamorphic-labs/orcapod-python'
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f  # v7.0.0
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: true
+          # A failed upload fails a push run, where it would otherwise go unseen; it never
+          # fails a pull request, whose fork uploads are tokenless (ITL-1193).
+          fail_ci_if_error: ${{ github.event_name != 'pull_request' }}

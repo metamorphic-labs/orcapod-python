@@ -12,3 +12,34 @@ reviews:
     enabled: true
     base_branches:
       - ".*"
+# This repository is public (ITL-1193). CodeRabbit takes review context from this
+# repository only: learnings, issues and pull requests of other repositories in the
+# organization, linked repositories, web search, and the Linear, Jira and MCP knowledge
+# sources are all off, so that nothing from a private repository or tracker is quoted in
+# a public review. On a public repository "auto" already means local or disabled; the
+# explicit values hold whatever the visibility or the UI settings are.
+knowledge_base:
+  web_search:
+    enabled: false
+  learnings:
+    scope: local
+  issues:
+    scope: local
+  pull_requests:
+    scope: local
+  automatic_linking_mode: disabled
+  linked_repositories: []
+  jira:
+    usage: disabled
+  linear:
+    usage: disabled
+  mcp:
+    usage: disabled
+chat:
+  # Only organization members can prompt CodeRabbit in a comment thread.
+  allow_non_org_members: false
+  integrations:
+    jira:
+      usage: disabled
+    linear:
+      usage: disabled
