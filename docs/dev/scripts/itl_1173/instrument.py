@@ -17,7 +17,6 @@ import orcapod as op
 from orcapod import sources
 from orcapod.core import cached_function_pod, data_function, result_cache
 from orcapod.core.nodes import function_node
-from orcapod.core.streams import arrow_table_stream
 from orcapod.databases import delta_lake_databases as dldb
 from orcapod.databases import in_memory_databases as imdb
 from orcapod.hashing import arrow_hashers
@@ -73,7 +72,6 @@ for owner, attr, name in [
     (result_cache.ResultCache, "store", "row.result_cache.store"),
     (data_function.PythonDataFunction, "call", "row.user_function_call"),
     (arrow_hashers.StarfixArrowHasher, "hash_table", "hash.arrow_hash_table(all)"),
-    (arrow_table_stream.ArrowTableStream, "iter_data", "stream.iter_data"),
     (D, "get_records_with_column_value", "db.get_records_with_column_value"),
     (D, "get_record_by_id", "db.get_record_by_id"),
     (D, "get_records_by_ids", "db.get_records_by_ids"),

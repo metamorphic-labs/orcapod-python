@@ -2028,7 +2028,8 @@ class DeltaTableDatabase:
         # never building that dataset over every file (ITL-1173).
         paths = cast(
             list[str],
-            pa.record_batch(committed.get_add_actions(flatten=False))
+            # A record batch in deltalake 1.0.2, a table from 1.5.0: pa.table takes both.
+            pa.table(committed.get_add_actions(flatten=False))
             .column("path")
             .to_pylist(),
         )

@@ -15,12 +15,14 @@ The snapshot's rows are compared directly (``_stored_rows``): they are the subje
 from __future__ import annotations
 
 import random
+import types
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 
 import deltalake
 import pyarrow as pa
+import pyarrow.dataset as pa_dataset
 import pytest
 
 from orcapod.databases import DeltaTableDatabase
@@ -59,6 +61,12 @@ def _rows(ids: list[str], *, extra: bool = False) -> pa.Table:
     return table
 
 
+def _data_files(table_dir: str) -> list[str]:
+    """The data files of the table's current version, as its add actions name them."""
+    actions = pa.table(deltalake.DeltaTable(table_dir).get_add_actions(flatten=False))
+    return cast(list[str], actions.column("path").to_pylist())
+
+
 def _sorted(table: pa.Table) -> pa.Table:
     return table.sort_by("__record_id")
 
@@ -80,6 +88,25 @@ def _assert_snapshot_exact(db: DeltaTableDatabase, root: Path) -> None:
             PATH, {"hash": b"h" + record_id, "context": "ctx"}
         )
         assert by_value is not None and by_value.num_rows == 1
+
+
+@pytest.fixture
+def files_read(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """Record the data files of every dataset the snapshot extension reads directly."""
+    read: list[list[str]] = []
+    real = pa_dataset.FileSystemDataset
+
+    def recording(fragments, *args, **kwargs):
+        fragments = list(fragments)
+        read.append([fragment.path for fragment in fragments])
+        return real(fragments, *args, **kwargs)
+
+    monkeypatch.setattr(
+        delta_lake_databases,
+        "pa_ds",
+        types.SimpleNamespace(FileSystemDataset=recording),
+    )
+    return read
 
 
 @pytest.fixture
@@ -105,20 +132,26 @@ def counts(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
 
 
 def test_append_commit_loads_once_and_reads_only_its_files(
-    tmp_path: Path, counts: dict[str, int]
+    tmp_path: Path, counts: dict[str, int], files_read: list[list[str]]
 ) -> None:
     db = DeltaTableDatabase(tmp_path)
     db.add_records(PATH, _rows(["r0", "r1"]), flush=True)
     assert db.get_record_by_id(PATH, b"r0") is not None  # loads the rows once
 
+    table_dir = str(tmp_path / "table")
     for commit in range(1, 21):
+        files_before = set(_data_files(table_dir))
         counts["table_loads"] = counts["datasets"] = 0
+        files_read.clear()
         db.add_records(PATH, _rows([f"r{commit}_{k}" for k in range(3)]))
         db.flush()
         # Lookups between commits are answered from the extended rows.
         assert db.get_record_by_id(PATH, f"r{commit}_1".encode()) is not None
         assert db.get_record_by_id(PATH, b"r0") is not None
         assert counts == {"table_loads": 1, "datasets": 0}, commit
+        added = set(_data_files(table_dir)) - files_before
+        assert len(added) == 1
+        assert files_read == [sorted(added)], commit
 
     _assert_snapshot_exact(db, tmp_path)
 

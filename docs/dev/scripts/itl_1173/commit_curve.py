@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import sys
 import time
 
@@ -43,7 +42,8 @@ def ms(seconds: float) -> float:
 
 def main() -> None:
     d = sys.argv[1]
-    shutil.rmtree(d, ignore_errors=True)
+    if os.path.exists(d) and os.listdir(d):
+        sys.exit(f"{d} is not empty: give an empty or missing directory")
     deltalake.write_deltalake(d, batch(0), mode="overwrite")
     handle = deltalake.DeltaTable(d)
     for k in range(1, 301):

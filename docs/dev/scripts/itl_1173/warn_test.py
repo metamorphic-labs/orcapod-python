@@ -22,6 +22,11 @@ def patch_create(property_on: bool) -> None:
     orig = dldb.deltalake.write_deltalake
 
     def write(table_uri, data, *a, **k):
+        """Add the statistics property to a create (``mode="overwrite"``) write.
+
+        Replaces ``write_deltalake`` in Orcapod's module for the whole process, so
+        every table this scenario creates gets the property; appends are unchanged.
+        """
         if k.get("mode") == "overwrite":
             mode = os.environ.get("ITL1173_PROP", "stats_cols")
             if mode == "num0":
@@ -29,6 +34,11 @@ def patch_create(property_on: bool) -> None:
             else:
 
                 def stat_ok(t):
+                    """Whether deltalake keeps min/max for a column of type ``t``.
+
+                    Experiment only: a column name with a comma breaks the
+                    property even when quoted, and is not handled here.
+                    """
                     t = t.storage_type if isinstance(t, pa.ExtensionType) else t
                     return (
                         pa.types.is_integer(t)
@@ -53,6 +63,8 @@ def patch_create(property_on: bool) -> None:
 
 
 def rows(ids, extra=False):
+    """Rows keyed by ``__record_id``: a binary hash ``h``, an int ``v``, and with
+    ``extra`` one more binary and one more int column (schema evolution)."""
     cols: dict[str, pa.Array[Any]] = {
         "__record_id": pa.array([f"id{i}".encode() for i in ids], pa.large_binary()),
         "h": pa.array([f"h{i}".encode() for i in ids], pa.large_binary()),
@@ -65,6 +77,13 @@ def rows(ids, extra=False):
 
 
 def scenario(name: str, d: str) -> None:
+    """Run one step on the table under ``d`` and print its version and properties.
+
+    The steps build on each other and must run in the driver's order (create,
+    append, merge, evolve, append_after_evolve, then set_property_on_existing and
+    append_new on the table created without the property). A ``_prop`` suffix
+    creates the table with the statistics property.
+    """
     from orcapod.databases import DeltaTableDatabase
 
     prop = name.endswith("_prop")
@@ -107,6 +126,12 @@ def scenario(name: str, d: str) -> None:
 
 
 def run(step: str, d: str) -> str:
+    """Run ``step`` in a subprocess and report its warning lines.
+
+    Returns one line: the step, the number of "Skipping column" lines and the
+    columns they name, the step's output, and the tail of stderr if it failed
+    (or ``TIMEOUT``). Failures are reported, never raised.
+    """
     try:
         r = subprocess.run(
             [sys.executable, __file__, step, d],
@@ -124,6 +149,9 @@ def run(step: str, d: str) -> str:
 if __name__ == "__main__":
     if sys.argv[1] == "all":
         base = sys.argv[2]
+        for name in ("t_none", "t_prop"):
+            if os.path.exists(os.path.join(base, name)):
+                sys.exit(f"{os.path.join(base, name)} exists: give a fresh directory")
         for variant in ("", "_prop"):
             d = os.path.join(base, f"t{variant or '_none'}")
             print(f"--- table created {'WITH' if variant else 'WITHOUT'} the property")

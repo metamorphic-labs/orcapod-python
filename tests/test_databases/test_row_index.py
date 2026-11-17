@@ -43,8 +43,11 @@ def _table(n: int) -> pa.Table:
     )
 
 
+@pytest.mark.parametrize("context_first", [False, True])
 @pytest.mark.parametrize("n", [10, 1_000, 10_000])
-def test_lookup_walks_only_the_shortest_position_list(n: int) -> None:
+def test_lookup_walks_only_the_shortest_position_list(
+    n: int, context_first: bool
+) -> None:
     """A lookup on (id, context) does not walk the context list, which holds every row.
 
     Before ITL-1173 the positions of every condition were intersected as sets, so a
@@ -56,6 +59,8 @@ def test_lookup_walks_only_the_shortest_position_list(n: int) -> None:
     _CountingPositions.walks = 0
 
     pairs: list[tuple[str, object]] = [("id", b"id3"), ("context", "ctx")]
+    if context_first:
+        pairs.reverse()
     result = matching_rows(key_index, pairs, _expression(pairs))
 
     assert result["value"].to_pylist() == [3]
