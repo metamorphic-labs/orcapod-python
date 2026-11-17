@@ -21,7 +21,7 @@ When adding or changing any instruction, update BOTH:
 
 `docs/dev/design_issues/` is the canonical log of known design problems, bugs, and code
 quality issues: one file per entry (developer, November 11, 2026; ITL-968). There is no
-`DESIGN_ISSUES.md` and no top-level `design_issues/` (moved in ITL-1169; `--check` refuses it);
+`DESIGN_ISSUES.md` and no top-level `design_issues/` (moved in ITL-1169; `--check` refuses both);
 never bring either back, and never put two entries in one file.
 
 - An entry is the file `docs/dev/design_issues/<LINEAR-ISSUE-ID>-<ENTRY-ID>.md` (e.g.
