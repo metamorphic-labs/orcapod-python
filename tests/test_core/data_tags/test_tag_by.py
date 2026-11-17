@@ -76,7 +76,7 @@ def test_named_data_columns_become_data_tags_in_the_order_given() -> None:
     tagged = _plain().tag_by("label", "trial")
     assert tagged.keys() == (
         ("unit", "label", "trial"),
-        ("trial", "amp", "label"),
+        ("label", "trial", "amp"),
     )
     assert stream_data_tags(tagged) == ("label", "trial")
     for tag, data in tagged.iter_data():
@@ -151,20 +151,22 @@ def test_the_schema_is_predicted(all_info: bool) -> None:
 
 
 def test_the_data_order_is_the_inputs_and_the_predicted_one() -> None:
-    """The named columns stay where they are: tagging reorders no data column.
+    """The new data-tags join the data-tags first, in tag order (ITL-1205).
 
     The order of ``keys()`` and of the data schema of the computed stream
-    (``static_process``) equals the input's and the predicted one, also when the
-    names are given in another order than the data (CodeRabbit on PR #420).
+    (``static_process``) equals the predicted one, also when the names are given in
+    another order than the data (CodeRabbit on PR #420); no column of the table moves.
     """
     source = _data_tag()
     tag_by = TagBy(["label", "trial"])
     computed = tag_by.static_process(source)
     _, input_data = source.keys()
     assert input_data == ("unit", "trial", "amp", "label")
-    assert computed.keys() == (("unit", "label", "trial"), input_data)
-    assert list(computed.output_schema()[1]) == list(input_data)
-    assert list(tag_by.output_schema(source)[1]) == list(input_data)
+    data = ("unit", "label", "trial", "amp")
+    assert computed.keys() == (("unit", "label", "trial"), data)
+    assert list(computed.output_schema()[1]) == list(data)
+    assert list(tag_by.output_schema(source)[1]) == list(data)
+    assert computed.as_table().column_names == source.as_table().column_names
     assert source.tag_by("label", "trial").keys() == computed.keys()
 
 
@@ -221,7 +223,7 @@ def test_a_computed_column_becomes_a_tag_and_keys_a_join() -> None:
 
 def test_a_computed_column_becomes_a_tag_and_keys_a_group() -> None:
     grouped = TagBy("session")(session_of.pod(_data_tag())).group_by(["session"])
-    assert grouped.keys() == (("session",), ("unit", "session"))
+    assert grouped.keys() == (("session",), ("session", "unit"))
     rows = sorted(grouped.as_table().to_pylist(), key=lambda r: r["session"])
     assert [(r["session"], r["unit"]) for r in rows] == [("s0", [1]), ("s1", [2])]
 

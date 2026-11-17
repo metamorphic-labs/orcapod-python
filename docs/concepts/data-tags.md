@@ -39,6 +39,10 @@ source v0.3 built: same columns, same hashes.
 The column is stored once: `as_table()` shows it once, and every row's tag and data hold
 the same value.
 
+Data-tags come first among the data columns, in tag order, then the other data columns in
+their table order. Every stream, operator result and row follows this order, whatever the
+position of the column in the table.
+
 ```python
 print(spikes.as_table().column_names)
 # ['unit', 'time', 'amp']
@@ -139,7 +143,7 @@ print(phased.keys())
 
 by_phase = phased.group_by(["phase"])
 print(by_phase.keys())
-# (('phase',), ('unit', 'time', 'phase'))
+# (('phase',), ('phase', 'unit', 'time'))
 ```
 
 - `s.tag_by("x", "y")` equals `s.tag_by(["x", "y"])`. The new tags follow the stream's
@@ -176,7 +180,7 @@ your own classes and logical types (`Path`, `UUID`, arrays) are refused.
 | `MapData` / `map_data` | Always a data-only move: the data column is renamed and `x` stays a plain tag. |
 | Filters, `DropNulls`, `SemiJoin`, `Pick`, `Index` | Keep the data-tag. |
 | `Batch` | Keeps every tag, list-valued, as for plain tags: `x` becomes the same list in both roles and stays a data-tag. Its source info is one token per member, like any data column: nothing is merged. |
-| `MergeJoin` | Follows `Join`. A data-tag in both inputs: **one** scalar data-tag column `x`, not a two-element list (the join equated the values), with one merged token as its source info, the same fold as `Join`'s (below). Referential in one input, and a plain tag or no column of that name in the other: `x` stays a data-tag with its own source info. A data-only column `x` in the other input is refused. A key that is `T` in one input and `T \| None` in the other is `T` in both roles. Every other colliding data column is merged into a sorted list, as before. |
+| `MergeJoin` | Follows `Join`. A data-tag in both inputs: **one** scalar data-tag column `x`, not a two-element list (the join equated the values), with one merged token as its source info, the same fold as `Join`'s (below). A data-tag in one input, and a plain tag or no column of that name in the other: `x` stays a data-tag with its own source info. A data-only column `x` in the other input is refused. A key that is `T` in one input and `T \| None` in the other is `T` in both roles. Every other colliding data column is merged into a sorted list, as before. |
 
 ```python
 units = op.sources.DictSource(
@@ -186,7 +190,7 @@ units = op.sources.DictSource(
 )
 joined = spikes.join(units)
 print(joined.keys())
-# (('unit', 'time'), ('unit', 'area', 'time', 'amp'))
+# (('unit', 'time'), ('unit', 'time', 'area', 'amp'))
 ```
 
 `MergeJoin` merges every other colliding data column into a sorted list, and keeps each

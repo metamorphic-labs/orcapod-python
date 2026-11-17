@@ -34,7 +34,7 @@ from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, Literal
 
 from orcapod.errors import InputValidationError
-from orcapod.types import SourceInfoValue
+from orcapod.types import Schema, SourceInfoValue
 
 from orcapod.utils.lazy_module import LazyModule
 
@@ -81,6 +81,32 @@ def materialization_diagnostic_off() -> Iterator[None]:
         yield
     finally:
         _diagnostic_off.reset(token)
+
+
+def data_tags_first(tag_schema: Mapping[str, Any], data_schema: Schema) -> Schema:  # pyright: ignore[reportExplicitAny]  # only the names of the tag schema are read
+    """Return ``data_schema`` with its data-tags first, in tag order (ITL-1205).
+
+    Developer decision, November 17, 2026: a stream lists its data-tags first among
+    its data columns, in tag order, then the other data columns in their own order.
+    A table built from rows lays a data-tag out among the tags, so this is the order
+    of every row; ``ArrowTableStream`` keys and every operator's prediction follow it.
+    No hash depends on the order of a schema's fields.
+
+    Args:
+        tag_schema: The tag schema; only its names, in order, are read.
+        data_schema: The data schema to order.
+
+    Returns:
+        ``data_schema`` itself when it is already in that order, else a reordered copy
+        with the same types and optional fields.
+    """
+    names = tuple(data_schema)
+    tags = tuple(name for name in tag_schema if name in data_schema)
+    if names[: len(tags)] == tags:
+        return data_schema
+    ordered = {name: data_schema[name] for name in tags}
+    ordered.update((name, data_schema[name]) for name in names if name not in ordered)
+    return Schema(ordered, optional_fields=data_schema.optional_fields)
 
 
 def data_tag_names(

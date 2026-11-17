@@ -10,6 +10,7 @@ from orcapod.core.operators.meta_columns import (
     without_meta_fields,
 )
 from orcapod.channels import ReadableChannel, WritableChannel
+from orcapod.core.data_tags import data_tags_first
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import (
@@ -156,8 +157,9 @@ class UnaryOperator(StaticOutputOperatorPod):
         tag_schema, data_schema = self.unary_output_schema(
             stream, columns=columns, all_info=all_info
         )
-        # The prediction of ``without_input_meta`` in ``static_process``.
-        return tag_schema, without_meta_fields(data_schema)
+        # The prediction of ``without_input_meta`` in ``static_process``, with
+        # data-tags first among the data columns (ITL-1205).
+        return tag_schema, data_tags_first(tag_schema, without_meta_fields(data_schema))
 
     def argument_symmetry(self, streams: Collection[StreamProtocol]) -> ArgumentGroup:
         # return single stream as a tuple
@@ -258,8 +260,9 @@ class BinaryOperator(StaticOutputOperatorPod):
         tag_schema, data_schema = self.binary_output_schema(
             left_stream, right_stream, columns=columns, all_info=all_info
         )
-        # The prediction of ``without_input_meta`` in ``static_process``.
-        return tag_schema, without_meta_fields(data_schema)
+        # The prediction of ``without_input_meta`` in ``static_process``, with
+        # data-tags first among the data columns (ITL-1205).
+        return tag_schema, data_tags_first(tag_schema, without_meta_fields(data_schema))
 
     def validate_inputs(self, *streams: StreamProtocol) -> None:
         if len(streams) != 2:

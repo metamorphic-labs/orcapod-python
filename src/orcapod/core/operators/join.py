@@ -20,8 +20,9 @@ from orcapod.core.operators.base import (
 )
 from orcapod.core.data_tags import (
     check_namespaces,
-    merge_source_info,
     data_tag_names,
+    data_tags_first,
+    merge_source_info,
     stream_data_tags,
 )
 from orcapod.core.operators.key_nullability import (
@@ -148,9 +149,13 @@ class Join(NonZeroInputOperator):
             tag_schema, data_schema = streams[0].output_schema(
                 columns=columns, all_info=all_info
             )
-            return tag_schema, without_meta_fields(data_schema)
+            return tag_schema, data_tags_first(
+                tag_schema, without_meta_fields(data_schema)
+            )
 
         tag_schema, data_schema = self._joined_user_schemas(*streams)
+        # Data-tags first among the data columns, in tag order (ITL-1205).
+        data_schema = data_tags_first(tag_schema, data_schema)
 
         # Add system tag columns if requested
         if columns_config.system_tags:

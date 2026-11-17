@@ -153,7 +153,16 @@ class ArrowTableStream(StreamBase):
             exclude_columns=tag_only,
         )
         # now table should only contain tag columns and data columns
-        self._data_columns = tuple(c for c in table.column_names if c not in tag_only)
+        # Data-tags come first among the data columns, in tag order, then the other
+        # data columns in table order (developer decision, November 17, 2026,
+        # ITL-1205): a table built from rows lays a data-tag out among the tags, so
+        # this is the order of every row, on every path. Only the keys follow it: the
+        # table keeps its column order, and no hash depends on the order of columns.
+        self._data_columns = self._data_tags + tuple(
+            c
+            for c in table.column_names
+            if c not in tag_only and c not in self._data_tags
+        )
         # No user column name holds the source-info separator (ITL-1154).
         schema_utils.require_names_without_separator(
             (*self._tag_columns, *self._data_columns)
@@ -177,7 +186,7 @@ class ArrowTableStream(StreamBase):
         )
         all_tag_schema = arrow_utils.join_arrow_schemas(tag_schema, system_tag_schema)
         data_schema = pa.schema(
-            f for f in self._table.schema if f.name in self._data_columns
+            self._table.schema.field(name) for name in self._data_columns
         )
 
         self._tag_schema = tag_schema

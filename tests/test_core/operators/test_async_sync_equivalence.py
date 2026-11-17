@@ -146,6 +146,20 @@ def source_a(with_data_tags: bool = False) -> ArrowTableSource:
     )
 
 
+def source_mid(with_data_tags: bool = True) -> ArrowTableSource:
+    """Data ``a``, tag ``k`` and data ``y``: the tag is not the first column (ITL-1205)."""
+    return _source(
+        {
+            "a": pa.array([1.5, 2.5, 3.5], pa.float32()),
+            "k": pa.array([1, 2, 3], pa.int16()),
+            "y": pa.array(["p", "q", "r"], pa.string()),
+        },
+        tags=("k",),
+        source_id="mid",
+        with_data_tags=with_data_tags,
+    )
+
+
 def source_b(nested: bool = True, with_data_tags: bool = False) -> ArrowTableSource:
     """Tag ``k: int16``; scalar data columns, plus list columns when ``nested``."""
     columns: dict[str, Column] = {
@@ -648,6 +662,15 @@ CASES = [
     Case("tag_by_reversed", lambda: TagBy(["bn", "i8"]), lambda: (source_a(),)),
     Case("tag_by_b", lambda: TagBy(["u8", "ls"]), lambda: (source_b(),)),
     Case("ref_tag_by", lambda: TagBy("i8"), lambda: (source_a(with_data_tags=True),)),
+    # A data-tag that is not the table's first column (ITL-1205): the barrier
+    # path rebuilds its input from rows, data-tags first; the sync path agrees.
+    Case(
+        "ref_mid_polars_filter",
+        lambda: PolarsFilter(constraints={"k": 2}),
+        lambda: (source_mid(),),
+    ),
+    Case("ref_mid_tag_by", lambda: TagBy("y"), lambda: (source_mid(),)),
+    Case("ref_mid_drop_nulls", lambda: DropNulls(), lambda: (source_mid(),)),
     # Every accepted value type, after the input's two tags (ITL-1196).
     Case(
         "add_tags",

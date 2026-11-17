@@ -947,6 +947,12 @@ data. The rules:
   path (`_kept_output`: a job run, sync or async, and `node.run()` on its own; ITL-1133),
   and reads a stored operator cache in row order (`_in_row_order_on_read`). Never change
   the order of any other populated table: stored tables depend on it.
+- **Data-tags come first among the data columns** (developer, November 17, 2026, ITL-1205):
+  a stream lists its data-tags first in its data keys and data schema, in tag order, then
+  its other data columns in table order. A table built from rows lays a data-tag out among
+  the tags, so this is every row's order, on every path. `ArrowTableStream` applies it to
+  its keys (its table keeps its column order) and every operator's prediction applies it
+  through `data_tags.data_tags_first`. No hash depends on the order of columns.
 - **Type strictness** (developer, November 10, 2026): Orcapod is type strict. It never
   expands or converts a type implicitly; the only exception is normalization to large variants.
   Inputs that disagree on a column's type are an error naming the column and both types, on

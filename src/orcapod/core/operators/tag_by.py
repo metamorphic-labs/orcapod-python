@@ -193,9 +193,9 @@ class TagBy(UnaryOperator):
         """Re-wrap the input's rows with the named columns among the tags.
 
         The input's table as it is laid out: no column moved, no cast, no value
-        changed. The data columns are taken in table order, so leaving each named
-        column where it is keeps the input's data order (the predicted one); the
-        tag order is the ``tag_columns`` given. The stream keeps the input's data
+        changed. The stream lists its data-tags first among the data columns, in
+        tag order (ITL-1205), so the named columns join them there, as predicted;
+        the tag order is the ``tag_columns`` given. The stream keeps the input's data
         context, and each row its own data context key (the context column).
 
         Args:
