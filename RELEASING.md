@@ -146,6 +146,8 @@ workflow until the tag is deleted.
    **[Actions → Release → Run workflow](https://github.com/nauticalab/orcapod-python/actions/workflows/release.yml)**
    in the GitHub UI, enter the version (e.g. `0.3.0`), optionally enter a branch name
    (defaults to `main`), and click **Run workflow**. A leading `v` is stripped automatically.
+   Leave the `skip_tests` checkbox (labelled *Skip the test jobs …*) unchecked; it is an
+   exception, described in *Skipping the release tests* below.
 
 3. **CI takes over** — the workflow runs the following jobs automatically:
 
@@ -155,7 +157,7 @@ workflow until the tag is deleted.
                                                  └─ linear-sync ──────────────────────┴─ linear-complete
    ```
 
-   - Pre-flight: branch validation, then tests on Python 3.11, 3.12 and 3.13 and license check (parallel after validation)
+   - Pre-flight: branch validation, then tests on Python 3.11, 3.12 and 3.13 and license check (parallel after validation); the tests are skipped only with `skip_tests`
    - Build: normalises version (strips a leading `v`), creates the local tag, builds wheel + sdist with `uv build`, aborts if the tag already exists on origin, pushes the tag, uploads `dist/` as an artifact
    - TestPyPI: in the `testpypi` environment, `uv publish --publish-url https://test.pypi.org/legacy/ dist/*` with an OIDC token (`id-token: write`) — a staging upload
    - PyPI: in the `pypi` environment, after TestPyPI succeeds, `uv publish dist/*` with an OIDC token, then creates the GitHub Release for the tag with generated release notes and the dist files attached
@@ -169,6 +171,38 @@ workflow until the tag is deleted.
    ```
 
    `metamorphic-labs` then holds the same tag on the same commit.
+
+## Skipping the release tests
+
+The Release workflow has a boolean input, `skip_tests` (a checkbox in the Run workflow form,
+labelled *Skip the test jobs …*, default unchecked; developer, November 16, 2026, ITL-1188).
+Checked, the `test` jobs (Python 3.11, 3.12 and 3.13) do not run; everything else does: branch validation,
+the license check, the build with its golden checks, the tag, TestPyPI, PyPI and the GitHub
+Release. Unchecked, the workflow is exactly what it was before the input existed.
+
+This is an exception, for a pinch: the release tests take a long time and repeat what the
+development repository already ran. Use it only when all of these hold:
+
+- The exact commit being released (the tip of the **Branch** input on `nauticalab`) has
+  green required CI on `metamorphic-labs/orcapod-python`: the `Run Tests` workflow on that
+  commit passed on Python 3.11, 3.12 and 3.13. Check the commit id, not the branch name.
+- The pre-push checklist above holds, the full suite included.
+- The developer chose it for this run. An agent never runs the Release workflow, with or
+  without the option.
+
+What the workflow guarantees:
+
+- Only the input skips the tests. A test job that failed or was cancelled still stops the
+  build and everything after it, as do a failed validation, license check or build.
+- A run with the tests skipped says so: the build job writes a `Tests skipped` warning
+  annotation and a run summary section naming who started the run (`github.actor`).
+
+Every job after the tests carries its own condition. A GitHub job whose need was skipped is
+itself skipped, and so is every job after it, unless its `if` names a status function; so
+`build`, `publish-testpypi`, `publish-pypi`, `linear-sync` and `linear-complete` each check
+the results of the jobs they need (`!cancelled() && needs.<job>.result == 'success'`), and
+`build` accepts a skipped `test` only when `skip_tests` is set. A new job after the tests
+needs the same.
 
 ## One-time setup (only the developer can do this)
 
@@ -259,8 +293,8 @@ workflow.
 4. Set **Branch** to `hotfix/0.1.x`
 5. Click **Run workflow**
 
-The workflow will confirm the branch exists, run tests against it, create the `v0.1.1`
-tag at its tip, and publish to TestPyPI and PyPI — identical to a normal release.
+The workflow will confirm the branch exists, run tests against it (unless `skip_tests` is
+set; see *Skipping the release tests*), create the `v0.1.1` tag at its tip, and publish to TestPyPI and PyPI — identical to a normal release.
 
 ## If a Run Fails Part-Way
 
