@@ -194,8 +194,8 @@ environments:
 ### SpiralDB integration job
 
 The `spiral-integration` job of `Run Tests` runs on every push to `main` and by hand
-(`workflow_dispatch`) on `metamorphic-labs/orcapod-python`, never on pull requests. It
-authenticates to SpiralDB with a workload private key (ITL-1185): pyspiral reads
+(`workflow_dispatch`) on `metamorphic-labs/orcapod-python`, never on pull requests. It runs
+beside the test jobs, not after them, so its result comes in minutes. It authenticates to SpiralDB with a workload private key (ITL-1185): pyspiral reads
 `SPIRAL_CLIENT_ID` (the workload id) and `SPIRAL_PRIVATE_KEY` (the private key as a JSON Web
 Key) from the environment, signs a client assertion with the key, and requests a token from
 `https://auth.spiraldb.com/oauth/token` with the `client_credentials` grant. It requests no
