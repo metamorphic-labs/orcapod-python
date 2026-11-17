@@ -6,7 +6,7 @@ import logging
 from abc import ABC, abstractmethod
 from collections.abc import Hashable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 
 from orcapod.core.nodes.function_node import FunctionNodeBase
 from orcapod.core.tracker import AutoRegisteringContextBasedTracker
@@ -23,6 +23,7 @@ from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
     import networkx as nx
+    from orcapod.pipeline.diagram import PipelineDiagram
     from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 else:
     nx = LazyModule("networkx")
@@ -301,6 +302,59 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
             self._hash_graph.add_edge(upstream_hash, key)
             if upstream_hash not in self._source_streams:
                 self._source_streams[upstream_hash] = upstream
+
+    # ------------------------------------------------------------------
+    # Diagram (ITL-1197)
+    # ------------------------------------------------------------------
+
+    def diagram(
+        self,
+        *,
+        direction: Literal["LR", "TB"] = "LR",
+        collapse: bool = False,
+        max_nodes: int = 400,
+    ) -> PipelineDiagram:
+        """A diagram of the DAG, drawn in a notebook without Graphviz.
+
+        In development: this interface may change. The first diagram made in a
+        process issues ``InDevelopmentWarning``, once.
+
+        Shown at the end of a notebook cell (as the pipeline or job itself is) it is a
+        picture of the nodes and the streams between them; where the notebook runs
+        scripts it can be dragged and zoomed, and selecting a node shows its schema and,
+        for a job, its run status. ``print`` gives a plain-text listing. Making it
+        computes nothing.
+
+        Args:
+            direction: ``"LR"`` lays the graph out left to right, ``"TB"`` top to
+                bottom.
+            collapse: Fold the joins and the column selections, drops and maps that
+                feed exactly one node into the edges they lie on.
+            max_nodes: Above this many nodes, show the text listing instead of the
+                picture.
+
+        Returns:
+            The diagram.
+
+        Raises:
+            RuntimeError: If the pipeline has not been compiled yet.
+        """
+        from orcapod.pipeline.diagram import PipelineDiagram
+
+        return PipelineDiagram(
+            self, direction=direction, collapse=collapse, max_nodes=max_nodes
+        )
+
+    def _repr_mimebundle_(
+        self,
+        include: Any = None,
+        exclude: Any = None,
+        **kwargs: Any,
+    ) -> dict[str, str]:
+        """The notebook display: the diagram, or the plain repr before compiling."""
+        if self._node_graph is None:
+            return {"text/plain": repr(self)}
+        return self.diagram()._repr_mimebundle_()
 
     # ------------------------------------------------------------------
     # reset() — no-op after refactor

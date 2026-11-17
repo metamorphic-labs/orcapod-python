@@ -116,7 +116,8 @@ compute a boolean column in a function pod and filter on it. See
 **Cause.** `show_graph` is a method of the job's pipeline.
 
 **Fix.** `job.pipeline.show_graph()`. It needs the Graphviz `dot` program; without it you
-get `ExecutableNotFound`.
+get `ExecutableNotFound`. To see the graph in a notebook without Graphviz, show `job` (or
+`job.diagram()`) at the end of a cell; see [Seeing the graph](concepts/pipeline-job.md#seeing-the-graph).
 
 ### `FileNotFoundError: File: path does not exist: ...` / `IsADirectoryError: File: path is a directory: ...`
 
@@ -312,5 +313,5 @@ Reading a Delta table yourself with `deltalake.DeltaTable(...).to_pyarrow_table(
   development headers. Install Orcapod 0.2 or newer.
 - **`ExecutableNotFound: failed to execute 'dot'`** when calling `show_graph()`. Install
   Graphviz (`brew install graphviz`, `apt install graphviz`, or `conda install graphviz`),
-  or do without the picture.
+  or show the job in a notebook cell instead: `job.diagram()` needs no Graphviz.
 - **Python version.** Orcapod needs Python 3.11 or newer.
