@@ -162,14 +162,10 @@ class MapData(UnaryOperator):
         )
 
         # A referenced column keeps its tag under its own name, now plain; the
-        # renamed data column is a copy beside it (a data-only move).
+        # renamed data column is a copy beside it (a data-only move), added after
+        # the renames so that no rename reaches the copy.
         references = stream_references(stream)
         moved = {c: self.name_map[c] for c in references if c in self.name_map}
-        for old, new in moved.items():
-            index = table.schema.get_field_index(old)
-            table = table.add_column(
-                index + 1, table.schema.field(old).with_name(new), table.column(old)
-            )
 
         name_map = {
             tc: tc
@@ -186,6 +182,13 @@ class MapData(UnaryOperator):
                 name_map[c] = c
 
         renamed_table = table.rename_columns(name_map)
+        for old, new in moved.items():
+            index = renamed_table.schema.get_field_index(old)
+            renamed_table = renamed_table.add_column(
+                index + 1,
+                renamed_table.schema.field(old).with_name(new),
+                renamed_table.column(old),
+            )
 
         if self.drop_unmapped and unmapped_columns:
             # An unmapped referential tag loses its data role and stays a plain tag.
@@ -431,14 +434,9 @@ class MapTags(UnaryOperator):
         renamed_refs = [c for c in references if c in self.name_map]
         if self.tag_only:
             # The renamed tag is a plain copy beside the data column, which keeps
-            # its name and its source info.
+            # its name and its source info. The copy is added after the renames, so
+            # that no rename of another column reaches it.
             for old in renamed_refs:
-                index = table.schema.get_field_index(old)
-                new = self.name_map[old]
-                table = table.add_column(
-                    index + 1, table.schema.field(old).with_name(new), table.column(old)
-                )
-                name_map[new] = new
                 name_map[old] = old
         else:
             # One column in both roles: its data source info follows the name.
@@ -450,6 +448,14 @@ class MapTags(UnaryOperator):
             name_map.setdefault(c, c)  # no renaming on other data columns
 
         renamed_table = table.rename_columns(name_map)
+        if self.tag_only:
+            for old in renamed_refs:
+                index = renamed_table.schema.get_field_index(old)
+                renamed_table = renamed_table.add_column(
+                    index + 1,
+                    renamed_table.schema.field(old).with_name(self.name_map[old]),
+                    renamed_table.column(old),
+                )
 
         if missing_tags and self.drop_unmapped:
             # drop any tags that are not in the name map; a referential one keeps

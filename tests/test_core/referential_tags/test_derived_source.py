@@ -33,7 +33,7 @@ from orcapod.pipeline import (
     SyncPipelineOrchestrator,
 )
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
-from orcapod.types import CacheMode
+from orcapod.types import CacheMode, NodeConfig
 
 JOB = "derived"
 REFERENTIAL_KEYS = (("unit", "time"), ("unit", "y"))
@@ -144,6 +144,23 @@ def test_as_source_of_a_function_node_keeps_its_bindings(
         assert tag["unit"] == data["unit"]
     head = source.head()
     assert head.table.column_names.count("unit") == 1
+
+
+def test_as_source_keeps_the_bindings_when_results_are_ephemeral() -> None:
+    """No persistent result row exists: the pipeline table's marker still holds."""
+    store = InMemoryArrowDatabase()
+    job = PipelineJob(name=JOB, database=store)
+    with job:
+        double.pod(_source(), label="double")
+    node = job.nodes["double"]
+    node.node_config = NodeConfig(is_result_ephemeral=True)
+    job.set_ephemeral_database(InMemoryArrowDatabase())
+    job.run()
+    records = node.get_all_records()
+    assert records is not None and records.num_rows == 2
+    source = node.as_source()
+    assert source.keys() == REFERENTIAL_KEYS
+    assert sorted(source.as_table().column("y").to_pylist()) == [1.0, 3.0]
 
 
 @STORES

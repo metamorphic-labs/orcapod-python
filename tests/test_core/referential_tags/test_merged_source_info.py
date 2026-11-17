@@ -129,13 +129,44 @@ def assert_provenance_has_the_shape_of_its_data(stream: StreamProtocol) -> None:
         for value, token in zip(
             table.column(name).to_pylist(), table.column(column).to_pylist()
         ):
-            for _ in range(depth):
-                assert isinstance(token, list) and len(token) == len(value), column
-                value, token = value[0] if value else None, token[0] if token else None
-            if value is not None:
-                assert token is None or isinstance(token, str), column
+            _assert_same_shape(value, token, depth, column)
         checked += 1
     assert checked, "no source-info column was checked"
+
+
+def _assert_same_shape(value: Any, token: Any, depth: int, column: str) -> None:
+    """``token`` nests as ``value`` does, ``depth`` lists deep, at every member."""
+    if depth == 0:
+        if value is not None:
+            assert token is None or isinstance(token, str), column
+        return
+    if value is None:
+        return
+    assert isinstance(token, list) and len(token) == len(value), column
+    for member, member_token in zip(value, token):
+        _assert_same_shape(member, member_token, depth - 1, column)
+
+
+def test_the_shape_check_looks_at_every_member() -> None:
+    """A nested member without its tokens is caught, not only the first one."""
+    _assert_same_shape([[20], [10]], [["a"], ["b"]], 2, "c")
+    with pytest.raises(AssertionError):
+        _assert_same_shape([[20], [10]], [["a"], []], 2, "c")
+
+
+def test_a_referential_group_key_schema_prediction_matches_the_result() -> None:
+    """The key stays scalar in both roles; the prediction agrees with the result."""
+    source = _ref(
+        [{"s": "a", "t": 1, "v": 0.5}, {"s": "a", "t": 2, "v": 0.7}], ["s", "t"], "S"
+    )
+    grouped = GroupBy(["s"])
+    result = grouped.static_process(source)
+    for columns in ({}, {"source": True}):
+        predicted = grouped.output_schema(source, columns=columns)
+        assert predicted == result.output_schema(columns=columns)
+        assert predicted[1]["s"] is str
+    predicted = grouped.output_schema(source, all_info=True)
+    assert predicted == result.output_schema(all_info=True)
 
 
 def _a(**kw: Any):
