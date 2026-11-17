@@ -32,7 +32,8 @@ from orcapod.pipeline import (
     PipelineJob,
     SyncPipelineOrchestrator,
 )
-from orcapod.system_constants import constants
+from orcapod.system_constants import OPERATOR_DB_SCHEMA_VERSION, constants
+from orcapod.types import CacheMode
 
 ORCHESTRATORS = pytest.mark.parametrize(
     "orchestrator",
@@ -398,3 +399,24 @@ def test_in_a_job_a_function_node_stores_the_new_tag_marked(
 def double(session: str) -> str:
     """Reads the new tag's data column; ``unit`` falls through."""
     return session * 2
+
+
+@ORCHESTRATORS
+def test_a_logged_tag_by_node_stores_its_new_tag_marked(
+    orchestrator: type[SyncPipelineOrchestrator | AsyncPipelineOrchestrator],
+) -> None:
+    database = InMemoryArrowDatabase()
+    job = PipelineJob(name="ops", database=database)
+    with job:
+        _ = TagBy("trial")(_referential(), label="tag_by")
+    job.nodes["tag_by"].attach_databases(
+        pipeline_database=database.at("ops"), cache_mode=CacheMode.LOG
+    )
+    job.run(orchestrator=orchestrator())
+    paths = [
+        p for p in database.list_table_paths() if p[-1] == OPERATOR_DB_SCHEMA_VERSION
+    ]
+    assert len(paths) == 1
+    stored = database.get_all_records(paths[0])
+    assert stored is not None
+    assert stored_references(stored.schema) == ("unit", "trial")
