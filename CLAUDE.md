@@ -56,8 +56,8 @@ Documents written during development are kept in the repository, under `docs/dev
 - Never put them in the published documentation (`docs/` outside `docs/dev/`) or at the top
   level of the repository. There is no top-level `superpowers/`; `scripts/design_issues.py
   --check` refuses one.
-- `docs/dev/` is developer material: `mkdocs.yml` excludes it from the published site
-  (`exclude_docs`), and the documentation sample test does not run it.
+- `docs/dev/` is developer material: the site build never publishes it (`EXCLUDED` in
+  `scripts/docs_site_content.py`), and the documentation sample test does not run it.
 
 ## Backward compatibility
 
@@ -92,12 +92,11 @@ to refer to names (e.g. ``PollingSource``, ``iter_data``, ``CursorInvalidatedErr
 
 `docs/` outside `docs/dev/` holds library documentation only. `docs/dev/` (the design issues
 log, the design specification, specs, plans and their scripts) is developer material, kept out
-of the published site (`exclude_docs` in `mkdocs.yml`) and out of the sample test.
+of the published site (`EXCLUDED` in `scripts/docs_site_content.py`) and out of the sample test.
 
 Every fenced `python` block in `README.md`, `docs/index.md`, `docs/getting-started.md`,
 `docs/troubleshooting.md`, `docs/concepts/`, `docs/reference/` and `docs/tutorial/` is executed
-by `tests/test_docs/test_doc_samples.py`, and `tests/test_docs/test_mkdocs_build.py` runs
-`mkdocs build --strict`. When writing docs:
+by `tests/test_docs/test_doc_samples.py`. When writing docs:
 
 - Blocks on one page share a namespace and run top to bottom.
 - Every line a block prints must appear as a `# ...` comment in that block; `...` inside the
@@ -112,6 +111,36 @@ by `tests/test_docs/test_doc_samples.py`, and `tests/test_docs/test_mkdocs_build
   Do not add a second dataset or a dependency to the generator.
 - Output that the library does not guarantee to be ordered must not be shown as if it were:
   print `sorted(job.nodes)`, and sort rows read back from a database before showing them.
+
+## Documentation site
+
+The documentation is published as an Astro Starlight site, built from `docs/` (developer,
+November 16, 2026, ITL-1170; `site/README.md` has the commands). mkdocs is gone.
+
+- `docs/` is the only source. `scripts/docs_site_content.py` writes the site's pages
+  (`site/src/content/docs/`, `site/public/`, both ignored by git) on every build: never
+  edit or commit them, and never copy page text into `site/`.
+- Write pages as before: a `# <title>` first line, mkdocs-style admonitions (`!!! note "Title"`,
+  `??? success "Solution"`) and relative `.md` links; the script converts them. A link to a
+  missing or unpublished page or file fails the build, and the site build validates every
+  link and anchor.
+- What is published is decided in `scripts/docs_site_content.py` (`PUBLISHED_FILES`,
+  `PUBLISHED_FOLDERS`, `EXCLUDED`). A new top-level entry under `docs/` fails the build until
+  it is added to one of them; `docs/dev/` is never published.
+- The API reference is generated from the source by `scripts/docs_site_api.py` (griffe).
+  `docs/api/*.md` are its input: an introduction and one `::: <object path>` line per object;
+  never write a signature or a docstring there. A docstring griffe warns about (an `Args:`
+  entry the signature does not have) fails the build.
+- Build locally with `cd site && pnpm install && pnpm build`; CI builds the site on every pull
+  request (`.github/workflows/docs-site.yml`) and `tests/test_docs/test_site_content.py` runs
+  the content build without Node. That workflow only builds: publishing to GitHub Pages
+  (`https://metamorphic-labs.github.io/orcapod-python/`) is a separate step the developer
+  enables. An agent never adds a deploy job or changes a Pages setting.
+- The site's address is never hard-coded: `DOCS_SITE_URL` (origin) and `DOCS_SITE_BASE`
+  (base path) come from the environment, in CI from the repository variables of the same
+  names, with the address above when unset or empty; `site_settings` in
+  `scripts/docs_site_content.py` is the one place that reads and checks them. An agent never
+  creates or changes those variables.
 
 ## Linear issue tracking
 
@@ -323,6 +352,10 @@ What runs where (developer, November 16, 2026; ITL-1181):
   needs a reason.
 - The Graphviz `dot` binary is optional. The tests that render a graph to an image skip
   when `dot` is not on `PATH` and run when it is.
+- A security advisory that a CI check accepts (`allow-ghsas` of the dependency review) is
+  listed in `docs/dev/security-exceptions.md`, the one list of exceptions: one is added only
+  with the developer's approval and a Linear issue with a due date, and the list is
+  reviewed at every release.
 
 ## Logical type identifiers
 

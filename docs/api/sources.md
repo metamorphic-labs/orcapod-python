@@ -1,4 +1,10 @@
 # Sources
+<!--
+Input of the API reference generator (scripts/docs_site_api.py), not a page written by
+hand: this file chooses the objects (one `::: <object path>` line each) and gives the
+introduction. Every signature and docstring on the published page comes from the source
+code. See site/README.md.
+-->
 
 Source classes provide the entry point for external data into Orcapod pipelines.
 All sources convert their input to a PyArrow Table and use `SourceStreamBuilder` for
