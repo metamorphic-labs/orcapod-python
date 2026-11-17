@@ -43,18 +43,18 @@ _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
 
 
-def _checked_value(name: str, value: object) -> TagConstant:
-    """Return ``value`` if it can be the constant value of tag ``name``.
+def _checked_value(value: object) -> TagConstant:
+    """Return ``value`` if it can be the constant value of a tag.
 
     The value's exact type must be ``bool``, ``int``, ``float``, ``str`` or
     ``bytes``: that type is the tag's declared type, mapped to Arrow by the data
     context's type converter (``int64``, ``double``, ``bool``, ``large_string``,
     ``large_binary``), so no type is inferred from data. A subclass of one of
     them (other than ``bool``, which is its own type) is refused, as are
-    ``None`` (no type) and every other type.
+    ``None`` (no type) and every other type. The caller names the tag in the
+    error.
 
     Args:
-        name: The tag's name.
         value: The tag's value.
 
     Returns:
@@ -67,16 +67,14 @@ def _checked_value(name: str, value: object) -> TagConstant:
     """
     if type(value) not in _ACCEPTED_TYPES.values():
         raise TypeError(
-            f"add_tags: tag {name!r} has a value of type {type(value).__name__!r}; "
+            f"a value of type {type(value).__name__!r} is not accepted; "
             + "a constant tag value must be a bool, int, float, str or bytes"
         )
     if type(value) is int and not _INT64_MIN <= value <= _INT64_MAX:
-        raise ValueError(
-            f"add_tags: tag {name!r} has the int value {value}, outside the int64 range"
-        )
+        raise ValueError(f"the int value {value} is outside the int64 range")
     if type(value) is float and not math.isfinite(value):
         raise ValueError(
-            f"add_tags: tag {name!r} has the float value {value}; "
+            f"the float value {value} is not accepted; "
             + "a constant tag value must be finite"
         )
     return value  # pyright: ignore[reportReturnType]  # checked above
@@ -123,9 +121,12 @@ class AddTags(UnaryOperator):
         schema_utils.require_names_not_meta(list(tags))
         schema_utils.require_names_not_system(list(tags))
         schema_utils.require_names_without_separator(list(tags))
-        self._tags: dict[str, TagConstant] = {
-            name: _checked_value(name, value) for name, value in tags.items()
-        }
+        self._tags: dict[str, TagConstant] = {}
+        for name, value in tags.items():
+            try:
+                self._tags[name] = _checked_value(value)
+            except (TypeError, ValueError) as error:
+                raise type(error)(f"add_tags: tag {name!r}: {error}") from error
         # The one-row table of the values, per type converter (the async path
         # needs it for every row); the converter is kept so its id stays valid.
         self._one_row: dict[int, tuple[TypeConverterProtocol, pa.Table]] = {}

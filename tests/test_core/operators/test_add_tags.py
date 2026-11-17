@@ -201,7 +201,7 @@ class TestRefusals:
         ],
     )
     def test_unsupported_type_names_the_tag(self, value: Any) -> None:
-        with pytest.raises(TypeError, match="'cohort'"):
+        with pytest.raises(TypeError, match="tag 'cohort': .*not accepted"):
             AddTags({"cohort": value})
 
     def test_subclass_of_an_accepted_type(self) -> None:
@@ -213,12 +213,12 @@ class TestRefusals:
 
     @pytest.mark.parametrize("value", [2**63, -(2**63) - 1])
     def test_int_outside_int64(self, value: int) -> None:
-        with pytest.raises(ValueError, match="int64"):
+        with pytest.raises(ValueError, match="tag 'run': .*int64"):
             AddTags({"run": value})
 
     @pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
     def test_non_finite_float(self, value: float) -> None:
-        with pytest.raises(ValueError, match="finite"):
+        with pytest.raises(ValueError, match="tag 'w': .*finite"):
             AddTags({"w": value})
 
 
