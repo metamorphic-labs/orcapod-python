@@ -428,6 +428,6 @@ containing the total number of spikes over both probes. (Hint: Part 4. After
     run_folders_strict()
     print(len(calls) - before)
     # 1
-```
+    ```
 
 Next: [Part 8: Inspecting and tracing](08-inspecting-and-tracing.md).

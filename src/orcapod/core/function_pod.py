@@ -819,11 +819,15 @@ class _FunctionPodBase(TraceableBase):
         # pod is the fall-through variant of this one.
         # Only a plain ``FunctionPod`` has a fall-through variant: a wrapper pod (a
         # ``CachedFunctionPod`` used directly) keeps its plain behaviour, its
-        # ``process`` being its inner pod's.
+        # ``process`` being its inner pod's. A fall-through pod itself (one rebuilt
+        # from a saved job) keeps the references it was built with.
         fall_through_pod = self if isinstance(self, FunctionPod) else None
-        references = (
-            stream_references(input_stream) if fall_through_pod is not None else ()
-        )
+        if isinstance(self, ReferenceFallThroughPod):
+            references = self.references
+        elif fall_through_pod is not None:
+            references = stream_references(input_stream)
+        else:
+            references = ()
         dropped = [
             name
             for name in data_schema
@@ -1986,7 +1990,9 @@ class ReferenceFallThroughPod(WrappedFunctionPod):
     """
 
     def __init__(self, function_pod: FunctionPod, references: Collection[str]) -> None:
-        super().__init__(function_pod)
+        # The plain pod's tracker manager: the pipeline step is recorded where the
+        # plain pod would record it.
+        super().__init__(function_pod, tracker_manager=function_pod.tracker_manager)
         self._plain_pod = function_pod
         self._references = tuple(references)
         # The plain pod's hooks, the same list: a hook registered on it fires here.
@@ -2104,6 +2110,12 @@ class ReferenceFallThroughPod(WrappedFunctionPod):
         )
 
     def _validate_input_schema(self, input_schema: Schema) -> None:
+        if missing := [name for name in self._references if name not in input_schema]:
+            raise ValueError(
+                f"The input has no data column for the referential tags {missing} "
+                f"that fall through this pod (it lets {list(self._references)} fall "
+                "through)"
+            )
         super()._validate_input_schema(self.function_input_schema(input_schema))
 
     def validate_inputs(self, *streams: StreamProtocol) -> None:
@@ -2166,6 +2178,39 @@ class ReferenceFallThroughPod(WrappedFunctionPod):
         run_id: str | None = None,
     ) -> tuple[TagProtocol, DataProtocol | None]:
         tag, output = await self._plain_pod.async_process_data(
+            tag, self.function_input(data), logger=logger, run_id=run_id
+        )
+        return tag, self.with_fall_through(data, output)
+
+    def _invoke_with_hooks(
+        self,
+        tag: TagProtocol,
+        data: DataProtocol,
+        *,
+        logger: DataExecutionLoggerProtocol | None = None,
+        run_id: str | None = None,
+    ) -> tuple[TagProtocol, DataProtocol | None]:
+        """Call the plain pod with its hooks on the function's input, then fall through.
+
+        The hooks see the invocation the function sees: the plain pod's invocation
+        context, built from the same input, so their ``invocation_hash`` is the
+        function's.
+        """
+        tag, output = self._plain_pod._invoke_with_hooks(  # pyright: ignore[reportPrivateUsage]  # one pod family
+            tag, self.function_input(data), logger=logger, run_id=run_id
+        )
+        return tag, self.with_fall_through(data, output)
+
+    async def _async_invoke_with_hooks(
+        self,
+        tag: TagProtocol,
+        data: DataProtocol,
+        *,
+        logger: DataExecutionLoggerProtocol | None = None,
+        run_id: str | None = None,
+    ) -> tuple[TagProtocol, DataProtocol | None]:
+        """Async counterpart of ``_invoke_with_hooks``."""
+        tag, output = await self._plain_pod._async_invoke_with_hooks(  # pyright: ignore[reportPrivateUsage]  # one pod family
             tag, self.function_input(data), logger=logger, run_id=run_id
         )
         return tag, self.with_fall_through(data, output)
