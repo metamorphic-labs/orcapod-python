@@ -464,16 +464,19 @@ class SQLiteConnector:
         return _sqlite_unstorable_reason(arrow_type)
 
     def unstorable_table_name_reason(self, table_name: str) -> str | None:
-        """Say why SQLite cannot hold a table of this name: it holds every name.
+        """Say why SQLite cannot hold a table of this name, or ``None`` (ITL-1162).
 
-        SQLite has no identifier length limit.
+        SQLite has no identifier length limit, but reserves table names that
+        start with ``sqlite_`` (in any case) for itself.
 
         Args:
             table_name: The table name.
 
         Returns:
-            Always ``None``.
+            A short reason, or ``None`` when SQLite holds the name.
         """
+        if table_name.lower().startswith("sqlite_"):
+            return "SQLite reserves table names that start with 'sqlite_'"
         return None
 
     def validate_records(self, records: pa.Table) -> None:

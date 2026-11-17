@@ -989,3 +989,35 @@ class TestTableNameLength:
         )
         again = pickle.loads(pickle.dumps(err))
         assert str(again) == str(err)
+
+
+class TestInPRReviewOn45e5e44e:
+    def test_data_function_result_database_checked(self, tmp_path: pathlib.Path):
+        """``function_pod(result_database=...)`` caches in its own database too."""
+        sqlite = _sqlite_database(tmp_path)
+
+        @function_pod(output_keys="double", result_database=sqlite)
+        def cached_double(x: int) -> int:
+            CALLS.append(x)
+            return 2 * x
+
+        job = PipelineJob(name="p", database=InMemoryArrowDatabase())
+        with pytest.raises(UnstorableColumnError) as exc_info:
+            with job:
+                _ = cached_double.pod(_source(), label="dbl")
+
+        assert exc_info.value.node_label == "dbl"
+        assert exc_info.value.database_kind == "SQLiteConnector"
+        assert CALLS == []
+
+    @pytest.mark.parametrize("name", ["sqlite_results", "SQLite_x", "SQLITE_"])
+    def test_sqlite_reserved_table_prefix(self, tmp_path: pathlib.Path, name):
+        from orcapod.errors import UnstorableTableNameError
+
+        database = _sqlite_database(tmp_path)
+        table = pa.table({"v": pa.array([1], type=pa.int64())})
+
+        with pytest.raises(UnstorableTableNameError):
+            database.add_record((name,), b"1", table)
+        database.flush()
+        assert database.list_table_paths() == []

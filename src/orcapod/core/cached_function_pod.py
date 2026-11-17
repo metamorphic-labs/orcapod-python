@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
+from orcapod.core.data_function import CachedDataFunction
 from orcapod.core.datagrams import Datagram
 from orcapod.core.function_pod import (
     FunctionPodStream,
@@ -114,6 +115,10 @@ class CachedFunctionPod(WrappedFunctionPod):
             ]
         )
         require_storable(self._cache.result_database, schema)
+        # A function with its own result database (``function_pod(result_database=)``)
+        # stores the same table there.
+        if isinstance(pf, CachedDataFunction):
+            require_storable(pf.result_database, schema)
         # A pod with its own cache database (``pod_cache_database``) stores there too.
         if isinstance(self._function_pod, CachedFunctionPod):
             self._function_pod.require_storable_results()
