@@ -6,6 +6,7 @@ from collections.abc import (
     AsyncIterator,
     Callable,
     Collection,
+    Iterable,
     Iterator,
     Mapping,
     Sequence,
@@ -509,25 +510,31 @@ class StreamBase(TraceableBase):
         self,
         by: Collection[str],
         label: str | None = None,
+        *,
+        member_order: str | Sequence[str] | None = None,
     ) -> StreamBase:
         """Reduce rows sharing a key into one row per group.
 
         Group-key columns stay scalar tags and are the only tags of the output;
         every other tag is dropped, and every data column becomes list-valued.
         A dropped tag's values are not carried: make the column data before
-        grouping if a later step needs it.  See
+        grouping if a later step needs it.  The members of a group are ordered
+        by the non-key tags in name order, or as ``member_order`` gives.  See
         ``orcapod.core.operators.GroupBy``.
 
         Args:
             by: Tag column names to group on.
             label: Optional node label for the pipeline graph.
+            member_order: ``None`` or ``"name"`` (the non-key tags in name
+                order), or a list of non-key tag names to order the members by
+                first.
 
         Returns:
             A stream with one row per distinct group-key tuple.
         """
         from orcapod.core.operators import GroupBy
 
-        return GroupBy(by=by)(self, label=label)
+        return GroupBy(by=by, member_order=member_order)(self, label=label)
 
     def polars_filter(
         self,
@@ -574,27 +581,27 @@ class StreamBase(TraceableBase):
 
     def tag_by(
         self,
-        *columns: str | Sequence[str],
+        *columns: str | Iterable[str],
         label: str | None = None,
     ) -> StreamBase:
         """Give the named data columns the tag role, as data-tags.
 
-        ``s.tag_by("x", "y")`` equals ``s.tag_by(["x", "y"])``. Each named data
+        ``s.tag_by("x", "y")`` equals ``s.tag_by(["x", "y"])``,
+        ``s.tag_by({"y", "x"})`` and ``s.tag_by("y", "x")``. Each named data
         column becomes a data-tag: one column, both a tag and the data column
         it was, with its values and source info unchanged. The new tags follow this
-        stream's tags, in the order given. See ``orcapod.core.operators.TagBy``.
+        stream's tags, in name order. See ``orcapod.core.operators.TagBy``.
 
         Args:
-            *columns: One or more data column names, or one list or tuple of names
-                as the only positional argument (not a set: the order matters).
+            *columns: One or more data column names, or one iterable of names
+                (a list, a tuple, a set) as the only positional argument.
             label: Optional node label for the pipeline graph.
 
         Returns:
             The stream with the named columns as data-tags.
 
         Raises:
-            TypeError: When no name is given, the names are a set, or a name is not
-                a string.
+            TypeError: When a name is not a string.
             ValueError: When a name is repeated.
             InputValidationError: When a name is reserved, is not a data column of
                 this stream, is already a tag, or has a type that cannot be a tag.
@@ -602,7 +609,7 @@ class StreamBase(TraceableBase):
         from orcapod.core.operators import TagBy
 
         if len(columns) == 1 and not isinstance(columns[0], str):
-            names: str | Sequence[str] = columns[0]
+            names: str | Iterable[str] = columns[0]
         else:
             names = cast("tuple[str, ...]", columns)
         return TagBy(names)(self, label=label)
