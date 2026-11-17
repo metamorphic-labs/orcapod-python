@@ -258,11 +258,16 @@ Developer decisions, November 16, 2026 (ITL-1193); the full procedure is `RELEAS
   private repository, no credential or secret value, no Linear text that is not about this
   repository, and nothing about the full EDI dataset (its location, storage, projects or
   tables).
+- Linear's linkback comments stay enabled (developer, November 16, 2026): every PR that links a
+  Linear issue gets a comment holding that issue's text, in public. So nothing about the full
+  EDI dataset or internal infrastructure is written into a Linear issue that an Orcapod PR
+  links; put such material in an issue no PR links.
 - An agent never runs the Release workflow, creates or pushes a tag, or touches a setting,
   secret, environment, ruleset or the visibility of the repository. The `v0.2.0` tag stays as
   it is.
-- The jobs that use a secret (Linear, Codecov, SpiralDB) run only when
-  `github.repository == 'metamorphic-labs/orcapod-python'`, so a fork's run skips them;
+- The Linear, Codecov and SpiralDB jobs run only when
+  `github.repository == 'metamorphic-labs/orcapod-python'`, so a fork's push run skips them
+  (Codecov uploads by GitHub OIDC, with no stored token; `RELEASING.md`, *Coverage uploads*);
   `lint.yml` runs on every repository (ITL-1181). Every workflow sets a read-only token
   (`permissions: contents: read`); a job that needs more grants it to itself.
 
@@ -397,9 +402,10 @@ Developer, November 12, 2026 (ITL-981); see `docs/concepts/arrays.md` and
   `allow_pickle=False` on write and read; never raise `max_header_size`). Options:
   `memory_order`, `byte_order`, `struct_layout`. Where stored arrays must be ordered, order
   them by value hash (`storage_sort_key`), never by stored bytes.
-- Library value types are provisional until the v0.4 audit (developer, November 13, 2026,
-  ITL-1068): their extension names are listed in `provisional` of
-  `contexts/logical_types.json`, and using one issues `ProvisionalHashWarning` once per type
+- Library value types are provisional until the library value type audit, after 0.4.0rc1
+  (developer, November 13, 2026, ITL-1068; moved past 0.4.0rc1 on November 17, 2026): their
+  extension names are listed in `provisional` of `contexts/logical_types.json`, and using
+  one issues `ProvisionalHashWarning` once per type
   per process. A new library value type must be added to that list. The list never enters a
   hash, identifier or stored path.
 

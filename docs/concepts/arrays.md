@@ -45,8 +45,8 @@ for tag, data in scale.pod(source).iter_data():
 ## Provisional value hashes
 
 The value hashes and stored identities of the library value types are provisional in v0.3:
-`numpy.ndarray`, `torch.Tensor`, and the pandas and polars `DataFrame` and `Series`. They
-will be reviewed for v0.4 and may change then. Every other type, and the hashing of everything
+`numpy.ndarray`, `torch.Tensor`, and the pandas and polars `DataFrame` and `Series`. They are
+provisional until the library value type audit (after 0.4.0rc1) and may change then. Every other type, and the hashing of everything
 else in a pipeline, is unaffected.
 
 Using one of these types issues `orcapod.errors.ProvisionalHashWarning` once per type per
@@ -54,10 +54,10 @@ process, on whichever use comes first: a value hashed, a source column of the ty
 pod with a parameter or output of the type, or stored results of the type read back. It names
 the type, for example `orcapod.numpy.ndarray`.
 
-In practice nothing needs to change. Use these types as described on this page. If v0.4
-changes how one of them is hashed, a result Orcapod computed under v0.3 from such a value gets
-a different identity, so v0.4 computes it again instead of reusing it. Nothing stored is lost
-or becomes wrong: the v0.3 rows stay where they are. Plan for that recomputation if a
+In practice nothing needs to change. Use these types as described on this page. If the audit
+changes how one of them is hashed, a result Orcapod computed earlier from such a value gets a
+different identity, so the release that carries the change computes it again instead of reusing
+it. Nothing stored is lost or becomes wrong: the earlier rows stay where they are. Plan for that recomputation if a
 pipeline is expensive. To silence the warning once you have taken note of it, filter its class
 after importing Orcapod:
 

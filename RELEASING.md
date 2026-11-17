@@ -215,12 +215,37 @@ secrets or environments:
    `refs/tags/v*`; deletion, update, non-fast-forward; no bypass actors), so the golden tag
    check has a fixed anchor (ITL-946). Done on 2026-11-15.
 5. The `LINEAR_ACCESS_KEY` repository secret, for the Linear jobs (see *Linear Release
-   System*), and the organization secret `CODECOV_TOKEN`, for the coverage uploads.
+   System*). Codecov needs no secret (see *Coverage uploads*).
 6. Before the first release cut here: the latest GitHub Release in this repository is
    `v0.1.2` (the GitHub Release of `v0.3.0` is on `nauticalab`), and the generated
    release notes start at the latest earlier Release. Create a GitHub Release for `v0.3.0`
    here (its notes copied from `nauticalab`) so that the next notes start at `v0.3.0`, or edit
    the next Release's notes after the run.
+
+### Coverage uploads
+
+The coverage jobs of `Run Tests`, `Run PostgreSQL Tests` and `Run Objective Tests` upload to
+Codecov without a stored token (ITL-1193). The organization secret `CODECOV_TOKEN` is shared
+with private and internal repositories only, so it would vanish when this repository became
+public, and a token upload would then fail silently.
+
+- **Pushes, `workflow_dispatch` and pull requests from a branch of this repository**
+  authenticate by GitHub OIDC: the job grants itself `id-token: write`, and the action
+  (`use_oidc: true`) sends a short-lived token signed by GitHub, which Codecov checks against
+  GitHub's public keys. Nothing is stored here or set up in Codecov.
+- **Pull requests from a fork** get no OIDC token. The action detects the fork and uploads
+  without a token, under a `<user>:<branch>` branch name, which Codecov accepts for a public
+  repository.
+- `fail_ci_if_error` is on for every run except a pull request: a failed upload of `main` is
+  seen, and a fork's tokenless upload can never fail its pull request.
+- `codecov.yml` holds Codecov's statuses until 7 uploads are in (`codecov.notify.after_n_builds`),
+  so a pull request's statuses wait for the main test job's coverage. The comment there
+  explains the number; change it with any change to the three workflows' matrices.
+
+The developer keeps Codecov's organization setting *token required for public repositories*
+at **Required**: then only OIDC (or a token) can upload to `main`, and only a fork's branch name
+uploads tokenless. Turning it off would let anyone upload to any branch of every public
+repository of the organization.
 
 ### SpiralDB integration job
 
@@ -359,10 +384,11 @@ Release workflow, the developer sets the version of the pipeline's open release 
 Linear (pre-release checklist, item 6); `linear-sync` then targets it and `linear-complete`
 completes it. From the rename until `linear-complete` has finished, merge nothing into `main`:
 a push sync in between adds its pull request to the renamed release, which would mark it
-shipped in `vX.Y.Z` although the build does not contain it. If one slips in, move it and its
-issues back to the next open release by hand, and put back the status of any issue the
-completed release moved. If a Linear job fails anyway, the release is published; finish the Linear release
-by hand (*If a Run Fails Part-Way*).
+shipped in `vX.Y.Z` although the build does not contain it. If one slips in, check whether the
+build contains it (`git merge-base --is-ancestor <its commit> vX.Y.Z`): if it does, it stays in
+`vX.Y.Z`; if not, move it and its issues back to the next open release by hand, and put back the
+status of any issue the completed release moved. If a Linear job fails anyway, check `publish-pypi` first: if it succeeded, finish
+the Linear release by hand; if not, recover publishing first (*If a Run Fails Part-Way*).
 
 **A hotfix run is different: never rename the open release for it.** The open release holds
 `main`'s unreleased pull requests; naming it after the hotfix would mark them shipped in the

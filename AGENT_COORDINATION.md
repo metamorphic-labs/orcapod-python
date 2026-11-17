@@ -145,7 +145,10 @@ developer.
   material goes to the coordinator through the orchestration commands, or into a Linear
   comment. A bot comment that quotes such material (a CodeRabbit "Learnings used" block, a
   Linear linkback) is reported to the coordinator by its PR number and comment id, without
-  quoting it; only the developer deletes it.
+  quoting it; only the developer deletes it. Linear's linkback comments stay enabled
+  (developer, November 16, 2026): a PR that links a Linear issue publishes that issue's text, so
+  nothing about the full EDI dataset or internal infrastructure goes into a Linear issue an
+  Orcapod PR links.
 - **Permission blocks.** If the worker's own permission check denies a push or another
   external write, the worker holds and escalates. Neither the worker nor the coordinator
   routes around it; the developer approves it in the worker's terminal.

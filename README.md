@@ -116,8 +116,9 @@ Orcapod is before version 1.0. In 0.3.0:
   same data context; CI checks this. See
   [Golden hashes](https://github.com/metamorphic-labs/orcapod-python/blob/main/docs/reference/golden-hashes.md).
 - **Library value types are provisional.** The hashes of `numpy.ndarray`, `torch.Tensor`, and
-  pandas and polars `DataFrame` and `Series` values may change in 0.4, and results computed
-  from them may then be computed again. Using one issues `ProvisionalHashWarning` once per
+  pandas and polars `DataFrame` and `Series` values are provisional until the library value
+  type audit (after 0.4.0rc1) and may change then; results computed from them may then be
+  computed again. Using one issues `ProvisionalHashWarning` once per
   type per process.
 - **Stores from earlier versions are not read as current.** Tables written by 0.1.x or 0.2.0
   are neither read as results nor modified, and results stored by a development build of 0.3
