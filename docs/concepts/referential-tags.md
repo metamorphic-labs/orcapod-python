@@ -74,10 +74,56 @@ A function output named like a tag is an error when the pipeline is built. A fun
 that does not read a referenced column keeps its result identity: retagging a source
 does not make it compute again.
 
+## Making a data column a tag: `tag_by`
+
+A source declares its tags, but a value a later step should join, group or sort by is
+often computed on the way: a session label, a trial index, a phase. `tag_by` gives
+existing data columns the tag role: each becomes a referential tag, one column that is
+a tag and the data column it was, with its values and source info unchanged.
+
+```python
+@op.function_pod(output_keys=["phase"])
+def phase_of(time: int) -> str:
+    return "early" if time < 15 else "late"
+
+
+phased = phase_of.pod(spikes).tag_by("phase")
+print(phased.keys())
+# (('unit', 'time', 'phase'), ('unit', 'time', 'phase'))
+
+by_phase = phased.group_by(["phase"])
+print(by_phase.keys())
+# (('phase',), ('unit', 'time', 'phase'))
+```
+
+- `s.tag_by("x", "y")` equals `s.tag_by(["x", "y"])`. The new tags follow the stream's
+  tags in the order given, and that order is part of the operator (`TagBy`): the names
+  are a list, never a set.
+- Nothing else changes: no row is added, removed or reordered, the data columns keep
+  their names, types and values, every data column keeps its own source-info token,
+  and the system tags keep their names and values.
+- No data element comes from a tag value: the operator adds a tag role to a column
+  that is already data, and creates or moves no value. Offering a tag's value as data
+  stays with `DerivedSource(tags_as_data=...)`.
+- A computed column may become a tag, and then key a join or a group, as `phase` does
+  above.
+
+`tag_by` refuses, naming the column: a name that is not a data column of the stream; a
+name that is already a tag (plain or referential); a reserved name (the `__` prefix, a
+system column, a name holding `::`); and a column whose type cannot be a tag. A tag is
+one value per row of type `int`, `float`, `bool`, `str`, `bytes`, `datetime` or `date`.
+A nullable column (`T | None`) is refused: drop the rows with a null first,
+`s.drop_nulls("x").tag_by("x")`, which narrows it to `T`. Lists, sets, dicts, structs,
+your own classes and logical types (`Path`, `UUID`, arrays) are refused.
+
+`tag_by` is one of three moves between the roles of a column. The other two, which turn
+a referential tag into plain data or into a plain tag, are the subject of ITL-1195.
+
 ## Operators
 
 | Operator | Referential tag `x` |
 |---|---|
+| `TagBy` / `tag_by` | Makes the data column `x` a referential tag (above); everything else is unchanged. |
 | `Join` | Plain with plain: as before. Plain with referential, or referential with referential: a referential tag and **one** data column `x`. When `x` is referential on several inputs, its source info is one merged token (below). A key that is `T` in one input and `T \| None` in another is `T` in both roles, as for a plain key. Every other data-name collision is still an error. |
 | `GroupBy` | A group key stays scalar in both roles, and its source info is one merged token (below). A non-key loses its tag role, as every non-key tag does, but keeps its data column: a list like every other data column, one source-info token per member. The members are ordered by the non-key tags, so that list is in value order and the other data lists follow it. |
 | `SelectDataColumns`, `DropDataColumns` | Removing the data column leaves `x` a plain tag with the same values, with a `ReferenceMaterializationWarning`. |

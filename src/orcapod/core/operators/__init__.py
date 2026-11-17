@@ -16,6 +16,7 @@ from .mappers import MapColumns, MapData, MapTags
 from .merge_join import MergeJoin
 from .pick import Pick
 from .semijoin import SemiJoin
+from .tag_by import TagBy
 
 __all__ = [
     "Join",
@@ -36,4 +37,5 @@ __all__ = [
     "DropNulls",
     "Pick",
     "Index",
+    "TagBy",
 ]
