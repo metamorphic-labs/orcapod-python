@@ -29,6 +29,7 @@ import base64
 import heapq
 import html
 import json
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -654,9 +655,20 @@ _DASHED_STATUSES = frozenset({"not run", "stale", "partial", "unbound"})
 _ARROW = 7.0
 
 
+# Code points XML 1.0 does not allow (C0 controls other than tab, line feed and carriage
+# return; surrogates; U+FFFE and U+FFFF): one in an SVG makes the whole picture fail to
+# parse, so each is shown as U+FFFD. An error message with terminal colours (ESC) is
+# the usual source.
+_XML_INVALID = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
+
+
 def _escape(text: str) -> str:
-    """Text escaped for HTML and SVG content and attribute values."""
-    return html.escape(text, quote=True)
+    """Text escaped for HTML and SVG content and attribute values.
+
+    Characters XML does not allow are replaced by U+FFFD first, so the SVG (an image
+    and inline) always parses; the model block keeps the text as it is, JSON-escaped.
+    """
+    return html.escape(_XML_INVALID.sub("\ufffd", text), quote=True)
 
 
 def _num(value: float) -> str:

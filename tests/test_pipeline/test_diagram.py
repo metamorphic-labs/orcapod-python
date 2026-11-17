@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import subprocess
 import sys
 import time
@@ -543,6 +544,33 @@ def test_user_text_cannot_inject_markup_or_script() -> None:
         assert not [a for e in elements for a in e.attrib if a.startswith("on")]
         texts = [e.text for e in elements if e.tag == f"{SVG_NS}text"]
         assert any(text and text.startswith("</script>") for text in texts)
+
+
+def test_control_characters_in_labels_and_errors_keep_the_svg_valid() -> None:
+    @function_pod(output_keys="out")
+    def coloured(x: int) -> int:
+        raise ValueError("\x1b[31mfailed\x1b[0m")
+
+    label = "bad\x00label\x1b"
+    job = PipelineJob(name="controls", database=InMemoryArrowDatabase())
+    with job:
+        coloured.pod(_units(), label=label)
+    with pytest.warns(Warning):
+        job.run()
+    diagram = job.diagram()
+    assert _facts(diagram, label)["first error"] == "ValueError: \x1b[31mfailed\x1b[0m"
+    document = diagram.to_html()
+    # No raw control character anywhere in the document: the model block escapes them
+    # as JSON, the picture and the node table replace them.
+    assert not re.search("[\x00-\x08\x0b\x0c\x0e-\x1f]", document)
+    for svg_text in (_picture(document), diagram.to_svg()):
+        root = ET.fromstring(svg_text)  # parses: XML allows every character left
+        texts = " ".join(e.text or "" for e in root.iter())
+        assert "bad\ufffdlabel\ufffd" in texts
+        assert "\ufffd[31mfailed\ufffd[0m" in texts
+    model_text = document.split('class="op-dag-model">', 1)[1].split("</script>", 1)[0]
+    model = json.loads(model_text)
+    assert label in [node["label"] for node in model["nodes"]]
 
 
 def test_a_notebook_that_strips_scripts_and_svg_still_shows_the_picture() -> None:
