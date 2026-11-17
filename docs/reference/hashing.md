@@ -82,8 +82,8 @@ The labels of v0.3:
 | `polars_dataframe_v1` | the Polars DataFrame value hash (§1e) | `PolarsDataFrameHandler.HASH_LABEL`, `hashing/semantic_hashing/builtin_handlers.py` |
 | `polars_series_v1` | the Polars Series value hash (§1e) | `PolarsSeriesHandler.HASH_LABEL`, `hashing/semantic_hashing/builtin_handlers.py` |
 | `batch_v1` | the folded source id and record id of `Batch` (site 6b) | `BATCH_FOLD_LABEL`, `core/operators/batch.py` |
-| `group_v1` | the folded source id and record id of `GroupBy` (site 6b), and the merged source-info token of a referential group key | `GROUP_BY_FOLD_LABEL`, `core/operators/group_by.py` |
-| `join_v1` | the merged source-info token of a key referential on several inputs of a `Join` (site 6b) | `JOIN_FOLD_LABEL`, `core/operators/join.py` |
+| `group_v1` | the folded source id and record id of `GroupBy` (site 6b), and the merged source-info token of a data-tag group key | `GROUP_BY_FOLD_LABEL`, `core/operators/group_by.py` |
+| `join_v1` | the merged source-info token of a key that is a data-tag on several inputs of a `Join` (site 6b) | `JOIN_FOLD_LABEL`, `core/operators/join.py` |
 | `sha256` | the file content hash: SHA-256 of the file's bytes | the file hasher's `algorithm` |
 
 Where a hash appears, and in which form:
@@ -893,11 +893,11 @@ sequence before the stream is returned:
 4. Two system tag columns, `_tag_source_id::{schema_hash}` and `_tag_record_id::{schema_hash}`, are appended to every row.
 
 `tag_only_columns` (the tags kept plain; `True` for all of them) enters these sites only
-through the schema: a referential tag is also a data column, so it is in the data schema and
+through the schema: a data-tag is also a data column, so it is in the data schema and
 the schema hash, while the default `source_id` (the table hash) and the record ids are those
 of the same source with every tag plain. Every golden fixture that builds a source with tag
 columns passes `tag_only_columns=True`, so the golden values of data context `v1` pin plain
-tags, unchanged now that tags are referential by default.
+tags, unchanged now that tags are data-tags by default.
 
 At Join time (site 6), all existing system tag columns are **renamed** by appending a
 topology suffix, encoding the full join lineage into each column name.
@@ -992,11 +992,11 @@ tag columns too, so those calls are as wide as the joins make them (ITL-1132).
 | **Uniqueness guarantee** | Deterministic per ordered member set, and stable across processes (both primitives are SHA-based). `Batch` and `GroupBy` both order their members deterministically before folding, so an unchanged member set always folds to the same digest |
 | **Known exclusions** | Member order is significant; a permuted member set folds differently. This is why `GroupBy` sorts members by their non-key tag values with `record_id` as a tiebreaker rather than relying on upstream emission order |
 
-> **Merged source-info tokens (referential tags, ITL-1017).** A value merged from several
+> **Merged source-info tokens (data-tags, ITL-1017).** A value merged from several
 > equal elements has one source-info token, folded by the same helper under the merging
 > operation's label: `group_v1:<hex>` for the key of a `GroupBy`, over the members' tokens
 > in member order (the procedure `group_v1` names for its system tags), and
-> `join_v1:<hex>` for a key referential on several inputs of a `Join`, over the members'
+> `join_v1:<hex>` for a key that is a data-tag on several inputs of a `Join`, over the members'
 > tokens sorted (a missing token last), because a join meets its inputs in an order that
 > is not canonical. The token holds no `::`, so it never reads as a row's token. No hash
 > reads source info.

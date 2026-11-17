@@ -56,7 +56,7 @@ nav:
     - Streams: concepts/streams.md
     - Operators: concepts/operators.md
     - Function Pods: concepts/function-pods.md
-    - Referential Tags: concepts/referential-tags.md
+    - Data-tags: concepts/data-tags.md
     - Pipelines and Jobs: concepts/pipeline-job.md
     - Your Own Data Types: concepts/your-own-data-types.md
     - Arrays and Tensors: concepts/arrays.md

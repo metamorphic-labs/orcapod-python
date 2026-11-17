@@ -65,8 +65,8 @@ ORCHESTRATORS = {
 TAG_ONLY: bool = True
 """The sources' ``tag_only_columns``: plain tags, as v0.3 (ITL-1023).
 
-The referential classes at the end set it to ``False`` (every tag referential) for
-the steps that handle referential tags (``REFERENTIAL_STEPS``).
+The data-tag classes at the end set it to ``False`` (every tag a data-tag) for
+the steps that handle data-tags (``DATA_TAG_STEPS``).
 """
 
 WITH_ROWS = ("g1", "g1", "g2")
@@ -540,15 +540,15 @@ class TestOutputSchemaPrediction:
         assert _schema_items(predicted) == _schema_items(computed)
 
 
-# ── referential tags (ITL-1023) ─────────────────────────────────────────────
+# ── data-tags (ITL-1023) ─────────────────────────────────────────────
 
-# Not supported with referential tags yet: MergeJoin (ITL-1018).
-REFERENTIAL_STEPS = [step for step in STEPS if step != "merge_join"]
+# Not supported with data-tags yet: MergeJoin (ITL-1018).
+DATA_TAG_STEPS = [step for step in STEPS if step != "merge_join"]
 
 
 @pytest.fixture
-def referential(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every source tag referential."""
+def with_data_tags(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every source tag a data-tag."""
     monkeypatch.setattr(f"{__name__}.TAG_ONLY", False)
 
 
@@ -561,27 +561,27 @@ def _methods(cls: type) -> dict[str, Any]:
     }
 
 
-TestReferentialPlainStream = pytest.mark.usefixtures("referential")(
+TestDataTagPlainStream = pytest.mark.usefixtures("with_data_tags")(
     pytest.mark.parametrize("pairs", PAIRS)(
-        pytest.mark.parametrize("step", REFERENTIAL_STEPS)(
+        pytest.mark.parametrize("step", DATA_TAG_STEPS)(
             type(
-                "TestReferentialPlainStream",
+                "TestDataTagPlainStream",
                 (),
-                {"__doc__": "TestPlainStream over referential sources."}
+                {"__doc__": "TestPlainStream over sources with data-tags."}
                 | _methods(TestPlainStream),
             )
         )
     )
 )
 
-TestReferentialJobNode = pytest.mark.usefixtures("referential")(
+TestDataTagJobNode = pytest.mark.usefixtures("with_data_tags")(
     pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))(
         pytest.mark.parametrize("pairs", PAIRS)(
-            pytest.mark.parametrize("step", REFERENTIAL_STEPS)(
+            pytest.mark.parametrize("step", DATA_TAG_STEPS)(
                 type(
-                    "TestReferentialJobNode",
+                    "TestDataTagJobNode",
                     (),
-                    {"__doc__": "TestJobNode over referential sources."}
+                    {"__doc__": "TestJobNode over sources with data-tags."}
                     | _methods(TestJobNode),
                 )
             )
@@ -589,19 +589,21 @@ TestReferentialJobNode = pytest.mark.usefixtures("referential")(
     )
 )
 
-TestReferentialOutputSchemaPrediction = pytest.mark.usefixtures("referential")(
+TestDataTagOutputSchemaPrediction = pytest.mark.usefixtures("with_data_tags")(
     pytest.mark.parametrize("config", list(COLUMN_CONFIGS))(
         pytest.mark.parametrize("pairs", PAIRS)(
             pytest.mark.parametrize(
                 "step",
                 _prediction_steps(
-                    [step for step in OPERATOR_STEPS if step in REFERENTIAL_STEPS]
+                    [step for step in OPERATOR_STEPS if step in DATA_TAG_STEPS]
                 ),
             )(
                 type(
-                    "TestReferentialOutputSchemaPrediction",
+                    "TestDataTagOutputSchemaPrediction",
                     (),
-                    {"__doc__": "TestOutputSchemaPrediction over referential sources."}
+                    {
+                        "__doc__": "TestOutputSchemaPrediction over sources with data-tags."
+                    }
                     | _methods(TestOutputSchemaPrediction),
                 )
             )
@@ -616,7 +618,7 @@ def _without_n(schemas: Any) -> tuple[list[Any], list[Any]]:
     return tag_items, [(name, hint) for name, hint in data_items if name != "n"]
 
 
-@pytest.mark.parametrize("tag_only", [True, False], ids=["plain", "referential"])
+@pytest.mark.parametrize("tag_only", [True, False], ids=["plain", "data-tag"])
 @pytest.mark.parametrize("config", list(COLUMN_CONFIGS))
 @pytest.mark.parametrize("pairs", PAIRS)
 @pytest.mark.parametrize("step", ["batch", "group_by"])

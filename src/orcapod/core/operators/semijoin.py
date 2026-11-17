@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, final
 
 from orcapod.channels import ChannelClosed, ReadableChannel, WritableChannel
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
-from orcapod.core.referential_tags import stream_references
+from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.operators.base import BinaryOperator, require_shared_arrow_type
 from orcapod.core.operators.key_nullability import reconcile_key_nullability
 from orcapod.core.operators.match_keys import frozen_scalar
@@ -76,7 +76,7 @@ class SemiJoin(BinaryOperator):
 
         The decision is by name only: no value or type is read. Meta (``__``)
         columns are not user columns and never count. A match key is never
-        reported, in either role: a referential tag (ITL-1023) is a tag and a data
+        reported, in either role: a data-tag (ITL-1023) is a tag and a data
         column of one name, one column, so its data role is the key's column.
 
         Args:
@@ -178,8 +178,8 @@ class SemiJoin(BinaryOperator):
         )
         return self._match_keys(tuple(left_tag_schema), tuple(right_tag_schema))
 
-    # Referential tags (ITL-1023): handled.
-    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = None
+    # Data-tags (ITL-1023): handled.
+    DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def binary_static_process(
         self, left_stream: StreamProtocol, right_stream: StreamProtocol
@@ -240,7 +240,7 @@ class SemiJoin(BinaryOperator):
         return ArrowTableStream(
             semi_joined_table,
             tag_columns=tuple(left_tag_schema.keys()),
-            reference_tags=stream_references(left_stream),
+            data_tags=stream_data_tags(left_stream),
         )
 
     def binary_output_schema(

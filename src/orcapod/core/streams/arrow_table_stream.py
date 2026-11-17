@@ -60,7 +60,7 @@ class ArrowTableStream(StreamBase):
         source_info: dict[str, SourceInfoValue] | None = None,
         producer: PodProtocol | None = None,
         upstreams: tuple[StreamProtocol, ...] = (),
-        reference_tags: Collection[str] = (),
+        data_tags: Collection[str] = (),
         **kwargs: Any,
     ) -> None:
         """Wrap ``table`` as a stream.
@@ -72,13 +72,13 @@ class ArrowTableStream(StreamBase):
             source_info: Source-info tokens to add, by column.
             producer: The pod that produced the stream, if any.
             upstreams: The streams the producer read.
-            reference_tags: The tag columns that are referential: each is also a data
+            data_tags: The tag columns that are data-tags: each is also a data
                 column of the same name, stored once (specification "Referential
                 Tags", section 4). Must be a subset of ``tag_columns``.
             **kwargs: Passed to ``StreamBase``.
 
         Raises:
-            ValueError: If a tag column or a reference tag is not a tag column of
+            ValueError: If a tag column or a data-tag is not a tag column of
                 the table, or the stream has no data column.
         """
         super().__init__(**kwargs)
@@ -139,18 +139,14 @@ class ArrowTableStream(StreamBase):
             raise ValueError(
                 f"Specified tag columns {delta} are not present in the table."
             )
-        if unknown := set(reference_tags) - set(self._tag_columns):
+        if unknown := set(data_tags) - set(self._tag_columns):
             raise ValueError(
-                f"Reference tags {sorted(unknown)} are not tag columns of the stream."
+                f"Data-tags {sorted(unknown)} are not tag columns of the stream."
             )
-        # A referential tag is one column in both roles: a tag, and a data column of
+        # A data-tag is one column in both roles: a tag, and a data column of
         # the same name (tag order).
-        self._reference_tags = tuple(
-            c for c in self._tag_columns if c in set(reference_tags)
-        )
-        tag_only = tuple(
-            c for c in self._all_tag_columns if c not in self._reference_tags
-        )
+        self._data_tags = tuple(c for c in self._tag_columns if c in set(data_tags))
+        tag_only = tuple(c for c in self._all_tag_columns if c not in self._data_tags)
         table, prefix_tables = arrow_utils.prepare_prefixed_columns(
             table,
             prefix_info,
@@ -204,14 +200,14 @@ class ArrowTableStream(StreamBase):
             self._tag_columns,
         ) + (
             # Only when there is one: a plain stream keeps its v0.3 identity, and a
-            # referential and a plain stream over one table differ (ITL-1023).
-            (("reference_tags", self._reference_tags),) if self._reference_tags else ()
+            # stream with data-tags and a plain one over one table differ (ITL-1023).
+            (("data_tags", self._data_tags),) if self._data_tags else ()
         )
 
     @property
-    def reference_tags(self) -> tuple[str, ...]:
-        """The referential tags: tag columns that are also data columns (tag order)."""
-        return self._reference_tags
+    def data_tags(self) -> tuple[str, ...]:
+        """The data-tags: tag columns that are also data columns (tag order)."""
+        return self._data_tags
 
     def _identity_table(self) -> "pa.Table":
         """Return the rows in the order and columns that ``identity_structure`` hashes.
@@ -453,9 +449,7 @@ class ArrowTableStream(StreamBase):
             yield from self._cached_elements
 
     def __repr__(self) -> str:
-        refs = (
-            f", reference_tags={self._reference_tags}" if self._reference_tags else ""
-        )
+        refs = f", data_tags={self._data_tags}" if self._data_tags else ""
         return (
             f"{self.__class__.__name__}(table={self._table.column_names}, "
             f"tag_columns={self._tag_columns}{refs})"

@@ -2,7 +2,7 @@ import logging
 from collections.abc import Collection, Iterable, Mapping
 from typing import Any, ClassVar, TYPE_CHECKING, TypeAlias
 
-from orcapod.core.referential_tags import stream_references
+from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.operators.base import UnaryOperator
 from orcapod.core.streams import ArrowTableStream
 from orcapod.protocols.core_protocols import StreamProtocol
@@ -30,8 +30,8 @@ class PolarsFilter(UnaryOperator):
     Operator that applies Polars filtering to a stream
     """
 
-    # Referential tags (ITL-1023): handled.
-    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = None
+    # Data-tags (ITL-1023): handled.
+    DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     # A filter chooses rows and never changes a column (ITL-912).
     OUTPUT_SCHEMA_IS_INPUT_SCHEMA = True
@@ -87,7 +87,7 @@ class PolarsFilter(UnaryOperator):
         return ArrowTableStream(
             filtered_table,
             tag_columns=stream.keys()[0],
-            reference_tags=stream_references(stream),
+            data_tags=stream_data_tags(stream),
         )
 
     def validate_unary_input(self, stream: StreamProtocol) -> None:

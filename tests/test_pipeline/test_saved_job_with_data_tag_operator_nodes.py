@@ -1,7 +1,7 @@
-"""Saved and loaded jobs with operator nodes and derived sources over referential tags.
+"""Saved and loaded jobs with operator nodes and derived sources over data-tags.
 
 ITL-1019 (gap audit S1, S2). The saved job is an independent point of verification: a
-loaded operator node declares the referential tags of its saved output schema (a name in
+loaded operator node declares the data-tags of its saved output schema (a name in
 both halves) and reads its stored table only when the table's marker agrees. A derived
 source over a job node writes no new key: its saved schema states the binding.
 """
@@ -16,7 +16,7 @@ import pytest
 
 import orcapod as op
 from orcapod.core.operators import Join
-from orcapod.core.referential_tags import stored_references, without_reference_marks
+from orcapod.core.data_tags import stored_data_tags, without_tag_kind_marks
 from orcapod.core.sources import DerivedSource
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.errors import InputValidationError
@@ -153,7 +153,7 @@ def test_a_loaded_operator_node_gives_its_stored_rows_as_a_source(
     loaded = PipelineJob.load(tmp_path / "job.json")
     node = loaded.nodes["joined"]
     records = node.get_all_records()
-    assert records is not None and stored_references(records.schema) == ("unit",)
+    assert records is not None and stored_data_tags(records.schema) == ("unit",)
     source = node.as_source()
     assert source.keys() == job.nodes["joined"].keys()
     assert _rows(source.as_table()) == _rows(job.nodes["joined"].as_table())
@@ -168,7 +168,7 @@ def test_the_operator_table_is_checked_against_the_saved_job(tmp_path: Path) -> 
         table = store.get_all_records(path, record_id_column="__copy_id")
         assert table is not None
         tampered.add_records(
-            path, without_reference_marks(table), record_id_column="__copy_id"
+            path, without_tag_kind_marks(table), record_id_column="__copy_id"
         )
     tampered.flush()
     loaded = _loaded_replaying(tmp_path, database=tampered)
@@ -216,7 +216,7 @@ def test_a_job_over_a_derived_source_saves_and_loads_its_binding(
     assert loaded.nodes["kept"].content_hash() == job.nodes["kept"].content_hash()
 
 
-def test_a_tags_as_data_source_over_a_referential_source_round_trips(
+def test_a_tags_as_data_source_over_a_data_tag_source_round_trips(
     tmp_path: Path,
 ) -> None:
     derived = DerivedSource(

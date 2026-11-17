@@ -1,8 +1,8 @@
-"""An operator node stores, and reads back, a referential stream (ITL-1019, gap audit S2).
+"""An operator node stores, and reads back, a stream with data-tags (ITL-1019, gap audit S2).
 
 Developer decision, November 16, 2026: the stored table fully expresses what it stores. The
-operator output table marks its referential tag columns with the same field-metadata marker
-as the function pipeline table (``referential_tags.REFERENTIAL_TAG_METADATA_KEY``), written
+operator output table marks its data-tag columns with the same field-metadata marker
+as the function pipeline table (``data_tags.TAG_KIND_METADATA_KEY``), written
 from the operator's own output binding. A read checks the marker against the node and drops
 it when the rows become a stream. Source info stays in the record hash (gap audit Q10); the
 marker never enters it.
@@ -23,11 +23,11 @@ import orcapod as op
 from orcapod.contexts import DataContext
 from orcapod.core.nodes import OperatorJobNode
 from orcapod.core.operators import Join
-from orcapod.core.referential_tags import (
-    REFERENTIAL_TAG_METADATA_KEY,
-    ReferenceMaterializationWarning,
-    stored_references,
-    without_reference_marks,
+from orcapod.core.data_tags import (
+    TAG_KIND_METADATA_KEY,
+    DataTagMaterializationWarning,
+    stored_data_tags,
+    without_tag_kind_marks,
 )
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.errors import InputValidationError
@@ -63,7 +63,7 @@ Orchestrator = type[SyncPipelineOrchestrator | AsyncPipelineOrchestrator]
 
 
 def _source(name: str, column: str, ids: list[int], tag_only: object = ("t",)):
-    """``id`` referential and ``t`` plain unless ``tag_only`` says otherwise."""
+    """``id`` a data-tag and ``t`` plain unless ``tag_only`` says otherwise."""
     table = pa.table(
         {
             "id": pa.array(ids, pa.int64()),
@@ -110,9 +110,7 @@ def _operator_table(store: ArrowDatabaseProtocol) -> pa.Table:
 
 def _marked(schema: pa.Schema) -> list[str]:
     """The columns carrying the marker key, whatever its value."""
-    return [
-        f.name for f in schema if REFERENTIAL_TAG_METADATA_KEY in (f.metadata or {})
-    ]
+    return [f.name for f in schema if TAG_KIND_METADATA_KEY in (f.metadata or {})]
 
 
 def _rows(table: pa.Table) -> list[dict[str, object]]:
@@ -126,7 +124,7 @@ def _rows(table: pa.Table) -> list[dict[str, object]]:
 
 @STORES
 @ORCHESTRATORS
-def test_the_operator_table_marks_only_its_referential_tags(
+def test_the_operator_table_marks_only_its_data_tags(
     tmp_path: Path,
     make_store: Callable[[Path], ArrowDatabaseProtocol],
     orchestrator: Orchestrator,
@@ -140,7 +138,7 @@ def test_the_operator_table_marks_only_its_referential_tags(
     # Stored once, marked; the plain tag and the data columns carry no marker.
     assert table.column_names.count("id") == 1
     assert _marked(table.schema) == ["id"]
-    assert stored_references(table.schema) == ("id",)
+    assert stored_data_tags(table.schema) == ("id",)
     # The rows a stream holds carry no marker.
     assert _marked(node.as_table(all_info=True).schema) == []
 
@@ -154,17 +152,17 @@ def test_a_plain_operator_table_carries_no_marker(
     table = _operator_table(store)
     assert _marked(table.schema) == []
     # Nothing to strip: the table is exactly what it was before markers existed.
-    assert without_reference_marks(table).schema.equals(
+    assert without_tag_kind_marks(table).schema.equals(
         table.schema, check_metadata=True
     )
 
 
-def test_a_reference_the_operator_materializes_is_not_marked() -> None:
+def test_a_data_tag_the_operator_materializes_is_not_marked() -> None:
     """The marker is the operator's output binding, never one that came from upstream."""
     store = InMemoryArrowDatabase()
     job = PipelineJob(name=JOB, database=store)
     with job, warnings.catch_warnings():
-        warnings.simplefilter("ignore", ReferenceMaterializationWarning)
+        warnings.simplefilter("ignore", DataTagMaterializationWarning)
         _ = _source("a", "x", [1, 2]).select_data_columns(["x"], label="selected")
     node = job.nodes["selected"]
     node.attach_databases(pipeline_database=store.at(JOB), cache_mode=CacheMode.LOG)
@@ -247,7 +245,7 @@ def test_the_raw_records_keep_the_marker(
     job.run()
     records = job.nodes["joined"].get_all_records()
     assert records is not None
-    assert stored_references(records.schema) == ("id",)
+    assert stored_data_tags(records.schema) == ("id",)
 
 
 @ORCHESTRATORS
@@ -263,14 +261,14 @@ def test_a_table_that_disagrees_with_the_operator_is_refused(
         assert table is not None
         tampered.add_records(
             path,
-            without_reference_marks(table),
+            without_tag_kind_marks(table),
             record_id_column="__copy_id",
             flush=True,
         )
     job = _join_job(tampered, [1, 2], mode=CacheMode.REPLAY)
     with pytest.raises(
         InputValidationError,
-        match=r"marks the referential tags \[\], but the node's operator declares \['id'\]",
+        match=r"marks the data-tags \[\], but the node's operator declares \['id'\]",
     ):
         job.run(orchestrator=orchestrator())
 
@@ -284,7 +282,7 @@ def test_a_marker_with_another_value_is_refused() -> None:
         assert table is not None
         index = table.schema.get_field_index("id")
         field = table.schema.field(index).with_metadata(
-            {REFERENTIAL_TAG_METADATA_KEY: b"materialized"}
+            {TAG_KIND_METADATA_KEY: b"materialized"}
         )
         table = pa.Table.from_arrays(
             table.columns, schema=table.schema.set(index, field)
@@ -310,13 +308,13 @@ def test_the_marker_survives_an_append_and_a_repeated_run(
     # The same rows again: the table is unchanged (per-row dedup).
     _join_job(store, [1, 2]).run()
     assert _operator_table(store).num_rows == 2
-    assert stored_references(_operator_table(store).schema) == ("id",)
+    assert stored_data_tags(_operator_table(store).schema) == ("id",)
     # New rows under the same node: appended, still marked.
     job = _join_job(store, [1, 2, 3])
     job.run()
     table = _operator_table(store)
     assert table.num_rows == 3
-    assert stored_references(table.schema) == ("id",)
+    assert stored_data_tags(table.schema) == ("id",)
     replayed = _join_job(store, [1, 2, 3], mode=CacheMode.REPLAY)
     replayed.run()
     assert sorted(replayed.nodes["joined"].as_table().column("id").to_pylist()) == [
@@ -345,7 +343,7 @@ def test_the_marker_survives_a_schema_merge(tmp_path: Path) -> None:
     reopened = DeltaTableDatabase(tmp_path / "store")
     table = reopened.get_all_records(path)
     assert table is not None and "extra" in table.column_names
-    assert stored_references(table.schema) == ("id",)
+    assert stored_data_tags(table.schema) == ("id",)
 
 
 # ---------------------------------------------------------------------------
@@ -411,6 +409,8 @@ def test_a_plain_operator_or_an_uncached_one_asks_nothing_of_the_database() -> N
     database = ConnectorArrowDatabase(SQLiteConnector(":memory:"))
     plain = _join_job(InMemoryArrowDatabase(), [1], tag_only=True).nodes["joined"]
     plain.attach_databases(pipeline_database=database, cache_mode=CacheMode.LOG)
-    referential = _join_job(InMemoryArrowDatabase(), [1]).nodes["joined"]
+    with_data_tags = _join_job(InMemoryArrowDatabase(), [1]).nodes["joined"]
     # OFF writes nothing, so there is nothing to refuse.
-    referential.attach_databases(pipeline_database=database, cache_mode=CacheMode.OFF)
+    with_data_tags.attach_databases(
+        pipeline_database=database, cache_mode=CacheMode.OFF
+    )

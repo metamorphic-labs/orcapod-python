@@ -29,18 +29,18 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 from orcapod import contexts
 from orcapod.core.function_pod import (
-    fall_through_references,
+    fall_through_tags,
     function_input,
     function_input_schema,
     result_data_schema,
     result_pod,
     with_fall_through,
 )
-from orcapod.core.referential_tags import (
-    mark_references,
+from orcapod.core.data_tags import (
+    mark_data_tags,
     require_database_keeps_marker,
-    stored_references,
-    without_reference_marks,
+    stored_data_tags,
+    without_tag_kind_marks,
 )
 from orcapod.channels import Channel, ReadableChannel, WritableChannel
 from orcapod.config import OrcapodConfig
@@ -463,30 +463,30 @@ class FunctionNodeBase(StreamBase):
         self._table_scope = table_scope
         self._node_identity_path_cache: tuple[str, ...] | None = None
 
-    def declared_references(self) -> tuple[str, ...]:
-        """Return the referential tags this node lets fall through, as it declares them.
+    def declared_data_tags(self) -> tuple[str, ...]:
+        """Return the data-tags this node lets fall through, as it declares them.
 
-        A node with a pod declares the pod's (``ReferenceFallThroughPod``); a node
-        loaded from a saved file declares the file's record (``fall_through_references``
+        A node with a pod declares the pod's (``FallThroughPod``); a node
+        loaded from a saved file declares the file's record (``fall_through_tags``
         of its descriptor, ITL-1019). They are what the node's stored pipeline table
         must mark.
 
         Returns:
-            The referential tags; empty for a plain pod.
+            The data-tags; empty for a plain pod.
 
         Raises:
             ValueError: If the node has neither a pod nor a saved record.
         """
         if self._function_pod is not None:
-            return fall_through_references(self._function_pod)
-        from orcapod.pipeline.serialization import FALL_THROUGH_REFERENCES_KEY
+            return fall_through_tags(self._function_pod)
+        from orcapod.pipeline.serialization import FALL_THROUGH_TAGS_KEY
 
-        if FALL_THROUGH_REFERENCES_KEY not in self._descriptor:
+        if FALL_THROUGH_TAGS_KEY not in self._descriptor:
             raise ValueError(
                 f"Function node {self.label!r} has no pod and no saved "
-                f"{FALL_THROUGH_REFERENCES_KEY}: its referential tags are unknown"
+                f"{FALL_THROUGH_TAGS_KEY}: its data-tags are unknown"
             )
-        return tuple(self._descriptor[FALL_THROUGH_REFERENCES_KEY])
+        return tuple(self._descriptor[FALL_THROUGH_TAGS_KEY])
 
     # ------------------------------------------------------------------
     # load_status
@@ -799,7 +799,7 @@ class FunctionNodeBase(StreamBase):
             )
         except InputValidationError as exc:
             raise InputValidationError(f"Function node {self.label!r}: {exc}") from exc
-        # A referential tag is one column: laid out once, among the tags.
+        # A data-tag is one column: laid out once, among the tags.
         shared = [c for c in data_table.column_names if c in tag_table.column_names]
         if shared:
             data_table = data_table.drop_columns(shared)
@@ -1223,7 +1223,7 @@ class _JoinedRecords(NamedTuple):
         empty_taginfo_rows: Mapping from ``base_entry_id`` bytes to the raw
             taginfo row dict for each entry in ``empty_data_tokens``. Used
             by ``_load_cached_entries`` to reconstruct the tag for each token.
-        references: The referential tags the pipeline table marks (ITL-1019),
+        data_tags: The data-tags the pipeline table marks (ITL-1019),
             checked against the node's pod when it has one.
     """
 
@@ -1231,7 +1231,7 @@ class _JoinedRecords(NamedTuple):
     taginfo_columns: tuple[str, ...]
     empty_data_tokens: dict[bytes, EmptyData]
     empty_taginfo_rows: dict[bytes, dict]
-    references: tuple[str, ...]
+    data_tags: tuple[str, ...]
 
 
 class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
@@ -1480,17 +1480,17 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 ``pipeline_database.at("_result")``, as in ``attach_databases``.
 
         Raises:
-            InputValidationError: If the node passes referential tags through and
+            InputValidationError: If the node passes data-tags through and
                 ``pipeline_database`` cannot keep their marker (ITL-1019).
             UnstorableColumnError: If a database cannot store a column, naming
                 this node.
         """
         if self._function_pod is None:
             return
-        # A table must state its referential tags (ITL-1019): a database that cannot
+        # A table must state its data-tags (ITL-1019): a database that cannot
         # is refused first, with the two ways out, as ``attach_databases`` refuses it.
         require_database_keeps_marker(
-            pipeline_database, fall_through_references(self._function_pod)
+            pipeline_database, fall_through_tags(self._function_pod)
         )
         if result_database is None:
             result_database = pipeline_database.at("_result")
@@ -1557,10 +1557,10 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 result_database = pipeline_database.at("_result")
 
             if self._function_pod is not None:
-                # A table must state its referential tags: refuse a database that
+                # A table must state its data-tags: refuse a database that
                 # cannot, before anything is written (ITL-1019).
                 require_database_keeps_marker(
-                    pipeline_database, fall_through_references(self._function_pod)
+                    pipeline_database, fall_through_tags(self._function_pod)
                 )
                 # Normal path: wrap in CachedFunctionPod for compute + cache.
                 # A fall-through pod's results are its plain pod's (ITL-1023).
@@ -2660,7 +2660,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             )
 
         if ephemeral_result or self._cached_function_pod is not None:
-            # The stored result is the function's; the row's referenced columns fall
+            # The stored result is the function's; the row's data-tag columns fall
             # through onto it, as the pod does (ITL-1023).
             output_data = with_fall_through(self._function_pod, data, output_data)
 
@@ -2808,7 +2808,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             )
 
         if ephemeral_result or self._cached_function_pod is not None:
-            # The stored result is the function's; the row's referenced columns fall
+            # The stored result is the function's; the row's data-tag columns fall
             # through onto it, as the pod does (ITL-1023).
             output_data = with_fall_through(self._function_pod, data, output_data)
 
@@ -3037,15 +3037,15 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         )
 
         # Combine: tag (with system tags) + input source columns + meta columns. The
-        # table states which tags are referential: the ones that fall through this
+        # table states which tags are data-tags: the ones that fall through this
         # node's pod, marked on their stored column (ITL-1019).
-        combined_record = mark_references(
+        combined_record = mark_data_tags(
             arrow_utils.hstack_tables(
                 tag.as_table(columns={"system_tags": True}),
                 input_source_table,
                 meta_table,
             ),
-            fall_through_references(self._function_pod),
+            fall_through_tags(self._function_pod),
         )
 
         try:
@@ -3247,7 +3247,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
 
         taginfo_columns = tuple(taginfo.column_names)
         taginfo_schema = taginfo.schema
-        references = self._stored_references(taginfo_schema)
+        data_tags = self._stored_data_tags(taginfo_schema)
 
         is_ephemeral_col = constants.IS_EPHEMERAL_COL
         taginfo_df = pl.DataFrame(taginfo)
@@ -3406,7 +3406,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 taginfo_columns=taginfo_columns,
                 empty_data_tokens=empty_data_tokens,
                 empty_taginfo_rows=empty_taginfo_rows,
-                references=references,
+                data_tags=data_tags,
             )
 
         # Apply base_entry_id filter if requested
@@ -3417,7 +3417,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
 
         joined = merged_df.to_arrow()
         # Polars drops field metadata and nullable flags: restore them from the
-        # pipeline table in every case (its referential marker included), and from
+        # pipeline table in every case (its data-tag marker included), and from
         # the result table when one was read.
         joined = arrow_utils.restore_schema_nullability(
             joined,
@@ -3437,43 +3437,43 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             taginfo_columns=taginfo_columns,
             empty_data_tokens=empty_data_tokens,
             empty_taginfo_rows=empty_taginfo_rows,
-            references=references,
+            data_tags=data_tags,
         )
 
-    def _stored_references(self, taginfo_schema: "pa.Schema") -> tuple[str, ...]:
-        """Return the referential tags the pipeline table marks, checked against the pod.
+    def _stored_data_tags(self, taginfo_schema: "pa.Schema") -> tuple[str, ...]:
+        """Return the data-tags the pipeline table marks, checked against the pod.
 
         The stored table states its bindings (developer, November 16, 2026, ITL-1019):
-        a referential tag column carries the marker of ``referential_tags``. The node
+        a data-tag column carries the marker of ``data_tags``. The node
         reads the table only when it agrees with what the node declares
-        (``declared_references``: its pod's, or a loaded node's saved record, an
+        (``declared_data_tags``: its pod's, or a loaded node's saved record, an
         independent point of verification).
 
         Args:
             taginfo_schema: The schema of the stored pipeline table.
 
         Returns:
-            The referential tags, in the order the node declares them.
+            The data-tags, in the order the node declares them.
 
         Raises:
             InputValidationError: If the table's marker is invalid, or the table
-                and the node disagree on which tags are referential.
+                and the node disagree on which tags are data-tags.
         """
         table_path = self._require_pipeline_database().base_path + (
             self._versioned_pipeline_path
         )
         try:
-            stored = stored_references(taginfo_schema)
+            stored = stored_data_tags(taginfo_schema)
         except ValueError as exc:
             raise InputValidationError(
                 f"Function node {self.label!r}, pipeline table {table_path}: {exc}"
             ) from exc
-        expected = self.declared_references()
+        expected = self.declared_data_tags()
         if set(stored) != set(expected):
             source = "pod" if self._function_pod is not None else "saved job"
             raise InputValidationError(
                 f"Function node {self.label!r}: the pipeline table {table_path} marks "
-                f"the referential tags {sorted(stored)}, but the node's {source} "
+                f"the data-tags {sorted(stored)}, but the node's {source} "
                 f"declares {sorted(expected)}. The table was not written by this "
                 "node's pipeline; nothing was read."
             )
@@ -3559,9 +3559,9 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         # the table states which (ITL-1019). In the stream the binding is the shared
         # name, so the marker stays with the stored table.
         stream = ArrowTableStream(
-            without_reference_marks(joined.drop(drop_cols)),
+            without_tag_kind_marks(joined.drop(drop_cols)),
             tag_columns=self._stored_tag_keys(fetched),
-            reference_tags=fetched.references,
+            data_tags=fetched.data_tags,
         )
         return base_entry_ids, stream, data_ids
 
@@ -4151,7 +4151,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                                 node_label=node_label, tag=original_tag.as_dict()
                             )
                             raise
-                        # The row's referenced columns fall through onto the stored
+                        # The row's data-tag columns fall through onto the stored
                         # result, as on the sync path (ITL-1023).
                         # Not None: the result channel carries only results.
                         output_data = cast(

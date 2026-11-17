@@ -12,10 +12,10 @@ from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.contexts import DataContext
 from orcapod.core.base import TraceableBase
-from orcapod.core.referential_tags import (
+from orcapod.core.data_tags import (
     not_supported_yet,
-    reference_names,
-    stream_references,
+    data_tag_names,
+    stream_data_tags,
 )
 from orcapod.core.function_pod import FunctionPodStream
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
@@ -63,10 +63,10 @@ class StaticOutputOperatorPod(TraceableBase):
     tracked by the tracker manager.
     """
 
-    # The Linear issue that will make this operator handle referential tags, or
+    # The Linear issue that will make this operator handle data-tags, or
     # ``None`` when it handles them (ITL-1023). An operator that declares nothing
     # does not handle them yet: it raises instead of giving a wrong answer.
-    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = "ITL-1022"
+    DATA_TAGS_ISSUE: ClassVar[str | None] = "ITL-1022"
 
     OUTPUT_SCHEMA_IS_INPUT_SCHEMA: ClassVar[bool] = False
     """Whether the output has exactly its single input's columns and Arrow types.
@@ -82,20 +82,20 @@ class StaticOutputOperatorPod(TraceableBase):
         self.tracker_manager = tracker_manager or DEFAULT_TRACKER_MANAGER
         super().__init__(**kwargs)
 
-    def check_reference_support(self, *streams: StreamProtocol) -> None:
-        """Raise if a referential tag reaches an operator that does not handle it yet.
+    def check_data_tag_support(self, *streams: StreamProtocol) -> None:
+        """Raise if a data-tag reaches an operator that does not handle it yet.
 
         Args:
             *streams: The input streams.
 
         Raises:
-            NotImplementedError: If ``REFERENTIAL_TAGS_ISSUE`` is set and an input
-                has a referential tag.
+            NotImplementedError: If ``DATA_TAGS_ISSUE`` is set and an input
+                has a data-tag.
         """
-        if self.REFERENTIAL_TAGS_ISSUE is None:
+        if self.DATA_TAGS_ISSUE is None:
             return
-        if any(stream_references(stream) for stream in streams):
-            raise not_supported_yet(type(self).__name__, self.REFERENTIAL_TAGS_ISSUE)
+        if any(stream_data_tags(stream) for stream in streams):
+            raise not_supported_yet(type(self).__name__, self.DATA_TAGS_ISSUE)
 
     def pipeline_identity_structure(self) -> Any:
         """Return the pipeline identity, which defaults to content identity for operators."""
@@ -194,7 +194,7 @@ class StaticOutputOperatorPod(TraceableBase):
         logger.debug("Invoking kernel %s on streams: %s", self, streams)
 
         # perform input stream validation
-        self.check_reference_support(*streams)
+        self.check_data_tag_support(*streams)
         self.validate_inputs(*streams)
         self.tracker_manager.record_operator_pod_invocation(
             self, upstreams=streams, label=label
@@ -260,12 +260,11 @@ class StaticOutputOperatorPod(TraceableBase):
         Args:
             rows: Non-empty sequence of (Tag, Data) pairs.
 
-        A referential tag (a name in both the tag and the data of a row) is one
+        A data-tag (a name in both the tag and the data of a row) is one
         column: it is taken from the tags, and its source info from the data.
 
         Returns:
-            The concatenated table, the user tag column names and the referential
-            tags.
+            The concatenated table, the user tag column names and the data-tags.
 
         Raises:
             ValueError: If ``rows`` is empty.
@@ -276,11 +275,11 @@ class StaticOutputOperatorPod(TraceableBase):
             raise ValueError("Cannot materialize an empty list of rows into a stream")
 
         first_tag, first_data = rows[0]
-        references = reference_names(first_tag.keys(), first_data.keys())
+        data_tags = data_tag_names(first_tag.keys(), first_data.keys())
         tag_tables = [tag.as_table(columns={"system_tags": True}) for tag, _ in rows]
         data_tables = [data.as_table(columns={"source": True}) for _, data in rows]
-        if references:
-            data_tables = [t.drop_columns(list(references)) for t in data_tables]
+        if data_tags:
+            data_tables = [t.drop_columns(list(data_tags)) for t in data_tables]
 
         # Rows may list the same columns in a different order (cached vs
         # freshly computed), so match columns by name.
@@ -292,7 +291,7 @@ class StaticOutputOperatorPod(TraceableBase):
         )
 
         full_table = arrow_utils.hstack_tables(combined_tags, combined_data)
-        return full_table, tuple(first_tag.keys()), references
+        return full_table, tuple(first_tag.keys()), data_tags
 
     @staticmethod
     def _in_row_order(table: pa.Table, tag_keys: Sequence[str]) -> pa.Table:
@@ -364,7 +363,7 @@ class StaticOutputOperatorPod(TraceableBase):
         return ArrowTableStream(
             table,
             tag_columns=tag_keys,
-            reference_tags=stream_references(result),
+            data_tags=stream_data_tags(result),
             data_context=result.data_context_key,
         )
 
@@ -442,7 +441,7 @@ class StaticOutputOperatorPod(TraceableBase):
         return StaticOutputOperatorPod._as_upstream_stream(
             StaticOutputOperatorPod._as_row_built_table(table, tag_keys),
             tag_keys,
-            stream_references(upstream),
+            stream_data_tags(upstream),
             upstream,
         )
 
@@ -478,7 +477,7 @@ class StaticOutputOperatorPod(TraceableBase):
             return ArrowTableStream(
                 normalized.empty_table(),
                 tag_columns=only.keys()[0],
-                reference_tags=stream_references(only),
+                data_tags=stream_data_tags(only),
                 data_context=only.data_context_key,
             )
         return self.static_process(*inputs)
@@ -505,10 +504,10 @@ class StaticOutputOperatorPod(TraceableBase):
         Raises:
             ValueError: If ``rows`` is empty.
         """
-        table, tag_keys, references = StaticOutputOperatorPod._rows_to_table(rows)
+        table, tag_keys, data_tags = StaticOutputOperatorPod._rows_to_table(rows)
         # No ``source_info`` argument: the table's own ``_source_*`` columns
         # pass through, one value per row.
-        return ArrowTableStream(table, tag_columns=tag_keys, reference_tags=references)
+        return ArrowTableStream(table, tag_columns=tag_keys, data_tags=data_tags)
 
     @staticmethod
     def _materialize_upstream(
@@ -544,11 +543,11 @@ class StaticOutputOperatorPod(TraceableBase):
         from orcapod.utils import arrow_utils
 
         if rows:
-            table, tag_keys, references = StaticOutputOperatorPod._rows_to_table(rows)
+            table, tag_keys, data_tags = StaticOutputOperatorPod._rows_to_table(rows)
             if zero_rows:
                 table = table.slice(0, 0)
             return StaticOutputOperatorPod._as_upstream_stream(
-                table, tag_keys, references, upstream
+                table, tag_keys, data_tags, upstream
             )
         typed = StaticOutputOperatorPod._zero_row_input(upstream)
         if typed is not None:
@@ -562,7 +561,7 @@ class StaticOutputOperatorPod(TraceableBase):
             StaticOutputOperatorPod._upstream_context(upstream).type_converter,
         )
         return StaticOutputOperatorPod._as_upstream_stream(
-            table, upstream.keys()[0], stream_references(upstream), upstream
+            table, upstream.keys()[0], stream_data_tags(upstream), upstream
         )
 
     @staticmethod
@@ -578,7 +577,7 @@ class StaticOutputOperatorPod(TraceableBase):
     def _as_upstream_stream(
         table: pa.Table,
         tag_keys: Sequence[str],
-        references: Sequence[str],
+        data_tags: Sequence[str],
         upstream: StreamProtocol,
     ) -> StreamProtocol:
         """Wrap a table of ``upstream``'s rows (or none) as ``upstream``'s stream.
@@ -587,7 +586,7 @@ class StaticOutputOperatorPod(TraceableBase):
             table: User tags, system tags, data and source info, without the
                 context column.
             tag_keys: The user tag columns.
-            references: The referential tags among ``tag_keys`` (ITL-1023).
+            data_tags: The data-tags among ``tag_keys`` (ITL-1023).
             upstream: The node or stream the table stands for.
 
         Returns:
@@ -614,7 +613,7 @@ class StaticOutputOperatorPod(TraceableBase):
                 table,
                 tag_columns=tag_keys,
                 pipeline_hash=upstream.pipeline_hash(),
-                reference_tags=references,
+                data_tags=data_tags,
                 upstreams=upstream.upstreams,
                 data_context=context,
             )
@@ -623,7 +622,7 @@ class StaticOutputOperatorPod(TraceableBase):
         return ArrowTableStream(
             table,
             tag_columns=tag_keys,
-            reference_tags=references,
+            data_tags=data_tags,
             producer=upstream.producer,
             upstreams=upstream.upstreams,
             data_context=context,
@@ -652,12 +651,12 @@ class StaticOutputOperatorPod(TraceableBase):
         Raises:
             ValueError: If ``rows`` is empty.
         """
-        table, tag_keys, references = StaticOutputOperatorPod._rows_to_table(rows)
+        table, tag_keys, data_tags = StaticOutputOperatorPod._rows_to_table(rows)
         return _RowsOfStream(
             table,
             tag_columns=tag_keys,
             pipeline_hash=pipeline_hash,
-            reference_tags=references,
+            data_tags=data_tags,
         )
 
     async def async_execute(
@@ -736,14 +735,14 @@ class _RowsOfStream(ArrowTableStream):
         *,
         tag_columns: Collection[str],
         pipeline_hash: ContentHash,
-        reference_tags: Collection[str] = (),
+        data_tags: Collection[str] = (),
         upstreams: tuple[StreamProtocol, ...] = (),
         data_context: DataContext | None = None,
     ) -> None:
         super().__init__(
             table,
             tag_columns=tag_columns,
-            reference_tags=reference_tags,
+            data_tags=data_tags,
             upstreams=upstreams,
             data_context=data_context,
         )
@@ -836,7 +835,7 @@ class DynamicPodStream(StreamBase):
                 ArrowTableStream(
                     table,
                     tag_columns=upstream.keys()[0],
-                    reference_tags=stream_references(upstream),
+                    data_tags=stream_data_tags(upstream),
                     producer=upstream.producer,
                     upstreams=upstream.upstreams,
                     data_context=StaticOutputOperatorPod._upstream_context(upstream),

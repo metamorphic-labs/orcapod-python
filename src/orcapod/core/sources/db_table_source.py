@@ -21,7 +21,7 @@ from typing import Any, ClassVar, TYPE_CHECKING
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource
-from orcapod.core.referential_tags import TagOnlyColumns, source_reference_tags
+from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
 from orcapod.core.sources.source_ids import location_source_id
 from orcapod.core.sources.reload import keep_nullable_columns, same_rows
 from orcapod.core.sources.stream_builder import (
@@ -75,7 +75,7 @@ class DBTableSource(RootSource):
         config: Orcapod configuration (controls hash character counts, etc.).
         tag_only_columns: Tag columns kept as tags only, not data, exactly as in
             v0.3; ``True`` for all of them. Keyword-only. Every other tag column is
-            referential: also a data column of the same name (ITL-1023).
+            a data-tag: also a data column of the same name (ITL-1023).
 
     Raises:
         ValueError: If no ``source_id`` is given and the source knows no address of
@@ -169,11 +169,11 @@ class DBTableSource(RootSource):
         # Step 4: Enrich via SourceStreamBuilder (same pipeline as all other RootSources)
         self._tag_columns: Collection[str] = resolved_tag_columns
         self._system_tag_columns: Collection[str] = system_tag_columns
-        # Every declared tag is referential unless kept tag-only (ITL-1023); a
+        # Every declared tag is a data-tag unless kept tag-only (ITL-1023); a
         # rebuild after a check (ITL-1102) applies the same choice.
-        reference_tags = source_reference_tags(self._tag_columns, tag_only_columns)
+        data_tags = source_data_tags(self._tag_columns, tag_only_columns)
         self._tag_only_columns: tuple[str, ...] = tuple(
-            c for c in self._tag_columns if c not in reference_tags
+            c for c in self._tag_columns if c not in data_tags
         )
         result = self._build(table)
         self._stream = result.stream
@@ -250,9 +250,7 @@ class DBTableSource(RootSource):
         return builder.build(
             table,
             tag_columns=self._tag_columns,
-            reference_tags=source_reference_tags(
-                self._tag_columns, self._tag_only_columns
-            ),
+            data_tags=source_data_tags(self._tag_columns, self._tag_only_columns),
             source_id=self._source_id,
             record_id_columns=self._key_columns,
             system_tag_columns=self._system_tag_columns,

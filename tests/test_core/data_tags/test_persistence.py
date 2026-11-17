@@ -1,11 +1,11 @@
-"""A stored table states which of its tags are referential (ITL-1019).
+"""A stored table states which of its tags are data-tags (ITL-1019).
 
 Developer decision, November 16, 2026: the stored table fully expresses what it stores. A
-stored tag column that is a referential tag carries Arrow field metadata
-(``referential_tags.REFERENTIAL_TAG_METADATA_KEY``); a plain tag carries none. A function
-node marks the referential tags of its pipeline (tag) table, reads the binding back from
+stored tag column that is a data-tag carries Arrow field metadata
+(``data_tags.TAG_KIND_METADATA_KEY``); a plain tag carries none. A function
+node marks the data-tags of its pipeline (tag) table, reads the binding back from
 that table, and refuses a table that disagrees with its pod. The result table never records
-referential status. The marker moves no hash.
+data-tag status. The marker moves no hash.
 """
 
 from __future__ import annotations
@@ -19,12 +19,12 @@ import pytest
 
 import orcapod as op
 from orcapod.contexts import resolve_context
-from orcapod.core.referential_tags import (
-    REFERENTIAL_TAG_METADATA_KEY,
-    REFERENTIAL_TAG_METADATA_VALUE,
-    mark_references,
-    stored_references,
-    without_reference_marks,
+from orcapod.core.data_tags import (
+    TAG_KIND_METADATA_KEY,
+    DATA_TAG_KIND,
+    mark_data_tags,
+    stored_data_tags,
+    without_tag_kind_marks,
 )
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.errors import InputValidationError
@@ -54,7 +54,7 @@ def double(amp: float) -> float:
 def _source(
     rows: list[dict[str, float]], tag_only: object = ("time",)
 ) -> op.sources.DictSource:
-    """``unit`` referential and ``time`` plain unless ``tag_only`` says otherwise."""
+    """``unit`` a data-tag and ``time`` plain unless ``tag_only`` says otherwise."""
     return op.sources.DictSource(
         rows,
         tag_columns=["unit", "time"],
@@ -109,9 +109,7 @@ def _tables(store: ArrowDatabaseProtocol) -> dict[str, pa.Table]:
 
 def _marked(schema: pa.Schema) -> list[str]:
     """The columns carrying the marker key, whatever its value."""
-    return [
-        f.name for f in schema if REFERENTIAL_TAG_METADATA_KEY in (f.metadata or {})
-    ]
+    return [f.name for f in schema if TAG_KIND_METADATA_KEY in (f.metadata or {})]
 
 
 # ---------------------------------------------------------------------------
@@ -119,8 +117,8 @@ def _marked(schema: pa.Schema) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def test_mark_references_marks_exactly_the_named_columns() -> None:
-    stray = pa.field("b", pa.int64(), metadata={REFERENTIAL_TAG_METADATA_KEY: b"x"})
+def test_mark_data_tags_marks_exactly_the_named_columns() -> None:
+    stray = pa.field("b", pa.int64(), metadata={TAG_KIND_METADATA_KEY: b"x"})
     table = pa.Table.from_arrays(
         [pa.array([1]), pa.array([2]), pa.array(["c"])],
         schema=pa.schema(
@@ -131,57 +129,55 @@ def test_mark_references_marks_exactly_the_named_columns() -> None:
             ]
         ),
     )
-    marked = mark_references(table, ["a"])
+    marked = mark_data_tags(table, ["a"])
     # A marker that came in on another column is not this writer's binding.
     assert _marked(marked.schema) == ["a"]
-    assert marked.schema.field("a").metadata == {
-        REFERENTIAL_TAG_METADATA_KEY: REFERENTIAL_TAG_METADATA_VALUE
-    }
+    assert marked.schema.field("a").metadata == {TAG_KIND_METADATA_KEY: DATA_TAG_KIND}
     assert marked.schema.field("b").metadata is None
     # Values, types and nullability are untouched.
     assert marked.schema.field("a").nullable is False
     assert marked.equals(table)
-    assert stored_references(marked.schema) == ("a",)
+    assert stored_data_tags(marked.schema) == ("a",)
     # The read side drops every marker and gives back the unmarked schema.
-    assert without_reference_marks(marked).schema.equals(
-        mark_references(table, []).schema, check_metadata=True
+    assert without_tag_kind_marks(marked).schema.equals(
+        mark_data_tags(table, []).schema, check_metadata=True
     )
 
 
-def test_mark_references_keeps_other_field_metadata() -> None:
+def test_mark_data_tags_keeps_other_field_metadata() -> None:
     field = pa.field("a", pa.int64(), metadata={b"other": b"kept"})
     table = pa.Table.from_arrays([pa.array([1])], schema=pa.schema([field]))
-    marked = mark_references(table, ["a"])
+    marked = mark_data_tags(table, ["a"])
     assert marked.schema.field("a").metadata == {
         b"other": b"kept",
-        REFERENTIAL_TAG_METADATA_KEY: REFERENTIAL_TAG_METADATA_VALUE,
+        TAG_KIND_METADATA_KEY: DATA_TAG_KIND,
     }
-    assert without_reference_marks(marked).schema.field("a").metadata == {
+    assert without_tag_kind_marks(marked).schema.field("a").metadata == {
         b"other": b"kept"
     }
 
 
 def test_an_unmarked_table_is_returned_as_it_is() -> None:
     table = pa.table({"a": [1]})
-    assert mark_references(table, []) is table
+    assert mark_data_tags(table, []) is table
 
 
 def test_marking_a_column_the_table_lacks_raises() -> None:
     with pytest.raises(ValueError, match="not columns of the stored table"):
-        mark_references(pa.table({"a": [1]}), ["b"])
+        mark_data_tags(pa.table({"a": [1]}), ["b"])
 
 
 def test_a_marker_with_another_value_is_refused_on_read() -> None:
-    field = pa.field("a", pa.int64(), metadata={REFERENTIAL_TAG_METADATA_KEY: b"plain"})
+    field = pa.field("a", pa.int64(), metadata={TAG_KIND_METADATA_KEY: b"plain"})
     with pytest.raises(ValueError, match="only valid value"):
-        stored_references(pa.schema([field]))
+        stored_data_tags(pa.schema([field]))
 
 
 def test_the_marker_moves_no_table_hash() -> None:
     """Audit probe 6: the table hash ignores the marker (no golden value can move)."""
     hasher = resolve_context(None).arrow_hasher
     table = pa.table({"unit": [1, 2], "y": [0.5, 1.5]})
-    marked = mark_references(table, ["unit"])
+    marked = mark_data_tags(table, ["unit"])
     assert marked.schema.field("unit").metadata
     assert hasher.hash_table(marked) == hasher.hash_table(table)
 
@@ -193,7 +189,7 @@ def test_the_marker_moves_no_table_hash() -> None:
 
 @STORES
 @ORCHESTRATORS
-def test_the_pipeline_table_marks_only_the_referential_tags(
+def test_the_pipeline_table_marks_only_the_data_tags(
     tmp_path: Path,
     make_store: Callable[[Path], ArrowDatabaseProtocol],
     orchestrator: type[SyncPipelineOrchestrator | AsyncPipelineOrchestrator],
@@ -202,13 +198,11 @@ def test_the_pipeline_table_marks_only_the_referential_tags(
     _run(store, ROWS, orchestrator)
     tables = _tables(store)
     pipeline = tables["pipeline"]
-    # ``unit`` is referential and is marked; ``time`` is plain and carries nothing.
+    # ``unit`` is a data-tag and is marked; ``time`` is plain and carries nothing.
     assert _marked(pipeline.schema) == ["unit"]
-    assert REFERENTIAL_TAG_METADATA_KEY not in (
-        pipeline.schema.field("time").metadata or {}
-    )
-    assert stored_references(pipeline.schema) == ("unit",)
-    # The result table never records referential status: no marker, no tag column.
+    assert TAG_KIND_METADATA_KEY not in (pipeline.schema.field("time").metadata or {})
+    assert stored_data_tags(pipeline.schema) == ("unit",)
+    # The result table never records data-tag status: no marker, no tag column.
     assert _marked(tables["result"].schema) == []
     assert "unit" not in tables["result"].column_names
 
@@ -241,10 +235,10 @@ def test_the_marker_survives_an_append(
     assert CALLS == [2.5]
     pipeline = _tables(store)["pipeline"]
     assert pipeline.num_rows == 3
-    assert stored_references(pipeline.schema) == ("unit",)
+    assert stored_data_tags(pipeline.schema) == ("unit",)
     # A fresh handle on the same store reads the marker back from storage.
     if isinstance(store, DeltaTableDatabase):
-        assert stored_references(
+        assert stored_data_tags(
             _tables(DeltaTableDatabase(tmp_path / "store"))["pipeline"].schema
         ) == ("unit",)
 
@@ -287,9 +281,9 @@ def test_a_table_that_disagrees_with_the_pod_is_refused(
         table = written.get_all_records(path, record_id_column=id_column)
         assert table is not None
         tampered.add_records(
-            path, without_reference_marks(table), record_id_column=id_column, flush=True
+            path, without_tag_kind_marks(table), record_id_column=id_column, flush=True
         )
-    with pytest.raises(InputValidationError, match=r"marks the referential tags \[\]"):
+    with pytest.raises(InputValidationError, match=r"marks the data-tags \[\]"):
         _run(tampered, ROWS, orchestrator, load_only=True)
 
 
@@ -307,7 +301,7 @@ def _rows(ids: list[int], extra: bool = False) -> pa.Table:
     }
     if extra:
         columns["z"] = pa.array(ids, pa.int64())
-    return mark_references(pa.Table.from_pydict(columns), ["unit"])
+    return mark_data_tags(pa.Table.from_pydict(columns), ["unit"])
 
 
 @pytest.mark.parametrize(
@@ -326,32 +320,32 @@ def test_every_write_path_keeps_the_marker(
     store = make_store(tmp_path)
     path = ("node", "table")
 
-    def references() -> tuple[str, ...]:
+    def data_tags() -> tuple[str, ...]:
         table = store.get_all_records(path)
         assert table is not None
-        return stored_references(table.schema)
+        return stored_data_tags(table.schema)
 
     store.add_records(path, _rows([1, 2]), record_id_column="rid", flush=True)
-    assert references() == ("unit",)  # first write
+    assert data_tags() == ("unit",)  # first write
     store.add_records(path, _rows([3]), record_id_column="rid")
-    assert references() == ("unit",)  # stored rows read together with pending ones
+    assert data_tags() == ("unit",)  # stored rows read together with pending ones
     store.flush()
-    assert references() == ("unit",)  # append
+    assert data_tags() == ("unit",)  # append
     store.add_records(
         path, _rows([3, 4]), record_id_column="rid", skip_duplicates=True, flush=True
     )
-    assert references() == ("unit",)  # some ids stored already: a merge
+    assert data_tags() == ("unit",)  # some ids stored already: a merge
     unit = store.get_records_with_column_value(path, {"unit": 1})
-    assert unit is not None and stored_references(unit.schema) == ("unit",)
+    assert unit is not None and stored_data_tags(unit.schema) == ("unit",)
     if isinstance(store, DeltaTableDatabase):
         # A new column: the stored schema evolves (in-memory tables do not evolve).
         store.add_records(
             path, _rows([5], extra=True), record_id_column="rid", flush=True
         )
-        assert references() == ("unit",)
+        assert data_tags() == ("unit",)
         reopened = DeltaTableDatabase(tmp_path / "store")
         table = reopened.get_all_records(path)
-        assert table is not None and stored_references(table.schema) == ("unit",)
+        assert table is not None and stored_data_tags(table.schema) == ("unit",)
 
 
 # ---------------------------------------------------------------------------
@@ -377,13 +371,13 @@ def test_a_database_without_field_metadata_is_refused_before_any_write() -> None
 
 
 def test_plain_tags_ask_nothing_of_the_database() -> None:
-    from orcapod.core.referential_tags import require_database_keeps_marker
+    from orcapod.core.data_tags import require_database_keeps_marker
     from orcapod.databases.connector_arrow_database import ConnectorArrowDatabase
     from orcapod.databases.sqlite_connector import SQLiteConnector
 
     database = ConnectorArrowDatabase(SQLiteConnector(":memory:"))
     require_database_keeps_marker(database, ())
-    with pytest.raises(InputValidationError, match="cannot store the referential"):
+    with pytest.raises(InputValidationError, match="cannot store the data-tags"):
         require_database_keeps_marker(database, ["unit"])
     # A database that keeps field metadata is accepted.
     require_database_keeps_marker(InMemoryArrowDatabase(), ["unit"])

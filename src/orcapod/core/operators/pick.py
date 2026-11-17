@@ -7,7 +7,7 @@ import typing
 from collections.abc import Sequence
 from typing import Any, ClassVar, TYPE_CHECKING, cast
 
-from orcapod.core.referential_tags import stream_references
+from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import UnaryOperator
@@ -53,8 +53,8 @@ class Pick(UnaryOperator):
             functional output semantics.  See ITL-439.
     """
 
-    # Referential tags (ITL-1023): handled.
-    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = None
+    # Data-tags (ITL-1023): handled.
+    DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def __init__(
         self,
@@ -153,11 +153,11 @@ class Pick(UnaryOperator):
         """
         tag_schema, data_schema = stream.output_schema()
         data_columns = list(data_schema.keys())
-        # Referential tags (ITL-1023): the output is a new data column, never a tag's
+        # Data-tags (ITL-1023): the output is a new data column, never a tag's
         # value replaced in place or a name shared with a tag (section 4).
         if self.out is None and self.column in tag_schema:
             raise InputValidationError(
-                f"Pick: column {self.column!r} is a referential tag; replacing it "
+                f"Pick: column {self.column!r} is a data-tag; replacing it "
                 "in place would change the tag's value. Give out=<new name>."
             )
         if self.out is not None and self.out in tag_schema:
@@ -422,7 +422,7 @@ class Pick(UnaryOperator):
                 self._as_row_built_table(output_schema.empty_table(), tag_columns),
                 tag_columns=tag_columns,
                 data_context=stream.data_context,
-                reference_tags=stream_references(stream),
+                data_tags=stream_data_tags(stream),
             )
 
         return self._materialize_to_stream(out_rows)

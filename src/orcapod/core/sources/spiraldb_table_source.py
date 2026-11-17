@@ -43,7 +43,7 @@ from typing import Any, ClassVar, NamedTuple, TYPE_CHECKING
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource, saved_tag_only_columns
-from orcapod.core.referential_tags import TagOnlyColumns, source_reference_tags
+from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
 from orcapod.core.sources.source_ids import joined_location, location_source_id
 from orcapod.core.sources.derived_source import validate_tags_as_data
 from orcapod.core.sources.stream_builder import (
@@ -269,7 +269,7 @@ class SpiralDBTableSource(RootSource):
             ``SpiralDBConnector``, e.g. ``{"server.url": "https://api.spiraldb.dev"}``.
         tag_only_columns: Tag columns kept as tags only, not data, exactly as in
             v0.3; ``True`` for all of them. Keyword-only. Every other tag column is
-            referential: also a data column of the same name (ITL-1023).
+            a data-tag: also a data column of the same name (ITL-1023).
         tags_as_data: Maps a key column that is a tag column of this source to the
             name of a data column that receives a copy of it, as in
             ``DerivedSource``. ``None`` (default) or an empty mapping copies nothing.
@@ -403,8 +403,8 @@ class SpiralDBTableSource(RootSource):
                 self.SOURCE_KIND,
                 spiraldb_table_address(project_id, dataset, table_name, self._table_id),
             )
-        # Every declared tag is referential unless kept tag-only (ITL-1023).
-        self._reference_tags = source_reference_tags(resolved_tags, tag_only_columns)
+        # Every declared tag is a data-tag unless kept tag-only (ITL-1023).
+        self._data_tags = source_data_tags(resolved_tags, tag_only_columns)
 
         # A zero-row stream with the table's columns answers every schema question.
         self._builder = SourceStreamBuilder(self.data_context, self.orcapod_config)
@@ -414,7 +414,7 @@ class SpiralDBTableSource(RootSource):
                 tag_columns=resolved_tags,
                 source_id=self._source_id,
                 system_tag_columns=system_tag_columns,
-                reference_tags=self._reference_tags,
+                data_tags=self._data_tags,
             )
         except ValueError as exc:
             raise ValueError(f"{location}, table {table_name!r}: {exc}") from exc
@@ -434,13 +434,13 @@ class SpiralDBTableSource(RootSource):
                 tag_columns=template.tag_columns,
                 source_id=self._source_id,
                 system_tag_columns=template.system_tag_columns,
-                reference_tags=self._reference_tags,
+                data_tags=self._data_tags,
             )
         self._stream = template.stream
         self._schema_hash = template.schema_hash
         self._tag_columns = template.tag_columns
         self._tag_only_columns = tuple(
-            c for c in self._tag_columns if c not in self._reference_tags
+            c for c in self._tag_columns if c not in self._data_tags
         )
         self._system_tag_columns = template.system_tag_columns
 
@@ -717,7 +717,7 @@ class SpiralDBTableSource(RootSource):
                         schema_hash=self._schema_hash,
                         source_id=self.source_id,
                         row_identifiers=tokens,
-                        reference_tags=self._reference_tags,
+                        data_tags=self._data_tags,
                     )
 
     def iter_data(self) -> Iterator["tuple[TagProtocol, DataProtocol]"]:
@@ -774,7 +774,7 @@ class SpiralDBTableSource(RootSource):
             table=pa.concat_tables(tables),
             tag_columns=self._tag_columns,
             system_tag_columns=self._system_tag_columns,
-            reference_tags=self._reference_tags,
+            data_tags=self._data_tags,
         )
         return whole.as_table(columns=columns, all_info=all_info)
 

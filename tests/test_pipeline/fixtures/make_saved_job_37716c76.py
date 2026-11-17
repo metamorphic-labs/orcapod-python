@@ -1,7 +1,7 @@
 """Produces ``saved_job_37716c76``: a job saved by Orcapod v0.3 (format 0.2.0).
 
 Not a test and not run in CI. It was run against the source of origin/main at commit
-37716c76 (v0.3 after ITL-1154, before referential tags) from an empty folder:
+37716c76 (v0.3 after ITL-1154, before data-tags) from an empty folder:
 
     git archive 37716c76 src | tar -x -C <dir>
     PYTHONPATH=<dir>/src uv run python make_saved_job_37716c76.py <out dir>

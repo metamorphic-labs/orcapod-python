@@ -25,13 +25,13 @@ from collections.abc import Collection, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from orcapod import contexts
-from orcapod.core.referential_tags import (
-    mark_references,
-    reference_names,
+from orcapod.core.data_tags import (
+    mark_data_tags,
+    data_tag_names,
     require_database_keeps_marker,
-    stored_references,
-    stream_references,
-    without_reference_marks,
+    stored_data_tags,
+    stream_data_tags,
+    without_tag_kind_marks,
 )
 from orcapod.channels import Channel, ChannelClosed, ReadableChannel, WritableChannel
 from orcapod.config import OrcapodConfig
@@ -891,15 +891,15 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             cache_mode: Caching behaviour (OFF, LOG, or REPLAY).
 
         Raises:
-            InputValidationError: If the node's output has referential tags, the cache
+            InputValidationError: If the node's output has data-tags, the cache
                 mode stores or replays them (``LOG`` or ``REPLAY``), and the database
                 cannot keep the marker that states them (ITL-1019). Nothing is
                 attached or written.
         """
         if cache_mode != CacheMode.OFF:
-            # A stored table states its referential tags; refuse a database that
+            # A stored table states its data-tags; refuse a database that
             # cannot, before anything runs or is written (ITL-1019).
-            require_database_keeps_marker(pipeline_database, stream_references(self))
+            require_database_keeps_marker(pipeline_database, stream_data_tags(self))
 
         # A database that cannot store the cache refuses it now, before anything
         # runs or changes (ITL-1162).
@@ -1070,11 +1070,11 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         return node
 
     # ------------------------------------------------------------------
-    # Referential tags in the stored table (ITL-1019)
+    # Data-tags in the stored table (ITL-1019)
     # ------------------------------------------------------------------
 
-    def declared_references(self) -> tuple[str, ...]:
-        """Return the referential tags of this node's output, as the node declares them.
+    def declared_data_tags(self) -> tuple[str, ...]:
+        """Return the data-tags of this node's output, as the node declares them.
 
         A node built in this process declares its operator's predicted output: the
         names in both halves of ``keys()``. A node loaded by ``PipelineJob.load``
@@ -1083,42 +1083,42 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         2026). These are the tags the node's stored table must mark.
 
         Returns:
-            The referential tags, in tag order; empty for a plain output.
+            The data-tags, in tag order; empty for a plain output.
         """
         saved = self._descriptor.get("output_schema") if self._loaded else None
         if saved is not None:
-            return reference_names(saved.get("tag", {}), saved.get("data", {}))
-        return stream_references(self)
+            return data_tag_names(saved.get("tag", {}), saved.get("data", {}))
+        return stream_data_tags(self)
 
-    def _check_stored_references(self, schema: "pa.Schema") -> None:
-        """Refuse a stored table whose referential tag marker disagrees with the node.
+    def _check_stored_data_tags(self, schema: "pa.Schema") -> None:
+        """Refuse a stored table whose data-tag marker disagrees with the node.
 
         The stored table states its bindings (developer, November 16, 2026, ITL-1019):
-        a referential tag column carries the marker of ``referential_tags``. The node
+        a data-tag column carries the marker of ``data_tags``. The node
         reads the table only when it agrees with what the node declares
-        (``declared_references``).
+        (``declared_data_tags``).
 
         Args:
             schema: The schema of the node's stored table.
 
         Raises:
             InputValidationError: If the table's marker is invalid, or the table and
-                the node disagree on which tags are referential.
+                the node disagree on which tags are data-tags.
         """
         assert self._pipeline_database is not None
         table_path = self._pipeline_database.base_path + self._stored_table_path
         try:
-            stored = stored_references(schema)
+            stored = stored_data_tags(schema)
         except ValueError as exc:
             raise InputValidationError(
                 f"Operator node {self.label!r}, stored table {table_path}: {exc}"
             ) from exc
-        expected = self.declared_references()
+        expected = self.declared_data_tags()
         if set(stored) != set(expected):
             declarer = "saved job" if self._loaded else "operator"
             raise InputValidationError(
                 f"Operator node {self.label!r}: the stored table {table_path} marks "
-                f"the referential tags {sorted(stored)}, but the node's {declarer} "
+                f"the data-tags {sorted(stored)}, but the node's {declarer} "
                 f"declares {sorted(expected)}. The table was not written by this "
                 "node's pipeline; nothing was read."
             )
@@ -1130,8 +1130,8 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         marker stays with the stored table: carried on, it would be written by a
         downstream store whose binding it is not.
 
-        The binding is the node's (``declared_references``), which every read checked
-        against the table's marker (``_check_stored_references``).
+        The binding is the node's (``declared_data_tags``), which every read checked
+        against the table's marker (``_check_stored_data_tags``).
 
         Args:
             records: The stored rows, without the bookkeeping columns.
@@ -1143,7 +1143,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         # ``data_context`` types the Python datagrams only; the rows' Arrow context
         # column comes from the table, and a stream fills a missing one with the
         # default key.
-        rows = without_reference_marks(records)
+        rows = without_tag_kind_marks(records)
         if constants.CONTEXT_KEY not in rows.column_names:
             rows = rows.append_column(
                 pa.field(constants.CONTEXT_KEY, pa.large_string(), nullable=False),
@@ -1152,7 +1152,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         return ArrowTableStream(
             rows,
             tag_columns=self.keys()[0],
-            reference_tags=self.declared_references(),
+            data_tags=self.declared_data_tags(),
             data_context=self.data_context,
         )
 
@@ -1272,8 +1272,8 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         """Materialize stream and store in the pipeline database with per-row dedup.
 
         The stored table states its bindings (developer, November 16, 2026, ITL-1019):
-        the columns of the node's referential tags carry the marker of
-        ``referential_tags``, written from the operator's own output binding and
+        the columns of the node's data-tags carry the marker of
+        ``data_tags``, written from the operator's own output binding and
         never from metadata that came in from upstream. The marker is put on after the
         per-row record hashes are computed, so it never enters them.
         """
@@ -1346,7 +1346,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             pipeline_database.add_records(
                 self._stored_table_path,
                 with_data_context(
-                    mark_references(output_table, stream_references(self)),
+                    mark_data_tags(output_table, stream_data_tags(self)),
                     self.data_context_key,
                 ),
                 record_id_column=self.HASH_COLUMN_NAME,
@@ -1389,7 +1389,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         keeps this node's. Rows of another data context are left out and reported once.
 
         Every read of the stored table goes through here, so every read checks the
-        table's referential tag marker against the node (``_check_stored_references``).
+        table's data-tag marker against the node (``_check_stored_data_tags``).
         The rows keep the marker; a read into a stream drops it
         (``_stream_over_stored``).
 
@@ -1399,7 +1399,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
 
         Raises:
             InputValidationError: If the table and the node disagree on which tags are
-                referential (ITL-1019).
+                data-tags (ITL-1019).
         """
         assert self._pipeline_database is not None
         self._account_for_stale_tables()
@@ -1408,7 +1408,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         )
         if records is None:
             return None
-        self._check_stored_references(records.schema)
+        self._check_stored_data_tags(records.schema)
         stored_rows = records.num_rows
         records = keep_rows_of_data_context(records, self.data_context_key)
         if records.num_rows < stored_rows and not self._skipped_rows_reported:
@@ -1936,13 +1936,13 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             return ArrowTableStream(
                 empty,
                 tag_columns=tuple(tag_schema),
-                reference_tags=self.declared_references(),
+                data_tags=self.declared_data_tags(),
                 data_context=self.data_context,
             ).as_table(columns=columns, all_info=all_info)
         empty_stream = ArrowTableStream(
             self._make_empty_table(),
             tag_columns=self.keys()[0],
-            reference_tags=stream_references(self),
+            data_tags=stream_data_tags(self),
             data_context=self.data_context,
         )
         return empty_stream.as_table(columns=columns, all_info=all_info)
@@ -1996,13 +1996,13 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         database is attached or no matching records exist. Switching to OFF
         does not remove records stored by an earlier LOG run.
 
-        This is the raw records view: a referential tag column keeps the marker the
+        This is the raw records view: a data-tag column keeps the marker the
         stored table states it with (ITL-1019), checked against the node on read.
         ``as_source()`` reads the binding from it.
 
         Raises:
             InputValidationError: If the stored table and the node disagree on which
-                tags are referential.
+                tags are data-tags.
         """
         if self._pipeline_database is None:
             return None

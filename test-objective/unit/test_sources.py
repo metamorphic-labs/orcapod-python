@@ -163,7 +163,7 @@ class TestArrowTableSourceSchema:
         tag_keys, data_keys = source.keys()
         assert "name" in tag_keys
         assert "age" in data_keys
-        # A declared tag is referential by default (ITL-1023): also a data column.
+        # A declared tag is a data-tag by default (ITL-1023): also a data column.
         assert "name" in data_keys
         plain = ArrowTableSource(
             _simple_table(),

@@ -612,7 +612,7 @@ class Data(Datagram):
         The added columns keep ``other``'s Arrow fields, values and source info. This
         data's own columns are kept as they are: their Arrow fields, and the Python
         values a function returned, are not converted again. Used for the columns of
-        referential tags that fall through a function pod.
+        data-tags that fall through a function pod.
 
         Args:
             other: The data to take the columns from.

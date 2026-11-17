@@ -9,7 +9,7 @@ from typing import Any, ClassVar, TYPE_CHECKING
 from typing_extensions import override
 
 from orcapod import contexts
-from orcapod.core.referential_tags import stream_references
+from orcapod.core.data_tags import stream_data_tags
 from orcapod.config import OrcapodConfig
 from orcapod.core.sources.base import RootSource
 from orcapod.errors import UnstorableColumnError
@@ -495,7 +495,7 @@ class CachedSource(RootSource):
             all_records,
             tag_columns=tag_keys,
             data_context=self.data_context,
-            reference_tags=stream_references(self._source),
+            data_tags=stream_data_tags(self._source),
         )
 
     def _empty_table(self) -> pa.Table:

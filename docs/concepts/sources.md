@@ -47,20 +47,20 @@ Two construction rules apply to every source and are the most common first error
 - At least one column must be left over as a data column, otherwise it raises
   `ValueError: No data columns found in the table`.
 
-**Referential and plain tags: `tag_only_columns`.** The sources built from a table
+**Data-tags and plain tags: `tag_only_columns`.** The sources built from a table
 (`ArrowTableSource`, `DictSource`, `DataFrameSource`, `CSVSource`, `DeltaTableSource` and the
 database sources) take the keyword-only option `tag_only_columns`. By default every declared
-tag is referential: it is also the data column of the same name (see
-[Referential tags](referential-tags.md)). `tag_only_columns` names the tags kept plain, a tag
+tag is a data-tag: it is also the data column of the same name (see
+[Data-tags](data-tags.md)). `tag_only_columns` names the tags kept plain, a tag
 only and never a data column, as every tag was in v0.3; `tag_only_columns=True` keeps all of
-them plain. Plain and referential sources over one table have the same source id and record
+them plain. A source with plain tags and one with data-tags over one table have the same source id and record
 ids, but different schemas and so different hashes.
 
 ```python
 from orcapod.sources import DictSource
 
-referential = DictSource(data=[{"k": "a", "x": 1}], tag_columns=["k"])
-print(referential.keys())
+with_data_tags = DictSource(data=[{"k": "a", "x": 1}], tag_columns=["k"])
+print(with_data_tags.keys())
 # (('k',), ('k', 'x'))
 plain = DictSource(
     data=[{"k": "a", "x": 1}], tag_columns=["k"], tag_only_columns=True
@@ -377,9 +377,9 @@ the system tags of every joined source, and binding refuses it with `SourceSpecM
 (support is planned, ITL-1127).
 
 **Using a tag value as an input to a computation.** Tags identify a row and data is what a
-function computes on. A referential tag (the default for a declared tag) is both: a function
+function computes on. A data-tag (the default for a declared tag) is both: a function
 reads it through its data role, under the same name (see
-[Referential Tags](referential-tags.md)). A plain tag is a tag only, and a function pod
+[Data-tags](data-tags.md)). A plain tag is a tag only, and a function pod
 never receives it. When a plain tag's value is also needed as data (a session's start time
 identifies the session, and it is also what you subtract to get an elapsed time), or you want
 the value as a data column under another name, pass `tags_as_data` to get a source that keeps

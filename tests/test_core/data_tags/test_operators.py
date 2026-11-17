@@ -1,9 +1,9 @@
-"""Referential tags through operators (ITL-1023).
+"""Data-tags through operators (ITL-1023).
 
 Specification "Orcapod v0.4 — Referential Tags" (ITL-1004): ``Join`` section 9 and
 tests 15.4; ``GroupBy`` section 8 and tests 15.3; select and drop sections 7 and 10 and
 tests 15.5; row-preserving operators section 10. Operators the slice does not cover raise
-"not supported with referential tags yet" instead of giving a wrong answer.
+"not supported with data-tags yet" instead of giving a wrong answer.
 
 Every operator is driven through its public call, ``op(stream)``, and read through the
 stream's public methods.
@@ -19,7 +19,7 @@ import pyarrow as pa
 import pytest
 
 import orcapod as op
-from orcapod.core import referential_tags
+from orcapod.core import data_tags
 from orcapod.core.operators.join import JOIN_FOLD_LABEL
 from orcapod.core.operators import (
     Batch,
@@ -40,9 +40,9 @@ from orcapod.core.operators import (
     SelectTagColumns,
     SemiJoin,
 )
-from orcapod.core.referential_tags import (
-    ReferenceMaterializationWarning,
-    stream_references,
+from orcapod.core.data_tags import (
+    DataTagMaterializationWarning,
+    stream_data_tags,
 )
 from orcapod.errors import InputValidationError, SemiJoinIgnoredColumnWarning
 from orcapod.utils import arrow_utils
@@ -67,7 +67,7 @@ def _rows(stream) -> list[dict[str, object]]:
 # ── Join (section 9) ────────────────────────────────────────────────────────
 
 
-def _keyed(sid: str, value: str, *, nullable_key: bool, referential: bool):
+def _keyed(sid: str, value: str, *, nullable_key: bool, with_data_tags: bool):
     """Tag ``x: int64`` (with a null when ``nullable_key``) and data ``value``."""
     xs = [1, None, 3] if nullable_key else [1, 2, 3]
     table = pa.table(
@@ -80,7 +80,7 @@ def _keyed(sid: str, value: str, *, nullable_key: bool, referential: bool):
         ),
     )
     return op.sources.ArrowTableSource(
-        table, tag_columns=["x"], tag_only_columns=not referential, source_id=sid
+        table, tag_columns=["x"], tag_only_columns=not with_data_tags, source_id=sid
     )
 
 
@@ -93,18 +93,20 @@ def _keyed(sid: str, value: str, *, nullable_key: bool, referential: bool):
 def test_join_key_differing_in_nullability_only_is_t_in_both_roles(
     left_ref: bool, right_ref: bool, nullable_side: str
 ) -> None:
-    """ITL-829 for a referential key: a null key matches nothing, so the one column
+    """ITL-829 for a data-tag key: a null key matches nothing, so the one column
     is ``T`` as a tag and as data, predicted and computed alike."""
-    left = _keyed("L", "a", nullable_key=nullable_side == "left", referential=left_ref)
+    left = _keyed(
+        "L", "a", nullable_key=nullable_side == "left", with_data_tags=left_ref
+    )
     right = _keyed(
-        "R", "b", nullable_key=nullable_side == "right", referential=right_ref
+        "R", "b", nullable_key=nullable_side == "right", with_data_tags=right_ref
     )
     join = Join()
     joined = join(left, right)
     tag_schema, data_schema = joined.output_schema()
     assert tag_schema["x"] is int
     assert data_schema["x"] is int
-    assert stream_references(joined) == ("x",)
+    assert stream_data_tags(joined) == ("x",)
     # Schema prediction checked against static_process (CLAUDE.md standing rule).
     assert (
         join.output_schema(left, right)
@@ -121,7 +123,7 @@ def test_join_key_differing_in_nullability_only_is_t_in_both_roles(
 
 
 def test_join_key_of_another_type_still_raises() -> None:
-    left = _keyed("L", "a", nullable_key=False, referential=True)
+    left = _keyed("L", "a", nullable_key=False, with_data_tags=True)
     right = op.sources.DictSource(
         [{"x": "1", "b": 1}], tag_columns=["x"], source_id="R"
     )
@@ -135,28 +137,28 @@ def test_join_plain_with_plain_is_unchanged() -> None:
         ("x",),
         ("b", "a"),
     )
-    assert stream_references(joined) == ()
+    assert stream_data_tags(joined) == ()
     assert _rows(joined) == [{"x": 1, "a": 0.5, "b": 10}]
 
 
 @pytest.mark.parametrize("plain_side", ["a", "b"])
-def test_join_plain_with_referential_gives_a_referential_tag(plain_side: str) -> None:
+def test_join_plain_with_data_tag_gives_a_data_tag(plain_side: str) -> None:
     a = _a(tag_only_columns=True) if plain_side == "a" else _a()
     b = _b(tag_only_columns=True) if plain_side == "b" else _b()
     joined = Join()(a, b)
     tags, data = joined.keys()
     assert tags == ("x",) and set(data) == {"x", "a", "b"}
-    assert stream_references(joined) == ("x",)
+    assert stream_data_tags(joined) == ("x",)
     table = joined.as_table(columns={"source": True})
     assert table.column_names.count("x") == 1
-    # The data column comes from the referential side, with its source info.
+    # The data column comes from the data-tag side, with its source info.
     side = "B" if plain_side == "a" else "A"
     assert table.column("_source_x").to_pylist() == [f"{side}::row_0::x"]
 
 
-def test_join_referential_with_referential_merges_one_data_column() -> None:
+def test_join_data_tag_with_data_tag_merges_one_data_column() -> None:
     joined = Join()(_a(), _b())
-    assert stream_references(joined) == ("x",)
+    assert stream_data_tags(joined) == ("x",)
     table = joined.as_table(columns={"source": True})
     assert table.column_names.count("x") == 1
     assert [{k: r[k] for k in ("x", "a", "b")} for r in table.to_pylist()] == [
@@ -169,7 +171,7 @@ def test_join_referential_with_referential_merges_one_data_column() -> None:
     assert token == arrow_utils.fold_system_tag_values(members, label=JOIN_FOLD_LABEL)
 
 
-def test_join_is_commutative_with_references() -> None:
+def test_join_is_commutative_with_data_tags() -> None:
     assert (
         Join()(_a(), _b()).as_table(columns={"source": True}).to_pylist()
         == Join()(_b(), _a()).as_table(columns={"source": True}).to_pylist()
@@ -177,10 +179,10 @@ def test_join_is_commutative_with_references() -> None:
 
 
 def test_join_rejects_other_data_collisions() -> None:
-    other = _ref([{"k": 1, "a": 0.9}], ["k"], "C")  # data ``a`` again, not a reference
+    other = _ref([{"k": 1, "a": 0.9}], ["k"], "C")  # data ``a`` again, not a data-tag
     with pytest.raises(InputValidationError, match="overlapping"):
         Join()(_a(), other)
-    # Data-only ``x`` on one side, referential ``x`` on the other: not equated by a tag.
+    # Data-only ``x`` on one side, data-tag ``x`` on the other: not equated by a tag.
     data_only = _ref([{"k": 1, "x": 1}], ["k"], "D")
     with pytest.raises(InputValidationError):
         Join()(_a(), data_only)
@@ -193,7 +195,7 @@ def test_join_rejects_a_plain_tag_named_like_a_data_column() -> None:
         Join()(plain_tag, data_only)
 
 
-def test_join_rejects_disagreeing_reference_types() -> None:
+def test_join_rejects_disagreeing_data_tag_types() -> None:
     as_text = _ref([{"x": "1", "b": 10}], ["x"], "T")
     with pytest.raises(InputValidationError):
         Join()(_a(), as_text)
@@ -222,23 +224,23 @@ GROUP_ROWS = [
 ]
 
 
-def test_group_by_referential_key_stays_scalar_in_both_roles() -> None:
+def test_group_by_data_tag_key_stays_scalar_in_both_roles() -> None:
     grouped = GroupBy(["x"])(_ref(GROUP_ROWS, ["s", "x"], "G"))
     tag_schema, data_schema = grouped.output_schema()
     assert tag_schema["x"] is int and data_schema["x"] is int
     # The non-key ``s`` is dropped in both roles (ITL-1070).
-    assert stream_references(grouped) == ("x",)
+    assert stream_data_tags(grouped) == ("x",)
     for tag, data in grouped.iter_data():
         assert tag["x"] == data["x"] and isinstance(data["x"], int)
 
 
-def test_group_by_referential_non_key_keeps_its_data_as_a_list() -> None:
+def test_group_by_data_tag_non_key_keeps_its_data_as_a_list() -> None:
     grouped = GroupBy(["s"])(_ref(GROUP_ROWS, ["s", "x"], "G"))
-    # A non-key tag loses its tag role (ITL-1070); a referential one keeps its data
+    # A non-key tag loses its tag role (ITL-1070); a data-tag keeps its data
     # column, aggregated like every other data column (developer, November 13, 2026).
     tags, data = grouped.keys()
     assert tags == ("s",) and set(data) == {"s", "x", "y"}
-    assert stream_references(grouped) == ("s",)
+    assert stream_data_tags(grouped) == ("s",)
     _, data_schema = grouped.output_schema()
     assert data_schema["x"] == list[int]
     rows = {tag["s"]: data for tag, data in grouped.iter_data()}
@@ -251,7 +253,7 @@ def test_group_by_referential_non_key_keeps_its_data_as_a_list() -> None:
 def test_group_by_lays_its_keys_out_first() -> None:
     """The keys lead the table, as in every node table (row order, ITL-1131).
 
-    A referential non-key ``x`` declared before the key keeps its data column, which
+    A data-tag non-key ``x`` declared before the key keeps its data column, which
     must not lead the table: a job node keeps the row order, and the operator's own
     table must equal it.
     """
@@ -274,19 +276,19 @@ def test_group_by_prediction_matches_the_result() -> None:
 # ── select and drop (sections 7 and 10) ─────────────────────────────────────
 
 
-def test_selecting_away_the_referenced_data_leaves_a_plain_tag() -> None:
+def test_selecting_away_the_data_tag_data_leaves_a_plain_tag() -> None:
     source = _ref([{"x": 1, "y": 2}], ["x"], "S")
-    with pytest.warns(ReferenceMaterializationWarning):
+    with pytest.warns(DataTagMaterializationWarning):
         selected = SelectDataColumns(["y"])(source)
     assert selected.keys() == (("x",), ("y",))
-    assert stream_references(selected) == ()
+    assert stream_data_tags(selected) == ()
     assert selected.as_table().to_pylist() == [{"x": 1, "y": 2}]
     assert "_source_x" not in selected.as_table(columns={"source": True}).column_names
 
 
-def test_dropping_the_referenced_data_leaves_a_plain_tag() -> None:
+def test_dropping_the_data_tag_data_leaves_a_plain_tag() -> None:
     source = _ref([{"x": 1, "y": 2}], ["x"], "S")
-    with pytest.warns(ReferenceMaterializationWarning):
+    with pytest.warns(DataTagMaterializationWarning):
         dropped = DropDataColumns(["x"])(source)
     assert dropped.keys() == (("x",), ("y",))
 
@@ -295,9 +297,9 @@ def test_silent_materialization_changes_nothing_but_the_warning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = _ref([{"x": 1, "y": 2}], ["x"], "S")
-    with pytest.warns(ReferenceMaterializationWarning):
+    with pytest.warns(DataTagMaterializationWarning):
         warned = SelectDataColumns(["y"])(source)
-    monkeypatch.setattr(referential_tags, "reference_materialization", "silent")
+    monkeypatch.setattr(data_tags, "data_tag_materialization", "silent")
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         silent = SelectDataColumns(["y"])(source)
@@ -309,11 +311,11 @@ def test_silent_materialization_changes_nothing_but_the_warning(
 @pytest.mark.parametrize(
     "drop", [lambda: DropTagColumns(["x"]), lambda: SelectTagColumns(["k"])]
 )
-def test_removing_a_referential_tag_keeps_its_data(drop) -> None:
+def test_removing_a_data_tag_keeps_its_data(drop) -> None:
     source = _ref([{"k": 1, "x": 1, "y": 2}], ["k", "x"], "S", tag_only_columns=["k"])
     result = drop()(source)
     assert result.keys() == (("k",), ("x", "y"))
-    assert stream_references(result) == ()
+    assert stream_data_tags(result) == ()
     ((tag, data),) = list(result.iter_data())
     assert tag.as_dict() == {"k": 1}
     assert data.as_dict() == {"x": 1, "y": 2}
@@ -325,16 +327,16 @@ def test_removing_a_referential_tag_keeps_its_data(drop) -> None:
 
 
 def _xky(**kw: Any):
-    """Referential tags ``k`` and ``x``; data ``y``."""
+    """Data-tags ``k`` and ``x``; data ``y``."""
     return _ref(
         [{"k": 1, "x": 10, "y": 2}, {"k": 2, "x": 20, "y": 3}], ["k", "x"], "C", **kw
     )
 
 
 @pytest.mark.parametrize(
-    ("make_op", "keys", "references"),
+    ("make_op", "keys", "data_tags"),
     [
-        # Naming a referential tag keeps its one column in both roles.
+        # Naming a data-tag keeps its one column in both roles.
         (lambda: SelectColumns(["x", "y"]), (("x",), ("x", "y")), ("x",)),
         (lambda: SelectColumns(["x"]), (("x",), ("x",)), ("x",)),
         # Not naming it removes the column, in both roles.
@@ -342,20 +344,20 @@ def _xky(**kw: Any):
         # Dropping it removes the column, in both roles.
         (lambda: DropColumns(["x"]), (("k",), ("k", "y")), ("k",)),
         (lambda: DropColumns(["k", "x"]), ((), ("y",)), ()),
-        # Not naming it keeps it referential.
+        # Not naming it keeps it a data-tag.
         (lambda: DropColumns(["y"]), (("k", "x"), ("k", "x")), ("k", "x")),
     ],
     ids=["select_x_y", "select_x", "select_k_y", "drop_x", "drop_k_x", "drop_y"],
 )
 def test_select_and_drop_columns_act_on_the_one_column_in_both_roles(
-    make_op, keys, references
+    make_op, keys, data_tags
 ) -> None:
     with warnings.catch_warnings():
         # Neither splits the roles, so nothing is materialized.
-        warnings.simplefilter("error", ReferenceMaterializationWarning)
+        warnings.simplefilter("error", DataTagMaterializationWarning)
         result = make_op()(_xky())
     assert result.keys() == keys
-    assert stream_references(result) == references
+    assert stream_data_tags(result) == data_tags
     table = result.as_table(columns={"source": True})
     tag_keys, data_keys = keys
     for name in ("k", "x", "y"):
@@ -363,11 +365,11 @@ def test_select_and_drop_columns_act_on_the_one_column_in_both_roles(
         assert table.column_names.count(name) == int(present)
         assert (f"_source_{name}" in table.column_names) == (name in data_keys)
     for tag, data in result.iter_data():
-        for name in references:
+        for name in data_tags:
             assert tag[name] == data[name]
 
 
-def test_selected_reference_keeps_its_values_and_source_info() -> None:
+def test_selected_data_tag_keeps_its_values_and_source_info() -> None:
     result = SelectColumns(["x", "y"])(_xky())
     assert _rows(result) == [{"x": 10, "y": 2}, {"x": 20, "y": 3}]
     assert result.as_table(columns={"source": True}).column(
@@ -393,7 +395,7 @@ def test_select_and_drop_columns_predict_their_result(make_op) -> None:
     # name intersection of the two halves, so the schemas also carry it.
     result = make_op().static_process(source)
     assert predicted == result.output_schema()
-    assert referential_tags.reference_names(*predicted) == stream_references(result)
+    assert data_tags.data_tag_names(*predicted) == stream_data_tags(result)
 
 
 @pytest.mark.parametrize(
@@ -407,7 +409,7 @@ def test_select_and_drop_columns_with_no_rows_keep_the_populated_shape(
     source = _xky()
     populated = make_op()(source).as_table(columns={"source": True})
     empty = make_op()(PolarsFilter(constraints={"k": 0})(source))
-    assert stream_references(empty) == stream_references(make_op()(source))
+    assert stream_data_tags(empty) == stream_data_tags(make_op()(source))
     table = empty.as_table(columns={"source": True})
     assert table.num_rows == 0
     assert table.schema == populated.schema
@@ -421,12 +423,12 @@ def test_select_and_drop_columns_with_no_rows_keep_the_populated_shape(
 def test_select_and_drop_columns_commute_with_batch(
     make_op: Callable[[], SelectColumns | DropColumns],
 ) -> None:
-    # Batch keeps a referential tag one list column in both roles (ITL-1017), so
-    # selecting or dropping before or after it gives the same rows and reference.
+    # Batch keeps a data-tag one list column in both roles (ITL-1017), so
+    # selecting or dropping before or after it gives the same rows and data-tag.
     after = make_op()(Batch(batch_size=2)(_xky()))
     before = Batch(batch_size=2)(make_op()(_xky()))
     assert after.keys() == before.keys() == (("x",), ("x", "y"))
-    assert stream_references(after) == stream_references(before) == ("x",)
+    assert stream_data_tags(after) == stream_data_tags(before) == ("x",)
     assert _rows(after) == _rows(before) == [{"x": [10, 20], "y": [2, 3]}]
 
 
@@ -461,17 +463,17 @@ def _rows_source():
     ],
     ids=["filter", "drop_nulls_all", "drop_nulls", "index", "pick"],
 )
-def test_row_preserving_operators_keep_references(make_op) -> None:
+def test_row_preserving_operators_keep_data_tags(make_op) -> None:
     result = make_op()(_rows_source())
-    assert stream_references(result) == ("x",)
+    assert stream_data_tags(result) == ("x",)
     assert result.as_table().column_names.count("x") == 1
     for tag, data in result.iter_data():
         assert tag["x"] == data["x"]
 
 
-def test_semijoin_keeps_the_left_references() -> None:
+def test_semijoin_keeps_the_left_data_tags() -> None:
     result = SemiJoin()(_a(), _b())
-    assert stream_references(result) == ("x",)
+    assert stream_data_tags(result) == ("x",)
     assert [r["x"] for r in result.as_table().to_pylist()] == [1]
 
 
@@ -480,10 +482,10 @@ def test_semijoin_keeps_the_left_references() -> None:
     [(False, False), (True, False), (False, True)],
     ids=["ref_ref", "plain_ref", "ref_plain"],
 )
-def test_semijoin_on_a_referential_key_warns_about_nothing(
+def test_semijoin_on_a_data_tag_key_warns_about_nothing(
     left_plain: bool, right_plain: bool
 ) -> None:
-    """A referential tag shared as a tag is a match key, used in both its roles.
+    """A data-tag shared as a tag is a match key, used in both its roles.
 
     Its data role is the same column, so ``SemiJoinIgnoredColumnWarning`` (ITL-1088)
     has nothing to report, on the sync and the async path.
@@ -496,19 +498,17 @@ def test_semijoin_on_a_referential_key_warns_about_nothing(
         assert [r["x"] for r in result.as_table().to_pylist()] == [1]
 
 
-def test_semijoin_still_warns_about_a_referential_tag_that_is_data_on_the_right() -> (
-    None
-):
-    """A left referential tag that is only data on the right is not a key."""
+def test_semijoin_still_warns_about_a_data_tag_that_is_data_on_the_right() -> None:
+    """A left data-tag that is only data on the right is not a key."""
     right = _ref([{"y": 1, "x": 1}], ["y"], "B", tag_only_columns=True)
     with pytest.warns(SemiJoinIgnoredColumnWarning, match="'x'"):
         _ = SemiJoin()(_a(), right)
 
 
 @pytest.mark.parametrize("make_op", [lambda: Index("x", 0), lambda: Pick("x", "q")])
-def test_in_place_extraction_of_a_referenced_column_raises(make_op) -> None:
+def test_in_place_extraction_of_a_data_tag_column_raises(make_op) -> None:
     source = _ref([{"x": [1], "y": 2}], ["x"], "R")
-    with pytest.raises(InputValidationError, match="referential tag"):
+    with pytest.raises(InputValidationError, match="data-tag"):
         make_op()(source)
 
 
@@ -522,7 +522,7 @@ def test_extraction_named_like_a_tag_raises() -> None:
 
 
 def test_uncovered_operators_raise() -> None:
-    # MergeJoin handles referential tags since ITL-1194 (test_merge_join.py).
+    # MergeJoin handles data-tags since ITL-1194 (test_merge_join.py).
     with pytest.raises(NotImplementedError, match="ITL-1022"):
         MapColumns({"x": "z"})(_a())
 
@@ -530,21 +530,21 @@ def test_uncovered_operators_raise() -> None:
 # ── renames (developer decision, November 12, 2026) ─────────────────────────
 
 
-def test_renames_that_leave_references_alone_work() -> None:
+def test_renames_that_leave_data_tags_alone_work() -> None:
     renamed = MapData({"a": "z"})(_a())
     assert renamed.keys() == (("x",), ("x", "z"))
-    assert stream_references(renamed) == ("x",)
+    assert stream_data_tags(renamed) == ("x",)
     retagged = MapTags({"k": "kk"})(
         _ref([{"k": 1, "x": 1, "y": 2}], ["k", "x"], "M", tag_only_columns=["k"])
     )
     assert retagged.keys() == (("kk", "x"), ("x", "y"))
-    assert stream_references(retagged) == ("x",)
+    assert stream_data_tags(retagged) == ("x",)
 
 
-def test_map_tags_renames_a_referential_tag_in_both_roles() -> None:
+def test_map_tags_renames_a_data_tag_in_both_roles() -> None:
     renamed = MapTags({"x": "z"})(_a())
     assert renamed.keys() == (("z",), ("z", "a"))
-    assert stream_references(renamed) == ("z",)
+    assert stream_data_tags(renamed) == ("z",)
     table = renamed.as_table(columns={"source": True})
     assert "x" not in table.column_names and table.column_names.count("z") == 1
     assert table.column("_source_z").to_pylist() == ["A::row_0::x", "A::row_1::x"]
@@ -556,7 +556,7 @@ def test_map_tags_renames_a_referential_tag_in_both_roles() -> None:
 def test_map_tags_tag_only_leaves_a_plain_tag_and_the_data_column() -> None:
     renamed = MapTags({"x": "z"}, tag_only=True)(_a())
     assert renamed.keys() == (("z",), ("x", "a"))
-    assert stream_references(renamed) == ()
+    assert stream_data_tags(renamed) == ()
     for tag, data in renamed.iter_data():
         assert tag["z"] == data["x"]
     # ``tag_only`` enters the identity only when set.
@@ -569,7 +569,7 @@ def test_map_tags_tag_only_leaves_a_plain_tag_and_the_data_column() -> None:
 def test_map_data_is_a_data_only_move() -> None:
     renamed = MapData({"x": "z"})(_a())
     assert renamed.keys() == (("x",), ("z", "a"))
-    assert stream_references(renamed) == ()
+    assert stream_data_tags(renamed) == ()
     for tag, data in renamed.iter_data():
         assert tag["x"] == data["z"]
     assert renamed.as_table(columns={"source": True}).column(
@@ -577,13 +577,13 @@ def test_map_data_is_a_data_only_move() -> None:
     ).to_pylist() == ["A::row_0::x", "A::row_1::x"]
 
 
-def test_map_data_chained_rename_does_not_reach_the_referenced_copy() -> None:
-    """``{x: z, z: w}``: the copy of referential ``x`` is ``z``, the old ``z`` is ``w``."""
+def test_map_data_chained_rename_does_not_reach_the_data_tag_copy() -> None:
+    """``{x: z, z: w}``: the copy of data-tag ``x`` is ``z``, the old ``z`` is ``w``."""
     source = _ref([{"x": 1, "z": 5}, {"x": 2, "z": 6}], ["x"], "C")
     mapper = MapData({"x": "z", "z": "w"})
     renamed = mapper(source)
     assert renamed.keys() == (("x",), ("z", "w"))
-    assert stream_references(renamed) == ()
+    assert stream_data_tags(renamed) == ()
     rows = sorted(
         (int(t["x"]), int(d["z"]), int(d["w"]))  # pyright: ignore[reportArgumentType]  # int columns
         for t, d in renamed.iter_data()
@@ -603,7 +603,7 @@ def test_map_tags_tag_only_keeps_a_chained_rename_of_another_tag() -> None:
     mapper = MapTags({"x": "z", "z": "w"}, tag_only=True)
     renamed = mapper(source)
     assert renamed.keys() == (("z", "w"), ("x", "a"))
-    assert stream_references(renamed) == ()
+    assert stream_data_tags(renamed) == ()
     rows = sorted(
         (int(t["z"]), int(t["w"]), int(d["x"]))  # pyright: ignore[reportArgumentType]  # int columns
         for t, d in renamed.iter_data()
@@ -612,16 +612,16 @@ def test_map_tags_tag_only_keeps_a_chained_rename_of_another_tag() -> None:
     assert mapper.output_schema(source) == mapper.static_process(source).output_schema()
 
 
-def test_map_data_dropping_an_unmapped_reference_leaves_a_plain_tag() -> None:
+def test_map_data_dropping_an_unmapped_data_tag_leaves_a_plain_tag() -> None:
     renamed = MapData({"a": "z"}, drop_unmapped=True)(_a())
     assert renamed.keys() == (("x",), ("z",))
 
 
-def test_map_tags_dropping_an_unmapped_reference_keeps_its_data() -> None:
+def test_map_tags_dropping_an_unmapped_data_tag_keeps_its_data() -> None:
     source = _ref([{"k": 1, "x": 1, "y": 2}], ["k", "x"], "M")
     renamed = MapTags({"k": "kk"}, drop_unmapped=True)(source)
     assert renamed.keys() == (("kk",), ("kk", "x", "y"))
-    assert stream_references(renamed) == ("kk",)
+    assert stream_data_tags(renamed) == ("kk",)
 
 
 def test_map_tags_on_plain_tags_is_unchanged() -> None:

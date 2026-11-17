@@ -2,8 +2,8 @@
 
 Developer decision, November 13, 2026: when a data value is the merge of several equal
 elements, its source-info value is one scalar token, a deterministic digest of the member
-tokens: the scalar key of a ``GroupBy`` on a referential tag, and the shared key of a
-``Join`` that is referential on more than one input. Provenance belongs to the data column
+tokens: the scalar key of a ``GroupBy`` on a data-tag, and the shared key of a
+``Join`` that is a data-tag on more than one input. Provenance belongs to the data column
 and keeps its shape: a scalar data column has a scalar token, a list column a list of
 tokens, nested as deep as the data. The token is the operation's fold (ITL-1154):
 ``group_v1:<hex>`` over the members' tokens in member order for a ``GroupBy`` key, and
@@ -43,7 +43,7 @@ from orcapod.core.operators import (
 )
 from orcapod.core.operators.group_by import GROUP_BY_FOLD_LABEL
 from orcapod.core.operators.join import JOIN_FOLD_LABEL
-from orcapod.core.referential_tags import merge_source_info
+from orcapod.core.data_tags import merge_source_info
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.utils import arrow_utils
 
@@ -154,7 +154,7 @@ def test_the_shape_check_looks_at_every_member() -> None:
         _assert_same_shape([[20], [10]], [["a"], []], 2, "c")
 
 
-def test_a_referential_group_key_schema_prediction_matches_the_result() -> None:
+def test_a_data_tag_group_key_schema_prediction_matches_the_result() -> None:
     """The key stays scalar in both roles; the prediction agrees with the result."""
     source = _ref(
         [{"s": "a", "t": 1, "v": 0.5}, {"s": "a", "t": 2, "v": 0.7}], ["s", "t"], "S"
@@ -297,13 +297,13 @@ def test_the_group_token_is_the_same_in_another_process() -> None:
 # ── Join: the shared key's token ────────────────────────────────────────────
 
 
-def test_join_of_two_referential_inputs_merges_their_tokens() -> None:
+def test_join_of_two_data_tag_inputs_merges_their_tokens() -> None:
     (token,) = _source_column(Join()(_a(), _b()), "x")
     assert JOIN_TOKEN.match(token)
     assert token == join_fold(["A::row_0::x", "B::row_0::x"])
 
 
-def test_join_with_a_plain_input_keeps_the_referential_token() -> None:
+def test_join_with_a_plain_input_keeps_the_data_tag_token() -> None:
     assert _source_column(Join()(_a(tag_only_columns=True), _b()), "x") == [
         "B::row_0::x"
     ]
@@ -315,7 +315,7 @@ def test_three_way_join_folds_all_inputs_once() -> None:
 
 
 def _tied(sid: str):
-    """A key-only referential input: every such input has one pipeline hash (a tie)."""
+    """A key-only input with data-tags: every such input has one pipeline hash (a tie)."""
     return _ref([{"x": 1}], ["x"], sid)
 
 

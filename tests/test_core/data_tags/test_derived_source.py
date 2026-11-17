@@ -1,10 +1,9 @@
 """A derived source carries the bindings of what it reads (ITL-1019, gap audit S1 and Q7).
 
-``node.as_source()`` over a function or operator node whose stored records hold referential
-tags presents the bindings the stored table states (the marker of ``referential_tags``),
+``node.as_source()`` over a function or operator node whose stored records hold data-tags presents the bindings the stored table states (the marker of ``data_tags``),
 checked against the node's keys, in the plain form and the ``tags_as_data`` form. Nothing is
 added to the identity for the binding: it is in the origin's content hash and in the output
-schema, where a referential tag is in both halves.
+schema, where a data-tag is in both halves.
 """
 
 from __future__ import annotations
@@ -18,11 +17,11 @@ import pytest
 
 import orcapod as op
 from orcapod.core.operators import Join
-from orcapod.core.referential_tags import (
-    REFERENTIAL_TAG_METADATA_KEY,
-    ReferenceMaterializationWarning,
-    mark_references,
-    without_reference_marks,
+from orcapod.core.data_tags import (
+    TAG_KIND_METADATA_KEY,
+    DataTagMaterializationWarning,
+    mark_data_tags,
+    without_tag_kind_marks,
 )
 from orcapod.core.sources import DerivedSource
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
@@ -36,7 +35,7 @@ from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.types import CacheMode, NodeConfig
 
 JOB = "derived"
-REFERENTIAL_KEYS = (("unit", "time"), ("unit", "y"))
+DATA_TAG_KEYS = (("unit", "time"), ("unit", "y"))
 
 
 def _in_memory(_: Path) -> ArrowDatabaseProtocol:
@@ -66,12 +65,12 @@ def double(amp: float) -> float:
 
 @op.function_pod(output_keys=["w"])
 def scale(unit: int, y: float) -> float:
-    """Reads the referential tag ``unit`` as data."""
+    """Reads the data-tag ``unit`` as data."""
     return unit * y
 
 
 def _source(tag_only: object = ("time",), rows: int = 2) -> op.sources.DictSource:
-    """``unit`` referential and ``time`` plain unless ``tag_only`` says otherwise."""
+    """``unit`` a data-tag and ``time`` plain unless ``tag_only`` says otherwise."""
     return op.sources.DictSource(
         [{"unit": i, "time": 10 * i, "amp": i - 0.5} for i in range(1, rows + 1)],
         tag_columns=["unit", "time"],
@@ -110,9 +109,7 @@ def _operator_job(
 
 
 def _marked(schema: pa.Schema) -> list[str]:
-    return [
-        f.name for f in schema if REFERENTIAL_TAG_METADATA_KEY in (f.metadata or {})
-    ]
+    return [f.name for f in schema if TAG_KIND_METADATA_KEY in (f.metadata or {})]
 
 
 def _by_unit(table: pa.Table) -> list[dict[str, object]]:
@@ -134,7 +131,7 @@ def test_as_source_of_a_function_node_keeps_its_bindings(
     job = _function_job(make_store(tmp_path), orchestrator)
     node = job.nodes["double"]
     source = node.as_source()
-    assert source.keys() == node.keys() == REFERENTIAL_KEYS
+    assert source.keys() == node.keys() == DATA_TAG_KEYS
     assert source.output_schema() == node.output_schema()
     table = source.as_table(all_info=True)
     assert table.column_names.count("unit") == 1
@@ -159,7 +156,7 @@ def test_as_source_keeps_the_bindings_when_results_are_ephemeral() -> None:
     records = node.get_all_records()
     assert records is not None and records.num_rows == 2
     source = node.as_source()
-    assert source.keys() == REFERENTIAL_KEYS
+    assert source.keys() == DATA_TAG_KEYS
     assert sorted(source.as_table().column("y").to_pylist()) == [1.0, 3.0]
 
 
@@ -171,7 +168,7 @@ def test_as_source_of_an_operator_node_keeps_its_bindings(
     orchestrator: Orchestrator,
 ) -> None:
     with warnings.catch_warnings():
-        warnings.simplefilter("ignore", ReferenceMaterializationWarning)
+        warnings.simplefilter("ignore", DataTagMaterializationWarning)
         job = _operator_job(make_store(tmp_path), orchestrator)
     node = job.nodes["joined"]
     source = node.as_source()
@@ -184,7 +181,7 @@ def test_as_source_of_an_operator_node_keeps_its_bindings(
 def test_a_derived_source_before_its_node_ran_has_the_binding_and_no_rows() -> None:
     job = _function_job(InMemoryArrowDatabase(), run=False)
     source = job.nodes["double"].as_source()
-    assert source.keys() == REFERENTIAL_KEYS
+    assert source.keys() == DATA_TAG_KEYS
     assert source.as_table().num_rows == 0
     assert source.as_table().column_names.count("unit") == 1
 
@@ -198,7 +195,7 @@ def test_a_derived_source_refuses_records_that_disagree_with_the_node() -> None:
         assert table is not None
         tampered.add_records(
             path,
-            without_reference_marks(table),
+            without_tag_kind_marks(table),
             record_id_column="__copy_id",
             flush=True,
         )
@@ -206,7 +203,7 @@ def test_a_derived_source_refuses_records_that_disagree_with_the_node() -> None:
     # The node checks its own table first and names it.
     with pytest.raises(
         InputValidationError,
-        match=r"pipeline table .* marks the referential tags \[\], but the node's pod "
+        match=r"pipeline table .* marks the data-tags \[\], but the node's pod "
         r"declares \['unit'\]",
     ):
         _ = source.as_table()
@@ -220,11 +217,11 @@ def test_a_derived_source_checks_the_records_it_reads_itself(
     records = node.get_all_records()
     assert records is not None
     # Records that mark one tag more than the node shares between tag and data.
-    wrong = mark_references(records, ["unit", "time"])
+    wrong = mark_data_tags(records, ["unit", "time"])
     monkeypatch.setattr(node, "get_all_records", lambda *_, **__: wrong)
     with pytest.raises(
         InputValidationError,
-        match=r"the stored records mark the referential tags \['time', 'unit'\], but "
+        match=r"the stored records mark the data-tags \['time', 'unit'\], but "
         r"the node declares \['unit'\]",
     ):
         _ = node.as_source().as_table()
@@ -236,16 +233,16 @@ def test_a_derived_source_checks_the_records_it_reads_itself(
 
 
 @ORCHESTRATORS
-def test_tags_as_data_over_a_referential_node(orchestrator: Orchestrator) -> None:
+def test_tags_as_data_over_a_data_tag_node(orchestrator: Orchestrator) -> None:
     job = _function_job(InMemoryArrowDatabase(), orchestrator)
     node = job.nodes["double"]
     source = node.as_source(tags_as_data={"time": "start", "unit": "unit_copy"})
-    # The referential tag keeps its binding; each copy is a new plain data column.
+    # The data-tag keeps its binding; each copy is a new plain data column.
     assert source.keys() == (("unit", "time"), ("unit", "y", "start", "unit_copy"))
     table = source.as_table(all_info=True)
     assert table.column_names.count("unit") == 1
     assert _marked(table.schema) == []
-    # Fresh provenance: every data column, the referential one included, gets a token.
+    # Fresh provenance: every data column, the data-tag included, gets a token.
     assert {"_source_unit", "_source_y", "_source_start", "_source_unit_copy"} <= set(
         table.column_names
     )
@@ -253,7 +250,7 @@ def test_tags_as_data_over_a_referential_node(orchestrator: Orchestrator) -> Non
         assert row["unit_copy"] == row["unit"] and row["start"] == 10 * row["unit"]
 
 
-def test_tags_as_data_over_a_referential_source() -> None:
+def test_tags_as_data_over_a_data_tag_source() -> None:
     source = DerivedSource(_source(), tags_as_data={"time": "start"})
     assert source.keys() == (("unit", "time"), ("unit", "amp", "start"))
     assert source.as_table().column_names.count("unit") == 1
@@ -265,7 +262,7 @@ def test_tags_as_data_over_a_referential_source() -> None:
 
 
 def test_the_binding_enters_the_identity_through_the_origin_and_the_schema() -> None:
-    referential = _function_job(InMemoryArrowDatabase()).nodes["double"].as_source()
+    with_data_tags = _function_job(InMemoryArrowDatabase()).nodes["double"].as_source()
     plain = (
         _function_job(InMemoryArrowDatabase(), tag_only=True)
         .nodes["double"]
@@ -273,16 +270,18 @@ def test_the_binding_enters_the_identity_through_the_origin_and_the_schema() -> 
     )
     assert plain.keys() == (("unit", "time"), ("y",))
     # Plain form: the content hash is the origin node's, which carries the binding.
-    assert referential.identity_structure() == (
-        referential._origin.content_hash(),  # pyright: ignore[reportPrivateUsage]  # the identity rule under test
+    assert with_data_tags.identity_structure() == (
+        with_data_tags._origin.content_hash(),  # pyright: ignore[reportPrivateUsage]  # the identity rule under test
     )
-    assert referential.content_hash() != plain.content_hash()
-    # Pipeline hash: schema only; a referential tag is in both halves of it.
-    assert referential.pipeline_identity_structure() == referential.output_schema()
-    assert referential.pipeline_hash() != plain.pipeline_hash()
+    assert with_data_tags.content_hash() != plain.content_hash()
+    # Pipeline hash: schema only; a data-tag is in both halves of it.
+    assert (
+        with_data_tags.pipeline_identity_structure() == with_data_tags.output_schema()
+    )
+    assert with_data_tags.pipeline_hash() != plain.pipeline_hash()
     # The default source id keeps its construction: derived:<label>:<hex> of the origin.
-    assert referential.source_id.startswith("derived:")
-    assert referential.source_id != plain.source_id
+    assert with_data_tags.source_id.startswith("derived:")
+    assert with_data_tags.source_id != plain.source_id
 
 
 def test_equal_origins_give_equal_derived_sources() -> None:
@@ -298,7 +297,7 @@ def test_equal_origins_give_equal_derived_sources() -> None:
 
 
 @ORCHESTRATORS
-def test_a_job_over_a_derived_source_reads_the_reference(
+def test_a_job_over_a_derived_source_reads_the_data_tag(
     orchestrator: Orchestrator,
 ) -> None:
     upstream = _function_job(InMemoryArrowDatabase(), orchestrator)

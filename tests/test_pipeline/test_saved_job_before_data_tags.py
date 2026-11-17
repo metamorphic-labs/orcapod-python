@@ -1,7 +1,7 @@
-"""A job saved before referential tags loads with its v0.3 meaning (ITL-1023).
+"""A job saved before data-tags loads with its v0.3 meaning (ITL-1023).
 
 The fixture ``fixtures/saved_job_37716c76`` was written by Orcapod at commit 37716c76
-(``main`` before referential tags, after the v1 hash definition of ITL-1154; job format
+(``main`` before data-tags, after the v1 hash definition of ITL-1154; job format
 ``0.2.0``, the format v0.3.0 writes) by ``fixtures/make_saved_job_37716c76.py``: a
 ``CSVSource`` with tag ``subject`` feeding one function node, run on a Delta store. Files
 at formats ``0.1.0`` and ``0.2.0`` hold v0.3 sources, whose declared tags are tag-only;

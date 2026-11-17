@@ -8,7 +8,7 @@ source kind from data that holds ``string``, ``binary``, ``list<string>`` and a 
 type in a table by walking its Arrow types.
 
 Every source keeps its tags plain (``tag_only_columns=True``): the cases assert the
-v0.3 shapes and run operators that do not handle referential tags yet (ITL-1023).
+v0.3 shapes and run operators that do not handle data-tags yet (ITL-1023).
 """
 
 from __future__ import annotations

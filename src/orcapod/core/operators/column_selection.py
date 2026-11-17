@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import UnaryOperator
-from orcapod.core.referential_tags import stream_references, warn_materialized
+from orcapod.core.data_tags import stream_data_tags, warn_materialized
 from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
@@ -64,8 +64,8 @@ class SelectTagColumns(UnaryOperator):
     Operator that selects specified columns from a stream.
     """
 
-    # Referential tags (ITL-1023): handled.
-    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = None
+    # Data-tags (ITL-1023): handled.
+    DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def __init__(self, columns: str | Collection[str], strict: bool = True, **kwargs):
         self.columns = _canonical_columns(columns)
@@ -99,17 +99,17 @@ class SelectTagColumns(UnaryOperator):
             columns={"source": True, "system_tags": True, "sort_by_tags": False}
         )
 
-        # A dropped referential tag leaves its column as plain data (specification
+        # A dropped data-tag leaves its column as plain data (specification
         # section 10, "Drop tag": remove the tag, retain data independently).
-        references = stream_references(stream)
+        data_tags = stream_data_tags(stream)
         modified_table = table.drop_columns(
-            [c for c in tags_to_drop if c not in references]
+            [c for c in tags_to_drop if c not in data_tags]
         )
 
         return ArrowTableStream(
             modified_table,
             tag_columns=new_tag_columns,
-            reference_tags=[c for c in references if c in new_tag_columns],
+            data_tags=[c for c in data_tags if c in new_tag_columns],
         )
 
     def validate_unary_input(self, stream: StreamProtocol) -> None:
@@ -195,8 +195,8 @@ class SelectDataColumns(UnaryOperator):
     Operator that selects specified columns from a stream.
     """
 
-    # Referential tags (ITL-1023): handled.
-    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = None
+    # Data-tags (ITL-1023): handled.
+    DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def __init__(self, columns: str | Collection[str], strict: bool = True, **kwargs):
         self.columns = _canonical_columns(columns)
@@ -233,18 +233,18 @@ class SelectDataColumns(UnaryOperator):
         associated_source_fields = [
             f"{constants.SOURCE_PREFIX}{c}" for c in data_columns_to_drop
         ]
-        # A referential tag whose data column is removed keeps its column as a plain
+        # A data-tag whose data column is removed keeps its column as a plain
         # tag with the same values (specification section 7.2).
-        references = stream_references(stream)
+        data_tags = stream_data_tags(stream)
         modified_table = table.drop_columns(
-            [c for c in data_columns_to_drop if c not in references]
+            [c for c in data_columns_to_drop if c not in data_tags]
             + associated_source_fields
         )
 
         return ArrowTableStream(
             modified_table,
             tag_columns=tag_columns,
-            reference_tags=[c for c in references if c not in data_columns_to_drop],
+            data_tags=[c for c in data_tags if c not in data_columns_to_drop],
         )
 
     def validate_unary_input(self, stream: StreamProtocol) -> None:
@@ -267,7 +267,7 @@ class SelectDataColumns(UnaryOperator):
             )
         warn_materialized(
             self,
-            [c for c in stream_references(stream) if c not in self.columns],
+            [c for c in stream_data_tags(stream) if c not in self.columns],
         )
         require_a_data_column([c for c in data_columns if c in columns_to_select])
 
@@ -343,8 +343,8 @@ class DropTagColumns(UnaryOperator):
     Operator that drops specified columns from a stream.
     """
 
-    # Referential tags (ITL-1023): handled.
-    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = None
+    # Data-tags (ITL-1023): handled.
+    DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def __init__(self, columns: str | Collection[str], strict: bool = True, **kwargs):
         self.columns = _canonical_columns(columns)
@@ -381,17 +381,17 @@ class DropTagColumns(UnaryOperator):
             columns={"source": True, "system_tags": True, "sort_by_tags": False}
         )
 
-        # A dropped referential tag leaves its column as plain data (specification
+        # A dropped data-tag leaves its column as plain data (specification
         # section 10, "Drop tag": remove the tag, retain data independently).
-        references = stream_references(stream)
+        data_tags = stream_data_tags(stream)
         modified_table = table.drop_columns(
-            [c for c in columns_to_drop if c not in references]
+            [c for c in columns_to_drop if c not in data_tags]
         )
 
         return ArrowTableStream(
             modified_table,
             tag_columns=new_tag_columns,
-            reference_tags=[c for c in references if c in new_tag_columns],
+            data_tags=[c for c in data_tags if c in new_tag_columns],
         )
 
     def validate_unary_input(self, stream: StreamProtocol) -> None:
@@ -479,8 +479,8 @@ class DropDataColumns(UnaryOperator):
     Operator that drops specified columns from a stream.
     """
 
-    # Referential tags (ITL-1023): handled.
-    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = None
+    # Data-tags (ITL-1023): handled.
+    DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def __init__(self, columns: str | Collection[str], strict: bool = True, **kwargs):
         self.columns = _canonical_columns(columns)
@@ -518,18 +518,18 @@ class DropDataColumns(UnaryOperator):
         table = stream.as_table(
             columns={"source": True, "system_tags": True, "sort_by_tags": False}
         )
-        # A referential tag whose data column is removed keeps its column as a plain
+        # A data-tag whose data column is removed keeps its column as a plain
         # tag with the same values (specification section 7.2).
-        references = stream_references(stream)
+        data_tags = stream_data_tags(stream)
         modified_table = table.drop_columns(
-            [c for c in columns_to_drop if c not in references]
+            [c for c in columns_to_drop if c not in data_tags]
             + associated_source_columns
         )
 
         return ArrowTableStream(
             modified_table,
             tag_columns=tag_columns,
-            reference_tags=[c for c in references if c not in columns_to_drop],
+            data_tags=[c for c in data_tags if c not in columns_to_drop],
         )
 
     def validate_unary_input(self, stream: StreamProtocol) -> None:
@@ -551,7 +551,7 @@ class DropDataColumns(UnaryOperator):
             )
         warn_materialized(
             self,
-            [c for c in stream_references(stream) if c in self.columns],
+            [c for c in stream_data_tags(stream) if c in self.columns],
         )
         require_a_data_column([c for c in data_columns if c not in self.columns])
 
@@ -645,14 +645,14 @@ class _TagAndDataColumnsOperator(UnaryOperator, ABC):
     on either path, as ``Join`` does; and a result without a data column is refused
     when the operator is called, on both paths.
 
-    A referential tag (ITL-1022) is one physical column whose name is in both
+    A data-tag (ITL-1022) is one physical column whose name is in both
     groups, so naming it acts on that one column in both roles: it is kept as a
-    referential tag or removed from both, never split into a plain tag and a data
+    data-tag or removed from both, never split into a plain tag and a data
     column. Nothing is materialized, so these operators never report it.
     """
 
-    # Referential tags: handled (ITL-1022). A name acts on both roles alike.
-    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = None
+    # Data-tags: handled (ITL-1022). A name acts on both roles alike.
+    DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     _verb: ClassVar[str] = ""
 
@@ -765,11 +765,9 @@ class _TagAndDataColumnsOperator(UnaryOperator, ABC):
                 ]
             ),
             tag_columns=[c for c in tag_columns if c not in tags_removed],
-            # A referential tag is kept or removed in both roles at once, so every
-            # kept one is still referential.
-            reference_tags=[
-                c for c in stream_references(stream) if c not in tags_removed
-            ],
+            # A data-tag is kept or removed in both roles at once, so every
+            # kept one is still a data-tag.
+            data_tags=[c for c in stream_data_tags(stream) if c not in tags_removed],
             data_context=stream.data_context_key,
         )
 

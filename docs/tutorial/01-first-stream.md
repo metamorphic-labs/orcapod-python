@@ -55,8 +55,8 @@ Every column of a source is either a tag column or a data column.
 - **Data columns** are everything else: the values that were measured or recorded.
 
 By default a declared tag column is also a data column: `CSVSource`, like every source built
-from a table, makes its tags **referential**, one column seen both as a tag and as the data
-column of the same name (see [Referential Tags](../concepts/referential-tags.md)). This
+from a table, makes its tags **data-tags**, one column seen both as a tag and as the data
+column of the same name (see [Data-tags](../concepts/data-tags.md)). This
 tutorial keeps its tags plain with `tag_only_columns=True`: a plain tag is a tag only, never
 also a data column, so the data columns below are exactly the columns that are not tags.
 

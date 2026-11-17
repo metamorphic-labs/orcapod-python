@@ -510,14 +510,14 @@ class TestNonNullableColumns:
         with pytest.raises(ValueError, match="float \\| None"):
             halve.pod(SelectDataColumns(["weight"])(source))
 
-    @pytest.mark.parametrize("tag_only", [True, False], ids=["plain", "referential"])
+    @pytest.mark.parametrize("tag_only", [True, False], ids=["plain", "data-tag"])
     def test_join_of_recorded_and_unrecorded_keys_gives_the_recorded_type(
         self, strict_root, tag_only
     ):
         """A T key joined with a T | None key is accepted and comes out T (ITL-829).
 
         A null key matches nothing, so no joined row can hold a null there. A
-        referential key (ITL-1023) is ``T`` in its data role too.
+        data-tag key (ITL-1023) is ``T`` in its data role too.
         """
         unit = SpiralDBTableSource(_PROJECT, "unit", tag_only_columns=tag_only)
         unrecorded = SpiralDBTableSource(

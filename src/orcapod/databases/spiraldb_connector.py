@@ -935,7 +935,7 @@ class SpiralDBConnector:
             )
             try:
                 # The Arrow metadata too goes before the rows, so rows never land
-                # without the metadata that states them (a referential tag's marker,
+                # without the metadata that states them (a data-tag's marker,
                 # ITL-1019): a failed metadata write stores no row, and its retry
                 # writes both.
                 if meta_kv is not None:

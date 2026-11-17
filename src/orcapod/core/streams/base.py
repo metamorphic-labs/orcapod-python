@@ -365,7 +365,7 @@ class StreamBase(TraceableBase):
         "animal"})``), or keyword arguments (``map_tags(subject="animal")``), not both.
         A name that is not a Python identifier, or a column named ``drop_unmapped``,
         ``strict``, ``label`` or ``tag_only`` (the options), is renamed through the
-        dict. A referential tag is renamed in both roles unless ``tag_only`` is
+        dict. A data-tag is renamed in both roles unless ``tag_only`` is
         ``True``; see ``MapTags``.
 
         Args:
@@ -375,7 +375,7 @@ class StreamBase(TraceableBase):
                 a tag column raises ``InputValidationError``; when ``False`` it is
                 ignored.
             label: Optional node label for the pipeline graph.
-            tag_only: Rename referential tags in the tag role only (ITL-1023).
+            tag_only: Rename data-tags in the tag role only (ITL-1023).
             **renames: Each column to rename, mapped to its new name, as
                 keyword arguments.
 
@@ -577,10 +577,10 @@ class StreamBase(TraceableBase):
         *columns: str | Sequence[str],
         label: str | None = None,
     ) -> StreamBase:
-        """Give the named data columns the tag role, as referential tags.
+        """Give the named data columns the tag role, as data-tags.
 
         ``s.tag_by("x", "y")`` equals ``s.tag_by(["x", "y"])``. Each named data
-        column becomes a referential tag: one column, both a tag and the data column
+        column becomes a data-tag: one column, both a tag and the data column
         it was, with its values and source info unchanged. The new tags follow this
         stream's tags, in the order given. See ``orcapod.core.operators.TagBy``.
 
@@ -590,7 +590,7 @@ class StreamBase(TraceableBase):
             label: Optional node label for the pipeline graph.
 
         Returns:
-            The stream with the named columns as referential tags.
+            The stream with the named columns as data-tags.
 
         Raises:
             TypeError: When no name is given, the names are a set, or a name is not
@@ -1124,7 +1124,7 @@ class StreamBase(TraceableBase):
         Returns:
             The table, or ``None`` when the stream cannot type it without rows.
         """
-        from orcapod.core.referential_tags import stream_references
+        from orcapod.core.data_tags import stream_data_tags
         from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 
         typed = typed_zero_row_table(self)
@@ -1133,7 +1133,7 @@ class StreamBase(TraceableBase):
         return ArrowTableStream(
             typed,
             tag_columns=self.keys()[0],
-            reference_tags=stream_references(self),
+            data_tags=stream_data_tags(self),
             data_context=self.data_context_key,
         ).as_table(columns=config)
 

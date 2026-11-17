@@ -1,18 +1,22 @@
-"""Referential tags: the rules every stream and operator shares (ITL-1023).
+# pyright: reportImportCycles=false
+# The existing cycle data_tags -> types -> core_protocols -> side_effect_pod -> side_effects
+# -> function_node, which the rename from referential_tags.py brought into pyright's view
+# (a file-level diagnostic: no line-level ignore reaches it). Breaking it is ITL-1206.
+"""Data-tags: the rules every stream and operator shares (ITL-1023).
 
 Specification "Orcapod v0.4 — Referential Tags" (attached to ITL-1004). A tag is either
-materialized (it carries its own value) or referential (a handle to the data column of the
-same name). In a stream a referential tag ``x`` is one physical column ``x`` whose name is
+plain (it carries its own value) or a data-tag (a handle to the data column of the
+same name). In a stream a data-tag ``x`` is one physical column ``x`` whose name is
 both a tag key and a data key, so the binding is the name intersection of the two halves of
 ``output_schema()`` / ``keys()`` (section 4.3: "the presence of a tag and data column with
-the same name must therefore be sufficient to identify the tag as referential"). No other
+the same name must therefore be sufficient to identify the tag as referential", the specification's word for a data-tag). No other
 schema field records it.
 
-This module holds what more than one operator needs: finding the references of a stream,
+This module holds what more than one operator needs: finding the data-tags of a stream,
 the namespace validator (sections 4 and 13.4), and the diagnostic emitted when a structural
-operator turns a reference into a plain tag (section 7).
+operator turns a data-tag into a plain tag (section 7).
 
-The identities of referential streams are not frozen yet: on the integration branch of
+The identities of streams with data-tags are not frozen yet: on the integration branch of
 ITL-1023 they may still change. Plain (``tag_only_columns``) streams keep their v0.3
 identities exactly.
 """
@@ -39,20 +43,20 @@ if TYPE_CHECKING:
 else:
     pa = LazyModule("pyarrow")
 
-# Diagnostic emitted when a structural operator materializes a reference (section 7.4).
-# ``"warn"`` emits a ``ReferenceMaterializationWarning``; ``"silent"`` emits nothing. The
+# Diagnostic emitted when a structural operator materializes a data-tag (section 7.4).
+# ``"warn"`` emits a ``DataTagMaterializationWarning``; ``"silent"`` emits nothing. The
 # setting never changes a result, a schema or a hash. A module-level default for now.
-reference_materialization: Literal["warn", "silent"] = "warn"
+data_tag_materialization: Literal["warn", "silent"] = "warn"
 
 
-class ReferenceMaterializationWarning(UserWarning):
-    """A structural operator turned a referential tag into a plain tag (section 7)."""
+class DataTagMaterializationWarning(UserWarning):
+    """A structural operator turned a data-tag into a plain tag (section 7)."""
 
 
 # Set while Orcapod itself adds a structural step the user did not write (the select
 # of a function pod call): its materializations are not reported.
 _diagnostic_off: ContextVar[bool] = ContextVar(
-    "reference_materialization_off", default=False
+    "data_tag_materialization_off", default=False
 )
 
 
@@ -79,10 +83,10 @@ def materialization_diagnostic_off() -> Iterator[None]:
         _diagnostic_off.reset(token)
 
 
-def reference_names(
+def data_tag_names(
     tag_names: Iterable[str], data_names: Iterable[str]
 ) -> tuple[str, ...]:
-    """Return the referential tags: the tag names that are also data names, in tag order.
+    """Return the data-tags: the tag names that are also data names, in tag order.
 
     Args:
         tag_names: The tag column names (system tags may be included; they never
@@ -96,8 +100,8 @@ def reference_names(
     return tuple(name for name in tag_names if name in data)
 
 
-def stream_references(stream: Any) -> tuple[str, ...]:  # pyright: ignore[reportExplicitAny]  # any object with keys(): a stream, source or node
-    """Return the referential tags of ``stream``, known from its keys at graph-build time.
+def stream_data_tags(stream: Any) -> tuple[str, ...]:  # pyright: ignore[reportExplicitAny]  # any object with keys(): a stream, source or node
+    """Return the data-tags of ``stream``, known from its keys at graph-build time.
 
     Args:
         stream: A stream (anything with ``keys()`` returning tag and data names).
@@ -106,51 +110,51 @@ def stream_references(stream: Any) -> tuple[str, ...]:  # pyright: ignore[report
         The names that are both tag keys and data keys, in tag order.
     """
     tag_keys, data_keys = stream.keys()
-    return reference_names(tag_keys, data_keys)
+    return data_tag_names(tag_keys, data_keys)
 
 
 def check_namespaces(
     tag_schema: Mapping[str, Any],  # pyright: ignore[reportExplicitAny]  # Python types of any kind
     data_schema: Mapping[str, Any],  # pyright: ignore[reportExplicitAny]  # Python types of any kind
-    references: Iterable[str],
+    data_tags: Iterable[str],
 ) -> None:
     """Check the column namespaces of an output schema (sections 4.1 to 4.4).
 
-    A name in both halves must be one of ``references`` (a materialized tag and a data
-    column never share a name), and a reference has one type in both halves.
+    A name in both halves must be one of ``data_tags`` (a materialized tag and a data
+    column never share a name), and a data-tag has one type in both halves.
 
     Args:
         tag_schema: The output tag schema.
         data_schema: The output data schema.
-        references: The names the producer keeps as referential tags.
+        data_tags: The names the producer keeps as data-tags.
 
     Raises:
         InputValidationError: If a tag and a data column share a name that is not a
-            reference, or a reference's tag and data types differ.
+            data-tag, or a data-tag's tag and data types differ.
     """
-    refs = set(references)
-    for name in reference_names(tag_schema, data_schema):
+    refs = set(data_tags)
+    for name in data_tag_names(tag_schema, data_schema):
         if name not in refs:
             raise InputValidationError(
                 f"tag {name!r} and data column {name!r} would share a name without "
-                "being one referential column: a plain tag and a data column cannot "
+                "being one data-tag column: a plain tag and a data column cannot "
                 "share a name"
             )
         if tag_schema[name] != data_schema[name]:
             raise InputValidationError(
-                f"referential tag {name!r} has type {tag_schema[name]} as a tag and "
+                f"data-tag {name!r} has type {tag_schema[name]} as a tag and "
                 f"{data_schema[name]} as data"
             )
 
 
 def warn_materialized(operation: object, names: Iterable[str]) -> None:
-    """Report that ``operation`` turned the referential tags ``names`` into plain tags.
+    """Report that ``operation`` turned the data-tags ``names`` into plain tags.
 
     Its job is the diagnostic of section 7.4, so it takes the operation. It reports
     once per operation object: a job validates its operators again when it builds and
     runs its nodes, and that is not a new structural step. An operation built while
     ``materialization_diagnostic_off`` is active (Orcapod's own step) never reports.
-    Emits nothing when ``names`` is empty or ``reference_materialization`` is
+    Emits nothing when ``names`` is empty or ``data_tag_materialization`` is
     ``"silent"``.
 
     Args:
@@ -161,48 +165,48 @@ def warn_materialized(operation: object, names: Iterable[str]) -> None:
     if not names or id(operation) in _reported:
         return
     _reported[id(operation)] = operation
-    if reference_materialization == "silent" or _diagnostic_off.get():
+    if data_tag_materialization == "silent" or _diagnostic_off.get():
         return
     warnings.warn(
-        f"{type(operation).__name__}: the data column of referential tag(s) {list(names)} was removed; "
+        f"{type(operation).__name__}: the data column of data-tag(s) {list(names)} was removed; "
         "they are now plain tags with the same values (set "
-        "orcapod.core.referential_tags.reference_materialization = 'silent' to hide this)",
-        ReferenceMaterializationWarning,
+        "orcapod.core.data_tags.data_tag_materialization = 'silent' to hide this)",
+        DataTagMaterializationWarning,
         stacklevel=3,
     )
 
 
-# The marker of a referential tag in a stored table (developer, November 16, 2026,
+# The marker of a data-tag in a stored table (developer, November 16, 2026,
 # ITL-1019): Arrow field metadata on the stored tag column, at the level of a logical
-# type's extension metadata. Only a referential tag carries it; a plain tag carries no
+# type's extension metadata. Only a data-tag carries it; a plain tag carries no
 # marker. It is not ``ARROW:extension:*`` metadata, so no schema or table hash reads it.
-REFERENTIAL_TAG_METADATA_KEY = b"orcapod:tag_kind"
-REFERENTIAL_TAG_METADATA_VALUE = b"referential"
+TAG_KIND_METADATA_KEY = b"orcapod:tag_kind"
+DATA_TAG_KIND = b"data_tag"
 
 
-def mark_references(table: "pa.Table", references: Iterable[str]) -> "pa.Table":
-    """Return ``table`` with exactly the columns ``references`` marked referential.
+def mark_data_tags(table: "pa.Table", data_tags: Iterable[str]) -> "pa.Table":
+    """Return ``table`` with exactly the columns ``data_tags`` marked as data-tags.
 
     A stored table states its own bindings: the writer marks the columns it knows to be
-    referential and removes a marker any other column carries (one that came in from
+    data-tags and removes a marker any other column carries (one that came in from
     upstream metadata is not this writer's binding). Values and every other field
     property (name, type, nullability, other metadata) are unchanged.
 
     Args:
         table: The rows about to be stored.
-        references: The referential tags of the rows; each must be a column of
+        data_tags: The data-tags of the rows; each must be a column of
             ``table``.
 
     Returns:
-        The table with the marker on exactly the ``references`` columns.
+        The table with the marker on exactly the ``data_tags`` columns.
 
     Raises:
-        ValueError: If a reference is not a column of ``table``.
+        ValueError: If a data-tag is not a column of ``table``.
     """
-    refs = set(references)
+    refs = set(data_tags)
     if missing := refs - set(table.column_names):
         raise ValueError(
-            f"referential tags {sorted(missing)} are not columns of the stored table"
+            f"data-tags {sorted(missing)} are not columns of the stored table"
         )
     schema = table.schema
     changed = False
@@ -210,15 +214,13 @@ def mark_references(table: "pa.Table", references: Iterable[str]) -> "pa.Table":
         metadata: dict[bytes | str, bytes | str] = {
             key: value for key, value in (field.metadata or {}).items()
         }
-        marked = metadata.get(REFERENTIAL_TAG_METADATA_KEY) is not None
+        marked = metadata.get(TAG_KIND_METADATA_KEY) is not None
         if field.name in refs:
-            if metadata.get(REFERENTIAL_TAG_METADATA_KEY) == (
-                REFERENTIAL_TAG_METADATA_VALUE
-            ):
+            if metadata.get(TAG_KIND_METADATA_KEY) == (DATA_TAG_KIND):
                 continue
-            metadata[REFERENTIAL_TAG_METADATA_KEY] = REFERENTIAL_TAG_METADATA_VALUE
+            metadata[TAG_KIND_METADATA_KEY] = DATA_TAG_KIND
         elif marked:
-            del metadata[REFERENTIAL_TAG_METADATA_KEY]
+            del metadata[TAG_KIND_METADATA_KEY]
         else:
             continue
         schema = schema.set(
@@ -232,38 +234,38 @@ def mark_references(table: "pa.Table", references: Iterable[str]) -> "pa.Table":
     return pa.Table.from_arrays(table.columns, schema=schema)
 
 
-def stored_references(schema: "pa.Schema") -> tuple[str, ...]:
-    """Return the columns a stored table marks as referential tags, in column order.
+def stored_data_tags(schema: "pa.Schema") -> tuple[str, ...]:
+    """Return the columns a stored table marks as data-tags, in column order.
 
     Args:
         schema: The Arrow schema of a stored table.
 
     Returns:
-        The names of the columns that carry the referential tag marker.
+        The names of the columns that carry the data-tag marker.
 
     Raises:
         ValueError: If a column carries the marker key with another value.
     """
     names: list[str] = []
     for field in schema:
-        value = (field.metadata or {}).get(REFERENTIAL_TAG_METADATA_KEY)
+        value = (field.metadata or {}).get(TAG_KIND_METADATA_KEY)
         if value is None:
             continue
-        if value != REFERENTIAL_TAG_METADATA_VALUE:
+        if value != DATA_TAG_KIND:
             raise ValueError(
-                f"stored column {field.name!r} has {REFERENTIAL_TAG_METADATA_KEY!r} "
+                f"stored column {field.name!r} has {TAG_KIND_METADATA_KEY!r} "
                 f"metadata {value!r}; the only valid value is "
-                f"{REFERENTIAL_TAG_METADATA_VALUE!r}"
+                f"{DATA_TAG_KIND!r}"
             )
         names.append(field.name)
     return tuple(names)
 
 
-def require_database_keeps_marker(database: object, references: Iterable[str]) -> None:
+def require_database_keeps_marker(database: object, data_tags: Iterable[str]) -> None:
     """Refuse, before anything is written, a database that cannot store the marker.
 
     A stored table must state what it stores (developer, November 16, 2026, ITL-1019),
-    so a referential tag is never stored unmarked. A database is accepted only when it
+    so a data-tag is never stored unmarked. A database is accepted only when it
     states that it keeps Arrow field metadata
     (``FieldMetadataKeepingDatabaseProtocol.keeps_field_metadata``); one that does not
     have the member is refused, so an unknown database never passes by default. The
@@ -272,8 +274,8 @@ def require_database_keeps_marker(database: object, references: Iterable[str]) -
     asked why, and the reason it gives is part of the error.
 
     Args:
-        database: The database a node will store its referential tags in.
-        references: The referential tags it will store; nothing is checked when empty.
+        database: The database a node will store its data-tags in.
+        data_tags: The data-tags it will store; nothing is checked when empty.
 
     Raises:
         InputValidationError: If the database does not state that it keeps field
@@ -284,23 +286,23 @@ def require_database_keeps_marker(database: object, references: Iterable[str]) -
         keeps_field_metadata,
     )
 
-    references = tuple(references)
-    if not references or keeps_field_metadata(database):
+    data_tags = tuple(data_tags)
+    if not data_tags or keeps_field_metadata(database):
         return
     reason = "it does not state that it keeps field metadata (keeps_field_metadata)"
     if isinstance(database, RecordValidatingDatabaseProtocol):
         # Only for the error: the reason the database gives for refusing marked rows.
-        probe = mark_references(
-            pa.table({name: pa.array([], type=pa.null()) for name in references}),
-            references,
+        probe = mark_data_tags(
+            pa.table({name: pa.array([], type=pa.null()) for name in data_tags}),
+            data_tags,
         )
         try:
             database.validate_records(probe)
         except ValueError as exc:
             reason = str(exc)
     raise InputValidationError(
-        f"{type(database).__name__} cannot store the referential tags "
-        f"{list(references)}: a stored referential tag carries Arrow field "
+        f"{type(database).__name__} cannot store the data-tags "
+        f"{list(data_tags)}: a stored data-tag carries Arrow field "
         f"metadata, and this database keeps none ({reason}). Use a database that "
         "keeps field metadata (DeltaTableDatabase, InMemoryArrowDatabase, the "
         "SpiralDB database), or keep these tags plain with tag_only_columns on "
@@ -308,8 +310,8 @@ def require_database_keeps_marker(database: object, references: Iterable[str]) -
     )
 
 
-def without_reference_marks(table: "pa.Table") -> "pa.Table":
-    """Return ``table`` with no referential tag marker on any column.
+def without_tag_kind_marks(table: "pa.Table") -> "pa.Table":
+    """Return ``table`` with no data-tag marker on any column.
 
     A stored table read into a stream drops the marker: in a stream the binding is the
     name intersection of the tag and data keys, and a marker carried further would be
@@ -321,10 +323,10 @@ def without_reference_marks(table: "pa.Table") -> "pa.Table":
     Returns:
         The same rows; no field carries the marker.
     """
-    return mark_references(table, ())
+    return mark_data_tags(table, ())
 
 
-# The Python types a column may have to become a referential tag by ``tag_by``
+# The Python types a column may have to become a data-tag by ``tag_by``
 # (ITL-1175): one value per row, of a type with plain equality and order. A column
 # whose Arrow type the type converter reads as no Python type (``Any``: decimal, time
 # of day, duration) is refused. Sources do not apply this rule yet: a source accepts
@@ -341,7 +343,7 @@ TAGGABLE_TYPES: tuple[type, ...] = (
 
 
 def require_taggable_type(python_type: object) -> None:
-    """Refuse a column type that cannot become a referential tag (ITL-1175).
+    """Refuse a column type that cannot become a data-tag (ITL-1175).
 
     The rule ``tag_by`` applies: the type must be one of ``TAGGABLE_TYPES``. A
     nullable type (``T | None``) is refused, with the way out: ``drop_nulls`` narrows
@@ -377,7 +379,7 @@ def require_taggable_type(python_type: object) -> None:
 
 
 def not_supported_yet(operation: str, issue: str) -> NotImplementedError:
-    """Return the error for an operation that does not handle referential tags yet.
+    """Return the error for an operation that does not handle data-tags yet.
 
     Args:
         operation: The operation's name.
@@ -387,7 +389,7 @@ def not_supported_yet(operation: str, issue: str) -> NotImplementedError:
         The error to raise.
     """
     return NotImplementedError(
-        f"{operation}: not supported with referential tags yet ({issue}). Build the "
+        f"{operation}: not supported with data-tags yet ({issue}). Build the "
         "source with tag_only_columns=True to keep every tag plain, as in v0.3, or "
         "tag_only_columns=[...] to keep the named tags plain."
     )
@@ -397,12 +399,12 @@ TagOnlyColumns = str | Iterable[str] | bool
 """The ``tag_only_columns`` option of a source: names, or ``True`` for every tag."""
 
 
-def source_reference_tags(
+def source_data_tags(
     tag_columns: Iterable[str], tag_only_columns: TagOnlyColumns
 ) -> tuple[str, ...]:
-    """Return a source's referential tags: its declared tags minus the tag-only ones.
+    """Return a source's data-tags: its declared tags minus the tag-only ones.
 
-    Every declared tag of a source is referential by default (developer, November 12,
+    Every declared tag of a source is a data-tag by default (developer, November 12,
     2026): it is also a data column of the same name. ``tag_only_columns`` names the tags
     kept plain, exactly as in v0.3 (tag only, not data); ``True`` keeps all of them plain.
 
@@ -412,7 +414,7 @@ def source_reference_tags(
             them, or ``False`` / empty for none.
 
     Returns:
-        The referential tags, in ``tag_columns`` order.
+        The data-tags, in ``tag_columns`` order.
 
     Raises:
         ValueError: If ``tag_only_columns`` names a column that is not in
@@ -445,7 +447,7 @@ def merge_source_info(
     data column; developer decision, November 13, 2026, ITL-1017). The result has
     that shape, and each of its tokens is ``combine`` of the tokens at that position;
     the operation that merges passes its own fold (``Join``: the ``join_v1`` fold).
-    This is what a ``Join`` does with the column of a tag that is referential on
+    This is what a ``Join`` does with the column of a tag that is a data-tag on
     several of its inputs, and does not assume the column is a tag.
 
     Args:

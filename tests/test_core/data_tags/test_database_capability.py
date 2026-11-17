@@ -3,7 +3,7 @@
 The developer's rule: a database that cannot keep field metadata is refused before
 anything is written, and when in doubt, refuse. A database states the capability with
 ``keeps_field_metadata`` (``FieldMetadataKeepingDatabaseProtocol``); one without the member
-is refused when a node would store a referential tag in it. Every database that states
+is refused when a node would store a data-tag in it. Every database that states
 ``True`` keeps the marker on its write paths: in memory and Delta are covered by
 ``test_persistence.py``; SpiralDB is covered here against the pyspiral fake only (the live
 service is unverified).
@@ -21,7 +21,7 @@ import pytest
 import orcapod as op
 from orcapod.contexts import resolve_context
 from orcapod.core.operators import Join
-from orcapod.core.referential_tags import mark_references, stored_references
+from orcapod.core.data_tags import mark_data_tags, stored_data_tags
 from orcapod.databases import (
     ConnectorArrowDatabase,
     DeltaTableDatabase,
@@ -162,7 +162,7 @@ def test_a_function_node_refuses_an_undeclared_database() -> None:
             double.pod(_source(), label="double")
         job.run()
     message = str(raised.value)
-    assert "ThirdPartyDatabase cannot store the referential tags ['unit']" in message
+    assert "ThirdPartyDatabase cannot store the data-tags ['unit']" in message
     assert "keeps_field_metadata" in message
     assert "keeps field metadata" in message and "tag_only_columns" in message
     assert CALLS == []
@@ -233,41 +233,41 @@ def _rows(ids: list[int], extra: bool = False) -> pa.Table:
     }
     if extra:
         columns["z"] = pa.array(ids, pa.int64())
-    return mark_references(pa.Table.from_pydict(columns), ["unit"])
+    return mark_data_tags(pa.Table.from_pydict(columns), ["unit"])
 
 
 def test_spiraldb_keeps_the_marker_on_every_write_path(spiral: None) -> None:
     db = ConnectorArrowDatabase(SpiralDBConnector("p"))
     path = ("node", "table")
 
-    def references(database: ConnectorArrowDatabase = db) -> tuple[str, ...]:
+    def data_tags(database: ConnectorArrowDatabase = db) -> tuple[str, ...]:
         table = database.get_all_records(path)
         assert table is not None
-        return stored_references(table.schema)
+        return stored_data_tags(table.schema)
 
     db.add_records(path, _rows([1, 2]), record_id_column="rid", flush=True)
-    assert references() == ("unit",)  # first write
+    assert data_tags() == ("unit",)  # first write
     db.add_records(path, _rows([3]), record_id_column="rid", flush=True)
-    assert references() == ("unit",)  # append
+    assert data_tags() == ("unit",)  # append
     db.add_records(
         path, _rows([3, 4]), record_id_column="rid", skip_duplicates=True, flush=True
     )
-    assert references() == ("unit",)  # some ids stored already: a merge
+    assert data_tags() == ("unit",)  # some ids stored already: a merge
     # Read through a new connector: the marker is stored, not held in memory.
-    assert references(ConnectorArrowDatabase(SpiralDBConnector("p"))) == ("unit",)
+    assert data_tags(ConnectorArrowDatabase(SpiralDBConnector("p"))) == ("unit",)
     # The connector database does not evolve a stored schema: it refuses, so no merge
     # can drop the marker.
     with pytest.raises(ValueError, match="Schema evolution is not supported"):
         db.add_records(path, _rows([5], extra=True), record_id_column="rid", flush=True)
-    assert references() == ("unit",)
+    assert data_tags() == ("unit",)
 
 
-def test_a_referential_job_on_spiraldb_is_refused_as_a_plain_one_is(
+def test_a_data_tag_job_on_spiraldb_is_refused_as_a_plain_one_is(
     spiral: None,
 ) -> None:
     """SpiralDB refuses a function node's reserved columns (ITL-1162), plain or not.
 
-    The marker is not what stops it: the referential job is refused for the same
+    The marker is not what stops it: the job with data-tags is refused for the same
     column as the plain one, before anything is written.
     """
     plain = op.sources.DictSource(
@@ -320,7 +320,7 @@ def test_spiraldb_failed_marker_write_stores_no_row(
     )
     table = ConnectorArrowDatabase(SpiralDBConnector("p")).get_all_records(path)
     assert table is not None and set(table.column("unit").to_pylist()) == {1, 2, 3}
-    assert stored_references(table.schema) == ("unit",)
+    assert stored_data_tags(table.schema) == ("unit",)
 
 
 def test_spiraldb_write_of_stored_rows_keeps_the_stored_metadata(spiral: None) -> None:
@@ -344,7 +344,7 @@ def test_spiraldb_write_of_stored_rows_keeps_the_stored_metadata(spiral: None) -
         path, other, record_id_column="rid", skip_duplicates=True, flush=True
     )
     table = ConnectorArrowDatabase(SpiralDBConnector("p")).get_all_records(path)
-    assert table is not None and stored_references(table.schema) == ("unit",)
+    assert table is not None and stored_data_tags(table.schema) == ("unit",)
 
 
 def test_spiraldb_marks_no_stored_row_it_skips(spiral: None) -> None:
@@ -356,7 +356,7 @@ def test_spiraldb_marks_no_stored_row_it_skips(spiral: None) -> None:
     db.add_records(path, unmarked, record_id_column="rid", flush=True)
     db.add_records(path, rows, record_id_column="rid", skip_duplicates=True, flush=True)
     table = ConnectorArrowDatabase(SpiralDBConnector("p")).get_all_records(path)
-    assert table is not None and stored_references(table.schema) == ()
+    assert table is not None and stored_data_tags(table.schema) == ()
 
 
 def test_spiraldb_failed_first_write_leaves_no_marker(
@@ -381,7 +381,7 @@ def test_spiraldb_failed_first_write_leaves_no_marker(
     unmarked = rows.cast(pa.schema([field.remove_metadata() for field in rows.schema]))
     connector.upsert_records("t", unmarked, id_column="rid")
     table = pa.Table.from_batches(list(connector.iter_batches('SELECT * FROM "t"')))
-    assert stored_references(table.schema) == ()
+    assert stored_data_tags(table.schema) == ()
 
 
 def test_spiraldb_failed_write_keeps_the_metadata_of_stored_rows(
@@ -394,7 +394,7 @@ def test_spiraldb_failed_write_keeps_the_metadata_of_stored_rows(
     )
 
     def key_only(ids: list[int]) -> pa.Table:
-        return mark_references(
+        return mark_data_tags(
             pa.table(
                 {"rid": pa.array([str(i).encode() for i in ids], pa.large_binary())}
             ),
@@ -414,7 +414,7 @@ def test_spiraldb_failed_write_keeps_the_metadata_of_stored_rows(
 
     table = pa.Table.from_batches(list(connector.iter_batches('SELECT * FROM "k"')))
     assert table.column("rid").to_pylist() == [b"1"]
-    assert stored_references(table.schema) == ("rid",)
+    assert stored_data_tags(table.schema) == ("rid",)
 
 
 def test_spiraldb_failed_metadata_read_leaves_no_nullability_record(

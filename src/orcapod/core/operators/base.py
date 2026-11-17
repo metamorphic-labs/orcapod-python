@@ -88,7 +88,7 @@ def require_tag_data_roles_agree(
             in which role (``first`` or ``second`` of the two given) and
             suggests the remedy.
     """
-    # A name that is a tag and a data column of one input is a referential tag
+    # A name that is a tag and a data column of one input is a data-tag
     # (ITL-1023): it may meet a tag of that name in the other input (a join then
     # equates the two), so only a data-only column counts here.
     for name in sorted(set(first_tags) & (set(second_data) - set(second_tags))):

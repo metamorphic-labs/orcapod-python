@@ -1,4 +1,4 @@
-"""TagBy operator: give existing data columns the tag role, as referential tags (ITL-1175)."""
+"""TagBy operator: give existing data columns the tag role, as data-tags (ITL-1175)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Any, ClassVar
 from typing_extensions import override
 
 from orcapod.core.operators.base import UnaryOperator
-from orcapod.core.referential_tags import require_taggable_type, stream_references
+from orcapod.core.data_tags import require_taggable_type, stream_data_tags
 from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import StreamProtocol
@@ -49,9 +49,9 @@ def _tag_by_names(columns: str | Sequence[str]) -> tuple[str, ...]:
 
 
 class TagBy(UnaryOperator):
-    """Give existing data columns of a stream the tag role, as referential tags.
+    """Give existing data columns of a stream the tag role, as data-tags.
 
-    Each named data column becomes a referential tag (ITL-1023): one column in
+    Each named data column becomes a data-tag (ITL-1023): one column in
     both roles, a tag and the data column it already was. Nothing else changes:
     the data columns keep their names, order, types, values and source info,
     the system tags keep their names and values (rule 1, name-preserving), and
@@ -74,8 +74,8 @@ class TagBy(UnaryOperator):
             column name, or one holding ``::``.
     """
 
-    # Referential tags (ITL-1023): handled; this operator makes them.
-    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = None
+    # Data-tags (ITL-1023): handled; this operator makes them.
+    DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def __init__(self, columns: str | Sequence[str], **kwargs: Any) -> None:
         names = _tag_by_names(columns)
@@ -119,16 +119,16 @@ class TagBy(UnaryOperator):
 
         Raises:
             InputValidationError: Naming the column, if it is already a tag
-                (referential or plain), is not a data column of ``stream``, or has a
-                type that cannot be a tag (``referential_tags.require_taggable_type``).
+                (a data-tag or plain), is not a data column of ``stream``, or has a
+                type that cannot be a tag (``data_tags.require_taggable_type``).
         """
         tag_columns, data_columns = stream.keys()
-        references = stream_references(stream)
+        data_tags = stream_data_tags(stream)
         _, data_schema = stream.output_schema()
         for name in self.columns:
-            if name in references:
+            if name in data_tags:
                 raise InputValidationError(
-                    f"TagBy: column {name!r} is already a referential tag"
+                    f"TagBy: column {name!r} is already a data-tag"
                 )
             if name in tag_columns:
                 raise InputValidationError(
@@ -202,7 +202,7 @@ class TagBy(UnaryOperator):
             stream: The input stream.
 
         Returns:
-            The stream with the named columns as referential tags.
+            The stream with the named columns as data-tags.
         """
         tag_columns, _ = stream.keys()
         # The context column too, so each row keeps its own data context key.
@@ -217,6 +217,6 @@ class TagBy(UnaryOperator):
         return ArrowTableStream(
             table,
             tag_columns=[*tag_columns, *self.columns],
-            reference_tags=[*stream_references(stream), *self.columns],
+            data_tags=[*stream_data_tags(stream), *self.columns],
             data_context=stream.data_context_key,
         )

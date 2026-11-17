@@ -299,7 +299,7 @@ def _table_of_rows(
                 "context": column_config.context,
             }
         )
-        # A referential tag (ITL-1023) is one column, shown once, among the tags.
+        # A data-tag (ITL-1023) is one column, shown once, among the tags.
         data_tables.append(
             data_table.drop_columns(
                 [c for c in data_table.column_names if c in tag_table.column_names]
@@ -367,7 +367,7 @@ def _side_effect_arguments(
 ) -> dict[str, Any]:
     """Return a row's data as keyword arguments for a side-effect function.
 
-    The column of a referential tag (a name that is a tag and a data column,
+    The column of a data-tag (a name that is a tag and a data column,
     ITL-1023) is passed only to a function that names it or takes ``**kwargs``: it
     is a tag first, and a function written for the row's data does not expect it.
     Every other data column is passed as before.
@@ -383,13 +383,13 @@ def _side_effect_arguments(
     import inspect
 
     values = data.as_dict()
-    references = set(tag.keys()) & set(values)
-    if not references:
+    data_tags = set(tag.keys()) & set(values)
+    if not data_tags:
         return values
     parameters = inspect.signature(fn).parameters
     if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
         return values
-    return {k: v for k, v in values.items() if k not in references or k in parameters}
+    return {k: v for k, v in values.items() if k not in data_tags or k in parameters}
 
 
 def _execute_side_effect_row(

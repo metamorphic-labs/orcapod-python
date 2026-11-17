@@ -7,7 +7,7 @@ from typing import Any, ClassVar, TYPE_CHECKING
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource, saved_tag_only_columns
-from orcapod.core.referential_tags import TagOnlyColumns, source_reference_tags
+from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
 from orcapod.core.sources.source_ids import location_source_id
 from orcapod.core.sources.reload import keep_nullable_columns, same_rows
 from orcapod.core.sources.stream_builder import (
@@ -45,7 +45,7 @@ class CSVSource(RootSource):
     moves its modified time. Record ids keep their rule: the ``record_id_columns``
     value, or the row's position.
 
-    Referential tags (ITL-1023): every declared tag column is referential by default,
+    Data-tags (ITL-1023): every declared tag column is a data-tag by default,
     also a data column of the same name. ``tag_only_columns`` (keyword-only) names the
     tags kept plain (tag only, not data, as in v0.3); ``True`` keeps all of them plain.
     """
@@ -84,11 +84,11 @@ class CSVSource(RootSource):
         # The rows as read, columns and types included: a check compares a new read
         # with them, and refuses a table whose columns changed.
         self._table: pa.Table = table
-        # Every declared tag is referential unless kept tag-only (ITL-1023); a
+        # Every declared tag is a data-tag unless kept tag-only (ITL-1023); a
         # rebuild after a check (ITL-1102) applies the same choice.
-        reference_tags = source_reference_tags(self._tag_columns, tag_only_columns)
+        data_tags = source_data_tags(self._tag_columns, tag_only_columns)
         self._tag_only_columns: tuple[str, ...] = tuple(
-            c for c in self._tag_columns if c not in reference_tags
+            c for c in self._tag_columns if c not in data_tags
         )
         result = self._build(table)
         self._stream = result.stream
@@ -112,9 +112,7 @@ class CSVSource(RootSource):
         return builder.build(
             table,
             tag_columns=self._tag_columns,
-            reference_tags=source_reference_tags(
-                self._tag_columns, self._tag_only_columns
-            ),
+            data_tags=source_data_tags(self._tag_columns, self._tag_only_columns),
             source_id=self._source_id,
             record_id_columns=self._record_id_columns or (),
             system_tag_columns=self._system_tag_columns,

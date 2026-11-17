@@ -362,7 +362,7 @@ class StreamWithOperationsProtocol(StreamProtocol, Protocol):
         Tags not in the mapping are kept unless ``drop_unmapped`` is True. With
         ``strict`` (the default), a name that is not a tag column is refused. The
         renames are one positional dict or keyword arguments (``old="new"``). A
-        referential tag is renamed in both roles unless ``tag_only`` is True.
+        data-tag is renamed in both roles unless ``tag_only`` is True.
         """
         ...
 
@@ -429,7 +429,7 @@ class StreamWithOperationsProtocol(StreamProtocol, Protocol):
         label: str | None = None,
     ) -> "StreamProtocol":
         """
-        Give the named data columns the tag role, as referential tags: each stays
+        Give the named data columns the tag role, as data-tags: each stays
         one column, a tag and the data column it was, with its values and source
         info unchanged. The new tags follow the stream's tags, in the order given.
         """

@@ -1,12 +1,12 @@
 """``tag_only_columns`` on every table source (ITL-1159, ITL-1023).
 
 Every source that declares tag columns accepts ``tag_only_columns``. On ``main`` (v0.3)
-its one accepted value is ``True``; with referential tags (v0.4) every declared tag is
-referential by default (also a data column of the same name), and ``tag_only_columns``
+its one accepted value is ``True``; with data-tags (v0.4) every declared tag is
+a data-tag by default (also a data column of the same name), and ``tag_only_columns``
 names the tags kept plain, ``True`` for all of them.
 
 These tests build the same source with and without the option: ``True`` gives the v0.3
-source (plain tags), the default a referential one with the same source id and record
+source (plain tags), the default one with data-tags, with the same source id and record
 ids.
 """
 
@@ -24,7 +24,7 @@ import pytest
 from deltalake import write_deltalake
 from typing_extensions import Unpack
 
-from orcapod.core.referential_tags import TagOnlyColumns
+from orcapod.core.data_tags import TagOnlyColumns
 from orcapod.core.sources import (
     ArrowTableSource,
     CachedSource,
@@ -198,7 +198,7 @@ class TestTrueKeepsEveryTagPlain:
         assert build(tag_only_columns=True).to_config()["tag_only_columns"] is True
 
 
-class TestTheDefaultIsReferential:
+class TestTheDefaultIsDataTag:
     """Without the option every declared tag is also a data column (ITL-1023)."""
 
     def test_every_tag_is_data(self, build: Build) -> None:
@@ -252,13 +252,13 @@ class TestFromConfig:
         assert loaded.content_hash() == source.content_hash()
         assert loaded.keys() == source.keys()
 
-    def test_referential_config_reads_back_referential(self, tmp_path: Path) -> None:
+    def test_data_tag_config_reads_back_data_tag(self, tmp_path: Path) -> None:
         source = _csv(tmp_path)
         loaded = CSVSource.from_config(source.to_config())
         assert loaded.content_hash() == source.content_hash()
         assert loaded.keys() == source.keys()
 
-    def test_referential_config_states_no_plain_tag(self, tmp_path: Path) -> None:
+    def test_data_tag_config_states_no_plain_tag(self, tmp_path: Path) -> None:
         assert _csv(tmp_path).to_config()["tag_only_columns"] == []
 
     def test_config_without_the_key_is_refused(self, tmp_path: Path) -> None:

@@ -1,8 +1,8 @@
-"""``Batch`` on referential tags (ITL-1017).
+"""``Batch`` on data-tags (ITL-1017).
 
 Developer decision, November 16, 2026 (gap audit Q5): "Batch always simply takes
 anything and puts into list." ``Batch`` keeps every tag, list-valued, as in v0.3. A
-referential tag becomes the same list in both roles and stays referential; its source
+data-tag becomes the same list in both roles and stays a data-tag; its source
 info is one token per member, a list of the shape of its data column (nothing is merged,
 so no token is folded). System tags fold as ``Batch`` already folds them.
 
@@ -20,7 +20,7 @@ import pytest
 
 import orcapod as op
 from orcapod.core.operators import Batch, GroupBy, PolarsFilter
-from orcapod.core.referential_tags import check_namespaces, stream_references
+from orcapod.core.data_tags import check_namespaces, stream_data_tags
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.pipeline import (
     AsyncPipelineOrchestrator,
@@ -38,7 +38,7 @@ ROWS = [
 
 
 def _source(**kw: Any) -> op.sources.DictSource:
-    """Tags ``s`` and ``x``, both referential unless ``tag_only_columns`` says otherwise."""
+    """Tags ``s`` and ``x``, both data-tags unless ``tag_only_columns`` says otherwise."""
     return op.sources.DictSource(ROWS, tag_columns=["s", "x"], source_id="B", **kw)
 
 
@@ -52,10 +52,10 @@ def _source_info(stream: StreamProtocol) -> list[dict[str, Any]]:
     return table.select(names).to_pylist()
 
 
-def test_a_referential_tag_is_the_same_list_in_both_roles() -> None:
+def test_a_data_tag_is_the_same_list_in_both_roles() -> None:
     batched = Batch(batch_size=2)(_source())
     assert batched.keys() == (("s", "x"), ("s", "x", "y"))
-    assert stream_references(batched) == ("s", "x")
+    assert stream_data_tags(batched) == ("s", "x")
     tag_schema, data_schema = batched.output_schema()
     assert tag_schema["x"] == data_schema["x"] == list[int]
     assert tag_schema["s"] == data_schema["s"] == list[str]
@@ -70,7 +70,7 @@ def test_a_referential_tag_is_the_same_list_in_both_roles() -> None:
 
 
 def test_source_info_is_one_token_per_member() -> None:
-    """A referential tag's source info is listed like any data column, never folded."""
+    """A data-tag's source info is listed like any data column, never folded."""
     batched = Batch(batch_size=2)(_source())
     assert _source_info(batched) == [
         {
@@ -97,14 +97,14 @@ def test_system_tags_fold_to_scalars() -> None:
 
 def test_a_batch_of_one_is_a_list_of_one() -> None:
     batched = Batch(batch_size=1)(_source())
-    assert stream_references(batched) == ("s", "x")
+    assert stream_data_tags(batched) == ("s", "x")
     assert [data["x"] for _, data in batched.iter_data()] == [[20], [10], [5]]
     assert _source_info(batched)[0]["_source_x"] == ["B::row_0::x"]
 
 
 def test_drop_partial_batch_drops_the_incomplete_batch() -> None:
     batched = Batch(batch_size=2, drop_partial_batch=True)(_source())
-    assert stream_references(batched) == ("s", "x")
+    assert stream_data_tags(batched) == ("s", "x")
     assert [(tag["x"], data["x"]) for tag, data in batched.iter_data()] == [
         ([20, 10], [20, 10])
     ]
@@ -114,7 +114,7 @@ def test_drop_partial_batch_can_leave_no_rows_with_the_types_of_rows() -> None:
     """Too few rows for one batch: zero rows, typed like a result with rows (ITL-912)."""
     empty = Batch(batch_size=5, drop_partial_batch=True)(_source())
     full = Batch(batch_size=2)(_source())
-    assert stream_references(empty) == ("s", "x")
+    assert stream_data_tags(empty) == ("s", "x")
     table = empty.as_table(all_info=True)
     assert table.num_rows == 0
     assert table.schema == full.as_table(all_info=True).schema
@@ -127,7 +127,7 @@ def test_no_input_rows_gives_the_types_of_rows(make: Callable[[], Batch]) -> Non
     """The zero-row table is the operator applied to a zero-row input (ITL-912)."""
     empty = make()(_no_rows(_source()))
     full = make()(_source())
-    assert stream_references(empty) == ("s", "x")
+    assert stream_data_tags(empty) == ("s", "x")
     assert empty.output_schema() == full.output_schema()
     # The filter is in the empty input's pipeline only, so system-tag names differ.
     columns = {"source": True, "context": True, "content_hash": True}
@@ -139,10 +139,10 @@ def test_no_input_rows_gives_the_types_of_rows(make: Callable[[], Batch]) -> Non
 
 
 def test_batch_after_group_by_nests_the_lists() -> None:
-    """The key stays referential, now a list; the non-key data lists nest one level."""
+    """The key stays a data-tag, now a list; the non-key data lists nest one level."""
     batched = Batch()(GroupBy(["s"])(_source()))
     assert batched.keys() == (("s",), ("s", "x", "y"))
-    assert stream_references(batched) == ("s",)
+    assert stream_data_tags(batched) == ("s",)
     tag_schema, data_schema = batched.output_schema()
     assert tag_schema["s"] == data_schema["s"] == list[str]
     assert data_schema["x"] == list[list[int]]
@@ -155,9 +155,9 @@ def test_batch_after_group_by_nests_the_lists() -> None:
     assert info["_source_x"] == [["B::row_1::x", "B::row_0::x"], ["B::row_2::x"]]
 
 
-def test_batch_after_batch_nests_the_reference() -> None:
+def test_batch_after_batch_nests_the_data_tag() -> None:
     batched = Batch()(Batch(batch_size=2)(_source()))
-    assert stream_references(batched) == ("s", "x")
+    assert stream_data_tags(batched) == ("s", "x")
     tag_schema, data_schema = batched.output_schema()
     assert tag_schema["x"] == data_schema["x"] == list[list[int]]
     [(tag, data)] = list(batched.iter_data())
@@ -168,7 +168,7 @@ def test_batch_after_batch_nests_the_reference() -> None:
     ]
 
 
-def test_a_nullable_referential_tag_is_one_type_in_both_roles() -> None:
+def test_a_nullable_data_tag_is_one_type_in_both_roles() -> None:
     rows = [{"x": 1, "y": 1}, {"x": None, "y": 2}]
     source = op.sources.DictSource(
         rows, tag_columns=["x"], source_id="N", data_schema={"x": int | None, "y": int}
@@ -198,7 +198,7 @@ def test_a_nullable_referential_tag_is_one_type_in_both_roles() -> None:
 def test_prediction_matches_the_result(
     make_input: Callable[[], StreamProtocol], make_op: Callable[[], Batch]
 ) -> None:
-    """The predicted schema, references included, equals ``static_process``'s."""
+    """The predicted schema, data-tags included, equals ``static_process``'s."""
     stream = make_input()
     batch = make_op()
     result = batch.static_process(stream)
@@ -207,23 +207,23 @@ def test_prediction_matches_the_result(
             columns=columns
         )
     assert batch(stream).keys() == result.keys()
-    assert stream_references(batch(stream)) == stream_references(result)
-    # Namespace check: a reference has one type in both halves.
+    assert stream_data_tags(batch(stream)) == stream_data_tags(result)
+    # Namespace check: a data-tag has one type in both halves.
     tag_schema, data_schema = batch.output_schema(stream)
-    check_namespaces(tag_schema, data_schema, stream_references(result))
+    check_namespaces(tag_schema, data_schema, stream_data_tags(result))
 
 
 def test_plain_tags_are_unchanged() -> None:
     plain = Batch(batch_size=2)(_source(tag_only_columns=True))
     assert plain.keys() == (("s", "x"), ("y",))
-    assert stream_references(plain) == ()
+    assert stream_data_tags(plain) == ()
     assert set(_source_info(plain)[0]) == {"_source_y"}
 
 
-def test_mixed_tags_keep_only_the_referential_ones_referential() -> None:
+def test_mixed_tags_keep_only_the_data_tag_ones_data_tag() -> None:
     batched = Batch(batch_size=2)(_source(tag_only_columns=["s"]))
     assert batched.keys() == (("s", "x"), ("x", "y"))
-    assert stream_references(batched) == ("x",)
+    assert stream_data_tags(batched) == ("x",)
 
 
 # ── a function pod after Batch ──────────────────────────────────────────────
@@ -234,10 +234,10 @@ def total(y: list[int]) -> int:
     return sum(y)
 
 
-def test_the_pod_call_lets_batched_references_fall_through() -> None:
+def test_the_pod_call_lets_batched_data_tags_fall_through() -> None:
     out = total.pod(Batch(batch_size=2)(_source()))
     assert out.keys() == (("s", "x"), ("s", "x", "total"))
-    assert stream_references(out) == ("s", "x")
+    assert stream_data_tags(out) == ("s", "x")
     rows = [(tag["x"], data["x"], data["total"]) for tag, data in out.iter_data()]
     assert sorted(rows) == [([5], [5], 1), ([20, 10], [20, 10], 9)]
 
@@ -271,7 +271,7 @@ def test_a_job_with_batch_runs_and_a_second_run_computes_nothing(
     job.run(orchestrator=orchestrator())
     assert sorted(CALLS) == [[1], [5, 4]]
     node = job.nodes["total"]
-    assert stream_references(node) == ("s", "x")
+    assert stream_data_tags(node) == ("s", "x")
     table = node.as_table()
     assert table.column_names.count("x") == 1
     assert sorted(r["total"] for r in table.to_pylist()) == [1, 9]

@@ -31,10 +31,10 @@ There are two important concepts here:
 - **Data columns** are the actual data payload. In this example, `temperature` and
   `pressure` are the data columns.
 
-By default a source's tag columns are also data columns: each is a **referential** tag, one
+By default a source's tag columns are also data columns: each is a **data-tag**, one
 column seen in both roles, so a function can read it. `tag_only_columns=True` keeps the tags
 plain (a tag only), which is what this example does, so the data columns are exactly the
-columns that are not tags. See [Referential Tags](concepts/referential-tags.md).
+columns that are not tags. See [Data-tags](concepts/data-tags.md).
 
 The `source_id` is a human-readable name used for provenance tracking.
 

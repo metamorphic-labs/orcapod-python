@@ -18,11 +18,11 @@ from orcapod.core.operators.base import (
     require_shared_arrow_type,
     require_tag_data_roles_agree,
 )
-from orcapod.core.referential_tags import (
+from orcapod.core.data_tags import (
     check_namespaces,
     merge_source_info,
-    reference_names,
-    stream_references,
+    data_tag_names,
+    stream_data_tags,
 )
 from orcapod.core.operators.key_nullability import (
     key_nullable,
@@ -49,11 +49,11 @@ else:
     pl = LazyModule("polars")
 
 
-# Temporary name of the right input's source info of a merged referential column
+# Temporary name of the right input's source info of a merged data-tag column
 # during the join (``static_process``); never in an output.
 _MERGED_SOURCE_PREFIX = "__join_merged_source__"
 
-# A column referential on several inputs gets ONE merged token per value, folded once
+# A column that is a data-tag on several inputs gets ONE merged token per value, folded once
 # over every input's token (ITL-1017), not pairwise: a pairwise fold would depend on
 # the order of the join chain, which inputs tied on pipeline hash leave to the
 # argument order. Between the pairwise steps of one join, each token position holds
@@ -81,7 +81,7 @@ def _merge_pending(left: Any, right: Any) -> Any:
 
 
 JOIN_FOLD_LABEL = "join_v1"
-"""Label of the fold of ``Join``: the one source-info token of a column referential on
+"""Label of the fold of ``Join``: the one source-info token of a column that is a data-tag on
 several inputs is ``"join_v1:<hex>"`` (ITL-1017, ITL-1154). It names the operation;
 the procedure is the members' tokens sorted (a missing token last), then
 ``arrow_utils.fold_system_tag_values``. The sort is part of it: the join meets the
@@ -107,8 +107,8 @@ def _fold_pending(value: Any) -> Any:
 
 
 class Join(NonZeroInputOperator):
-    # Referential tags (ITL-1023): handled.
-    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = None
+    # Data-tags (ITL-1023): handled.
+    DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     @property
     def kernel_id(self) -> tuple[str, ...]:
@@ -178,9 +178,9 @@ class Join(NonZeroInputOperator):
         Args:
             *streams: Two or more input streams.
 
-        Referential tags (specification section 9): a shared tag ``x`` that is
-        referential in either input is referential in the output. When it is
-        referential in both, their data columns ``x`` are merged into one: the join
+        Data-tags (specification section 9): a shared tag ``x`` that is
+        a data-tag in either input is a data-tag in the output. When it is
+        a data-tag in both, their data columns ``x`` are merged into one: the join
         equated the tags, so the values are equal (section 9.3). Every other data
         column shared by two inputs is still an error, and so is a plain tag of one
         input named like a data column of another (section 4.3).
@@ -190,7 +190,7 @@ class Join(NonZeroInputOperator):
 
         Raises:
             InputValidationError: If two inputs share a data column that is not the
-                target of a referential tag both of them join on, a merged column's
+                target of a data-tag both of them join on, a merged column's
                 types differ, or a plain tag would share a name with a data column.
         """
         self._require_tag_data_roles_agree(streams)
@@ -198,25 +198,25 @@ class Join(NonZeroInputOperator):
         stream = ordered_streams[0]
         tag_schema, data_schema = stream.output_schema()
         data_schema = without_meta_fields(data_schema)
-        references = set(reference_names(tag_schema, data_schema))
+        data_tags = set(data_tag_names(tag_schema, data_schema))
         for other_stream in ordered_streams[1:]:
             other_tag_schema, other_data_schema = other_stream.output_schema()
             other_data_schema = without_meta_fields(other_data_schema)
-            other_references = set(reference_names(other_tag_schema, other_data_schema))
-            merged = self._merged_references(
-                tag_schema, references, other_tag_schema, other_references
+            other_data_tags = set(data_tag_names(other_tag_schema, other_data_schema))
+            merged = self._merged_data_tags(
+                tag_schema, data_tags, other_tag_schema, other_data_tags
             )
             # A shared tag key that differs in nullability only is non-nullable
-            # (ITL-829): a null key matches nothing. A referential key is one
+            # (ITL-829): a null key matches nothing. A data-tag key is one
             # column, so its data role takes the same type (ITL-1023).
             reconciled, other_reconciled = reconcile_key_nullability(
                 tag_schema, other_tag_schema
             )
-            data_schema = self._narrow_references(
-                data_schema, tag_schema, reconciled, references
+            data_schema = self._narrow_data_tags(
+                data_schema, tag_schema, reconciled, data_tags
             )
-            other_data_schema = self._narrow_references(
-                other_data_schema, other_tag_schema, other_reconciled, other_references
+            other_data_schema = self._narrow_data_tags(
+                other_data_schema, other_tag_schema, other_reconciled, other_data_tags
             )
             tag_schema, other_tag_schema = reconciled, other_reconciled
             shared_data = set(data_schema) & set(other_data_schema)
@@ -233,40 +233,40 @@ class Join(NonZeroInputOperator):
             for name in sorted(merged):
                 if data_schema[name] != other_data_schema[name]:
                     raise InputValidationError(
-                        f"Join: referential tag {name!r} has type "
+                        f"Join: data-tag {name!r} has type "
                         f"{data_schema[name]} in one input and "
                         f"{other_data_schema[name]} in another"
                     )
             tag_schema = schema_utils.union_schemas(tag_schema, other_tag_schema)
             data_schema = schema_utils.union_schemas(data_schema, other_data_schema)
-            references |= other_references
-            check_namespaces(tag_schema, data_schema, references)
+            data_tags |= other_data_tags
+            check_namespaces(tag_schema, data_schema, data_tags)
         return tag_schema, data_schema
 
     @staticmethod
-    def _narrow_references(
+    def _narrow_data_tags(
         data_schema: Schema,
         tag_schema: Schema,
         reconciled: Schema,
-        references: Collection[str],
+        data_tags: Collection[str],
     ) -> Schema:
-        """Give a referential key narrowed by ``reconcile_key_nullability`` its data type.
+        """Give a data-tag key narrowed by ``reconcile_key_nullability`` its data type.
 
-        A referential tag is one column in two roles (ITL-1023): when the join makes
+        A data-tag is one column in two roles (ITL-1023): when the join makes
         the key non-nullable (ITL-829), its data role is that type too.
 
         Args:
             data_schema: One input's data schema.
             tag_schema: The input's tag schema.
             reconciled: The tag schema after ``reconcile_key_nullability``.
-            references: The input's referential tags.
+            data_tags: The input's data-tags.
 
         Returns:
-            ``data_schema`` with each narrowed referential key given its tag type.
+            ``data_schema`` with each narrowed data-tag key given its tag type.
         """
         narrowed = [
             name
-            for name in references
+            for name in data_tags
             if name in data_schema and reconciled[name] != tag_schema[name]
         ]
         return Schema(
@@ -278,29 +278,29 @@ class Join(NonZeroInputOperator):
         )
 
     @staticmethod
-    def _merged_references(
+    def _merged_data_tags(
         tags: Collection[str],
-        references: Collection[str],
+        data_tags: Collection[str],
         other_tags: Collection[str],
-        other_references: Collection[str],
+        other_data_tags: Collection[str],
     ) -> set[str]:
         """Return the data columns two join inputs merge into one (section 9.5).
 
-        A data column is merged when it is the target of a referential tag in both
+        A data column is merged when it is the target of a data-tag in both
         inputs and that tag is a join key (a tag of both inputs). ``Join`` joins on
-        every shared tag, so the second condition holds for every shared reference.
+        every shared tag, so the second condition holds for every shared data-tag.
 
         Args:
             tags: The first input's tag names.
-            references: The first input's referential tags.
+            data_tags: The first input's data-tags.
             other_tags: The second input's tag names.
-            other_references: The second input's referential tags.
+            other_data_tags: The second input's data-tags.
 
         Returns:
             The names of the merged data columns.
         """
         keys = set(tags) & set(other_tags)
-        return keys & set(references) & set(other_references)
+        return keys & set(data_tags) & set(other_data_tags)
 
     @staticmethod
     def _require_tag_data_roles_agree(streams: Sequence[StreamProtocol]) -> None:
@@ -376,8 +376,8 @@ class Join(NonZeroInputOperator):
         stream = ordered_streams[0]
 
         tag_keys, _ = [set(k) for k in stream.keys()]
-        references = set(stream_references(stream))
-        # Source-info columns of merged referential columns, folded once at the end.
+        data_tags = set(stream_data_tags(stream))
+        # Source-info columns of merged data-tag columns, folded once at the end.
         merged_source: set[str] = set()
         table = without_meta_columns(
             stream.as_table(columns={"source": True, "system_tags": True}), tag_keys
@@ -409,9 +409,9 @@ class Join(NonZeroInputOperator):
             )
 
             common_tag_keys = tag_keys.intersection(next_tag_keys)
-            next_references = set(stream_references(next_stream))
-            merged = self._merged_references(
-                tag_keys, references, next_tag_keys, next_references
+            next_data_tags = set(stream_data_tags(next_stream))
+            merged = self._merged_data_tags(
+                tag_keys, data_tags, next_tag_keys, next_data_tags
             )
             # The merged columns are join keys, so the join keeps one of each. Their
             # source info is kept from both sides: the right side's is set aside
@@ -456,7 +456,7 @@ class Join(NonZeroInputOperator):
             merged_source |= set(right_source)
 
             tag_keys.update(next_tag_keys)
-            references |= next_references
+            data_tags |= next_data_tags
 
         # reorder columns to bring tag columns to the front
         # TODO: come up with a better algorithm
@@ -473,7 +473,7 @@ class Join(NonZeroInputOperator):
         # keys from ``tag_columns``, so both must follow it. No hash or record
         # ID depends on column order.
         tag_order = list(tag_schema.keys())
-        # A referential tag's column is laid out once, among the tags.
+        # A data-tag's column is laid out once, among the tags.
         data_order = [name for name in data_schema if name not in tag_schema]
         listed = {*tag_order, *data_order}
         result_table = table.select(
@@ -484,7 +484,7 @@ class Join(NonZeroInputOperator):
         return ArrowTableStream(
             result_table,
             tag_columns=tuple(tag_order),
-            reference_tags=reference_names(tag_schema, data_schema),
+            data_tags=data_tag_names(tag_schema, data_schema),
         )
 
     @staticmethod
@@ -1100,7 +1100,7 @@ class Join(NonZeroInputOperator):
         Every column keeps the Arrow type it already has, and the source info
         of both sides is carried over. Neither side's meta columns are, as in
         ``static_process`` (``meta_columns.without_meta_columns``). A data column
-        that is the target of a referential tag on both sides, joined on, is kept
+        that is the target of a data-tag on both sides, joined on, is kept
         once, with the source info of both inputs, merged as ``static_process``
         merges it.
 
@@ -1119,16 +1119,16 @@ class Join(NonZeroInputOperator):
 
         Raises:
             InputValidationError: If both sides have a data column of the same
-                name that is not such a reference.
+                name that is not such a data-tag.
         """
         from orcapod.core.datagrams import Data
 
         left_table, right_table = left.as_table(), right.as_table()
-        merged = Join._merged_references(
+        merged = Join._merged_data_tags(
             left_tag.keys(),
-            reference_names(left_tag.keys(), left_table.column_names),
+            data_tag_names(left_tag.keys(), left_table.column_names),
             right_tag.keys(),
-            reference_names(right_tag.keys(), right_table.column_names),
+            data_tag_names(right_tag.keys(), right_table.column_names),
         )
         overlap = set(left_table.column_names) & set(right_table.column_names)
         if overlap - merged:
@@ -1146,32 +1146,32 @@ class Join(NonZeroInputOperator):
             source_info = {
                 name: _fold_pending(value) for name, value in source_info.items()
             }
-        # Column order as ``static_process`` lays it out: the referential columns
+        # Column order as ``static_process`` lays it out: the data-tag columns
         # first, in the merged tag order, then each side's other data columns.
         tag_order = [*left_tag.keys()]
         tag_order += [name for name in right_tag.keys() if name not in tag_order]
-        referential = [
+        with_data_tags = [
             name
             for name in tag_order
             if name in left_table.column_names or name in right_table.column_names
         ]
-        if not referential:
+        if not with_data_tags:
             return Data(
                 arrow_utils.hstack_tables(left_table, right_table),
                 source_info=source_info,
                 data_context=left.data_context_key,
             )
         left_rest = left_table.drop_columns(
-            [c for c in referential if c in left_table.column_names]
+            [c for c in with_data_tags if c in left_table.column_names]
         )
         right_rest = right_table.drop_columns(
-            [c for c in referential if c in right_table.column_names]
+            [c for c in with_data_tags if c in right_table.column_names]
         )
         owners = [
             left_table if name in left_table.column_names else right_table
-            for name in referential
+            for name in with_data_tags
         ]
-        # A referential join key is one column: its data role is nullable only
+        # A data-tag join key is one column: its data role is nullable only
         # when the key is nullable in both tags, as the merged tag is (ITL-829).
         left_tags, right_tags = left_tag.as_table().schema, right_tag.as_table().schema
         fields = [
@@ -1182,14 +1182,14 @@ class Join(NonZeroInputOperator):
             )
             if name in left_tags.names and name in right_tags.names
             else owner.schema.field(name)
-            for owner, name in zip(owners, referential)
+            for owner, name in zip(owners, with_data_tags)
         ]
-        references = pa.Table.from_arrays(
-            [owner.column(name) for owner, name in zip(owners, referential)],
+        data_tags = pa.Table.from_arrays(
+            [owner.column(name) for owner, name in zip(owners, with_data_tags)],
             schema=pa.schema(fields),
         )
         return Data(
-            arrow_utils.hstack_tables(references, left_rest, right_rest),
+            arrow_utils.hstack_tables(data_tags, left_rest, right_rest),
             source_info=source_info,
             data_context=left.data_context_key,
         )

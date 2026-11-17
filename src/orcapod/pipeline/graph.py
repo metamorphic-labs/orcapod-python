@@ -174,7 +174,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
 
         import json as _json
         from orcapod.pipeline.serialization import (
-            FALL_THROUGH_REFERENCES_KEY,
+            FALL_THROUGH_TAGS_KEY,
             PIPELINE_FORMAT_VERSION,
             serialize_nullability,
             serialize_output_schema,
@@ -259,9 +259,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                         descriptor["function_config"] = node._function_pod.to_config()
                     descriptor["table_scope"] = node._table_scope
                     # Written for every function node, also a plain one (ITL-1019).
-                    descriptor[FALL_THROUGH_REFERENCES_KEY] = list(
-                        node.declared_references()
-                    )
+                    descriptor[FALL_THROUGH_TAGS_KEY] = list(node.declared_data_tags())
 
                 case OperatorNode():
                     if node._operator is not None:
@@ -307,11 +305,11 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         """
         import json as _json
         from orcapod.pipeline.serialization import (
-            FALL_THROUGH_REFERENCES_KEY,
+            FALL_THROUGH_TAGS_KEY,
             SUPPORTED_FORMAT_VERSIONS,
             check_saved_output_schema_is_plain,
             deserialize_schema,
-            saved_fall_through_references,
+            saved_fall_through_tags,
         )
         from orcapod.core.nodes import FunctionNode, OperatorNode
         from orcapod.core.nodes.source_node import SourceNode as SourceNodeClass
@@ -373,13 +371,13 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                 deserialize_output_schema,
             )
 
-            # The format version decides which tags may be referential (ITL-1019).
+            # The format version decides which tags may be data-tags (ITL-1019).
             try:
                 check_saved_output_schema_is_plain(descriptor, version)
                 if descriptor.get("node_type") == "function":
                     # Stated explicitly from here on, whatever the version.
-                    descriptor[FALL_THROUGH_REFERENCES_KEY] = list(
-                        saved_fall_through_references(descriptor, version)
+                    descriptor[FALL_THROUGH_TAGS_KEY] = list(
+                        saved_fall_through_tags(descriptor, version)
                     )
             except ValueError as exc:
                 raise ValueError(

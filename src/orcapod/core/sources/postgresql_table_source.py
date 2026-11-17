@@ -16,7 +16,7 @@ from collections.abc import Collection, Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
-from orcapod.core.referential_tags import TagOnlyColumns
+from orcapod.core.data_tags import TagOnlyColumns
 from typing_extensions import override
 
 from orcapod.core.sources.db_table_source import DBTableSource
@@ -65,7 +65,7 @@ class PostgreSQLTableSource(DBTableSource):
         config: OrcaPod configuration.
         tag_only_columns: Tag columns kept as tags only, not data, exactly as in
             v0.3; ``True`` for all of them. Keyword-only. Every other tag column is
-            referential: also a data column of the same name (ITL-1023).
+            a data-tag: also a data column of the same name (ITL-1023).
 
     Raises:
         ValueError: If the table is not found, is empty, or has no PK and

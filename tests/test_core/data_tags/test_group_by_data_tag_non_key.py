@@ -1,14 +1,14 @@
-"""``GroupBy`` over referential tags after ITL-1070 (ITL-1023, ITL-1017).
+"""``GroupBy`` over data-tags after ITL-1070 (ITL-1023, ITL-1017).
 
-``GroupBy`` keeps only its ``by`` tags (ITL-1070). A referential tag is one column in two
-roles (developer, November 13, 2026): a referential tag that is not in ``by`` loses its tag
+``GroupBy`` keeps only its ``by`` tags (ITL-1070). A data-tag is one column in two
+roles (developer, November 13, 2026): a data-tag that is not in ``by`` loses its tag
 role only. Its data column stays and is aggregated like every other data column, a list
 with one element per member and one source-info token per member. A plain (tag-only)
-non-key tag is dropped entirely. A referential ``by`` tag stays scalar in both roles and
+non-key tag is dropped entirely. A data-tag ``by`` tag stays scalar in both roles and
 keeps its one merged source-info token (pinned from a run at ``c78ba80a``).
 
 The members of a group are ordered by the non-key tags, then by record id, as on main; so
-the list of a referential non-key is ordered by its own values, and every other data list
+the list of a data-tag non-key is ordered by its own values, and every other data list
 follows that order. Both the sync path, ``op(stream)``, and the async path,
 ``async_execute`` over channels, are checked.
 """
@@ -22,7 +22,7 @@ from typing import Any
 import orcapod as op
 from orcapod.channels import Channel
 from orcapod.core.operators import GroupBy
-from orcapod.core.referential_tags import stream_references
+from orcapod.core.data_tags import stream_data_tags
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
 
 ROWS = [
@@ -33,7 +33,7 @@ ROWS = [
 
 # Pinned from a run of this input at c78ba80a, before ITL-1070 was merged, and
 # re-pinned when the token became the ``group_v1`` fold of the members' tokens in
-# member order (ITL-1154 refresh): the folded token of the referential key must not
+# member order (ITL-1154 refresh): the folded token of the data-tag key must not
 # move. ``m2`` has one member, so its digest is the one pinned before.
 SUBJECT_TOKENS = {
     "m1": "group_v1:dc09a0e68d7b52eac555beced397606aea786ac869a0af46465a376874bb07c7",
@@ -53,7 +53,7 @@ V_TOKENS = {
 
 
 def _source(**kw: Any) -> StreamProtocol:
-    """Tags ``subject`` and ``session``, both referential unless ``kw`` says otherwise."""
+    """Tags ``subject`` and ``session``, both data-tags unless ``kw`` says otherwise."""
     return op.sources.DictSource(
         ROWS, tag_columns=["subject", "session"], source_id="sessions", **kw
     )
@@ -137,12 +137,12 @@ def test_schema_prediction_matches_the_result_for_a_plain_non_key() -> None:
     assert dict(data_schema) == {"subject": str, "v": list[float]}
 
 
-def test_referential_non_key_loses_its_tag_role_only() -> None:
+def test_data_tag_non_key_loses_its_tag_role_only() -> None:
     grouped = GroupBy(["subject"])(_source())
     tags, data = grouped.keys()
     assert tags == ("subject",)
     assert set(data) == {"subject", "session", "v"}
-    assert stream_references(grouped) == ("subject",)
+    assert stream_data_tags(grouped) == ("subject",)
     names = grouped.as_table(all_info=True).column_names
     assert names.count("subject") == 1
     assert names.count("session") == 1
@@ -154,7 +154,7 @@ def test_plain_non_key_is_dropped_entirely() -> None:
     tags, data = grouped.keys()
     assert tags == ("subject",)
     assert set(data) == {"subject", "v"}
-    assert stream_references(grouped) == ("subject",)
+    assert stream_data_tags(grouped) == ("subject",)
     names = grouped.as_table(all_info=True).column_names
     assert "session" not in names and "_source_session" not in names
 
@@ -220,9 +220,9 @@ def _check_time_order(rows: Sequence[tuple[TagProtocol, DataProtocol]]) -> None:
     assert by_trial[2]["value"] == ["x"]
 
 
-def test_members_are_ordered_by_the_referential_non_key_sync() -> None:
+def test_members_are_ordered_by_the_data_tag_non_key_sync() -> None:
     _check_time_order(list(GroupBy(["trial"])(_series()).iter_data()))
 
 
-def test_members_are_ordered_by_the_referential_non_key_async() -> None:
+def test_members_are_ordered_by_the_data_tag_non_key_async() -> None:
     _check_time_order(asyncio.run(_run_async(GroupBy(["trial"]), _series())))

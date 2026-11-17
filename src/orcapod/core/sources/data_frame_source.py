@@ -5,7 +5,7 @@ from collections.abc import Collection
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from orcapod.core.sources.base import RootSource
-from orcapod.core.referential_tags import TagOnlyColumns, source_reference_tags
+from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
 from orcapod.core.sources.stream_builder import (
     normalize_record_id_columns,
@@ -31,7 +31,7 @@ class DataFrameSource(RootSource):
     The DataFrame is converted to an Arrow table and enriched by
     ``SourceStreamBuilder`` (source-info, schema-hash, system tags).
 
-    Referential tags (ITL-1023): every declared tag column is referential by default,
+    Data-tags (ITL-1023): every declared tag column is a data-tag by default,
     also a data column of the same name. ``tag_only_columns`` (keyword-only) names the
     tags kept plain (tag only, not data, as in v0.3); ``True`` keeps all of them plain.
     """
@@ -91,7 +91,7 @@ class DataFrameSource(RootSource):
         result = builder.build(
             arrow_table,
             tag_columns=tag_columns,
-            reference_tags=source_reference_tags(tag_columns, tag_only_columns),
+            data_tags=source_data_tags(tag_columns, tag_only_columns),
             source_id=self._source_id,
             source_kind=self.SOURCE_KIND,
             record_id_columns=self._key_columns,
@@ -101,7 +101,7 @@ class DataFrameSource(RootSource):
         self._stream = result.stream
         self._tag_columns = result.tag_columns
         self._tag_only_columns = tuple(
-            c for c in result.tag_columns if c not in result.reference_tags
+            c for c in result.tag_columns if c not in result.data_tags
         )
         if self._source_id is None:
             self._source_id = result.source_id

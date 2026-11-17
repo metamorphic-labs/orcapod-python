@@ -890,7 +890,7 @@ session, so that you can read the results the job stored. The file also records
 `orcapod_version`, the Orcapod release that wrote it (the same text as `orcapod.__version__`;
 a development checkout gives a development version). It is informational: loading never
 depends on it. Adding the field moved the file format version from `0.1.0` to `0.2.0`, and
-stating every tag binding (referential tags) moved it to `0.3.0`, the version written now. A
+stating every tag binding (data-tags) moved it to `0.3.0`, the version written now. A
 `0.1.0` file, written by v0.2.0, and a `0.2.0` file, written by v0.3.0, still load, with every
 source tag plain as they were written; any other version is rejected.
 The reverse does not hold: v0.2.0 cannot load a file saved by v0.3.0, because hashes differ

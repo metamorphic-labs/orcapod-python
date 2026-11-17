@@ -1,6 +1,6 @@
-"""``TagBy`` / ``stream.tag_by``: data columns become referential tags (ITL-1175).
+"""``TagBy`` / ``stream.tag_by``: data columns become data-tags (ITL-1175).
 
-A named data column becomes a referential tag: one column, a tag and the data column it
+A named data column becomes a data-tag: one column, a tag and the data column it
 was, with its values and source info unchanged. The new tags follow the input's tags in
 the order given. Every operator is driven through its public call and read through the
 stream's public methods; a schema prediction is checked against ``static_process``.
@@ -19,10 +19,10 @@ import pytest
 
 import orcapod as op
 from orcapod.core.operators import TagBy
-from orcapod.core.referential_tags import (
-    ReferenceMaterializationWarning,
-    stored_references,
-    stream_references,
+from orcapod.core.data_tags import (
+    DataTagMaterializationWarning,
+    stored_data_tags,
+    stream_data_tags,
 )
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import InputValidationError
@@ -54,8 +54,8 @@ def _plain() -> op.sources.DictSource:
     )
 
 
-def _referential() -> op.sources.DictSource:
-    """``unit`` a referential tag; ``trial``, ``amp`` and ``label`` data."""
+def _data_tag() -> op.sources.DictSource:
+    """``unit`` a data-tag; ``trial``, ``amp`` and ``label`` data."""
     return op.sources.DictSource(ROWS, tag_columns=["unit"], source_id="spikes")
 
 
@@ -72,13 +72,13 @@ def _sorted_rows(table: pa.Table) -> list[dict[str, Any]]:
 # ── what the output is ──────────────────────────────────────────────────────
 
 
-def test_named_data_columns_become_referential_tags_in_the_order_given() -> None:
+def test_named_data_columns_become_data_tags_in_the_order_given() -> None:
     tagged = _plain().tag_by("label", "trial")
     assert tagged.keys() == (
         ("unit", "label", "trial"),
         ("trial", "amp", "label"),
     )
-    assert stream_references(tagged) == ("label", "trial")
+    assert stream_data_tags(tagged) == ("label", "trial")
     for tag, data in tagged.iter_data():
         assert tag["label"] == data["label"] and tag["trial"] == data["trial"]
 
@@ -108,9 +108,9 @@ def test_values_system_tags_and_source_info_are_unchanged() -> None:
         assert after.schema.field(name) == before.schema.field(name)
 
 
-def test_an_existing_reference_is_kept() -> None:
-    tagged = _referential().tag_by("trial")
-    assert stream_references(tagged) == ("unit", "trial")
+def test_an_existing_data_tag_is_kept() -> None:
+    tagged = _data_tag().tag_by("trial")
+    assert stream_data_tags(tagged) == ("unit", "trial")
     assert tagged.keys() == (("unit", "trial"), ("unit", "trial", "amp", "label"))
 
 
@@ -141,7 +141,7 @@ def test_the_order_of_the_names_is_part_of_the_identity() -> None:
 
 @pytest.mark.parametrize("all_info", [False, True])
 def test_the_schema_is_predicted(all_info: bool) -> None:
-    source = _referential()
+    source = _data_tag()
     tag_by = TagBy(["label", "trial"])
     predicted = tag_by.output_schema(source, all_info=all_info)
     assert predicted == tag_by.static_process(source).output_schema(all_info=all_info)
@@ -157,7 +157,7 @@ def test_the_data_order_is_the_inputs_and_the_predicted_one() -> None:
     (``static_process``) equals the input's and the predicted one, also when the
     names are given in another order than the data (CodeRabbit on PR #420).
     """
-    source = _referential()
+    source = _data_tag()
     tag_by = TagBy(["label", "trial"])
     computed = tag_by.static_process(source)
     _, input_data = source.keys()
@@ -203,7 +203,7 @@ def test_the_config_round_trips_and_is_registered_for_loading() -> None:
 
 
 def test_a_computed_column_becomes_a_tag_and_keys_a_join() -> None:
-    computed = TagBy("session")(session_of.pod(_referential()))
+    computed = TagBy("session")(session_of.pod(_data_tag()))
     assert computed.keys() == (("unit", "session"), ("unit", "session"))
     sessions = op.sources.DictSource(
         [{"session": "s0", "room": "A"}, {"session": "s1", "room": "B"}],
@@ -211,7 +211,7 @@ def test_a_computed_column_becomes_a_tag_and_keys_a_join() -> None:
         source_id="sessions",
     )
     joined = computed.join(sessions)
-    assert set(stream_references(joined)) == {"unit", "session"}
+    assert set(stream_data_tags(joined)) == {"unit", "session"}
     rows = sorted(joined.as_table().to_pylist(), key=lambda r: r["unit"])
     assert [(r["unit"], r["session"], r["room"]) for r in rows] == [
         (1, "s0", "A"),
@@ -220,7 +220,7 @@ def test_a_computed_column_becomes_a_tag_and_keys_a_join() -> None:
 
 
 def test_a_computed_column_becomes_a_tag_and_keys_a_group() -> None:
-    grouped = TagBy("session")(session_of.pod(_referential())).group_by(["session"])
+    grouped = TagBy("session")(session_of.pod(_data_tag())).group_by(["session"])
     assert grouped.keys() == (("session",), ("unit", "session"))
     rows = sorted(grouped.as_table().to_pylist(), key=lambda r: r["session"])
     assert [(r["session"], r["unit"]) for r in rows] == [("s0", [1]), ("s1", [2])]
@@ -244,7 +244,7 @@ def test_removing_the_data_role_afterwards_leaves_a_plain_tag_with_the_warning()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         plain = tagged.drop_data_columns(["label"])
-    assert any(w.category is ReferenceMaterializationWarning for w in caught)
+    assert any(w.category is DataTagMaterializationWarning for w in caught)
     assert plain.keys() == (("unit", "label"), ("trial", "amp"))
 
 
@@ -313,9 +313,9 @@ def test_a_name_that_is_not_a_data_column_is_refused(name: str, match: str) -> N
         _ = _plain().tag_by(name)
 
 
-def test_an_existing_referential_tag_is_refused() -> None:
-    with pytest.raises(InputValidationError, match="'unit' is already a referential"):
-        _ = _referential().tag_by("unit")
+def test_an_existing_data_tag_is_refused() -> None:
+    with pytest.raises(InputValidationError, match="'unit' is already a data-tag"):
+        _ = _data_tag().tag_by("unit")
 
 
 def _typed_source(column: pa.Array[Any] | pa.ChunkedArray[Any]) -> Any:
@@ -385,7 +385,7 @@ def test_a_logical_type_is_refused() -> None:
 def test_a_scalar_type_is_accepted(column: pa.Array[Any]) -> None:
     source = _typed_source(column)
     tagged = source.tag_by("v")
-    assert stream_references(tagged) == ("v",)
+    assert stream_data_tags(tagged) == ("v",)
     assert tagged.as_table().schema.field("v") == source.as_table().schema.field("v")
 
 
@@ -400,7 +400,7 @@ def test_in_a_job_a_function_node_stores_the_new_tag_marked(
     database = InMemoryArrowDatabase()
     job = PipelineJob(database=database)
     with job:
-        computed = session_of.pod(_referential(), label="session")
+        computed = session_of.pod(_data_tag(), label="session")
         tagged = TagBy("session")(computed, label="tag_by")
         double.pod(tagged, label="double")
     job.run(orchestrator=orchestrator())
@@ -412,7 +412,7 @@ def test_in_a_job_a_function_node_stores_the_new_tag_marked(
         (2, "s1", "s1s1"),
     ]
     marked = {
-        stored_references(database.get_all_records(path).schema)  # pyright: ignore[reportOptionalMemberAccess]  # every listed table has records
+        stored_data_tags(database.get_all_records(path).schema)  # pyright: ignore[reportOptionalMemberAccess]  # every listed table has records
         for path in database.list_table_paths()
         if "_result" not in path
     }
@@ -437,7 +437,7 @@ def test_a_logged_tag_by_node_stores_its_new_tag_marked(
     database = InMemoryArrowDatabase()
     job = PipelineJob(name="ops", database=database)
     with job:
-        _ = TagBy("trial")(_referential(), label="tag_by")
+        _ = TagBy("trial")(_data_tag(), label="tag_by")
     job.nodes["tag_by"].attach_databases(
         pipeline_database=database.at("ops"), cache_mode=CacheMode.LOG
     )
@@ -448,4 +448,4 @@ def test_a_logged_tag_by_node_stores_its_new_tag_marked(
     assert len(paths) == 1
     stored = database.get_all_records(paths[0])
     assert stored is not None
-    assert stored_references(stored.schema) == ("unit", "trial")
+    assert stored_data_tags(stored.schema) == ("unit", "trial")

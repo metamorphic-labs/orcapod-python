@@ -257,7 +257,7 @@ def _roles(
 ) -> frozenset[str]:
     """Return the roles ``name`` has in a pair of schemas: ``"tag"``, ``"data"``, both, none.
 
-    A name in both is a referential tag (ITL-1023): one column in both roles.
+    A name in both is a data-tag (ITL-1023): one column in both roles.
     """
     return frozenset(
         role
@@ -266,18 +266,18 @@ def _roles(
     )
 
 
-def _referential_role_hint(
+def _data_tag_role_hint(
     name: str,
     *,
     source_roles: frozenset[str],
     slot_roles: frozenset[str],
     source_plain_tags: list[str],
 ) -> str | None:
-    """Explain a role difference that a referential tag on one side causes, with the remedy.
+    """Explain a role difference that a data-tag on one side causes, with the remedy.
 
     The bind refuses every role difference (ITL-1142: strict for now). The missing and
     unexpected columns it lists do not say that one side holds the column as a
-    referential tag, a tag and a data column of one name; this does, and names how to
+    data-tag, a tag and a data column of one name; this does, and names how to
     make the two agree (ITL-1022).
 
     Args:
@@ -290,7 +290,7 @@ def _referential_role_hint(
 
     Returns:
         The explanation, or ``None`` when the roles agree, when neither side holds the
-        column as a referential tag, or when one side lacks the column altogether.
+        column as a data-tag, or when one side lacks the column altogether.
     """
     if source_roles == slot_roles or not source_roles or not slot_roles:
         return None
@@ -310,17 +310,17 @@ def _referential_role_hint(
             )
             slot_role = "a data column only"
         return (
-            f"{name!r} is a referential tag of the source (a tag and a data column of "
+            f"{name!r} is a data-tag of the source (a tag and a data column of "
             f"one name) but {slot_role} of the slot: {remedy}"
         )
     if slot_roles == _BOTH_ROLES:
-        # A declared tag is referential unless ``tag_only_columns`` names it.
+        # A declared tag is a data-tag unless ``tag_only_columns`` names it.
         others = [tag for tag in source_plain_tags if tag != name]
         tag_only = f"tag_only_columns={others}" if others else "no tag_only_columns"
         if source_roles == _TAG_ROLE:
             source_role = "a plain tag"
             remedy = (
-                f"build the source with {tag_only} (a declared tag is referential "
+                f"build the source with {tag_only} (a declared tag is a data-tag "
                 f"unless named there), or declare the slot with {name!r} as a plain tag"
             )
         else:
@@ -330,7 +330,7 @@ def _referential_role_hint(
                 f"declare the slot with {name!r} as a data column only"
             )
         return (
-            f"{name!r} is {source_role} of the source but a referential tag of the "
+            f"{name!r} is {source_role} of the source but a data-tag of the "
             f"slot (a tag and a data column of one name): {remedy}"
         )
     return None
@@ -745,13 +745,13 @@ class SourceNodeBase(TraceableBase, ABC):
                         f"{_type_text(given[name])}"
                     )
 
-        # A name whose roles differ only because one side holds it as a referential tag
+        # A name whose roles differ only because one side holds it as a data-tag
         # (a tag and a data column of one name) is refused like any role difference
         # (ITL-1142: strict for now); say so, and how to make the two agree (ITL-1022).
         for name in sorted(
             {*self._tag_schema, *self._data_schema, *source_tag, *source_data}
         ):
-            hint = _referential_role_hint(
+            hint = _data_tag_role_hint(
                 name,
                 source_roles=_roles(name, source_tag, source_data),
                 slot_roles=_roles(name, self._tag_schema, self._data_schema),

@@ -81,7 +81,7 @@ and `SemiJoin`. In the output of `Join` and `MergeJoin` the column is `T` when a
 input's type. Any other type difference is still an error, and a data column is never
 reconciled this way.
 
-A plain tag and a data column never share a name across inputs: if one input has `x` as a plain tag column and another has it as a data column only, `Join` (and `MergeJoin`) raises `InputValidationError` when the graph is built; rename one with `map_tags` or `map_data`. A referential tag is the exception: it is one column in both roles, and `Join` merges a key that is referential on its inputs (or plain on one and referential on another) into a referential tag with one data column (see [Referential Tags](referential-tags.md)).
+A plain tag and a data column never share a name across inputs: if one input has `x` as a plain tag column and another has it as a data column only, `Join` (and `MergeJoin`) raises `InputValidationError` when the graph is built; rename one with `map_tags` or `map_data`. A data-tag is the exception: it is one column in both roles, and `Join` merges a key that is a data-tag on its inputs (or plain on one and a data-tag on another) into a data-tag with one data column (see [Data-tags](data-tags.md)).
 
 Column order follows each operator's argument symmetry: commutative operators (`Join`,
 `MergeJoin`) list tag and data columns by first appearance across their inputs in canonical
@@ -269,14 +269,14 @@ The output schema follows three rules:
   the only tag columns of the output.
 - **A tag that is not a key is dropped** (`probe`). A list of the members' values is not a key
   for the group, just as SQL drops a non-key, non-aggregated column after `GROUP BY`. A
-  [referential tag](referential-tags.md) that is not a key loses its tag role only: its data
+  [data-tag](data-tags.md) that is not a key loses its tag role only: its data
   column stays, as a list like any other.
 - **Data columns become `list[T]`** (`spike_count: list[int]`), one element per member.
 
 !!! warning "Member tag values are not carried"
     `GroupBy` does not keep the members' values of a plain non-key tag, as a tag or as data.
     If a later step needs to know which member each element came from, make the column data
-    *before* grouping: keep the tag referential at the source (the default without
+    *before* grouping: keep the tag a data-tag at the source (the default without
     `tag_only_columns`), declare it as data at the source, or derive a source that offers the
     tag as data with `DerivedSource(origin, tags_as_data={...})`.
 
@@ -295,8 +295,8 @@ for tag, data in by_subject.iter_data():
 
 The data columns of the output are exactly the data columns of the input: a function pod that
 follows `GroupBy` receives `spike_count` (and `probe_name`, when the source offers it), never a
-plain tag. A referential group key stays a data column too (scalar, in both roles), so a
-following function can read its value (see [Referential Tags](referential-tags.md)).
+plain tag. A data-tag group key stays a data column too (scalar, in both roles), so a
+following function can read its value (see [Data-tags](data-tags.md)).
 
 Ordering is deterministic by construction, because orcapod hashes the emitted lists to build
 cache keys: members are sorted by the input's non-key tag values (with the internal record id

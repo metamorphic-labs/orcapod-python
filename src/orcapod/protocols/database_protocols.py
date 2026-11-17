@@ -249,7 +249,7 @@ class RecordValidatingDatabaseProtocol(Protocol):
     A database whose backend cannot keep every part of an Arrow table (the SQLite and
     PostgreSQL connector databases keep no field metadata) refuses such rows on
     write. ``validate_records`` applies the same check without writing, so a caller
-    can refuse up front (ITL-1019: a referential tag marker).
+    can refuse up front (ITL-1019: a data-tag marker).
     """
 
     def validate_records(self, records: pa.Table) -> None:
@@ -261,12 +261,12 @@ class RecordValidatingDatabaseProtocol(Protocol):
 class FieldMetadataKeepingDatabaseProtocol(Protocol):
     """A database that states whether it keeps Arrow field metadata.
 
-    A stored referential tag is marked with Arrow field metadata (ITL-1019), so a node
+    A stored data-tag is marked with Arrow field metadata (ITL-1019), so a node
     stores one only in a database that keeps it on every write path (first write,
     append, merge, schema evolution where the database supports it) and reads it back.
     A database states this with ``keeps_field_metadata``. One that does not have the
     member is treated as not keeping field metadata: a node refuses it before
-    anything is written (``referential_tags.require_database_keeps_marker``).
+    anything is written (``data_tags.require_database_keeps_marker``).
 
     ``InMemoryArrowDatabase`` and ``DeltaTableDatabase`` keep it. A
     ``ConnectorArrowDatabase`` keeps it when its connector does: a connector states it

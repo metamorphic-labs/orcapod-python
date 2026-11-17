@@ -14,10 +14,10 @@ from orcapod.core.operators.key_nullability import (
     key_nullable,
     reconcile_key_nullability,
 )
-from orcapod.core.referential_tags import (
+from orcapod.core.data_tags import (
     check_namespaces,
-    reference_names,
-    stream_references,
+    data_tag_names,
+    stream_data_tags,
 )
 from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import InputValidationError
@@ -167,20 +167,20 @@ class MergeJoin(BinaryOperator):
     MergeJoin is commutative: MergeJoin(A, B) produces the same result as
     MergeJoin(B, A), achieved by sorting merged values and system tag values.
 
-    Referential tags (ITL-1194) follow ``Join``, with ``Join``'s helpers. A tag
-    ``x`` referential in both inputs is a join key, so its two values are equal: the
-    output has ONE scalar referential column ``x``, not a two-element list, and its
+    Data-tags (ITL-1194) follow ``Join``, with ``Join``'s helpers. A tag
+    ``x`` that is a data-tag in both inputs is a join key, so its two values are equal: the
+    output has ONE scalar data-tag column ``x``, not a two-element list, and its
     source info is one token, the ``join_v1`` fold of the two inputs' tokens
-    (sorted). A tag referential in one input stays referential, with its own token,
-    whether the other input has it as a plain tag or not at all. A referential tag
+    (sorted). A tag that is a data-tag in one input stays a data-tag, with its own token,
+    whether the other input has it as a plain tag or not at all. A data-tag
     of one input named like a data-only column of the other is refused (the tag and
     data role check). A shared key that is ``T`` in one input and ``T | None`` in
     the other is ``T`` in both roles (ITL-829). Every other colliding data column is
     merged into a sorted list, as for plain inputs.
     """
 
-    # Referential tags (ITL-1023) are handled (ITL-1194).
-    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = None
+    # Data-tags (ITL-1023) are handled (ITL-1194).
+    DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     @property
     def kernel_id(self) -> tuple[str, ...]:
@@ -199,7 +199,7 @@ class MergeJoin(BinaryOperator):
 
         # Colliding data columns must have identical types since they are
         # merged into list[T] — both sides must contribute the same T. A merged
-        # referential column is one value, checked in ``binary_output_schema``.
+        # data-tag column is one value, checked in ``binary_output_schema``.
         colliding_keys = (
             set(left_data_schema.keys()) & set(right_data_schema.keys())
         ) - merged
@@ -257,11 +257,11 @@ class MergeJoin(BinaryOperator):
             *reconcile_key_nullability(left_tag_schema, right_tag_schema)
         )
 
-        # A referential tag of both inputs is one column, one value (ITL-1194).
+        # A data-tag of both inputs is one column, one value (ITL-1194).
         for name in sorted(merged):
             if left_data_schema[name] != right_data_schema[name]:
                 raise InputValidationError(
-                    f"MergeJoin: referential tag {name!r} has type "
+                    f"MergeJoin: data-tag {name!r} has type "
                     f"{left_data_schema[name]} in one input and "
                     f"{right_data_schema[name]} in the other"
                 )
@@ -284,19 +284,19 @@ class MergeJoin(BinaryOperator):
             else:
                 merged_data_schema[key] = right_data_schema[key]
 
-        # A referential tag's column is laid out once, among the tags, and a
-        # stream takes its data order from the layout: the referential columns
-        # lead the data, in tag order. Without referential tags the order is as
+        # A data-tag's column is laid out once, among the tags, and a
+        # stream takes its data order from the layout: the data-tag columns
+        # lead the data, in tag order. Without data-tags the order is as
         # before.
-        references = set(reference_names(tag_schema, merged_data_schema))
-        check_namespaces(tag_schema, merged_data_schema, references)
+        data_tags = set(data_tag_names(tag_schema, merged_data_schema))
+        check_namespaces(tag_schema, merged_data_schema, data_tags)
         merged_data_schema = {
             **{
                 name: merged_data_schema[name]
                 for name in tag_schema
-                if name in references
+                if name in data_tags
             },
-            **{k: v for k, v in merged_data_schema.items() if k not in references},
+            **{k: v for k, v in merged_data_schema.items() if k not in data_tags},
         }
 
         # Add system tag columns if requested
@@ -314,10 +314,10 @@ class MergeJoin(BinaryOperator):
     ) -> tuple[Schema, Schema, set[str]]:
         """Return the inputs' data schemas as the join sees them, and the merged names.
 
-        As in ``Join``: a referential key the join narrows to non-nullable (ITL-829)
-        has that type in its data role too (``Join._narrow_references``), and the
-        merged columns are the referential tags of both inputs
-        (``Join._merged_references``).
+        As in ``Join``: a data-tag key the join narrows to non-nullable (ITL-829)
+        has that type in its data role too (``Join._narrow_data_tags``), and the
+        merged columns are the data-tags of both inputs
+        (``Join._merged_data_tags``).
 
         Args:
             first_stream: One input.
@@ -328,19 +328,19 @@ class MergeJoin(BinaryOperator):
         """
         first_tags, first_data = first_stream.output_schema()
         second_tags, second_data = second_stream.output_schema()
-        first_refs = set(reference_names(first_tags, first_data))
-        second_refs = set(reference_names(second_tags, second_data))
-        merged = Join._merged_references(  # pyright: ignore[reportPrivateUsage]  # Join's one rule
+        first_refs = set(data_tag_names(first_tags, first_data))
+        second_refs = set(data_tag_names(second_tags, second_data))
+        merged = Join._merged_data_tags(  # pyright: ignore[reportPrivateUsage]  # Join's one rule
             first_tags, first_refs, second_tags, second_refs
         )
         first_reconciled, second_reconciled = reconcile_key_nullability(
             first_tags, second_tags
         )
         return (
-            Join._narrow_references(  # pyright: ignore[reportPrivateUsage]  # Join's one rule
+            Join._narrow_data_tags(  # pyright: ignore[reportPrivateUsage]  # Join's one rule
                 first_data, first_tags, first_reconciled, first_refs
             ),
-            Join._narrow_references(  # pyright: ignore[reportPrivateUsage]  # Join's one rule
+            Join._narrow_data_tags(  # pyright: ignore[reportPrivateUsage]  # Join's one rule
                 second_data, second_tags, second_reconciled, second_refs
             ),
             merged,
@@ -446,14 +446,14 @@ class MergeJoin(BinaryOperator):
         right_tag_keys, right_data_keys = second_stream.keys()
         shared_tag_keys = set(left_tag_keys) & set(right_tag_keys)
 
-        # A referential tag of both inputs is a join key: the join keeps one column,
+        # A data-tag of both inputs is a join key: the join keeps one column,
         # and its two source-info tokens become one (ITL-1194, as ``Join``). The
         # second input's token is set aside under a temporary name until then.
-        merged = Join._merged_references(  # pyright: ignore[reportPrivateUsage]  # Join's one rule
+        merged = Join._merged_data_tags(  # pyright: ignore[reportPrivateUsage]  # Join's one rule
             left_tag_keys,
-            stream_references(first_stream),
+            stream_data_tags(first_stream),
             right_tag_keys,
-            stream_references(second_stream),
+            stream_data_tags(second_stream),
         )
         right_source = {
             f"{constants.SOURCE_PREFIX}{name}": f"{_MERGED_SOURCE_PREFIX}{name}"
@@ -465,7 +465,7 @@ class MergeJoin(BinaryOperator):
                 [right_source.get(c, c) for c in right_table.column_names]
             )
 
-        # Find colliding data columns (a merged referential column is not one)
+        # Find colliding data columns (a merged data-tag column is not one)
         colliding_keys = (set(left_data_keys) & set(right_data_keys)) - merged
 
         # Snapshot the inputs' Arrow types BEFORE the Polars round-trip, which
@@ -647,7 +647,7 @@ class MergeJoin(BinaryOperator):
         # so both must follow it. No hash or record ID depends on column order.
         tag_schema, data_schema = self.binary_output_schema(left_stream, right_stream)
         tag_cols = list(tag_schema.keys())
-        # A referential tag's column is laid out once, among the tags.
+        # A data-tag's column is laid out once, among the tags.
         data_cols = [name for name in data_schema if name not in tag_schema]
         listed = {*tag_cols, *data_cols}
         other_cols = [c for c in joined.column_names if c not in listed]
@@ -675,7 +675,7 @@ class MergeJoin(BinaryOperator):
         return ArrowTableStream(
             joined,
             tag_columns=tuple(tag_cols),
-            reference_tags=reference_names(tag_schema, data_schema),
+            data_tags=data_tag_names(tag_schema, data_schema),
         )
 
     def identity_structure(self) -> Any:

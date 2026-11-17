@@ -296,7 +296,7 @@ class SourceStreamResult:
     source_id: str
     tag_columns: tuple[str, ...]
     system_tag_columns: tuple[str, ...]
-    reference_tags: tuple[str, ...] = ()
+    data_tags: tuple[str, ...] = ()
 
 
 class SourceStreamBuilder:
@@ -319,7 +319,7 @@ class SourceStreamBuilder:
         record_id_columns: str | Collection[str] | None = (),
         system_tag_columns: Collection[str] = (),
         source_kind: str | None = None,
-        reference_tags: Collection[str] = (),
+        data_tags: Collection[str] = (),
     ) -> SourceStreamResult:
         """Run the full enrichment pipeline.
 
@@ -346,7 +346,7 @@ class SourceStreamBuilder:
             source_kind: Kind prefix of the default source id, for example
                 ``dict``. Required when ``source_id`` is not given; not used
                 otherwise.
-            reference_tags: The tag columns that are referential: also data columns
+            data_tags: The tag columns that are data-tags: also data columns
                 of the same name, stored once (ITL-1023). Empty (the builder's
                 default) gives plain tags, exactly as in v0.3; sources pass their
                 declared tags minus ``tag_only_columns``.
@@ -362,18 +362,14 @@ class SourceStreamBuilder:
         """
         tag_columns_tuple = tuple(tag_columns)
         system_tag_columns_tuple = tuple(system_tag_columns)
-        reference_tags_tuple = tuple(
-            c for c in tag_columns_tuple if c in reference_tags
-        )
-        if unknown := set(reference_tags) - set(tag_columns_tuple):
+        data_tags_tuple = tuple(c for c in tag_columns_tuple if c in data_tags)
+        if unknown := set(data_tags) - set(tag_columns_tuple):
             raise ValueError(
-                f"reference_tags {sorted(unknown)} are not in tag_columns "
+                f"data_tags {sorted(unknown)} are not in tag_columns "
                 f"{list(tag_columns_tuple)}"
             )
         # Tag-only columns: the tags that are not also data.
-        tag_only_tuple = tuple(
-            c for c in tag_columns_tuple if c not in reference_tags_tuple
-        )
+        tag_only_tuple = tuple(c for c in tag_columns_tuple if c not in data_tags_tuple)
 
         # A tag never has a meta column's name; the meta columns are dropped next,
         # so say so here rather than report the tag as missing (ITL-1080).
@@ -460,7 +456,7 @@ class SourceStreamBuilder:
             schema_hash=schema_hash,
             source_id=source_id,
             row_identifiers=identifiers,
-            reference_tags=reference_tags_tuple,
+            data_tags=data_tags_tuple,
         )
 
         return SourceStreamResult(
@@ -470,7 +466,7 @@ class SourceStreamBuilder:
             source_id=source_id,
             tag_columns=tag_columns_tuple,
             system_tag_columns=system_tag_columns_tuple,
-            reference_tags=reference_tags_tuple,
+            data_tags=data_tags_tuple,
         )
 
     def attach_provenance(
@@ -482,7 +478,7 @@ class SourceStreamBuilder:
         schema_hash: str,
         source_id: str,
         row_identifiers: Sequence[str],
-        reference_tags: Sequence[str] = (),
+        data_tags: Sequence[str] = (),
     ) -> ArrowTableStream:
         """Add source-info and system-tag columns to ``table`` and wrap it as a stream.
 
@@ -502,7 +498,7 @@ class SourceStreamBuilder:
             source_id: The canonical source name.
             row_identifiers: One identifier per row, identifying the row within the
                 source.
-            reference_tags: The tag columns that are also data columns (referential);
+            data_tags: The tag columns that are also data columns (data-tags);
                 they get source info like any data column.
 
         Returns:
@@ -515,7 +511,7 @@ class SourceStreamBuilder:
         table = arrow_utils.add_source_info(
             table,
             source_info,
-            exclude_columns=[c for c in tag_columns if c not in reference_tags],
+            exclude_columns=[c for c in tag_columns if c not in data_tags],
         )
         table = arrow_utils.add_system_tag_columns(
             table,
@@ -528,5 +524,5 @@ class SourceStreamBuilder:
             table=table,
             tag_columns=tag_columns,
             system_tag_columns=system_tag_columns,
-            reference_tags=reference_tags,
+            data_tags=data_tags,
         )

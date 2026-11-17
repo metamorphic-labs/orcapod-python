@@ -31,14 +31,14 @@ logger = logging.getLogger(__name__)
 # only test membership (``Pipeline.load``).
 #   0.1.0: first format (v0.2.0).
 #   0.2.0: adds ``orcapod_version`` (v0.3.0); a 0.1.0 file loads unchanged.
-#   0.3.0: a source's tags may be referential (ITL-1023). A file at 0.1.0 or 0.2.0
+#   0.3.0: a source's tags may be data-tags (ITL-1023). A file at 0.1.0 or 0.2.0
 #          holds v0.3 sources: their configs carry no ``tag_only_columns`` and read
 #          back with every declared tag plain, so their saved hashes match.
 # Plain tags are decided by this version, never by a missing key (ITL-1159, ITL-1019):
 # everything in a file at a ``PLAIN_TAG_FORMAT_VERSIONS`` version is plain, and such a
-# file never holds ``tag_only_columns`` or ``fall_through_references``. From 0.3.0 on,
+# file never holds ``tag_only_columns`` or ``fall_through_tags``. From 0.3.0 on,
 # every source config that takes the option writes ``tag_only_columns`` and every
-# function node writes ``fall_through_references``; a load refuses a file without them.
+# function node writes ``fall_through_tags``; a load refuses a file without them.
 PIPELINE_FORMAT_VERSION = "0.3.0"
 SUPPORTED_FORMAT_VERSIONS = frozenset({"0.1.0", "0.2.0", "0.3.0"})
 PLAIN_TAG_FORMAT_VERSIONS = frozenset({"0.1.0", "0.2.0"})
@@ -1309,21 +1309,21 @@ SUPPORTED_JOB_FORMAT_VERSIONS = frozenset({"0.1.0", "0.2.0", "0.3.0"})
 
 
 # ---------------------------------------------------------------------------
-# Referential tags in saved files (ITL-1019)
+# Data-tags in saved files (ITL-1019)
 # ---------------------------------------------------------------------------
 
-FALL_THROUGH_REFERENCES_KEY = "fall_through_references"
-"""The function node descriptor key naming the referential tags its pod lets fall
+FALL_THROUGH_TAGS_KEY = "fall_through_tags"
+"""The function node descriptor key naming the data-tags its pod lets fall
 through (a list; empty for a plain pod)."""
 
 
-def saved_fall_through_references(
+def saved_fall_through_tags(
     descriptor: dict[str, Any], version: str
 ) -> tuple[str, ...]:
-    """Return the referential tags a saved function node lets fall through.
+    """Return the data-tags a saved function node lets fall through.
 
     The file's format version decides what a file may hold (ITL-1019): at a
-    ``PLAIN_TAG_FORMAT_VERSIONS`` version nothing is referential and the key is never
+    ``PLAIN_TAG_FORMAT_VERSIONS`` version nothing is a data-tag and the key is never
     written; from 0.3.0 on the key is always written. The saved output schema is
     checked against it: its tag and data halves share exactly these names. When the
     descriptor holds the pod's config, the config's list must agree too.
@@ -1333,58 +1333,56 @@ def saved_fall_through_references(
         version: The file's format version.
 
     Returns:
-        The referential tags, in the saved order.
+        The data-tags, in the saved order.
 
     Raises:
         ValueError: If the key is present in a file of a plain-tag version, missing
             or not a list of names in a later one, or disagrees with the saved output
             schema or the saved pod config.
     """
-    from orcapod.core.referential_tags import reference_names
+    from orcapod.core.data_tags import data_tag_names
 
     output_schema = descriptor.get("output_schema") or {}
-    shared = reference_names(
-        output_schema.get("tag", {}), output_schema.get("data", {})
-    )
+    shared = data_tag_names(output_schema.get("tag", {}), output_schema.get("data", {}))
     if version in PLAIN_TAG_FORMAT_VERSIONS:
-        if FALL_THROUGH_REFERENCES_KEY in descriptor:
+        if FALL_THROUGH_TAGS_KEY in descriptor:
             raise ValueError(
                 f"a file at format {version} holds only plain tags, but it names "
-                f"{FALL_THROUGH_REFERENCES_KEY} {descriptor[FALL_THROUGH_REFERENCES_KEY]!r}"
+                f"{FALL_THROUGH_TAGS_KEY} {descriptor[FALL_THROUGH_TAGS_KEY]!r}"
             )
-        references: tuple[str, ...] = ()
+        data_tags: tuple[str, ...] = ()
     else:
-        if FALL_THROUGH_REFERENCES_KEY not in descriptor:
+        if FALL_THROUGH_TAGS_KEY not in descriptor:
             raise ValueError(
-                f"a file at format {version} names the fall-through references of "
-                f"every function node, but this one has no {FALL_THROUGH_REFERENCES_KEY}"
+                f"a file at format {version} names the fall-through tags of "
+                f"every function node, but this one has no {FALL_THROUGH_TAGS_KEY}"
             )
-        saved = descriptor[FALL_THROUGH_REFERENCES_KEY]
+        saved = descriptor[FALL_THROUGH_TAGS_KEY]
         if not isinstance(saved, list) or not all(isinstance(n, str) for n in saved):
             raise ValueError(
-                f"{FALL_THROUGH_REFERENCES_KEY} must be a list of names, got {saved!r}"
+                f"{FALL_THROUGH_TAGS_KEY} must be a list of names, got {saved!r}"
             )
-        references = tuple(saved)
-    if set(shared) != set(references):
+        data_tags = tuple(saved)
+    if set(shared) != set(data_tags):
         raise ValueError(
-            f"the saved output schema has the referential tags {sorted(shared)}, but "
-            f"{FALL_THROUGH_REFERENCES_KEY} is {sorted(references)}"
+            f"the saved output schema has the data-tags {sorted(shared)}, but "
+            f"{FALL_THROUGH_TAGS_KEY} is {sorted(data_tags)}"
         )
     function_config = descriptor.get("function_config")
     if function_config is not None and version not in PLAIN_TAG_FORMAT_VERSIONS:
-        configured = function_config.get(FALL_THROUGH_REFERENCES_KEY, [])
-        if set(configured) != set(references):
+        configured = function_config.get(FALL_THROUGH_TAGS_KEY, [])
+        if set(configured) != set(data_tags):
             raise ValueError(
                 f"the saved pod lets {sorted(configured)} fall through, but "
-                f"{FALL_THROUGH_REFERENCES_KEY} is {sorted(references)}"
+                f"{FALL_THROUGH_TAGS_KEY} is {sorted(data_tags)}"
             )
-    return references
+    return data_tags
 
 
 def check_saved_output_schema_is_plain(
     descriptor: dict[str, Any], version: str
 ) -> None:
-    """Refuse a saved node with a referential tag in a file of a plain-tag version.
+    """Refuse a saved node with a data-tag in a file of a plain-tag version.
 
     Args:
         descriptor: A node descriptor of a saved pipeline.
@@ -1398,25 +1396,25 @@ def check_saved_output_schema_is_plain(
             data halves share a name, in its output schema or in the schemas its
             source config restores.
     """
-    from orcapod.core.referential_tags import reference_names
+    from orcapod.core.data_tags import data_tag_names
 
     if version not in PLAIN_TAG_FORMAT_VERSIONS:
         return
     output_schema = descriptor.get("output_schema") or {}
-    if shared := reference_names(
+    if shared := data_tag_names(
         output_schema.get("tag", {}), output_schema.get("data", {})
     ):
         raise ValueError(
             f"a file at format {version} holds only plain tags, but the saved output "
-            f"schema has the referential tags {list(shared)}"
+            f"schema has the data-tags {list(shared)}"
         )
     source_config = descriptor.get("source_config") or {}
-    if shared := reference_names(
+    if shared := data_tag_names(
         source_config.get("tag_schema") or {}, source_config.get("data_schema") or {}
     ):
         raise ValueError(
             f"a file at format {version} holds only plain tags, but the saved source "
-            f"schema has the referential tags {list(shared)}"
+            f"schema has the data-tags {list(shared)}"
         )
 
 
@@ -1481,10 +1479,10 @@ def source_config_at_version(config: dict[str, Any], version: str) -> dict[str, 
 def check_source_config_binding(
     config: dict[str, Any], tag_names: Iterable[str], data_names: Iterable[str]
 ) -> None:
-    """Refuse a saved source config whose referential tags contradict its slot.
+    """Refuse a saved source config whose data-tags contradict its slot.
 
     The source config (``tag_columns`` and ``tag_only_columns``) and the slot's saved
-    schema (a name in both halves is a referential tag) each state the source's
+    schema (a name in both halves is a data-tag) each state the source's
     bindings, independently; a file in which they disagree is refused before the
     source is rebuilt (ITL-1019). A config of a source that does not take the option,
     or one whose ``tag_columns`` is absent or ``None`` (a database source that takes
@@ -1497,9 +1495,9 @@ def check_source_config_binding(
         data_names: The slot's saved data column names.
 
     Raises:
-        ValueError: If the config and the slot name different referential tags.
+        ValueError: If the config and the slot name different data-tags.
     """
-    from orcapod.core.referential_tags import reference_names, source_reference_tags
+    from orcapod.core.data_tags import data_tag_names, source_data_tags
 
     _ensure_registries()
     cls = SOURCE_REGISTRY.get(config.get("source_type"))  # pyright: ignore[reportArgumentType]  # any saved value
@@ -1512,10 +1510,10 @@ def check_source_config_binding(
     # A source takes one tag name as a bare string: that name, never its characters.
     if isinstance(tag_columns, str):
         tag_columns = [tag_columns]
-    configured = source_reference_tags(tag_columns, config["tag_only_columns"])
-    declared = reference_names(tag_names, data_names)
+    configured = source_data_tags(tag_columns, config["tag_only_columns"])
+    declared = data_tag_names(tag_names, data_names)
     if set(configured) != set(declared):
         raise ValueError(
-            f"its config makes {sorted(configured)} referential, but its slot's saved "
+            f"its config makes {sorted(configured)} data-tags, but its slot's saved "
             f"schema declares {sorted(declared)}"
         )
