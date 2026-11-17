@@ -56,6 +56,7 @@ from orcapod.errors import (
     TypeIdentityError,
     OrcapodDatabaseReadError,
     OrcapodDatabaseWriteError,
+    UnstorableColumnError,
 )
 from orcapod.contexts.stored import (
     StaleTables,
@@ -66,6 +67,7 @@ from orcapod.contexts.stored import (
     find_stale_tables,
     report_rows_of_other_data_contexts,
     report_unexpected_row_count,
+    require_storable,
 )
 from orcapod.utils.database_errors import (
     commit_best_effort,
@@ -125,6 +127,28 @@ _PIPELINE_BASE_ENTRY_ID_COL = "__pipeline_base_entry_id"
 _PIPELINE_RECOMPUTATION_INDEX_COL = "__pipeline_recomputation_index"
 
 
+def _pipeline_meta_schema() -> pa.Schema:
+    """The bookkeeping columns of a function node's pipeline record (``pdb_v2``).
+
+    The record holds the tags, system tags and input source-info columns, then
+    these. One definition for the writer (``add_pipeline_record``) and for the
+    check of the pipeline database when it is attached (ITL-1162).
+    """
+    return pa.schema(
+        [
+            pa.field(constants.DATA_RECORD_ID, pa.large_binary()),
+            pa.field(constants.NODE_CONTENT_HASH_COL, pa.large_binary()),
+            pa.field(constants.INPUT_DATA_HASH_COL, pa.large_binary()),
+            pa.field(constants.OUTPUT_DATA_HASH_COL, pa.large_binary()),
+            pa.field(constants.DATA_CONTEXT_COL, pa.large_string()),
+            pa.field(f"{constants.META_PREFIX}computed", pa.bool_()),
+            pa.field(constants.IS_EPHEMERAL_COL, pa.bool_()),
+            pa.field(_PIPELINE_BASE_ENTRY_ID_COL, pa.large_binary()),
+            pa.field(_PIPELINE_RECOMPUTATION_INDEX_COL, pa.int32()),
+        ]
+    )
+
+
 def _build_record_id_preimage(
     tag: "TagProtocol",
     input_data: "DataProtocol",
@@ -135,10 +159,10 @@ def _build_record_id_preimage(
     single-row Arrow table.  ``NODE_CONTENT_HASH_COL`` is intentionally excluded —
     it is redundant (fully determined by the table path + system tags).
 
-    The input data hash enters as its raw digest, without its label: a label names
-    the algorithm that produced a digest and is never part of a hash input, so
-    renaming the Arrow label changes no entry id. The stored ``INPUT_DATA_HASH_COL``
-    column of the pipeline and result tables keeps the labelled form.
+    The input data hash enters with its label, ``b"<label>:" + digest``, the form
+    the stored ``INPUT_DATA_HASH_COL`` column of the pipeline and result tables
+    keeps: a hash fed into another hash carries the name of the algorithm that
+    produced it (ITL-1154).
 
     Args:
         tag: The tag datagram for the input row.
@@ -146,11 +170,13 @@ def _build_record_id_preimage(
 
     Returns:
         A single-row ``pa.Table`` with system-tag columns and
-        ``INPUT_DATA_HASH_COL`` (``large_binary``, the raw digest).
+        ``INPUT_DATA_HASH_COL`` (``large_binary``, the prefixed digest).
     """
     return tag.as_table(columns={"system_tags": True}).append_column(
         constants.INPUT_DATA_HASH_COL,
-        pa.array([input_data.content_hash().digest], type=pa.large_binary()),
+        pa.array(
+            [input_data.content_hash().to_prefixed_digest()], type=pa.large_binary()
+        ),
     )
 
 
@@ -828,6 +854,30 @@ class FunctionNodeBase(StreamBase):
             f"input_stream={short_stream_repr(self._input_stream)})"
         )
 
+    def require_storable_results(self, result_database: ArrowDatabaseProtocol) -> None:
+        """Refuse a result database that cannot store this node's result table (ITL-1162).
+
+        Nothing is computed and nothing changes. A node without its function stores
+        no results and is not checked.
+
+        Args:
+            result_database: The database results would be stored in (the
+                persistent result database or an ephemeral one).
+
+        Raises:
+            UnstorableColumnError: If the database cannot store a column, naming
+                this node.
+        """
+        if self._function_pod is None:
+            return
+        try:
+            CachedFunctionPod(
+                self._function_pod, result_database=result_database
+            ).require_storable_results()
+        except UnstorableColumnError as exc:
+            exc.add_context(node_label=self.label)
+            raise
+
     @abstractmethod
     def set_ephemeral_database(self, database: "ArrowDatabaseProtocol | None") -> None:
         """Assign or remove the ephemeral result database for this node.
@@ -1362,6 +1412,38 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
     # attach_databases
     # ------------------------------------------------------------------
 
+    def require_storable_tables(
+        self,
+        pipeline_database: ArrowDatabaseProtocol,
+        result_database: ArrowDatabaseProtocol | None = None,
+    ) -> None:
+        """Refuse databases that cannot store this node's tables (ITL-1162).
+
+        Checks the result table (``CachedFunctionPod.require_storable_results``)
+        against ``result_database`` and the pipeline records' own columns against
+        ``pipeline_database``. Nothing is computed and nothing changes. A node
+        loaded without its function stores nothing and is not checked.
+
+        Args:
+            pipeline_database: The database for pipeline records.
+            result_database: The database for results; defaults to
+                ``pipeline_database.at("_result")``, as in ``attach_databases``.
+
+        Raises:
+            UnstorableColumnError: If a database cannot store a column, naming
+                this node.
+        """
+        if self._function_pod is None:
+            return
+        if result_database is None:
+            result_database = pipeline_database.at("_result")
+        self.require_storable_results(result_database)
+        try:
+            require_storable(pipeline_database, _pipeline_meta_schema())
+        except UnstorableColumnError as exc:
+            exc.add_context(node_label=self.label)
+            raise
+
     def attach_databases(
         self,
         pipeline_database: ArrowDatabaseProtocol | None = None,
@@ -1398,6 +1480,12 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 ``set_ephemeral_database(ephemeral_database)`` after
                 ``attach_databases()``.
         """
+        if pipeline_database is not None:
+            # A database that cannot store this node's tables refuses them now,
+            # before anything runs or changes (ITL-1162).
+            self.require_storable_tables(pipeline_database, result_database)
+        if ephemeral_database is not None:
+            self.require_storable_results(ephemeral_database)
         # Another database has its own tables of other generations to account for.
         self._stale_tables_checked = False
         self._current_tables_checked = False
@@ -1869,6 +1957,10 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             database: The ``ArrowDatabaseProtocol`` to use for ephemeral result
                 storage, or ``None`` to detach and revert to persistent-only writes.
         """
+        if database is not None:
+            # A database that cannot store the result table refuses it now, before
+            # anything runs or changes (ITL-1162).
+            self.require_storable_results(database)
         # Another database has its own tables of other generations to account for,
         # as in ``attach_databases``.
         self._stale_tables_checked = False
@@ -2842,40 +2934,27 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         input_source_table = input_table_with_source.select(source_col_names)
 
         # Build the meta columns table.
-        meta_table = pa.table(
+        meta_table = pa.Table.from_pydict(
             {
-                constants.DATA_RECORD_ID: pa.array(
-                    [data_record_id.bytes], type=pa.large_binary()
-                ),
-                constants.NODE_CONTENT_HASH_COL: pa.array(
-                    [self.content_hash().to_prefixed_digest()], type=pa.large_binary()
-                ),
-                constants.INPUT_DATA_HASH_COL: pa.array(
-                    [input_data.content_hash().to_prefixed_digest()],
-                    type=pa.large_binary(),
-                ),
-                constants.OUTPUT_DATA_HASH_COL: pa.array(
-                    [
-                        output_data_hash.to_prefixed_digest()
-                        if output_data_hash is not None
-                        else None
-                    ],
-                    type=pa.large_binary(),
-                ),
-                constants.DATA_CONTEXT_COL: pa.array(
-                    [self._stored_data_context_key], type=pa.large_string()
-                ),
-                f"{constants.META_PREFIX}computed": pa.array(
-                    [computed], type=pa.bool_()
-                ),
-                constants.IS_EPHEMERAL_COL: pa.array([is_ephemeral], type=pa.bool_()),
-                _PIPELINE_BASE_ENTRY_ID_COL: pa.array(
-                    [base_entry_id], type=pa.large_binary()
-                ),
-                _PIPELINE_RECOMPUTATION_INDEX_COL: pa.array(
-                    [new_index], type=pa.int32()
-                ),
-            }
+                constants.DATA_RECORD_ID: [data_record_id.bytes],
+                constants.NODE_CONTENT_HASH_COL: [
+                    self.content_hash().to_prefixed_digest()
+                ],
+                constants.INPUT_DATA_HASH_COL: [
+                    input_data.content_hash().to_prefixed_digest()
+                ],
+                constants.OUTPUT_DATA_HASH_COL: [
+                    output_data_hash.to_prefixed_digest()
+                    if output_data_hash is not None
+                    else None
+                ],
+                constants.DATA_CONTEXT_COL: [self._stored_data_context_key],
+                f"{constants.META_PREFIX}computed": [computed],
+                constants.IS_EPHEMERAL_COL: [is_ephemeral],
+                _PIPELINE_BASE_ENTRY_ID_COL: [base_entry_id],
+                _PIPELINE_RECOMPUTATION_INDEX_COL: [new_index],
+            },
+            schema=_pipeline_meta_schema(),
         )
 
         # Combine: tag (with system tags) + input source columns + meta columns
