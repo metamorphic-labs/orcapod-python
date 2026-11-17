@@ -113,8 +113,15 @@ names, in an order that can differ from one Python session to the next.)
 - Operators are named after their kind, numbered when there are several.
 
 To see how the nodes connect, put `job` on the last line of a notebook cell: the job draws
-itself as a diagram. Drag it to move it, zoom with the `+` and `−` buttons, and click a node
-to see its columns and how many rows the last run computed or read. Outside a notebook,
+itself as a diagram.
+
+!!! caution "In development"
+    `Pipeline.diagram()`, `PipelineJob.diagram()`, `PipelineDiagram` and its methods and
+    arguments, the look of the picture and the notebook display may change in any release
+    without a deprecation period.
+
+Drag it to move it, zoom with the `+` and `−` buttons, and click a node to see its schema
+(its tag and data columns) and how many rows the last run computed or read. Outside a notebook,
 `print(job.diagram())` gives the same graph as text, one node per line with the nodes it
 reads from:
 

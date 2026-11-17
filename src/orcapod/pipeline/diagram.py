@@ -216,9 +216,7 @@ def _job_status(
         return "not run"
     if node.is_stale:
         return "stale"
-    # The node's own count, not the job's summary: a node's own ``run()`` changes it
-    # and leaves ``job.last_run`` as it was.
-    if getattr(node, "last_run_failed", 0):
+    if _failed_rows(node):
         return "failed"
     if node.holds_current_run():
         return "held" if summary is not None and summary.held else "current"
@@ -227,6 +225,21 @@ def _job_status(
     if any(status in ("failed", "partial") for status in upstream_statuses):
         return "partial"
     return "not run"
+
+
+def _failed_rows(node: Any) -> int:
+    """The failed rows of a function job node's last run; 0 for any other node.
+
+    The node's own count, not the job's summary: a node's own ``run()`` changes it and
+    leaves ``job.last_run`` as it was. Read through one internal helper until a job
+    node keeps the summary of its own last run (ITL-1209).
+    """
+    from orcapod.core.nodes.function_node import (
+        FunctionJobNode,
+        _last_run_failed,  # pyright: ignore[reportPrivateUsage]  # ITL-1209: internal until a node keeps its own run summary
+    )
+
+    return _last_run_failed(node) if isinstance(node, FunctionJobNode) else 0
 
 
 def _topological_labels(
@@ -823,6 +836,8 @@ _STYLE = """
 .op-dag{position:relative;border:1px solid rgba(127,127,127,.35);border-radius:6px;
 padding:6px 8px;max-width:100%;box-sizing:border-box;overflow:hidden}
 .op-dag .op-dag-head{font:600 13px system-ui,sans-serif;margin:0 0 4px;padding-right:96px}
+.op-dag .op-dag-sep{display:none}
+.op-dag .op-dag-preview{font-weight:500;font-size:11px;border:1px solid currentColor;border-radius:3px;padding:0 4px;margin-left:4px;opacity:.7;vertical-align:1px}
 .op-dag .op-dag-view{overflow:auto;max-height:560px}
 .op-dag.op-dag-live .op-dag-view{overflow:hidden;cursor:grab;height:var(--op-dag-h,auto);
 touch-action:none}
@@ -839,7 +854,7 @@ padding-top:6px;border-top:1px solid rgba(127,127,127,.35)}
 .op-dag .op-dag-panel.op-dag-open{display:block}
 .op-dag .op-dag-panel dl{display:grid;grid-template-columns:max-content 1fr;gap:2px 12px;
 margin:4px 0 0}
-.op-dag .op-dag-panel dt{opacity:.7}
+.op-dag .op-dag-panel dt{opacity:.7;white-space:nowrap;float:none;width:auto;margin:0;padding:0}
 .op-dag .op-dag-panel dd{margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
 overflow-wrap:anywhere}
 .op-dag .op-dag-table{font:12px system-ui,sans-serif;margin-top:6px}
@@ -936,8 +951,23 @@ def _json_for_script(value: object) -> str:
     return text.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
 
 
+# Shown next to the title, in the rendered view and in the no-script fallback: the
+# diagram and its interface are in development (developer, November 17, 2026). Plain
+# text in the text colour; no warning at call or display time.
+_PREVIEW_NOTE = "In development: the diagram and its interface may change"
+# The separator shows only where the style sheet is removed (an untrusted notebook),
+# where the tag is plain text.
+_PREVIEW_TAG = (
+    '<span class="op-dag-sep">· </span>'
+    f'<span class="op-dag-preview" title="{_PREVIEW_NOTE}" '
+    f'aria-label="{_PREVIEW_NOTE}">preview</span>'
+)
+
+
 class PipelineDiagram:
     """The DAG of a pipeline or job, drawn for a notebook.
+
+    In development: this interface may change.
 
     Shown at the end of a notebook cell it is an SVG picture of the nodes (sources,
     operators, function pods, side-effect pods) and the streams between them. Where the
@@ -990,7 +1020,10 @@ class PipelineDiagram:
 
     @property
     def title(self) -> str:
-        """``Pipeline '<name>'`` or ``Job '<name>'``."""
+        """``Pipeline '<name>'`` or ``Job '<name>'``.
+
+        In development: this interface may change.
+        """
         return f"{self._kind.capitalize()} {self._name!r}"
 
     def _inputs(self) -> dict[int, list[str]]:
@@ -1002,6 +1035,10 @@ class PipelineDiagram:
 
     def to_dict(self) -> dict[str, Any]:
         """The diagram's model: plain data that any renderer can draw.
+
+        In development: this interface may change.
+
+        Its shape may change: it carries no version marker yet.
 
         Returns:
             ``{"kind", "name", "title", "nodes", "edges"}``. Each node has ``index``,
@@ -1038,6 +1075,8 @@ class PipelineDiagram:
     def to_text(self) -> str:
         """The nodes as plain text, one per line, each with its inputs.
 
+        In development: this interface may change.
+
         Returns:
             A title line, then ``  <label> (<kind> · <detail> · <status>) <- <inputs>``
             per node, in topological order with ties broken by label.
@@ -1053,6 +1092,8 @@ class PipelineDiagram:
 
     def to_svg(self) -> str:
         """The picture alone, as an SVG element.
+
+        In development: this interface may change.
 
         Returns:
             The ``<svg>`` element; it uses no style sheet and no script.
@@ -1086,6 +1127,8 @@ class PipelineDiagram:
     def to_html(self) -> str:
         """The HTML fragment a notebook shows: picture, node table, model and script.
 
+        In development: this interface may change.
+
         Returns:
             The fragment. Above ``max_nodes`` nodes, the plain-text listing in a
             ``<pre>`` element instead.
@@ -1096,11 +1139,14 @@ class PipelineDiagram:
                 "the picture is not drawn. Pass a larger max_nodes to diagram() to "
                 "draw it, or collapse=True to fold column steps."
             )
-            return f"<pre>{_escape(self.to_text())}\n\n{_escape(note)}</pre>"
+            return (
+                f"<div>{_PREVIEW_TAG}</div>"
+                f"<pre>{_escape(self.to_text())}\n\n{_escape(note)}</pre>"
+            )
         return (
             f'<div class="op-dag"><style>{_STYLE}</style>'
             f'<div class="op-dag-head">{_escape(self.title)} · '
-            f"{len(self._nodes)} nodes</div>"
+            f"{len(self._nodes)} nodes {_PREVIEW_TAG}</div>"
             f'<div class="op-dag-view">{self._picture()}</div>'
             '<div class="op-dag-panel" aria-live="polite"></div>'
             f"{_table(self._nodes, self._inputs())}"
@@ -1111,6 +1157,8 @@ class PipelineDiagram:
 
     def save(self, path: str | Path) -> None:
         """Write the diagram as a standalone HTML page, viewable in any browser offline.
+
+        In development: this interface may change.
 
         Args:
             path: The file to write.

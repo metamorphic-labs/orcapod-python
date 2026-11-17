@@ -8,8 +8,21 @@ developer approved a vendored library in principle for the follow-up (section 8)
 Implementation: `src/orcapod/pipeline/diagram.py`, `Pipeline.diagram()` /
 `PipelineJob.diagram()` and the rich display in `src/orcapod/pipeline/base.py`, tests in
 `tests/test_pipeline/test_diagram.py`. Screenshots of the tutorial job (before and after a
-run, light and dark, a node selected, scripts removed, folded, top to bottom) are in
-`itl-1197-pipeline-diagram/`, made by `docs/dev/scripts/itl_1197/diagram_screenshots.py`.
+run, light and dark, a node selected, scripts removed, folded, top to bottom, and `partial`
+after a run where `firing_rate` failed for one unit) are in `itl-1197-pipeline-diagram/`,
+made by `docs/dev/scripts/itl_1197/diagram_screenshots.py`. The two JupyterLab shots were
+taken by hand (section 3): notebooks with a `python3` kernelspec (no kernel dialog), the
+news notification turned off in a scratch settings directory, and in the trusted one a
+small script added to the output after the diagram clicks the `rates` node, as a reader
+would, so its details pane shows.
+
+**In development** (developer, November 17, 2026): the diagram, its interface and the
+notebook display may change in any release without a deprecation period. The docs say so
+in a caution box, the docstrings and the changelog (Added and Known limitations), and the
+rendered view carries a small "preview" tag next to the title (also in the no-script
+fallback). No warning is raised. `to_dict()` has no version marker; its shape may change.
+The developer confirmed the diagram as the default rich display of `Pipeline` and
+`PipelineJob` (November 17, 2026).
 
 ## 1. What is displayed, read without computing
 
@@ -25,7 +38,8 @@ run, light and dark, a node selected, scripts removed, folded, top to bottom) ar
   last-run counts, first error, folded steps.
 - Job status, all from memory: source `bound`/`unbound` (`bound_source`); other nodes
   `not run` (`last_modified is None`), `stale` (`is_stale`), `failed` (the node's own
-  `last_run_failed`, set by a job run and by the node's own `run()`), `current`
+  failed-row count, set by a job run and by the node's own `run()`, read through one
+  internal helper until ITL-1209 gives a node its own run summary), `current`
   (`holds_current_run()`), `held` (current and the last run held it,
   `NodeRunSummary.held`), `loaded only` (`holds_current_run(load_only=True)`),
   `partial` (ran, not current, and a node it reads from is `failed` or `partial`: it holds

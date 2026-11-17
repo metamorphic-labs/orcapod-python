@@ -1800,16 +1800,6 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         """
         return self._run_not_stored
 
-    @property
-    def last_run_failed(self) -> int:
-        """Rows of the node's last completed run whose function raised.
-
-        Set by every run of the node, by the job's run as by the node's own ``run()``
-        (error policy ``"continue"``); 0 before a run and after ``clear_cache()``. A
-        node with failed rows is not current: the next run retries them.
-        """
-        return self._run_failed
-
     def _stored_entry(
         self, entry_id: bytes
     ) -> tuple[TagProtocol, DataProtocol | None] | None:
@@ -4196,3 +4186,20 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 # A close that raises or is cancelled fails the run: no rows.
                 self.clear_cache()
                 raise
+
+
+def _last_run_failed(node: FunctionJobNode) -> int:
+    """Rows of ``node``'s last completed run whose function raised.
+
+    Set by every run of the node (the job's run and the node's own ``run()``); 0 before
+    a run and after ``clear_cache()``. Internal: the pipeline diagram reads a node's
+    failed state through this one helper (ITL-1197). ITL-1209 replaces it: a job node
+    will keep the summary of its own last run.
+
+    Args:
+        node: The function job node.
+
+    Returns:
+        The number of failed rows of its last completed run.
+    """
+    return node._run_failed  # pyright: ignore[reportPrivateUsage]  # ITL-1209: the one internal reader

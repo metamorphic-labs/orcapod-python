@@ -202,7 +202,6 @@ def test_a_node_s_own_run_sets_its_status_not_the_job_s_last_run() -> None:
         with pytest.warns(Warning):
             job.nodes["rates"].run()
         assert job.last_run is None
-        assert job.nodes["rates"].last_run_failed == 1
         assert _statuses(job.diagram())["rates"] == "failed"
 
         # A job run that failed, then a node run that succeeds: current again,
@@ -213,12 +212,11 @@ def test_a_node_s_own_run_sets_its_status_not_the_job_s_last_run() -> None:
     finally:
         FAIL_ON.clear()
     retried.nodes["rates"].run()
-    assert retried.nodes["rates"].last_run_failed == 0
     diagram = retried.diagram()
     assert _statuses(diagram)["rates"] == "current"
     assert _facts(diagram, "rates")["job's last run"] == "4 rows, 3 computed, 1 failed"
-    retried.nodes["rates"].clear_cache()
-    assert retried.nodes["rates"].last_run_failed == 0
+    job.nodes["rates"].clear_cache()
+    assert _statuses(job.diagram())["rates"] == "not run"
 
 
 def test_an_unbound_source_and_a_load_only_run() -> None:
@@ -319,6 +317,25 @@ def test_the_notebook_display() -> None:
     assert bundle["text/html"] == job.diagram().to_html()
 
 
+def test_the_view_is_marked_as_a_preview_without_a_warning() -> None:
+    """A small "preview" tag next to the title: in development, no warning raised."""
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        document = _job().diagram().to_html()
+    collector = _Collector()
+    collector.feed(document)
+    note = "In development: the diagram and its interface may change"
+    assert ("title", note) in collector.attributes
+    assert ("aria-label", note) in collector.attributes
+    head = document.split('<div class="op-dag-head">', 1)[1].split("</div>", 1)[0]
+    assert head.endswith('">preview</span>')
+    # Outside the script: the tag stays where scripts are removed.
+    without_scripts = document.split("<script", 1)[0]
+    assert ">preview</span>" in without_scripts
+
+
 def test_an_uncompiled_pipeline_displays_as_text() -> None:
     pipeline = Pipeline(name="later", auto_compile=False)
     with pipeline:
@@ -377,7 +394,7 @@ class _Collector(HTMLParser):
 
 ALLOWED_TAGS = {
     "div", "style", "img", "details", "summary", "table", "thead", "tbody", "tr", "th",
-    "td", "b", "script",
+    "td", "b", "script", "span",
 }  # fmt: skip
 SVG_TAGS = {"svg", "title", "g", "path", "rect", "circle", "text"}
 SVG_NS = "{http://www.w3.org/2000/svg}"
@@ -506,7 +523,8 @@ def test_collapse_goes_by_the_operator_class_not_its_label() -> None:
 def test_max_nodes_shows_the_listing_instead() -> None:
     diagram = _job().diagram(max_nodes=2)
     document = diagram.to_html()
-    assert document.startswith("<pre>")
+    assert document.startswith('<div><span class="op-dag-sep">')
+    assert "<pre>" in document
     assert "<svg" not in document
     assert "more than max_nodes=2" in document
 

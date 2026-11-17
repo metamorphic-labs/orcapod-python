@@ -1,7 +1,8 @@
 """Pages and screenshots of the tutorial job's diagram, for review (ITL-1197).
 
 Writes HTML pages of the Part 5 tutorial job's diagram (before and after a run, light and
-dark page colours, a node selected, scripts off) and, when Google Chrome is found, a PNG
+dark page colours, a node selected, scripts off, and a run where ``firing_rate`` failed for
+one unit, so the nodes below it are ``partial``) and, when Google Chrome is found, a PNG
 screenshot of each, into ``docs/dev/specs/itl-1197-pipeline-diagram/``.
 
 Run from the repository root:
@@ -14,11 +15,13 @@ does: the diagram draws its text and edges in the text colour (``currentColor``)
 
 from __future__ import annotations
 
+import csv
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -41,8 +44,14 @@ if(g)g.dispatchEvent(new MouseEvent('click',{bubbles:true}));
 </script>"""
 
 
-def _tutorial_job(workdir: Path):
-    """The Part 5 tutorial job over an in-memory database, not run yet."""
+def _tutorial_job(workdir: Path, fail_on: int | None = None):
+    """The Part 5 tutorial job over an in-memory database, not run yet.
+
+    Args:
+        workdir: Where the dataset is written.
+        fail_on: A spike count for which ``firing_rate`` raises, for a run with a
+            failed row.
+    """
     sys.path.insert(0, str(ROOT / "docs" / "tutorial"))
     from workshop_data import make_dataset  # pyright: ignore[reportMissingImports, reportAttributeAccessIssue]  # docs/tutorial, put on sys.path above
 
@@ -64,6 +73,8 @@ def _tutorial_job(workdir: Path):
 
     @function_pod(output_keys="rate_hz")
     def firing_rate(n_spikes: int, duration_s: float) -> float:
+        if n_spikes == fail_on:
+            raise ValueError(f"no rate for {n_spikes} spikes")
         return n_spikes / duration_s
 
     @function_pod(output_keys="mean_rate_hz")
@@ -82,6 +93,13 @@ def _tutorial_job(workdir: Path):
             label="session_means",
         )
     return job
+
+
+def _first_spike_count(tmp: str) -> int:
+    """The ``n_spikes`` of the first unit of the tutorial dataset written into ``tmp``."""
+    with open(Path(tmp) / "units.csv", encoding="utf-8") as units:
+        rows = list(csv.DictReader(units))
+    return int(rows[0]["n_spikes"])
 
 
 def _page(fragment: str, theme: str, extra: str = "") -> str:
@@ -116,6 +134,14 @@ def main() -> None:
         pages["collapsed-light"] = _page(job.diagram(collapse=True).to_html(), "light")
         pages["top-to-bottom-dark"] = _page(
             job.diagram(direction="TB").to_html(), "dark"
+        )
+        # A run where one unit's firing_rate raised: rates failed, the nodes below partial.
+        failing = _tutorial_job(Path(tmp) / "failing", fail_on=_first_spike_count(tmp))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # the failed row's warning
+            failing.run()
+        pages["partial-light"] = _page(
+            failing.diagram().to_html(), "light", SELECT_RATES
         )
         # As a viewer that drops scripts shows it: the picture (an image) and the node table.
         without_scripts = re.sub(r"<script\b.*?</script>", "", after, flags=re.S)
