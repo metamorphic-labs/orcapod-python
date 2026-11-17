@@ -901,16 +901,18 @@ class SpiralDBConnector:
         meta_kv = _serialize_arrow_metadata(records)
 
         def write_rows(rows: pa.Table) -> None:
-            # Record first, so rows are never stored without their record; if the rows
-            # then fail, remove the record again, since it names columns the table lacks.
-            wrote_record = record_first and write_nullability_record(
-                tbl, records.schema
-            )
-            # The entry as it was before this write, put back if the write fails.
+            # The Arrow metadata entry as it was before this write, put back if the
+            # write fails. Read before anything is written, so a failed read leaves
+            # nothing to clean up.
             previous_meta = (
                 tbl.get_metadata().get(_ARROW_METADATA_KEY)
                 if meta_kv is not None
                 else None
+            )
+            # Record first, so rows are never stored without their record; if the rows
+            # then fail, remove the record again, since it names columns the table lacks.
+            wrote_record = record_first and write_nullability_record(
+                tbl, records.schema
             )
             try:
                 # The Arrow metadata too goes before the rows, so rows never land

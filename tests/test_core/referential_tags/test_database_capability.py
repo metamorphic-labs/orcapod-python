@@ -400,3 +400,45 @@ def test_spiraldb_failed_write_keeps_the_metadata_of_stored_rows(
     table = pa.Table.from_batches(list(connector.iter_batches('SELECT * FROM "k"')))
     assert table.column("rid").to_pylist() == [b"1"]
     assert stored_references(table.schema) == ("rid",)
+
+
+def test_spiraldb_failed_metadata_read_leaves_no_nullability_record(
+    spiral: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A metadata read that fails after the record was written leaves no stale record."""
+    from orcapod.databases.spiraldb_nullability import RECORD_KEY
+
+    connector = SpiralDBConnector("p")
+    connector.create_table_if_not_exists(
+        "t", [ColumnInfo("rid", pa.large_binary())], pk_column="rid"
+    )
+    real_get_metadata = fake_pyspiral.FakeTable.get_metadata
+    real_set_metadata = fake_pyspiral.FakeTable.set_metadata
+    record_written: list[bool] = []
+
+    def tracking_set_metadata(self: Any, metadata: dict[str, bytes]) -> None:
+        real_set_metadata(self, metadata)
+        if any(key.startswith(RECORD_KEY) for key in metadata):
+            record_written.append(True)
+
+    def failing_get_metadata(self: Any) -> dict[str, bytes]:
+        # Every read after the nullability record is written fails.
+        if record_written:
+            raise RuntimeError("metadata read failed")
+        return real_get_metadata(self)
+
+    monkeypatch.setattr(fake_pyspiral.FakeTable, "set_metadata", tracking_set_metadata)
+    monkeypatch.setattr(fake_pyspiral.FakeTable, "get_metadata", failing_get_metadata)
+    try:
+        connector.upsert_records("t", _rows([1]), id_column="rid")
+        wrote = True
+    except RuntimeError:
+        wrote = False
+    monkeypatch.undo()
+
+    table = connector._project.table(connector._table_id("t"))  # pyright: ignore[reportPrivateUsage]
+    if not wrote:
+        assert not any(key.startswith(RECORD_KEY) for key in table.get_metadata())
+    else:
+        rows = pa.Table.from_batches(list(connector.iter_batches('SELECT * FROM "t"')))
+        assert rows.num_rows == 1
