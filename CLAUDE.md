@@ -281,10 +281,11 @@ What runs where (developer, November 16, 2026; ITL-1181):
   to `main`, Python 3.11, 3.12 and 3.13. Once the required CI no longer applies, a pull
   request is tested on Python 3.13 only, and a failure only 3.11 or 3.12 shows is first
   seen on `main`.
-- In CI the tests run in parallel on every core (pytest-xdist, `-n auto`). One place turns
-  it on, `tests/conftest.py`, when `CI` is `true` and no `-n` is given; `-n 0` keeps a run
-  serial (the PostgreSQL and SpiralDB integration jobs). Coverage on Python 3.12 and later
-  uses `COVERAGE_CORE=sysmon`.
+- In CI the tests run in parallel, one worker per logical CPU (pytest-xdist, `-n logical`;
+  `-n auto` counts physical cores, one on a GitHub runner). One place turns it on,
+  `tests/conftest.py`, when `CI` is `true` and no `-n` is given; `-n 0` keeps a run serial
+  (the PostgreSQL and SpiralDB integration jobs). Coverage on Python 3.12 and later uses
+  `COVERAGE_CORE=sysmon`.
 - Locally the tests run serially. `uv run pytest -n 4 tests/` runs them on four workers;
   each worker holds its own copy of the suite's memory, so do it only on a machine with
   cores and memory to spare, never beside another heavy process.

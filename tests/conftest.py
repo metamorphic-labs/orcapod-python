@@ -5,8 +5,9 @@ tests by default.  Pass ``--postgres`` to opt in::
 
     uv run pytest --postgres
 
-In CI (``CI`` set to ``true``, as GitHub Actions does) the tests run in parallel on every
-core of the runner (pytest-xdist, ``-n auto``) unless ``-n`` is given (ITL-1181). This is
+In CI (``CI`` set to ``true``, as GitHub Actions does) the tests run in parallel, one worker
+per logical CPU of the runner (pytest-xdist, ``-n logical``; ``-n auto`` counts physical
+cores, of which a GitHub runner has one), unless ``-n`` is given (ITL-1181). This is
 the one place that turns it on without ``-n``: it is how the organization's required pytest
 check, whose command this repository cannot change, runs in parallel. Local runs stay
 serial; pass ``-n 4`` to run in parallel on a machine with cores and memory to spare.
@@ -26,9 +27,9 @@ def _running_in_ci() -> bool:
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_cmdline_main(config: pytest.Config) -> None:
-    """In CI, run the tests on every core unless ``-n`` was given (ITL-1181).
+    """In CI, run the tests on every logical CPU unless ``-n`` was given (ITL-1181).
 
-    Sets ``-n auto`` before pytest-xdist reads the option: both hooks are ``tryfirst``,
+    Sets ``-n logical`` before pytest-xdist reads the option: both hooks are ``tryfirst``,
     and pytest calls this conftest's before the plugin's, which was registered earlier.
     ``-n 0`` (or ``-p no:xdist``) keeps a CI run serial. A worker is left alone: xdist
     clears ``-n`` in each worker before calling this hook there, and setting it again
@@ -39,7 +40,7 @@ def pytest_cmdline_main(config: pytest.Config) -> None:
     if hasattr(config, "workerinput"):
         return
     if config.getoption("numprocesses") is None:
-        config.option.numprocesses = "auto"
+        config.option.numprocesses = "logical"
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
