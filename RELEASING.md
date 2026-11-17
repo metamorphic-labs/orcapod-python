@@ -174,8 +174,8 @@ This is an exception, for a pinch: the release tests take a long time and repeat
 `Run Tests` already ran on the same commit. Use it only when all of these hold:
 
 - The exact commit being released (the tip of the **Branch** input) has green CI: the
-  `Run Tests` workflow on that commit passed on Python 3.11, 3.12 and 3.13. Check the commit
-  id, not the branch name.
+  `Run Tests` workflow on that commit passed on Python 3.11, 3.12 and 3.13 (checks
+  `Tests (3.11)`, `Tests (3.12)` and `Tests (3.13)`). Check the commit id, not the branch name.
 - The pre-release checklist above holds, the full suite included.
 - The developer chose it for this run. An agent never runs the Release workflow, with or
   without the option.

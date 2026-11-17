@@ -12,6 +12,8 @@ permissions:
 
 jobs:
   test:
+    # Check name `Tests (3.13)`; distinct from the objective and PostgreSQL suites' (ITL-1212).
+    name: Tests (${{ matrix.python-version }})
     needs: license-check
     runs-on: ubuntu-latest
     # id-token: write lets the Codecov upload authenticate by GitHub OIDC, with no stored

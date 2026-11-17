@@ -12,6 +12,8 @@ permissions:
 
 jobs:
   test:
+    # Check name `Objective tests (3.13)`; distinct from the other suites' (ITL-1212).
+    name: Objective tests (${{ matrix.python-version }})
     runs-on: ubuntu-latest
     # id-token: write lets the Codecov upload authenticate by GitHub OIDC, with no stored
     # token (ITL-1193). A fork's pull request gets no OIDC token: the action detects the fork
