@@ -1,20 +1,16 @@
 name: Documentation site
 
 # Builds the documentation site (site/, Astro Starlight) from docs/ and the source on every
-# pull request and push, so a broken page, link, anchor or docstring fails CI (ITL-1170).
-# The public repository publishes it to GitHub Pages, https://nauticalab.github.io/orcapod-python/
-# (the base path is set in site/astro.config.mjs): when `main` is pushed there (a release
-# point, see RELEASING.md) or by hand (Run workflow). The development repository only builds.
+# pull request and push to main, so a broken page, link, anchor or docstring fails CI
+# (ITL-1170). This workflow only builds: it publishes nothing. Publishing to GitHub Pages
+# (https://metamorphic-labs.github.io/orcapod-python/; the base path is set in
+# site/astro.config.mjs) is a separate step the developer enables.
 
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
-
-env:
-  # The one repository that publishes the site.
-  PAGES_REPOSITORY: nauticalab/orcapod-python
 
 permissions:
   contents: read
@@ -28,8 +24,6 @@ jobs:
     name: Build the site
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    outputs:
-      publish: ${{ steps.publish.outputs.publish }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
@@ -71,36 +65,3 @@ jobs:
       - name: Build the site
         working-directory: site
         run: pnpm build
-
-      - name: Decide whether to publish
-        id: publish
-        run: echo "publish=${{ github.repository == env.PAGES_REPOSITORY && github.event_name != 'pull_request' }}" >> "$GITHUB_OUTPUT"
-
-      - name: Upload the site for GitHub Pages
-        if: steps.publish.outputs.publish == 'true'
-        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9  # v5.0.0
-        with:
-          path: site/dist
-
-  deploy:
-    name: Publish to GitHub Pages
-    needs: build
-    if: needs.build.outputs.publish == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      pages: write
-      id-token: write
-    concurrency:
-      group: pages
-      cancel-in-progress: false
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Configure GitHub Pages
-        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d  # v6.0.0
-
-      - name: Deploy
-        id: deployment
-        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346  # v5.0.1

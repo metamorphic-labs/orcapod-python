@@ -133,9 +133,9 @@ November 16, 2026, ITL-1170; `site/README.md` has the commands). mkdocs is gone.
   entry the signature does not have) fails the build.
 - Build locally with `cd site && pnpm install && pnpm build`; CI builds the site on every pull
   request (`.github/workflows/docs-site.yml`) and `tests/test_docs/test_site_content.py` runs
-  the content build without Node. The public repository publishes it to GitHub Pages
-  (`https://nauticalab.github.io/orcapod-python/`); the repository that publishes is named
-  once, in that workflow.
+  the content build without Node. That workflow only builds: publishing to GitHub Pages
+  (`https://metamorphic-labs.github.io/orcapod-python/`) is a separate step the developer
+  enables. An agent never adds a deploy job or changes a Pages setting.
 
 ## Linear issue tracking
 

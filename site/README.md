@@ -1,7 +1,7 @@
 # The Orcapod documentation site
 
 An [Astro Starlight](https://starlight.astro.build) site, built from `../docs/` and the
-source code. It is published at <https://nauticalab.github.io/orcapod-python/>.
+source code. It is to be published at <https://metamorphic-labs.github.io/orcapod-python/>.
 
 ## Build and preview
 
@@ -72,6 +72,6 @@ site has no images, and its `libvips` is under a license the project does not al
 
 ## CI and publishing
 
-`.github/workflows/docs-site.yml` builds the site on every pull request and push, and
-checks the npm packages' licenses (`../scripts/check_site_licenses.py`). On the public
-repository, a push to `main` (a release) or a manual run publishes it to GitHub Pages.
+`.github/workflows/docs-site.yml` builds the site on every pull request and push to `main`,
+and checks the npm packages' licenses (`../scripts/check_site_licenses.py`). It publishes
+nothing: publishing to GitHub Pages is a separate step the developer enables.

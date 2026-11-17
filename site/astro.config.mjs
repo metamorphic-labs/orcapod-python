@@ -7,8 +7,8 @@ import starlight from '@astrojs/starlight';
 import starlightLinksValidator from 'starlight-links-validator';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
-// Published as a GitHub Pages project page: https://nauticalab.github.io/orcapod-python/
-const site = 'https://nauticalab.github.io';
+// To be published as a GitHub Pages project page: https://metamorphic-labs.github.io/orcapod-python/
+const site = 'https://metamorphic-labs.github.io';
 const base = '/orcapod-python/';
 
 /** Write src/content/docs and public from ../docs (pages and generated API reference). */
