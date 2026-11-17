@@ -1,6 +1,7 @@
 """Integration tests for SpiralDBConnector against the live dev project.
 
-These tests are skipped unless the ``SPIRAL_INTEGRATION_TESTS=1`` env var is set.
+These tests are skipped unless the ``SPIRAL_INTEGRATION_TESTS=1`` env var is set and
+``SPIRAL_PROJECT_ID`` names the project to test against.
 They require a valid auth mechanism, either:
 
 - Local dev: a saved ``spiral login`` (pyspiral keeps it in
@@ -15,7 +16,7 @@ integration tests.
 
 Project and server URL are configurable via env vars:
 
-- ``SPIRAL_PROJECT_ID`` (default: ``test-orcapod-362211``)
+- ``SPIRAL_PROJECT_ID`` (required; no default)
 - ``SPIRAL_SERVER_URL`` (default: ``https://api.spiraldb.dev``)
 
 Version compatibility note (PLT-1773)
@@ -46,14 +47,17 @@ from orcapod.databases import ConnectorArrowDatabase, SpiralDBConnector
 from orcapod.types import ColumnInfo
 
 INTEGRATION = os.environ.get("SPIRAL_INTEGRATION_TESTS") == "1"
-DEV_PROJECT = os.environ.get("SPIRAL_PROJECT_ID", "test-orcapod-362211")
+DEV_PROJECT = os.environ.get("SPIRAL_PROJECT_ID", "")
 DEV_OVERRIDES = {
     "server.url": os.environ.get("SPIRAL_SERVER_URL", "https://api.spiraldb.dev")
 }
 
 pytestmark = pytest.mark.skipif(
-    not INTEGRATION,
-    reason="Set SPIRAL_INTEGRATION_TESTS=1 to run SpiralDB integration tests",
+    not (INTEGRATION and DEV_PROJECT),
+    reason=(
+        "Set SPIRAL_INTEGRATION_TESTS=1 and SPIRAL_PROJECT_ID to run SpiralDB "
+        "integration tests"
+    ),
 )
 
 
@@ -386,3 +390,69 @@ class TestArrowMetadataRoundTrip:
             assert inner.metadata.get(b"unit") == b"volts"
         finally:
             connector.delete_table(table_name)
+
+
+class TestReservedNamesRefusedLive:
+    """ITL-1162 / ITL-1164 against the live service (opt-in, like every test here).
+
+    The refusal itself is decided by ``SpiralDBConnector.unstorable_column_reason``
+    before any request; the second test checks the rule against SpiralDB's own
+    refusals, so the fake's model of them stays honest.
+    """
+
+    def test_function_node_job_refused_before_anything_runs(self, connector):
+        from orcapod import PipelineJob, function_pod
+        from orcapod.errors import UnstorableColumnError
+        from orcapod.sources import DictSource
+
+        calls: list[int] = []
+
+        @function_pod(output_keys="double")
+        def double(x: int) -> int:
+            calls.append(x)
+            return 2 * x
+
+        job = PipelineJob(
+            name=_unique_table("itl1162"), database=ConnectorArrowDatabase(connector)
+        )
+        source = DictSource(
+            data=[{"k": "a", "x": 1}],
+            tag_columns=["k"],
+            tag_only_columns=True,
+            source_id="src",
+        )
+        with pytest.raises(UnstorableColumnError) as exc_info:
+            with job:
+                _ = double.pod(source, label="dbl")
+        assert exc_info.value.column == "__input_data_hash"
+        assert calls == []
+
+    @pytest.mark.parametrize("name", ["__value", "a.b"])
+    def test_spiraldb_itself_refuses_the_names_the_connector_refuses(
+        self, connector, name
+    ):
+        assert (
+            connector.unstorable_column_reason(name, pa.int64(), primary_key=False)
+            is not None
+        )
+        table = _unique_table("itl1162_names")
+        try:
+            connector.create_table_if_not_exists(
+                table,
+                [
+                    ColumnInfo("k", pa.large_string(), nullable=False),
+                    ColumnInfo(name, pa.int64(), nullable=True),
+                ],
+                pk_column="k",
+            )
+            rows = pa.table(
+                {
+                    "k": pa.array(["a"], type=pa.large_string()),
+                    name: pa.array([1], type=pa.int64()),
+                }
+            )
+            with pytest.raises(Exception, match="reserved"):
+                connector.upsert_records(table, rows, id_column="k")
+        finally:
+            if table in connector.get_table_names():
+                connector.delete_table(table)

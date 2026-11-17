@@ -196,6 +196,7 @@ def _build_operator_registry() -> dict[str, type]:
         DropTagColumns,
         GroupBy,
         Join,
+        MapColumns,
         MapData,
         MapTags,
         MergeJoin,
@@ -220,6 +221,7 @@ def _build_operator_registry() -> dict[str, type]:
         "DropColumns": DropColumns,
         "MapTags": MapTags,
         "MapData": MapData,
+        "MapColumns": MapColumns,
         "PolarsFilter": PolarsFilter,
         "DropNulls": DropNulls,
     }

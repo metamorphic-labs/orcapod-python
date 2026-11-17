@@ -125,7 +125,8 @@ for tag, data in batched.iter_data():
 to drop with `drop_tag_columns` afterwards (that raises, since the tag is gone). A
 referential non-key column loses its tag role there, but keeps its data column, a list
 like every other data column. So after the grouping it is data only, and is renamed with
-`map_data`; `map_tags` would find no tag of that name and rename nothing.
+`map_data`; `map_tags` refuses it, since it is no longer a tag, and the error says to use
+`map_data`.
 
 ```python
 by_unit = spikes.group_by(["unit"])
@@ -227,7 +228,7 @@ the file is checked against the stored tables when a node reads them.
 ## Not supported yet
 
 These raise "not supported with referential tags yet" when a referential tag reaches them:
-`MergeJoin`, storing an operator node's results (`LOG` and `REPLAY` cache modes),
+`MergeJoin`, `MapColumns` (`map_columns`; rename with `map_tags` and `map_data`), storing an operator node's results (`LOG` and `REPLAY` cache modes),
 and `DerivedSource` over a stream with referential tags (so `node.as_source()` of a node
 with referential tags).
 `PollingSource` keeps its tags plain. Each error names its issue and the way out: build the

@@ -80,7 +80,7 @@ Do these on `metamorphic-labs` `main` before anything is pushed:
    not exist on PyPI or TestPyPI; neither index allows a version to be uploaded twice, even
    after it is deleted.
 
-Per-release checklists live in `superpowers/plans/` (for example
+Per-release checklists live in `docs/dev/plans/` (for example
 `2026-11-09-v0.2-release-checklist.md`).
 
 ## Pre-push checklist
@@ -275,5 +275,5 @@ does not block or fail the release (no publish job depends on them). They call
 Because the Release workflow runs on `nauticalab`, these jobs do not run for a release at all
 today; completing the Linear release is a manual step until the developer decides otherwise
 (the issue ITL-1007 notes this "needs more thought"). Setup on `metamorphic-labs`: the
-`LINEAR_ACCESS_KEY` repo secret (the key `metamorphic-brain/axon` uses) and a Linear release
+`LINEAR_ACCESS_KEY` repo secret (the organisation's Linear access key) and a Linear release
 configured in the workspace.

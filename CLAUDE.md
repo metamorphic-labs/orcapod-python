@@ -19,39 +19,45 @@ When adding or changing any instruction, update BOTH:
 
 ## Design issues log
 
-`design_issues/` at the project root is the canonical log of known design problems, bugs, and
-code quality issues: one file per entry (developer, November 11, 2026; ITL-968). There is no
-`DESIGN_ISSUES.md`; never bring it back, and never put two entries in one file.
+`docs/dev/design_issues/` is the canonical log of known design problems, bugs, and code
+quality issues: one file per entry (developer, November 11, 2026; ITL-968). There is no
+`DESIGN_ISSUES.md` and no top-level `design_issues/` (moved in ITL-1169; `--check` refuses both);
+never bring either back, and never put two entries in one file.
 
-- An entry is the file `design_issues/<LINEAR-ISSUE-ID>-<ENTRY-ID>.md` (e.g.
-  `design_issues/ITL-955-GB1.md`). Its first line is the `## <area heading>` it belongs
+- An entry is the file `docs/dev/design_issues/<LINEAR-ISSUE-ID>-<ENTRY-ID>.md` (e.g.
+  `docs/dev/design_issues/ITL-955-GB1.md`). Its first line is the `## <area heading>` it belongs
   under, then a blank line, `### <ENTRY-ID> — <title>`, the `**Status:**` (`open`,
   `in progress` or `resolved`), `**Severity:**` and `**Issue:**` lines, a blank line and the
   body.
 - Read the log with `uv run python scripts/design_issues.py` (index by area; `--status open`
-  filters; `--full` prints every entry). Find one entry by id: `ls design_issues/*-GB1.md`.
+  filters; `--full` prints every entry). Find one entry by id: `ls docs/dev/design_issues/*-GB1.md`.
 - Check the files with `uv run python scripts/design_issues.py --check`
   (`tests/test_design_issues.py` runs it in CI).
-- `design_issues/README.md` is the full statement of the convention, with the severity
+- `docs/dev/design_issues/README.md` is the full statement of the convention, with the severity
   guide.
 
 When fixing a bug or addressing a design problem:
-1. Check `design_issues/` first — if a matching entry exists, edit its file: update its
+1. Check `docs/dev/design_issues/` first — if a matching entry exists, edit its file: update its
    status to `in progress` while working and `resolved` once done, adding a brief **Fix:**
    note.
 2. If no matching entry exists, ask the user whether it should be added before proceeding.
    If yes, add it as a new file (status `open` or `in progress` as appropriate).
 
 When discovering a new issue that won't be fixed immediately, ask the user whether it should be
-logged in `design_issues/` before adding it.
+logged in `docs/dev/design_issues/` before adding it.
 
-## Superpowers artifacts
+## Development documents
 
-Place all superpowers-related artifacts (design specs, plans, etc.) in the `superpowers/`
-directory at the project root — **not** under `docs/`. The `docs/` directory is reserved for
-actual library documentation.
+Documents written during development are kept in the repository, under `docs/dev/`
+(developer, November 16, 2026; ITL-1169):
 
-- Specs go in `superpowers/specs/`
+- Specs go in `docs/dev/specs/`, plans in `docs/dev/plans/`, and the scripts and evidence
+  they cite in `docs/dev/scripts/` (or beside the spec, under `docs/dev/specs/<topic>/`).
+- Never put them in the published documentation (`docs/` outside `docs/dev/`) or at the top
+  level of the repository. There is no top-level `superpowers/`; `scripts/design_issues.py
+  --check` refuses one.
+- `docs/dev/` is developer material: `mkdocs.yml` excludes it from the published site
+  (`exclude_docs`), and the documentation sample test does not run it.
 
 ## Backward compatibility
 
@@ -83,6 +89,10 @@ Python docstrings everywhere.
 to refer to names (e.g. ``PollingSource``, ``iter_data``, ``CursorInvalidatedError``).
 
 ## Documentation samples
+
+`docs/` outside `docs/dev/` holds library documentation only. `docs/dev/` (the design issues
+log, the design specification, specs, plans and their scripts) is developer material, kept out
+of the published site (`exclude_docs` in `mkdocs.yml`) and out of the sample test.
 
 Every fenced `python` block in `README.md`, `docs/index.md`, `docs/getting-started.md`,
 `docs/troubleshooting.md`, `docs/concepts/`, `docs/reference/` and `docs/tutorial/` is executed
@@ -545,7 +555,7 @@ src/orcapod/
 │       ├── batch.py            # Batch (group rows by count, types become list[T])
 │       ├── group_by.py         # GroupBy (many→one reduction keyed on tag values)
 │       ├── column_selection.py # Select/Drop Tag/Data columns; SelectColumns/DropColumns (tag or data)
-│       ├── mappers.py          # MapTags, MapData (rename columns)
+│       ├── mappers.py          # MapTags, MapData, MapColumns (rename columns; strict by default)
 │       ├── filters.py          # PolarsFilter
 │       └── drop_nulls.py       # DropNulls (drop rows with a null in named or all columns, T | None → T)
 ├── hashing/
@@ -575,7 +585,7 @@ tests/
 
 ## Architecture overview
 
-See `orcapod-design.md` at the project root for the full design specification.
+See `docs/dev/orcapod-design.md` for the full design specification.
 
 ### Core data flow
 
@@ -678,8 +688,10 @@ raw `ArrowTableStream`'s `__` columns and for the meta a cached pod's or functio
 carry. The rule is in one place, `core/operators/meta_columns.py` (sync results through the
 operator base classes, async rows through `WithoutMetaWriter`). A carry-forward mode is ITL-867.
 The meta prefix (`__`) is reserved: `ArrowTableStream` and the source builder refuse a tag named
-with it, and `MapTags` / `MapData` (targets) and `Pick` / `Index` (`out`) refuse it as a new name
-(`schema_utils.require_names_not_meta`, at construction).
+with it, and `MapTags` / `MapData` / `MapColumns` (targets) and `Pick` / `Index` (`out`) refuse it as a new name
+(`schema_utils.require_names_not_meta`, at construction). The three mappers also refuse a new name
+that a stream reads as a system column (system-tag or source-info prefix, the context key column;
+`schema_utils.require_names_not_system`, ITL-1160).
 
 **Operator or derived source?** (developer, November 11, 2026) The test is: does any data
 element come from a tag value, or from anywhere other than the input's data elements? If yes,
