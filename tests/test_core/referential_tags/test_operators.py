@@ -30,9 +30,9 @@ from orcapod.core.operators import (
     GroupBy,
     Index,
     Join,
+    MapColumns,
     MapData,
     MapTags,
-    MergeJoin,
     Pick,
     PolarsFilter,
     SelectColumns,
@@ -522,8 +522,9 @@ def test_extraction_named_like_a_tag_raises() -> None:
 
 
 def test_uncovered_operators_raise() -> None:
-    with pytest.raises(NotImplementedError, match="ITL-1018"):
-        MergeJoin()(_a(), _b())
+    # MergeJoin handles referential tags since ITL-1194 (test_merge_join.py).
+    with pytest.raises(NotImplementedError, match="ITL-1022"):
+        MapColumns({"x": "z"})(_a())
 
 
 # ── renames (developer decision, November 12, 2026) ─────────────────────────
@@ -629,6 +630,5 @@ def test_map_tags_on_plain_tags_is_unchanged() -> None:
 
 
 def test_uncovered_operators_still_work_on_plain_tags() -> None:
-    plain = MergeJoin()(_a(tag_only_columns=True), _b(tag_only_columns=True))
-    tags, data = plain.keys()
-    assert tags == ("x",) and sorted(data) == ["a", "b"]
+    plain = MapColumns({"x": "z"})(_a(tag_only_columns=True))
+    assert plain.keys() == (("z",), ("a",))

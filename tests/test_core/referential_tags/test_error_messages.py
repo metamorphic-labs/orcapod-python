@@ -17,7 +17,7 @@ from orcapod import PipelineJob
 from orcapod.core.cached_function_pod import CachedFunctionPod
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.nodes.source_node import SourceNode
-from orcapod.core.operators import DropNulls, MergeJoin
+from orcapod.core.operators import DropNulls, MapColumns
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import SourceSpecMismatchError
 from orcapod.types import Schema
@@ -253,10 +253,10 @@ def test_the_exact_form_on_plain_tags_says_nothing_about_referential_tags() -> N
 
 
 def test_not_supported_yet_names_tag_only_columns_true_and_the_issue() -> None:
-    # MergeJoin is the operator not supported yet (Batch is, since ITL-1017).
+    # MapColumns is an operator not supported yet (MergeJoin is, since ITL-1194).
     source = _source(["k", "x"])
     with pytest.raises(NotImplementedError) as excinfo:
-        _ = MergeJoin()(source, source)
+        _ = MapColumns({"x": "z"})(source)
     message = str(excinfo.value)
-    assert "ITL-1018" in message
+    assert "ITL-1022" in message
     assert "tag_only_columns=True" in message
