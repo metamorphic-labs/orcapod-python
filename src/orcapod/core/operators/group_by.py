@@ -164,7 +164,8 @@ class GroupBy(UnaryOperator):
     list is aligned with it.  This matters because orcapod hashes those lists
     to build the cache key -- an unsorted list would make an identical member
     set hash differently and trigger a spurious recompute.  Groups themselves
-    are emitted in group-key order for the same reason: a reordered input must
+    are emitted sorted by their keys, in name order, for the same reason: a
+    reordered input or a reordered ``by`` must
     produce an identical output.
 
     Tag tuples are expected to be unique within a stream, but nothing enforces
@@ -187,8 +188,11 @@ class GroupBy(UnaryOperator):
     what tells a batch's members apart.
 
     Args:
-        by: Tag column names to group on.  Must be non-empty, free of
-            duplicates, and must all be scalar tag columns of the input stream.
+        by: Tag column names to group on, in any order (a set too).  Must be
+            non-empty, free of duplicates, and must all be scalar tag columns of
+            the input stream.  Their order is not kept: it is not part of the
+            identity, and the groups are emitted sorted by the keys in name order
+            (developer, November 17, 2026, ITL-1226).
         member_order: The order of the members of a group.  ``None`` (or
             ``"name"``): by the non-key tags in name order.  A list or tuple of
             non-key tag names (plain tags or data-tags): by those tags in the
@@ -223,7 +227,9 @@ class GroupBy(UnaryOperator):
                 f"GroupBy `by` contains duplicate column names: {duplicates}. "
                 f"Got {list(by_tuple)}."
             )
-        self.by = by_tuple
+        # The order of the keys only orders the groups (rows), never a value
+        # within a row: it is not identity (developer, November 17, 2026).
+        self.by = tuple(sorted(by_tuple))
         self.member_order = _member_order_names(member_order, by_tuple)
         super().__init__(**kwargs)
 

@@ -106,12 +106,12 @@ session_means = mean_rate.pod(per_session)
 print(session_means.as_pandas_df())
 #   subject_id session  mean_rate_hz
 # 0   mouse_01      s1      6.033333
-# 1   mouse_01      s2      6.793750
-# 2   mouse_02      s1      5.845833
-# 3   mouse_02      s2      7.506250
-# 4   mouse_03      s1      4.906944
-# 5   mouse_03      s2      5.059375
-# 6   mouse_04      s1      5.136458
+# 1   mouse_02      s1      5.845833
+# 2   mouse_03      s1      4.906944
+# 3   mouse_04      s1      5.136458
+# 4   mouse_01      s2      6.793750
+# 5   mouse_02      s2      7.506250
+# 6   mouse_03      s2      5.059375
 # 7   mouse_04      s2      5.129167
 ```
 
@@ -211,9 +211,9 @@ and `group_by` cannot use those.
     print(per_probe.as_pandas_df().head(4))
     #   subject_id session  probe  mean_rate_hz
     # 0   mouse_01      s1  imec0      7.233333
-    # 1   mouse_01      s1  imec1      4.833333
-    # 2   mouse_01      s2  imec0      6.564583
-    # 3   mouse_01      s2  imec1      7.022917
+    # 1   mouse_02      s1  imec0      6.572222
+    # 2   mouse_03      s1  imec0      5.102778
+    # 3   mouse_04      s1  imec0      5.510417
     print(per_probe.as_table().num_rows)
     # 16
     ```
@@ -232,8 +232,8 @@ values: the number of units, the mean rate, and the highest rate. Apply it per s
     print(summary.as_pandas_df().head(3))
     #   subject_id session  n_units  mean_rate_hz  max_rate_hz
     # 0   mouse_01      s1        8      6.033333    11.033333
-    # 1   mouse_01      s2        8      6.793750    10.175000
-    # 2   mouse_02      s1        8      5.845833    11.400000
+    # 1   mouse_02      s1        8      5.845833    11.400000
+    # 2   mouse_03      s1        8      4.906944     7.877778
     ```
 
 **3.** Compute one number for each genotype: the mean of the session means of its animals.

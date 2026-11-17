@@ -177,6 +177,51 @@ def test_the_output_column_order_follows_the_input() -> None:
     assert backward.group_by(["g", "k"]).keys() == (("k", "g"), ("b", "a"))
 
 
+@pytest.mark.parametrize("member_order", [None, ["y"]])
+@pytest.mark.parametrize("mode", MODES)
+def test_the_order_of_by_is_not_identity(
+    mode: str, member_order: list[str] | None
+) -> None:
+    """The keys' order only ordered the groups (rows): it is not identity.
+
+    Developer, November 17, 2026: ``GroupBy(["g", "k"])`` and ``GroupBy(["k", "g"])``
+    are one operator: equal identity, config, hashes, rows and row order, whatever
+    the arrangement of the input.
+    """
+    seen: dict[str, Any] = {}
+    for by, tag_order, layout in itertools.product(
+        (["g", "k"], ["k", "g"], {"k", "g"}), (TAGS, ("y", "k", "x", "g")), LAYOUTS
+    ):
+        group_by = GroupBy(by, member_order=member_order)
+        grouped = group_by(_input(mode, "source", tag_order, layout))
+        found = {
+            "identity": group_by.identity_structure(),
+            "config": group_by.to_config(),
+            "label": grouped.label,
+            "row_order": [(tag["g"], tag["k"]) for tag, _ in grouped.iter_data()],
+            **_fingerprint(grouped, content_hash=True),
+        }
+        if not seen:
+            seen = found
+        assert found == seen, (by, tag_order, layout)
+    assert seen["config"]["config"]["by"] == ["g", "k"]
+
+
+def test_groups_are_emitted_by_their_keys_in_name_order() -> None:
+    rows = [{"g": g, "k": k, "a": float(10 * g + k)} for g in (2, 1) for k in (1, 2)]
+    source = op.sources.DictSource(
+        rows, tag_columns=["k", "g"], tag_only_columns=True, source_id="emit"
+    )
+    for by in (["k", "g"], ["g", "k"]):
+        grouped = source.group_by(by)
+        assert [(t["g"], t["k"]) for t, _ in grouped.iter_data()] == [
+            (1, 1),
+            (1, 2),
+            (2, 1),
+            (2, 2),
+        ]
+
+
 # ── the order itself ────────────────────────────────────────────────────────
 
 
