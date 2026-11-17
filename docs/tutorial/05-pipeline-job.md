@@ -112,6 +112,41 @@ names, in an order that can differ from one Python session to the next.)
   function's name.
 - Operators are named after their kind, numbered when there are several.
 
+To see how the nodes connect, put `job` on the last line of a notebook cell: the job draws
+itself as a diagram. Drag it to move it, zoom with the `+` and `−` buttons, and click a node
+to see its columns and how many rows the last run computed or read. Outside a notebook,
+`print(job.diagram())` gives the same graph as text, one node per line with the nodes it
+reads from:
+
+```python
+print(job.diagram())
+# Job 'workshop': 9 nodes
+#   sessions (source · CSVSource · bound)
+#   SelectDataColumns_1 (operator · current) <- sessions
+#   units (source · CSVSource · bound)
+#   SelectDataColumns_3 (operator · current) <- units
+#   Join (operator · current) <- SelectDataColumns_1, SelectDataColumns_3
+#   rates (function pod · firing_rate · current) <- Join
+#   GroupBy (operator · current) <- rates
+#   SelectDataColumns_2 (operator · current) <- GroupBy
+#   session_means (function pod · mean_rate · current) <- SelectDataColumns_2
+```
+
+The `Join` is there because `firing_rate` was given two streams: the pod joins them for you.
+`current` means the node holds the rows of the run you just did; before `job.run()` every
+node but the sources says `not run`. `job.diagram(collapse=True)` hides the steps that only
+choose or join columns, leaving the sources, the function pods and the `GroupBy`:
+
+```python
+print(job.diagram(collapse=True))
+# Job 'workshop': 5 nodes
+#   sessions (source · CSVSource · bound)
+#   units (source · CSVSource · bound)
+#   rates (function pod · firing_rate · current) <- sessions, units
+#   GroupBy (operator · current) <- rates
+#   session_means (function pod · mean_rate · current) <- GroupBy
+```
+
 A node is a stream. Everything from Part 1 works on it:
 
 ```python

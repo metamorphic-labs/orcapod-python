@@ -270,8 +270,62 @@ print(job_c.nodes["bmi"].as_table().num_rows)
 # 1
 ```
 
-Every job also carries its blueprint as `job.pipeline`. That object has `show_graph()`,
-which draws the pipeline and needs the Graphviz `dot` program to be installed.
+Every job also carries its blueprint as `job.pipeline`.
+
+## Seeing the graph
+
+In a notebook, a job or a pipeline shown at the end of a cell draws itself: a diagram of its
+nodes (sources, operators, function pods, side-effect pods) and the streams between them,
+laid out left to right. Drag to move it, use the `+`, `−` and `fit` buttons (or Ctrl or Cmd
+with the mouse wheel) to zoom, and select a node to see its tag and data columns and, for a
+job, its run status. `diagram()` makes the same diagram with options, and `print` shows it
+as text:
+
+```python
+print(job_c.diagram())
+# Job 'bmi': 2 nodes
+#   mice (source · DictSource · bound)
+#   bmi (function pod · compute_bmi · current) <- mice
+print(pipeline.diagram())
+# Pipeline 'bmi': 2 nodes
+#   mice (source)
+#   bmi (function pod · compute_bmi) <- mice
+```
+
+Each line is a node: its name, its kind, what it is when the name does not say it (the
+function of a function pod, the class of a bound source), and for a job its status:
+
+- `not run`: the node has not run in this Python session, or was cleared (`clear_cache()`).
+- `current`: it holds the rows of its last run, and nothing it depends on has changed.
+- `held`: current, and the job's last run kept it without running it again.
+- `stale`: something it depends on changed after its run (a source was bound again, a node
+  above it was cleared); the next run computes it again.
+- `failed`: the job's last run had rows whose function raised; select the node to see the
+  first error.
+- `loaded only`: filled by `job.run(load_only=True)`.
+- `bound` or `unbound`, for a source slot.
+
+A selected node also shows the row counts of the job's last run (`job.last_run`).
+
+The options:
+
+- `direction="TB"` lays the graph out top to bottom instead of left to right.
+- `collapse=True` folds the steps that only choose, rename or join columns (joins, column
+  selections, drops and maps, among them the join and select a function pod adds for you)
+  into the edge they lie on: the edge is dashed, and the node it leads to lists them.
+- `max_nodes` (400 by default): a larger graph is shown as the text listing instead.
+
+Drawing a diagram never computes anything. Like `head()`, it reads only what is already
+known: each node's columns (which Orcapod knows without computing) and the run state the job
+holds in memory. It runs no function, reads no source and no database. It needs no Graphviz
+and nothing from the network: the picture is part of the cell's output, so it stays in a saved
+notebook and in an HTML export. Where a notebook does not run scripts (an untrusted notebook,
+a preview on a website), the picture is still shown, without pan, zoom or selection; hover
+over a node for its details, or open the **Nodes** table below the picture.
+`job.diagram().save("pipeline.html")` writes it as a page that opens in any browser.
+
+`job.pipeline.show_graph()` still draws the pipeline with Graphviz, for an image file; it
+needs the Graphviz `dot` program.
 
 ## Saving and loading
 
