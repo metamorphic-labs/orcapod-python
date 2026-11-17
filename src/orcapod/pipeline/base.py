@@ -524,7 +524,7 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
                 node_dag.add_node(node)
         self._node_graph = node_dag
 
-        # 6. Enrich hash_graph node attributes (used by GraphRenderer and serialization).
+        # 6. Enrich hash_graph node attributes (used by serialization).
         for node_hash, node in node_map.items():
             if node_hash not in self._hash_graph:
                 continue

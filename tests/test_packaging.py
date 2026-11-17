@@ -59,15 +59,6 @@ def _pyproject_strings(*keys: str) -> list[str]:
     return [str(item) for item in cast("list[object]", value)]
 
 
-def test_pygraphviz_is_not_a_dependency():
-    """``pygraphviz`` needs Graphviz C headers to build and nothing imports it (ITL-134)."""
-    project = tomllib.loads(PYPROJECT.read_text())["project"]
-    declared = list(project["dependencies"])
-    for extra in project.get("optional-dependencies", {}).values():
-        declared.extend(extra)
-    assert not [d for d in declared if d.lower().startswith("pygraphviz")]
-
-
 def test_license_is_mit() -> None:
     """Orcapod is MIT licensed from v0.2.0 on (ITL-875, reversing ITL-827)."""
     # PEP 639 SPDX expression; it is written to the metadata as License-Expression.
@@ -100,6 +91,21 @@ def _names(requirements: list[str]) -> set[str]:
     """Return the PEP 503 normalized names of PEP 508 requirement strings."""
     names = (re.split(r"[\s<>=!~;\[]", r, maxsplit=1)[0] for r in requirements)
     return {re.sub(r"[-_.]+", "-", name).lower() for name in names}
+
+
+# The old Graphviz renderer (``show_graph``) and its packages are retired: the pipeline
+# draws itself with ``diagram()`` (ITL-134, ITL-1216).
+RETIRED_PACKAGES = ("graphviz", "matplotlib", "pygraphviz")
+
+
+@pytest.mark.parametrize("name", RETIRED_PACKAGES)
+def test_retired_package_is_not_a_dependency(name: str) -> None:
+    """No runtime dependency or extra installs a retired graph-rendering package."""
+    project = tomllib.loads(PYPROJECT.read_text())["project"]
+    declared = list(project["dependencies"])
+    for extra in project.get("optional-dependencies", {}).values():
+        declared.extend(extra)
+    assert name not in _names(declared)
 
 
 @pytest.mark.parametrize("name", ["pymongo", "pyyaml"])
@@ -307,3 +313,58 @@ def test_version_has_placeholder_when_nothing_is_available() -> None:
     """With neither ``_version.py`` nor metadata, import still succeeds."""
     prelude = _BLOCK_GENERATED_VERSION + _HIDE_DISTRIBUTION_METADATA
     assert _orcapod_version(prelude) == "0.0.0+unknown"
+
+
+_BLOCK_RETIRED_PACKAGES = f"""
+import importlib.abc
+import sys
+
+RETIRED = {RETIRED_PACKAGES!r}
+
+
+class _BlockRetired(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.partition(".")[0] in RETIRED:
+            raise ImportError(f"simulated environment without {{fullname}}")
+        return None
+
+
+sys.meta_path.insert(0, _BlockRetired())
+"""
+
+_DRAW_A_JOB = """
+import warnings
+
+import orcapod
+from orcapod import PipelineJob, function_pod
+from orcapod.databases import InMemoryArrowDatabase
+from orcapod.sources import DictSource
+
+warnings.simplefilter("ignore")
+
+
+@function_pod(output_keys="y")
+def inc(x: int) -> int:
+    return x + 1
+
+
+job = PipelineJob(name="demo", database=InMemoryArrowDatabase())
+with job:
+    units = DictSource([{"k": 1, "x": 10}], tag_columns=["k"], tag_only_columns=True)
+    inc.pod(units, label="rates")
+diagram = job.diagram()
+assert diagram.to_svg().startswith("<svg")
+assert "op-dag" in diagram.to_html()
+assert "text/html" in job._repr_mimebundle_()
+assert "rates" in str(diagram)
+assert not [m for m in sys.modules if m.partition(".")[0] in RETIRED]
+print("ok")
+"""
+
+
+def test_orcapod_draws_a_pipeline_without_retired_packages() -> None:
+    """Import and the diagram work with ``graphviz`` and ``matplotlib`` not importable.
+
+    Guards against either package creeping back in as an import (ITL-1216).
+    """
+    assert _run_python(_BLOCK_RETIRED_PACKAGES + _DRAW_A_JOB) == "ok"
