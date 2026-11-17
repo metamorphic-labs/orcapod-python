@@ -142,7 +142,7 @@ The project uses [uv](https://docs.astral.sh/uv/):
 uv sync --all-extras --dev
 ```
 
-Every pull request must pass these checks (pytest on Python 3.11, 3.12 and 3.13):
+Every pull request must pass these checks:
 
 ```bash
 uv run --with ruff ruff check .
@@ -150,6 +150,10 @@ uv run --with ruff ruff format --check .
 uv run --with basedpyright basedpyright
 uv run pytest tests/
 ```
+
+CI runs the tests in parallel (pytest-xdist). Locally they run serially; `uv run pytest -n 4 tests/`
+runs them on four workers, each holding its own copy of the suite's memory, so use it only on a
+machine with cores and memory to spare.
 
 The PostgreSQL integration tests are skipped unless asked for
 (`uv run pytest -m postgres --postgres`) and need a running PostgreSQL server, reached
