@@ -19,6 +19,11 @@ pip install orcapod
 uv add orcapod
 ```
 
+0.3.0 is the first release on PyPI since 0.1.4; 0.2.0 was never published to PyPI. Tables
+written by 0.2.0 or earlier are not read by 0.3.0: see
+[Upgrading from 0.2.0](https://github.com/nauticalab/orcapod-python/blob/main/CHANGELOG.md#upgrading-from-020)
+(it also covers 0.1.4).
+
 Optional features are installed as extras:
 
 | Extra | Adds |
@@ -116,10 +121,9 @@ Orcapod is before version 1.0. In 0.3.0:
   type per process.
 - **Stores from earlier versions are not read as current.** Tables written by 0.1.x or 0.2.0
   are neither read as results nor modified, and results stored by a development build of 0.3
-  are not found again: 0.3.0 computes them again. Read the upgrade notes under "Breaking
-  changes and migration" for 0.3.0 in the
-  [CHANGELOG](https://github.com/nauticalab/orcapod-python/blob/main/CHANGELOG.md) before
-  running a job over an old store, in particular one with side-effect nodes.
+  are not found again: 0.3.0 computes them again. Read
+  [Upgrading from 0.2.0](https://github.com/nauticalab/orcapod-python/blob/main/CHANGELOG.md#upgrading-from-020)
+  before running a job over an old store, in particular one with side-effect nodes.
 - **Connector databases cannot hold function nodes yet.** A job over a SQLite, PostgreSQL or
   SpiralDB database refuses every function node when it is built. Use `InMemoryArrowDatabase`
   or `DeltaTableDatabase` for jobs.
