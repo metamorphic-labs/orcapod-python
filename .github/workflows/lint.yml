@@ -1,9 +1,9 @@
 name: Lint and type check
 
-# The public repository (nauticalab/orcapod-python) has no organization-level required checks, so
-# the checks CLAUDE.md lists under "Lint, format and type checks" run here. pytest is covered by
-# run-tests.yml. The job does not run on the development repository, whose required CI runs the
-# same commands (ITL-1007).
+# The checks CLAUDE.md lists under "Lint, format and type checks", in this repository's own
+# workflow; pytest is covered by run-tests.yml. They run on every repository, the development
+# one included (ITL-1181): once it is public, the organization's required workflow no longer
+# applies to it (ITL-1193), and these checks are the ones that remain.
 
 on:
   push:
@@ -13,7 +13,6 @@ on:
 jobs:
   lint:
     name: Ruff and basedpyright
-    if: github.repository == 'nauticalab/orcapod-python'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

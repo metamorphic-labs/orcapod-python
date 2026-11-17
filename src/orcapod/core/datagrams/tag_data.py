@@ -647,9 +647,11 @@ class Data(Datagram):
             }
         )
         new_p._data_arrow_schema = None
+        # The added columns' source info is ``other``'s; an entry this data holds for
+        # one of them (it does not hold the column) does not override it.
         new_p._source_info = {
             **{name: other_info.get(name) for name in names},
-            **self._source_info,
+            **{k: v for k, v in self._source_info.items() if k not in names},
         }
         new_p._source_info_table = None
         return new_p

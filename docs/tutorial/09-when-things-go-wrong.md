@@ -289,7 +289,7 @@ one.
     except InputValidationError as err:
         print("c:", str(err).split(", but")[0])
     # c: Input streams are not compatible: Datas should not have overlapping keys
-```
+    ```
 
     (a) The column is called `subject_id`. (b) `n_spikes` is in `units`, not `sessions`:
     pass both, `firing_rate.pod(units, sessions)`. (c) Both sides have the same data

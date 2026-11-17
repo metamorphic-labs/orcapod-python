@@ -576,6 +576,41 @@ def test_map_data_is_a_data_only_move() -> None:
     ).to_pylist() == ["A::row_0::x", "A::row_1::x"]
 
 
+def test_map_data_chained_rename_does_not_reach_the_referenced_copy() -> None:
+    """``{x: z, z: w}``: the copy of referential ``x`` is ``z``, the old ``z`` is ``w``."""
+    source = _ref([{"x": 1, "z": 5}, {"x": 2, "z": 6}], ["x"], "C")
+    mapper = MapData({"x": "z", "z": "w"})
+    renamed = mapper(source)
+    assert renamed.keys() == (("x",), ("z", "w"))
+    assert stream_references(renamed) == ()
+    rows = sorted(
+        (int(t["x"]), int(d["z"]), int(d["w"]))  # pyright: ignore[reportArgumentType]  # int columns
+        for t, d in renamed.iter_data()
+    )
+    assert rows == [(1, 1, 5), (2, 2, 6)]
+    assert mapper.output_schema(source) == mapper.static_process(source).output_schema()
+
+
+def test_map_tags_tag_only_keeps_a_chained_rename_of_another_tag() -> None:
+    """``{x: z, z: w}`` with ``tag_only``: plain ``z`` becomes ``w``, ``x``'s tag ``z``."""
+    source = _ref(
+        [{"x": 1, "z": 7, "a": 0.5}, {"x": 2, "z": 8, "a": 0.6}],
+        ["x", "z"],
+        "D",
+        tag_only_columns=["z"],
+    )
+    mapper = MapTags({"x": "z", "z": "w"}, tag_only=True)
+    renamed = mapper(source)
+    assert renamed.keys() == (("z", "w"), ("x", "a"))
+    assert stream_references(renamed) == ()
+    rows = sorted(
+        (int(t["z"]), int(t["w"]), int(d["x"]))  # pyright: ignore[reportArgumentType]  # int columns
+        for t, d in renamed.iter_data()
+    )
+    assert rows == [(1, 7, 1), (2, 8, 2)]
+    assert mapper.output_schema(source) == mapper.static_process(source).output_schema()
+
+
 def test_map_data_dropping_an_unmapped_reference_leaves_a_plain_tag() -> None:
     renamed = MapData({"a": "z"}, drop_unmapped=True)(_a())
     assert renamed.keys() == (("x",), ("z",))
