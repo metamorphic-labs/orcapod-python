@@ -30,6 +30,14 @@ class RayExecutor(PythonFunctionExecutorBase):
     Note:
         ``ray`` is an optional dependency.  Import errors surface at
         construction time so callers get a clear message.
+
+        With Ray 2.54 or later, a driver started with ``uv run`` from a
+        project whose version comes from version control (such as an
+        Orcapod source checkout) hangs: Ray rebuilds the project on its
+        workers without ``.git``, and the workers never start. Set
+        ``RAY_ENABLE_UV_RUN_RUNTIME_ENV=0`` or start the driver with
+        ``python``. See "A job with ``RayExecutor`` hangs and its tasks
+        never start" in the troubleshooting page.
     """
 
     SUPPORTED_TYPES: frozenset[str] = frozenset({"python.function.v0"})
