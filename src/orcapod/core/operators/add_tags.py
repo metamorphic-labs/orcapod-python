@@ -66,16 +66,16 @@ def _checked_value(name: str, value: object) -> TagConstant:
     if type(value) not in _ACCEPTED_TYPES.values():
         raise TypeError(
             f"add_tags: tag {name!r} has a value of type {type(value).__name__!r}; "
-            "a constant tag value must be a bool, int, float, str or bytes"
+            + "a constant tag value must be a bool, int, float, str or bytes"
         )
-    if type(value) is int and not _INT64_MIN <= value <= _INT64_MAX:  # pyright: ignore[reportOperatorIssue]  # narrowed by the exact type check
+    if type(value) is int and not _INT64_MIN <= value <= _INT64_MAX:
         raise ValueError(
             f"add_tags: tag {name!r} has the int value {value}, outside the int64 range"
         )
-    if type(value) is float and not math.isfinite(value):  # pyright: ignore[reportArgumentType]  # narrowed by the exact type check
+    if type(value) is float and not math.isfinite(value):
         raise ValueError(
             f"add_tags: tag {name!r} has the float value {value}; "
-            "a constant tag value must be finite"
+            + "a constant tag value must be finite"
         )
     return value  # pyright: ignore[reportReturnType]  # checked above
 
@@ -124,6 +124,9 @@ class AddTags(UnaryOperator):
         self.tags: dict[str, TagConstant] = {
             name: _checked_value(name, value) for name, value in tags.items()
         }
+        # The one-row table of the values, per type converter (the async path
+        # needs it for every row); the converter is kept so its id stays valid.
+        self._one_row: dict[int, tuple[TypeConverterProtocol, pa.Table]] = {}
         super().__init__(**kwargs)
 
     def identity_structure(self) -> Any:
@@ -191,11 +194,15 @@ class AddTags(UnaryOperator):
         Returns:
             A table of the new tag columns, in the order given.
         """
-        one_row = converter.python_dicts_to_arrow_table(
-            [dict(self.tags)],
-            python_schema={name: type(value) for name, value in self.tags.items()},
-        )
-        return one_row.take(pa.array([0] * num_rows, type=pa.int64()))
+        cached = self._one_row.get(id(converter))
+        if cached is None or cached[0] is not converter:
+            one_row = converter.python_dicts_to_arrow_table(
+                [dict(self.tags)],
+                python_schema={name: type(value) for name, value in self.tags.items()},
+            )
+            cached = (converter, one_row)
+            self._one_row[id(converter)] = cached
+        return cached[1].take(pa.array([0] * num_rows, type=pa.int64()))
 
     def _with_constants(
         self, table: pa.Table, tag_keys: Sequence[str], converter: TypeConverterProtocol
@@ -224,7 +231,9 @@ class AddTags(UnaryOperator):
             table = table.add_column(position + offset, field, column)
         return table
 
-    def _require_new_names(self, tag_keys: Sequence[str], data_keys: Sequence[str]) -> None:
+    def _require_new_names(
+        self, tag_keys: Sequence[str], data_keys: Sequence[str]
+    ) -> None:
         """Refuse a new tag whose name is already a column of the input.
 
         Args:
@@ -235,7 +244,9 @@ class AddTags(UnaryOperator):
             InputValidationError: When a new tag's name is a tag or data column.
         """
         taken = [
-            f"{name!r} is a tag column" if name in tag_keys else f"{name!r} is a data column"
+            f"{name!r} is a tag column"
+            if name in tag_keys
+            else f"{name!r} is a data column"
             for name in self.tags
             if name in tag_keys or name in data_keys
         ]
@@ -246,7 +257,9 @@ class AddTags(UnaryOperator):
 
     def validate_unary_input(self, stream: StreamProtocol) -> None:
         tag_keys, data_keys = stream.keys()
-        self._require_new_names(tag_keys, [c for c in data_keys if not is_meta_column(c)])
+        self._require_new_names(
+            tag_keys, [c for c in data_keys if not is_meta_column(c)]
+        )
 
     def unary_output_schema(
         self,
@@ -255,7 +268,9 @@ class AddTags(UnaryOperator):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> tuple[Schema, Schema]:
-        tag_schema, data_schema = stream.output_schema(columns=columns, all_info=all_info)
+        tag_schema, data_schema = stream.output_schema(
+            columns=columns, all_info=all_info
+        )
         new_tags = {name: type(value) for name, value in self.tags.items()}
         return Schema({**tag_schema, **new_tags}), data_schema
 

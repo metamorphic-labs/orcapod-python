@@ -29,6 +29,7 @@ from orcapod.core.cached_function_pod import CachedFunctionPod
 from orcapod.core.data_function import PythonDataFunction
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.operators import (
+    AddTags,
     Batch,
     DropColumns,
     DropDataColumns,
@@ -416,6 +417,14 @@ CASES = [
     ),
     # No names: every tag and data column, among them struct, logical and list ones.
     Case("drop_nulls_all", lambda: DropNulls(), lambda: (source_a(),)),
+    # Every accepted value type, after the input's two tags (ITL-1196).
+    Case(
+        "add_tags",
+        lambda: AddTags(
+            {"cohort": "A", "run": 3, "ok": True, "w": 1.5, "raw": b"\x01"}
+        ),
+        lambda: (source_a(),),
+    ),
 ]
 CASE = pytest.mark.parametrize("case", CASES, ids=[c.label for c in CASES])
 

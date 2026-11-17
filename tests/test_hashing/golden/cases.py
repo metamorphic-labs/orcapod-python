@@ -2089,6 +2089,32 @@ def pipeline_drop_nulls_all() -> dict[str, Any]:
     return out
 
 
+@case("pipeline", "add_tags")
+def pipeline_add_tags() -> dict[str, Any]:
+    """Pin ``AddTags`` (ITL-1196): its identity, one value of each type, and the rows."""
+    from orcapod.operators import AddTags
+
+    every_type = {"cohort": "A", "run": 3, "ok": True, "w": 1.5, "raw": b"\x01"}
+    out: dict[str, Any] = {}
+    out["operator[every_type].content_hash"] = (
+        AddTags(every_type).content_hash().to_string()
+    )
+    out["operator[every_type].pipeline_hash"] = (
+        AddTags(every_type).pipeline_hash().to_string()
+    )
+    out.update(
+        _prefixed(
+            "every_type", stream_summary(AddTags(every_type)(_nullable_readings()))
+        )
+    )
+    out.update(
+        _prefixed(
+            "method", stream_summary(_nullable_readings().add_tags(cohort="A", run=3))
+        )
+    )
+    return out
+
+
 @case("pipeline", "drop_nulls_job")
 def pipeline_drop_nulls_job() -> dict[str, Any]:
     """Record a job with ``DropNulls`` upstream of a pod with non-optional parameters."""
