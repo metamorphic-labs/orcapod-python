@@ -205,6 +205,7 @@ def _build_operator_registry() -> dict[str, type]:
         SelectDataColumns,
         SelectTagColumns,
         SemiJoin,
+        TagBy,
     )
 
     return {
@@ -224,6 +225,7 @@ def _build_operator_registry() -> dict[str, type]:
         "MapColumns": MapColumns,
         "PolarsFilter": PolarsFilter,
         "DropNulls": DropNulls,
+        "TagBy": TagBy,
     }
 
 

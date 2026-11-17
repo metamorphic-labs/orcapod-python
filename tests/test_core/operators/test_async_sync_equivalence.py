@@ -47,6 +47,7 @@ from orcapod.core.operators import (
     SelectDataColumns,
     SelectTagColumns,
     SemiJoin,
+    TagBy,
 )
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.sources import ArrowTableSource
@@ -591,6 +592,12 @@ CASES = [
         lambda: DropTagColumns(["ta"]),
         lambda: (source_a(referential=True),),
     ),
+    # Not selecting a referential tag removes its tag role only (ITL-1195).
+    Case(
+        "ref_select_tag_columns",
+        lambda: SelectTagColumns(["k"]),
+        lambda: (source_a(referential=True),),
+    ),
     Case(
         "ref_drop_data_columns",
         lambda: DropDataColumns(["k"]),
@@ -632,6 +639,11 @@ CASES = [
         lambda: MapData({"ta": "tb"}),
         lambda: (source_a(referential=True),),
     ),
+    # TagBy gives data columns the tag role, as referential tags (ITL-1175).
+    Case("tag_by", lambda: TagBy(["i8", "bn"]), lambda: (source_a(),)),
+    Case("tag_by_reversed", lambda: TagBy(["bn", "i8"]), lambda: (source_a(),)),
+    Case("tag_by_b", lambda: TagBy(["u8", "ls"]), lambda: (source_b(),)),
+    Case("ref_tag_by", lambda: TagBy("i8"), lambda: (source_a(referential=True),)),
 ]
 CASE = pytest.mark.parametrize("case", CASES, ids=[c.label for c in CASES])
 

@@ -423,6 +423,18 @@ class StreamWithOperationsProtocol(StreamProtocol, Protocol):
         """
         ...
 
+    def tag_by(
+        self,
+        *columns: str | Sequence[str],
+        label: str | None = None,
+    ) -> "StreamProtocol":
+        """
+        Give the named data columns the tag role, as referential tags: each stays
+        one column, a tag and the data column it was, with its values and source
+        info unchanged. The new tags follow the stream's tags, in the order given.
+        """
+        ...
+
     def select_tag_columns(
         self,
         tag_columns: str | Collection[str],

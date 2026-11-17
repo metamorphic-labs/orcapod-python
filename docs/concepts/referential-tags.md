@@ -74,14 +74,103 @@ A function output named like a tag is an error when the pipeline is built. A fun
 that does not read a referenced column keeps its result identity: retagging a source
 does not make it compute again.
 
+## Moving a column between roles
+
+A referential tag is one column in two roles, a tag and a data column. Four steps move a
+column between the roles, and none of them changes, copies or creates a value:
+
+| Step | Data column `x` | Referential tag `x` | Plain tag `x` |
+|---|---|---|---|
+| `tag_by("x")` | becomes a referential tag | refused: already a tag | refused: not a data column |
+| `drop_tag_columns(["x"])` | refused: not a tag | the tag role goes: `x` is plain data | removed |
+| `drop_data_columns(["x"])` | removed | the data role goes: `x` is a plain tag, with a `ReferenceMaterializationWarning` | refused: not a data column |
+| `drop_columns(["x"])` | removed | removed from both roles | removed |
+
+The select operators follow the same rule by role: `select_tag_columns` removes the tag
+role of every tag it does not name, `select_data_columns` the data role of every data
+column it does not name, and `select_columns` keeps exactly the columns it names, in
+both roles. (The drop and select refusals are those of a missing name: `strict=False`
+ignores the name instead.)
+
+For a referential tag `x`, in plain words:
+
+- Dropping or selecting away the **data** of `x` leaves a plain tag `x`, and issues a
+  `ReferenceMaterializationWarning`: the tag no longer refers to a data column, so its
+  values now live only in the tag (see below to turn the warning off).
+- Dropping or selecting away the **tag** `x` leaves plain data `x`, silently.
+- Dropping the **column** `x` removes it from both roles, silently.
+
+```python
+print(spikes.drop_tag_columns(["time"]).keys())
+# (('unit',), ('unit', 'time', 'amp'))
+print(spikes.drop_data_columns(["time"]).keys())
+# (('unit', 'time'), ('unit', 'amp'))
+print(spikes.drop_columns(["time"]).keys())
+# (('unit',), ('unit', 'amp'))
+```
+
+- System tags and record ids never change.
+- Source info belongs to the data role: dropping the tag keeps the column's source-info
+  token, dropping the data removes it (a plain tag carries none). The row's provenance
+  is still its system tags (its source id and record id).
+- No data element comes from a tag value: dropping the tag leaves a data column that was
+  data before; dropping the data leaves a tag whose values came from a data column.
+- A stream keeps at least one data column: dropping the data role of the last one is
+  refused.
+- A stored table marks exactly the referential tags of what it stores, so a column moved
+  out of one role is stored unmarked.
+
+### Adding the tag role: `tag_by`
+
+A source declares its tags, but a value a later step should join, group or sort by is
+often computed on the way: a session label, a trial index, a phase. `tag_by` gives
+existing data columns the tag role: each becomes a referential tag, one column that is
+a tag and the data column it was, with its values and source info unchanged.
+
+```python
+@op.function_pod(output_keys=["phase"])
+def phase_of(time: int) -> str:
+    return "early" if time < 15 else "late"
+
+
+phased = phase_of.pod(spikes).tag_by("phase")
+print(phased.keys())
+# (('unit', 'time', 'phase'), ('unit', 'time', 'phase'))
+
+by_phase = phased.group_by(["phase"])
+print(by_phase.keys())
+# (('phase',), ('unit', 'time', 'phase'))
+```
+
+- `s.tag_by("x", "y")` equals `s.tag_by(["x", "y"])`. The new tags follow the stream's
+  tags in the order given, and that order is part of the operator (`TagBy`): the names
+  are a list, never a set.
+- Nothing else changes: no row is added, removed or reordered, the data columns keep
+  their names, types and values, every data column keeps its own source-info token,
+  and the system tags keep their names and values.
+- No data element comes from a tag value: the operator adds a tag role to a column
+  that is already data, and creates or moves no value. Offering a tag's value as data
+  stays with `DerivedSource(tags_as_data=...)`.
+- A computed column may become a tag, and then key a join or a group, as `phase` does
+  above.
+
+`tag_by` refuses, naming the column: a name that is not a data column of the stream; a
+name that is already a tag (plain or referential); a reserved name (the `__` prefix, a
+system column, a name holding `::`); and a column whose type cannot be a tag. A tag is
+one value per row of type `int`, `float`, `bool`, `str`, `bytes`, `datetime` or `date`.
+A nullable column (`T | None`) is refused: drop the rows with a null first,
+`s.drop_nulls("x").tag_by("x")`, which narrows it to `T`. Lists, sets, dicts, structs,
+your own classes and logical types (`Path`, `UUID`, arrays) are refused.
+
 ## Operators
 
 | Operator | Referential tag `x` |
 |---|---|
+| `TagBy` / `tag_by` | Makes the data column `x` a referential tag (above); everything else is unchanged. |
 | `Join` | Plain with plain: as before. Plain with referential, or referential with referential: a referential tag and **one** data column `x`. When `x` is referential on several inputs, its source info is one merged token (below). A key that is `T` in one input and `T \| None` in another is `T` in both roles, as for a plain key. Every other data-name collision is still an error. |
 | `GroupBy` | A group key stays scalar in both roles, and its source info is one merged token (below). A non-key loses its tag role, as every non-key tag does, but keeps its data column: a list like every other data column, one source-info token per member. The members are ordered by the tuple of the input's non-key tags (then record ids), the same order for every data list of the group, so all of them stay aligned. |
-| `SelectDataColumns`, `DropDataColumns` | Removing the data column leaves `x` a plain tag with the same values, with a `ReferenceMaterializationWarning`. |
-| `SelectTagColumns`, `DropTagColumns` | Removing the tag leaves `x` a data column. |
+| `SelectDataColumns`, `DropDataColumns` | Removing the data column removes the data role only: `x` stays a plain tag with the same values, without source info, with a `ReferenceMaterializationWarning`. |
+| `SelectTagColumns`, `DropTagColumns` | Removing the tag removes the tag role only: `x` stays a data column, with its source info. |
 | `SelectColumns`, `DropColumns` | `x` is one column, so naming it acts on both roles: selecting it keeps `x` referential, dropping it (or not selecting it) removes the column from both roles. The roles are never split, so nothing is materialized. |
 | `MapTags` / `map_tags` | Renames the column in both roles; `tag_only=True` renames the tag only and leaves a plain tag. |
 | `MapData` / `map_data` | Always a data-only move: the data column is renamed and `x` stays a plain tag. |

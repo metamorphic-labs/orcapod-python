@@ -101,8 +101,8 @@ def _tag_data_error(name: str, tag_side: str, data_side: str) -> InputValidation
     return InputValidationError(
         f"column {name!r} is a tag in the {tag_side} input and a data column in the "
         + f"{data_side}, and a name cannot be both. Rename it in one input with "
-        + "map_tags or map_data, or declare it a tag at the source that has it as "
-        + "a data column."
+        + "map_tags or map_data, or make it a tag of the input that has it as a data column (declare it "
+        + "a tag at its source, or mark it with tag_by)."
     )
 
 

@@ -19,6 +19,8 @@ identities exactly.
 
 from __future__ import annotations
 
+import datetime
+import types
 import typing
 import warnings
 import weakref
@@ -320,6 +322,58 @@ def without_reference_marks(table: "pa.Table") -> "pa.Table":
         The same rows; no field carries the marker.
     """
     return mark_references(table, ())
+
+
+# The Python types a column may have to become a referential tag by ``tag_by``
+# (ITL-1175): one value per row, of a type with plain equality and order. A column
+# whose Arrow type the type converter reads as no Python type (``Any``: decimal, time
+# of day, duration) is refused. Sources do not apply this rule yet: a source accepts
+# any type for a declared tag.
+TAGGABLE_TYPES: tuple[type, ...] = (
+    int,
+    float,
+    bool,
+    str,
+    bytes,
+    datetime.datetime,
+    datetime.date,
+)
+
+
+def require_taggable_type(python_type: object) -> None:
+    """Refuse a column type that cannot become a referential tag (ITL-1175).
+
+    The rule ``tag_by`` applies: the type must be one of ``TAGGABLE_TYPES``. A
+    nullable type (``T | None``) is refused, with the way out: ``drop_nulls`` narrows
+    the column to ``T``. Lists, sets, dicts, tuples, structs, user classes and every
+    logical type (``Path``, ``UUID``, arrays) are refused, and so is a column the type
+    converter gives no Python type (``Any``).
+
+    Args:
+        python_type: The column's Python type, as ``output_schema()`` gives it.
+
+    Raises:
+        InputValidationError: If the type cannot be a tag. The caller names the
+            column.
+    """
+    if python_type in TAGGABLE_TYPES:
+        return
+    members = typing.get_args(python_type)
+    if typing.get_origin(python_type) in (typing.Union, types.UnionType) and (
+        type(None) in members
+    ):
+        rest = [member for member in members if member is not type(None)]
+        if len(rest) == 1 and rest[0] in TAGGABLE_TYPES:
+            raise InputValidationError(
+                f"its type {python_type} is nullable, and a tag needs a value in "
+                + "every row: drop the rows with a null first with drop_nulls, which "
+                + f"narrows the column to {rest[0].__name__}"
+            )
+    names = ", ".join(t.__name__ for t in TAGGABLE_TYPES)
+    raise InputValidationError(
+        f"its type {python_type} cannot be a tag: a tag is one value of one of "
+        + f"these types: {names}"
+    )
 
 
 def not_supported_yet(operation: str, issue: str) -> NotImplementedError:

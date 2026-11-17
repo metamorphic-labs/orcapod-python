@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import logging
 from abc import abstractmethod
-from collections.abc import AsyncIterator, Callable, Collection, Iterator, Mapping
+from collections.abc import (
+    AsyncIterator,
+    Callable,
+    Collection,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from contextvars import ContextVar
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
@@ -564,6 +571,41 @@ class StreamBase(TraceableBase):
         from orcapod.core.operators import DropNulls
 
         return DropNulls(columns)(self, label=label)
+
+    def tag_by(
+        self,
+        *columns: str | Sequence[str],
+        label: str | None = None,
+    ) -> StreamBase:
+        """Give the named data columns the tag role, as referential tags.
+
+        ``s.tag_by("x", "y")`` equals ``s.tag_by(["x", "y"])``. Each named data
+        column becomes a referential tag: one column, both a tag and the data column
+        it was, with its values and source info unchanged. The new tags follow this
+        stream's tags, in the order given. See ``orcapod.core.operators.TagBy``.
+
+        Args:
+            *columns: One or more data column names, or one list or tuple of names
+                as the only positional argument (not a set: the order matters).
+            label: Optional node label for the pipeline graph.
+
+        Returns:
+            The stream with the named columns as referential tags.
+
+        Raises:
+            TypeError: When no name is given, the names are a set, or a name is not
+                a string.
+            ValueError: When a name is repeated.
+            InputValidationError: When a name is reserved, is not a data column of
+                this stream, is already a tag, or has a type that cannot be a tag.
+        """
+        from orcapod.core.operators import TagBy
+
+        if len(columns) == 1 and not isinstance(columns[0], str):
+            names: str | Sequence[str] = columns[0]
+        else:
+            names = cast("tuple[str, ...]", columns)
+        return TagBy(names)(self, label=label)
 
     def select_tag_columns(
         self,
