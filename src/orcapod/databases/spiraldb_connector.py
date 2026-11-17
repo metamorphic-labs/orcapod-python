@@ -906,6 +906,12 @@ class SpiralDBConnector:
             wrote_record = record_first and write_nullability_record(
                 tbl, records.schema
             )
+            # The entry as it was before this write, put back if the write fails.
+            previous_meta = (
+                tbl.get_metadata().get(_ARROW_METADATA_KEY)
+                if meta_kv is not None
+                else None
+            )
             try:
                 # The Arrow metadata too goes before the rows, so rows never land
                 # without the metadata that states them (a referential tag's marker,
@@ -915,18 +921,20 @@ class SpiralDBConnector:
                     tbl.set_metadata(meta_kv)
                 tbl.write(rows)
             except BaseException:
-                # The Arrow metadata went in before the rows: remove it again while the
-                # table still has no value columns (no row carries it), so a later
-                # unmarked write does not read back with it.
+                # The Arrow metadata went in before the rows: put the entry back as it
+                # was, so the rows already stored keep theirs and a later write without
+                # metadata does not read back with this one.
                 if meta_kv is not None:
                     try:
-                        if set(tbl.schema().to_arrow().names) <= set(pk_cols):
+                        if previous_meta is None:
                             tbl.drop_metadata([_ARROW_METADATA_KEY])
+                        else:
+                            tbl.set_metadata({_ARROW_METADATA_KEY: previous_meta})
                     except Exception as cleanup_exc:
                         logger.warning(
-                            "Could not remove the Arrow metadata of %s after a failed "
-                            "first write (%s: %s); a later write without metadata "
-                            "reads back with it.",
+                            "Could not restore the Arrow metadata of %s after a failed "
+                            "write (%s: %s); its rows may read back with the metadata "
+                            "of the failed write.",
                             qualified,
                             type(cleanup_exc).__name__,
                             cleanup_exc,

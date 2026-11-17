@@ -367,3 +367,36 @@ def test_spiraldb_failed_first_write_leaves_no_marker(
     connector.upsert_records("t", unmarked, id_column="rid")
     table = pa.Table.from_batches(list(connector.iter_batches('SELECT * FROM "t"')))
     assert stored_references(table.schema) == ()
+
+
+def test_spiraldb_failed_write_keeps_the_metadata_of_stored_rows(
+    spiral: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed write restores the metadata entry the stored rows had, even key-only."""
+    connector = SpiralDBConnector("p")
+    connector.create_table_if_not_exists(
+        "k", [ColumnInfo("rid", pa.large_binary())], pk_column="rid"
+    )
+
+    def key_only(ids: list[int]) -> pa.Table:
+        return mark_references(
+            pa.table(
+                {"rid": pa.array([str(i).encode() for i in ids], pa.large_binary())}
+            ),
+            ["rid"],
+        )
+
+    connector.upsert_records("k", key_only([1]), id_column="rid")
+    real_write = fake_pyspiral.FakeTable.write
+
+    def failing_write(self: Any, *args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("write failed")
+
+    monkeypatch.setattr(fake_pyspiral.FakeTable, "write", failing_write)
+    with pytest.raises(RuntimeError, match="write failed"):
+        connector.upsert_records("k", key_only([2]), id_column="rid")
+    monkeypatch.setattr(fake_pyspiral.FakeTable, "write", real_write)
+
+    table = pa.Table.from_batches(list(connector.iter_batches('SELECT * FROM "k"')))
+    assert table.column("rid").to_pylist() == [b"1"]
+    assert stored_references(table.schema) == ("rid",)
