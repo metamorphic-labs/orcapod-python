@@ -20,7 +20,7 @@ run, light and dark, a node selected, scripts removed, folded, top to bottom) ar
   function's name when the label does not already say it (`function pod · firing_rate`; not for `SelectDataColumns_2`), for a job the
   run status.
 - Edges: the DAG's edges (streams). Under `collapse=True`, dashed when steps were folded.
-- Selected node (click/Enter; tooltip without JS): tag and data schema from
+- Selected node (click/Enter; hover tooltip on the inline picture): tag and data schema from
   `node.output_schema()` (predicted, never computed), its inputs, and for a job: status,
   last-run counts, first error, folded steps.
 - Job status, all from memory: source `bound`/`unbound` (`bound_source`); other nodes
@@ -58,13 +58,21 @@ only) -> inline SVG with presentation attributes (draws with no CSS and no JS), 
 `<script type="application/json">` block, inserted with textContent only. No dependency,
 nothing vendored, no network, no binary. Survives save/reopen and nbconvert HTML export
 (it is just HTML+SVG). When scripts do not run (untrusted notebook, GitHub, a sanitizer)
-the SVG, its `<title>` tooltips and a `<details>` node table remain.
+the picture and a `<details>` node table remain.
 Front ends: JupyterLab / Notebook 7 run the script for trusted (freshly produced)
 outputs; classic Notebook 6 evaluates scripts through jQuery (no
 `document.currentScript`: the script falls back to the last un-initialised container);
-VS Code and Colab run output scripts in their webview/iframe. To verify by hand in
-JupyterLab: how its sanitizer treats SVG in an untrusted reopened notebook (worst case the
-node table remains).
+VS Code and Colab run output scripts in their webview/iframe.
+
+Checked by hand in JupyterLab 4.6.6 (headless server, headless Chrome; screenshots
+`itl-1197-pipeline-diagram/jupyterlab-*.png`): for an untrusted notebook its sanitizer
+removes inline `<svg>` (keeping only its text, so the hover texts showed as a wall of
+text) and `<style>`, and keeps `<img>` with any `src` (it checks schemes on `href` and
+`cite` only). So the picture is shipped as `<img src="data:image/svg+xml;base64,...">`,
+drawn on its own light background in a fixed text colour (an image does not take the
+page's colours), and the script, where it runs, swaps it for the same SVG inline (no
+background, `currentColor`) and creates the zoom buttons itself, so nothing inert is left
+in a sanitized output. Untrusted: the picture and the Nodes table. Trusted: interactive.
 (b) Vendored library: see section 8 (later end state).
 (c) anywidget/ipywidgets: rejected: new dependencies, widget state lost on save/export
 unless widget state is saved, Colab needs its custom widget manager.

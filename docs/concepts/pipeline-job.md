@@ -320,8 +320,8 @@ known: each node's columns (which Orcapod knows without computing) and the run s
 holds in memory. It runs no function, reads no source and no database. It needs no Graphviz
 and nothing from the network: the picture is part of the cell's output, so it stays in a saved
 notebook and in an HTML export. Where a notebook does not run scripts (an untrusted notebook,
-a preview on a website), the picture is still shown, without pan, zoom or selection; hover
-over a node for its details, or open the **Nodes** table below the picture.
+a preview on a website), the picture is still shown, without pan, zoom or selection; open
+the **Nodes** table below the picture for each node's columns and status.
 `job.diagram().save("pipeline.html")` writes it as a page that opens in any browser.
 
 `job.pipeline.show_graph()` still draws the pipeline with Graphviz, for an image file; it

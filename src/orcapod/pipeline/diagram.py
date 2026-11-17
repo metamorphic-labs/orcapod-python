@@ -10,11 +10,13 @@ job displayed at the end of a notebook cell shows one. The diagram is made in tw
    calls no user function, reads no source and no database, and writes nothing (the
    rule of ``head()`` and the notebook preview).
 2. A renderer that turns the model into a document. The one here lays the graph out in
-   layers (a small Sugiyama layout, standard library only) and draws an SVG picture with
-   presentation attributes, so the picture shows without any style sheet or script (an
-   untrusted notebook, an HTML export, a sanitizing viewer). One inline script, where
-   the front end runs it, adds pan, zoom and a details panel. Nothing is fetched from a
-   network and no system binary is needed.
+   layers (a small Sugiyama layout, standard library only) and draws an SVG picture. The
+   picture is embedded as an image (a ``data:`` URI), which every notebook shows: a
+   notebook that does not trust an output (JupyterLab for a notebook its reader did not
+   run) removes inline SVG, style sheets and scripts from HTML but keeps an image. Where
+   the front end runs scripts, one inline script replaces the image by the same SVG
+   drawn inline in the page's colours and adds pan, zoom and a details panel. Nothing is
+   fetched from a network and no system binary is needed.
 
 Every text that comes from the user (labels, column names, type names, error messages,
 the pipeline name) is escaped where it enters the document, and the model reaches the
@@ -23,6 +25,7 @@ script as JSON with ``<``, ``>`` and ``&`` escaped, read with ``textContent`` on
 
 from __future__ import annotations
 
+import base64
 import heapq
 import html
 import json
@@ -636,7 +639,7 @@ def _schema_text(pairs: Sequence[tuple[str, str]]) -> str:
 
 
 def _tooltip(node: _Node, inputs: Sequence[str]) -> str:
-    """The node's details as plain text, shown on hover without any script."""
+    """The node's details as plain text, shown on hover over the inline picture."""
     lines = [f"{node.label} ({node.kind_line})"]
     lines.append(f"tags: {_schema_text(node.tag_schema)}")
     lines.append(f"data: {_schema_text(node.data_schema)}")
@@ -652,18 +655,42 @@ def _svg(
     inputs: Mapping[int, Sequence[str]],
     layout: _Layout,
     across: bool,
+    standalone: bool,
 ) -> str:
-    """The SVG picture; complete without any style sheet or script."""
+    """The SVG picture; complete without any style sheet or script.
+
+    Args:
+        title: The diagram's title, the picture's accessible name.
+        nodes: The nodes.
+        inputs: The labels of each node's inputs, by node index.
+        layout: Where the nodes and edges are drawn.
+        across: Whether the layers advance left to right.
+        standalone: Draw it for an image of its own: on a light background, in a fixed
+            text colour, since an image does not take the page's colours. Otherwise
+            the text and edges take the page's text colour and the background is
+            transparent.
+
+    Returns:
+        The ``<svg>`` element.
+    """
     width, height = _num(layout.width), _num(layout.height)
+    colour = ' color="#1f1f1f"' if standalone else ' style="max-width:100%;height:auto"'
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" class="op-dag-svg" role="img" '
         f'width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
-        'font-family="system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif" '
-        'style="max-width:100%;height:auto">',
+        'font-family="system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif"'
+        f"{colour}>",
         f"<title>{_escape(title)}</title>",
-        '<g class="op-dag-edges" fill="none" stroke="currentColor" '
-        'stroke-opacity="0.5" stroke-width="1.4">',
     ]
+    if standalone:
+        parts.append(
+            f'<rect class="op-dag-bg" width="{width}" height="{height}" rx="6" '
+            'fill="#ffffff"/>'
+        )
+    parts.append(
+        '<g class="op-dag-edges" fill="none" stroke="currentColor" '
+        'stroke-opacity="0.5" stroke-width="1.4">'
+    )
     for edge, points in layout.edges:
         tip = f"{nodes[edge.source].label} → {nodes[edge.target].label}"
         if edge.folded:
@@ -752,8 +779,7 @@ touch-action:none}
 .op-dag .op-dag-node:focus-visible rect:first-of-type,
 .op-dag .op-dag-node.op-dag-selected rect:first-of-type{stroke-width:3.4}
 .op-dag .op-dag-edges g.op-dag-lit path:first-child{stroke-opacity:1;stroke-width:2.4}
-.op-dag .op-dag-tools{position:absolute;top:5px;right:8px;display:none;gap:4px}
-.op-dag.op-dag-live .op-dag-tools{display:flex}
+.op-dag .op-dag-tools{position:absolute;top:5px;right:8px;display:flex;gap:4px}
 .op-dag .op-dag-tools button{font:12px system-ui,sans-serif;padding:1px 8px;border-radius:4px;
 border:1px solid rgba(127,127,127,.5);background:transparent;color:inherit;cursor:pointer}
 .op-dag .op-dag-panel{display:none;font:12px system-ui,sans-serif;margin-top:6px;
@@ -783,7 +809,20 @@ var all=document.querySelectorAll('.op-dag:not([data-op-dag-ready])');root=all[a
 if(!root||root.hasAttribute('data-op-dag-ready'))return;
 root.setAttribute('data-op-dag-ready','');
 var model=JSON.parse(root.querySelector('script.op-dag-model').textContent);
-var svg=root.querySelector('svg'),view=root.querySelector('.op-dag-view'),
+var img=root.querySelector('img.op-dag-picture');if(!img)return;
+var bytes=Uint8Array.from(atob(img.getAttribute('src').split(',')[1]),
+function(c){return c.charCodeAt(0);});
+var svg=document.importNode(new DOMParser().parseFromString(
+new TextDecoder().decode(bytes),'image/svg+xml').documentElement,true);
+var bg=svg.querySelector('.op-dag-bg');if(bg)bg.parentNode.removeChild(bg);
+svg.removeAttribute('color');img.parentNode.replaceChild(svg,img);
+var tools=document.createElement('div');tools.className='op-dag-tools';
+[['in','+','Zoom in'],['out','\u2212','Zoom out'],['fit','fit','Fit to view']].forEach(
+function(b){var e=document.createElement('button');e.type='button';
+e.setAttribute('data-op-dag-act',b[0]);e.textContent=b[1];e.title=b[2];
+e.setAttribute('aria-label',b[2]);tools.appendChild(e);});
+root.appendChild(tools);
+var view=root.querySelector('.op-dag-view'),
 panel=root.querySelector('.op-dag-panel');
 var W=+svg.getAttribute('width'),H=+svg.getAttribute('height');
 var cw=view.clientWidth||W,k0=Math.max(W/cw,1);
@@ -798,7 +837,7 @@ var k=Math.max(W/rw,H/rh,1);vb.w=rw*k;vb.h=rh*k;vb.x=(W-vb.w)/2;vb.y=(H-vb.h)/2;
 function zoom(f,cx,cy){var r=view.getBoundingClientRect();
 var px=cx===undefined?.5:(cx-r.left)/r.width,py=cy===undefined?.5:(cy-r.top)/r.height;
 var nw=vb.w*f,nh=vb.h*f;vb.x+=(vb.w-nw)*px;vb.y+=(vb.h-nh)*py;vb.w=nw;vb.h=nh;apply();}
-root.querySelector('.op-dag-tools').addEventListener('click',function(ev){
+tools.addEventListener('click',function(ev){
 var a=ev.target.getAttribute('data-op-dag-act');
 if(a==='in')zoom(1/1.25);else if(a==='out')zoom(1.25);else if(a==='fit')fit();});
 view.addEventListener('wheel',function(ev){if(!(ev.ctrlKey||ev.metaKey))return;
@@ -852,7 +891,7 @@ class PipelineDiagram:
     operators, function pods, side-effect pods) and the streams between them. Where the
     notebook runs scripts, the picture can be dragged and zoomed, and selecting a node
     shows its tag and data schema and, for a job, its run status and the last run's row
-    counts. Without scripts the picture, its hover texts and a table of the nodes remain.
+    counts. Without scripts the picture and a table of the nodes remain.
     ``print`` gives a plain-text listing.
 
     Making a diagram computes nothing: it reads each node's predicted ``output_schema()``,
@@ -966,9 +1005,31 @@ class PipelineDiagram:
         Returns:
             The ``<svg>`` element; it uses no style sheet and no script.
         """
-        across = self._direction == "LR"
         layout = _layout(self._nodes, self._edges, self._direction)
-        return _svg(self.title, self._nodes, self._inputs(), layout, across)
+        return self._svg(layout, standalone=False)
+
+    def _svg(self, layout: _Layout, *, standalone: bool) -> str:
+        across = self._direction == "LR"
+        return _svg(self.title, self._nodes, self._inputs(), layout, across, standalone)
+
+    def _picture(self) -> str:
+        """The picture as an image element, which every notebook shows.
+
+        A notebook that does not trust an output (JupyterLab and the classic Notebook,
+        for a notebook not run by its reader) removes inline SVG and style sheets from
+        its HTML but keeps an image. Where scripts run, the diagram's script replaces
+        the image by the same SVG drawn inline, in the page's colours.
+        """
+        layout = _layout(self._nodes, self._edges, self._direction)
+        svg = self._svg(layout, standalone=True)
+        encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")
+        alt = f"Diagram of {self.title}: {len(self._nodes)} nodes"
+        return (
+            f'<img class="op-dag-picture" alt="{_escape(alt)}" '
+            f'width="{_num(layout.width)}" height="{_num(layout.height)}" '
+            'style="max-width:100%;height:auto" '
+            f'src="data:image/svg+xml;base64,{encoded}">'
+        )
 
     def to_html(self) -> str:
         """The HTML fragment a notebook shows: picture, node table, model and script.
@@ -988,14 +1049,7 @@ class PipelineDiagram:
             f'<div class="op-dag"><style>{_STYLE}</style>'
             f'<div class="op-dag-head">{_escape(self.title)} · '
             f"{len(self._nodes)} nodes</div>"
-            '<div class="op-dag-tools">'
-            '<button type="button" data-op-dag-act="in" title="Zoom in" '
-            'aria-label="Zoom in">+</button>'
-            '<button type="button" data-op-dag-act="out" title="Zoom out" '
-            'aria-label="Zoom out">−</button>'
-            '<button type="button" data-op-dag-act="fit" title="Fit to view" '
-            'aria-label="Fit to view">fit</button></div>'
-            f'<div class="op-dag-view">{self.to_svg()}</div>'
+            f'<div class="op-dag-view">{self._picture()}</div>'
             '<div class="op-dag-panel" aria-live="polite"></div>'
             f"{_table(self._nodes, self._inputs())}"
             '<script type="application/json" class="op-dag-model">'

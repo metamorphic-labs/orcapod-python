@@ -6,8 +6,10 @@ listing, its HTML parsed with ``html.parser``, and its layout. No browser is nee
 
 from __future__ import annotations
 
+import base64
 import json
 import time
+import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 from typing import Any
 
@@ -230,7 +232,7 @@ def test_making_a_diagram_calls_no_function_and_reads_nothing(
     )
     for target in (job, job.pipeline):
         bundle = target._repr_mimebundle_()
-        assert "<svg" in bundle["text/html"]
+        assert "op-dag-picture" in bundle["text/html"]
         _ = target.diagram(collapse=True).to_html()
     assert CALLS == []
 
@@ -318,9 +320,22 @@ class _Collector(HTMLParser):
 
 
 ALLOWED_TAGS = {
-    "div", "style", "button", "svg", "title", "g", "path", "rect", "circle", "text",
-    "details", "summary", "table", "thead", "tbody", "tr", "th", "td", "b", "script",
+    "div", "style", "img", "details", "summary", "table", "thead", "tbody", "tr", "th",
+    "td", "b", "script",
 }  # fmt: skip
+SVG_TAGS = {"svg", "title", "g", "path", "rect", "circle", "text"}
+SVG_NS = "{http://www.w3.org/2000/svg}"
+
+
+def _picture(document: str) -> str:
+    """The SVG text of the diagram's image."""
+    collector = _Collector()
+    collector.feed(document)
+    sources = [value for name, value in collector.attributes if name == "src"]
+    assert len(sources) == 1 and sources[0] is not None
+    prefix = "data:image/svg+xml;base64,"
+    assert sources[0].startswith(prefix)
+    return base64.b64decode(sources[0][len(prefix) :]).decode("utf-8")
 
 
 def test_user_text_cannot_inject_markup_or_script() -> None:
@@ -344,7 +359,7 @@ def test_user_text_cannot_inject_markup_or_script() -> None:
     collector = _Collector()
     collector.feed(document)
     assert set(collector.tags) <= ALLOWED_TAGS
-    assert "img" not in collector.tags
+    assert collector.tags.count("img") == 1  # the picture, not the label's
     assert not [name for name, _ in collector.attributes if name.startswith("on")]
     # Two scripts only: the model and the diagram's own; the model holds no markup.
     assert len(collector.scripts) == 2
@@ -354,6 +369,30 @@ def test_user_text_cannot_inject_markup_or_script() -> None:
     assert HOSTILE in [node["label"] for node in model["nodes"]]
     assert model["name"] == name
     assert HOSTILE not in document
+
+    # The picture parses as XML: every user text in it is escaped, as text only.
+    for svg_text in (_picture(document), job.diagram().to_svg()):
+        root = ET.fromstring(svg_text)
+        elements = list(root.iter())
+        assert {e.tag.removeprefix(SVG_NS) for e in elements} <= SVG_TAGS
+        assert not [a for e in elements for a in e.attrib if a.startswith("on")]
+        texts = [e.text for e in elements if e.tag == f"{SVG_NS}text"]
+        assert any(text and text.startswith("</script>") for text in texts)
+
+
+def test_a_notebook_that_strips_scripts_and_svg_still_shows_the_picture() -> None:
+    """An untrusted JupyterLab output keeps an image but drops inline SVG and styles."""
+    document = _job().diagram().to_html()
+    assert "<svg" not in document  # inline SVG is made by the script only
+    svg_text = _picture(document)
+    root = ET.fromstring(svg_text)
+    # On its own background, in a fixed text colour: an image takes no page colours.
+    assert root.get("color") == "#1f1f1f"
+    assert root.find(f"{SVG_NS}rect").get("class") == "op-dag-bg"  # pyright: ignore[reportOptionalMemberAccess]  # asserted by the test
+    # The inline picture, made where scripts run, takes the page's colours instead.
+    inline = ET.fromstring(_job().diagram().to_svg())
+    assert inline.get("color") is None
+    assert inline.find(f"{SVG_NS}rect[@class='op-dag-bg']") is None
 
 
 # ---------------------------------------------------------------------------
@@ -404,9 +443,8 @@ def test_save_writes_a_standalone_page(tmp_path: Any) -> None:
     _job().diagram().save(path)
     page = path.read_text(encoding="utf-8")
     assert page.startswith("<!doctype html>")
-    assert "<svg" in page and "http" not in page.replace(
-        "http://www.w3.org/2000/svg", ""
-    )
+    assert "data:image/svg+xml;base64," in page
+    assert "http" not in page  # nothing is fetched
 
 
 # ---------------------------------------------------------------------------

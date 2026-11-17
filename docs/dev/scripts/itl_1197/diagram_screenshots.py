@@ -117,7 +117,7 @@ def main() -> None:
         pages["top-to-bottom-dark"] = _page(
             job.diagram(direction="TB").to_html(), "dark"
         )
-        # As a viewer that drops scripts shows it: the picture, hover texts, node table.
+        # As a viewer that drops scripts shows it: the picture (an image) and the node table.
         without_scripts = re.sub(r"<script\b.*?</script>", "", after, flags=re.S)
         pages["no-scripts-light"] = _page(without_scripts, "light")
 
