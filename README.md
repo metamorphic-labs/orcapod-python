@@ -2,7 +2,8 @@
 Orcapod's Python library for developing reproducible scientific pipelines.
 
 User documentation lives in [`docs/`](docs/index.md) (start with
-[Getting Started](docs/getting-started.md)) and is built with `uv run mkdocs build --strict`.
+[Getting Started](docs/getting-started.md)) and is published as a website built from it
+(see [`site/README.md`](site/README.md)).
 `tests/test_docs/` executes the Python samples in this README, `docs/index.md`,
 `docs/getting-started.md`, `docs/concepts/` and `docs/reference/`, except the two samples in
 `docs/concepts/file-hash-caching.md` that need a PostgreSQL server.
