@@ -161,9 +161,9 @@ your own classes and logical types (`Path`, `UUID`, arrays) are refused.
 | `TagBy` / `tag_by` | Makes the data column `x` a referential tag (above); everything else is unchanged. |
 | `Join` | Plain with plain: as before. Plain with referential, or referential with referential: a referential tag and **one** data column `x`. When `x` is referential on several inputs, its source info is one merged token (below). A key that is `T` in one input and `T \| None` in another is `T` in both roles, as for a plain key. Every other data-name collision is still an error. |
 | `GroupBy` | A group key stays scalar in both roles, and its source info is one merged token (below). A non-key loses its tag role, as every non-key tag does, but keeps its data column: a list like every other data column, one source-info token per member. The members are ordered by the non-key tags, so that list is in value order and the other data lists follow it. |
-| `SelectDataColumns`, `DropDataColumns` | Removing the data column removes the data role only: `x` stays a plain tag with the same values, without source info, with a `ReferenceMaterializationWarning`. |
+| `SelectDataColumns`, `DropDataColumns` | Removing the data column removes the data role only: `x` stays a plain tag with the same values, without source info. |
 | `SelectTagColumns`, `DropTagColumns` | Removing the tag removes the tag role only: `x` stays a data column, with its source info. |
-| `SelectColumns`, `DropColumns` | `x` is one column, so naming it acts on both roles: selecting it keeps `x` referential, dropping it (or not selecting it) removes the column from both roles. The roles are never split, so nothing is materialized. |
+| `SelectColumns`, `DropColumns` | `x` is one column, so naming it acts on both roles: selecting it keeps `x` referential, dropping it (or not selecting it) removes the column from both roles. The roles are never split. |
 | `MapTags` / `map_tags` | Renames the column in both roles; `tag_only=True` renames the tag only and leaves a plain tag. |
 | `MapData` / `map_data` | Always a data-only move: the data column is renamed and `x` stays a plain tag. |
 | Filters, `DropNulls`, `SemiJoin`, `Pick`, `Index` | Keep the reference. |
@@ -250,16 +250,6 @@ print(grouped.column("_source_subject").to_pylist())
 # ['group_v1:...']
 print(grouped.column("_source_v").to_pylist())
 # [['sessions::row_0::v', 'sessions::row_1::v']]
-```
-
-The materialization warning can be turned off; it never changes a result or a hash:
-
-```python
-from orcapod.core import referential_tags
-
-referential_tags.reference_materialization = "silent"
-# ... build the pipeline ...
-referential_tags.reference_materialization = "warn"  # the default
 ```
 
 ## Stored tables and saved jobs

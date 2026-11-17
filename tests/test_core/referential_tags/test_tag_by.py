@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import datetime
 import decimal
-import warnings
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +19,6 @@ import pytest
 import orcapod as op
 from orcapod.core.operators import TagBy
 from orcapod.core.referential_tags import (
-    ReferenceMaterializationWarning,
     stored_references,
     stream_references,
 )
@@ -208,14 +206,8 @@ def test_a_join_with_a_data_only_column_of_that_name_is_refused() -> None:
         _ = _plain().tag_by("label").join(other)
 
 
-def test_removing_the_data_role_afterwards_leaves_a_plain_tag_with_the_warning() -> (
-    None
-):
-    tagged = _plain().tag_by("label")
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        plain = tagged.drop_data_columns(["label"])
-    assert any(w.category is ReferenceMaterializationWarning for w in caught)
+def test_dropping_the_data_role_afterwards_leaves_a_plain_tag() -> None:
+    plain = _plain().tag_by("label").drop_data_columns(["label"])
     assert plain.keys() == (("unit", "label"), ("trial", "amp"))
 
 

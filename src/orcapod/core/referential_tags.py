@@ -9,8 +9,9 @@ the same name must therefore be sufficient to identify the tag as referential").
 schema field records it.
 
 This module holds what more than one operator needs: finding the references of a stream,
-the namespace validator (sections 4 and 13.4), and the diagnostic emitted when a structural
-operator turns a reference into a plain tag (section 7).
+the namespace validator (sections 4 and 13.4), the stored marker, and the type rule of
+``tag_by``. Removing a role is no diagnostic: dropping the tag or the data of a
+referential tag removes that role only (developer, November 16, 2026, ITL-1195).
 
 The identities of referential streams are not frozen yet: on the integration branch of
 ITL-1023 they may still change. Plain (``tag_only_columns``) streams keep their v0.3
@@ -22,12 +23,8 @@ from __future__ import annotations
 import datetime
 import types
 import typing
-import warnings
-import weakref
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
-from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any, Literal
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any
 
 from orcapod.errors import InputValidationError
 from orcapod.types import SourceInfoValue
@@ -38,45 +35,6 @@ if TYPE_CHECKING:
     import pyarrow as pa
 else:
     pa = LazyModule("pyarrow")
-
-# Diagnostic emitted when a structural operator materializes a reference (section 7.4).
-# ``"warn"`` emits a ``ReferenceMaterializationWarning``; ``"silent"`` emits nothing. The
-# setting never changes a result, a schema or a hash. A module-level default for now.
-reference_materialization: Literal["warn", "silent"] = "warn"
-
-
-class ReferenceMaterializationWarning(UserWarning):
-    """A structural operator turned a referential tag into a plain tag (section 7)."""
-
-
-# Set while Orcapod itself adds a structural step the user did not write (the select
-# of a function pod call): its materializations are not reported.
-_diagnostic_off: ContextVar[bool] = ContextVar(
-    "reference_materialization_off", default=False
-)
-
-
-# The operations that already reported, by id, holding the object so the id is not
-# reused while the entry exists.
-_reported: "weakref.WeakValueDictionary[int, object]" = weakref.WeakValueDictionary()
-
-
-@contextmanager
-def materialization_diagnostic_off() -> Iterator[None]:
-    """Build the steps in this block without the materialization diagnostic.
-
-    Used for steps Orcapod adds by itself, such as the automatic select of a function
-    pod call, which would otherwise report on every call. The steps and their results
-    are exactly the same.
-
-    Yields:
-        Nothing.
-    """
-    token = _diagnostic_off.set(True)
-    try:
-        yield
-    finally:
-        _diagnostic_off.reset(token)
 
 
 def reference_names(
@@ -141,35 +99,6 @@ def check_namespaces(
                 f"referential tag {name!r} has type {tag_schema[name]} as a tag and "
                 f"{data_schema[name]} as data"
             )
-
-
-def warn_materialized(operation: object, names: Iterable[str]) -> None:
-    """Report that ``operation`` turned the referential tags ``names`` into plain tags.
-
-    Its job is the diagnostic of section 7.4, so it takes the operation. It reports
-    once per operation object: a job validates its operators again when it builds and
-    runs its nodes, and that is not a new structural step. An operation built while
-    ``materialization_diagnostic_off`` is active (Orcapod's own step) never reports.
-    Emits nothing when ``names`` is empty or ``reference_materialization`` is
-    ``"silent"``.
-
-    Args:
-        operation: The structural operation (an operator instance).
-        names: The tags that became plain.
-    """
-    names = tuple(names)
-    if not names or id(operation) in _reported:
-        return
-    _reported[id(operation)] = operation
-    if reference_materialization == "silent" or _diagnostic_off.get():
-        return
-    warnings.warn(
-        f"{type(operation).__name__}: the data column of referential tag(s) {list(names)} was removed; "
-        "they are now plain tags with the same values (set "
-        "orcapod.core.referential_tags.reference_materialization = 'silent' to hide this)",
-        ReferenceMaterializationWarning,
-        stacklevel=3,
-    )
 
 
 # The marker of a referential tag in a stored table (developer, November 16, 2026,

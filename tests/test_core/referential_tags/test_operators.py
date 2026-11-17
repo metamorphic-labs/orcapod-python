@@ -41,7 +41,6 @@ from orcapod.core.operators import (
     SemiJoin,
 )
 from orcapod.core.referential_tags import (
-    ReferenceMaterializationWarning,
     stream_references,
 )
 from orcapod.errors import InputValidationError, SemiJoinIgnoredColumnWarning
@@ -276,8 +275,7 @@ def test_group_by_prediction_matches_the_result() -> None:
 
 def test_selecting_away_the_referenced_data_leaves_a_plain_tag() -> None:
     source = _ref([{"x": 1, "y": 2}], ["x"], "S")
-    with pytest.warns(ReferenceMaterializationWarning):
-        selected = SelectDataColumns(["y"])(source)
+    selected = SelectDataColumns(["y"])(source)
     assert selected.keys() == (("x",), ("y",))
     assert stream_references(selected) == ()
     assert selected.as_table().to_pylist() == [{"x": 1, "y": 2}]
@@ -286,24 +284,8 @@ def test_selecting_away_the_referenced_data_leaves_a_plain_tag() -> None:
 
 def test_dropping_the_referenced_data_leaves_a_plain_tag() -> None:
     source = _ref([{"x": 1, "y": 2}], ["x"], "S")
-    with pytest.warns(ReferenceMaterializationWarning):
-        dropped = DropDataColumns(["x"])(source)
+    dropped = DropDataColumns(["x"])(source)
     assert dropped.keys() == (("x",), ("y",))
-
-
-def test_silent_materialization_changes_nothing_but_the_warning(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source = _ref([{"x": 1, "y": 2}], ["x"], "S")
-    with pytest.warns(ReferenceMaterializationWarning):
-        warned = SelectDataColumns(["y"])(source)
-    monkeypatch.setattr(referential_tags, "reference_materialization", "silent")
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        silent = SelectDataColumns(["y"])(source)
-    assert silent.content_hash() == warned.content_hash()
-    assert silent.pipeline_hash() == warned.pipeline_hash()
-    assert silent.as_table().to_pylist() == warned.as_table().to_pylist()
 
 
 @pytest.mark.parametrize(
@@ -350,10 +332,7 @@ def _xky(**kw: Any):
 def test_select_and_drop_columns_act_on_the_one_column_in_both_roles(
     make_op, keys, references
 ) -> None:
-    with warnings.catch_warnings():
-        # Neither splits the roles, so nothing is materialized.
-        warnings.simplefilter("error", ReferenceMaterializationWarning)
-        result = make_op()(_xky())
+    result = make_op()(_xky())
     assert result.keys() == keys
     assert stream_references(result) == references
     table = result.as_table(columns={"source": True})

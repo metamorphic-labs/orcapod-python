@@ -20,7 +20,6 @@ import pytest
 import orcapod as op
 from orcapod.core.operators import SelectDataColumns
 from orcapod.core.referential_tags import (
-    ReferenceMaterializationWarning,
     stream_references,
 )
 from orcapod.databases import InMemoryArrowDatabase
@@ -113,9 +112,7 @@ def test_fall_through_equals_the_composition_it_abbreviates() -> None:
     )
     # The plain pod (``t`` becomes a plain tag), joined back on ``t`` and ``row`` with
     # the input's referenced column: plain with referential gives the reference back.
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", ReferenceMaterializationWarning)
-        computed = half.pod.process(with_row.select_data_columns(["amp"]))
+    computed = half.pod.process(with_row.select_data_columns(["amp"]))
     joined = op.operators.Join()(computed, with_row.select_data_columns(["t"]))
     composed = sorted(
         (tag["t"], data["t"], data["half"]) for tag, data in joined.iter_data()
@@ -161,17 +158,18 @@ def test_ordinary_data_replacement_is_unchanged() -> None:
     assert out.keys() == (("t",), ("t", "amp"))
 
 
-def test_the_call_reports_no_materialization() -> None:
+def test_removing_a_data_role_emits_no_warning() -> None:
+    """Dropping the data of a referential tag is the defined meaning (ITL-1195)."""
+
     @op.function_pod(output_keys=["half"])
     def half(amp: float) -> float:
         return amp / 2
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", ReferenceMaterializationWarning)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         half.pod(_source())
-    # A select written by hand that drops the referenced column does report.
-    with pytest.warns(ReferenceMaterializationWarning):
         SelectDataColumns(["amp"])(_source())
+    assert [str(w.message) for w in caught] == []
 
 
 CALLS: list[float] = []
