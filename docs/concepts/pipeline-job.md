@@ -305,8 +305,9 @@ Each line is a node: its name, its kind, what it is when the name does not say i
 function of a function pod, the class of a bound source), and for a job its status:
 
 - `not run`: the node has not run in this Python session, or was cleared (`clear_cache()`).
-- `current`: it holds the rows of its last run, and nothing it depends on has changed.
-- `held`: current, and the job's last run kept it without running it again.
+- `current`: it holds the rows of its last run, and nothing it depends on has changed (also
+  when the job's last run kept it without running it again; a function pod's details then
+  count those rows as held).
 - `stale`: something it depends on changed after its run (a source was bound again, a node
   above it was cleared); the next run computes it again.
 - `failed`: its last run (the job's, or the node's own `run()`) had rows whose function

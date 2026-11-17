@@ -195,21 +195,20 @@ def _run_facts(summary: NodeRunSummary | None) -> tuple[tuple[str, str], ...]:
     return tuple(facts)
 
 
-def _job_status(
-    node: Any, summary: NodeRunSummary | None, upstream_statuses: Iterable[str]
-) -> str:
+def _job_status(node: Any, upstream_statuses: Iterable[str]) -> str:
     """A job node's run state, from what it holds in memory; never reads or computes.
 
     Sources are ``bound`` or ``unbound``. Any other node is ``not run`` (no run in this
     process, or cleared), ``stale`` (an input changed since its run), ``failed`` (its
-    last run, by the job or its own ``run()``, had failed rows), ``held`` (current, and
-    the job's last run kept it without running it), ``current``, ``loaded only``
-    (filled by a load-only run) or ``partial`` (it ran, without the failed rows of a
-    node above it, so the next run computes it again).
+    last run, by the job or its own ``run()``, had failed rows), ``current`` (it holds
+    a run that a run need not redo, whether the job's last run ran it or kept it),
+    ``loaded only`` (filled by a load-only run) or ``partial`` (it ran, without the
+    failed rows of a node above it, so the next run computes it again). Whether the
+    job's last run kept a node is not a status: ``job.last_run`` records it for
+    function nodes only, so a function node's details give its held rows instead.
 
     Args:
         node: The job node.
-        summary: What the job's last run did with the node, if it ran in it.
         upstream_statuses: The statuses of the nodes it reads from.
     """
     if node.node_type == "source":
@@ -221,7 +220,7 @@ def _job_status(
     if _failed_rows(node):
         return "failed"
     if node.holds_current_run():
-        return "held" if summary is not None and summary.held else "current"
+        return "current"
     if node.holds_current_run(load_only=True):
         return "loaded only"
     if any(status in ("failed", "partial") for status in upstream_statuses):
@@ -342,9 +341,7 @@ def _build_model(
     if is_job:
         for label in _topological_labels(preds, succs):
             statuses[label] = _job_status(
-                by_label[label],
-                summaries.get(label),
-                (statuses[upstream] for upstream in preds[label]),
+                by_label[label], (statuses[upstream] for upstream in preds[label])
             )
 
     nodes: list[_Node] = []
@@ -644,7 +641,6 @@ _KIND_COLOUR: dict[str, str] = {
 }
 _STATUS_COLOUR: dict[str, str] = {
     "current": "#2e9e5b",
-    "held": "#2e9e5b",
     "bound": "#2e9e5b",
     "loaded only": "#3b8fd1",
     "stale": "#d08a16",

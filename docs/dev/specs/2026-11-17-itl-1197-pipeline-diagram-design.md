@@ -45,8 +45,10 @@ The developer confirmed the diagram as the default rich display of `Pipeline` an
   `not run` (`last_modified is None`), `stale` (`is_stale`), `failed` (the node's own
   failed-row count, set by a job run and by the node's own `run()`, read through one
   internal helper until ITL-1209 gives a node its own run summary), `current`
-  (`holds_current_run()`), `held` (current and the last run held it,
-  `NodeRunSummary.held`), `loaded only` (`holds_current_run(load_only=True)`),
+  (`holds_current_run()`, whether the job's last run ran or kept it: `held` was dropped
+  as a status after the Copilot review, since `job.last_run` records held rows for function
+  nodes only; a function node's facts count them), `loaded only`
+  (`holds_current_run(load_only=True)`),
   `partial` (ran, not current, and a node it reads from is `failed` or `partial`: it holds
   the results of the rows that did not fail; Copilot review of #424).
   Row counts from `job.last_run` (function nodes: rows, computed, reused, failed, held,
@@ -126,7 +128,7 @@ set/dict iteration order or hash() in the output; marker id from a SHA-256 of th
 ## 5. Tests (no browser) and docs
 
 - Model: tutorial-like job: nodes, kinds, labels, edges, schemas; statuses before run,
-  after run, failed rows, stale after rebind/clear_cache, held on a rerun, loaded only.
+  after run, failed rows, stale after rebind/clear_cache, held rows on a rerun, loaded only.
 - Determinism: two diagrams of the same pipeline are byte-identical; recording order of
   independent branches does not change the output.
 - Escaping: label, column name, pipeline name and error message containing

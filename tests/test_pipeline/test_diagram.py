@@ -158,7 +158,8 @@ def test_job_status_follows_the_run() -> None:
     # A second run holds every node: nothing is run again.
     job.run()
     statuses = _statuses(job.diagram())
-    assert statuses["rates"] == "held"
+    # Kept, not run: every node is current; a function node counts the held rows.
+    assert set(statuses.values()) == {"bound", "current"}
     assert _facts(job.diagram(), "rates") == {"job's last run": "4 rows, 4 held"}
 
     # A cleared node reads as never run; its successors are stale.
