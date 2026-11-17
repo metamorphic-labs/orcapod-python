@@ -261,40 +261,49 @@ def require_database_keeps_marker(database: object, references: Iterable[str]) -
     """Refuse, before anything is written, a database that cannot store the marker.
 
     A stored table must state what it stores (developer, November 16, 2026, ITL-1019),
-    so a referential tag is never stored unmarked. A database that checks rows before
-    writing them (``RecordValidatingDatabaseProtocol``, the connector-backed databases)
-    is asked whether it keeps the marker and refused if it does not. Any other database
-    is accepted without a check: the in-memory and Delta databases keep Arrow field
-    metadata.
+    so a referential tag is never stored unmarked. A database is accepted only when it
+    states that it keeps Arrow field metadata
+    (``FieldMetadataKeepingDatabaseProtocol.keeps_field_metadata``); one that does not
+    have the member is refused, so an unknown database never passes by default. The
+    statement decides: a database that states it is not probed. One that does not,
+    and can check rows before writing them (``RecordValidatingDatabaseProtocol``), is
+    asked why, and the reason it gives is part of the error.
 
     Args:
         database: The database a node will store its referential tags in.
         references: The referential tags it will store; nothing is checked when empty.
 
     Raises:
-        InputValidationError: If the database cannot keep the marker, naming the
-            database kind and the two ways out.
+        InputValidationError: If the database does not state that it keeps field
+            metadata, naming the database class and the two ways out.
     """
-    from orcapod.protocols.database_protocols import RecordValidatingDatabaseProtocol
+    from orcapod.protocols.database_protocols import (
+        RecordValidatingDatabaseProtocol,
+        keeps_field_metadata,
+    )
 
     references = tuple(references)
-    if not references or not isinstance(database, RecordValidatingDatabaseProtocol):
+    if not references or keeps_field_metadata(database):
         return
-    probe = mark_references(
-        pa.table({name: pa.array([], type=pa.null()) for name in references}),
-        references,
+    reason = "it does not state that it keeps field metadata (keeps_field_metadata)"
+    if isinstance(database, RecordValidatingDatabaseProtocol):
+        # Only for the error: the reason the database gives for refusing marked rows.
+        probe = mark_references(
+            pa.table({name: pa.array([], type=pa.null()) for name in references}),
+            references,
+        )
+        try:
+            database.validate_records(probe)
+        except ValueError as exc:
+            reason = str(exc)
+    raise InputValidationError(
+        f"{type(database).__name__} cannot store the referential tags "
+        f"{list(references)}: a stored referential tag carries Arrow field "
+        f"metadata, and this database keeps none ({reason}). Use a database that "
+        "keeps field metadata (DeltaTableDatabase, InMemoryArrowDatabase, the "
+        "SpiralDB database), or keep these tags plain with tag_only_columns on "
+        "the source. Nothing was written."
     )
-    try:
-        database.validate_records(probe)
-    except ValueError as exc:
-        raise InputValidationError(
-            f"{type(database).__name__} cannot store the referential tags "
-            f"{list(references)}: a stored referential tag carries Arrow field "
-            f"metadata, and this database keeps none ({exc}). Use a database that "
-            "keeps field metadata (DeltaTableDatabase, InMemoryArrowDatabase, the "
-            "SpiralDB database), or keep these tags plain with tag_only_columns on "
-            "the source. Nothing was written."
-        ) from exc
 
 
 def without_reference_marks(table: "pa.Table") -> "pa.Table":

@@ -164,6 +164,17 @@ class ExtensionAwareDatabase:
             flush=flush,
         )
 
+    @property
+    def keeps_field_metadata(self) -> bool:
+        """Whether the wrapped database keeps Arrow field metadata (ITL-1019).
+
+        A wrapped database without the member does not keep it, so the wrapper never
+        states more than the database it wraps.
+        """
+        from orcapod.protocols.database_protocols import keeps_field_metadata
+
+        return keeps_field_metadata(self._db)
+
     def validate_records(self, records: pa.Table) -> None:
         """Raise ``ValueError`` if the wrapped database could not store ``records``.
 

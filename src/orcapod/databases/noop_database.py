@@ -86,6 +86,11 @@ class NoOpArrowDatabase:
     ) -> "pa.Table | None":
         return None
 
+    @property
+    def keeps_field_metadata(self) -> bool:
+        """Whether this database keeps Arrow field metadata: it keeps nothing (ITL-1019)."""
+        return False
+
     def flush(self) -> None:
         pass
 

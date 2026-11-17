@@ -289,6 +289,11 @@ class InMemoryArrowDatabase:
     # Flush
     # ------------------------------------------------------------------
 
+    @property
+    def keeps_field_metadata(self) -> bool:
+        """Whether this database keeps Arrow field metadata: it does (ITL-1019)."""
+        return True
+
     def flush(self) -> None:
         for record_key in list(self._pending_batches.keys()):
             pending = self._pending_batches.pop(record_key)

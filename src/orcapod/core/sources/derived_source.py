@@ -5,7 +5,11 @@ from collections.abc import Collection, Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from orcapod.core.referential_tags import not_supported_yet, stream_references
+from orcapod.core.referential_tags import (
+    stored_references,
+    stream_references,
+    without_reference_marks,
+)
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource
@@ -169,6 +173,16 @@ class DerivedSource(RootSource):
     rows with the correct columns. In the ``tags_as_data`` form the rows appear
     once the node has run.
 
+    Referential tags (ITL-1019): the source carries the bindings of what it reads,
+    in both forms. Over a job node they are the ones the node's stored table states
+    (the marker of ``referential_tags``), which must be the node's own (a name in
+    both halves of its keys); a table that disagrees is refused. Over a source they
+    are the source's own. A ``tags_as_data`` copy of a referential tag is a new,
+    plain data column. Nothing is added to the identity for the binding, because it
+    is already there: the plain form's ``content_hash`` is the origin's, which carries
+    it, and every ``pipeline_hash`` and the ``tags_as_data`` form's ``content_hash``
+    hash the output schema, in which a referential tag is in both halves.
+
     Args:
         origin: The source or DB-backed job node to derive from.
         source_id: Canonical source name. Defaults as described above.
@@ -239,8 +253,6 @@ class DerivedSource(RootSource):
         record_id_columns: str | Collection[str] | None = None,
         **kwargs: Any,
     ) -> None:
-        if stream_references(origin):
-            raise not_supported_yet("DerivedSource", "ITL-1019")
         key_columns = normalize_record_id_columns(record_id_columns)
         if tags_as_data is None:
             if isinstance(origin, RootSource):
@@ -399,11 +411,46 @@ class DerivedSource(RootSource):
             return self._origin.keys(columns=columns, all_info=all_info)
         return self._get_stream().keys(columns=columns, all_info=all_info)
 
+    def _references(self) -> tuple[str, ...]:
+        """Return the referential tags this source presents: its origin's.
+
+        A derived source carries the bindings of what it reads (gap audit Q7). Over a
+        job node they are the ones its stored table states, which ``_origin_records``
+        checks against the node's keys on every read; over a source, the source's own.
+        """
+        return stream_references(self._origin)
+
     def _origin_records(self) -> "pa.Table | None":
-        """Return the origin's rows, or ``None`` when a job node has none stored."""
+        """Return the origin's rows, or ``None`` when a job node has none stored.
+
+        A job node's stored rows state their referential tags with a marker on the
+        column (ITL-1019). The derived source presents exactly those: the marker must
+        name the tags the node's keys share between tag and data, and is then
+        dropped, since in a stream the binding is the shared name.
+
+        Raises:
+            InputValidationError: If a job node's stored rows mark other referential
+                tags than the node's keys declare, or carry an invalid marker.
+        """
         if isinstance(self._origin, RootSource):
             return self._origin.as_table()
-        return self._origin.get_all_records()
+        records = self._origin.get_all_records()
+        if records is None:
+            return None
+        try:
+            stored = stored_references(records.schema)
+        except ValueError as exc:
+            raise InputValidationError(
+                f"DerivedSource over {self._origin.label!r}: {exc}"
+            ) from exc
+        declared = self._references()
+        if set(stored) != set(declared):
+            raise InputValidationError(
+                f"DerivedSource over {self._origin.label!r}: the stored records mark "
+                f"the referential tags {sorted(stored)}, but the node declares "
+                f"{sorted(declared)}; nothing was read."
+            )
+        return without_reference_marks(records)
 
     def _empty_origin_table(self) -> "pa.Table":
         """Return a zero-row table with the origin's declared columns."""
@@ -452,6 +499,7 @@ class DerivedSource(RootSource):
         result = builder.build(
             table,
             tag_columns=self._origin.keys()[0],
+            reference_tags=self._references(),
             source_id=self.source_id,
             record_id_columns=self._record_id_columns or (),
         )
@@ -476,8 +524,7 @@ class DerivedSource(RootSource):
                 self._cached_table = self._empty_origin_table()
             else:
                 self._cached_table = records
-        tag_keys = self._origin.keys()[0]
-        return ArrowTableStream(self._cached_table, tag_columns=tag_keys)
+        return self._stream_over(self._cached_table)
 
     def _held_rows(self) -> "pa.Table | None":
         """The rows this source holds from its origin, or ``None`` before a read."""
@@ -569,9 +616,7 @@ class DerivedSource(RootSource):
                 self, origin=origin_kind
             )
         if self._tags_as_data is None and self._cached_table is not None:
-            stream = ArrowTableStream(
-                self._cached_table, tag_columns=self._origin.keys()[0]
-            )
+            stream = self._stream_over(self._cached_table)
             return stream.head(n, columns=config).for_stream(self, origin=origin_kind)
         if isinstance(self._origin, RootSource):
             origin_head = self._origin.head(n)
@@ -637,7 +682,11 @@ class DerivedSource(RootSource):
         """Return this source's stream over the origin rows ``table``."""
         if self._tags_as_data is not None:
             return self._derive_from(table, self._tags_as_data)
-        return ArrowTableStream(table, tag_columns=self._origin.keys()[0])
+        return ArrowTableStream(
+            table,
+            tag_columns=self._origin.keys()[0],
+            reference_tags=self._references(),
+        )
 
     def iter_data(self):
         return self._get_stream().iter_data()

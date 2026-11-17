@@ -597,8 +597,3 @@ def test_uncovered_operators_still_work_on_plain_tags() -> None:
     plain = MergeJoin()(_a(tag_only_columns=True), _b(tag_only_columns=True))
     tags, data = plain.keys()
     assert tags == ("x",) and sorted(data) == ["a", "b"]
-
-
-def test_derived_source_over_a_referential_stream_raises() -> None:
-    with pytest.raises(NotImplementedError, match="ITL-1019"):
-        op.sources.DerivedSource(origin=_a(), tags_as_data={"x": "x_copy"})
