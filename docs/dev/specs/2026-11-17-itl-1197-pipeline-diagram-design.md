@@ -14,7 +14,8 @@ made by `docs/dev/scripts/itl_1197/diagram_screenshots.py`. The two JupyterLab s
 taken by hand (section 3): notebooks with a `python3` kernelspec (no kernel dialog), the
 news notification turned off in a scratch settings directory, and in the trusted one a
 small script added to the output after the diagram clicks the `rates` node, as a reader
-would, so its details pane shows.
+would, so its details pane shows. The JupyterLab shots were taken before the collapse checkbox
+was added (`collapse-checkbox-light.png` shows it).
 
 **In development** (developer, November 17, 2026): the diagram, its interface and the
 notebook display may change in any release without a deprecation period. The docs say so
@@ -71,7 +72,18 @@ The developer confirmed the diagram as the default rich display of `Pipeline` an
   hand-written ones, so `collapse=True` folds by kind: Join, Select*/Drop*/Map* operators
   with exactly one consumer are folded into the edge (dashed) and listed in the consumer's
   details. Decided by the operator's class, never its label (a user's `Join(label="joined")`
-  is folded, a `DropNulls(label="Join")` is not); an operator's detail is its class name. Default False (the tutorial teaches the node names, SelectDataColumns_1 etc.).
+  is folded, a `DropNulls(label="Join")` is not); an operator's detail is its class name.
+- Collapse checkbox (developer, November 17, 2026): the layout stays in Python, so the
+  output embeds both layouts: the one `collapse=` asks for as the image, the node table
+  and the model block, and the other as a second JSON block (`op-dag-other`: its model and
+  its standalone SVG, base64). The script builds a `collapse` checkbox beside the zoom
+  buttons and switches pictures; selection, pan, zoom and the details panel keep working,
+  and the selected node stays selected when it is in both layouts (else the panel
+  closes). The checkbox exists only where scripts run, only when folding changes
+  something, and only when the other layout has at most `max_nodes` nodes. The no-script
+  fallback shows the `collapse=` layout. Output is deterministic. Size: the other layout
+  adds about half again (100 joined branches, 401 nodes, 201 folded: 923 KiB of HTML
+  instead of about 613 KiB; built in 0.03 s). Default False (the tutorial teaches the node names, SelectDataColumns_1 etc.).
 
 ## 3. Rendering approach
 

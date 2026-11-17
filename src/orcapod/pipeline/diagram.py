@@ -849,6 +849,10 @@ touch-action:none}
 .op-dag .op-dag-node.op-dag-selected rect:first-of-type{stroke-width:3.4}
 .op-dag .op-dag-edges g.op-dag-lit path:first-of-type{stroke-opacity:1;stroke-width:2.4}
 .op-dag .op-dag-tools{position:absolute;top:5px;right:8px;display:flex;gap:4px}
+.op-dag.op-dag-has-other .op-dag-head{padding-right:190px}
+.op-dag .op-dag-collapse{font:12px system-ui,sans-serif;display:flex;align-items:center;
+gap:3px;margin-right:6px;cursor:pointer}
+.op-dag .op-dag-collapse input{margin:0}
 .op-dag .op-dag-tools button{font:12px system-ui,sans-serif;padding:1px 8px;border-radius:4px;
 border:1px solid rgba(127,127,127,.5);background:transparent;color:inherit;cursor:pointer}
 .op-dag .op-dag-panel{display:none;font:12px system-ui,sans-serif;margin-top:6px;
@@ -868,8 +872,10 @@ padding:1px 8px}
 # An enhancement only: the SVG is complete without it. It finds its own container (the
 # element just before it; or, where scripts run without ``document.currentScript``, as
 # in the classic Notebook, the last container not set up yet), reads the model from the
-# JSON block and adds pan (drag), zoom (buttons, Ctrl or Cmd with the wheel), fit, and a
-# details panel built with ``textContent`` only.
+# JSON block and adds pan (drag), zoom (buttons, Ctrl or Cmd with the wheel), fit, a
+# details panel built with ``textContent`` only and, when the output holds the other
+# layout, a collapse checkbox that switches to it (keeping the selected node if it is in
+# both).
 _SCRIPT = r"""
 (function(){
 var s=document.currentScript,root=s&&s.previousElementSibling;
@@ -877,29 +883,29 @@ if(!root||!root.classList||!root.classList.contains('op-dag')){
 var all=document.querySelectorAll('.op-dag:not([data-op-dag-ready])');root=all[all.length-1];}
 if(!root||root.hasAttribute('data-op-dag-ready'))return;
 root.setAttribute('data-op-dag-ready','');
-var model=JSON.parse(root.querySelector('script.op-dag-model').textContent);
 var img=root.querySelector('img.op-dag-picture');if(!img)return;
-var bytes=Uint8Array.from(atob(img.getAttribute('src').split(',')[1]),
-function(c){return c.charCodeAt(0);});
-var svg=document.importNode(new DOMParser().parseFromString(
-new TextDecoder().decode(bytes),'image/svg+xml').documentElement,true);
-var bg=svg.querySelector('.op-dag-bg');if(bg)bg.parentNode.removeChild(bg);
-svg.removeAttribute('color');img.parentNode.replaceChild(svg,img);
+function decode(b64){return new TextDecoder().decode(
+Uint8Array.from(atob(b64),function(c){return c.charCodeAt(0);}));}
+var views=[{model:JSON.parse(root.querySelector('script.op-dag-model').textContent),
+picture:img.getAttribute('src').split(',')[1]}];
+var otherBlock=root.querySelector('script.op-dag-other'),
+other=otherBlock&&JSON.parse(otherBlock.textContent);
+if(other)views.push({model:other.model,picture:other.picture});
+var view=root.querySelector('.op-dag-view'),panel=root.querySelector('.op-dag-panel'),
+count=root.querySelector('.op-dag-count');
+var cur=0,model=views[0].model,svg=img,selected=null,W=1,H=1,vb={x:0,y:0,w:1,h:1};
 var tools=document.createElement('div');tools.className='op-dag-tools';
-[['in','+','Zoom in'],['out','\u2212','Zoom out'],['fit','fit','Fit to view']].forEach(
+if(other){root.classList.add('op-dag-has-other');
+var label=document.createElement('label');label.className='op-dag-collapse';
+label.title='Fold the steps that only join, choose or rename columns into the edges';
+var box=document.createElement('input');box.type='checkbox';box.checked=!other.collapse;
+label.appendChild(box);label.appendChild(document.createTextNode('collapse'));
+tools.appendChild(label);box.addEventListener('change',function(){show(1-cur);});}
+[['in','+','Zoom in'],['out','−','Zoom out'],['fit','fit','Fit to view']].forEach(
 function(b){var e=document.createElement('button');e.type='button';
 e.setAttribute('data-op-dag-act',b[0]);e.textContent=b[1];e.title=b[2];
 e.setAttribute('aria-label',b[2]);tools.appendChild(e);});
 root.appendChild(tools);
-var view=root.querySelector('.op-dag-view'),
-panel=root.querySelector('.op-dag-panel');
-var W=+svg.getAttribute('width'),H=+svg.getAttribute('height');
-var cw=view.clientWidth||W,k0=Math.max(W/cw,1);
-root.classList.add('op-dag-live');
-root.style.setProperty('--op-dag-h',Math.round(Math.min(Math.max(H/k0,120),560))+'px');
-svg.removeAttribute('width');svg.removeAttribute('height');
-svg.style.width='100%';svg.style.height='100%';svg.style.maxWidth='none';
-var vb={x:0,y:0,w:W,h:H};
 function apply(){svg.setAttribute('viewBox',[vb.x,vb.y,vb.w,vb.h].join(' '));}
 function fit(){var r=view.getBoundingClientRect(),rw=r.width||W,rh=r.height||H;
 var k=Math.max(W/rw,H/rh,1);vb.w=rw*k;vb.h=rh*k;vb.x=(W-vb.w)/2;vb.y=(H-vb.h)/2;apply();}
@@ -924,11 +930,11 @@ view.addEventListener('pointerup',stop);view.addEventListener('pointercancel',st
 function schema(cols){return cols.map(function(c){return c[0]+': '+c[1];}).join(', ')||'none';}
 function row(dl,name,text){var dt=document.createElement('dt'),dd=document.createElement('dd');
 dt.textContent=name;dd.textContent=text;dl.appendChild(dt);dl.appendChild(dd);}
-function select(i){var n=model.nodes[i],inputs=[];
+function select(i){var n=model.nodes[i],inputs=[];selected=n.label;
 model.edges.forEach(function(e){if(e.target===i)inputs.push(model.nodes[e.source].label);});
-root.querySelectorAll('.op-dag-node').forEach(function(g){
+svg.querySelectorAll('.op-dag-node').forEach(function(g){
 g.classList.toggle('op-dag-selected',+g.getAttribute('data-index')===i);});
-root.querySelectorAll('.op-dag-edges > g').forEach(function(g){
+svg.querySelectorAll('.op-dag-edges > g').forEach(function(g){
 g.classList.toggle('op-dag-lit',+g.getAttribute('data-source')===i||
 +g.getAttribute('data-target')===i);});
 panel.textContent='';var head=document.createElement('div');head.style.fontWeight='600';
@@ -938,13 +944,37 @@ row(dl,'tags',schema(n.tag_schema));row(dl,'data',schema(n.data_schema));
 row(dl,'inputs',inputs.join(', ')||'none');
 n.facts.forEach(function(f){row(dl,f[0],f[1]);});
 panel.appendChild(dl);panel.classList.add('op-dag-open');}
-root.querySelectorAll('.op-dag-node').forEach(function(g){var i=+g.getAttribute('data-index');
+function show(v){cur=v;model=views[v].model;
+var el=document.importNode(new DOMParser().parseFromString(
+decode(views[v].picture),'image/svg+xml').documentElement,true);
+var bg=el.querySelector('.op-dag-bg');if(bg)bg.parentNode.removeChild(bg);
+el.removeAttribute('color');
+W=+el.getAttribute('width');H=+el.getAttribute('height');
+var cw=view.clientWidth||W,k0=Math.max(W/cw,1);
+root.style.setProperty('--op-dag-h',Math.round(Math.min(Math.max(H/k0,120),560))+'px');
+el.removeAttribute('width');el.removeAttribute('height');
+el.style.width='100%';el.style.height='100%';el.style.maxWidth='none';
+svg.parentNode.replaceChild(el,svg);svg=el;
+if(count)count.textContent=String(model.nodes.length);
+svg.querySelectorAll('.op-dag-node').forEach(function(g){var i=+g.getAttribute('data-index');
 g.addEventListener('click',function(){select(i);});
 g.addEventListener('keydown',function(ev){
 if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();select(i);}});});
-fit();
+var keep=-1;model.nodes.forEach(function(n,i){if(n.label===selected)keep=i;});
+if(keep>=0)select(keep);
+else{selected=null;panel.textContent='';panel.classList.remove('op-dag-open');}
+root.classList.add('op-dag-live');fit();}
+show(0);
 })();
 """
+
+
+def _inputs(nodes: Sequence[_Node], edges: Sequence[_Edge]) -> dict[int, list[str]]:
+    """The labels of each node's inputs, by node index, in edge order."""
+    inputs: dict[int, list[str]] = {}
+    for edge in edges:
+        inputs.setdefault(edge.target, []).append(nodes[edge.source].label)
+    return inputs
 
 
 def _json_for_script(value: object) -> str:
@@ -1024,9 +1054,18 @@ class PipelineDiagram:
         self._name: str = ".".join(pipeline.name)
         self._direction: Direction = direction
         self._max_nodes: int = max_nodes
+        self._collapse: bool = collapse
         nodes, edges = _build_model(pipeline, is_job=is_job, collapse=collapse)
         self._nodes: list[_Node] = nodes
         self._edges: list[_Edge] = edges
+        # The other layout, for the notebook's collapse checkbox: kept only when folding
+        # changes something. Built from the same read of the graph, computing nothing.
+        other_nodes, other_edges = _build_model(
+            pipeline, is_job=is_job, collapse=not collapse
+        )
+        self._other: tuple[list[_Node], list[_Edge]] | None = (
+            None if len(other_nodes) == len(nodes) else (other_nodes, other_edges)
+        )
 
     @property
     def title(self) -> str:
@@ -1038,10 +1077,7 @@ class PipelineDiagram:
 
     def _inputs(self) -> dict[int, list[str]]:
         """The labels of each node's inputs, in edge order."""
-        inputs: dict[int, list[str]] = {}
-        for edge in self._edges:
-            inputs.setdefault(edge.target, []).append(self._nodes[edge.source].label)
-        return inputs
+        return _inputs(self._nodes, self._edges)
 
     def to_dict(self) -> dict[str, Any]:
         """The diagram's model: plain data that any renderer can draw.
@@ -1058,6 +1094,10 @@ class PipelineDiagram:
             each edge has ``source`` and ``target`` (node indices) and ``folded``
             (the labels of the steps folded into it).
         """
+        return self._model(self._nodes, self._edges)
+
+    def _model(self, nodes: list[_Node], edges: list[_Edge]) -> dict[str, Any]:
+        """The model of one layout: the given nodes and edges."""
         return {
             "kind": self._kind,
             "name": self._name,
@@ -1074,11 +1114,11 @@ class PipelineDiagram:
                     "data_schema": [list(pair) for pair in node.data_schema],
                     "facts": [list(fact) for fact in node.facts],
                 }
-                for node in self._nodes
+                for node in nodes
             ],
             "edges": [
                 {"source": e.source, "target": e.target, "folded": list(e.folded)}
-                for e in self._edges
+                for e in edges
             ],
         }
 
@@ -1109,11 +1149,37 @@ class PipelineDiagram:
             The ``<svg>`` element; it uses no style sheet and no script.
         """
         layout = _layout(self._nodes, self._edges, self._direction)
-        return self._svg(layout, standalone=False)
+        return self._svg(self._nodes, self._edges, layout, standalone=False)
 
-    def _svg(self, layout: _Layout, *, standalone: bool) -> str:
+    def _svg(
+        self,
+        nodes: list[_Node],
+        edges: list[_Edge],
+        layout: _Layout,
+        *,
+        standalone: bool,
+    ) -> str:
         across = self._direction == "LR"
-        return _svg(self.title, self._nodes, self._inputs(), layout, across, standalone)
+        inputs = _inputs(nodes, edges)
+        return _svg(self.title, nodes, inputs, layout, across, standalone)
+
+    def _other_view(self) -> dict[str, Any] | None:
+        """The other layout (folded or not) for the collapse checkbox, or ``None``.
+
+        ``None`` when folding changes nothing, or when the other layout has more than
+        ``max_nodes`` nodes. Its picture is the standalone SVG, base64-encoded, as the
+        image's; the script draws it inline when the checkbox is switched.
+        """
+        if self._other is None or len(self._other[0]) > self._max_nodes:
+            return None
+        nodes, edges = self._other
+        layout = _layout(nodes, edges, self._direction)
+        svg = self._svg(nodes, edges, layout, standalone=True)
+        return {
+            "collapse": not self._collapse,
+            "model": self._model(nodes, edges),
+            "picture": base64.b64encode(svg.encode("utf-8")).decode("ascii"),
+        }
 
     def _picture(self) -> str:
         """The picture as an image element, which every notebook shows.
@@ -1124,7 +1190,7 @@ class PipelineDiagram:
         the image by the same SVG drawn inline, in the page's colours.
         """
         layout = _layout(self._nodes, self._edges, self._direction)
-        svg = self._svg(layout, standalone=True)
+        svg = self._svg(self._nodes, self._edges, layout, standalone=True)
         encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")
         alt = f"Diagram of {self.title}: {len(self._nodes)} nodes"
         return (
@@ -1153,16 +1219,24 @@ class PipelineDiagram:
                 f"<div>{_PREVIEW_TAG}</div>"
                 f"<pre>{_escape(self.to_text())}\n\n{_escape(note)}</pre>"
             )
+        other = self._other_view()
+        other_block = (
+            ""
+            if other is None
+            else '<script type="application/json" class="op-dag-other">'
+            f"{_json_for_script(other)}</script>"
+        )
         return (
             f'<div class="op-dag"><style>{_STYLE}</style>'
             f'<div class="op-dag-head">{_escape(self.title)} · '
-            f"{len(self._nodes)} nodes {_PREVIEW_TAG}</div>"
+            f'<span class="op-dag-count">{len(self._nodes)}</span> nodes '
+            f"{_PREVIEW_TAG}</div>"
             f'<div class="op-dag-view">{self._picture()}</div>'
             '<div class="op-dag-panel" aria-live="polite"></div>'
             f"{_table(self._nodes, self._inputs())}"
             '<script type="application/json" class="op-dag-model">'
             f"{_json_for_script(self.to_dict())}</script>"
-            f"</div><script>{_SCRIPT}</script>"
+            f"{other_block}</div><script>{_SCRIPT}</script>"
         )
 
     def save(self, path: str | Path) -> None:

@@ -520,10 +520,15 @@ def test_user_text_cannot_inject_markup_or_script() -> None:
     assert set(collector.tags) <= ALLOWED_TAGS
     assert collector.tags.count("img") == 1  # the picture, not the label's
     assert not [name for name, _ in collector.attributes if name.startswith("on")]
-    # Two scripts only: the model and the diagram's own; the model holds no markup.
-    assert len(collector.scripts) == 2
-    model_text = collector.scripts[0]
-    assert "<" not in model_text and ">" not in model_text and "&" not in model_text
+    # Three scripts only: the model, the other layout (the map folds) and the
+    # diagram's own; the two JSON blocks hold no markup.
+    assert len(collector.scripts) == 3
+    for block in collector.scripts[:2]:
+        assert "<" not in block and ">" not in block and "&" not in block
+    model_text, other_text = collector.scripts[:2]
+    other_svg = base64.b64decode(json.loads(other_text)["picture"]).decode("utf-8")
+    other_root = ET.fromstring(other_svg)
+    assert {e.tag.removeprefix(SVG_NS) for e in other_root.iter()} <= SVG_TAGS
     model = json.loads(model_text)
     assert HOSTILE in [node["label"] for node in model["nodes"]]
     assert model["name"] == name
@@ -604,6 +609,61 @@ def test_collapse_goes_by_the_operator_class_not_its_label() -> None:
     labels = [n["label"] for n in job.diagram(collapse=True).to_dict()["nodes"]]
     assert "joined" not in labels  # a Join, whatever its label
     assert "Join" in labels  # a DropNulls is never folded
+
+
+def _other_view(document: str) -> dict[str, Any] | None:
+    """The other layout embedded for the collapse checkbox, or ``None``."""
+    marker = '<script type="application/json" class="op-dag-other">'
+    if marker not in document:
+        return None
+    return json.loads(document.split(marker, 1)[1].split("</script>", 1)[0])
+
+
+@pytest.mark.parametrize("collapse", [False, True])
+def test_the_output_holds_the_other_layout_for_the_collapse_checkbox(
+    collapse: bool,
+) -> None:
+    job = PipelineJob(name="folded", database=InMemoryArrowDatabase())
+    with job:
+        rates: Any = inc.pod(_units(), _scales(), label="rates")
+        total.pod(rates.group_by(["g"]), label="sums")
+    diagram = job.diagram(collapse=collapse)
+    document = diagram.to_html()
+    other = _other_view(document)
+    assert other is not None
+    assert other["collapse"] is not collapse
+    shown, hidden = job.diagram(collapse=collapse), job.diagram(collapse=not collapse)
+    assert other["model"] == hidden.to_dict()
+    assert base64.b64decode(other["picture"]).decode("utf-8") == _picture(
+        hidden.to_html()
+    )
+    # Without scripts, the picture and the node table are those of collapse=.
+    assert _picture(document) == _picture(shown.to_html())
+    labels = {n["label"] for n in shown.to_dict()["nodes"]}
+    table = document.split('class="op-dag-table"', 1)[1].split("</table>", 1)[0]
+    assert ("<b>Join</b>" in table) == ("Join" in labels) == (not collapse)
+    head = document.split('<span class="op-dag-count">', 1)[1].split("<", 1)[0]
+    assert head == str(len(labels))
+    # The same output every time.
+    assert job.diagram(collapse=collapse).to_html() == document
+
+
+def test_no_collapse_checkbox_when_folding_changes_nothing() -> None:
+    job = _job()  # a GroupBy only: nothing to fold
+    assert len(job.diagram(collapse=True).to_dict()["nodes"]) == len(job.nodes)
+    assert _other_view(job.diagram().to_html()) is None
+
+
+def test_no_other_layout_beyond_max_nodes() -> None:
+    job = PipelineJob(name="folded", database=InMemoryArrowDatabase())
+    with job:
+        inc.pod(_units(), _scales(), label="rates")
+    full = len(job.diagram().to_dict()["nodes"])
+    folded = len(job.diagram(collapse=True).to_dict()["nodes"])
+    assert folded < full
+    # Folded fits, the full layout does not: no checkbox.
+    assert _other_view(job.diagram(collapse=True, max_nodes=folded).to_html()) is None
+    assert _other_view(job.diagram(collapse=True, max_nodes=full).to_html()) is not None
 
 
 def test_max_nodes_shows_the_listing_instead() -> None:

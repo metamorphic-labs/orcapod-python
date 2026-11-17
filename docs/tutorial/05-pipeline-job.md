@@ -145,7 +145,8 @@ print(job.diagram())
 The `Join` is there because `firing_rate` was given two streams: the pod joins them for you.
 `current` means the node holds the rows of the run you just did; before `job.run()` every
 node but the sources says `not run`. `job.diagram(collapse=True)` hides the steps that only
-choose or join columns, leaving the sources, the function pods and the `GroupBy`:
+choose or join columns, leaving the sources, the function pods and the `GroupBy` (in the
+notebook, the `collapse` checkbox above the diagram does the same):
 
 ```python
 print(job.diagram(collapse=True))

@@ -1,7 +1,7 @@
 """Pages and screenshots of the tutorial job's diagram, for review (ITL-1197).
 
 Writes HTML pages of the Part 5 tutorial job's diagram (before and after a run, light and
-dark page colours, a node selected, scripts off, and a run where ``firing_rate`` failed for
+dark page colours, a node selected, the collapse checkbox ticked, scripts off, and a run where ``firing_rate`` failed for
 one unit, so the nodes below it are ``partial``) and, when Google Chrome is found, a PNG
 screenshot of each, into ``docs/dev/specs/itl-1197-pipeline-diagram/``.
 
@@ -36,6 +36,10 @@ THEMES = {
     "light": "background:#ffffff;color:#1f1f1f",
     "dark": "background:#1e1e1e;color:#d4d4d4",
 }
+# Ticks the collapse checkbox, as a reader would, after ``SELECT_RATES``.
+TICK_COLLAPSE = """<script>
+var box=document.querySelector('.op-dag-collapse input');if(box)box.click();
+</script>"""
 # Selects the ``rates`` node once the diagram's own script has set the diagram up.
 SELECT_RATES = """<script>
 var g=[].find.call(document.querySelectorAll('.op-dag-node'),function(n){
@@ -132,6 +136,9 @@ def main() -> None:
             pages[f"after-run-{theme}"] = _page(after, theme)
             pages[f"selected-{theme}"] = _page(after, theme, SELECT_RATES)
         pages["collapsed-light"] = _page(job.diagram(collapse=True).to_html(), "light")
+        pages["collapse-checkbox-light"] = _page(
+            after, "light", SELECT_RATES + TICK_COLLAPSE
+        )
         pages["top-to-bottom-dark"] = _page(
             job.diagram(direction="TB").to_html(), "dark"
         )
