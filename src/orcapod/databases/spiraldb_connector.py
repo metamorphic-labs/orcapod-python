@@ -907,6 +907,12 @@ class SpiralDBConnector:
                 tbl, records.schema
             )
             try:
+                # The Arrow metadata too goes before the rows, so rows never land
+                # without the metadata that states them (a referential tag's marker,
+                # ITL-1019): a failed metadata write stores no row, and its retry
+                # writes both.
+                if meta_kv is not None:
+                    tbl.set_metadata(meta_kv)
                 tbl.write(rows)
             except BaseException:
                 # Remove the record only while the table still has no value columns:
@@ -925,8 +931,6 @@ class SpiralDBConnector:
                             cleanup_exc,
                         )
                 raise
-            if meta_kv is not None:
-                tbl.set_metadata(meta_kv)
 
         if not skip_existing:
             # Always upsert-by-key: existing rows overwritten, novel rows inserted.
@@ -946,13 +950,6 @@ class SpiralDBConnector:
         novel = records.filter(mask)
         if len(novel) > 0:
             write_rows(novel)
-        elif meta_kv is not None and _ARROW_METADATA_KEY not in tbl.get_metadata():
-            # Every row is stored already, but the table has no metadata entry: a write
-            # whose rows landed and whose metadata did not. Its retry publishes it, so
-            # stored rows are never left without the metadata (a referential tag's
-            # marker, ITL-1019) that states them. A stored entry is never replaced by
-            # a write that stores no row.
-            tbl.set_metadata(meta_kv)
 
     @property
     def keeps_field_metadata(self) -> bool:

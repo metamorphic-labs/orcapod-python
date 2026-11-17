@@ -270,16 +270,17 @@ def test_a_referential_job_runs_on_spiraldb(spiral: None) -> None:
     assert records is not None and stored_references(records.schema) == ("unit",)
 
 
-def test_spiraldb_retry_publishes_a_marker_whose_write_failed(
+def test_spiraldb_failed_marker_write_stores_no_row(
     spiral: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Rows stored but the marker not: a retry that finds every id stored repairs it."""
+    """The marker is written before the rows: if it fails, no row is stored unmarked."""
     db = ConnectorArrowDatabase(SpiralDBConnector("p"))
     path = ("node", "table")
+    db.add_records(path, _rows([1]), record_id_column="rid", flush=True)
     real_set_metadata = fake_pyspiral.FakeTable.set_metadata
 
     def failing_set_metadata(self: Any, metadata: dict[str, bytes]) -> None:
-        # Only the Arrow metadata entry (the marker), written after the rows, fails.
+        # Only the Arrow metadata entry (the marker) fails.
         if "__arrow_metadata__" in metadata:
             raise RuntimeError("metadata service unavailable")
         real_set_metadata(self, metadata)
@@ -288,19 +289,21 @@ def test_spiraldb_retry_publishes_a_marker_whose_write_failed(
     with pytest.raises(RuntimeError, match="metadata service unavailable"):
         db.add_records(
             path,
-            _rows([1, 2]),
+            _rows([2, 3]),
             record_id_column="rid",
             skip_duplicates=True,
             flush=True,
         )
     monkeypatch.setattr(fake_pyspiral.FakeTable, "set_metadata", real_set_metadata)
+    stored = ConnectorArrowDatabase(SpiralDBConnector("p")).get_all_records(path)
+    assert stored is not None and stored.column("unit").to_pylist() == [1]
 
-    # The retry finds every id stored already, and still publishes the marker.
+    # The retry writes the rows and their marker.
     db.add_records(
-        path, _rows([1, 2]), record_id_column="rid", skip_duplicates=True, flush=True
+        path, _rows([2, 3]), record_id_column="rid", skip_duplicates=True, flush=True
     )
     table = ConnectorArrowDatabase(SpiralDBConnector("p")).get_all_records(path)
-    assert table is not None and table.num_rows == 2
+    assert table is not None and set(table.column("unit").to_pylist()) == {1, 2, 3}
     assert stored_references(table.schema) == ("unit",)
 
 
@@ -326,3 +329,15 @@ def test_spiraldb_write_of_stored_rows_keeps_the_stored_metadata(spiral: None) -
     )
     table = ConnectorArrowDatabase(SpiralDBConnector("p")).get_all_records(path)
     assert table is not None and stored_references(table.schema) == ("unit",)
+
+
+def test_spiraldb_marks_no_stored_row_it_skips(spiral: None) -> None:
+    """Rows stored unmarked stay unmarked when the same ids are written marked."""
+    db = ConnectorArrowDatabase(SpiralDBConnector("p"))
+    path = ("node", "table")
+    rows = _rows([1, 2])
+    unmarked = rows.cast(pa.schema([field.remove_metadata() for field in rows.schema]))
+    db.add_records(path, unmarked, record_id_column="rid", flush=True)
+    db.add_records(path, rows, record_id_column="rid", skip_duplicates=True, flush=True)
+    table = ConnectorArrowDatabase(SpiralDBConnector("p")).get_all_records(path)
+    assert table is not None and stored_references(table.schema) == ()
