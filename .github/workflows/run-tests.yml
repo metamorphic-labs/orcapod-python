@@ -50,35 +50,46 @@ jobs:
   spiral-integration:
     runs-on: ubuntu-latest
     # Only run on push/manual trigger — not on PRs — to avoid consuming SpiralDB
-    # resources on every review cycle.
-    # Requires the SPIRAL_WORKLOAD_ID secret and the SPIRAL_PROJECT_ID repository variable;
-    # fails loudly if either is absent so missing settings don't silently drop coverage. Runs only on the development repository:
-    # the public repository has no SpiralDB credentials, so the job is skipped there (ITL-1007).
+    # resources on every review cycle. Runs only on the development repository: the public
+    # repository has no SpiralDB credentials, so the job is skipped there (ITL-1007).
+    #
+    # Authentication (ITL-1185): workload client credentials. pyspiral reads SPIRAL_CLIENT_ID
+    # and SPIRAL_CLIENT_SECRET from the environment and requests a token with the
+    # client_credentials grant. The SpiralDB server no longer accepts the OIDC token exchange,
+    # so the job requests no GitHub OIDC token (no id-token permission). Requires the
+    # SPIRAL_CLIENT_ID and SPIRAL_CLIENT_SECRET secrets and the SPIRAL_PROJECT_ID repository
+    # variable; fails loudly, naming each missing setting, so missing settings don't silently
+    # drop coverage. Setup and secret rotation: RELEASING.md, "SpiralDB integration job".
+    # The two secrets are given only to the two steps that read them, not to the job, so
+    # no third-party action sees them. Never add a step that prints the environment (env,
+    # printenv, set -x) to this job.
     if: >-
       github.repository == 'metamorphic-labs/orcapod-python'
       && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     needs: test
     permissions:
-      id-token: write  # required to request a GitHub OIDC token for SpiralDB auth
       contents: read
     env:
-      SPIRAL_WORKLOAD_ID: ${{ secrets.SPIRAL_WORKLOAD_ID }}
       SPIRAL_INTEGRATION_TESTS: "1"
       SPIRAL_PROJECT_ID: ${{ vars.SPIRAL_PROJECT_ID }}
       SPIRAL_SERVER_URL: https://api.spiraldb.dev  # plain http no longer answers (ITL-1008); the repository variable of this name is not read
 
     steps:
-      - name: Check for SPIRAL_WORKLOAD_ID
-        if: env.SPIRAL_WORKLOAD_ID == ''
+      - name: Check SpiralDB settings
+        # Tests only whether each setting is empty and prints only the names of the
+        # missing ones, never a value.
+        env:
+          SPIRAL_CLIENT_ID: ${{ secrets.SPIRAL_CLIENT_ID }}
+          SPIRAL_CLIENT_SECRET: ${{ secrets.SPIRAL_CLIENT_SECRET }}
         run: |
-          echo "::error::SPIRAL_WORKLOAD_ID secret is not set. SpiralDB integration tests cannot run. Configure the secret or investigate why it is missing."
-          exit 1
-
-      - name: Check for SPIRAL_PROJECT_ID
-        if: env.SPIRAL_PROJECT_ID == ''
-        run: |
-          echo "::error::SPIRAL_PROJECT_ID repository variable is not set. SpiralDB integration tests cannot run. Configure the variable or investigate why it is missing."
-          exit 1
+          missing=""
+          [ -n "$SPIRAL_CLIENT_ID" ] || missing="$missing SPIRAL_CLIENT_ID (secret)"
+          [ -n "$SPIRAL_CLIENT_SECRET" ] || missing="$missing SPIRAL_CLIENT_SECRET (secret)"
+          [ -n "$SPIRAL_PROJECT_ID" ] || missing="$missing SPIRAL_PROJECT_ID (repository variable)"
+          if [ -n "$missing" ]; then
+            echo "::error::SpiralDB integration tests cannot run; not set:$missing. See RELEASING.md, 'SpiralDB integration job'."
+            exit 1
+          fi
 
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
@@ -99,6 +110,9 @@ jobs:
         run: uv sync --locked --all-extras --dev --python "3.11"
 
       - name: Run SpiralDB integration tests
+        env:
+          SPIRAL_CLIENT_ID: ${{ secrets.SPIRAL_CLIENT_ID }}
+          SPIRAL_CLIENT_SECRET: ${{ secrets.SPIRAL_CLIENT_SECRET }}
         run: uv run --python "3.11" pytest tests/test_databases/test_spiraldb_connector_integration.py -v
 
   license-check:

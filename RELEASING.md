@@ -191,6 +191,34 @@ environments:
 5. Optional: set `CODECOV_TOKEN` there. The Codecov, SpiralDB and Linear jobs run only on
    `metamorphic-labs` and are skipped on `nauticalab`.
 
+### SpiralDB integration job
+
+The `spiral-integration` job of `Run Tests` runs on every push to `main` and by hand
+(`workflow_dispatch`) on `metamorphic-labs/orcapod-python`, never on pull requests. It
+authenticates to SpiralDB with workload client credentials (ITL-1185): pyspiral reads
+`SPIRAL_CLIENT_ID` and `SPIRAL_CLIENT_SECRET` from the environment and requests a token with
+the `client_credentials` grant. It requests no GitHub OIDC token: the SpiralDB server no
+longer accepts the OIDC token exchange. The job fails at its first step, naming each missing
+setting, when one of the three below is not set. No agent creates, reads or sets any of them.
+
+On `metamorphic-labs/orcapod-python` and in SpiralDB, the developer sets:
+
+1. The SpiralDB workload the job runs as (today `orcapod-gha`) holds the **editor** role on
+   the test project ("Orcapod testing"): the tests create, write, read and drop tables there.
+2. Repository secrets (`Settings → Secrets and variables → Actions → Secrets`):
+   `SPIRAL_CLIENT_ID` and `SPIRAL_CLIENT_SECRET`, both from
+   `spiral workloads issue-creds <workload id>`. The secret is shown once, when it is issued.
+3. Repository variable (`… → Variables`): `SPIRAL_PROJECT_ID`, the id of the test project.
+
+The server URL is fixed in the workflow (`https://api.spiraldb.dev`); the repository variable
+`SPIRAL_SERVER_URL` and the secret `SPIRAL_WORKLOAD_ID` are not read and can be deleted.
+
+To rotate the secret: issue new credentials for the workload
+(`spiral workloads issue-creds <workload id>`), replace both repository secrets with the new
+pair, run `Run Tests` by hand on `main` and check that `spiral-integration` passes, then revoke
+the old pair (`spiral workloads revoke-creds <old client id>`). Rotate at once if a secret may
+have been exposed, for example printed in a log.
+
 ## Pre-releases
 
 Release candidates (e.g. `0.1.0rc1`) follow exactly the same path — enter the version in the
