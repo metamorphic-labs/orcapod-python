@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import UnaryOperator
-from orcapod.core.referential_tags import stream_references
+from orcapod.core.referential_tags import stream_references, warn_materialized
 from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
@@ -265,6 +265,10 @@ class SelectDataColumns(UnaryOperator):
             raise InputValidationError(
                 f"Missing data columns: {missing_columns}. Make sure all specified columns to select are present or use strict=False to ignore missing columns"
             )
+        warn_materialized(
+            self,
+            [c for c in stream_references(stream) if c not in self.columns],
+        )
         require_a_data_column([c for c in data_columns if c in columns_to_select])
 
     def unary_output_schema(
@@ -545,6 +549,10 @@ class DropDataColumns(UnaryOperator):
             raise InputValidationError(
                 f"Missing data columns: {missing_columns}. Make sure all specified columns to drop are present or use strict=False to ignore missing columns"
             )
+        warn_materialized(
+            self,
+            [c for c in stream_references(stream) if c in self.columns],
+        )
         require_a_data_column([c for c in data_columns if c not in self.columns])
 
     def unary_output_schema(

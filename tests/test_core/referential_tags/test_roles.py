@@ -2,8 +2,8 @@
 
 Developer decision, November 16, 2026: for a referential tag ``x`` (one column in two
 roles), dropping the tag removes the tag role only and leaves ``x`` plain data; dropping
-the data removes the data role only and leaves ``x`` a plain tag; dropping the column
-removes it from both roles. The select operators follow the same rule: selecting tags
+the data removes the data role only and leaves ``x`` a plain tag, with a
+``ReferenceMaterializationWarning``; dropping the column removes it from both roles. The select operators follow the same rule: selecting tags
 or data drops the others by role. Plain tags and plain data columns behave as before.
 
 Every operator is driven through its public call and read through the stream's public
@@ -13,6 +13,7 @@ methods; a schema prediction is checked against ``static_process``.
 from __future__ import annotations
 
 from collections.abc import Callable
+import warnings
 from typing import Any
 
 import pytest
@@ -28,7 +29,10 @@ from orcapod.core.operators import (
     TagBy,
 )
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
-from orcapod.core.referential_tags import stream_references
+from orcapod.core.referential_tags import (
+    ReferenceMaterializationWarning,
+    stream_references,
+)
 from orcapod.errors import InputValidationError
 from orcapod.system_constants import constants
 
@@ -100,6 +104,25 @@ def test_each_operator_acts_by_role(
     if "x" in data:
         assert info["x"] == _source_info(source)["x"]
     _ = label
+
+
+@pytest.mark.parametrize(
+    ("label", "make_op", "keys", "references"), ROLE_CASES, ids=ROLE_IDS
+)
+def test_only_removing_the_data_role_warns(
+    label: str,
+    make_op: Callable[[], StaticOutputOperatorPod],
+    keys: Any,  # pyright: ignore[reportExplicitAny]  # unused case field
+    references: Any,  # pyright: ignore[reportExplicitAny]  # unused case field
+) -> None:
+    """Dropping or selecting away the data of ``x`` leaves a plain tag and warns
+    (``ReferenceMaterializationWarning``); removing the tag role or the whole column
+    is silent (developer, November 17, 2026: keep the warning for now)."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _ = make_op()(_source()).keys()
+    warned = any(w.category is ReferenceMaterializationWarning for w in caught)
+    assert warned == (label in ("drop_data", "select_data"))
 
 
 def _by_k(k: int) -> dict[str, Any]:  # pyright: ignore[reportExplicitAny]  # row values

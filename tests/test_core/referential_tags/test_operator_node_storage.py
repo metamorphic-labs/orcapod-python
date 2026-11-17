@@ -11,6 +11,7 @@ marker never enters it.
 from __future__ import annotations
 
 import dataclasses
+import warnings
 from collections.abc import Callable
 from pathlib import Path
 from typing import cast
@@ -24,6 +25,7 @@ from orcapod.core.nodes import OperatorJobNode
 from orcapod.core.operators import Join
 from orcapod.core.referential_tags import (
     REFERENTIAL_TAG_METADATA_KEY,
+    ReferenceMaterializationWarning,
     stored_references,
     without_reference_marks,
 )
@@ -161,7 +163,8 @@ def test_a_reference_the_operator_materializes_is_not_marked() -> None:
     """The marker is the operator's output binding, never one that came from upstream."""
     store = InMemoryArrowDatabase()
     job = PipelineJob(name=JOB, database=store)
-    with job:
+    with job, warnings.catch_warnings():
+        warnings.simplefilter("ignore", ReferenceMaterializationWarning)
         _ = _source("a", "x", [1, 2]).select_data_columns(["x"], label="selected")
     node = job.nodes["selected"]
     node.attach_databases(pipeline_database=store.at(JOB), cache_mode=CacheMode.LOG)

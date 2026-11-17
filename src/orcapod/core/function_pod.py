@@ -16,6 +16,7 @@ from orcapod.core.base import TraceableBase
 from orcapod.core.data_function import CachedDataFunction, PythonDataFunction
 from orcapod.core.datagrams import Data
 from orcapod.core.referential_tags import (
+    materialization_diagnostic_off,
     reference_names,
     stream_references,
 )
@@ -846,7 +847,10 @@ class _FunctionPodBase(TraceableBase):
                 self.label,
                 dropped,
             )
-            input_stream = SelectDataColumns(columns=kept)(input_stream)
+            # The select is Orcapod's own step: the referential tags it turns into
+            # plain tags are not reported (ITL-1023).
+            with materialization_diagnostic_off():
+                input_stream = SelectDataColumns(columns=kept)(input_stream)
         if fall_through_pod is not None and references:
             return ReferenceFallThroughPod(fall_through_pod, references).process(
                 input_stream, label=label

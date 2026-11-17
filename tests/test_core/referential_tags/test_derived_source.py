@@ -9,6 +9,7 @@ schema, where a referential tag is in both halves.
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable
 from pathlib import Path
 
@@ -19,6 +20,7 @@ import orcapod as op
 from orcapod.core.operators import Join
 from orcapod.core.referential_tags import (
     REFERENTIAL_TAG_METADATA_KEY,
+    ReferenceMaterializationWarning,
     mark_references,
     without_reference_marks,
 )
@@ -151,7 +153,9 @@ def test_as_source_of_an_operator_node_keeps_its_bindings(
     make_store: Callable[[Path], ArrowDatabaseProtocol],
     orchestrator: Orchestrator,
 ) -> None:
-    job = _operator_job(make_store(tmp_path), orchestrator)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ReferenceMaterializationWarning)
+        job = _operator_job(make_store(tmp_path), orchestrator)
     node = job.nodes["joined"]
     source = node.as_source()
     assert source.keys() == node.keys()
