@@ -209,7 +209,9 @@ def source_shared_data() -> ArrowTableSource:
     )
 
 
-def merge_source(source_id: str, offset: int) -> ArrowTableSource:
+def merge_source(
+    source_id: str, offset: int, referential: bool = False
+) -> ArrowTableSource:
     """A ``MergeJoin`` input; two of them collide on every data column but one."""
     only = f"only_{source_id}"
     return _source(
@@ -224,6 +226,7 @@ def merge_source(source_id: str, offset: int) -> ArrowTableSource:
         tags=("k",),
         source_id=source_id,
         nullable=("xs",),
+        referential=referential,
     )
 
 
@@ -492,6 +495,50 @@ CASES = [
                 {
                     "k": pa.array([1, None, 3], pa.int16()),
                     "kn": pa.array([7, 8, 9], pa.int32()),
+                },
+                ("k",),
+                "n",
+                nullable=("k",),
+                referential=True,
+            ),
+        ),
+    ),
+    # MergeJoin on referential tags (ITL-1194): one merged scalar column for a tag
+    # referential in both inputs; the other colliding columns merged into lists.
+    Case(
+        "ref_merge_join_2",
+        MergeJoin,
+        lambda: (
+            merge_source("m", 0, referential=True),
+            merge_source("n", 10, referential=True),
+        ),
+    ),
+    Case(
+        "ref_merge_join_plain_left",
+        MergeJoin,
+        lambda: (merge_source("m", 0), merge_source("n", 10, referential=True)),
+    ),
+    Case(
+        "ref_merge_join_plain_right",
+        MergeJoin,
+        lambda: (merge_source("m", 0, referential=True), merge_source("n", 10)),
+    ),
+    Case(
+        # ``tc`` is referential on one input and absent from the other.
+        "ref_merge_join_absent",
+        MergeJoin,
+        lambda: (source_c(referential=True), merge_source("n", 10, referential=True)),
+    ),
+    Case(
+        # A referential key T on one side and T | None on the other (ITL-829).
+        "ref_merge_join_key_nullability",
+        MergeJoin,
+        lambda: (
+            merge_source("m", 0, referential=True),
+            _source(
+                {
+                    "k": pa.array([1, None, 3], pa.int16()),
+                    "x8": pa.array([7, 8, 9], pa.int8()),
                 },
                 ("k",),
                 "n",
