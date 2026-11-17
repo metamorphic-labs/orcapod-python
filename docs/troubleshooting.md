@@ -238,7 +238,17 @@ version to regenerate them.
 ## Messages you can ignore
 
 - `WARN deltalake_core::writer::stats] Skipping column ... because it's a binary field.`
-  whenever a `DeltaTableDatabase` is written to.
+  whenever a `DeltaTableDatabase` is written to: one line per binary column (record ids and
+  hashes) per commit. The deltalake library keeps no minimum and maximum statistics for binary
+  columns and says so on every write; nothing is wrong with the table. To hide only this line,
+  set `RUST_LOG` in the environment before Python starts, keeping deltalake's other warnings:
+
+  ```
+  RUST_LOG="warn,deltalake_core::writer::stats=error" python my_pipeline.py
+  ```
+
+  deltalake reads `RUST_LOG` once, when it is first imported, so setting it later in the
+  same process (for example with `os.environ`) has no effect.
 
 ## A script finishes its work but the process never exits
 
