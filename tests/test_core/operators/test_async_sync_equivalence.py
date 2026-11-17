@@ -545,6 +545,12 @@ CASES = [
         lambda: DropTagColumns(["ta"]),
         lambda: (source_a(referential=True),),
     ),
+    # Not selecting a referential tag removes its tag role only (ITL-1195).
+    Case(
+        "ref_select_tag_columns",
+        lambda: SelectTagColumns(["k"]),
+        lambda: (source_a(referential=True),),
+    ),
     Case(
         "ref_drop_data_columns",
         lambda: DropDataColumns(["k"]),
