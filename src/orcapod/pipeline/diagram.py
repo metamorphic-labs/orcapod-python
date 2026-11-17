@@ -778,7 +778,7 @@ touch-action:none}
 .op-dag .op-dag-node:focus{outline:none}
 .op-dag .op-dag-node:focus-visible rect:first-of-type,
 .op-dag .op-dag-node.op-dag-selected rect:first-of-type{stroke-width:3.4}
-.op-dag .op-dag-edges g.op-dag-lit path:first-child{stroke-opacity:1;stroke-width:2.4}
+.op-dag .op-dag-edges g.op-dag-lit path:first-of-type{stroke-opacity:1;stroke-width:2.4}
 .op-dag .op-dag-tools{position:absolute;top:5px;right:8px;display:flex;gap:4px}
 .op-dag .op-dag-tools button{font:12px system-ui,sans-serif;padding:1px 8px;border-radius:4px;
 border:1px solid rgba(127,127,127,.5);background:transparent;color:inherit;cursor:pointer}
