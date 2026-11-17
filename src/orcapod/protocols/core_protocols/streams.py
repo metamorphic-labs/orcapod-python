@@ -354,13 +354,15 @@ class StreamWithOperationsProtocol(StreamProtocol, Protocol):
         drop_unmapped: bool = False,
         strict: bool = True,
         label: str | None = None,
+        tag_only: bool = False,
         **renames: str,
     ) -> "StreamProtocol":
         """
         Map tag names in this stream to new names based on the provided mapping.
         Tags not in the mapping are kept unless ``drop_unmapped`` is True. With
         ``strict`` (the default), a name that is not a tag column is refused. The
-        renames are one positional dict or keyword arguments (``old="new"``).
+        renames are one positional dict or keyword arguments (``old="new"``). A
+        referential tag is renamed in both roles unless ``tag_only`` is True.
         """
         ...
 
