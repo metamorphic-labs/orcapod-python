@@ -112,7 +112,11 @@ accent of its own:
   in dark mode it is shown inverted. The content build writes the favicon into
   `public/` (`SITE_PUBLIC_FILES` in `../scripts/docs_site_content.py`);
 - the text is set in Asap and the site's name in Lexend Exa (bold, lower case), the
-  fonts of orcapod.org, when they are available, with the system fonts after them;
+  fonts of orcapod.org, with the system fonts after them. Both are bundled with the site
+  (`@fontsource-variable/asap`, `@fontsource/lexend-exa` weight 700; the `customCss`
+  entries in `astro.config.mjs`) and served from it, never from a font host. They are
+  under the SIL Open Font License 1.1, which `../scripts/check_site_licenses.py` allows
+  (developer, November 17, 2026);
 - the light theme has orcapod.org's background (`#fcfafc`) and text (`#0a0a0a`), the
   dark theme a near-black with a blue tint; links, the current sidebar entry, the
   banner and note asides are blue (`#1565c0` light, `#3d8fe8` and `#a8d0ff` dark).

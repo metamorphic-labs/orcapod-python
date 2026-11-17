@@ -12,8 +12,9 @@
  */
 
 :root {
-	/* Fonts: orcapod.org sets its text in Asap and its name in Lexend Exa. They are used
-	 * when installed or bundled; Starlight appends its system font stack after them. */
+	/* Fonts: orcapod.org sets its text in Asap and its name in Lexend Exa. Both are bundled
+	 * with the site (@fontsource-variable/asap, @fontsource/lexend-exa 700; customCss in
+	 * astro.config.mjs); Starlight appends its system font stack after them. */
 	--sl-font: 'Asap Variable', 'Asap';
 	--orcapod-font-title: 'Lexend Exa';
 

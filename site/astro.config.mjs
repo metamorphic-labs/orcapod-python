@@ -87,8 +87,14 @@ export default defineConfig({
 			// writes the favicon into public/ (SITE_PUBLIC_FILES in docs_site_content.py).
 			logo: { src: './src/assets/orcapod-icon.png' },
 			favicon: '/favicon.ico',
-			// The brand fonts and the blue colour scheme (src/styles/orcapod.css).
-			customCss: ['./src/styles/orcapod.css'],
+			// The brand fonts, bundled with the site (OFL-1.1; served from the site itself,
+			// never from a font host): Asap for the text, Lexend Exa bold for the name.
+			// Then the colour scheme (src/styles/orcapod.css).
+			customCss: [
+				'@fontsource-variable/asap',
+				'@fontsource/lexend-exa/700.css',
+				'./src/styles/orcapod.css',
+			],
 			plugins: [starlightLinksValidator()],
 			// The banner on every page: the site documents main, not a release.
 			routeMiddleware: './src/routeData.ts',

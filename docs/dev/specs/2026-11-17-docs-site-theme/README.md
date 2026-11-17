@@ -17,7 +17,10 @@ official logo, the fonts and the colour scheme, with a bluer theme. The theme it
 ## The site's theme
 
 The site takes `iconOutlined.png` (header logo, inverted in dark mode) and `favicon.ico`
-unmodified, the background and text colours, and the name in lower case. The blue accent
+unmodified, the background and text colours, the name in lower case, and the fonts Asap
+and Lexend Exa (bold), bundled from the `@fontsource-variable/asap` and
+`@fontsource/lexend-exa` packages (OFL-1.1, allowed for the site by the developer on
+November 17, 2026) and served by the site itself. The blue accent
 family (hue about 212) is the site's own.
 
 | | Light | Dark |
@@ -35,8 +38,9 @@ banner text 9.1:1.
 
 ## Screenshots
 
-Taken from a local `pnpm build` and `pnpm preview` with headless Chrome at 1280 x 900,
-scaled to 960 x 675. They show the system fonts: the brand fonts are not bundled yet.
+Taken from a local `pnpm build`, served statically, with headless Chrome at 1280 x 900
+(colour scheme set through the DevTools protocol, after `document.fonts.ready`), scaled to
+960 x 675. They show the bundled brand fonts.
 
 - `home-light.png`, `home-dark.png`: header, banner, sidebar, a code block.
 - `concept-function-pods-light.png`, `concept-function-pods-dark.png`: code, a caution and
