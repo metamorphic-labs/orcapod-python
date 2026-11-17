@@ -80,6 +80,12 @@ class RunSummary:
             for new data at the start of the run (ITL-1102): each raised in
             ``check_for_new_data``, was reported by a ``SourceCheckFailedWarning``,
             and fed the run with the data it already held.
+        restrictions: The restriction in force of each restricted source of the run
+            (ITL-1218), by slot name (the name ``bind`` takes; a source read directly
+            by a node's ``run()`` by its label): ``{"source_id": ..., "where":
+            {column: value}, "limit": n}``, ``where`` and ``limit`` only when set. A
+            restriction chooses which rows flow and is not part of any identity, so
+            this is the record of which rows a run saw.
         ran_nothing: Whether the run ran no node: every node held a current run
             (ITL-1095). Decided by the run's plan, which counts every kind of node, so a
             run that ran only a side-effect or operator node is not "nothing to do".
@@ -94,6 +100,7 @@ class RunSummary:
         target: str | None = None,
         unchecked_sources: Sequence[str] = (),
         ran_nothing: bool = False,
+        restrictions: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         """Build the summary.
 
@@ -104,6 +111,8 @@ class RunSummary:
             target: The label of the node whose ``run()`` this was, if any.
             unchecked_sources: The sources that could not be checked for new data.
             ran_nothing: Whether the run ran no node (every node held a current run).
+            restrictions: The restricted sources of the run and their restrictions
+                (``node_run.restrictions_in_force``).
         """
         self.job_name: str = job_name
         self.nodes: Mapping[str, NodeRunSummary] = {node.label: node for node in nodes}
@@ -111,6 +120,9 @@ class RunSummary:
         self.target: str | None = target
         self.unchecked_sources: tuple[str, ...] = tuple(unchecked_sources)
         self.ran_nothing: bool = ran_nothing
+        self.restrictions: Mapping[str, Mapping[str, Any]] = {
+            slot: dict(record) for slot, record in (restrictions or {}).items()
+        }
 
     @property
     def failed_rows(self) -> int:
@@ -192,6 +204,22 @@ class RunSummary:
             self.unchecked_sources
         )
 
+    def _restrictions_line(self) -> str | None:
+        """The line naming each restricted source and its restriction, if any."""
+        if not self.restrictions:
+            return None
+        return "restricted sources: " + "; ".join(
+            f"{slot}: {_restriction_text(record)}"
+            for slot, record in self.restrictions.items()
+        )
+
+    def _source_lines_html(self) -> str:
+        """The unchecked and restricted source lines as HTML paragraphs, or ``""``."""
+        restricted = self._restrictions_line()
+        return self._unchecked_html() + (
+            "" if restricted is None else f"<p>{html.escape(restricted)}</p>"
+        )
+
     def _unchecked_html(self) -> str:
         """The unchecked-sources line as an HTML paragraph, or ``""``."""
         unchecked = self._unchecked_line()
@@ -203,6 +231,9 @@ class RunSummary:
         unchecked = self._unchecked_line()
         if unchecked is not None:
             lines.append(f"  {unchecked}")
+        restricted = self._restrictions_line()
+        if restricted is not None:
+            lines.append(f"  {restricted}")
         for node in self.nodes.values():
             lines.append(
                 f"  {node.label}: {_rows(node.rows)}: {_counts(node, self.load_only)}"
@@ -248,7 +279,7 @@ class RunSummary:
                 "</tr>"
             )
         return (
-            f"<p>{html.escape(self._headline())}</p>{self._unchecked_html()}"
+            f"<p>{html.escape(self._headline())}</p>{self._source_lines_html()}"
             f"<table><thead><tr>{header}</tr></thead>"
             f"<tbody>{''.join(body)}</tbody></table>"
         )
@@ -268,7 +299,7 @@ class RunSummary:
             for node in self.nodes.values()
         ]
         return (
-            f"<p>{html.escape(self._headline())}</p>{self._unchecked_html()}"
+            f"<p>{html.escape(self._headline())}</p>{self._source_lines_html()}"
             f"<table><thead><tr>{header}</tr></thead>"
             f"<tbody>{''.join(body)}</tbody></table>"
         )
@@ -291,6 +322,17 @@ def _counts(node: NodeRunSummary, load_only: bool) -> str:
     if node.inputs_incomplete:
         text += f" (inputs incomplete: {', '.join(node.inputs_incomplete)})"
     return text
+
+
+def _restriction_text(record: Mapping[str, Any]) -> str:
+    """A restriction as words: ``where a='x', b=1, limit 3``."""
+    parts: list[str] = []
+    where = record.get("where")
+    if where:
+        parts.append("where " + ", ".join(f"{c}={v!r}" for c, v in where.items()))
+    if record.get("limit") is not None:
+        parts.append(f"limit {record['limit']}")
+    return ", ".join(parts)
 
 
 def _rows(n: int) -> str:

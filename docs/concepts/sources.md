@@ -176,7 +176,9 @@ print(first.row_count_estimate)  # rows in the whole table, without reading any
 ```
 
 - `limit=n` reads the first `n` rows in key order.
-- `where={column: value, ...}` reads the rows in which every named column equals its value.
+- `where={column: value, ...}` reads the rows in which every named column equals its value
+  (`source.where(...)` adds conditions to a built source; see
+  [Restricting a source versus filtering in the pipeline](#restricting-a-source-versus-filtering-in-the-pipeline)).
 - `asof=` reads the table as of an earlier version, and keeps reading it. Without it, a
   source reads the version the table had when the source was built, in every read, until a
   run finds a newer one (see [What a source does at a run](#what-a-source-does-at-a-run)):
@@ -213,6 +215,70 @@ consequence: with a shared store, reading a job node's stored records back
 (`get_all_records()`, `node.as_source()`) returns every row that any job with the same
 pipeline has read from that table, not only the rows of the latest restriction. The rows
 sent downstream during a run are only the rows that run read.
+
+#### Restricting a source versus filtering in the pipeline
+
+`source.where(column=value, ...)` returns a new source on the same table that reads only the
+rows in which every named column equals its value. It is a **restriction**, not an operator:
+
+- An operator (`SemiJoin`, `PolarsFilter`) is a step of the pipeline. It is a node of the
+  graph and part of the pipeline's identity: a pipeline with a filter computes something
+  else than one without, and its nodes have other hashes and other stored tables.
+- A restriction is attached to the source. It chooses which of the source's rows flow and
+  changes nothing else: the restricted source has the same `source_id`, `content_hash`,
+  `pipeline_hash`, schema and system-tag columns as the unrestricted one, and every row it
+  reads is the unrestricted source's row, record ID included. It adds no node, so a job
+  bound to a restricted source is the same job, run over fewer rows.
+
+Use a restriction to work on part of a table (one subject, one session) with the pipeline you
+will later run on all of it: results computed under the restriction are stored under the same
+identities and reused by the full run. Use an operator when selecting rows is part of what
+the pipeline computes. Restrict on tag (key) columns where you can; a condition on a data
+column is allowed.
+
+<!-- docs-test: skip -->
+```python
+events = SpiralDBTableSource("my-project-123456", "spike_event", source_id="spikes")
+one_unit = events.where(unit_id=106)  # or events.where({"unit_id": 106})
+one_session = one_unit.where(session_index=2)  # conditions add up
+
+assert one_unit.content_hash() == events.content_hash()
+job.bind(sources={"spikes": one_unit})  # the slot the unrestricted source fills
+summary = job.run()
+print(summary.restrictions)
+# {'spikes': {'source_id': 'spikes', 'where': {'unit_id': 106}}}
+```
+
+(This sample needs a SpiralDB project, so it is not run with the documentation; `job` is a
+job built over `events`, whose slot is named by the source id.)
+
+- **One mechanism.** `where()` adds to the conditions given with `where=` when the source was
+  built, and SpiralDB applies them in the scan. A column already restricted to another value
+  is refused, as is a column the table does not have, `None` (a null equals nothing) and
+  `where()` with no condition. Everything else of the source is carried over: the pinned
+  table version, `limit`, `max_rows`, the tags and data-tags, `tags_as_data`, the key
+  columns, the source id and the label. The original source is not changed.
+- **No conversion.** A value must be exactly of its column's Python type: an `int` for an
+  integer column (not `True`, not `1.0`, not a NumPy scalar: use `.item()`), a `float` for a
+  float column, a `datetime.date` or `datetime.datetime` for a date or timestamp column (not
+  a string: use `date.fromisoformat`), and it must fit the column's Arrow type. Anything else
+  raises `TypeError`, naming the column and both types. Columns of other types (lists,
+  structs) take no condition.
+- **With `limit=`.** A source built with `limit=n` reads the first `n` rows that match, in
+  key order: the conditions are applied first.
+- **Recorded.** `RunSummary.restrictions` maps each restricted source's slot to its source id
+  and its conditions (and `limit`), and the summary shows them. A saved job records them in
+  the source's config, and a loaded job reads with them. Binding does not compare
+  restrictions: a restricted source fits the slot of the unrestricted one.
+- **Under an aggregation.** A `GroupBy`, `Batch` or `MergeJoin` below a restricted source
+  builds its groups from the rows the restriction lets through. That is allowed (each
+  aggregated row lists its members), and a job run issues one
+  `RestrictedAggregationWarning` naming the source and the step.
+- **Stored rows stay.** A run over a restricted source deletes nothing: a job node shows the
+  rows of its current run, and `node.as_source()` shows everything stored for it.
+
+`where()` is a copy of the source with the restriction applied to the copy; a later version
+offers the two steps on their own, and restrictions on other kinds of source.
 
 **Running again.** A run first checks the source: when the table has a newer version (rows
 added since the source was built or last checked), the source reads that version from then

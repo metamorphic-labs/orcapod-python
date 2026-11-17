@@ -520,6 +520,17 @@ class SourceCheckFailedWarning(UserWarning):
     """
 
 
+class RestrictedAggregationWarning(UserWarning):
+    """A restricted source feeds an aggregating step of a job run (ITL-1218).
+
+    A restriction (``SpiralDBTableSource.where``) chooses which rows flow without
+    changing any identity, so a ``GroupBy``, ``Batch`` or ``MergeJoin`` below it builds
+    its groups from the rows let through only. That is allowed: an aggregated row
+    records its members, so what a group was computed over stays visible. Issued once
+    per run (``job.run()``, ``run_async()``), naming each source slot and step.
+    """
+
+
 class OrcapodDatabaseContentWarning(UserWarning):
     """A loaded node's database holds another number of rows than the saved run recorded.
 

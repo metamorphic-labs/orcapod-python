@@ -3842,7 +3842,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         """
         from dataclasses import replace
 
-        from orcapod.pipeline.node_run import commit_run
+        from orcapod.pipeline.node_run import commit_run, restrictions_in_force
         from orcapod.pipeline.run_summary import RunCountingObserver, RunSummary
         from orcapod.utils.database_errors import flush_best_effort
 
@@ -3879,6 +3879,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             load_only=load_only,
             target=self.label,
             unchecked_sources=unchecked_sources,
+            restrictions=restrictions_in_force([self]),
         )
 
     def _incomplete_inputs(self) -> list[str]:

@@ -247,6 +247,98 @@ def check_sources(streams: Iterable[Any]) -> tuple[str, ...]:
     return tuple(unchecked)
 
 
+def restrictions_in_force(streams: Iterable[Any]) -> dict[str, dict[str, Any]]:
+    """The restriction of each restricted source feeding ``streams`` (ITL-1218).
+
+    A restriction belongs to the source object bound to a slot, so the key is the
+    slot's name (the ``SourceJobNode``'s, the name ``bind`` takes); a source read
+    directly by the node whose ``run()`` it is has no slot and is keyed by its label.
+    Two slots bound to one table with different conditions are both reported.
+
+    Only a ``SpiralDBTableSource`` can be restricted today; it answers through
+    ``_restriction_record``, which every root source gets when restrictions are
+    generalized (ITL-1219).
+
+    Args:
+        streams: The nodes of a run, or the node whose ``run()`` it is.
+
+    Returns:
+        Slot name to ``{"source_id": ..., "where": {...}, "limit": n}`` (``where`` and
+        ``limit`` only when set), for the sources that restrict their rows, in the
+        order first met.
+    """
+    from orcapod.core.nodes.source_node import SourceJobNode
+    from orcapod.core.sources.base import RootSource
+
+    found: dict[str, dict[str, Any]] = {}
+    visited: list[Any] = []
+    pending: list[tuple[Any, str | None]] = [(stream, None) for stream in streams]
+    while pending:
+        stream, slot = pending.pop(0)
+        if isinstance(stream, RootSource):
+            # Not deduplicated: one source object bound to two slots is reported
+            # under each.
+            record_of = getattr(stream, "_restriction_record", None)
+            record = record_of() if record_of is not None else {}
+            if record:
+                name = slot if slot is not None else str(stream.label)
+                found[name] = {"source_id": _source_name(stream), **record}
+            continue
+        if any(stream is seen for seen in visited):
+            continue
+        visited.append(stream)
+        if isinstance(stream, SourceJobNode):
+            if stream.bound_source is not None:
+                pending.append((stream.bound_source, stream.name))
+        else:
+            pending.extend((up, None) for up in getattr(stream, "upstreams", ()))
+    return found
+
+
+def warn_restricted_aggregation(dag: Any) -> None:
+    """Warn once when a restricted source feeds a ``GroupBy``, ``Batch`` or ``MergeJoin``.
+
+    Called by ``job.run()`` and ``run_async()`` before the run (ITL-1218). The
+    warning names each source slot and aggregating step, at the user's line that
+    started the run, at every run.
+
+    Args:
+        dag: The job's graph of the run.
+    """
+    import sys
+    import warnings
+
+    from orcapod.core.operators import Batch, GroupBy, MergeJoin
+    from orcapod.errors import RestrictedAggregationWarning
+    from orcapod.utils.warning_utils import outside_orcapod_stacklevel
+
+    pairs: list[str] = []
+    for node in dag.topological_sort():
+        step = getattr(node, "producer", None)
+        if not isinstance(step, (GroupBy, Batch, MergeJoin)):
+            continue
+        restricted = sorted(restrictions_in_force(dag.ancestors(node)))
+        pairs.extend(
+            f"{slot!r} feeds {type(step).__name__} {node.label!r}"
+            for slot in restricted
+        )
+    if not pairs:
+        return
+    caller = sys._getframe(outside_orcapod_stacklevel() - 1)  # pyright: ignore[reportPrivateUsage]  # as the warnings module does
+    warnings.warn_explicit(
+        "A restricted source feeds an aggregating step: "
+        + "; ".join(pairs)
+        + ". Its groups are built from the rows the restriction lets through only "
+        "(each aggregated row lists its members).",
+        RestrictedAggregationWarning,
+        caller.f_code.co_filename,
+        caller.f_lineno,
+        module=caller.f_globals.get("__name__"),
+        registry=None,
+        module_globals=caller.f_globals,
+    )
+
+
 def _source_name(source: Any) -> str:
     """A source's name for a report: its source id, or its label without one."""
     try:
@@ -456,4 +548,5 @@ def run_with_dependencies(
         target=target.label,
         unchecked_sources=unchecked_sources,
         ran_nothing=not plan.to_run,
+        restrictions=restrictions_in_force(graph.nodes()),
     )

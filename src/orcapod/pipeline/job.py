@@ -32,6 +32,8 @@ from orcapod.pipeline.dag import OrcaDAG
 from orcapod.pipeline.node_run import (
     RunPlan,
     check_sources,
+    restrictions_in_force,
+    warn_restricted_aggregation,
     clear_run_rows,
     plan_run,
 )
@@ -1294,6 +1296,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # Every source first takes in any new data, moving its modified time, before
         # the state rule judges any node (ITL-1102).
         unchecked = check_sources(exec_dag.nodes())
+        # A restricted source under an aggregation is allowed, and said (ITL-1218).
+        warn_restricted_aggregation(exec_dag)
         # The state rule (ITL-1095): a node that holds a current run is not run again.
         plan = plan_run(exec_dag, load_only=load_only)
         # Pre-v0.3 tables are reported for a run that runs a node or leaves one out
@@ -1440,6 +1444,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             load_only=load_only,
             unchecked_sources=unchecked_sources,
             ran_nothing=not plan.to_run,
+            restrictions=restrictions_in_force(prepared.exec_dag.nodes()),
         )
         return self._last_run
 

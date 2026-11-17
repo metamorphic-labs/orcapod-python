@@ -1097,6 +1097,21 @@ data. The rules:
   only after the read succeeded. Without key columns a row's record id is its position: a
   change of row order is a change; with one, only content counts
   (reload.same_rows(..., ordered=), decided by the caller; in doubt, order counts).
+- A restriction is not an operator (developer, November 17, 2026, ITL-1218). It is attached
+  to a source, chooses which of its rows flow, and changes no row, schema, DAG node or
+  identity: content_hash, pipeline_hash, source_id, schema, system-tag column names and
+  every row's record id equal the unrestricted source's (a positional record id is never
+  renumbered). Selecting rows as part of what a pipeline computes is an operator
+  (SemiJoin, PolarsFilter). Today only SpiralDBTableSource.where(mapping=None, /,
+  **columns) exists: equality conditions, added to those of where= (one mechanism, the
+  private _Restriction the scan, head, to_config and run summary read), applied by
+  SpiralDB in the scan; a conflicting value, an unknown column, None and a value not exactly
+  of its column's Python type (no conversion) are refused. where() is _copy() then
+  _apply_restriction() in place on the copy, the future public copy() and
+  apply_restriction(); other source kinds and limit() are ITL-1219. RunSummary.restrictions
+  records each restricted source by slot ({"source_id", "where", "limit"}), the saved job
+  keeps it in the source config, bind never compares it, and a job run over a restricted
+  source feeding GroupBy, Batch or MergeJoin issues one RestrictedAggregationWarning.
 - Empty data → ArrowTableSource raises ValueError("Table is empty").
 - A side-effect job node delivers only when it runs (developer, November 13, 2026, ITL-1091):
   job.run(), node.run() (state-driven, ITL-1095: a node holding a current run delivers
