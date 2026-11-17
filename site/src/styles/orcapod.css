@@ -58,8 +58,10 @@
 }
 
 /* The site's name beside the logo, as orcapod.org's navigation writes it: lower case,
- * Lexend Exa bold. The page titles keep "Orcapod". */
+ * Lexend Exa bold, in the text colour (black, white in dark mode) rather than the
+ * accent. The page titles keep "Orcapod". */
 .site-title {
+	color: var(--sl-color-white);
 	font-family: var(--orcapod-font-title), var(--__sl-font);
 	font-weight: 700;
 	text-transform: lowercase;
