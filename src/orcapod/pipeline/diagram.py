@@ -36,6 +36,8 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from typing_extensions import override
 
+from orcapod.utils.in_development import warn_in_development
+
 if TYPE_CHECKING:
     from orcapod.pipeline.dag import OrcaDAG
     from orcapod.pipeline.run_summary import NodeRunSummary
@@ -953,7 +955,8 @@ def _json_for_script(value: object) -> str:
 
 # Shown next to the title, in the rendered view and in the no-script fallback: the
 # diagram and its interface are in development (developer, November 17, 2026). Plain
-# text in the text colour; no warning at call or display time.
+# text in the text colour. The first diagram of a process also issues
+# ``InDevelopmentWarning`` (``__init__``).
 _PREVIEW_NOTE = "In development: the diagram and its interface may change"
 # The separator shows only where the style sheet is removed (an untrusted notebook),
 # where the tag is plain text.
@@ -979,7 +982,8 @@ class PipelineDiagram:
     Making a diagram computes nothing: it reads each node's predicted ``output_schema()``,
     and for a job what each node holds in memory and ``job.last_run``.
 
-    Use ``Pipeline.diagram()`` or ``PipelineJob.diagram()`` to make one.
+    Use ``Pipeline.diagram()`` or ``PipelineJob.diagram()`` to make one. The first
+    diagram made in a process issues ``InDevelopmentWarning`` (once per process).
 
     Args:
         pipeline: A compiled ``Pipeline`` or ``PipelineJob``.
@@ -1009,6 +1013,12 @@ class PipelineDiagram:
             raise ValueError(f"direction must be 'LR' or 'TB', not {direction!r}")
         if max_nodes < 1:
             raise ValueError(f"max_nodes must be at least 1, not {max_nodes!r}")
+        warn_in_development(
+            "pipeline diagram",
+            "The pipeline diagram (Pipeline.diagram(), PipelineJob.diagram(), "
+            "PipelineDiagram and the notebook display of a pipeline or job) is in "
+            "development: its interface and appearance may change in any release.",
+        )
         is_job = _is_job(pipeline)
         self._kind: str = "job" if is_job else "pipeline"
         self._name: str = ".".join(pipeline.name)

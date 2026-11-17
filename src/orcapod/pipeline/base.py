@@ -316,7 +316,8 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
     ) -> PipelineDiagram:
         """A diagram of the DAG, drawn in a notebook without Graphviz.
 
-        In development: this interface may change.
+        In development: this interface may change. The first diagram made in a
+        process issues ``InDevelopmentWarning``, once.
 
         Shown at the end of a notebook cell (as the pipeline or job itself is) it is a
         picture of the nodes and the streams between them; where the notebook runs

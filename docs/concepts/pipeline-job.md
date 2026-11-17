@@ -277,7 +277,10 @@ Every job also carries its blueprint as `job.pipeline`.
 !!! caution "In development"
     `Pipeline.diagram()`, `PipelineJob.diagram()`, `PipelineDiagram` and its methods and
     arguments, the look of the picture and the notebook display may change in any release
-    without a deprecation period.
+    without a deprecation period. The first diagram in a Python session issues
+    `orcapod.errors.InDevelopmentWarning` once, as a reminder; to silence it, run
+    `warnings.filterwarnings("ignore", category=InDevelopmentWarning)` after importing
+    it from `orcapod.errors`.
 
 In a notebook, a job or a pipeline shown at the end of a cell draws itself: a diagram of its
 nodes (sources, operators, function pods, side-effect pods) and the streams between them,

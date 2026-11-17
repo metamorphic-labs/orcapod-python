@@ -118,7 +118,10 @@ itself as a diagram.
 !!! caution "In development"
     `Pipeline.diagram()`, `PipelineJob.diagram()`, `PipelineDiagram` and its methods and
     arguments, the look of the picture and the notebook display may change in any release
-    without a deprecation period.
+    without a deprecation period. The first diagram in a Python session issues
+    `orcapod.errors.InDevelopmentWarning` once, as a reminder; to silence it, run
+    `warnings.filterwarnings("ignore", category=InDevelopmentWarning)` after importing
+    it from `orcapod.errors`.
 
 Drag it to move it, zoom with the `+` and `−` buttons, and click a node to see its schema
 (its tag and data columns) and how many rows the last run computed or read. Outside a notebook,

@@ -20,7 +20,11 @@ would, so its details pane shows.
 notebook display may change in any release without a deprecation period. The docs say so
 in a caution box, the docstrings and the changelog (Added and Known limitations), and the
 rendered view carries a small "preview" tag next to the title (also in the no-script
-fallback). No warning is raised. `to_dict()` has no version marker; its shape may change.
+fallback). The first diagram made in a process issues `orcapod.errors.InDevelopmentWarning`
+(developer, November 17, 2026: once per process, modelled on `ProvisionalHashWarning`; a
+general class for any feature in development, bookkeeping in
+`orcapod/utils/in_development.py`); importing Orcapod, `repr`, `head()` and the plain display
+of an uncompiled pipeline never issue it. `to_dict()` has no version marker; its shape may change.
 The developer confirmed the diagram as the default rich display of `Pipeline` and
 `PipelineJob` (November 17, 2026).
 

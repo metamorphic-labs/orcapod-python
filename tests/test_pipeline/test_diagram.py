@@ -8,7 +8,11 @@ from __future__ import annotations
 
 import base64
 import json
+import subprocess
+import sys
 import time
+import warnings
+from collections.abc import Iterator
 import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 from typing import Any
@@ -17,10 +21,12 @@ import pytest
 
 from orcapod import PipelineJob, function_pod
 from orcapod.databases import InMemoryArrowDatabase
+from orcapod.errors import InDevelopmentWarning
 from orcapod.pipeline import Pipeline, PipelineDiagram
 from orcapod.pipeline.diagram import _Edge, _layout, _Node
 from orcapod.side_effects import SideEffectPod, side_effect_pod
 from orcapod.sources import DictSource
+from orcapod.utils.in_development import reset_in_development_warnings
 
 CALLS: list[str] = []
 FAIL_ON: set[int] = set()
@@ -317,13 +323,9 @@ def test_the_notebook_display() -> None:
     assert bundle["text/html"] == job.diagram().to_html()
 
 
-def test_the_view_is_marked_as_a_preview_without_a_warning() -> None:
-    """A small "preview" tag next to the title: in development, no warning raised."""
-    import warnings
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        document = _job().diagram().to_html()
+def test_the_view_is_marked_as_a_preview() -> None:
+    """A small "preview" tag next to the title: the diagram is in development."""
+    document = _job().diagram().to_html()
     collector = _Collector()
     collector.feed(document)
     note = "In development: the diagram and its interface may change"
@@ -334,6 +336,90 @@ def test_the_view_is_marked_as_a_preview_without_a_warning() -> None:
     # Outside the script: the tag stays where scripts are removed.
     without_scripts = document.split("<script", 1)[0]
     assert ">preview</span>" in without_scripts
+
+
+# ---------------------------------------------------------------------------
+# In development: warned once per process
+# ---------------------------------------------------------------------------
+
+
+def _in_development(record: list[warnings.WarningMessage]) -> list[str]:
+    return [str(w.message) for w in record if w.category is InDevelopmentWarning]
+
+
+@pytest.fixture
+def fresh_warnings() -> Iterator[None]:
+    """The test starts as a new process would: no feature has warned yet."""
+    reset_in_development_warnings()
+    yield
+    reset_in_development_warnings()
+
+
+@pytest.mark.usefixtures("fresh_warnings")
+def test_the_first_diagram_warns_once_per_process() -> None:
+    job = _job()
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        _ = job.diagram()
+        _ = job.diagram(collapse=True).to_html()
+        _ = job._repr_mimebundle_()
+        _ = job.pipeline.diagram()
+    messages = _in_development(record)
+    assert len(messages) == 1
+    assert messages[0].startswith("The pipeline diagram (Pipeline.diagram(), ")
+    assert "may change in any release" in messages[0]
+    assert "category=orcapod.errors.InDevelopmentWarning" in messages[0]
+    # Attributed to the code that made the diagram.
+    warned = [w for w in record if w.category is InDevelopmentWarning][0]
+    assert warned.filename == __file__
+
+
+@pytest.mark.usefixtures("fresh_warnings")
+def test_the_notebook_display_warns_when_it_makes_the_first_diagram() -> None:
+    job = _job()
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        _ = job._repr_mimebundle_()
+    assert len(_in_development(record)) == 1
+
+
+@pytest.mark.usefixtures("fresh_warnings")
+def test_no_warning_without_a_diagram() -> None:
+    job = _job()
+    pipeline = Pipeline(name="uncompiled")
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        _ = repr(job)
+        _ = str(job)
+        _ = pipeline._repr_mimebundle_()
+        job.run()
+        _ = job.nodes["sums"].head()
+        _ = job.nodes["sums"]._repr_html_()
+    assert _in_development(record) == []
+
+
+@pytest.mark.usefixtures("fresh_warnings")
+def test_under_an_error_filter_every_diagram_raises() -> None:
+    job = _job()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", InDevelopmentWarning)
+        for _ in range(2):
+            with pytest.raises(InDevelopmentWarning):
+                _ = job.diagram()
+
+
+def test_importing_orcapod_does_not_warn() -> None:
+    code = (
+        "import warnings\n"
+        "warnings.simplefilter('error')\n"
+        "import orcapod, orcapod.pipeline, orcapod.pipeline.diagram\n"
+        "print('ok')\n"
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == "ok"
 
 
 def test_an_uncompiled_pipeline_displays_as_text() -> None:
