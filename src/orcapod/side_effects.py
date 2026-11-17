@@ -368,9 +368,10 @@ def _side_effect_arguments(
     """Return a row's data as keyword arguments for a side-effect function.
 
     The column of a data-tag (a name that is a tag and a data column,
-    ITL-1023) is passed only to a function that names it or takes ``**kwargs``: it
-    is a tag first, and a function written for the row's data does not expect it.
-    Every other data column is passed as before.
+    ITL-1023) is passed only to a function that takes it as a keyword: a parameter
+    of that name that accepts a keyword (not ``*args``, not positional-only), or
+    ``**kwargs``. It is a tag first, and a function written for the row's data does
+    not expect it. Every other data column is passed as before.
 
     Args:
         fn: The side-effect function.
@@ -389,7 +390,15 @@ def _side_effect_arguments(
     parameters = inspect.signature(fn).parameters
     if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
         return values
-    return {k: v for k, v in values.items() if k not in data_tags or k in parameters}
+    # Only a parameter that accepts a keyword receives a data-tag by name: never
+    # ``*args``, nor a positional-only one (Copilot on PR #342).
+    keywords = {
+        name
+        for name, p in parameters.items()
+        if p.kind
+        in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    }
+    return {k: v for k, v in values.items() if k not in data_tags or k in keywords}
 
 
 def _execute_side_effect_row(

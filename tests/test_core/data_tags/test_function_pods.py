@@ -246,3 +246,53 @@ def test_a_side_effect_function_gets_a_data_tag_column_only_when_it_names_it() -
         {"half": 0.125, "t": 20},
         {"half": 0.25, "t": 10},
     ]
+
+
+def _keyed_source(key: str) -> op.sources.DictSource:
+    """One data-tag named ``key`` and the data column ``amp``."""
+    return op.sources.DictSource(
+        [{key: 10, "amp": 0.5}, {key: 20, "amp": 0.25}],
+        tag_columns=[key],
+        source_id=f"keyed_{key}",
+    )
+
+
+def test_a_data_tag_named_like_a_star_args_parameter_is_not_passed() -> None:
+    """``*args`` takes no keyword: a data-tag named ``args`` is not passed (Copilot, #342)."""
+    from orcapod.side_effects import SideEffectPod, side_effect_pod
+
+    seen: list[float] = []
+
+    @side_effect_pod
+    def deliver(*args: object, amp: float, ctx: object) -> None:
+        seen.append(amp)
+
+    list(cast(SideEffectPod, deliver)(_keyed_source("args")).iter_data())
+    assert sorted(seen) == [0.25, 0.5]
+
+
+def test_a_data_tag_named_like_a_positional_only_parameter_is_not_passed() -> None:
+    """A positional-only parameter takes no keyword either: its default is used."""
+    from orcapod.side_effects import SideEffectPod, side_effect_pod
+
+    seen: list[tuple[int, float]] = []
+
+    @side_effect_pod
+    def deliver(t: int = -1, /, *, amp: float, ctx: object) -> None:
+        seen.append((t, amp))
+
+    list(cast(SideEffectPod, deliver)(_keyed_source("t")).iter_data())
+    assert sorted(seen) == [(-1, 0.25), (-1, 0.5)]
+
+
+def test_a_data_tag_named_like_a_keyword_only_parameter_is_passed() -> None:
+    from orcapod.side_effects import SideEffectPod, side_effect_pod
+
+    seen: list[tuple[int, float]] = []
+
+    @side_effect_pod
+    def deliver(*, t: int, amp: float, ctx: object) -> None:
+        seen.append((t, amp))
+
+    list(cast(SideEffectPod, deliver)(_keyed_source("t")).iter_data())
+    assert sorted(seen) == [(10, 0.5), (20, 0.25)]
