@@ -14,8 +14,7 @@ made by `docs/dev/scripts/itl_1197/diagram_screenshots.py`. The two JupyterLab s
 taken by hand (section 3): notebooks with a `python3` kernelspec (no kernel dialog), the
 news notification turned off in a scratch settings directory, and in the trusted one a
 small script added to the output after the diagram clicks the `rates` node, as a reader
-would, so its details pane shows. The JupyterLab shots were taken before the collapse checkbox
-was added (`collapse-checkbox-light.png` shows it).
+would, so its details pane shows. The trusted one shows the collapse checkbox (unticked).
 
 **In development** (developer, November 17, 2026): the diagram, its interface and the
 notebook display may change in any release without a deprecation period. The docs say so
