@@ -31,7 +31,7 @@ from orcapod.databases import (
 )
 from orcapod.databases.extension_aware_database import ExtensionAwareDatabase
 from orcapod.databases.sqlite_connector import SQLiteConnector
-from orcapod.errors import InputValidationError
+from orcapod.errors import InputValidationError, UnstorableColumnError
 from orcapod.protocols.db_connector_protocol import ColumnInfo
 from orcapod.pipeline import PipelineJob
 from orcapod.protocols.database_protocols import (
@@ -262,13 +262,28 @@ def test_spiraldb_keeps_the_marker_on_every_write_path(spiral: None) -> None:
     assert references() == ("unit",)
 
 
-def test_a_referential_job_runs_on_spiraldb(spiral: None) -> None:
-    job = PipelineJob(database=ConnectorArrowDatabase(SpiralDBConnector("p")))
-    with job:
-        double.pod(_source(), label="double")
-    job.run()
-    records = job.nodes["double"].get_all_records()
-    assert records is not None and stored_references(records.schema) == ("unit",)
+def test_a_referential_job_on_spiraldb_is_refused_as_a_plain_one_is(
+    spiral: None,
+) -> None:
+    """SpiralDB refuses a function node's reserved columns (ITL-1162), plain or not.
+
+    The marker is not what stops it: the referential job is refused for the same
+    column as the plain one, before anything is written.
+    """
+    plain = op.sources.DictSource(
+        [{"unit": 1, "time": 10, "amp": 0.5}],
+        tag_columns=["unit", "time"],
+        tag_only_columns=True,
+        source_id="spikes",
+    )
+    messages = []
+    for source in (_source(), plain):
+        job = PipelineJob(database=ConnectorArrowDatabase(SpiralDBConnector("p")))
+        with pytest.raises(UnstorableColumnError) as info:
+            with job:
+                double.pod(source, label="double")
+        messages.append(str(info.value))
+    assert all("'__input_data_hash'" in message for message in messages)
 
 
 def test_spiraldb_failed_marker_write_stores_no_row(

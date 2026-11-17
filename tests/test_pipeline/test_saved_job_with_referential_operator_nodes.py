@@ -37,6 +37,13 @@ Orchestrator = type[SyncPipelineOrchestrator | AsyncPipelineOrchestrator]
 JOINED_KEYS = (("unit", "time"), ("unit", "amp", "gain"))
 
 
+def _unordered_data(
+    keys: tuple[tuple[str, ...], tuple[str, ...]],
+) -> tuple[object, ...]:
+    """Tag keys as they are, data keys as a set: ``Join`` orders its inputs by hash."""
+    return keys[0], set(keys[1])
+
+
 @op.function_pod(output_keys=["y"])
 def double(amp: float) -> float:
     """Double the amplitude; reads no tag, so ``unit`` falls through."""
@@ -114,7 +121,7 @@ def test_a_loaded_operator_node_replays_its_stored_binding(
     tmp_path: Path, orchestrator: Orchestrator
 ) -> None:
     job = _saved_job(tmp_path, orchestrator)
-    assert job.nodes["joined"].keys() == JOINED_KEYS
+    assert _unordered_data(job.nodes["joined"].keys()) == _unordered_data(JOINED_KEYS)
     expected = _rows(job.nodes["joined"].as_table())
 
     loaded = _loaded_replaying(tmp_path)
@@ -148,7 +155,7 @@ def test_a_loaded_operator_node_gives_its_stored_rows_as_a_source(
     records = node.get_all_records()
     assert records is not None and stored_references(records.schema) == ("unit",)
     source = node.as_source()
-    assert source.keys() == JOINED_KEYS
+    assert source.keys() == job.nodes["joined"].keys()
     assert _rows(source.as_table()) == _rows(job.nodes["joined"].as_table())
 
 
