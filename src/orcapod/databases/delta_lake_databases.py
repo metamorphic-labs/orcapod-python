@@ -29,6 +29,7 @@ from orcapod.databases.delta_arrow_types import (
     recorded_type,
     to_delta_layout,
 )
+from orcapod.databases.delta_statistics import statistics_configuration
 from orcapod.databases.storage_utils import (
     delta_to_pyarrow_dataset,
     is_cloud_uri,
@@ -1780,6 +1781,8 @@ class DeltaTableDatabase:
                     mode="overwrite",
                     schema_mode="merge" if self.allow_schema_evolution else "overwrite",
                     storage_options=self._storage_options or None,
+                    # Name the statistics columns once, at creation (ITL-1187).
+                    configuration=statistics_configuration(combined_table.schema),
                 )
                 base = _CommittedSnapshot(version=-1, ids=set())
                 inserted_ids = self._non_null_ids(combined_table)
