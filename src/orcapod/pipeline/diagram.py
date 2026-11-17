@@ -863,6 +863,8 @@ padding:6px 8px;max-width:100%;box-sizing:border-box;overflow:hidden}
 touch-action:none}
 .op-dag .op-dag-node{cursor:pointer}
 .op-dag .op-dag-node:focus{outline:none}
+.op-dag .op-dag-view:focus{outline:none}
+.op-dag .op-dag-view:focus-visible{outline:2px solid currentColor;outline-offset:-2px}
 .op-dag .op-dag-node:focus-visible rect:first-of-type,
 .op-dag .op-dag-node.op-dag-selected rect:first-of-type{stroke-width:3.4}
 .op-dag .op-dag-edges g.op-dag-lit path:first-of-type{stroke-opacity:1;stroke-width:2.4}
@@ -945,6 +947,20 @@ var k=vb.w/(view.getBoundingClientRect().width||W);
 vb.x=drag.vx-(ev.clientX-drag.x)*k;vb.y=drag.vy-(ev.clientY-drag.y)*k;apply();});
 function stop(){drag=null;view.style.cursor='';}
 view.addEventListener('pointerup',stop);view.addEventListener('pointercancel',stop);
+view.tabIndex=0;view.setAttribute('role','group');view.setAttribute('aria-label',
+'Pipeline diagram: arrow keys move it, + and \u2212 zoom, 0 fits; Tab reaches the nodes');
+function pan(dx,dy){vb.x+=dx*vb.w;vb.y+=dy*vb.h;apply();}
+view.addEventListener('keydown',function(ev){if(ev.altKey||ev.ctrlKey||ev.metaKey)return;
+var k=ev.key,step=ev.shiftKey?.5:.1;
+if(k==='ArrowLeft')pan(-step,0);else if(k==='ArrowRight')pan(step,0);
+else if(k==='ArrowUp')pan(0,-step);else if(k==='ArrowDown')pan(0,step);
+else if(k==='+'||k==='=')zoom(1/1.25);else if(k==='-'||k==='\u2212')zoom(1.25);
+else if(k==='0')fit();else return;ev.preventDefault();});
+view.addEventListener('focusin',function(ev){var g=ev.target.closest&&ev.target.closest('.op-dag-node');
+if(!g)return;var b=g.getBoundingClientRect(),r=view.getBoundingClientRect();
+if(b.left<r.left||b.top<r.top||b.right>r.right||b.bottom>r.bottom){
+var k=vb.w/(r.width||W);vb.x+=((b.left+b.right)/2-(r.left+r.right)/2)*k;
+vb.y+=((b.top+b.bottom)/2-(r.top+r.bottom)/2)*k;apply();}});
 function schema(cols){return cols.map(function(c){return c[0]+': '+c[1];}).join(', ')||'none';}
 function row(dl,name,text){var dt=document.createElement('dt'),dd=document.createElement('dd');
 dt.textContent=name;dd.textContent=text;dl.appendChild(dt);dl.appendChild(dd);}

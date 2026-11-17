@@ -424,6 +424,15 @@ def test_importing_orcapod_does_not_warn() -> None:
     assert done.stdout.strip() == "ok"
 
 
+def test_the_script_offers_keyboard_pan_and_zoom() -> None:
+    """Checked in a browser by hand; here only that the script carries the handlers."""
+    script = _job().diagram().to_html().rsplit("<script>", 1)[1]
+    assert "view.tabIndex=0" in script
+    for key in ("ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"):
+        assert f"k==='{key}'" in script
+    assert "focusin" in script  # a node reached with Tab is brought into view
+
+
 def test_an_uncompiled_pipeline_displays_as_text() -> None:
     pipeline = Pipeline(name="later", auto_compile=False)
     with pipeline:
