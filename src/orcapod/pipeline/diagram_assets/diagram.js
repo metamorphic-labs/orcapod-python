@@ -12,6 +12,17 @@
 // layout, a collapse checkbox that switches to it (keeping the selected node if it is
 // in both).
 //
+// Scale (ITL-1231): the view keeps a scale (screen pixels per picture unit) and the
+// picture point at its centre, and derives the viewBox from its own size each time, so
+// the picture is never distorted or shrunk by a size the view had earlier. Fit (the
+// button, the 0 key) shows the whole picture, scaled up or down, at most MAX_SCALE. The
+// first display fits too, but never below MIN_FIRST_SCALE: a picture wider or taller
+// than that starts at its left or top end. Where the picture goes on beyond an edge of
+// the view, a cue at that edge says so and moves it on a click. The view's height
+// follows the picture at its first-display scale. Until the reader zooms or pans, a
+// change of the view's width (the notebook laying the cell out, a side bar closing)
+// draws it again as on first display.
+//
 // Rules for this file:
 // - Nothing from the user is ever written into it; the model is read from the JSON
 //   blocks with ``textContent`` and shown with ``textContent``, never as markup.
@@ -51,7 +62,15 @@
   var panel = root.querySelector('.op-dag-panel');
   var count = root.querySelector('.op-dag-count');
   var cur = 0, model = views[0].model, svg = img, selected = null;
-  var W = 1, H = 1, vb = {x: 0, y: 0, w: 1, h: 1};
+  // The largest scale (also the no-script image's, ``diagram._MAX_SCALE``): the node
+  // labels (13 pixels) at 16 pixels and the kind line (11) at 13.75, about a notebook's
+  // own text size; so a two-node job is not blown up. The smallest scale of the first
+  // display: labels at 10.4 pixels, still readable.
+  var MAX_SCALE = 1.25, MIN_FIRST_SCALE = .8;
+  // The picture's size; the scale; the picture point at the view's centre; and how a
+  // change of the view's width redraws it: 'first' as on first display, 'fit' as fit,
+  // null (after a zoom or pan) keeping the scale and centre.
+  var W = 1, H = 1, z = 1, cx = .5, cy = .5, mode = 'first';
 
   // The tools, top right: the collapse checkbox (with the other layout) and the zoom
   // buttons.
@@ -82,55 +101,121 @@
     });
   root.appendChild(tools);
 
-  // Pan and zoom move the SVG's viewBox.
+  // The cues at the edges of the view beyond which the picture goes on; a click moves
+  // the picture half a view that way.
+  var sides = [['left', '\u25c2', -.5, 0], ['right', '\u25b8', .5, 0],
+    ['top', '\u25b4', 0, -.5], ['bottom', '\u25be', 0, .5]];
+  sides.forEach(function (d) {
+    var e = document.createElement('button');
+    e.type = 'button';
+    e.className = 'op-dag-more op-dag-more-' + d[0];
+    e.textContent = d[1];
+    e.title = 'More of the diagram this way: click, drag, or fit to see all of it';
+    e.setAttribute('aria-label', 'Move the diagram to show more on the ' + d[0]);
+    e.addEventListener('click', function () { pan(d[2], d[3]); });
+    view.appendChild(e);
+  });
+
+  // The viewBox, from the scale, the centre and the view's size now, and the cues of
+  // the edges the picture goes on beyond; nothing while the view is not laid out (a
+  // width or height of 0).
   function apply() {
-    svg.setAttribute('viewBox', [vb.x, vb.y, vb.w, vb.h].join(' '));
+    var r = view.getBoundingClientRect();
+    if (!r.width || !r.height) return;
+    var w = r.width / z, h = r.height / z, x = cx - w / 2, y = cy - h / 2, e = 1 / z;
+    svg.setAttribute('viewBox', [x, y, w, h].join(' '));
+    root.classList.toggle('op-dag-clip-left', x > e);
+    root.classList.toggle('op-dag-clip-right', x + w < W - e);
+    root.classList.toggle('op-dag-clip-top', y > e);
+    root.classList.toggle('op-dag-clip-bottom', y + h < H - e);
+  }
+  // The scale of the first display at a view width: fitted to it, within the limits.
+  function firstScale(cw) {
+    return Math.max(Math.min(cw / W, MAX_SCALE), MIN_FIRST_SCALE);
+  }
+  // The view's height: the picture's at its first-display scale, within 560 pixels; at
+  // least 120 pixels unless the picture is shorter at MAX_SCALE.
+  function height() {
+    var h = H * firstScale(view.clientWidth || W);
+    h = Math.min(Math.max(h, Math.min(120, H * MAX_SCALE)), 560);
+    root.style.setProperty('--op-dag-h', Math.round(h) + 'px');
+  }
+  // The scale at which the whole picture fits the view, at most MAX_SCALE.
+  function fitScale() {
+    var r = view.getBoundingClientRect();
+    if (!r.width || !r.height) return z;
+    return Math.min(r.width / W, r.height / H, MAX_SCALE);
   }
   function fit() {
-    var r = view.getBoundingClientRect(), rw = r.width || W, rh = r.height || H;
-    var k = Math.max(W / rw, H / rh, 1);
-    vb.w = rw * k;
-    vb.h = rh * k;
-    vb.x = (W - vb.w) / 2;
-    vb.y = (H - vb.h) / 2;
+    z = fitScale();
+    cx = W / 2;
+    cy = H / 2;
+    mode = 'fit';
     apply();
   }
-  function zoom(f, cx, cy) {
+  // As fit, but never below MIN_FIRST_SCALE: along an axis where the picture is then
+  // larger than the view, it starts at its left or top end.
+  function first() {
     var r = view.getBoundingClientRect();
-    var px = cx === undefined ? .5 : (cx - r.left) / r.width;
-    var py = cy === undefined ? .5 : (cy - r.top) / r.height;
-    var nw = vb.w * f, nh = vb.h * f;
-    vb.x += (vb.w - nw) * px;
-    vb.y += (vb.h - nh) * py;
-    vb.w = nw;
-    vb.h = nh;
+    z = Math.max(fitScale(), Math.min(MIN_FIRST_SCALE, MAX_SCALE));
+    cx = W * z <= r.width ? W / 2 : r.width / z / 2;
+    cy = H * z <= r.height ? H / 2 : r.height / z / 2;
+    mode = 'first';
+    apply();
+  }
+  function zoom(f, px, py) {
+    var r = view.getBoundingClientRect();
+    var ox = px === undefined ? 0 : px - (r.left + r.width / 2);
+    var oy = py === undefined ? 0 : py - (r.top + r.height / 2);
+    var nz = Math.min(Math.max(z * f, .02), 20);
+    cx += ox / z - ox / nz;
+    cy += oy / z - oy / nz;
+    z = nz;
+    mode = null;
     apply();
   }
   tools.addEventListener('click', function (ev) {
     var a = ev.target.getAttribute('data-op-dag-act');
-    if (a === 'in') zoom(1 / 1.25);
-    else if (a === 'out') zoom(1.25);
+    if (a === 'in') zoom(1.25);
+    else if (a === 'out') zoom(1 / 1.25);
     else if (a === 'fit') fit();
   });
   view.addEventListener('wheel', function (ev) {
     if (!(ev.ctrlKey || ev.metaKey)) return;
     ev.preventDefault();
-    zoom(ev.deltaY > 0 ? 1.1 : 1 / 1.1, ev.clientX, ev.clientY);
+    zoom(ev.deltaY > 0 ? 1 / 1.1 : 1.1, ev.clientX, ev.clientY);
   }, {passive: false});
+
+  // A change of the view's width (the notebook laying the cell out, a side bar
+  // opening): its height follows, and the picture is drawn again. Observed on the
+  // title line, as wide as the view, whose size the new height does not change.
+  var lastWidth = -1;
+  function resized() {
+    var cw = view.clientWidth;
+    if (cw === lastWidth) return;
+    lastWidth = cw;
+    height();
+    if (mode === 'first') first();
+    else if (mode === 'fit') fit();
+    else apply();
+  }
+  var head = root.querySelector('.op-dag-head') || root;
+  if (window.ResizeObserver) new ResizeObserver(resized).observe(head);
+  else window.addEventListener('resize', resized);
 
   // Drag to pan; a drag never starts on a node, so a click selects it.
   var drag = null;
   view.addEventListener('pointerdown', function (ev) {
-    if (ev.target.closest && ev.target.closest('.op-dag-node')) return;
-    drag = {x: ev.clientX, y: ev.clientY, vx: vb.x, vy: vb.y};
+    if (ev.target.closest && ev.target.closest('.op-dag-node, .op-dag-more')) return;
+    drag = {x: ev.clientX, y: ev.clientY, cx: cx, cy: cy};
     view.setPointerCapture(ev.pointerId);
     view.style.cursor = 'grabbing';
   });
   view.addEventListener('pointermove', function (ev) {
     if (!drag) return;
-    var k = vb.w / (view.getBoundingClientRect().width || W);
-    vb.x = drag.vx - (ev.clientX - drag.x) * k;
-    vb.y = drag.vy - (ev.clientY - drag.y) * k;
+    cx = drag.cx - (ev.clientX - drag.x) / z;
+    cy = drag.cy - (ev.clientY - drag.y) / z;
+    mode = null;
     apply();
   });
   function stop() {
@@ -141,14 +226,18 @@
   view.addEventListener('pointercancel', stop);
 
   // The keyboard: arrow keys pan (Shift for larger steps), + and - zoom, 0 fits; a node
-  // reached with Tab is brought into view.
+  // reached with Tab is brought into view. A key the diagram uses goes no further, so
+  // a notebook's own shortcuts (in JupyterLab the arrow keys move between cells, and
+  // 0 twice restarts the kernel) do not act on it too.
   view.tabIndex = 0;
   view.setAttribute('role', 'group');
   view.setAttribute('aria-label',
     'Pipeline diagram: arrow keys move it, + and \u2212 zoom, 0 fits; Tab reaches the nodes');
   function pan(dx, dy) {
-    vb.x += dx * vb.w;
-    vb.y += dy * vb.h;
+    var r = view.getBoundingClientRect();
+    cx += dx * r.width / z;
+    cy += dy * r.height / z;
+    mode = null;
     apply();
   }
   view.addEventListener('keydown', function (ev) {
@@ -158,20 +247,21 @@
     else if (k === 'ArrowRight') pan(step, 0);
     else if (k === 'ArrowUp') pan(0, -step);
     else if (k === 'ArrowDown') pan(0, step);
-    else if (k === '+' || k === '=') zoom(1 / 1.25);
-    else if (k === '-' || k === '\u2212') zoom(1.25);
+    else if (k === '+' || k === '=') zoom(1.25);
+    else if (k === '-' || k === '\u2212') zoom(1 / 1.25);
     else if (k === '0') fit();
     else return;
     ev.preventDefault();
+    ev.stopPropagation();
   });
   view.addEventListener('focusin', function (ev) {
     var g = ev.target.closest && ev.target.closest('.op-dag-node');
     if (!g) return;
     var b = g.getBoundingClientRect(), r = view.getBoundingClientRect();
     if (b.left < r.left || b.top < r.top || b.right > r.right || b.bottom > r.bottom) {
-      var k = vb.w / (r.width || W);
-      vb.x += ((b.left + b.right) / 2 - (r.left + r.right) / 2) * k;
-      vb.y += ((b.top + b.bottom) / 2 - (r.top + r.bottom) / 2) * k;
+      cx += ((b.left + b.right) / 2 - (r.left + r.right) / 2) / z;
+      cy += ((b.top + b.bottom) / 2 - (r.top + r.bottom) / 2) / z;
+      mode = null;
       apply();
     }
   });
@@ -227,8 +317,6 @@
     el.removeAttribute('color');
     W = +el.getAttribute('width');
     H = +el.getAttribute('height');
-    var cw = view.clientWidth || W, k0 = Math.max(W / cw, 1);
-    root.style.setProperty('--op-dag-h', Math.round(Math.min(Math.max(H / k0, 120), 560)) + 'px');
     el.removeAttribute('width');
     el.removeAttribute('height');
     el.style.width = '100%';
@@ -243,6 +331,7 @@
       g.addEventListener('keydown', function (ev) {
         if (ev.key === 'Enter' || ev.key === ' ') {
           ev.preventDefault();
+          ev.stopPropagation();
           select(i);
         }
       });
@@ -257,7 +346,9 @@
       panel.classList.remove('op-dag-open');
     }
     root.classList.add('op-dag-live');
-    fit();
+    lastWidth = view.clientWidth;
+    height();
+    first();
   }
   show(0);
 })();

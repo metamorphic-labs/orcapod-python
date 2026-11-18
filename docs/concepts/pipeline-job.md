@@ -284,8 +284,11 @@ Every job also carries its blueprint as `job.pipeline`.
 
 In a notebook, a job or a pipeline shown at the end of a cell draws itself: a diagram of its
 nodes (sources, operators, function pods, side-effect pods) and the streams between them,
-laid out left to right. Drag to move it and use the `+`, `−` and `fit` buttons (or Ctrl or
-Cmd with the mouse wheel) to zoom; from the keyboard, focus the diagram and use the arrow keys
+laid out left to right. It is drawn as wide as the cell, at most 1.25 times its own size; a
+diagram that would then be drawn below 0.8 times its size, where its labels get hard to
+read, starts at 0.8 times from its left (or top) end, and a shaded edge with an arrow shows
+that there is more: click it or drag to move along, or use `fit` to see all of it. Drag to
+move it and use the `+`, `−` and `fit` buttons (or Ctrl or Cmd with the mouse wheel) to zoom; from the keyboard, focus the diagram and use the arrow keys
 to move it, `+` and `-` to zoom and `0` to fit, and Tab to reach the nodes. Click a node (or focus it and press Enter) to see its
 schema: its tag and data columns, the nodes it reads from and, for a job, its run status and
 the row counts of the job's last run. `diagram()` makes the same diagram with options, and
