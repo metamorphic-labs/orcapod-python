@@ -23,7 +23,18 @@ def compute_bmi(weight: float, height: float) -> float:
 Key points:
 
 - **`output_keys`** names the output data column(s). A single string means one output
-  column; a list of strings means the function returns multiple values.
+  column; a list of strings means the function returns multiple values. A function with
+  no outputs (it only reads its inputs) is annotated `-> None`, or not annotated, and
+  takes no `output_keys`; its pod has no output columns. `-> None` together with
+  `output_keys` raises `ValueError` when the pod is created, and a value other than
+  `None` returned by a function with no outputs raises `NoOutputsDeclaredError` (an
+  `OutputTypeError`): to keep the value, declare an output key with its type (a return
+  annotation or `output_schema`), or return nothing. Such a pod is
+  limited for now: in a job its rows fail, over data-tags and before an operator it
+  raises (ITL-1260); for a function run for its effect, use a `SideEffectPod`. An
+  output that may be
+  missing is not "no outputs": it is one output key typed `T | None`, and a returned
+  `None` is stored as a null.
 - **Function parameters** are matched to the input stream's data columns by name: one data
   column per parameter. A parameter with a default value may be left out of the stream, and
   the default is used. Data columns the function does not take are dropped when the pod is
@@ -34,6 +45,9 @@ Key points:
   dataclass instance, raises `TypeError` when the pod is created, naming the parameter. Use
   a hashable default and build the object inside the function, or supply the value as an
   input column. See [Function values and parameter defaults](../reference/hashing.md#1d-function-values-and-parameter-defaults).
+- **Inputs are passed by name.** A parameter may be keyword-only (after `*`), but a
+  positional-only parameter (before `/`) and `*args` / `**kwargs` raise `ValueError`
+  when the pod is created.
 - **Parameter types** are used to validate schema compatibility. Give each parameter a type
   annotation, or supply its type through the decorator's `input_schema` mapping. A parameter
   with neither raises `ValueError` when the pod is created.
@@ -82,7 +96,7 @@ print("Data schema:", dict(data_schema))
 # Data schema: {'bmi': <class 'float'>}
 
 # Iterate over results
-for tag, data in result.iter_data():
+for tag, data in result:
     print(f"  {tag.as_dict()} -> {data.as_dict()}")
 # {'subject_id': 'mouse_01'} -> {'bmi': 1756.9444444444446}
 # {'subject_id': 'mouse_02'} -> {'bmi': 2209.9999999999995}
@@ -114,7 +128,7 @@ wide = DictSource(
 )
 
 result = compute_bmi.pod(wide)  # 'age' is not a parameter: it is dropped
-for tag, data in result.iter_data():
+for tag, data in result:
     print(f"{tag.as_dict()} -> {data.as_dict()}")
 # {'subject_id': 'mouse_01'} -> {'bmi': 1756.9444444444446}
 # {'subject_id': 'mouse_02'} -> {'bmi': 2209.9999999999995}
@@ -289,7 +303,7 @@ explicit:
 def twice(weight: float) -> list[float]:
     return list((weight, weight * 2))
 
-for tag, data in twice.pod(weights).iter_data():
+for tag, data in twice.pod(weights):
     print(data.as_dict())
 # {'weights': [25.3, 50.6]}
 ```
@@ -1131,12 +1145,12 @@ recordings = DictSource(
     tag_columns=["session"], tag_only_columns=True,
 )
 readings = load_readings.pod(recordings)
-for tag, data in readings.iter_data():
+for tag, data in readings:
     print(tag["session"], dict(data["readings"].schema))
 # s1 {'sample': UInt16, 'voltage': Float32}
 # s2 {'sample': UInt16, 'voltage': Float32}
 
-for tag, data in count_rows.pod(readings).iter_data():
+for tag, data in count_rows.pod(readings):
     print(tag["session"], data["n_rows"])
 # s1 2
 # s2 3
@@ -1177,7 +1191,7 @@ labels = DictSource(
     tag_columns=["sample"], tag_only_columns=True,
     data_schema={"sample": str, "counts": list[int | None]},
 )
-for tag, data in labels.iter_data():
+for tag, data in labels:
     print(data["counts"])
 # [3, None, 1]
 ```
@@ -1218,7 +1232,7 @@ heights = DictSource(
 )
 
 result = compute_bmi.pod(weights, heights)
-for tag, data in result.iter_data():
+for tag, data in result:
     print(f"{tag.as_dict()} -> {data.as_dict()}")
 # {'subject_id': 'mouse_01'} -> {'bmi': 1756.9444444444446}
 # {'subject_id': 'mouse_02'} -> {'bmi': 2209.9999999999995}
@@ -1242,7 +1256,7 @@ chosen = DictSource(
 )
 
 result = compute_bmi.pod(weights, heights, chosen)
-for tag, data in result.iter_data():
+for tag, data in result:
     print(f"{tag.as_dict()} -> {data.as_dict()}")
 # {'subject_id': 'mouse_02'} -> {'bmi': 2209.9999999999995}
 ```

@@ -21,7 +21,7 @@ from orcapod.hashing.hash_utils import (
     get_function_components,
 )
 from orcapod.core.result_cache import ResultCache
-from orcapod.errors import OutputTypeError
+from orcapod.errors import NoOutputsDeclaredError, OutputTypeError
 from orcapod.protocols.core_protocols import DataFunctionProtocol, DataProtocol
 from orcapod.protocols.core_protocols.executor import (
     DataFunctionExecutorProtocol,
@@ -80,7 +80,8 @@ def parse_function_outputs(
     Map raw function return values to a keyed output dict.
 
     Rules:
-        - ``output_keys = []``: return value is ignored; empty dict returned.
+        - ``output_keys = []``: empty dict returned. ``PythonDataFunction`` refuses a
+          returned value other than ``None`` before this is called (ITL-1257).
         - ``output_keys = ["result"]``: any value (including iterables) is stored as-is
           under the single key.
         - ``output_keys = ["a", "b", ...]``: ``values`` must be iterable and its length
@@ -439,11 +440,27 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
                 f"parameters (*args / **kwargs). "
                 f"Offending parameters: {_variadic!r}."
             )
+        # A pod passes its inputs by name, so a positional-only parameter could never
+        # be given (ITL-1258).
+        _positional_only = [
+            name
+            for name, param in _sig.parameters.items()
+            if param.kind is inspect.Parameter.POSITIONAL_ONLY
+        ]
+        if _positional_only:
+            raise ValueError(
+                f"PythonDataFunction does not support functions with positional-only "
+                f"parameters: a function pod passes its inputs by name. "
+                f"Offending parameters: {_positional_only!r}; remove the '/' from the "
+                f"signature."
+            )
 
         if output_keys is None:
             output_keys = []
         if isinstance(output_keys, str):
             output_keys = [output_keys]
+        # A copy taken once: a later change to the caller's list changes nothing.
+        output_keys = tuple(output_keys)
         self._output_keys = output_keys
         if function_name is None:
             if hasattr(self._function, "__name__"):
@@ -617,9 +634,15 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
             A Data containing the parsed outputs with source info.
 
         Raises:
+            NoOutputsDeclaredError: If the function declares no outputs and returned a
+                value other than ``None``.
             OutputTypeError: If a returned value does not conform to its declared type,
                 or cannot be converted to it.
         """
+        if not self._output_keys and values is not None:
+            # No output keys declare an empty return (ITL-1257): a returned value
+            # contradicts the declaration and is refused, never dropped.
+            raise NoOutputsDeclaredError(self.canonical_function_name, values)
         output_data = parse_function_outputs(self._output_keys, values)
         output_schema = self.output_data_schema
         for key, value in output_data.items():

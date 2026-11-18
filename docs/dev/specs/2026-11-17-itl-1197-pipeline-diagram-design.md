@@ -87,6 +87,23 @@ The developer confirmed the diagram as the default rich display of `Pipeline` an
   fallback shows the `collapse=` layout. Output is deterministic. Size: the other layout
   adds about half again (100 joined branches, 401 nodes, 201 folded: 923 KiB of HTML
   instead of about 613 KiB; built in 0.03 s). Default False (the tutorial teaches the node names, SelectDataColumns_1 etc.).
+- Direction checkbox (developer, November 17, 2026; ITL-1232): the output embeds every
+  layout of both directions and both collapse states, in one JSON block (`op-dag-views`,
+  which replaced `op-dag-other`): the shown direction and collapse state, the other
+  collapse state's model (when folding changes something and it has at most `max_nodes`
+  nodes) and the other layouts' standalone SVGs, base64: up to three. The script builds a
+  `vertical` checkbox (ticked for top to bottom) and the `collapse` checkbox for the
+  layouts the block holds, and fits each new picture as on first display. Above
+  `_MAX_EMBEDDED_NODES` (100) nodes no other layout is embedded and neither checkbox
+  appears. Sizes (wrapped node text): the tutorial job 31 KiB with one layout, 61 KiB
+  with four; 100 foldable nodes 174 KiB with one, 516 KiB with four; 200 nodes 335 KiB
+  and 1,019 KiB; 400 nodes (the default `max_nodes`, one layout above the limit) 659 KiB.
+- Node text (ITL-1232): the kind line is wrapped at its ` · ` separators to the width of
+  the label or its widest part (within the node width limits), one 13 px line more per
+  wrapped line; nothing is dropped from it. Tutorial job left to right: 1,664 x 134 px
+  before, 1,213 x 186 px after (top to bottom 428 x 668, 383 x 772); a two-node job
+  499 x 68 before, 279 x 94 after. At a 1,280 px JupyterLab window (a 1,062 px view)
+  the tutorial job now fits at 0.88, above the 0.8 floor of ITL-1231: shown whole.
 
 ## 3. Rendering approach
 
@@ -133,6 +150,38 @@ in a sanitized output. Untrusted: the picture and the Nodes table. Trusted: inte
 (b) Vendored library: see section 8 (later end state).
 (c) anywidget/ipywidgets: rejected: new dependencies, widget state lost on save/export
 unless widget state is saved, Colab needs its custom widget manager.
+
+### Scale and size of the view (ITL-1231)
+
+Developer and coordinator decision, November 17, 2026. The view keeps a scale (screen
+pixels per picture unit) and the picture point at its centre; the viewBox is derived from
+them and the view's size every time, so it always has the view's proportions. Before, the
+script fitted once, while JupyterLab had not yet given the cell its final width, kept that
+viewBox, and so drew the tutorial job at about 0.26 of its size in a much larger box.
+
+- `MAX_SCALE` = 1.25 (`diagram.js`, and `diagram._MAX_SCALE` for the image): labels (13 px)
+  at 16 px, the kind line (11 px) at 13.75 px; a two-node job is not blown up.
+- Fit (button, `0`) shows the whole picture, scaled up or down, at most `MAX_SCALE`.
+- First display: as fit, but never below `MIN_FIRST_SCALE` = 0.8 (labels at 10.4 px). The
+  tutorial job is 1664 px wide (seven layers), so in a cell narrower than 1330 px it starts
+  at 0.8 from its left end (a top-to-bottom picture taller than the view, from its top).
+  Each edge beyond which the picture goes on shows a grey fade with an arrow (made by the
+  script; a click moves half a view that way).
+- The view's height is the picture's at its first-display scale, at most 560 px, at least
+  120 px unless the picture is shorter at `MAX_SCALE`: no empty band.
+- A change of the view's width (observed on the title line, so the new height does not
+  feed back) redraws as on first display, or as fit after fit; after a zoom or pan it keeps
+  the scale and centre.
+- Keys the diagram handles stop propagating (JupyterLab's arrow keys and `0 0`); in
+  JupyterLab 4.6.6 they had no effect on the notebook even before.
+- No script: the image is `width:100%` with `max-width` at 1.25 times its own width;
+  JupyterLab keeps that style in an untrusted notebook.
+- Checked in JupyterLab 4.6.6 (headless Chrome, 820 and 1280 px windows, light and dark,
+  trusted and untrusted): `docs/dev/scripts/itl_1231/` and the pictures in
+  `docs/dev/specs/itl-1231-diagram-scale/`. The report that a scripted zoom did nothing
+  was not reproduced: clicks and focused keys zoom on `main` too; a key sent while the
+  diagram is not focused goes to the notebook. Making the nodes narrower, so that the whole
+  tutorial job reads at fit, is ITL-1214.
 
 ## 4. Layout quality
 

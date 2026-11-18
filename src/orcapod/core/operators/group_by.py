@@ -14,6 +14,7 @@ from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
+from orcapod.utils.schema_utils import column_names
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -112,15 +113,17 @@ class GroupBy(UnaryOperator):
     what tells a batch's members apart.
 
     Args:
-        by: Tag column names to group on.  Must be non-empty, free of
-            duplicates, and must all be scalar tag columns of the input stream.
+        by: Tag column names to group on, or one name as a string (a bare
+            string is one name, never its characters).  Must be non-empty, free
+            of duplicates, and must all be scalar tag columns of the input
+            stream.
     """
 
     # Data-tags (ITL-1023): handled.
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
-    def __init__(self, by: Collection[str], **kwargs: Any) -> None:
-        by_tuple = tuple(by)
+    def __init__(self, by: str | Collection[str], **kwargs: Any) -> None:
+        by_tuple = column_names(by)
         if not by_tuple:
             raise ValueError("GroupBy requires at least one column in `by`.")
         duplicates = sorted({c for c in by_tuple if by_tuple.count(c) > 1})

@@ -86,3 +86,11 @@
 :root:not([data-theme='light']) .hero > img {
 	filter: invert(1);
 }
+
+/* A page picture made in a light and a dark version is written twice, with GitHub's
+ * fragments (`![...](x-light.png#gh-light-mode-only)`, `![...](x-dark.png#gh-dark-mode-only)`),
+ * so GitHub and the site each show the one that matches the theme. */
+:root:not([data-theme='light']) .sl-markdown-content img[src$='#gh-light-mode-only'],
+:root[data-theme='light'] .sl-markdown-content img[src$='#gh-dark-mode-only'] {
+	display: none;
+}

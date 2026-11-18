@@ -94,8 +94,8 @@ pyspiral keeps the login in its per-user directory (`~/Library/Application Suppo
 on macOS, `~/.config/pyspiral/` on Linux):
 
 ```bash
-pip install "orcapod[spiraldb]"
-spiral login
+uv add "orcapod[spiraldb]"      # or, without uv: pip install "orcapod[spiraldb]"
+uv run spiral login
 ```
 
 Log in before you build a source. Without a saved login, pyspiral starts a sign-in in the
@@ -711,7 +711,7 @@ print("Data keys:", data_keys)
 # Data keys: ('age', 'weight')
 
 # Iterate over (Tag, Data) pairs
-for tag, data in source.iter_data():
+for tag, data in source:
     print(f"  Tag: {tag.as_dict()}, Data: {data.as_dict()}")
 # Tag: {'subject_id': 'mouse_01'}, Data: {'age': 12, 'weight': 25.3}
 # Tag: {'subject_id': 'mouse_02'}, Data: {'age': 8, 'weight': 22.1}

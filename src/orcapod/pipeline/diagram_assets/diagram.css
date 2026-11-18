@@ -25,9 +25,17 @@
   padding-right: 96px;
 }
 
-/* Wider room when the collapse checkbox sits beside the buttons. */
-.op-dag.op-dag-has-other .op-dag-head {
+/* Wider room when the direction or collapse checkbox sits beside the buttons. */
+.op-dag.op-dag-has-collapse .op-dag-head {
   padding-right: 190px;
+}
+
+.op-dag.op-dag-has-direction .op-dag-head {
+  padding-right: 180px;
+}
+
+.op-dag.op-dag-has-direction.op-dag-has-collapse .op-dag-head {
+  padding-right: 270px;
 }
 
 /* The separator before the "preview" tag shows only without this style sheet. */
@@ -53,10 +61,76 @@
 }
 
 .op-dag.op-dag-live .op-dag-view {
+  position: relative;
   overflow: hidden;
   cursor: grab;
   height: var(--op-dag-h, auto);
   touch-action: none;
+}
+
+/*
+ * The cues at the edges of the view beyond which the picture goes on: a grey fade
+ * (grey reads on light and dark themes alike) with an arrow; a click moves the
+ * picture that way. Made by the script and shown only on the edges it marks.
+ */
+.op-dag .op-dag-more {
+  display: none;
+  position: absolute;
+  align-items: center;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  color: inherit;
+  font: 20px/1 system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.op-dag .op-dag-more-left,
+.op-dag .op-dag-more-right {
+  top: 0;
+  bottom: 0;
+  width: 30px;
+  padding: 0 5px;
+}
+
+.op-dag .op-dag-more-top,
+.op-dag .op-dag-more-bottom {
+  left: 0;
+  right: 0;
+  height: 24px;
+  padding: 2px 0;
+  justify-content: center;
+}
+
+.op-dag .op-dag-more-left {
+  left: 0;
+  justify-content: flex-start;
+  background: linear-gradient(to right, rgba(127, 127, 127, .4), rgba(127, 127, 127, 0));
+}
+
+.op-dag .op-dag-more-right {
+  right: 0;
+  justify-content: flex-end;
+  background: linear-gradient(to left, rgba(127, 127, 127, .4), rgba(127, 127, 127, 0));
+}
+
+.op-dag .op-dag-more-top {
+  top: 0;
+  align-items: flex-start;
+  background: linear-gradient(to bottom, rgba(127, 127, 127, .4), rgba(127, 127, 127, 0));
+}
+
+.op-dag .op-dag-more-bottom {
+  bottom: 0;
+  align-items: flex-end;
+  background: linear-gradient(to top, rgba(127, 127, 127, .4), rgba(127, 127, 127, 0));
+}
+
+.op-dag.op-dag-clip-left .op-dag-more-left,
+.op-dag.op-dag-clip-right .op-dag-more-right,
+.op-dag.op-dag-clip-top .op-dag-more-top,
+.op-dag.op-dag-clip-bottom .op-dag-more-bottom {
+  display: flex;
 }
 
 .op-dag .op-dag-node {
@@ -97,7 +171,7 @@
   gap: 4px;
 }
 
-.op-dag .op-dag-collapse {
+.op-dag .op-dag-check {
   font: 12px system-ui, sans-serif;
   display: flex;
   align-items: center;
@@ -106,7 +180,7 @@
   cursor: pointer;
 }
 
-.op-dag .op-dag-collapse input {
+.op-dag .op-dag-check input {
   margin: 0;
 }
 

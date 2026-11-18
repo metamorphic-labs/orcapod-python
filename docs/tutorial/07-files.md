@@ -213,7 +213,7 @@ summaries = job.nodes["summaries"]
 print(summaries.output_schema()[1])
 # Schema({'summary': Path})
 wanted = {"subject_id": "mouse_01", "session": "s1", "probe": "imec0"}
-data = next(data for tag, data in summaries.iter_data() if tag.as_dict() == wanted)
+data = next(data for tag, data in summaries if tag.as_dict() == wanted)
 print(data.as_dict()["summary"].read_text())
 # n_spikes: 1737
 # last_spike_s: 59.9999
@@ -377,7 +377,7 @@ containing the total number of spikes over both probes. (Hint: Part 4. After
     # Schema({'spikes': list[orcapod.logical_types.file_type.File]})
 
     totals = write_session_total.pod(per_session)
-    for tag, data in totals.iter_data():
+    for tag, data in totals:
         path = data.as_dict()["total_file"]
         print(path.name, path.read_text().strip())
     # mouse_01_s1_total.txt 2897

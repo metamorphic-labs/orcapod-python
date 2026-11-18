@@ -284,8 +284,11 @@ Every job also carries its blueprint as `job.pipeline`.
 
 In a notebook, a job or a pipeline shown at the end of a cell draws itself: a diagram of its
 nodes (sources, operators, function pods, side-effect pods) and the streams between them,
-laid out left to right. Drag to move it and use the `+`, `−` and `fit` buttons (or Ctrl or
-Cmd with the mouse wheel) to zoom; from the keyboard, focus the diagram and use the arrow keys
+laid out left to right. It is drawn as wide as the cell, at most 1.25 times its own size; a
+diagram that would then be drawn below 0.8 times its size, where its labels get hard to
+read, starts at 0.8 times from its left (or top) end, and a shaded edge with an arrow shows
+that there is more: click it or drag to move along, or use `fit` to see all of it. Drag to
+move it and use the `+`, `−` and `fit` buttons (or Ctrl or Cmd with the mouse wheel) to zoom; from the keyboard, focus the diagram and use the arrow keys
 to move it, `+` and `-` to zoom and `0` to fit, and Tab to reach the nodes. Click a node (or focus it and press Enter) to see its
 schema: its tag and data columns, the nodes it reads from and, for a job, its run status and
 the row counts of the job's last run. `diagram()` makes the same diagram with options, and
@@ -326,11 +329,18 @@ The options:
 - `collapse=True` folds the steps that only choose, rename or join columns (joins, column
   selections, drops and maps, among them the join and select a function pod adds for you)
   into the edge they lie on: the edge is dashed, and the node it leads to lists them. A step
-  is folded by what its operator is, whatever label it was given. In a notebook that runs
-  scripts, a `collapse` checkbox next to the zoom buttons switches between the two
-  layouts (`collapse=` sets the one shown first, and the one shown where scripts do not
-  run); it appears only when there is something to fold.
+  is folded by what its operator is, whatever label it was given.
 - `max_nodes` (400 by default): a larger graph is shown as the text listing instead.
+
+In a notebook that runs scripts, two checkboxes next to the zoom buttons switch the layout
+in place: `vertical` (top to bottom, or left to right when unticked) and `collapse` (which
+appears only when there is something to fold). `direction=` and `collapse=` set the layout
+shown first, and the one shown where scripts do not run. A selected node stays selected
+when it is in the new layout. The checkboxes appear for graphs of up to 100 nodes: a larger
+diagram carries only the layout its arguments ask for, which keeps a notebook small.
+
+In each node, the kind line under the name (kind, what it is, status) is wrapped onto
+short lines, so a node is about as wide as its name.
 
 Drawing a diagram never computes anything. Like `head()`, it reads only what is already
 known: each node's columns (which Orcapod knows without computing) and the run state the job

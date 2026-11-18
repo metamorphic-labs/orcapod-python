@@ -8,25 +8,29 @@ workshop dataset on disk.
 Orcapod needs Python 3.11 or newer. Create a fresh environment for the workshop so that
 nothing else on your machine is affected.
 
-With [uv](https://docs.astral.sh/uv/):
+With [uv](https://docs.astral.sh/uv/), the recommended way (`uv init` starts a project in the
+new directory, and `uv add` adds Orcapod to it):
 
 ```bash
 mkdir orcapod-workshop && cd orcapod-workshop
 uv init
-uv add orcapod
+uv add git+https://github.com/metamorphic-labs/orcapod-python
 ```
 
-With `pip`:
+Without uv, with `pip` in a virtual environment:
 
 ```bash
 mkdir orcapod-workshop && cd orcapod-workshop
 python -m venv .venv
 source .venv/bin/activate        # on Windows: .venv\Scripts\activate
-pip install orcapod
+pip install git+https://github.com/metamorphic-labs/orcapod-python
 ```
 
-If your workshop organiser asked you to install the development version instead, replace
-`orcapod` with `git+https://github.com/metamorphic-labs/orcapod-python.git` in either command.
+Both install the development version from the repository: until 0.4.0 is released, PyPI has
+no current stable release (0.3.0 was withdrawn), so a plain `uv add orcapod` installs 0.1.4,
+which this tutorial does not cover. If your workshop organiser asked you to install a release
+candidate, name it instead: `uv add "orcapod==0.4.0rc1"`. Once 0.4.0 is out, `uv add orcapod`
+(or `pip install orcapod`) installs the latest stable release.
 
 The tutorial needs nothing beyond this. Orcapod already depends on `pandas`, `polars` and
 `pyarrow`, which the samples use.
@@ -38,8 +42,8 @@ The tutorial needs nothing beyond this. Orcapod already depends on `pandas`, `po
 
 ## Check your install
 
-Save this as `check_install.py` and run it with `python check_install.py` (or
-`uv run python check_install.py`):
+Save this as `check_install.py` and run it with `uv run python check_install.py` (with
+`pip`, in the activated environment: `python check_install.py`):
 
 ```python
 from orcapod import PipelineJob, function_pod

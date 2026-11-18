@@ -3,7 +3,7 @@
 import inspect
 import logging
 import sys
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from types import UnionType
 from typing import Any, Union, get_args, get_origin, get_type_hints
 
@@ -134,6 +134,25 @@ def schema_incompatibility(
     return None
 
 
+def _declares_none(annotation: object) -> bool:
+    """Whether a return annotation, as read, is ``-> None``.
+
+    ``typing.get_type_hints`` turns ``-> None`` into ``NoneType``. When it fails on
+    another annotation, a postponed annotation (``from __future__ import annotations``)
+    is still text: ``"None"``, or ``"'None'"`` when it was written as a string
+    (``-> "None"``).
+
+    Args:
+        annotation: The return annotation as ``get_type_hints`` or the signature gives it.
+
+    Returns:
+        True when it is ``None`` written in one of those forms.
+    """
+    if annotation is type(None):
+        return True
+    return isinstance(annotation, str) and annotation.strip("'\"") == "None"
+
+
 def extract_function_schemas(
     func: Callable,
     output_keys: Collection[str],
@@ -259,6 +278,10 @@ def extract_function_schemas(
 
     # get_type_hints stores the return annotation under the key 'return'
     return_annot = resolved_hints.get("return", signature.return_annotation)
+    # ``-> None`` declares no outputs (ITL-1257), which is not an output whose value is
+    # None: the number of outputs is the number of output keys.
+    if _declares_none(return_annot):
+        return_annot = None
     inferred_output_types: Schema = {}
     if return_annot is not inspect.Signature.empty and return_annot is not None:
         output_item_types = []
@@ -520,12 +543,51 @@ def compute_source_schema_hash(
     )
 
 
-def _normalize_column_list(value: Any) -> list[str]:
-    """Normalize a column-list argument to a plain list of strings.
+def column_names(columns: str | Iterable[str]) -> tuple[str, ...]:
+    """Return the column names an argument gives, in the order given: the one rule.
 
-    Accepts a bare string (wraps it in a list), any iterable of strings
-    (converts to list), or raises ``TypeError`` for non-string non-iterable
-    inputs or iterables that contain non-string elements.
+    A bare string is one column name, never a collection of one-character names
+    (ITL-1221); any other iterable gives its elements. Every operator and source
+    argument that takes column names reads it through this function; the caller
+    then applies its own rules (sorting, repeats, an empty collection).
+
+    Args:
+        columns: One column name, or an iterable of column names.
+
+    Returns:
+        The names, in the order given.
+
+    Raises:
+        TypeError: If ``columns`` is ``bytes`` or ``bytearray`` (empty or not),
+            neither a string nor an iterable, or an element is not a string.
+    """
+    if isinstance(columns, str):
+        return (columns,)
+    if isinstance(columns, (bytes, bytearray)):
+        # Iterable, but of integers; an empty one would pass as no names.
+        raise TypeError(
+            "column names must be a string or iterable of strings, "
+            f"got {type(columns).__name__!r}"
+        )
+    try:
+        names = tuple(columns)
+    except TypeError:
+        raise TypeError(
+            "column names must be a string or iterable of strings, "
+            f"got {type(columns).__name__!r}"
+        ) from None
+    bad = [name for name in names if not isinstance(name, str)]
+    if bad:
+        raise TypeError(
+            f"column names must be strings; got {[type(x).__name__ for x in bad]!r}"
+        )
+    return names
+
+
+def _normalize_column_list(value: Any) -> list[str]:
+    """Normalize a ``tag_columns`` argument to a plain list of strings.
+
+    The rule is ``column_names``: a bare string is one name.
 
     Args:
         value: A single column name (``str``) or an iterable of column names.
@@ -537,22 +599,10 @@ def _normalize_column_list(value: Any) -> list[str]:
         TypeError: If ``value`` is not a ``str`` or iterable, or if any
             element of the iterable is not a ``str``.
     """
-    if isinstance(value, str):
-        return [value]
     try:
-        result = list(value)
-    except TypeError:
-        raise TypeError(
-            f"tag_columns must be a string or iterable of strings, "
-            f"got {type(value).__name__!r}"
-        )
-    bad = [x for x in result if not isinstance(x, str)]
-    if bad:
-        raise TypeError(
-            f"All tag_columns elements must be strings; "
-            f"got {[type(x).__name__ for x in bad]!r}"
-        )
-    return result
+        return list(column_names(value))
+    except TypeError as exc:
+        raise TypeError(f"tag_columns: {exc}") from None
 
 
 def require_output_keys_not_tags(
