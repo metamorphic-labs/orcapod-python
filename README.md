@@ -13,18 +13,24 @@ provenance token.
 
 Orcapod supports Python 3.11, 3.12 and 3.13 and is published on PyPI as `orcapod`:
 
+The recommended way to install it is [uv](https://docs.astral.sh/uv/): `uv add` adds
+Orcapod to a uv project (start one with `uv init` in a new directory), and `uv run` runs
+your code in that project's environment:
+
 ```bash
-pip install orcapod
-# or, in a uv project
 uv add orcapod
 ```
+
+In an environment not managed by uv, use `pip install orcapod` instead. A plain
+`uv add orcapod` installs the latest stable release; to try a release candidate, name it,
+for example `uv add "orcapod==0.4.0rc1"`.
 
 0.3.0 is the first release on PyPI since 0.1.4; 0.2.0 was never published to PyPI. Tables
 written by 0.2.0 or earlier are not read by 0.3.0: see
 [Upgrading from 0.2.0](https://github.com/metamorphic-labs/orcapod-python/blob/main/CHANGELOG.md#upgrading-from-020)
 (it also covers 0.1.4).
 
-Optional features are installed as extras:
+Optional features are installed as extras, for example `uv add "orcapod[spiraldb]"`:
 
 | Extra | Adds |
 |-------|------|

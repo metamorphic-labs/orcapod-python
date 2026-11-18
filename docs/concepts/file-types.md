@@ -139,7 +139,7 @@ def summarize(recording: op.File) -> Path:
 result = summarize.pod(files)
 print(result.output_schema()[1])
 # Schema({'summary': Path})
-for tag, data in result.iter_data():
+for tag, data in result:
     print(tag.as_dict(), data.as_dict()["summary"].read_text().strip())
 # {'name': 'a'} 3 lines
 # {'name': 'b'} 2 lines
@@ -180,7 +180,7 @@ def total_lines(recording: list[op.File]) -> int:
 
 
 everything = files.batch()
-for _, data in total_lines.pod(everything).iter_data():
+for _, data in total_lines.pod(everything):
     print(data.as_dict())
 # {'total_lines': 5}
 ```

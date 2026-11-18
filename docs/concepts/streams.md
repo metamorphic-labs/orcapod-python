@@ -78,11 +78,13 @@ tag_keys, data_keys = stream.keys()
 
 ### `iter_data()`
 
-Iterates over (Tag, Data) pairs. Each Tag and Data is an immutable datagram that you can
-inspect with `.as_dict()`:
+Iterates over (Tag, Data) pairs. A stream is itself iterable, and iterating it is the same as
+calling `iter_data()`, so a loop is written `for tag, data in stream:`; the method is there
+for when the iterator is passed on as a value (`list(stream.iter_data())`). Each Tag and Data
+is an immutable datagram that you can inspect with `.as_dict()`:
 
 ```python
-for tag, data in stream.iter_data():
+for tag, data in stream:
     print(tag.as_dict(), data.as_dict())
 # {'subject_id': 'mouse_01'} {'age': 12, 'weight': 25.3}
 # {'subject_id': 'mouse_02'} {'age': 8, 'weight': 22.1}
@@ -358,7 +360,7 @@ print("Data schema:", dict(data_schema))
 # Data schema: {'age': <class 'int'>, 'weight': <class 'float'>}
 
 # Iterate over (Tag, Data) pairs
-for tag, data in source.iter_data():
+for tag, data in source:
     print(f"  {tag.as_dict()} -> {data.as_dict()}")
 # {'subject_id': 'mouse_01'} -> {'age': 12, 'weight': 25.3}
 # {'subject_id': 'mouse_02'} -> {'age': 8, 'weight': 22.1}

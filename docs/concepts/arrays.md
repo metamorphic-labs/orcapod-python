@@ -23,7 +23,7 @@ source = DictSource(
     tag_columns=["trial"],
     source_id="trials",
 )
-for tag, data in scale.pod(source).iter_data():
+for tag, data in scale.pod(source):
     print(tag["trial"], data["scaled"].dtype, data["scaled"].shape)
 # t1 float32 (2, 3)
 ```
@@ -246,7 +246,7 @@ big = np.asfortranarray(np.arange(6, dtype=">f4").reshape(2, 3))
 kept = DictSource(
     data=[{"trial": "t1", "signal": big}], tag_columns=["trial"], source_id="kept"
 )
-for tag, data in kept.iter_data():
+for tag, data in kept:
     print(data["signal"].dtype.str, data["signal"].flags.f_contiguous)
 # >f4 True
 ```
@@ -269,9 +269,9 @@ values have different hashes.
 ## PyTorch tensors
 
 A `torch.Tensor` can be a data value too. PyTorch is an optional dependency. Tensor support
-works whenever PyTorch can be imported, however it was installed: `pip install "orcapod[torch]"`
-installs it from PyPI, or install the build that suits your hardware yourself (see
-pytorch.org; on Linux the PyPI build includes CUDA, and pytorch.org also offers smaller
+works whenever PyTorch can be imported, however it was installed: `uv add "orcapod[torch]"`
+(or `pip install "orcapod[torch]"`) installs it from PyPI, or install the build that suits
+your hardware yourself (see pytorch.org; on Linux the PyPI build includes CUDA, and pytorch.org also offers smaller
 CPU-only builds). Orcapod needs PyTorch 2.6 or later, the first version whose restricted
 loader (below) reads `uint16`, `uint32` and `uint64` tensors, and is tested with PyTorch 2.15. Orcapod
 hashes a tensor's elements through NumPy (`Tensor.numpy()`), so your PyTorch build must
@@ -299,7 +299,7 @@ tensors = DictSource(
     tag_columns=["trial"],
     source_id="tensor_trials",
 )
-for tag, data in scale_tensor.pod(tensors).iter_data():
+for tag, data in scale_tensor.pod(tensors):
     print(tag["trial"], data["scaled"].dtype, tuple(data["scaled"].shape))
 # t1 torch.float32 (2, 3)
 ```
