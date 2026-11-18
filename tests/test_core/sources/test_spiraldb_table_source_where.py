@@ -581,6 +581,66 @@ class TestRunsAndSavedJobs:
                 first.pod(events.where(subject_id="m1"), label="first")
                 second.pod(events.where(subject_id="m2"), label="second")
 
+    def test_streams_built_before_the_capture_are_checked_too(self, project, tmp_path):
+        """Streams over differently restricted sources, built outside, are refused."""
+
+        @function_pod(output_keys="a")
+        def first(amplitude: float | None) -> float | None:
+            """Return ``amplitude``."""
+            return amplitude
+
+        @function_pod(output_keys="b")
+        def second(amplitude: float | None) -> float | None:
+            """Return ``amplitude``."""
+            return amplitude
+
+        events = _source(source_id="events", tag_only_columns=True)
+        m1 = events.where(subject_id="m1").select_data_columns(["amplitude"])
+        m2 = events.where(subject_id="m2").select_data_columns(["amplitude"])
+        job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
+        with pytest.raises(ValueError, match="different rows in one pipeline"):
+            with job:
+                first.pod(m1, label="first")
+                second.pod(m2, label="second")
+
+    def test_a_refused_invocation_records_nothing(self, project, tmp_path):
+        """After the refusal the graph holds only what was captured before it."""
+
+        @function_pod(output_keys="a")
+        def first(amplitude: float | None) -> float | None:
+            """Return ``amplitude``."""
+            return amplitude
+
+        @function_pod(output_keys="b")
+        def second(channel: int | None) -> int | None:
+            """Return ``channel``."""
+            return channel
+
+        events = _source(source_id="events", tag_only_columns=True)
+        job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
+        with job:
+            first.pod(events.where(subject_id="m1"), label="first")
+            with pytest.raises(ValueError):
+                second.pod(events.where(subject_id="m2"), label="second")
+        only_first = PipelineJob(name="one")
+        with only_first:
+            first.pod(events.where(subject_id="m1"), label="first")
+
+        assert sorted(job.nodes) == sorted(only_first.nodes)
+        job.run()
+        rows = job.nodes["first"].as_table().column("timestamp").to_pylist()
+        assert sorted(rows) == [1, 2, 3]
+
+    def test_two_inputs_of_one_invocation_are_checked(self, project):
+        """One operator over two differently restricted sources of one table."""
+        events = _source(source_id="events", tag_only_columns=True)
+        job = PipelineJob(name="two")
+        with pytest.raises(ValueError, match="different rows in one pipeline"):
+            with job:
+                events.where(subject_id="m1").semi_join(
+                    events.where(subject_id="m2"), label="both"
+                )
+
     @pytest.mark.parametrize("restrict", [False, True])
     def test_one_restriction_twice_in_one_job_is_accepted(
         self, project, tmp_path, restrict

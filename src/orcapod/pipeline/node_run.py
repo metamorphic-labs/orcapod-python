@@ -253,29 +253,61 @@ def _restriction_of(stream: Any) -> dict[str, Any]:
     return record_of() if record_of is not None else {}
 
 
+def _restrictions_beneath(stream: Any) -> list[tuple[str, str]]:
+    """The restrictions of every source a stream reads, as sorted comparable pairs.
+
+    Walks ``upstreams`` and a ``SourceJobNode``'s bound source down to the root
+    sources; each restricted root gives ``(source name, repr of its restriction)``.
+    """
+    from orcapod.core.nodes.source_node import SourceJobNode
+
+    found: list[tuple[str, str]] = []
+    visited: list[Any] = []
+    pending = [stream]
+    while pending:
+        current = pending.pop()
+        if any(current is seen for seen in visited):
+            continue
+        visited.append(current)
+        record = _restriction_of(current)
+        if record:
+            found.append((_source_name(current), repr(sorted(record.items()))))
+        if isinstance(current, SourceJobNode):
+            if current.bound_source is not None:
+                pending.append(current.bound_source)
+        else:
+            pending.extend(getattr(current, "upstreams", ()))
+    return sorted(found)
+
+
 def require_one_restriction(known: Any, other: Any) -> None:
-    """Refuse two sources of one identity with different restrictions in one graph.
+    """Refuse two streams of one identity that read differently restricted sources.
 
     A restriction (ITL-1218) does not change a source's identity, so a pipeline
-    records one source per content hash and every node over that hash reads it.
-    Two sources of one table restricted differently would be one source of the
-    graph and the second restriction would be lost: refused instead.
+    records one stream per content hash and every node over that hash reads it.
+    Two streams of one content hash over differently restricted sources (two
+    sources of one table, or two streams built on them before the capture) would
+    be one input of the graph and one restriction would be lost: refused instead.
 
     Args:
-        known: The source the graph already holds for the content hash.
+        known: The stream the graph already holds for the content hash.
         other: Another stream with the same content hash.
 
     Raises:
-        ValueError: If the two restrict their rows differently.
+        ValueError: If the sources beneath the two restrict their rows differently.
     """
-    known_record, other_record = _restriction_of(known), _restriction_of(other)
-    if known_record != other_record:
+    known_found, other_found = (
+        _restrictions_beneath(known),
+        _restrictions_beneath(other),
+    )
+    if known_found != other_found:
         raise ValueError(
-            f"Two sources of one identity ({_source_name(known)!r}) read different "
-            f"rows in one pipeline: {known_record or 'every row'} and "
-            f"{other_record or 'every row'}. A restriction does not change a "
-            "source's identity, so a pipeline holds one of them: use one restriction "
-            "for the table in this pipeline, or build a separate pipeline."
+            f"Two inputs of one identity ({_stream_name(known)!r}) read different "
+            "rows in one pipeline: their sources are restricted differently "
+            f"({known_found or 'no restriction'} and {other_found or 'no restriction'}). "
+            "A restriction does not change a source's identity, so a pipeline "
+            "holds one of them: use one restriction for the table in this pipeline, "
+            "or build a separate pipeline."
         )
 
 
@@ -376,6 +408,14 @@ def warn_restricted_aggregation(dag: Any) -> None:
         registry=None,
         module_globals=caller.f_globals,
     )
+
+
+def _stream_name(stream: Any) -> str:
+    """A stream's name for a message: a source's id or label, any other's label."""
+    try:
+        return _source_name(stream)
+    except AttributeError:
+        return str(getattr(stream, "label", type(stream).__name__))
 
 
 def _source_name(source: Any) -> str:
