@@ -6,6 +6,7 @@ Usage::
     uv run python tests/test_hashing/golden/generate_golden_hashes.py --check    # report
     uv run python tests/test_hashing/golden/generate_golden_hashes.py --release 0.4.0
     uv run python tests/test_hashing/golden/generate_golden_hashes.py --remove <entry>
+    uv run python tests/test_hashing/golden/generate_golden_hashes.py --relocate
 
 The golden values of the current data context live in
 ``tests/test_hashing/golden/data/<folder>/<group>-NN.json``, and the manifest of the data
@@ -44,6 +45,16 @@ The rules (developer, November 15, 2026, ITL-946; reopened November 17, 2026, IT
    and a written migration assessment: ``--remove <entry>`` takes the entry out of its
    unreleased file and records that file again in the open revision (it refuses an entry a
    release lists), then ``--add`` writes the new value.
+
+5. Provisional operators (``orcapod.operators.PROVISIONAL_OPERATORS``, ITL-1266) are outside
+   the freeze. A case that depends on one declares it (``@case(..., provisional=(...))``);
+   its entries go to ``<folder>/provisional/<group>.json``, which the manifest lists in
+   ``golden.provisional``, outside the history, so no release freezes them. Their values
+   are checked like every other and change only with the developer's approval of the exact
+   list (``--remove`` then ``--add``), without a new data context. ``--relocate`` moves
+   pinned entries, values unchanged, to the kind of file their case declares: out of an
+   unreleased frozen file into the provisional file, or, when an operator leaves the group
+   before a release, into the open frozen file of its group.
 
 Never edit a golden file to make a failing test pass. If a test fails and you did not mean to
 change a hash, the code change is the bug.

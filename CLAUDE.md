@@ -507,6 +507,20 @@ Orcapod stores or embeds in a name is pinned in the golden folder of the current
   generator writes the new value. `--release 0.4.0` freezes v1. Any version published
   before it, a pre-release included, would freeze v1 there: the Release workflow requires
   the release step for every version. A withdrawn version is never released again.
+- Provisional operators are outside the freeze (developer, November 18, 2026, ITL-1266):
+  `orcapod.operators.PROVISIONAL_OPERATORS` (`core/operators/provisional.py`) is the one
+  list (name to the issue deciding its identity; today `PolarsFilter`), and each listed class
+  sets `PROVISIONAL = True` (a test checks they agree). Building one issues
+  `ProvisionalHashWarning` once per operator per process. A golden case that depends on one
+  declares it (`@case(..., provisional=("PolarsFilter",))`; `compute_group_kinds` refuses a
+  case that builds an undeclared one); its entries live in
+  `data/<folder>/provisional/<group>.json`, listed in `golden.provisional` of the manifest,
+  outside the history, so no release freezes them. They are checked like every other value
+  and change only with the developer's approval of the exact list, without a new data
+  context. `generate_golden_hashes.py --relocate` moves entries, values unchanged, between
+  frozen and provisional files; an operator leaving the group has its entries relocated into
+  a frozen file before the release step. Never put a value that depends on a provisional
+  operator in a frozen file.
 - The unit of immutability is the golden file. The manifest's `golden.history`
   (`src/orcapod/contexts/data/<version>.json`) lists every file with the sha256 of its bytes;
   a release appends a revision with `added: {}`, pinned in

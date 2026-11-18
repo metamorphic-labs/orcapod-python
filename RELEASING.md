@@ -127,6 +127,13 @@ against are in `docs/reference/golden-hashes.md`.
   step of `0.4.0` freezes v1. Every published version needs the release step, a pre-release
   included (the gate below refuses to tag one without it), so **publishing `0.4.0rc1` would
   freeze v1 at the release candidate**: plan the release around it.
+- Provisional operators (`orcapod.operators.PROVISIONAL_OPERATORS`, ITL-1266) are outside
+  the freeze: the golden values of the cases that depend on one are in
+  `tests/test_hashing/golden/data/v1/provisional/`, which no release step lists or pins. An
+  operator that stops being provisional in a release leaves the list (with its `PROVISIONAL`
+  marker and its golden cases' declarations) before the release step, and
+  `generate_golden_hashes.py --relocate` moves its golden values, unchanged, into a frozen
+  file, so that the release step freezes them.
 - Release tags are protected on `metamorphic-labs/orcapod-python` (and on
   `nauticalab/orcapod-python`, the release repository up to `0.3.0`): the repository ruleset
   `protect-release-tags` (target `refs/tags/v*`; rules deletion, update and non-fast-forward;

@@ -20,6 +20,9 @@ context, the tag ``v<X.Y.Z>`` is checked against that record instead: the record
 shipped. So the check passes the same way whether the tag still exists or was deleted, and
 a record never excuses a release it does not describe.
 
+The provisional golden files (``golden.provisional``, ITL-1266) are not compared: no
+revision lists them, so no release freezes them.
+
 The current data context is the one manifest in ``src/orcapod/contexts/data/`` at HEAD.
 
 Usage:
