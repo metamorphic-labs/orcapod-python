@@ -86,7 +86,7 @@ def main() -> None:
     _ = target.write_text(
         json.dumps(fragments, indent=1, sort_keys=True), encoding="utf-8"
     )
-    print(f"wrote {target.relative_to(ROOT)}")
+    print(f"wrote {target}")
 
 
 if __name__ == "__main__":
