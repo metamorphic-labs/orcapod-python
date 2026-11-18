@@ -34,6 +34,7 @@ from orcapod.core.data_function import (
     declaration_for,
 )
 from orcapod.core.datagrams import Data
+from orcapod.core.function_pod import FunctionPod
 from orcapod.core.result_cache import COMMON_RESULT_COLUMNS
 from orcapod.core.sources import DictSource
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
@@ -362,11 +363,26 @@ def test_the_snapshot_holds_the_declaration() -> None:
     assert snapshot["revision_component"] == "rev1"
 
 
+def _open_copy(tmp_path: Path) -> Path:
+    """A copy of the snapshots with every pin open, whatever the repository has released.
+
+    The tests below write and pin snapshots; a released pin copied from the repository
+    would refuse both (CodeRabbit and Copilot, #448).
+    """
+    snapshots = tmp_path / "snapshots"
+    shutil.copytree(SNAPSHOTS, snapshots)
+    pins = json.loads((snapshots / "released.json").read_text())
+    opened = {relative: {"released_in": None, "sha256": None} for relative in pins}
+    (snapshots / "released.json").write_text(
+        json.dumps(opened, indent=2, sort_keys=True) + "\n"
+    )
+    return snapshots
+
+
 def test_an_open_snapshot_that_differs_from_the_code_fails_and_write_fixes_it(
     tmp_path: Path,
 ) -> None:
-    snapshots = tmp_path / "snapshots"
-    shutil.copytree(SNAPSHOTS, snapshots)
+    snapshots = _open_copy(tmp_path)
     target = snapshots / "python.function" / "v1-rev1.json"
     target.write_text(target.read_text().replace("rev1", "revX"))
     failed = _run("--check", "--snapshots", snapshots)
@@ -376,8 +392,7 @@ def test_an_open_snapshot_that_differs_from_the_code_fails_and_write_fixes_it(
 
 
 def test_release_pins_and_a_pinned_snapshot_never_changes(tmp_path: Path) -> None:
-    snapshots = tmp_path / "snapshots"
-    shutil.copytree(SNAPSHOTS, snapshots)
+    snapshots = _open_copy(tmp_path)
     released = _run("--release", "9.9.9", "--snapshots", snapshots)
     assert released.returncode == 0, released.stdout + released.stderr
     assert "pinned python.function/v1-rev1.json for 9.9.9" in released.stdout
@@ -444,3 +459,162 @@ def test_the_reference_page_lists_the_common_columns() -> None:
         row = fixed[column.name]
         assert row[1] == column.arrow_type
         assert (row[2] == "yes") == column.nullable
+
+
+def test_a_release_with_an_unsound_snapshot_writes_nothing(tmp_path: Path) -> None:
+    """The snapshots are checked before the golden release step writes (Copilot, #448)."""
+    from orcapod.contexts import get_default_context
+    from tests.test_hashing.golden import store
+    from tests.test_hashing.golden.generate_golden_hashes import main
+
+    version = get_default_context().version
+    root = tmp_path / "repo"
+    store.copy_tree(store.PROJECT_ROOT, root, version)
+    store.reopen_tree(root, version, "2026-11-18")
+    (root / "scripts").mkdir(exist_ok=True)
+    shutil.copy(SCRIPT, root / "scripts" / SCRIPT.name)
+    shutil.copytree(
+        _open_copy(tmp_path), root / "src" / "orcapod" / "data_function_types"
+    )
+    snapshot = (
+        root
+        / "src"
+        / "orcapod"
+        / "data_function_types"
+        / "python.function"
+        / "v1-rev1.json"
+    )
+    snapshot.write_text(snapshot.read_text().replace("rev1", "revX"))
+    manifest = store.manifest_path(root, version)
+    pins = store.pins_path(root)
+    before = (manifest.read_bytes(), pins.read_bytes())
+
+    with pytest.raises(SystemExit, match="nothing was released"):
+        main(["--root", str(root), "--release", "9.9.9"])
+    assert (manifest.read_bytes(), pins.read_bytes()) == before
+
+
+# ---------------------------------------------------------------------------
+# A revision move never makes a side effect run again (CodeRabbit and Copilot, #448)
+# ---------------------------------------------------------------------------
+
+DELIVERED: list[int] = []
+
+
+def deliver(x: int, ctx: Any) -> int:
+    """A function whose call is an external action: it takes the invocation context."""
+    DELIVERED.append(x)
+    return x * 2
+
+
+def compute(x: int) -> int:
+    """A plain function: computing it again is harmless."""
+    DELIVERED.append(x)
+    return x * 2
+
+
+def _revision_job(database: Any, fn: Any, ctx: bool) -> PipelineJob:
+    job = PipelineJob(name="revisions", database=database)
+    pod = (
+        FunctionPod.from_fn(fn, output_keys="y", ctx_arg_name="ctx")
+        if ctx
+        else FunctionPod.from_fn(fn, output_keys="y")
+    )
+    with job:
+        pod(
+            DictSource(
+                [{"k": "a", "j": 1, "x": 1}, {"k": "b", "j": 2, "x": 2}],
+                tag_columns=["k", "j"],
+                tag_only_columns=True,
+                source_id="s",
+            ),
+            label="fn",
+        )
+    return job
+
+
+@pytest.mark.parametrize(
+    "orchestrator",
+    [SyncPipelineOrchestrator, AsyncPipelineOrchestrator],
+    ids=["sync", "async"],
+)
+def test_a_side_effecting_pod_refuses_results_of_another_revision(
+    orchestrator: type, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Under rev2, the rev1 result table is of another layout: refused, not repeated."""
+    from orcapod.errors import SideEffectLogDataContextError
+
+    database = InMemoryArrowDatabase()
+    DELIVERED.clear()
+    _revision_job(database, deliver, ctx=True).run(orchestrator=orchestrator())
+    assert sorted(DELIVERED) == [1, 2]
+
+    rev2 = dataclasses.replace(PYTHON_FUNCTION, revision=2)
+    monkeypatch.setitem(data_function.DECLARATIONS, rev2.type_id, rev2)
+    with pytest.raises(SideEffectLogDataContextError) as info:
+        _revision_job(database, deliver, ctx=True).run(orchestrator=orchestrator())
+    assert sorted(DELIVERED) == [1, 2]
+    assert any(path[-2:] == ("rev1", "rdb_v1") for path in info.value.record_paths)
+
+
+@pytest.mark.parametrize(
+    "orchestrator",
+    [SyncPipelineOrchestrator, AsyncPipelineOrchestrator],
+    ids=["sync", "async"],
+)
+def test_a_plain_pod_reports_results_of_another_revision_and_recomputes(
+    orchestrator: type,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    database = InMemoryArrowDatabase()
+    DELIVERED.clear()
+    _revision_job(database, compute, ctx=False).run(orchestrator=orchestrator())
+    rev2 = dataclasses.replace(PYTHON_FUNCTION, revision=2)
+    monkeypatch.setitem(data_function.DECLARATIONS, rev2.type_id, rev2)
+    with caplog.at_level(logging.WARNING, logger="orcapod.contexts.stored"):
+        job = _revision_job(database, compute, ctx=False)
+        job.run(orchestrator=orchestrator())
+    assert sorted(DELIVERED) == [1, 1, 2, 2]
+    assert sorted(d["y"] for _, d in job.nodes["fn"].iter_data()) == [2, 4]
+    assert any("rev1/rdb_v1" in record.getMessage() for record in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# A wrapper's declaration, and saved python.function.v0 functions
+# ---------------------------------------------------------------------------
+
+
+class _OtherRevision(PythonDataFunction):
+    """A data function that declares its own record revision (rev7)."""
+
+    @property
+    def declaration(self) -> Any:
+        return dataclasses.replace(PYTHON_FUNCTION, revision=7)
+
+
+def test_a_wrapper_takes_the_wrapped_functions_declaration() -> None:
+    """``CachedDataFunction`` stores at the wrapped function's revision (CodeRabbit, #448)."""
+    inner = _OtherRevision(one, output_keys=["total"])
+    cached = CachedDataFunction(inner, result_database=InMemoryArrowDatabase())  # pyright: ignore[reportArgumentType]  # PythonDataFunction is not yet typed as matching DataFunctionProtocol; it works at runtime
+    assert cached.declaration.revision == 7
+    assert cached.record_path[-2:] == ("rev7", RESULT_DB_SCHEMA_VERSION)
+
+
+def test_a_saved_python_function_v0_cannot_bind_a_v1_function() -> None:
+    """A job saved before 0.4 names python.function.v0: its function is not bound.
+
+    Deliberate (nobody used a version before 0.4): such a job loads read only; to run
+    it, rebuild the pipeline (CodeRabbit, #448).
+    """
+    from orcapod.core.data_function_proxy import DataFunctionProxy
+
+    function = PythonDataFunction(one, output_keys=["total"])
+    config = function.to_config()
+    config["data_function_type_id"] = "python.function.v0"
+    config["uri"] = [*function.uri[:-1], "python.function.v0"]
+    proxy = DataFunctionProxy(config=config)
+    with pytest.raises(ValueError, match="data_function_type_id"):
+        proxy.bind(function)  # pyright: ignore[reportArgumentType]  # as above

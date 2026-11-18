@@ -222,7 +222,13 @@ class TestSideEffectNodeChecksEveryRun:
     """A sink looks for completions it cannot match before every run (CodeRabbit, PR #315)."""
 
     def test_a_table_written_before_v03_that_appears_between_runs_is_refused(self):
-        """A sink's second run raises on an old log added after its first run."""
+        """A sink's second run raises on an old log added after its first run.
+
+        The old log is at a layout of the withdrawn 0.3.0 (``tdb_v2``). A log a version
+        before 0.4 wrote at ``tdb_v1`` under another hash looks current and does not stop
+        the sink: the approved removal of the pre-0.4 store detection (nobody has such
+        a store; ITL-1259).
+        """
         store = InMemoryArrowDatabase()
         job = _sink_job(store)
         _ = job.run()

@@ -399,22 +399,28 @@ class StaleTables:
 
 
 def tables_of_another_layout(
-    database: object, name_path: tuple[str, ...]
+    database: object,
+    name_path: tuple[str, ...],
+    result_revision: str | None = None,
 ) -> list[tuple[str, ...]]:
     """List the tables under ``name_path`` that are at another layout than this build's.
 
-    Another layout and the current ones are told apart by the last path component, never
-    by a hash: every table this version writes ends in one of ``CURRENT_LAYOUTS``.
-    ``name_path`` is expected to end with the name of one function or pod, so that
-    every table under it belongs to a node of that name.
+    Another layout and the current ones are told apart by path components, never by a
+    hash: every table this version writes ends in one of ``CURRENT_LAYOUTS``, and a
+    function result table has its data function type's revision just before its layout
+    (``.../rev1/rdb_v1``, ITL-1259). ``name_path`` is expected to end with the name of one
+    function or pod, so that every table under it belongs to a node of that name.
 
     Args:
         database: The database to list.
         name_path: Leading path components, relative to the database's ``base_path``.
+        result_revision: The revision component of the result tables the caller reads
+            (``rev1``). A result table under ``name_path`` with another revision is then
+            of another layout too. ``None`` checks the last component only.
 
     Returns:
         The paths, relative to the database's ``base_path``, of the tables under
-        ``name_path`` whose last component is not a current layout, sorted.
+        ``name_path`` that are not at a current layout, sorted.
 
     Raises:
         TableListingNotSupportedError: If the database cannot list its tables.
@@ -423,6 +429,11 @@ def tables_of_another_layout(
         path
         for path in _list_table_paths(database, name_path)
         if path[-1] not in CURRENT_LAYOUTS
+        or (
+            result_revision is not None
+            and path[-1] == RESULT_DB_SCHEMA_VERSION
+            and (len(path) < 2 or path[-2] != result_revision)
+        )
     ]
 
 
@@ -447,6 +458,7 @@ def find_stale_tables(
     database: _RecordStore,
     current: tuple[tuple[str, ...], str] | None = None,
     name_path: tuple[str, ...] | None = None,
+    result_revision: str | None = None,
 ) -> StaleTables:
     """Find the stored rows of other generations that belong to one table of a node.
 
@@ -463,6 +475,9 @@ def find_stale_tables(
             the whole table). ``None`` skips that search.
         name_path: The beginning of the table's path up to the name of its function
             or pod, the part that holds no hash. ``None`` skips the listing.
+        result_revision: For a result cache, the revision of its data function type's
+            record: a result table under ``name_path`` at another revision is listed too
+            (``tables_of_another_layout``).
 
     Returns:
         The tables of another layout found, then one entry per other data context
@@ -473,7 +488,7 @@ def find_stale_tables(
     if name_path is not None:
         under = database.base_path + name_path
         try:
-            listed = tables_of_another_layout(database, name_path)
+            listed = tables_of_another_layout(database, name_path, result_revision)
         except TableListingNotSupportedError as exc:
             found.unlisted.append(UnlistedTables(under, str(exc)))
         else:

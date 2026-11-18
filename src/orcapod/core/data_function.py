@@ -424,10 +424,9 @@ PYTHON_FUNCTION = DataFunctionTypeDeclaration(
         "a parameter with a default may be left out of the inputs",
         "the returned value is mapped to the output keys by position: one key takes "
         + "the whole value, several keys take the items of a returned sequence",
-        "a function with no output keys (-> None or no return annotation) has no "
-        + "outputs; a returned value other than None is refused",
+        "a function with no output keys and no return annotation has no outputs",
         "a returned value must conform to its declared output type",
-        "variadic (*args, **kwargs) and positional-only parameters are refused",
+        "variadic (*args, **kwargs) parameters are refused",
     ),
     variation=(
         StoredColumn(
@@ -1115,6 +1114,11 @@ class DataFunctionWrapper(DataFunctionBase[E]):
     @property
     def data_function_type_id(self) -> str:
         return self._data_function.data_function_type_id
+
+    @property
+    def declaration(self) -> DataFunctionTypeDeclaration:
+        """The wrapped function's declaration, as its type id is the wrapped one's."""
+        return self._data_function.declaration
 
     @property
     def canonical_function_name(self) -> str:

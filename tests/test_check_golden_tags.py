@@ -360,3 +360,62 @@ def test_tags_of_earlier_data_contexts_pass_with_nothing_to_check(
     result = _check(root, ci=True)
     assert result.returncode == 0, result.stderr
     assert "nothing to check" in result.stdout
+
+
+# The data function type snapshots (ITL-1259): a released one never changes.
+
+SNAPSHOT = Path("src/orcapod/data_function_types/python.function/v1-rev1.json")
+PINS = Path("src/orcapod/data_function_types/released.json")
+
+
+def _release_a_snapshot(repo: Path) -> None:
+    """Pin a snapshot as released in 9.9.9, commit and tag it ``v9.9.9``."""
+    import hashlib
+    import json
+
+    snapshot = repo / SNAPSHOT
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    _ = snapshot.write_text('{"revision": 1}\n')
+    digest = hashlib.sha256(snapshot.read_bytes()).hexdigest()
+    pins = {
+        SNAPSHOT.relative_to(PINS.parent).as_posix(): {
+            "released_in": "9.9.9",
+            "sha256": digest,
+        }
+    }
+    _ = (repo / PINS).write_text(json.dumps(pins, indent=2, sort_keys=True) + "\n")
+    _commit(repo, "release a snapshot")
+    _git(repo, "tag", "v9.9.9")
+
+
+def test_a_released_type_snapshot_kept_passes(repo: Path) -> None:
+    _release_a_snapshot(repo)
+    result = _check(repo, ci=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_a_released_type_snapshot_rewritten_with_its_pin_fails(repo: Path) -> None:
+    import hashlib
+    import json
+
+    _release_a_snapshot(repo)
+    snapshot = repo / SNAPSHOT
+    _ = snapshot.write_text('{"revision": 1, "changed": true}\n')
+    pins = json.loads((repo / PINS).read_text())
+    key = SNAPSHOT.relative_to(PINS.parent).as_posix()
+    pins[key]["sha256"] = hashlib.sha256(snapshot.read_bytes()).hexdigest()
+    _ = (repo / PINS).write_text(json.dumps(pins, indent=2, sort_keys=True) + "\n")
+    _commit(repo, "rewrite a released snapshot and its pin")
+    result = _check(repo, ci=True)
+    assert result.returncode == 1
+    assert "python.function/v1-rev1.json" in result.stderr
+    assert "never changes" in result.stderr
+
+
+def test_a_removed_type_snapshot_pin_fails(repo: Path) -> None:
+    _release_a_snapshot(repo)
+    _ = (repo / PINS).write_text("{}\n")
+    _commit(repo, "drop a released pin")
+    result = _check(repo, ci=True)
+    assert result.returncode == 1
+    assert "pin of data function type snapshot" in result.stderr

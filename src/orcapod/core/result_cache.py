@@ -174,10 +174,10 @@ class ResultCache:
     ) -> StaleTables:
         """Find stored results of other generations: rows this cache will not use.
 
-        Result tables at an older layout (``rdb_v1``, or no layout component), at
-        this cache's own path and anywhere under its function's name (ITL-954),
-        and, for a cache whose function delivers side effects, rows of another data
-        context in the current table (ITL-944). The tables are only read.
+        Result tables of another layout, or of another revision of the data function
+        type's record (``rev1``), anywhere under its function's name (ITL-954,
+        ITL-1259), and, for a cache whose function delivers side effects, rows of
+        another data context in the current table (ITL-944). The tables are only read.
 
         Args:
             data_context_key: Key of the caller's data context.
@@ -193,6 +193,7 @@ class ResultCache:
             if self._delivers_side_effects and include_current
             else None,
             name_path=self._name_path,
+            result_revision=self._revision,
         )
 
     def stale_tables_accounted_for(self) -> None:

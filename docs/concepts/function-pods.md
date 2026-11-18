@@ -896,6 +896,10 @@ stating every tag binding (data-tags) moved it to `0.3.0`, the version written n
 `0.1.0` file, written by v0.2.0, and a `0.2.0` file, written by v0.3.0, still load, with every
 source tag plain as they were written, within the schema limits described below (a file with
 name-only extension type text cannot be loaded); any other version is rejected.
+A job saved before 0.4 names its functions `python.function.v0`; it loads read only (its
+blueprint, with its tables of the older layouts reported and not read), and its functions
+cannot be bound, because 0.4 runs them as `python.function.v1`
+([Data function types](../reference/data-function-types.md)): rebuild the pipeline to run it.
 The reverse does not hold: v0.2.0 cannot load a file saved by v0.3.0, because hashes differ
 between the two releases.
 
