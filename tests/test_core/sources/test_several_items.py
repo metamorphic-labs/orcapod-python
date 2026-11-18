@@ -58,6 +58,23 @@ def _record_ids(source: ArrowTableSource) -> list[str]:
     return sorted(ids)
 
 
+def _expected_record_ids(keys: tuple[str, ...]) -> list[str]:
+    """Each row's record id for ``keys``, built from the input values, sorted.
+
+    The canonical JSON of the key columns in key order: compact separators, the values
+    as written (``{"t1":"b","t2":2}``).
+    """
+    rows = len(MAIN.columns[keys[0]])
+    return sorted(
+        json.dumps(
+            {key: MAIN.columns[key][row].as_py() for key in keys},
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        for row in range(rows)
+    )
+
+
 @pytest.mark.parametrize("role", ROLES)
 def test_tag_order_is_the_order_of_the_tags_and_enters_no_hash(role: str) -> None:
     """Every tag order and layout: same rows, hashes and system tags; keys follow."""
@@ -103,10 +120,13 @@ def test_record_ids_follow_the_key_order(role: str) -> None:
             record_id_columns=list(keys),
             tag_only_columns=_tag_only(role),
         )
-        ids = _record_ids(source)
-        # The canonical JSON of the key columns, in key order.
-        assert all(list(json.loads(record_id)) == list(keys) for record_id in ids)
+        # The whole record id: the canonical JSON of each row's key values, in key
+        # order, built here from the input columns (Copilot, #443).
+        assert _record_ids(source) == _expected_record_ids(keys)
         by_keys[keys] = source
+    # The format itself, for the first row (t1="b", t2=2, t3=1, d3="w").
+    assert '{"t1":"b","t2":2,"t3":1}' in _expected_record_ids(("t1", "t2", "t3"))
+    assert '{"d3":"w","t1":"b"}' in _expected_record_ids(("d3", "t1"))
     first = by_keys[("t1", "t2", "t3")]
     for keys, source in by_keys.items():
         # The keys name the rows: one pipeline hash and one source id ...
