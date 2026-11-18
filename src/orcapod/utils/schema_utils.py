@@ -5,7 +5,7 @@ import logging
 import sys
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from types import UnionType
-from typing import Any, Union, get_args, get_origin, get_type_hints
+from typing import Annotated, Any, Union, get_args, get_origin, get_type_hints
 
 from orcapod.errors import InputValidationError
 from orcapod.types import Schema, SchemaLike
@@ -134,21 +134,48 @@ def schema_incompatibility(
     return None
 
 
+def _resolved_return_annotation(func: Callable[..., Any], annotation: Any) -> Any:
+    """The return annotation resolved on its own, as ``typing.get_type_hints`` would.
+
+    Used when ``get_type_hints`` failed on another annotation of ``func``: a postponed
+    annotation (``from __future__ import annotations``) is still text then. The text is
+    evaluated in the function's module namespace, a string inside it as well
+    (``-> "None"``), and ``Annotated[T, ...]`` becomes ``T``, as ``get_type_hints``
+    gives it. Text that cannot be evaluated is returned as it is.
+
+    Args:
+        func: The function the annotation belongs to.
+        annotation: The return annotation as the signature gives it.
+
+    Returns:
+        The resolved annotation, or ``annotation`` when it cannot be resolved.
+    """
+    namespace = getattr(func, "__globals__", {})
+    while isinstance(annotation, str):
+        try:
+            # Evaluated as typing.get_type_hints evaluates an annotation.
+            annotation = eval(annotation, namespace)
+        except Exception:
+            return annotation
+    if get_origin(annotation) is Annotated:
+        annotation = get_args(annotation)[0]
+    return annotation
+
+
 def _declares_none(annotation: object) -> bool:
     """Whether a return annotation, as read, is ``-> None``.
 
-    ``typing.get_type_hints`` turns ``-> None`` into ``NoneType``. When it fails on
-    another annotation, a postponed annotation (``from __future__ import annotations``)
-    is still text: ``"None"``, or ``"'None'"`` when it was written as a string
-    (``-> "None"``).
+    ``typing.get_type_hints`` turns ``-> None`` into ``NoneType``; an annotation it could
+    not resolve is resolved on its own first (``_resolved_return_annotation``). The text
+    ``"None"`` (or ``"'None'"``) also counts, should that fail.
 
     Args:
-        annotation: The return annotation as ``get_type_hints`` or the signature gives it.
+        annotation: The return annotation, resolved where it could be.
 
     Returns:
-        True when it is ``None`` written in one of those forms.
+        True when it is ``None``, ``NoneType`` or ``Annotated[None, ...]``.
     """
-    if annotation is type(None):
+    if annotation is None or annotation is type(None):
         return True
     return isinstance(annotation, str) and annotation.strip("'\"") == "None"
 
@@ -276,8 +303,11 @@ def extract_function_schemas(
         if param.default is not inspect.Parameter.empty:
             optional_params.add(name)
 
-    # get_type_hints stores the return annotation under the key 'return'
+    # get_type_hints stores the return annotation under the key 'return'; when it
+    # failed on another annotation, the return annotation is resolved on its own.
     return_annot = resolved_hints.get("return", signature.return_annotation)
+    if "return" not in resolved_hints:
+        return_annot = _resolved_return_annotation(func, return_annot)
     # ``-> None`` declares no outputs (ITL-1257), which is not an output whose value is
     # None: the number of outputs is the number of output keys.
     if _declares_none(return_annot):

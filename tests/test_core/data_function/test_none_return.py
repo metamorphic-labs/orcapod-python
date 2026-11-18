@@ -250,17 +250,23 @@ def test_the_error_pickles_with_its_arguments() -> None:
 
 @pytest.mark.parametrize(
     "fn",
-    [strings.unresolvable_input, strings.unresolvable_input_quoted],
-    ids=["none", "quoted_none"],
+    [
+        strings.unresolvable_input,
+        strings.unresolvable_input_quoted,
+        strings.unresolvable_input_none_type,
+        strings.unresolvable_input_annotated_none,
+    ],
+    ids=["none", "quoted_none", "none_type", "annotated_none"],
 )
 def test_none_is_read_when_another_annotation_cannot_be_resolved(
     fn: Callable[..., Any],
 ) -> None:
     """``get_type_hints`` fails on ``x: Missing``; the postponed ``-> None`` still counts.
 
-    Both spellings: ``-> None`` (the text ``"None"``) and ``-> "None"`` (the text
-    ``"'None'"``). The input type comes from ``input_schema`` (Copilot and CodeRabbit,
-    #447).
+    Every spelling of no outputs: ``-> None``, ``-> "None"``, ``-> NoneType`` and
+    ``-> Annotated[None, ...]`` (as ``get_type_hints`` gives it: ``Annotated`` is
+    dropped). The return annotation is resolved on its own; the input type comes from
+    ``input_schema`` (Copilot and CodeRabbit, #447).
     """
     data_function = PythonDataFunction(fn, input_schema={"x": int})
     assert dict(data_function.output_data_schema) == {}
@@ -294,3 +300,16 @@ def test_the_error_keeps_the_attributes_of_an_output_type_error() -> None:
             "Declare an output key with its type (a return "
             "annotation or output_schema), or return nothing"
         )
+
+
+def test_a_return_annotation_resolves_when_another_annotation_does_not() -> None:
+    """``x: Missing`` cannot be resolved; ``-> int`` still gives an ``int`` output."""
+    data_function = PythonDataFunction(
+        strings.unresolvable_input_returns_int,
+        output_keys="value",
+        input_schema={"x": int},
+    )
+    assert dict(data_function.output_data_schema) == {"value": int}
+    result = data_function.call(Data({"x": 4}))
+    assert result is not None
+    assert result.as_dict() == {"value": 4}
