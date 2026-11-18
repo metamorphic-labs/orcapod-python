@@ -59,9 +59,26 @@ def test_drop_nulls_of_several_columns_with_nullable_data_tags(
         tag_schema, data_schema = kept.output_schema()
         assert tag_schema["t1"] is str and tag_schema["t2"] is int
         assert data_schema["d1"] is int
-        if "t1" not in tag_only:
-            # A data-tag is one column: narrowed in both roles.
-            assert data_schema["t1"] is str
+        # A data-tag is one column: narrowed in both roles, each data-tag.
+        for name, python_type in (("t1", str), ("t2", int)):
+            if name not in tag_only:
+                assert data_schema[name] is python_type
+            else:
+                assert name not in data_schema
+        # The prediction equals the computed stream's schema (a prediction is
+        # verified against the static result, CLAUDE.md), with system tags and
+        # source info too.
+        for config in (
+            {},
+            {"system_tags": True},
+            {"source": True, "system_tags": True},
+        ):
+            computed = op.static_process(source).output_schema(columns=config)
+            assert kept.output_schema(columns=config) == computed
+        # The computed rows hold no null in a named column, in either role.
+        table = kept.as_table()
+        assert all(table.column(name).null_count == 0 for name in names)
+        assert not any(table.schema.field(name).nullable for name in names)
         rows = rows_fingerprint(list(kept.iter_data()))
         assert rows_fingerprint(async_rows(DropNulls(list(names)), source)) == rows
         results[names] = {**fingerprint(kept), "presentation": presentation(kept)}
@@ -91,8 +108,14 @@ def test_index_reads_a_list_valued_data_tag_as_a_data_column(
     indexed = op(batched)
     first = [data[f"first_{column}"] for _, data in indexed.iter_data()]
     assert first == {"t1": ["b", "b"], "t3": [1, 2], "d1": [10, 40]}[column]
-    # The data-tag itself is unchanged: still a tag and a data column.
+    # The data-tag itself is unchanged: still a tag and a data column, with its lists.
     assert presentation(indexed)[0] == ("t1", "t2", "t3")
+    assert column in presentation(indexed)[1]
+    lists = {"t1": [["b", "a", "a"], ["b", "a", "b"]], "t3": [[1, 2, 1], [2, 1, 2]]}
+    lists["d1"] = [[10, 20, 30], [40, 50, 60]]
+    assert [data[column] for _, data in indexed.iter_data()] == lists[column]
+    if column != "d1":
+        assert [tag[column] for tag, _ in indexed.iter_data()] == lists[column]
     assert rows_fingerprint(
         async_rows(Index(column, 0, out=f"first_{column}"), batched)
     ) == rows_fingerprint(list(indexed.iter_data()))

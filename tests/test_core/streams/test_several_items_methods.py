@@ -36,6 +36,7 @@ from orcapod.core.operators import (
 )
 from orcapod.core.sources import ArrowTableSource
 from orcapod.protocols.core_protocols import StreamProtocol
+from orcapod.system_constants import constants
 
 from ..operators.several_items import (
     LAYOUTS,
@@ -171,22 +172,53 @@ def test_polars_filter_keywords_win_over_the_constraint_map() -> None:
 
 
 COLUMN_GROUPS = ("meta", "context", "source", "system_tags", "content_hash")
+CONTENT_HASH_COLUMN = "_content_hash"
+
+
+def _group_of(name: str) -> str | None:
+    """The ``ColumnConfig`` group of a column name, or ``None`` for a user column.
+
+    Derived from the column naming convention (CLAUDE.md, "Column naming
+    conventions"), not from the stream under test.
+    """
+    if name.startswith(constants.META_PREFIX):
+        return "meta"
+    if name == constants.CONTEXT_KEY:
+        return "context"
+    if name.startswith(constants.SOURCE_PREFIX):
+        return "source"
+    if name.startswith(constants.SYSTEM_TAG_PREFIX):
+        return "system_tags"
+    if name == CONTENT_HASH_COLUMN:
+        return "content_hash"
+    return None
 
 
 @pytest.mark.parametrize("layout", LAYOUTS)
 @pytest.mark.parametrize("role", ROLES)
-def test_several_column_groups_keep_the_all_info_column_order(
+def test_several_column_groups_give_exactly_their_columns_in_the_all_info_order(
     role: str, layout: str
 ) -> None:
-    """Every combination of ``ColumnConfig`` groups: the all_info columns, filtered."""
+    """Every combination of groups: the user columns and those groups' columns, in order.
+
+    The expected list is the ``all_info`` table's columns kept by their group, so a
+    missing requested column and an unrequested group both fail.
+    """
     source = make_source(MAIN, Arrangement(MAIN.tags, layout, role))
     partner = make_source(P, Arrangement(P.tags, layout, role))
     for stream in (source, Join()(source, partner), Batch(batch_size=2)(source)):
         full = stream.as_table(all_info=True).column_names
+        present = {_group_of(name) for name in full} - {None}
+        # Every group but meta shows up in all_info for these streams.
+        assert present == {"context", "source", "system_tags", "content_hash"}
         for n in range(1, len(COLUMN_GROUPS) + 1):
             for groups in itertools.combinations(COLUMN_GROUPS, n):
+                expected = [
+                    name
+                    for name in full
+                    if _group_of(name) is None or _group_of(name) in groups
+                ]
                 columns = stream.as_table(
                     columns=dict.fromkeys(groups, True)
                 ).column_names
-                assert len(set(columns)) == len(columns), groups
-                assert columns == [c for c in full if c in columns], groups
+                assert columns == expected, groups
