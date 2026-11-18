@@ -488,8 +488,9 @@ def test_a_dictionary_encoded_float_key_emits_the_smallest_bits(width: int) -> N
             BITS["nan"][width],
             None,
         ]
-        # ``all_info`` sorts by the tags, which a dictionary tag cannot be yet: the
-        # rows come in key order already, with every system tag and source token.
+        # ``all_info`` sorts by the tags, which a dictionary tag cannot be yet
+        # (ITL-1264): the rows come in key order already, with every system tag and
+        # source token.
         fingerprint = {
             "rows": [
                 json.dumps(_with_bits(row), sort_keys=True, default=str)
@@ -509,8 +510,8 @@ async def _async_grouped_rows(source: StreamBase) -> list[Any]:
     """The rows of ``GroupBy("k")``'s async path, over a channel.
 
     A pipeline job cannot carry a dictionary-typed tag yet (its stored-table sort and
-    nullability restore refuse a dictionary), so the operator's async path is driven
-    directly, as ``test_async_sync_equivalence.py`` does.
+    nullability restore refuse a dictionary; ITL-1264), so the operator's async path
+    is driven directly, as ``test_async_sync_equivalence.py`` does.
     """
     channel: Channel[Any] = Channel(buffer_size=64)
     output: Channel[Any] = Channel(buffer_size=64)
