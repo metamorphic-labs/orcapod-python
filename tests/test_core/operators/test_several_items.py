@@ -25,7 +25,7 @@ the new tags and part of its identity, and is tested as such below.
 from __future__ import annotations
 
 import itertools
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -141,7 +141,7 @@ def _unary_params() -> list[object]:
     ]
 
 
-def _assert_all_equal(results: dict[str, dict[str, object]]) -> None:
+def _assert_all_equal(results: Mapping[str, Mapping[str, object]]) -> None:
     """Assert every arrangement's fingerprint equals the first one's, naming the field.
 
     A result that holds ``async_rows`` must also have them equal to its own sync
