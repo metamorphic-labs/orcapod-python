@@ -295,25 +295,38 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
             invocation: The pod invocation to record.
 
         Raises:
-            ValueError: If an input has the content hash of a stream the graph
-                already holds (or of another input of the invocation) but reads
+            ValueError: If a stream of the invocation (an input, or its output) has
+                the content hash of a stream the graph already holds, of a recorded
+                invocation's output, or of another input of the invocation, but reads
                 differently restricted sources (ITL-1218). Nothing is recorded then.
         """
         from orcapod.pipeline.node_run import require_one_restriction
 
         key = invocation.content_hash().to_string()
+        inputs = tuple(invocation.input_streams)
         upstreams = [
-            (upstream, upstream.content_hash().to_string())
-            for upstream in invocation.input_streams
+            (upstream, upstream.content_hash().to_string()) for upstream in inputs
         ]
         # Checked before anything is recorded, so a refused invocation leaves the
-        # graph as it was: against the streams held, and between this invocation's
-        # own inputs.
+        # graph as it was. Compilation resolves a hash to one stream: a held one, or
+        # the output of the invocation recorded under it. So each input is checked
+        # against the stream held for its hash, against the inputs of an invocation
+        # recorded under its hash, and against this invocation's other inputs; and
+        # this invocation's output against a stream held, or an invocation recorded,
+        # under its hash.
         held = dict(self._source_streams)
         for upstream, upstream_hash in upstreams:
             known = held.setdefault(upstream_hash, upstream)
             if known is not upstream:
-                require_one_restriction(known, upstream)
+                require_one_restriction((known,), (upstream,))
+            producer = self._invocation_lut.get(upstream_hash)
+            if producer is not None:
+                require_one_restriction(tuple(producer.input_streams), (upstream,))
+        if key in self._source_streams:
+            require_one_restriction((self._source_streams[key],), inputs)
+        recorded = self._invocation_lut.get(key)
+        if recorded is not None:
+            require_one_restriction(tuple(recorded.input_streams), inputs)
         self._invocation_lut[key] = invocation
         self._hash_graph.add_node(key)
         for upstream, upstream_hash in upstreams:

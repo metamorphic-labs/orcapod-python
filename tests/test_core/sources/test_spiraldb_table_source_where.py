@@ -772,6 +772,71 @@ class TestRunsAndSavedJobs:
                 first.pod(m1, label="first")
                 second.pod(m2, label="second")
 
+    @pytest.mark.parametrize(
+        "captured, prebuilt",
+        [
+            ({"subject_id": "m1"}, {"subject_id": "m2"}),
+            ({"subject_id": "m1", "flag": True}, {"flag": False, "subject_id": "m1"}),
+            ({"flag": True, "subject_id": "m1"}, {"subject_id": "m2"}),
+        ],
+        ids=["one condition", "several conditions", "several against one"],
+    )
+    @pytest.mark.parametrize(
+        "prebuilt_first", [False, True], ids=["captured first", "prebuilt first"]
+    )
+    def test_a_stream_with_the_hash_of_a_captured_output_is_checked(
+        self, project, tmp_path, captured, prebuilt, prebuilt_first
+    ):
+        """A stream built before the capture with the hash of a step captured inside
+        it, over another restriction, is refused in either order: compilation would
+        resolve it to the captured step and read that step's rows."""
+
+        @function_pod(output_keys="a")
+        def first(amplitude: float | None) -> float | None:
+            """Return ``amplitude``."""
+            return amplitude
+
+        events = _source(source_id="events", tag_only_columns=True)
+        outside = events.where(**prebuilt).select_data_columns(["amplitude"])
+        job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
+        with pytest.raises(ValueError, match="different rows in one pipeline"):
+            with job:
+                if prebuilt_first:
+                    first.pod(outside, label="first")
+                events.where(**captured).select_data_columns(["amplitude"])
+                if not prebuilt_first:
+                    first.pod(outside, label="first")
+
+    @pytest.mark.parametrize(
+        "prebuilt_first", [False, True], ids=["captured first", "prebuilt first"]
+    )
+    def test_a_stream_with_the_hash_of_an_equal_captured_output_is_accepted(
+        self, project, tmp_path, prebuilt_first
+    ):
+        """The same restriction, its conditions in another order, is one stream."""
+
+        @function_pod(output_keys="a")
+        def first(amplitude: float | None) -> float | None:
+            """Return ``amplitude``."""
+            return amplitude
+
+        events = _source(source_id="events", tag_only_columns=True)
+        outside = events.where(flag=True, subject_id="m1").select_data_columns(
+            ["amplitude"]
+        )
+        job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
+        with job:
+            if prebuilt_first:
+                first.pod(outside, label="first")
+            events.where(subject_id="m1", flag=True).select_data_columns(["amplitude"])
+            if not prebuilt_first:
+                first.pod(outside, label="first")
+
+        job.run()
+
+        rows = job.nodes["first"].as_table().column("timestamp").to_pylist()
+        assert rows == [3]
+
     def test_a_refused_invocation_records_nothing(self, project, tmp_path):
         """After the refusal the graph holds only what was captured before it."""
 

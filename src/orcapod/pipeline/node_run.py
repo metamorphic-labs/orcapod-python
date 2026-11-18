@@ -14,7 +14,6 @@ the commit ``job.run()`` makes.
 
 from __future__ import annotations
 
-from collections import Counter
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeAlias
@@ -275,19 +274,21 @@ def _restriction_of(stream: object) -> _Restriction | None:
     return (condition or None, limit)
 
 
-def _restrictions_beneath(stream: Any) -> Counter[tuple[str, _Restriction]]:
-    """Return the restrictions of every source a stream reads, order-free.
+def _restrictions_beneath(
+    streams: Iterable[Any],
+) -> frozenset[tuple[str, _Restriction]]:
+    """Return the restrictions of every source the streams read, order-free.
 
     Walks ``upstreams`` and a ``SourceJobNode``'s bound source down to the root
-    sources; each restricted root counts ``(source name, (condition, limit))``. Two
+    sources; each restricted root gives ``(source name, (condition, limit))``. Two
     results are equal when the same sources are restricted equally (``Condition``
     equality: by value, in any order of the columns; and the same limit).
     """
     from orcapod.core.nodes.source_node import SourceJobNode
 
-    found: Counter[tuple[str, _Restriction]] = Counter()
+    found: set[tuple[str, _Restriction]] = set()
     visited: list[Any] = []
-    pending = [stream]
+    pending = list(streams)
     while pending:
         current = pending.pop()
         if any(current is seen for seen in visited):
@@ -295,51 +296,50 @@ def _restrictions_beneath(stream: Any) -> Counter[tuple[str, _Restriction]]:
         visited.append(current)
         restriction = _restriction_of(current)
         if restriction is not None:
-            found[(_source_name(current), restriction)] += 1
+            found.add((_source_name(current), restriction))
         if isinstance(current, SourceJobNode):
             if current.bound_source is not None:
                 pending.append(current.bound_source)
         else:
             pending.extend(getattr(current, "upstreams", ()))
-    return found
+    return frozenset(found)
 
 
-def _restrictions_text(found: Counter[tuple[str, _Restriction]]) -> str:
-    """The restrictions found beneath a stream, as words for a message."""
+def _restrictions_text(found: frozenset[tuple[str, _Restriction]]) -> str:
+    """The restrictions found beneath streams, as words for a message."""
     if not found:
         return "no restriction"
     return "; ".join(
         sorted(
-            f"{name}: {restriction_text(*restriction)}"
-            for name, restriction in found.elements()
+            f"{name}: {restriction_text(*restriction)}" for name, restriction in found
         )
     )
 
 
-def require_one_restriction(known: Any, other: Any) -> None:
+def require_one_restriction(known: Sequence[Any], other: Sequence[Any]) -> None:
     """Refuse two streams of one identity that read differently restricted sources.
 
     A restriction (ITL-1218) does not change a source's identity, so a pipeline
     records one stream per content hash and every node over that hash reads it.
     Two streams of one content hash over differently restricted sources (two
-    sources of one table, or two streams built on them before the capture) would
-    be one input of the graph and one restriction would be lost: refused instead.
+    sources of one table, or streams built on them before the capture, or a
+    stream with the hash of a recorded step's output) would be one stream of the
+    graph and one restriction would be lost: refused instead.
 
     Args:
-        known: The stream the graph already holds for the content hash.
-        other: Another stream with the same content hash.
+        known: What the graph already holds for the content hash: the stream, or
+            the input streams of the recorded step that produces it.
+        other: What is being recorded with the same content hash, in the same form.
 
     Raises:
         ValueError: If the sources beneath the two restrict their rows differently.
     """
-    known_found, other_found = (
-        _restrictions_beneath(known),
-        _restrictions_beneath(other),
-    )
+    known_found = _restrictions_beneath(known)
+    other_found = _restrictions_beneath(other)
     if known_found != other_found:
         raise ValueError(
-            f"Two inputs of one identity ({_stream_name(known)!r}) read different "
-            "rows in one pipeline: their sources are restricted differently "
+            "Two streams of one identity read different rows in one pipeline: "
+            "their sources are restricted differently "
             f"({_restrictions_text(known_found)} and "
             f"{_restrictions_text(other_found)}). "
             "A restriction does not change a source's identity, so a pipeline "
