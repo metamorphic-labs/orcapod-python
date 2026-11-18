@@ -327,17 +327,26 @@ def release(root: pathlib.Path, version: str, release_text: str) -> str:
 
 
 def _data_function_types_script(root: pathlib.Path) -> Any | None:
-    """The module ``scripts/data_function_types.py`` of ``root``, with its folder.
+    """The module ``scripts/data_function_types.py`` of ``root``.
 
-    Returns ``None`` for a root without the snapshot folder or the script (a test's
-    copy of the golden store): it has nothing to check or pin.
+    Returns ``None`` for a root without the snapshot folder (a test's copy of the golden
+    store): it has nothing to check or pin.
+
+    Raises:
+        SystemExit: If the root has snapshots but not the script that checks and pins
+            them: a release would otherwise leave them open.
     """
     import importlib.util
 
     snapshots = root / "src" / "orcapod" / "data_function_types"
     script = root / "scripts" / "data_function_types.py"
-    if not snapshots.is_dir() or not script.is_file():
+    if not snapshots.is_dir():
         return None
+    if not script.is_file():
+        raise SystemExit(
+            f"{snapshots} holds data function type snapshots but {script} is missing: "
+            "they cannot be checked or pinned; nothing was released"
+        )
     spec = importlib.util.spec_from_file_location("data_function_types_script", script)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -367,6 +376,40 @@ def check_data_function_types(root: pathlib.Path) -> None:
             "the data function type snapshots are not sound; nothing was released:\n"
             + "\n".join(problems)
         )
+
+
+def golden_release_recorded(
+    root: pathlib.Path, version: str, release_text: str
+) -> bool:
+    """Whether the golden step of ``release_text`` is recorded and nothing came after it.
+
+    True when the pins record the release and the last revision of the golden history
+    is that release's revision (the digest the pins name): a release step whose snapshot
+    pinning failed may then be run again to finish it. Any later change to the golden
+    history makes it False, and the release is refused as before.
+
+    Args:
+        root: Project root.
+        version: Data context version.
+        release_text: The library version, e.g. ``0.4.0``.
+
+    Returns:
+        Whether the golden release is recorded and current.
+    """
+    try:
+        name = store.normalize_release(release_text)
+    except ValueError:
+        return False
+    pins = store.read_json(store.pins_path(root))
+    digest = pins.get(version, {}).get("releases", {}).get(name)
+    if digest is None:
+        return False
+    history = store.read_json(store.manifest_path(root, version))["golden"]["history"]
+    return (
+        bool(history)
+        and history[-1].get("release") == name
+        and (history[-1].get("digest") == digest)
+    )
 
 
 def pin_data_function_types(root: pathlib.Path, release_text: str) -> None:
@@ -450,7 +493,18 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.release is not None:
         check_data_function_types(args.root)
-        _ = release(args.root, version, args.release)
+        module = _data_function_types_script(args.root)
+        snapshots = args.root / "src" / "orcapod" / "data_function_types"
+        if golden_release_recorded(args.root, version, args.release):
+            # A release step whose snapshot pinning failed: finish it, nothing else.
+            if module is None or not module.open_snapshots(snapshots):
+                raise SystemExit(f"{args.release} is already released")
+            _require_sound(args.root, version)
+            print(
+                f"the golden step of {args.release} is recorded; pinning the snapshots"
+            )
+        else:
+            _ = release(args.root, version, args.release)
         pin_data_function_types(args.root, args.release)
         return
 

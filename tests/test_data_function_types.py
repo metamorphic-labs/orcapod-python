@@ -35,6 +35,7 @@ from orcapod.core.data_function import (
 )
 from orcapod.core.datagrams import Data
 from orcapod.core.function_pod import FunctionPod
+from orcapod.core.data_function_types import snapshot_path
 from orcapod.core.result_cache import COMMON_RESULT_COLUMNS
 from orcapod.core.sources import DictSource
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
@@ -356,25 +357,33 @@ def test_the_snapshots_match_the_code_and_the_pins() -> None:
 
 def test_the_snapshot_holds_the_declaration() -> None:
     snapshot = json.loads(
-        (SNAPSHOTS / "python.function" / "v1-rev1.json").read_text(encoding="utf-8")
+        (SNAPSHOTS / snapshot_path(PYTHON_FUNCTION)).read_text(encoding="utf-8")
     )
     assert snapshot == PYTHON_FUNCTION.to_snapshot()
     assert snapshot["type_id"] == "python.function.v1"
     assert snapshot["revision_component"] == "rev1"
 
 
-def _open_copy(tmp_path: Path) -> Path:
-    """A copy of the snapshots with every pin open, whatever the repository has released.
+CURRENT = snapshot_path(PYTHON_FUNCTION)
+"""The snapshot the current declaration writes (``python.function/v1-rev1.json`` today)."""
 
-    The tests below write and pin snapshots; a released pin copied from the repository
-    would refuse both (CodeRabbit and Copilot, #448).
+
+def _open_copy(tmp_path: Path) -> Path:
+    """A copy of the snapshots whose current snapshots are open, whatever was released.
+
+    The tests below write and pin the snapshot the current declaration writes; a
+    released pin copied from the repository would refuse both (CodeRabbit and Copilot,
+    #448). Only snapshots a current declaration writes are reopened: a released
+    snapshot of an earlier revision stays pinned, as it is in the repository.
     """
     snapshots = tmp_path / "snapshots"
     shutil.copytree(SNAPSHOTS, snapshots)
     pins = json.loads((snapshots / "released.json").read_text())
-    opened = {relative: {"released_in": None, "sha256": None} for relative in pins}
+    current = {snapshot_path(declaration) for declaration in DECLARATIONS.values()}
+    for relative in current:
+        pins[relative] = {"released_in": None, "sha256": None}
     (snapshots / "released.json").write_text(
-        json.dumps(opened, indent=2, sort_keys=True) + "\n"
+        json.dumps(pins, indent=2, sort_keys=True) + "\n"
     )
     return snapshots
 
@@ -383,8 +392,10 @@ def test_an_open_snapshot_that_differs_from_the_code_fails_and_write_fixes_it(
     tmp_path: Path,
 ) -> None:
     snapshots = _open_copy(tmp_path)
-    target = snapshots / "python.function" / "v1-rev1.json"
-    target.write_text(target.read_text().replace("rev1", "revX"))
+    target = snapshots / CURRENT
+    snapshot = json.loads(target.read_text())
+    snapshot["run_rules"] = ["edited by hand"]
+    target.write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n")
     failed = _run("--check", "--snapshots", snapshots)
     assert failed.returncode == 1 and "differs from the code" in failed.stdout
     assert _run("--write", "--snapshots", snapshots).returncode == 0
@@ -395,13 +406,13 @@ def test_release_pins_and_a_pinned_snapshot_never_changes(tmp_path: Path) -> Non
     snapshots = _open_copy(tmp_path)
     released = _run("--release", "9.9.9", "--snapshots", snapshots)
     assert released.returncode == 0, released.stdout + released.stderr
-    assert "pinned python.function/v1-rev1.json for 9.9.9" in released.stdout
+    assert f"pinned {CURRENT} for 9.9.9" in released.stdout
     pins = json.loads((snapshots / "released.json").read_text())
-    pin = pins["python.function/v1-rev1.json"]
+    pin = pins[CURRENT]
     assert pin["released_in"] == "9.9.9" and len(pin["sha256"]) == 64
     assert _run("--check", "--snapshots", snapshots).returncode == 0
 
-    target = snapshots / "python.function" / "v1-rev1.json"
+    target = snapshots / CURRENT
     target.write_text(target.read_text() + " ")
     failed = _run("--check", "--snapshots", snapshots)
     assert failed.returncode == 1
@@ -478,15 +489,8 @@ def test_a_release_with_an_unsound_snapshot_writes_nothing(tmp_path: Path) -> No
     shutil.copytree(
         _open_copy(tmp_path), root / "src" / "orcapod" / "data_function_types"
     )
-    snapshot = (
-        root
-        / "src"
-        / "orcapod"
-        / "data_function_types"
-        / "python.function"
-        / "v1-rev1.json"
-    )
-    snapshot.write_text(snapshot.read_text().replace("rev1", "revX"))
+    snapshot = root / "src" / "orcapod" / "data_function_types" / CURRENT
+    snapshot.write_text(snapshot.read_text() + " ")
     manifest = store.manifest_path(root, version)
     pins = store.pins_path(root)
     before = (manifest.read_bytes(), pins.read_bytes())
@@ -620,3 +624,104 @@ def test_a_saved_python_function_v0_cannot_bind_a_v1_function() -> None:
     proxy = DataFunctionProxy(config=config)
     with pytest.raises(ValueError, match="data_function_type_id"):
         proxy.bind(function)  # pyright: ignore[reportArgumentType]  # as above
+
+
+def _release_tree(tmp_path: Path, *, with_script: bool = True) -> Path:
+    """A copy of the golden store, open, with the snapshots (open) and their tool."""
+    from orcapod.contexts import get_default_context
+    from tests.test_hashing.golden import store
+
+    version = get_default_context().version
+    root = tmp_path / "repo"
+    store.copy_tree(store.PROJECT_ROOT, root, version)
+    store.reopen_tree(root, version, "2026-11-18")
+    if with_script:
+        (root / "scripts").mkdir(exist_ok=True)
+        shutil.copy(SCRIPT, root / "scripts" / SCRIPT.name)
+    shutil.copytree(
+        _open_copy(tmp_path), root / "src" / "orcapod" / "data_function_types"
+    )
+    return root
+
+
+def _golden_state(root: Path) -> tuple[bytes, bytes]:
+    from orcapod.contexts import get_default_context
+    from tests.test_hashing.golden import store
+
+    version = get_default_context().version
+    return (
+        store.manifest_path(root, version).read_bytes(),
+        store.pins_path(root).read_bytes(),
+    )
+
+
+def test_a_release_refuses_snapshots_without_their_tool(tmp_path: Path) -> None:
+    """Snapshots without ``scripts/data_function_types.py``: nothing is released."""
+    from tests.test_hashing.golden.generate_golden_hashes import main
+
+    root = _release_tree(tmp_path, with_script=False)
+    before = _golden_state(root)
+    with pytest.raises(SystemExit, match="is missing"):
+        main(["--root", str(root), "--release", "9.9.9"])
+    assert _golden_state(root) == before
+
+
+def test_a_release_whose_snapshot_pinning_failed_is_finished_by_running_it_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The golden step stays recorded; the same command then pins the snapshots only."""
+    from tests.test_hashing.golden import generate_golden_hashes as generator
+
+    root = _release_tree(tmp_path)
+    pins_path = root / "src" / "orcapod" / "data_function_types" / "released.json"
+    real_pin = generator.pin_data_function_types
+
+    def failing_pin(_root: Path, _release: str) -> None:
+        raise OSError("released.json cannot be written")
+
+    monkeypatch.setattr(generator, "pin_data_function_types", failing_pin)
+    with pytest.raises(OSError, match="cannot be written"):
+        generator.main(["--root", str(root), "--release", "9.9.9"])
+    recorded = _golden_state(root)
+    assert json.loads(pins_path.read_text())[CURRENT]["sha256"] is None
+
+    monkeypatch.setattr(generator, "pin_data_function_types", real_pin)
+    generator.main(["--root", str(root), "--release", "9.9.9"])
+    assert _golden_state(root) == recorded
+    pin = json.loads(pins_path.read_text())[CURRENT]
+    assert pin["released_in"] == "9.9.9" and len(pin["sha256"]) == 64
+
+    with pytest.raises(SystemExit, match="already released"):
+        generator.main(["--root", str(root), "--release", "9.9.9"])
+
+
+def test_a_retry_after_the_golden_history_changed_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from orcapod.contexts import get_default_context
+    from tests.test_hashing.golden import generate_golden_hashes as generator
+    from tests.test_hashing.golden import store
+
+    root = _release_tree(tmp_path)
+
+    def failing_pin(_root: Path, _release: str) -> None:
+        raise OSError("released.json cannot be written")
+
+    monkeypatch.setattr(generator, "pin_data_function_types", failing_pin)
+    with pytest.raises(OSError):
+        generator.main(["--root", str(root), "--release", "9.9.9"])
+    # Something after the release step: the release revision is no longer the last.
+    manifest_path = store.manifest_path(root, get_default_context().version)
+    manifest = store.read_json(manifest_path)
+    manifest["golden"]["history"].append({"added": {}, "digest": "0" * 64})
+    store.write_json(manifest_path, manifest)
+    assert not generator.golden_release_recorded(
+        root, get_default_context().version, "9.9.9"
+    )
+    # Refused (the golden state is not the recorded release's), and nothing pinned.
+    with pytest.raises(SystemExit):
+        generator.main(["--root", str(root), "--release", "9.9.9"])
+    pins = json.loads(
+        (root / "src" / "orcapod" / "data_function_types" / "released.json").read_text()
+    )
+    assert pins[CURRENT]["sha256"] is None

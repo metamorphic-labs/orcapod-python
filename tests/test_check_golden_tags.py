@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -557,3 +558,63 @@ def test_the_gate_refuses_a_withdrawn_version(repo: Path) -> None:
     result = _gate(repo, "0.3.0")
     assert result.returncode == 1
     assert "was withdrawn and is never released again" in result.stderr
+
+
+def _gate_module() -> Any:
+    """The script as a module, for the cases a command cannot reach."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("check_golden_tags_script", SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_gate_reads_a_snapshot_name_holding_a_space(repo: Path) -> None:
+    """Paths come NUL-separated from git: a space stays in its name (CodeRabbit, #448)."""
+    import json
+
+    snapshot = repo / "src/orcapod/data_function_types/python.function/v1 rev2.json"
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    _ = snapshot.write_text('{"revision": 2}\n')
+    _ = (repo / PINS).write_text(json.dumps({}) + "\n")
+    _commit(repo, "a snapshot named with a space")
+    result = _gate(repo, "0.3.0")
+    assert result.returncode == 1
+    assert "python.function/v1 rev2.json is not pinned" in result.stderr
+
+
+def test_the_gate_reports_a_snapshot_listing_git_cannot_read(tmp_path: Path) -> None:
+    """A failing listing is a problem, never a pass (CodeRabbit, #448)."""
+    module = _gate_module()
+    problems = module.unpinned_type_snapshots(tmp_path)  # not a repository
+    assert len(problems) == 1 and "git cannot list" in problems[0]
+
+
+def test_the_gate_reports_a_snapshot_git_cannot_read(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hashlib
+    import json
+
+    snapshot = repo / SNAPSHOT
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    _ = snapshot.write_text('{"revision": 1}\n')
+    key = SNAPSHOT.relative_to(PINS.parent).as_posix()
+    digest = hashlib.sha256(snapshot.read_bytes()).hexdigest()
+    _ = (repo / PINS).write_text(
+        json.dumps({key: {"released_in": "0.3.0", "sha256": digest}}) + "\n"
+    )
+    _commit(repo, "a pinned snapshot")
+    module = _gate_module()
+    real_show = module._show
+
+    def show(repo_: Path, rev: str, path: Any) -> bytes | None:
+        return (
+            None if str(path).endswith("v1-rev1.json") else real_show(repo_, rev, path)
+        )
+
+    monkeypatch.setattr(module, "_show", show)
+    problems = module.unpinned_type_snapshots(repo)
+    assert problems == [f"git cannot read data function type snapshot {key}"]

@@ -141,6 +141,22 @@ def check(snapshots: Path) -> list[str]:
     return problems
 
 
+def open_snapshots(snapshots: Path) -> list[str]:
+    """The snapshots ``released.json`` lists as open (``sha256`` null), sorted.
+
+    Args:
+        snapshots: The snapshot folder.
+
+    Returns:
+        Their paths relative to ``snapshots``.
+    """
+    return sorted(
+        relative
+        for relative, pin in _read_pins(snapshots).items()
+        if pin.get("sha256") is None
+    )
+
+
 def release(snapshots: Path, version: str) -> list[str]:
     """Pin every open snapshot as released in ``version``.
 

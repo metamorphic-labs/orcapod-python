@@ -321,36 +321,44 @@ def unpinned_type_snapshots(repo: Path) -> list[str]:
     Every snapshot file under ``TYPE_SNAPSHOTS`` (other than ``released.json``) must be
     listed in HEAD's ``released.json`` with a ``sha256`` that is not null and equals the
     file's: a snapshot added or changed after the release step would otherwise ship open,
-    and no later tag check would protect it (ITL-1259).
+    and no later tag check would protect it (ITL-1259). A HEAD without the folder has no
+    snapshot to pin; a listing or a file git cannot read is a problem, never a pass.
 
     Args:
         repo: The repository.
 
     Returns:
-        One problem per open, missing or mismatched pin; empty when every snapshot is
-        pinned.
+        One problem per open, missing or mismatched pin, or per path git cannot read;
+        empty when every snapshot is pinned.
     """
     import hashlib
 
-    listed = _git(repo, "ls-tree", "-r", "--name-only", "HEAD", str(TYPE_SNAPSHOTS))
+    listed = _git(
+        repo, "ls-tree", "-r", "-z", "--name-only", "HEAD", str(TYPE_SNAPSHOTS)
+    )
     if listed.returncode != 0:
-        return []
+        detail = listed.stderr.decode(errors="replace").strip()
+        return [f"git cannot list the data function type snapshots at HEAD: {detail}"]
     pins = _show_json(repo, "HEAD", TYPE_SNAPSHOTS / "released.json")
     pins = pins if isinstance(pins, dict) else {}
     problems: list[str] = []
-    for name in sorted(listed.stdout.decode().split()):
+    names = [name for name in listed.stdout.decode().split("\0") if name]
+    for name in sorted(names):
         path = PurePosixPath(name)
         relative = path.relative_to(TYPE_SNAPSHOTS).as_posix()
         if relative == "released.json" or path.suffix != ".json":
             continue
         pin = pins.get(relative)
         sha = pin.get("sha256") if isinstance(pin, dict) else None
-        data = _show(repo, "HEAD", path) or b""
         if sha is None:
             problems.append(
                 f"data function type snapshot {relative} is not pinned: run "
                 "generate_golden_hashes.py --release after adding it (a new version)"
             )
+            continue
+        data = _show(repo, "HEAD", path)
+        if data is None:
+            problems.append(f"git cannot read data function type snapshot {relative}")
         elif sha != hashlib.sha256(data).hexdigest():
             problems.append(
                 f"data function type snapshot {relative} does not match its pin"
