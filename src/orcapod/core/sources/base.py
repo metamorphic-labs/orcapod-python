@@ -4,11 +4,16 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from orcapod import contexts
 from orcapod.config import OrcapodConfig
-from orcapod.core.streams.base import StreamBase, typed_zero_row_table
+from orcapod.core.streams.base import (
+    StreamBase,
+    typed_arrow_schemas,
+    typed_zero_row_table,
+)
 from orcapod.system_constants import constants
 from orcapod.core.streams.view import StreamView
 from orcapod.protocols.core_protocols import StreamProtocol
-from orcapod.types import ColumnConfig, Schema
+from orcapod.types import ColumnConfig, ContentHash, Schema
+from orcapod.utils.schema_utils import arrow_schema_identity
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -128,8 +133,19 @@ class RootSource(StreamBase):
     """The resolved key columns of the record ids, in key order; ``()`` for the
     position. Every concrete source sets it in ``__init__``."""
 
+    def _schema_identity(self) -> tuple[ContentHash, ContentHash]:
+        """The identity of this source's schema: its Arrow tag and data schemas (ITL-640).
+
+        The Arrow schemas its rows have (``typed_arrow_schemas``), hashed by the one rule
+        (``schema_utils.arrow_schema_identity``): two sources whose columns differ only
+        in an Arrow type (``int32`` and ``int64``) are two identities, with two pipeline
+        hashes, stored paths and system-tag column names.
+        """
+        tag_schema, data_schema = typed_arrow_schemas(self)
+        return arrow_schema_identity(tag_schema, data_schema, self.data_context)
+
     def identity_structure(self) -> Any:
-        """Identity from the class name, output schema, ``source_id`` and key columns.
+        """Identity from the class name, Arrow schema, ``source_id`` and key columns.
 
         The key columns are the resolved ``record_id_columns`` (``()`` for the
         position): two sources that differ only in how they name their rows are two
@@ -138,7 +154,7 @@ class RootSource(StreamBase):
         """
         return (
             self.__class__.__name__,
-            self.output_schema(),
+            self._schema_identity(),
             self.source_id,
             self._key_columns,
         )
@@ -183,13 +199,13 @@ class RootSource(StreamBase):
         return {"tag_only_columns": list(tag_only)}
 
     def pipeline_identity_structure(self) -> Any:
-        """Return (tag_schema, data_schema) as the pipeline identity for this
-        source.  Schema-only: no data content is included, so sources with
-        identical schemas share the same pipeline hash and therefore the same
-        pipeline database table.
+        """Return the hashes of the Arrow tag and data schemas: the pipeline identity.
+
+        Schema-only: no data content is included, so sources whose Arrow schemas are
+        equal share the same pipeline hash and therefore the same pipeline database
+        table; sources whose Arrow types differ do not (ITL-640).
         """
-        tag_schema, data_schema = self.output_schema()
-        return (tag_schema, data_schema)
+        return self._schema_identity()
 
     # -------------------------------------------------------------------------
     # StreamProtocol protocol

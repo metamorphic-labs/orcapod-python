@@ -27,12 +27,14 @@ from orcapod.core.streams.view import (
 from orcapod.core.streams.base import (
     check_head_size,
     schema_requires_io,
+    typed_zero_row_table,
 )
 from orcapod.errors import InputValidationError
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, ContentHash, Schema
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
+from orcapod.utils.schema_utils import arrow_schema_identity
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -122,6 +124,11 @@ def validate_tags_as_data(
                 f"with {constants.DATAGRAM_PREFIX!r} are reserved for system columns."
             )
         seen.add(name)
+
+
+def _field_text(field: "pa.Field") -> str:
+    """The Arrow type of ``field`` with its top-level nullability, for a message."""
+    return f"{field.type}{'' if field.nullable else ' not null'}"
 
 
 class DerivedSource(RootSource):
@@ -474,17 +481,75 @@ class DerivedSource(RootSource):
                 f"the data-tags {sorted(stored)}, but the node declares "
                 f"{sorted(declared)}; nothing was read."
             )
-        return without_tag_kind_marks(records)
+        records = without_tag_kind_marks(records)
+        self._require_origin_types(records)
+        return records
+
+    def _require_origin_types(self, records: "pa.Table") -> None:
+        """Refuse stored rows whose Arrow types are not the origin's (ITL-640).
+
+        This source's identity is built from the origin's Arrow types; a store that
+        gave a column back as another type (a fixed-size list read back as a list, a
+        non-null column read back as nullable) would present rows of another schema
+        under that identity, so nothing is read.
+
+        Raises:
+            InputValidationError: Naming the column and both types.
+        """
+        expected = self._empty_origin_table().schema
+        hasher = self.data_context.arrow_hasher
+        for field in expected:
+            if field.name not in records.column_names:
+                continue
+            stored = records.schema.field(field.name)
+            if hasher.hash_schema(pa.schema([stored])) != hasher.hash_schema(
+                pa.schema([field])
+            ):
+                raise InputValidationError(
+                    f"DerivedSource over {self._origin.label!r}: the stored column "
+                    f"{field.name!r} reads back as {_field_text(stored)}, but the "
+                    f"origin's rows have {_field_text(field)}; nothing was read."
+                )
 
     def _empty_origin_table(self) -> "pa.Table":
-        """Return a zero-row table with the origin's declared columns."""
+        """Return a zero-row table with the origin's tag and data columns.
+
+        The columns have the Arrow types the origin's rows have (its typed zero-row
+        table, ITL-912), so this source presents the same types and has the same
+        identity before and after rows are stored (ITL-640). Only an origin that
+        cannot type itself without rows gives its declared Python schema, converted.
+        """
+        tag_keys, data_keys = self._origin.keys()
+        names = list(dict.fromkeys([*tag_keys, *data_keys]))
+        typed = typed_zero_row_table(self._origin)
+        if typed is not None:
+            return typed.select(names)
         # Build empty table preserving declared field nullability.
         tag_schema, data_schema = self._origin.output_schema()
-        tag_keys = self._origin.keys()[0]
         tc = self.data_context.type_converter
         python_schema = {k: tag_schema[k] for k in tag_keys}
         python_schema.update(data_schema)
         return arrow_utils.make_empty_table(python_schema, tc)
+
+    def _schema_identity(self) -> "tuple[ContentHash, ContentHash]":
+        """The identity of this source's Arrow schemas: its origin's columns (ITL-640).
+
+        Taken from the origin's typed zero-row table (``_empty_origin_table``) with the
+        ``tags_as_data`` copies, never from rows, so it does not change when the origin
+        stores rows. Rows read later must have these types (``_origin_records``).
+        """
+        table = self._empty_origin_table()
+        for tag, name in (self._tags_as_data or {}).items():
+            table = table.append_column(
+                table.schema.field(tag).with_name(name), table.column(tag)
+            )
+        tag_keys, data_keys = self.keys()
+        schema = table.schema
+        return arrow_schema_identity(
+            pa.schema([schema.field(name) for name in tag_keys]),
+            pa.schema([schema.field(name) for name in data_keys]),
+            self.data_context,
+        )
 
     def _build_derived_stream(
         self, tags_as_data: Mapping[str, str]

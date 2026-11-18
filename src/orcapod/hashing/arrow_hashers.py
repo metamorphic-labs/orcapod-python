@@ -39,6 +39,18 @@ value hashes built on it (pandas ``DataFrame`` and ``Series``).
 """
 
 
+ARROW_SCHEMA_HASH_LABEL = "arrow_schema_v1"
+"""``ContentHash.method`` of ``StarfixArrowHasher.hash_schema``: the single definition.
+
+A schema digest is a procedure of its own, not a table digest: the fields as
+``hash_table`` hashes them (``SemanticHashingVisitor.hashed_field``), then the starfix
+schema digest, which ignores column order and the large and non-large variants and
+tells apart every type, width, unit, zone, nullability at every depth and logical type
+identifier (ITL-640). Every schema that enters an identity is hashed by this procedure,
+so it has its own label (ITL-1154).
+"""
+
+
 class StarfixArrowHasher:
     """Arrow table hasher backed by the starfix-python ``ArrowDigester``.
 
@@ -78,7 +90,7 @@ class StarfixArrowHasher:
         ``SemanticHasherProtocol`` used to hash Python objects extracted
         from extension-typed columns.
     hasher_id:
-        The label (``ContentHash.method``) of every hash produced. Defaults to
+        The label (``ContentHash.method``) of every table hash produced. Defaults to
         ``ARROW_HASH_LABEL``, the label of this algorithm.
     """
 
@@ -165,6 +177,12 @@ class StarfixArrowHasher:
     def hash_schema(self, schema: "pa.Schema") -> ContentHash:
         """Hash an Arrow schema using the starfix canonical algorithm.
 
+        This is the hash of every schema that enters an identity (ITL-640): a source's
+        pipeline and content identity, the system-tag column names, the output schema
+        in a function's ``uri``. The ``ContentHash`` returned is labelled
+        ``ARROW_SCHEMA_HASH_LABEL``. Schema metadata and field metadata other than a
+        logical type's ``ARROW:extension:*`` keys are not part of the hash.
+
         Each field is hashed under the same rule as in ``hash_table``
         (``SemanticHashingVisitor.hashed_field``). A logical type whose values
         are hashed by a value handler is a ``large_binary`` field carrying the
@@ -184,7 +202,7 @@ class StarfixArrowHasher:
         if include_meta:
             schema = clean_schema_for_hashing(schema)
         digest = ArrowDigester.hash_schema(schema, include_metadata=include_meta)
-        return ContentHash(method=self._hasher_id, digest=digest)
+        return ContentHash(method=ARROW_SCHEMA_HASH_LABEL, digest=digest)
 
     def hash_table(self, table: "pa.Table | pa.RecordBatch") -> ContentHash:
         """Hash an Arrow table (or ``RecordBatch``) using starfix.

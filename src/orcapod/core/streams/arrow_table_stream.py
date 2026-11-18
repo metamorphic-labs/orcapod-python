@@ -245,8 +245,11 @@ class ArrowTableStream(StreamBase):
         if self._producer is None or not isinstance(
             self._producer, PipelineElementProtocol
         ):
-            tag_schema, data_schema = self.output_schema()
-            return (tag_schema, data_schema)
+            # A stream with no pipeline producer is a root: its Arrow schemas (ITL-640).
+            from orcapod.core.streams.base import typed_arrow_schemas
+            from orcapod.utils.schema_utils import arrow_schema_identity
+
+            return arrow_schema_identity(*typed_arrow_schemas(self), self.data_context)
         return super().pipeline_identity_structure()
 
     @property

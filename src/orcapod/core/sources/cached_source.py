@@ -15,6 +15,7 @@ from orcapod.core.sources.base import RootSource
 from orcapod.errors import UnstorableColumnError
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
+    typed_arrow_schemas,
     check_head_size,
     schema_requires_io,
     typed_zero_row_table,
@@ -37,8 +38,9 @@ from orcapod.contexts.stored import (
 from orcapod.protocols.core_protocols import DataProtocol, SourceProtocol, TagProtocol
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.system_constants import SOURCE_DB_SCHEMA_VERSION, constants
-from orcapod.types import ColumnConfig, Schema
+from orcapod.types import ColumnConfig, ContentHash, Schema
 from orcapod.utils.lazy_module import LazyModule
+from orcapod.utils.schema_utils import arrow_schema_identity
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -226,6 +228,14 @@ class CachedSource(RootSource):
 
     def identity_structure(self) -> Any:
         return self._source.identity_structure()
+
+    def _schema_identity(self) -> "tuple[ContentHash, ContentHash]":
+        """The wrapped source's schema identity: the cache stores that source's rows."""
+        if isinstance(self._source, RootSource):
+            return self._source._schema_identity()  # pyright: ignore[reportPrivateUsage]  # one rule for a source and its cache
+        return arrow_schema_identity(
+            *typed_arrow_schemas(self._source), self.data_context
+        )
 
     # -------------------------------------------------------------------------
     # Cache path — scoped to source's content hash

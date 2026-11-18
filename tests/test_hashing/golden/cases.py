@@ -590,15 +590,25 @@ def _tag_data_schemas() -> tuple[Any, Any]:
     )
 
 
+def _tag_data_arrow_schemas() -> tuple[pa.Schema, pa.Schema]:
+    """The Arrow schemas the converter gives ``_tag_data_schemas`` (ITL-640)."""
+    converter = _ctx().type_converter
+    tag_schema, data_schema = _tag_data_schemas()
+    return (
+        converter.python_schema_to_arrow_schema(tag_schema),
+        converter.python_schema_to_arrow_schema(data_schema),
+    )
+
+
 @case("schema", "compute_schema_hash")
 def schema_compute_schema_hash() -> dict[str, Any]:
     from orcapod.utils.schema_utils import compute_schema_hash
 
-    tag_schema, data_schema = _tag_data_schemas()
-    hasher = _ctx().semantic_hasher
+    tag_schema, data_schema = _tag_data_arrow_schemas()
+    ctx = _ctx()
     return {
-        "full": compute_schema_hash(tag_schema, data_schema, hasher, None),
-        "chars_16": compute_schema_hash(tag_schema, data_schema, hasher, 16),
+        "full": compute_schema_hash(tag_schema, data_schema, ctx, None),
+        "chars_16": compute_schema_hash(tag_schema, data_schema, ctx, 16),
     }
 
 
@@ -608,7 +618,7 @@ def schema_source_schema_hash() -> dict[str, Any]:
     from orcapod.utils.arrow_utils import system_tag_column_names
     from orcapod.utils.schema_utils import compute_source_schema_hash
 
-    tag_schema, data_schema = _tag_data_schemas()
+    tag_schema, data_schema = _tag_data_arrow_schemas()
     schema_hash = compute_source_schema_hash(
         tag_schema, data_schema, _ctx(), DEFAULT_CONFIG
     )

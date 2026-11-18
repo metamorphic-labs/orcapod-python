@@ -5,10 +5,13 @@ import logging
 import sys
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from types import UnionType
-from typing import Any, Union, get_args, get_origin, get_type_hints
+from typing import TYPE_CHECKING, Any, Union, get_args, get_origin, get_type_hints
 
 from orcapod.errors import InputValidationError
-from orcapod.types import Schema, SchemaLike
+from orcapod.types import ContentHash, Schema, SchemaLike
+
+if TYPE_CHECKING:
+    import pyarrow as pa
 
 logger = logging.getLogger(__name__)
 
@@ -479,55 +482,80 @@ def intersection_schemas(*schemas: SchemaLike) -> Schema:
     return Schema(intersection)
 
 
+def arrow_schema_identity(
+    tag_schema: "pa.Schema", data_schema: "pa.Schema", data_context: Any
+) -> tuple[ContentHash, ContentHash]:
+    """Return the identity of a ``(tag, data)`` schema pair: the one rule (ITL-640).
+
+    A schema enters an identity as its Arrow schema, hashed by the data context's
+    ``arrow_hasher.hash_schema`` (labelled ``arrow_schema_v1``): two schemas whose
+    Arrow types differ (width, unit, zone, precision, nullability at any depth, a
+    logical type's identifier) are two identities, and column order, large and
+    non-large variants, list item field names, dictionary encoding and field metadata
+    are not part of it. The tag and data schemas are hashed apart, so a data-tag (a
+    column in both) differs from a plain tag. The pair of ``ContentHash`` objects is
+    what a source's pipeline and content identity embed; the structure hasher keeps
+    each hash's label.
+
+    Args:
+        tag_schema: The Arrow schema of the tag columns.
+        data_schema: The Arrow schema of the data columns (data-tags included).
+        data_context: The data context whose ``arrow_hasher`` hashes the schemas.
+
+    Returns:
+        The labelled hashes of the tag schema and of the data schema.
+    """
+    hasher = data_context.arrow_hasher
+    return hasher.hash_schema(tag_schema), hasher.hash_schema(data_schema)
+
+
 def compute_schema_hash(
-    tag_schema: Schema,
-    data_schema: Schema,
-    semantic_hasher: Any,
+    tag_schema: "pa.Schema",
+    data_schema: "pa.Schema",
+    data_context: Any,
     char_count: int | None,
 ) -> str:
     """Compute the schema hash used for system-tag column naming.
 
-    This is the same hash that ``SourceStreamBuilder`` embeds in system-tag
-    column names when building an ``ArrowTableStream`` from a source table.
-    Extracting it here lets ``SourceNodeBase`` predict the system-tag column
-    names from its declared schemas alone, without requiring a live source.
+    This is the hash that ``SourceStreamBuilder`` embeds in system-tag column names
+    when building an ``ArrowTableStream`` from a source table: the semantic hash of
+    ``arrow_schema_identity`` of the pair, so a slot can predict the names from its
+    Arrow schemas alone, without a live source. A hash inside a name is the bare hex
+    digest.
 
     Args:
-        tag_schema: Python tag schema (``Schema`` mapping column names to types).
-        data_schema: Python data schema.
-        semantic_hasher: Hasher from the active ``DataContext``
-            (``data_context.semantic_hasher``).
-        char_count: Number of hex characters to include. ``None`` (the default)
-            returns the full hex digest. Pass a positive integer to truncate
-            (e.g. for backwards compatibility with stored data).
+        tag_schema: The Arrow schema of the tag columns.
+        data_schema: The Arrow schema of the data columns (data-tags included).
+        data_context: The active ``DataContext``.
+        char_count: Number of hex characters to include. ``None`` returns the full
+            hex digest.
 
     Returns:
-        Hex string — full digest length when ``char_count`` is ``None``,
-        otherwise truncated to ``char_count`` characters.
+        Hex string: the full digest when ``char_count`` is ``None``, otherwise
+        truncated to ``char_count`` characters.
     """
-    return semantic_hasher.hash_object((tag_schema, data_schema)).to_hex(
+    identity = arrow_schema_identity(tag_schema, data_schema, data_context)
+    return data_context.semantic_hasher.hash_object(identity).to_hex(
         char_count=char_count
     )
 
 
 def compute_source_schema_hash(
-    tag_schema: Schema,
-    data_schema: Schema,
+    tag_schema: "pa.Schema",
+    data_schema: "pa.Schema",
     data_context: Any,
     config: Any,
 ) -> str:
     """Compute the schema hash for system-tag column naming from a ``DataContext`` and config.
 
     This is the canonical single entry-point used by ``SourceStreamBuilder``,
-    ``SourceNodeBase``, and ``PollingSource`` so the unpacking of
-    ``data_context.semantic_hasher`` and ``config.hashing.schema_n_char``
-    is not replicated at every call site.
+    ``SourceNodeBase``, and ``PollingSource`` so the truncation by
+    ``config.hashing.schema_n_char`` is not replicated at every call site.
 
     Args:
-        tag_schema: Python tag schema (``Schema`` mapping column names to types).
-        data_schema: Python data schema.
-        data_context: Active ``DataContext`` — its ``semantic_hasher`` attribute
-            is used for hashing.
+        tag_schema: The Arrow schema of the tag columns.
+        data_schema: The Arrow schema of the data columns (data-tags included).
+        data_context: The active ``DataContext``.
         config: Active ``OrcapodConfig`` — ``config.hashing.schema_n_char``
             controls hash truncation.
 
@@ -536,10 +564,7 @@ def compute_source_schema_hash(
         characters.
     """
     return compute_schema_hash(
-        tag_schema,
-        data_schema,
-        data_context.semantic_hasher,
-        config.hashing.schema_n_char,
+        tag_schema, data_schema, data_context, config.hashing.schema_n_char
     )
 
 

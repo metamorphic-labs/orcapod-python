@@ -367,9 +367,13 @@ class PollingSource(RootSource, Generic[T]):
         """
         if self._tag_schema is None or self._data_schema is None:
             return None
+        converter = self.data_context.type_converter
+        converter.ensure_types_registered_for_schemas(
+            self._tag_schema, self._data_schema
+        )
         return compute_source_schema_hash(
-            self._tag_schema,
-            self._data_schema,
+            converter.python_schema_to_arrow_schema(self._tag_schema),
+            converter.python_schema_to_arrow_schema(self._data_schema),
             self.data_context,
             self.orcapod_config,
         )

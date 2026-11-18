@@ -399,21 +399,15 @@ class SourceStreamBuilder:
             table, normalize_record_id_columns(record_id_columns) or ()
         )
 
-        # 4. Compute schema hash from tag/data python schemas.
+        # 4. Compute schema hash from the tag/data Arrow schemas (ITL-640).
         # Nullable flags in the incoming table are trusted as-is — callers must
         # set them correctly before calling build().
         non_sys = arrow_utils.drop_system_columns(table)
         tag_schema = non_sys.select(list(tag_columns_tuple)).schema
         data_schema = non_sys.drop(list(tag_only_tuple)).schema
-        tag_python = self._data_context.type_converter.arrow_schema_to_python_schema(
-            tag_schema
-        )
-        data_python = self._data_context.type_converter.arrow_schema_to_python_schema(
-            data_schema
-        )
         schema_hash = compute_source_schema_hash(
-            tag_python,
-            data_python,
+            tag_schema,
+            data_schema,
             self._data_context,
             self._config,
         )

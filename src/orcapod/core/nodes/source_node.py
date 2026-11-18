@@ -23,7 +23,11 @@ from orcapod.core.base import TraceableBase
 from orcapod.core.datagrams import Data, Tag
 from orcapod.core.operators.drop_nulls import _without_none  # pyright: ignore[reportPrivateUsage]  # DropNulls' rule for removing None from a type, shared, never copied
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
-from orcapod.core.streams.base import schema_requires_io, typed_zero_row_table
+from orcapod.core.streams.base import (
+    schema_requires_io,
+    typed_arrow_schemas,
+    typed_zero_row_table,
+)
 from orcapod.core.streams.view import (
     ViewStatus,
     StreamView,
@@ -41,7 +45,10 @@ from orcapod.types import ColumnConfig, ContentHash, Schema
 from orcapod.utils import arrow_utils
 from orcapod.utils.arrow_utils import system_tag_column_names
 from orcapod.utils.lazy_module import LazyModule
-from orcapod.utils.schema_utils import compute_source_schema_hash
+from orcapod.utils.schema_utils import (
+    arrow_schema_identity,
+    compute_source_schema_hash,
+)
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -352,6 +359,9 @@ class SourceNodeBase(TraceableBase, ABC):
         data_context: Optional data context override.
         label: Optional display label override.
         config: Optional config override.
+        arrow_schemas: The Arrow tag and data schemas of the slot's columns, when
+            known (a slot made from a stream takes its stream's). ``None`` converts
+            the declared Python types with the data context's type converter.
     """
 
     node_type = "source"
@@ -364,11 +374,16 @@ class SourceNodeBase(TraceableBase, ABC):
         data_context: str | contexts.DataContext | None = None,
         label: str | None = None,
         config: OrcapodConfig | None = None,
+        arrow_schemas: "tuple[pa.Schema, pa.Schema] | None" = None,
     ) -> None:
         super().__init__(label=label, data_context=data_context, config=config)
         self._name = name
         self._tag_schema = tag_schema
         self._data_schema = data_schema
+        # The Arrow types of the slot's columns, which its identity is built from
+        # (ITL-640): those of the stream it was made from, or the conversion of the
+        # declared Python types (``arrow_schemas``).
+        self._given_arrow_schemas = arrow_schemas
         # A slot rebuilt from a saved job keeps the saved hashes, and the columns whose
         # saved type could not be restored at load (ITL-1138); see ``_keep_saved``.
         self._saved_pipeline_hash: ContentHash | None = None
@@ -425,6 +440,7 @@ class SourceNodeBase(TraceableBase, ABC):
         it is kept only when this slot has *other*'s name.
         """
         self._saved_pipeline_hash = other._saved_pipeline_hash
+        self._given_arrow_schemas = other._given_arrow_schemas
         if self._name == other._name:
             self._saved_content_hash = other._saved_content_hash
         self._pending_types = dict(other._pending_types)
@@ -517,17 +533,41 @@ class SourceNodeBase(TraceableBase, ABC):
     # Identity
     # ------------------------------------------------------------------
 
+    @property
+    def arrow_schemas(self) -> "tuple[pa.Schema, pa.Schema]":
+        """The Arrow tag and data schemas of the slot's columns (ITL-640).
+
+        A slot made from a stream holds the Arrow types of that stream's rows; a slot
+        declared with Python types holds the data context's conversion of them. The
+        slot's identity, and so every pipeline hash and stored path below it, is built
+        from these schemas, and a bound source must have them.
+        """
+        if self._given_arrow_schemas is not None:
+            return self._given_arrow_schemas
+        converter = self.data_context.type_converter
+        converter.ensure_types_registered_for_schemas(
+            self._tag_schema, self._data_schema
+        )
+        return (
+            converter.python_schema_to_arrow_schema(self._tag_schema),
+            converter.python_schema_to_arrow_schema(self._data_schema),
+        )
+
+    def _schema_identity(self) -> "tuple[ContentHash, ContentHash]":
+        """The hashes of the slot's Arrow schemas: ``schema_utils.arrow_schema_identity``."""
+        return arrow_schema_identity(*self.arrow_schemas, self.data_context)
+
     def identity_structure(self) -> Any:
-        """Return the content identity: ``("source_node", name, tag_schema, data_schema)``."""
-        return ("source_node", self._name, self._tag_schema, self._data_schema)
+        """Return the content identity: ``("source_node", name, schema identity)``."""
+        return ("source_node", self._name, self._schema_identity())
 
     def pipeline_identity_structure(self) -> Any:
-        """Return the pipeline identity: ``(tag_schema, data_schema)`` (name-independent).
+        """Return the pipeline identity: the slot's Arrow schema identity (name-independent).
 
-        Sources with identical schemas share the same DB table paths regardless
-        of name.
+        Sources with equal Arrow schemas share the same DB table paths regardless
+        of name; sources whose Arrow types differ do not (ITL-640).
         """
-        return (self._tag_schema, self._data_schema)
+        return self._schema_identity()
 
     # ------------------------------------------------------------------
     # Properties
@@ -571,9 +611,10 @@ class SourceNodeBase(TraceableBase, ABC):
         Returns:
             Hex string schema hash.
         """
+        tag_schema, data_schema = self.arrow_schemas
         return compute_source_schema_hash(
-            self._tag_schema,
-            self._data_schema,
+            tag_schema,
+            data_schema,
             self.data_context,
             self.orcapod_config,
         )
@@ -1029,6 +1070,11 @@ class SourceNode(SourceNodeBase):
             name=slot_name,
             tag_schema=tag_schema,
             data_schema=data_schema,
+            arrow_schemas=(
+                stream.arrow_schemas
+                if isinstance(stream, SourceNodeBase)
+                else typed_arrow_schemas(stream)
+            ),
         )
         if isinstance(stream, SourceNodeBase):
             # A loaded job's slot keeps its pending types and its saved pipeline hash,
@@ -1081,6 +1127,7 @@ class SourceJobNode(SourceNodeBase):
         data_schema: Schema | None = None,
         bound_source: StreamProtocol | None = None,
         data_context: str | contexts.DataContext | None = None,
+        arrow_schemas: "tuple[pa.Schema, pa.Schema] | None" = None,
     ) -> None:
         if tag_schema is None or data_schema is None:
             if bound_source is None:
@@ -1093,11 +1140,14 @@ class SourceJobNode(SourceNodeBase):
                 tag_schema = derived_tag
             if data_schema is None:
                 data_schema = derived_data
+            if arrow_schemas is None:
+                arrow_schemas = typed_arrow_schemas(bound_source)
         super().__init__(
             name=name,
             tag_schema=tag_schema,
             data_schema=data_schema,
             data_context=data_context,
+            arrow_schemas=arrow_schemas,
         )
         self._bound_source: StreamProtocol | None = None
         self._declared_form: _DeclaredForm | None = None
@@ -1568,6 +1618,7 @@ class SourceJobNode(SourceNodeBase):
                     name=slot_name,
                     tag_schema=tag_schema,
                     data_schema=data_schema,
+                    arrow_schemas=typed_arrow_schemas(stream),
                     bound_source=stream,
                 )
 
