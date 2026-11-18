@@ -84,7 +84,8 @@ def _member_order_names(
         raise ValueError(
             f"GroupBy: member_order {member_order!r} is not a known order; the "
             + f"keyword is {MEMBER_ORDER_NAME!r} (the default: the non-key tags in "
-            + "name order), or give a list of tag names"
+            + "name order); to order by a tag, give a list of tag names: "
+            + f"member_order=[{member_order!r}]"
         )
     if callable(member_order):
         raise NotImplementedError(

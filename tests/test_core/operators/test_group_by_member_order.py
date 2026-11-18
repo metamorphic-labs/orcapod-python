@@ -333,8 +333,17 @@ def test_the_config_round_trips(member_order: list[str] | None) -> None:
         ([1], TypeError, "strings"),
         (["k"], ValueError, "group key"),
         ("canonical", ValueError, "'name'"),
+        ("x", ValueError, r"a list of tag names: member_order=\['x'\]"),
     ],
-    ids=["empty", "repeated", "set", "not_a_string", "key", "unknown_keyword"],
+    ids=[
+        "empty",
+        "repeated",
+        "set",
+        "not_a_string",
+        "key",
+        "unknown_keyword",
+        "bare_tag_name",
+    ],
 )
 def test_bad_member_orders_are_refused_at_construction(
     member_order: Any,  # pyright: ignore[reportExplicitAny]  # the refusal is the test
