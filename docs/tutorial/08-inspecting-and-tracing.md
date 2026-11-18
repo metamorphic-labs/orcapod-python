@@ -91,7 +91,8 @@ The whole graph, rather than one node's lineage, is what the job draws when it i
 line of a notebook cell (see [Part 5](05-pipeline-job.md#nodes-where-the-results-are)).
 Clicking a node there shows its columns and its row counts in the last run.
 `job.diagram(direction="TB")` lays it out top to bottom, and `print(job.diagram())` lists
-it as text.
+it as text. [Working in notebooks](../concepts/notebooks.md) shows the diagram, the table
+preview of a node and the run summary as they appear in a notebook.
 
 ## Which rows did a value come from?
 
