@@ -15,6 +15,7 @@ from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
 from orcapod.utils import schema_utils
+from orcapod.utils.schema_utils import column_names
 
 
 def _tag_by_names(columns: str | Iterable[str]) -> tuple[str, ...]:
@@ -33,13 +34,12 @@ def _tag_by_names(columns: str | Iterable[str]) -> tuple[str, ...]:
         TypeError: If a name is not a string.
         ValueError: If no name is given, or a name is repeated.
     """
-    if isinstance(columns, str):
-        return (columns,)
-    names = tuple(columns)
+    try:
+        names = column_names(columns)
+    except TypeError as exc:
+        raise TypeError(f"TagBy: {exc}") from None
     if not names:
         raise ValueError("TagBy: expected at least one column name")
-    if not_strings := [name for name in names if not isinstance(name, str)]:
-        raise TypeError(f"TagBy: column names must be strings, got {not_strings!r}")
     if repeated := sorted({name for name in names if names.count(name) > 1}):
         raise ValueError(f"TagBy: columns {repeated} are named more than once")
     return tuple(sorted(names))

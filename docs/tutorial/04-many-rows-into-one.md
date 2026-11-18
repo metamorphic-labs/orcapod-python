@@ -170,7 +170,7 @@ becomes a single row:
 
 ```python
 everyone = subjects.batch()
-for tag, data in everyone.iter_data():
+for tag, data in everyone:
     print(tag.as_dict())
     print(data.as_dict())
 # {'subject_id': ['mouse_01', 'mouse_02', 'mouse_03', 'mouse_04']}
@@ -182,7 +182,7 @@ Here the tags became lists too, since no column identifies the single row any mo
 `drop_partial_batch=True`:
 
 ```python
-for tag, data in subjects.batch(batch_size=3).iter_data():
+for tag, data in subjects.batch(batch_size=3):
     print(tag.as_dict())
 # {'subject_id': ['mouse_01', 'mouse_02', 'mouse_03']}
 # {'subject_id': ['mouse_04']}
@@ -267,7 +267,7 @@ filter, then narrow, then `batch()`.)
             .select_data_columns(["mean_rate_hz"])
             .batch()
         )
-        for _, data in mean_of_means.pod(one_genotype).iter_data():
+        for _, data in mean_of_means.pod(one_genotype):
             print(genotype, round(data.as_dict()["genotype_mean_hz"], 3))
     # wildtype 6.545
     # knockout 5.058

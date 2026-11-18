@@ -4,6 +4,19 @@ This guide walks you through the core workflow in Orcapod: creating a data sourc
 inspecting its stream, applying a transformation with a function pod, and examining
 the results.
 
+## Installing
+
+Install Orcapod with [uv](https://docs.astral.sh/uv/), the recommended way: start a project
+with `uv init` (in a new directory), add Orcapod to it, and run your scripts with `uv run`:
+
+```bash
+uv init
+uv add orcapod
+uv run python my_pipeline.py
+```
+
+In an environment not managed by uv, `pip install orcapod` installs it instead.
+
 ## Creating a source
 
 A **source** is the entry point for data in an Orcapod pipeline. The simplest way to
@@ -74,10 +87,11 @@ print(data_keys)
 
 ### Iterating over rows
 
-Use `iter_data()` to walk through each (Tag, Data) pair:
+A stream is iterable: a `for` loop walks through each (Tag, Data) pair. Iterating a stream
+is the same as calling its `iter_data()` method:
 
 ```python
-for tag, data in source.iter_data():
+for tag, data in source:
     print(f"Tag: {tag.as_dict()}, Data: {data.as_dict()}")
 # Tag: {'experiment': 'exp_001'}, Data: {'temperature': 20.5, 'pressure': 1.01}
 # Tag: {'experiment': 'exp_002'}, Data: {'temperature': 22.3, 'pressure': 0.98}
@@ -160,7 +174,7 @@ now reflects the function's output types.
 Iterate over the results:
 
 ```python
-for tag, data in result.iter_data():
+for tag, data in result:
     print(f"Tag: {tag.as_dict()}, Data: {data.as_dict()}")
 # Tag: {'experiment': 'exp_001'}, Data: {'temp_fahrenheit': 68.9, 'is_high_pressure': True}
 # Tag: {'experiment': 'exp_002'}, Data: {'temp_fahrenheit': 72.14, 'is_high_pressure': False}

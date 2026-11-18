@@ -227,7 +227,7 @@ column:
 batched = spikes.batch()
 print(batched.keys())
 # (('unit', 'time'), ('unit', 'time', 'amp'))
-for tag, data in batched.iter_data():
+for tag, data in batched:
     print(tag["time"], data["time"])
 # [10, 20] [10, 20]
 ```

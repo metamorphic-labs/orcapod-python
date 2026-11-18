@@ -314,3 +314,6 @@ Reading a Delta table yourself with `deltalake.DeltaTable(...).to_pyarrow_table(
   are installing a version of Orcapod older than 0.2, which required the Graphviz
   development headers. Install Orcapod 0.2 or newer.
 - **Python version.** Orcapod needs Python 3.11 or newer.
+- **A release candidate is not installed.** `uv add orcapod` (like `pip install orcapod`)
+  takes the latest stable release and skips pre-releases. Name the release candidate:
+  `uv add "orcapod==0.4.0rc1"`.

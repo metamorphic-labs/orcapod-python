@@ -149,7 +149,7 @@ scale_b = DictSource(
 )
 
 merged = MergeJoin()(scale_a, scale_b)
-for tag, data in merged.iter_data():
+for tag, data in merged:
     print(tag.as_dict(), "->", data.as_dict())
 # {'subject_id': 'mouse_01'} -> {'weight': [24.9, 25.3]}
 # {'subject_id': 'mouse_02'} -> {'weight': [22.1, 22.6]}
@@ -197,7 +197,7 @@ weighed = DictSource(
 )
 
 only_weighed = SemiJoin()(all_subjects, weighed)
-for tag, data in only_weighed.iter_data():
+for tag, data in only_weighed:
     print(tag.as_dict(), "->", data.as_dict())
 # {'subject_id': 'mouse_01'} -> {'age': 12}
 # {'subject_id': 'mouse_02'} -> {'age': 8}
@@ -222,7 +222,7 @@ source = DictSource(
 
 batch = Batch()
 batched = batch.process(source)
-for tag, data in batched.iter_data():
+for tag, data in batched:
     print("Tags:", tag.as_dict())
     # Tags: {'subject_id': ['mouse_01', 'mouse_02']}
     print("Data:", data.as_dict())
@@ -263,7 +263,7 @@ source = DictSource(
 grouped = GroupBy(by=["subject_id"])(source)
 print(grouped.keys())
 # (('subject_id',), ('spike_count',))
-for tag, data in grouped.iter_data():
+for tag, data in grouped:
     print("Tags:", tag.as_dict(), "Data:", data.as_dict())
     # Tags: {'subject_id': 'mouse_01'} Data: {'spike_count': [1200, 980]}
     # Tags: {'subject_id': 'mouse_02'} Data: {'spike_count': [1450]}
@@ -293,7 +293,7 @@ with_probe = DerivedSource(source, tags_as_data={"probe": "probe_name"})
 by_subject = GroupBy(by=["subject_id"])(with_probe)
 print(by_subject.keys())
 # (('subject_id',), ('spike_count', 'probe_name'))
-for tag, data in by_subject.iter_data():
+for tag, data in by_subject:
     print(tag.as_dict(), data.as_dict())
     # {'subject_id': 'mouse_01'} {'spike_count': [1200, 980], 'probe_name': ['imec0', 'imec1']}
     # {'subject_id': 'mouse_02'} {'spike_count': [1450], 'probe_name': ['imec0']}
@@ -354,10 +354,13 @@ Every name in `by` must be a **scalar tag column** of the input. `GroupBy` raise
 the last usually means the stream came from `Batch`, so group *before* batching rather than
 after.
 
-Streams also expose this as a fluent method:
+Streams also expose this as a fluent method. A single column may be given as a string, as
+for every operator that takes column names (a string is one name, never its characters):
 
 ```python
 grouped = source.group_by(["subject_id"])
+same = source.group_by("subject_id")
+assert same.content_hash() == grouped.content_hash()
 ```
 
 ### Column selection
@@ -490,7 +493,7 @@ from orcapod.operators import PolarsFilter
 
 filt = PolarsFilter(predicates=[pl.col("age") > 10])
 filtered = filt.process(source)
-for tag, pkt in filtered.iter_data():
+for tag, pkt in filtered:
     print(f"{tag.as_dict()} -> {pkt.as_dict()}")
 # {'subject_id': 'mouse_01'} -> {'age': 12, 'weight': 25.3}
 # {'subject_id': 'mouse_03'} -> {'age': 15, 'weight': 27.8}
@@ -694,7 +697,7 @@ keyword arguments or as one dict (the only positional argument), as `map_tags` t
 ```python
 labelled = sessions.add_tags(cohort="A", run=3)
 print(labelled.keys())  # (('subject_id', 'session', 'cohort', 'run'), ('age', 'weight'))
-for tag, data in labelled.iter_data():
+for tag, data in labelled:
     print(tag.as_dict(), "->", data.as_dict())
 # {'subject_id': 'mouse_01', 'session': 1, 'cohort': 'A', 'run': 3} -> {'age': 12, 'weight': 25.3}
 # {'subject_id': 'mouse_02', 'session': 2, 'cohort': 'A', 'run': 3} -> {'age': 8, 'weight': 22.1}
@@ -838,7 +841,7 @@ Every stream also exposes the operators as methods, which reads well when chaini
 import polars as pl
 
 adults = subjects.join(measurements).polars_filter(pl.col("age") > 10)
-for tag, data in adults.iter_data():
+for tag, data in adults:
     print(tag.as_dict(), "->", data.as_dict())
 # {'subject_id': 'mouse_01'} -> {'weight': 25.3, 'age': 12}
 ```

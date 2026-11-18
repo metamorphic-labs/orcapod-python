@@ -929,6 +929,14 @@ def _json_for_script(value: object) -> str:
     return text.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
 
 
+# The largest scale at which the notebook shows a picture (ITL-1231): the image is as
+# wide as its container but never wider than this times its own width, so a two-node
+# job is not blown up. At 1.25 the node labels (13 px) are drawn at 16 px and the kind
+# line (11 px) at 13.75 px, about the size of a notebook's own text. The script has the
+# same maximum (``MAX_SCALE`` in ``diagram_assets/diagram.js``).
+_MAX_SCALE = 1.25
+
+
 # Shown next to the title, in the rendered view and in the no-script fallback: the
 # diagram and its interface are in development (developer, November 17, 2026). Plain
 # text in the text colour. The first diagram of a process also issues
@@ -1134,7 +1142,10 @@ class PipelineDiagram:
         A notebook that does not trust an output (JupyterLab and the classic Notebook,
         for a notebook not run by its reader) removes inline SVG and style sheets from
         its HTML but keeps an image. Where scripts run, the diagram's script replaces
-        the image by the same SVG drawn inline, in the page's colours.
+        the image by the same SVG drawn inline, in the page's colours. Without
+        scripts the image is as wide as its container, up to ``_MAX_SCALE`` times its
+        own width; its ``width`` and ``height`` attributes keep its proportions where a
+        notebook removes the style.
         """
         layout = _layout(self._nodes, self._edges, self._direction)
         svg = self._svg(self._nodes, self._edges, layout, standalone=True)
@@ -1143,7 +1154,8 @@ class PipelineDiagram:
         return (
             f'<img class="op-dag-picture" alt="{_escape(alt)}" '
             f'width="{_num(layout.width)}" height="{_num(layout.height)}" '
-            'style="max-width:100%;height:auto" '
+            f'style="width:100%;max-width:{_num(layout.width * _MAX_SCALE)}px;'
+            'height:auto" '
             f'src="data:image/svg+xml;base64,{encoded}">'
         )
 

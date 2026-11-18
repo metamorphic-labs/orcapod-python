@@ -82,7 +82,7 @@ print("Data schema:", dict(data_schema))
 # Data schema: {'bmi': <class 'float'>}
 
 # Iterate over results
-for tag, data in result.iter_data():
+for tag, data in result:
     print(f"  {tag.as_dict()} -> {data.as_dict()}")
 # {'subject_id': 'mouse_01'} -> {'bmi': 1756.9444444444446}
 # {'subject_id': 'mouse_02'} -> {'bmi': 2209.9999999999995}
@@ -114,7 +114,7 @@ wide = DictSource(
 )
 
 result = compute_bmi.pod(wide)  # 'age' is not a parameter: it is dropped
-for tag, data in result.iter_data():
+for tag, data in result:
     print(f"{tag.as_dict()} -> {data.as_dict()}")
 # {'subject_id': 'mouse_01'} -> {'bmi': 1756.9444444444446}
 # {'subject_id': 'mouse_02'} -> {'bmi': 2209.9999999999995}
@@ -289,7 +289,7 @@ explicit:
 def twice(weight: float) -> list[float]:
     return list((weight, weight * 2))
 
-for tag, data in twice.pod(weights).iter_data():
+for tag, data in twice.pod(weights):
     print(data.as_dict())
 # {'weights': [25.3, 50.6]}
 ```
@@ -1131,12 +1131,12 @@ recordings = DictSource(
     tag_columns=["session"], tag_only_columns=True,
 )
 readings = load_readings.pod(recordings)
-for tag, data in readings.iter_data():
+for tag, data in readings:
     print(tag["session"], dict(data["readings"].schema))
 # s1 {'sample': UInt16, 'voltage': Float32}
 # s2 {'sample': UInt16, 'voltage': Float32}
 
-for tag, data in count_rows.pod(readings).iter_data():
+for tag, data in count_rows.pod(readings):
     print(tag["session"], data["n_rows"])
 # s1 2
 # s2 3
@@ -1177,7 +1177,7 @@ labels = DictSource(
     tag_columns=["sample"], tag_only_columns=True,
     data_schema={"sample": str, "counts": list[int | None]},
 )
-for tag, data in labels.iter_data():
+for tag, data in labels:
     print(data["counts"])
 # [3, None, 1]
 ```
@@ -1218,7 +1218,7 @@ heights = DictSource(
 )
 
 result = compute_bmi.pod(weights, heights)
-for tag, data in result.iter_data():
+for tag, data in result:
     print(f"{tag.as_dict()} -> {data.as_dict()}")
 # {'subject_id': 'mouse_01'} -> {'bmi': 1756.9444444444446}
 # {'subject_id': 'mouse_02'} -> {'bmi': 2209.9999999999995}
@@ -1242,7 +1242,7 @@ chosen = DictSource(
 )
 
 result = compute_bmi.pod(weights, heights, chosen)
-for tag, data in result.iter_data():
+for tag, data in result:
     print(f"{tag.as_dict()} -> {data.as_dict()}")
 # {'subject_id': 'mouse_02'} -> {'bmi': 2209.9999999999995}
 ```

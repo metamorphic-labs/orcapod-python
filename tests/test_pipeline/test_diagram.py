@@ -18,6 +18,7 @@ import warnings
 from collections.abc import Iterator
 import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -516,6 +517,400 @@ def test_the_embedded_script_parses(tmp_path: Any) -> None:
         ["node", "--check", str(path)], capture_output=True, text=True, check=False
     )
     assert done.returncode == 0, done.stderr
+
+
+# ---------------------------------------------------------------------------
+# The view's scale and size (ITL-1231), checked by running the embedded script under
+# Node.js against a stand-in page (``diagram_harness.js``): the view is as wide as a
+# step says and as tall as the script makes it.
+# ---------------------------------------------------------------------------
+
+HARNESS = Path(__file__).with_name("diagram_harness.js")
+MAX_SCALE = 1.25
+MIN_FIRST_SCALE = 0.8
+needs_node = pytest.mark.skipif(
+    shutil.which("node") is None, reason="Node.js is not on PATH"
+)
+
+
+class _Tree(HTMLParser):
+    """An HTML fragment as nested ``{"tag", "attrs", "children"}`` dictionaries."""
+
+    _VOID = frozenset({"img", "input", "br", "meta"})
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.root: dict[str, Any] = {"tag": "body", "attrs": {}, "children": []}
+        self._stack = [self.root]
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        element = {"tag": tag, "attrs": {k: v or "" for k, v in attrs}, "children": []}
+        self._stack[-1]["children"].append(element)
+        if tag not in self._VOID:
+            self._stack.append(element)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag not in self._VOID:
+            assert self._stack[-1]["tag"] == tag
+            self._stack.pop()
+
+    def handle_data(self, data: str) -> None:
+        self._stack[-1]["children"].append(data)
+
+
+def _run_view(
+    document: str, steps: list[dict[str, Any]], tmp_path: Any
+) -> list[dict[str, Any]]:
+    """Run the output's script on the steps; the observations, in order."""
+    tree = _Tree()
+    tree.feed(document)
+    script = document.rsplit("<script>", 1)[1].removesuffix("</script>")
+    case = tmp_path / "case.json"
+    case.write_text(json.dumps({"tree": tree.root, "script": script, "steps": steps}))
+    done = subprocess.run(
+        ["node", str(HARNESS), str(case)], capture_output=True, text=True, check=False
+    )
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout)
+
+
+def _size(document: str) -> tuple[float, float]:
+    """The picture's natural width and height."""
+    root = ET.fromstring(_picture(document))
+    return float(root.get("width", "0")), float(root.get("height", "0"))
+
+
+def _small_job() -> PipelineJob:
+    """A source and one function pod: a picture much narrower than a notebook cell."""
+    job = PipelineJob(name="small", database=InMemoryArrowDatabase())
+    with job:
+        inc.pod(_units(), label="rates")
+    return job
+
+
+def _fit_scale(width: float, height: float, w: float, h: float) -> float:
+    """The scale at which the whole picture fits the view (fit, the 0 key)."""
+    return min(width / w, height / h, MAX_SCALE)
+
+
+def _first_scale(width: float, height: float, w: float, h: float) -> float:
+    """The scale of the first display: fitted, but never below the readable floor."""
+    return max(_fit_scale(width, height, w, h), MIN_FIRST_SCALE)
+
+
+def _first_height(width: float, w: float, h: float) -> int:
+    """The view's height: the picture's at its first-display scale, within limits."""
+    scale = max(min(width / w, MAX_SCALE), MIN_FIRST_SCALE)
+    return round(min(max(h * scale, min(120, h * MAX_SCALE)), 560))
+
+
+def _shows_all(seen: dict[str, Any], w: float, h: float) -> bool:
+    x, y, vw, vh = seen["viewBox"]
+    eps = 1e-6
+    return x <= eps and y <= eps and x + vw >= w - eps and y + vh >= h - eps
+
+
+def _undistorted(seen: dict[str, Any]) -> bool:
+    """The viewBox has the view's proportions: the picture is not shrunk to fit a
+    size the view had before."""
+    vb = seen["viewBox"]
+    return vb[2] / vb[3] == pytest.approx(seen["width"] / seen["height"])
+
+
+def test_the_script_and_the_image_have_the_same_maximum_scale() -> None:
+    from orcapod.pipeline import diagram as module
+
+    script = _asset_file("diagram.js")
+    found = re.search(r"var MAX_SCALE = ([\d.]+), MIN_FIRST_SCALE = ([\d.]+);", script)
+    assert found is not None
+    assert float(found.group(1)) == module._MAX_SCALE == MAX_SCALE
+    assert float(found.group(2)) == MIN_FIRST_SCALE
+
+
+@needs_node
+@pytest.mark.parametrize("direction", ["LR", "TB"])
+def test_a_small_picture_is_scaled_up_to_the_maximum(
+    direction: Any, tmp_path: Any
+) -> None:
+    """A two-node job in a wide cell is drawn at the maximum scale, its view no taller
+    than the picture at that scale."""
+    document = _small_job().diagram(direction=direction).to_html()
+    w, h = _size(document)
+    assert w * MAX_SCALE < 1000
+    seen = _run_view(
+        document,
+        [{"op": "run", "width": 1000}, {"op": "observe"}, {"op": "key", "key": "0"}]
+        + [{"op": "observe"}],
+        tmp_path,
+    )
+    first, fitted = [view for view in seen if "viewBox" in view]
+    for view in (first, fitted):
+        assert view["scale"] == pytest.approx(MAX_SCALE)
+        assert view["height"] == round(h * MAX_SCALE)
+        assert view["centre"] == pytest.approx([w / 2, h / 2])
+        assert view["clipped"] == []
+        assert _undistorted(view)
+
+
+@needs_node
+@pytest.mark.parametrize("direction", ["LR", "TB"])
+def test_a_picture_that_fits_readably_is_shown_whole(
+    direction: Any, tmp_path: Any
+) -> None:
+    document = _job().diagram(direction=direction).to_html()
+    w, h = _size(document)
+    width = round(w * 0.9)
+    [seen] = _run_view(
+        document, [{"op": "run", "width": width}, {"op": "observe"}], tmp_path
+    )
+    assert seen["height"] == _first_height(width, w, h)
+    assert seen["scale"] == pytest.approx(_fit_scale(width, seen["height"], w, h))
+    assert seen["scale"] >= MIN_FIRST_SCALE
+    assert _shows_all(seen, w, h) and seen["clipped"] == []
+
+
+@needs_node
+def test_a_wide_picture_starts_readable_at_its_left_end(tmp_path: Any) -> None:
+    """Fitted, the picture would be drawn below the readable floor: the first display
+    is at the floor, from the picture's left end, with a cue on the right edge; fit
+    and the 0 key show all of it."""
+    document = _job().diagram().to_html()
+    w, h = _size(document)
+    width = round(w / 2)
+    seen = _run_view(
+        document,
+        [
+            {"op": "run", "width": width},
+            {"op": "observe"},
+            {"op": "cue", "side": "right"},
+            {"op": "observe"},
+            {"op": "click", "act": "fit"},
+            {"op": "observe"},
+            {"op": "click", "act": "in"},
+            {"op": "key", "key": "0"},
+            {"op": "observe"},
+        ],
+        tmp_path,
+    )
+    seen = [view for view in seen if "viewBox" in view]
+    first, moved, fitted, keyed = seen
+    assert first["height"] == _first_height(width, w, h)
+    assert first["scale"] == pytest.approx(MIN_FIRST_SCALE)
+    assert first["viewBox"][0] == pytest.approx(0)  # the left end
+    assert first["centre"][1] == pytest.approx(h / 2)  # whole along the other axis
+    assert first["clipped"] == ["right"]
+    # The cue moves the picture half a view to the right.
+    assert moved["centre"][0] == pytest.approx(
+        first["centre"][0] + width / 2 / MIN_FIRST_SCALE
+    )
+    assert moved["clipped"] == ["left", "right"]
+    for view in (fitted, keyed):
+        assert view["scale"] == pytest.approx(_fit_scale(width, view["height"], w, h))
+        assert _shows_all(view, w, h) and view["clipped"] == []
+    for view in seen:
+        assert _undistorted(view)
+
+
+@needs_node
+def test_a_tall_picture_starts_at_its_top_end(tmp_path: Any) -> None:
+    """Many parallel branches: the view stops at 560 pixels; the picture starts at its
+    top end, readable, and fit shows all of it."""
+    job = PipelineJob(name="wide", database=InMemoryArrowDatabase())
+    with job:
+        for i in range(24):
+            inc.pod(_units(source_id=f"units_{i}"), label=f"rates_{i}")
+    document = job.diagram().to_html()
+    w, h = _size(document)
+    assert h * MIN_FIRST_SCALE > 560
+    seen = _run_view(
+        document,
+        [
+            {"op": "run", "width": 900},
+            {"op": "observe"},
+            {"op": "key", "key": "0"},
+            {"op": "observe"},
+        ],
+        tmp_path,
+    )
+    seen = [view for view in seen if "viewBox" in view]
+    first, fitted = seen
+    assert first["height"] == 560
+    assert first["scale"] == pytest.approx(_first_scale(900, 560, w, h))
+    assert first["viewBox"][1] == pytest.approx(0)  # the top end
+    assert "bottom" in first["clipped"] and "top" not in first["clipped"]
+    assert fitted["scale"] == pytest.approx(_fit_scale(900, 560, w, h))
+    assert _shows_all(fitted, w, h) and fitted["clipped"] == []
+
+
+@needs_node
+def test_the_view_is_drawn_again_when_the_notebook_lays_it_out(tmp_path: Any) -> None:
+    """Set up before the cell has a width (JupyterLab), the picture is drawn once the
+    view gets one, and again when it widens (a side bar closing)."""
+    document = _job().diagram().to_html()
+    w, h = _size(document)
+    seen = _run_view(
+        document,
+        [
+            {"op": "run", "width": 0},
+            {"op": "width", "width": round(w / 2)},
+            {"op": "observe"},
+            {"op": "width", "width": round(w * 1.1)},
+            {"op": "observe"},
+        ],
+        tmp_path,
+    )
+    for view in seen:
+        assert view["height"] == _first_height(view["width"], w, h)
+        assert view["scale"] == pytest.approx(
+            _first_scale(view["width"], view["height"], w, h)
+        )
+        assert _undistorted(view)
+    assert _shows_all(seen[1], w, h)
+    # Observed on the title line, whose size the view's new height does not change.
+    assert seen[0]["observed"] == ["op-dag-head"]
+
+
+@needs_node
+def test_zoom_buttons_and_keys_change_the_picture(tmp_path: Any) -> None:
+    document = _job().diagram().to_html()
+    w, h = _size(document)
+    seen = _run_view(
+        document,
+        [
+            {"op": "run", "width": 800},
+            {"op": "observe"},
+            {"op": "click", "act": "in"},
+            {"op": "observe"},
+            {"op": "key", "key": "-"},
+            {"op": "key", "key": "-"},
+            {"op": "observe"},
+            {"op": "key", "key": "+"},
+            {"op": "drag", "dx": 40, "dy": 0},
+            {"op": "observe"},
+            # The reader zoomed and moved it: a new width keeps the scale and centre.
+            {"op": "width", "width": 600},
+            {"op": "observe"},
+            {"op": "click", "act": "fit"},
+            {"op": "observe"},
+            # After fit, a new width fits again.
+            {"op": "width", "width": 700},
+            {"op": "observe"},
+        ],
+        tmp_path,
+    )
+    views = [view for view in seen if "viewBox" in view]
+    first, zoomed, smaller, dragged, resized, refit, refit_wider = views
+    base = first["scale"]
+    assert base == pytest.approx(_first_scale(800, first["height"], w, h))
+    assert zoomed["scale"] == pytest.approx(base * 1.25)
+    assert smaller["scale"] == pytest.approx(base / 1.25)
+    assert dragged["scale"] == pytest.approx(base)
+    # A drag of 40 pixels to the right shows what was 40 pixels to the left.
+    assert dragged["centre"][0] == pytest.approx(first["centre"][0] - 40 / base)
+    assert resized["scale"] == pytest.approx(base)
+    assert resized["centre"] == pytest.approx(dragged["centre"])
+    for view in views:
+        assert _undistorted(view)
+    for view in (refit, refit_wider):
+        assert view["scale"] == pytest.approx(
+            _fit_scale(view["width"], view["height"], w, h)
+        )
+        assert _shows_all(view, w, h)
+
+
+@needs_node
+def test_zoom_never_moves_against_its_direction(tmp_path: Any) -> None:
+    """A picture that fits below the smallest zoom step (a very large graph in a
+    narrow view): zooming out never enlarges it, zooming in never shrinks it."""
+    document = _job().diagram().to_html()
+    w, h = _size(document)
+    width = 10
+    seen = _run_view(
+        document,
+        [
+            {"op": "run", "width": width},
+            {"op": "key", "key": "0"},
+            {"op": "observe"},
+            {"op": "click", "act": "out"},
+            {"op": "observe"},
+            {"op": "click", "act": "in"},
+            {"op": "observe"},
+        ],
+        tmp_path,
+    )
+    fitted, out, back = [view for view in seen if "viewBox" in view]
+    assert fitted["scale"] == pytest.approx(_fit_scale(width, fitted["height"], w, h))
+    assert fitted["scale"] < 0.02
+    assert out["scale"] <= fitted["scale"]
+    assert back["scale"] >= out["scale"]
+    assert back["scale"] <= 0.02
+
+
+@needs_node
+def test_keys_the_diagram_uses_go_no_further(tmp_path: Any) -> None:
+    """In JupyterLab the arrow keys also move between cells and 0 twice restarts the
+    kernel: a key the diagram handles stops there; any other key passes on."""
+    keys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "+", "=", "-", "0", "a"]
+    steps: list[dict[str, Any]] = [{"op": "run", "width": 800}]
+    steps += [{"op": "key", "key": key} for key in keys]
+    seen = _run_view(_job().diagram().to_html(), steps, tmp_path)
+    assert {s["key"]: s["stopped"] for s in seen} == {k: k != "a" for k in keys}
+    assert {s["key"]: s["prevented"] for s in seen} == {k: k != "a" for k in keys}
+
+
+@needs_node
+def test_the_collapse_checkbox_resizes_the_view_for_the_other_layout(
+    tmp_path: Any,
+) -> None:
+    job = PipelineJob(name="folded", database=InMemoryArrowDatabase())
+    with job:
+        rates: Any = inc.pod(_units(), _scales(), label="rates")
+        total.pod(rates.group_by(["g"]), label="sums")
+    document = job.diagram().to_html()
+    folded = job.diagram(collapse=True).to_html()
+    w, h = _size(document)
+    fw, fh = _size(folded)
+    assert fw < w
+    seen = _run_view(
+        document,
+        [
+            {"op": "run", "width": 700},
+            {"op": "observe"},
+            {"op": "collapse"},
+            {"op": "observe"},
+            {"op": "collapse"},
+            {"op": "observe"},
+        ],
+        tmp_path,
+    )
+    for view, (pw, ph) in zip(seen, [(w, h), (fw, fh), (w, h)], strict=True):
+        assert view["height"] == _first_height(700, pw, ph)
+        assert view["scale"] == pytest.approx(_first_scale(700, view["height"], pw, ph))
+        assert _undistorted(view)
+
+
+def test_the_image_fills_the_width_up_to_the_maximum_scale() -> None:
+    """Without scripts the image is as wide as the cell, up to 1.25 times its own size;
+    its width and height attributes keep its proportions where the style is removed."""
+    document = _small_job().diagram().to_html()
+    w, h = _size(document)
+    tree = _Tree()
+    tree.feed(document)
+
+    def find(node: dict[str, Any], tag: str) -> dict[str, Any] | None:
+        if node["tag"] == tag:
+            return node
+        for child in node["children"]:
+            if isinstance(child, dict) and (hit := find(child, tag)) is not None:
+                return hit
+        return None
+
+    img = find(tree.root, "img")
+    assert img is not None
+    assert img["attrs"]["style"] == (
+        f"width:100%;max-width:{round(w * MAX_SCALE, 1):g}px;height:auto"
+    )
+    assert (float(img["attrs"]["width"]), float(img["attrs"]["height"])) == (w, h)
 
 
 def test_an_uncompiled_pipeline_displays_as_text() -> None:

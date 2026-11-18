@@ -14,6 +14,7 @@ from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
+from orcapod.utils.schema_utils import column_names
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -188,11 +189,12 @@ class GroupBy(UnaryOperator):
     what tells a batch's members apart.
 
     Args:
-        by: Tag column names to group on, in any order (a set too).  Must be
-            non-empty, free of duplicates, and must all be scalar tag columns of
-            the input stream.  Their order is not kept: it is not part of the
-            identity, and the groups are emitted sorted by the keys in name order
-            (developer, November 17, 2026, ITL-1226).
+        by: Tag column names to group on, in any order (a set too), or one
+            name as a string (a bare string is one name, never its characters).
+            Must be non-empty, free of duplicates, and must all be scalar tag
+            columns of the input stream.  Their order is not kept: it is not part
+            of the identity, and the groups are emitted sorted by the keys in name
+            order (developer, November 17, 2026, ITL-1226).
         member_order: The order of the members of a group.  ``None`` (or
             ``"name"``): by the non-key tags in name order.  A list or tuple of
             non-key tag names (plain tags or data-tags): by those tags in the
@@ -203,8 +205,8 @@ class GroupBy(UnaryOperator):
     Raises:
         ValueError: If ``by`` is empty or repeats a name, or ``member_order`` is
             an unknown keyword, empty, repeats a name or names a group key.
-        TypeError: If ``member_order`` is a set or holds a name that is not a
-            string.
+        TypeError: If ``by`` is not a string or an iterable of strings, or
+            ``member_order`` is a set or holds a name that is not a string.
         NotImplementedError: If ``member_order`` is a function.
     """
 
@@ -213,12 +215,12 @@ class GroupBy(UnaryOperator):
 
     def __init__(
         self,
-        by: Collection[str],
+        by: str | Collection[str],
         *,
         member_order: str | Sequence[str] | None = None,
         **kwargs: Any,
     ) -> None:
-        by_tuple = tuple(by)
+        by_tuple = column_names(by)
         if not by_tuple:
             raise ValueError("GroupBy requires at least one column in `by`.")
         duplicates = sorted({c for c in by_tuple if by_tuple.count(c) > 1})

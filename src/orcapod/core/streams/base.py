@@ -508,7 +508,7 @@ class StreamBase(TraceableBase):
 
     def group_by(
         self,
-        by: Collection[str],
+        by: str | Collection[str],
         label: str | None = None,
         *,
         member_order: str | Sequence[str] | None = None,
@@ -523,7 +523,7 @@ class StreamBase(TraceableBase):
         ``orcapod.core.operators.GroupBy``.
 
         Args:
-            by: Tag column names to group on.
+            by: Tag column names to group on, or one name as a string.
             label: Optional node label for the pipeline graph.
             member_order: ``None`` or ``"name"`` (the non-key tags in name
                 order), or a list of non-key tag names to order the members by
