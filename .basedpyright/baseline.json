@@ -66222,7 +66222,7 @@
                 }
             }
         ],
-        "./test-objective/conftest.py": [
+        "./test-specification/conftest.py": [
             {
                 "code": "reportUnusedParameter",
                 "range": {
@@ -66288,7 +66288,7 @@
                 }
             }
         ],
-        "./test-objective/integration/test_caching_flows.py": [
+        "./test-specification/integration/test_caching_flows.py": [
             {
                 "code": "reportArgumentType",
                 "range": {
@@ -66322,7 +66322,7 @@
                 }
             }
         ],
-        "./test-objective/integration/test_hash_invariants.py": [
+        "./test-specification/integration/test_hash_invariants.py": [
             {
                 "code": "reportUnknownParameterType",
                 "range": {
@@ -66476,7 +66476,7 @@
                 }
             }
         ],
-        "./test-objective/integration/test_pipeline_flows.py": [
+        "./test-specification/integration/test_pipeline_flows.py": [
             {
                 "code": "reportUnusedFunction",
                 "range": {
@@ -66662,7 +66662,7 @@
                 }
             }
         ],
-        "./test-objective/integration/test_provenance.py": [
+        "./test-specification/integration/test_provenance.py": [
             {
                 "code": "reportUnknownParameterType",
                 "range": {
@@ -66872,7 +66872,7 @@
                 }
             }
         ],
-        "./test-objective/property/test_hash_properties.py": [
+        "./test-specification/property/test_hash_properties.py": [
             {
                 "code": "reportUnknownParameterType",
                 "range": {
@@ -67098,7 +67098,7 @@
                 }
             }
         ],
-        "./test-objective/property/test_operator_algebra.py": [
+        "./test-specification/property/test_operator_algebra.py": [
             {
                 "code": "reportUnknownParameterType",
                 "range": {
@@ -67276,7 +67276,7 @@
                 }
             }
         ],
-        "./test-objective/property/test_schema_properties.py": [
+        "./test-specification/property/test_schema_properties.py": [
             {
                 "code": "reportUnknownParameterType",
                 "range": {
@@ -67518,7 +67518,7 @@
                 }
             }
         ],
-        "./test-objective/unit/test_arrow_data_utils.py": [
+        "./test-specification/unit/test_arrow_data_utils.py": [
             {
                 "code": "reportUnusedCallResult",
                 "range": {
@@ -67536,7 +67536,7 @@
                 }
             }
         ],
-        "./test-objective/unit/test_arrow_utils.py": [
+        "./test-specification/unit/test_arrow_utils.py": [
             {
                 "code": "reportUnknownVariableType",
                 "range": {
@@ -67722,7 +67722,7 @@
                 }
             }
         ],
-        "./test-objective/unit/test_contexts.py": [
+        "./test-specification/unit/test_contexts.py": [
             {
                 "code": "reportUnusedCallResult",
                 "range": {
@@ -67732,7 +67732,7 @@
                 }
             }
         ],
-        "./test-objective/unit/test_data.py": [
+        "./test-specification/unit/test_data.py": [
             {
                 "code": "reportUnknownVariableType",
                 "range": {
@@ -67918,7 +67918,7 @@
                 }
             }
         ],
-        "./test-objective/unit/test_data_function.py": [
+        "./test-specification/unit/test_data_function.py": [
             {
                 "code": "reportUnusedParameter",
                 "range": {
@@ -68120,7 +68120,7 @@
                 }
             }
         ],
-        "./test-objective/unit/test_databases.py": [
+        "./test-specification/unit/test_databases.py": [
             {
                 "code": "reportArgumentType",
                 "range": {
@@ -68146,7 +68146,7 @@
                 }
             }
         ],
-        "./test-objective/unit/test_datagram.py": [
+        "./test-specification/unit/test_datagram.py": [
             {
                 "code": "reportUnknownMemberType",
                 "range": {
@@ -68332,7 +68332,7 @@
                 }
             }
         ],
-        "./test-objective/unit/test_function_pod.py": [
+        "./test-specification/unit/test_function_pod.py": [
             {
                 "code": "reportUnknownVariableType",
                 "range": {
@@ -68542,7 +68542,7 @@
                 }
             }
         ],
-        "./test-objective/unit/test_hashing.py": [
+        "./test-specification/unit/test_hashing.py": [
             {
                 "code": "reportAny",
                 "range": {
@@ -68944,7 +68944,7 @@
                 }
             }
         ],
-        "./test-objective/unit/test_lazy_module.py": [
+        "./test-specification/unit/test_lazy_module.py": [
             {
                 "code": "reportAny",
                 "range": {
@@ -68994,7 +68994,7 @@
                 }
             }
         ],
-        "./test-objective/unit/test_nodes.py": [
+        "./test-specification/unit/test_nodes.py": [
             {
                 "code": "reportArgumentType",
                 "range": {
@@ -69132,7 +69132,7 @@
                 }
             }
         ],
-        "./test-objective/unit/test_operators.py": [
+        "./test-specification/unit/test_operators.py": [
             {
                 "code": "reportUnknownParameterType",
                 "range": {
@@ -69326,7 +69326,7 @@
                 }
             }
         ],
-        "./test-objective/unit/test_schema_utils.py": [
+        "./test-specification/unit/test_schema_utils.py": [
             {
                 "code": "reportUnknownVariableType",
                 "range": {
@@ -69560,7 +69560,7 @@
                 }
             }
         ],
-        "./test-objective/unit/test_semantic_types.py": [
+        "./test-specification/unit/test_semantic_types.py": [
             {
                 "code": "reportUnknownParameterType",
                 "range": {
@@ -70130,7 +70130,7 @@
                 }
             }
         ],
-        "./test-objective/unit/test_source_registry.py": [
+        "./test-specification/unit/test_source_registry.py": [
             {
                 "code": "reportArgumentType",
                 "range": {
@@ -70180,7 +70180,7 @@
                 }
             }
         ],
-        "./test-objective/unit/test_sources.py": [
+        "./test-specification/unit/test_sources.py": [
             {
                 "code": "reportUnusedCallResult",
                 "range": {
@@ -70558,7 +70558,7 @@
                 }
             }
         ],
-        "./test-objective/unit/test_stream.py": [
+        "./test-specification/unit/test_stream.py": [
             {
                 "code": "reportUnknownParameterType",
                 "range": {
@@ -70632,7 +70632,7 @@
                 }
             }
         ],
-        "./test-objective/unit/test_tag.py": [
+        "./test-specification/unit/test_tag.py": [
             {
                 "code": "reportUnknownVariableType",
                 "range": {
@@ -70826,7 +70826,7 @@
                 }
             }
         ],
-        "./test-objective/unit/test_tracker.py": [
+        "./test-specification/unit/test_tracker.py": [
             {
                 "code": "reportArgumentType",
                 "range": {
@@ -70868,7 +70868,7 @@
                 }
             }
         ],
-        "./test-objective/unit/test_types.py": [
+        "./test-specification/unit/test_types.py": [
             {
                 "code": "reportIndexIssue",
                 "range": {
