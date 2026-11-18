@@ -28,7 +28,8 @@ Key points:
   takes no `output_keys`; its pod has no output columns. `-> None` together with
   `output_keys` raises `ValueError` when the pod is created, and a value other than
   `None` returned by a function with no outputs raises `NoOutputsDeclaredError` (an
-  `OutputTypeError`): add an output key for it, or return nothing. Such a pod is
+  `OutputTypeError`): to keep the value, declare an output key with its type (a return
+  annotation or `output_schema`), or return nothing. Such a pod is
   limited for now: in a job its rows fail, over data-tags and before an operator it
   raises (ITL-1260); for a function run for its effect, use a `SideEffectPod`. An
   output that may be

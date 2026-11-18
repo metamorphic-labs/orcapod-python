@@ -29,3 +29,11 @@ def unresolvable_input(x: Missing) -> None:  # noqa: F821  # pyright: ignore[rep
     ``"None"``; the input type is supplied with ``input_schema``.
     """
     del x
+
+
+def unresolvable_input_quoted(x: Missing) -> "None":  # noqa: F821  # pyright: ignore[reportUndefinedVariable]  # unresolvable on purpose
+    """As ``unresolvable_input``, with the return annotation written as a string.
+
+    The postponed annotation is then the text ``"'None'"``.
+    """
+    del x

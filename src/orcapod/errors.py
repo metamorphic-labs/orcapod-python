@@ -397,7 +397,10 @@ class NoOutputsDeclaredError(OutputTypeError):
         self.declared_type: object = None
         self.value: object = value
         self.detail: str | None = None
-        self.hint: str | None = "Add an output key for the value, or return nothing"
+        self.hint: str | None = (
+            "Declare an output key with its type (a return "
+            "annotation or output_schema), or return nothing"
+        )
         # Types only, never the value (see ``OutputTypeError``).
         TypeError.__init__(
             self,

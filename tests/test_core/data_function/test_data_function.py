@@ -222,9 +222,9 @@ class TestPythonDataFunctionConstruction:
         schema = add_pf.output_data_schema
         assert schema["result"] is int
 
-    def test_output_keys_string_normalised_to_list(self):
+    def test_output_keys_string_normalised_to_tuple(self):
         pf = PythonDataFunction(add, output_keys="result")
-        assert pf._output_keys == ["result"]
+        assert pf._output_keys == ("result",)
 
     def test_output_keys_collection_preserved(self):
         pf = PythonDataFunction(multi, output_keys=["sum", "product"])

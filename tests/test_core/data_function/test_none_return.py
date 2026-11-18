@@ -200,7 +200,8 @@ def test_a_value_returned_by_a_function_with_no_outputs_is_refused(
     message = str(error)
     assert repr(RETURNS_A_VALUE[declaration].__name__) in message
     assert "declares no outputs" in message
-    assert "Add an output key" in message and "return nothing" in message
+    assert "Declare an output key with its type" in message
+    assert "return nothing" in message
     # Types only, never the value.
     assert "7" not in message
 
@@ -247,19 +248,37 @@ def test_the_error_pickles_with_its_arguments() -> None:
     )
 
 
-def test_none_is_read_when_another_annotation_cannot_be_resolved() -> None:
+@pytest.mark.parametrize(
+    "fn",
+    [strings.unresolvable_input, strings.unresolvable_input_quoted],
+    ids=["none", "quoted_none"],
+)
+def test_none_is_read_when_another_annotation_cannot_be_resolved(
+    fn: Callable[..., Any],
+) -> None:
     """``get_type_hints`` fails on ``x: Missing``; the postponed ``-> None`` still counts.
 
-    The input type comes from ``input_schema`` (Copilot, #447).
+    Both spellings: ``-> None`` (the text ``"None"``) and ``-> "None"`` (the text
+    ``"'None'"``). The input type comes from ``input_schema`` (Copilot and CodeRabbit,
+    #447).
     """
-    data_function = PythonDataFunction(
-        strings.unresolvable_input, input_schema={"x": int}
-    )
+    data_function = PythonDataFunction(fn, input_schema={"x": int})
     assert dict(data_function.output_data_schema) == {}
     with pytest.raises(ValueError, match=REFUSAL):
-        PythonDataFunction(
-            strings.unresolvable_input, output_keys="out", input_schema={"x": int}
-        )
+        PythonDataFunction(fn, output_keys="out", input_schema={"x": int})
+
+
+def test_the_output_keys_are_copied_at_construction() -> None:
+    """A later change to the caller's list changes nothing (CodeRabbit, #447)."""
+    keys = ["value"]
+    data_function = PythonDataFunction(maybe, output_keys=keys)
+    keys.clear()
+    keys.append("other")
+    assert tuple(data_function.output_data_schema) == ("value",)
+    result = data_function.call(Data({"x": 3}))
+    assert result is not None
+    assert result.as_dict() == {"value": 3}
+    assert data_function.to_config()["config"]["output_keys"] == ["value"]
 
 
 def test_the_error_keeps_the_attributes_of_an_output_type_error() -> None:
@@ -271,4 +290,7 @@ def test_the_error_keeps_the_attributes_of_an_output_type_error() -> None:
         assert restored.output_key is None
         assert restored.declared_type is None
         assert restored.detail is None
-        assert restored.hint == "Add an output key for the value, or return nothing"
+        assert restored.hint == (
+            "Declare an output key with its type (a return "
+            "annotation or output_schema), or return nothing"
+        )
