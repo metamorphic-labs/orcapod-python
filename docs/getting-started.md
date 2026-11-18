@@ -18,7 +18,7 @@ source = DictSource(
         {"experiment": "exp_002", "temperature": 22.3, "pressure": 0.98},
         {"experiment": "exp_003", "temperature": 19.8, "pressure": 1.05},
     ],
-    tag_columns=["experiment"],
+    tag_columns=["experiment"], tag_only_columns=True,
     source_id="lab_results",
 )
 ```
@@ -28,8 +28,13 @@ There are two important concepts here:
 - **Tag columns** (`tag_columns`) are the keys that identify each row -- like primary keys
   in a database or independent variables in an experiment. Here, `experiment` uniquely
   identifies each measurement.
-- **Data columns** are everything else -- the actual data payload. In this example,
-  `temperature` and `pressure` are the data columns.
+- **Data columns** are the actual data payload. In this example, `temperature` and
+  `pressure` are the data columns.
+
+By default a source's tag columns are also data columns: each is a **data-tag**, one
+column seen in both roles, so a function can read it. `tag_only_columns=True` keeps the tags
+plain (a tag only), which is what this example does, so the data columns are exactly the
+columns that are not tags. See [Data-tags](concepts/data-tags.md).
 
 The `source_id` is a human-readable name used for provenance tracking.
 
@@ -187,7 +192,7 @@ source = DictSource(
         {"experiment": "exp_002", "temperature": 22.3, "pressure": 0.98},
         {"experiment": "exp_003", "temperature": 19.8, "pressure": 1.05},
     ],
-    tag_columns=["experiment"],
+    tag_columns=["experiment"], tag_only_columns=True,
     source_id="lab_results",
 )
 

@@ -5,8 +5,9 @@ from __future__ import annotations
 import logging
 import typing
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, ClassVar, TYPE_CHECKING, cast
 
+from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import UnaryOperator
@@ -51,6 +52,9 @@ class Pick(UnaryOperator):
             ``identity_structure`` — miss-handling does not affect
             functional output semantics.  See ITL-439.
     """
+
+    # Data-tags (ITL-1023): handled.
+    DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def __init__(
         self,
@@ -149,6 +153,24 @@ class Pick(UnaryOperator):
         """
         tag_schema, data_schema = stream.output_schema()
         data_columns = list(data_schema.keys())
+        # Data-tags (ITL-1023): the output is a new data column, never a tag's
+        # value replaced in place or a name shared with a tag (section 4).
+        # A data-tag is a name in both schemas; a plain tag is not a data column
+        # and gets the missing-data error below (Copilot on PR #342).
+        if (
+            self.out is None
+            and self.column in tag_schema
+            and self.column in data_schema
+        ):
+            raise InputValidationError(
+                f"Pick: column {self.column!r} is a data-tag; replacing it "
+                "in place would change the tag's value. Give out=<new name>."
+            )
+        if self.out is not None and self.out in tag_schema:
+            raise InputValidationError(
+                f"Pick: out column {self.out!r} is the name of a tag; a data "
+                "column cannot share a name with a tag it does not back."
+            )
 
         if self.column not in data_columns:
             raise InputValidationError(
@@ -406,6 +428,7 @@ class Pick(UnaryOperator):
                 self._as_row_built_table(output_schema.empty_table(), tag_columns),
                 tag_columns=tag_columns,
                 data_context=stream.data_context,
+                data_tags=stream_data_tags(stream),
             )
 
         return self._materialize_to_stream(out_rows)

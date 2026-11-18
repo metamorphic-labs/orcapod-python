@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Self
 
 from orcapod import contexts
@@ -39,6 +39,8 @@ from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
     import pyarrow as pa
+
+    from orcapod.protocols.core_protocols import DataProtocol
 else:
     pa = LazyModule("pyarrow")
 
@@ -603,6 +605,56 @@ class Data(Datagram):
         return Datagram(
             data=data, python_schema=python_schema, data_context=self._data_context
         )
+
+    def with_columns_of(self, other: "DataProtocol", names: "Sequence[str]") -> Self:
+        """Return a copy with ``other``'s columns ``names`` placed first (ITL-1023).
+
+        The added columns keep ``other``'s Arrow fields, values and source info. This
+        data's own columns are kept as they are: their Arrow fields, and the Python
+        values a function returned, are not converted again. Used for the columns of
+        data-tags that fall through a function pod.
+
+        Args:
+            other: The data to take the columns from.
+            names: The columns to take, in order.
+
+        Returns:
+            The new data, or this data when ``names`` is empty.
+
+        Raises:
+            ValueError: If this data already has one of ``names``.
+        """
+        if not names:
+            return self
+        if clash := sorted(set(names) & set(self.keys())):
+            raise ValueError(f"Columns already exist: {clash}")
+        columns = other.as_table().select(list(names))
+        other_schema = other.schema()
+        other_info = other.source_info()
+        new_p = self.copy(include_cache=False)
+        new_p._data_table = arrow_utils.hstack_tables(
+            columns, self._ensure_data_table()
+        )
+        if self._data_dict is not None:
+            new_p._data_dict = {
+                **{name: other[name] for name in names},
+                **self._data_dict,
+            }
+        new_p._data_python_schema = Schema(
+            {
+                **{name: other_schema[name] for name in names},
+                **self._ensure_python_schema(),
+            }
+        )
+        new_p._data_arrow_schema = None
+        # The added columns' source info is ``other``'s; an entry this data holds for
+        # one of them (it does not hold the column) does not override it.
+        new_p._source_info = {
+            **{name: other_info.get(name) for name in names},
+            **{k: v for k, v in self._source_info.items() if k not in names},
+        }
+        new_p._source_info_table = None
+        return new_p
 
     def copy(self, include_cache: bool = True, preserve_id: bool = True) -> Self:
         new_p = super().copy(include_cache=include_cache, preserve_id=preserve_id)

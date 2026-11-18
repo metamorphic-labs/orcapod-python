@@ -85,7 +85,7 @@ files = DictSource(
         {"name": "a", "recording": op.File(recordings / "a.txt")},
         {"name": "b", "recording": op.File(recordings / "b.txt")},
     ],
-    tag_columns=["name"],
+    tag_columns=["name"], tag_only_columns=True,
     source_id="recordings",
 )
 print(files.output_schema()[1])

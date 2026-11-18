@@ -20,16 +20,16 @@ from orcapod.sources import CSVSource
 data_dir = make_dataset()
 
 subjects = CSVSource(
-    str(data_dir / "subjects.csv"), tag_columns=["subject_id"], source_id="subjects"
+    str(data_dir / "subjects.csv"), tag_columns=["subject_id"], tag_only_columns=True, source_id="subjects"
 )
 sessions = CSVSource(
     str(data_dir / "sessions.csv"),
-    tag_columns=["subject_id", "session"],
+    tag_columns=["subject_id", "session"], tag_only_columns=True,
     source_id="sessions",
 )
 units = CSVSource(
     str(data_dir / "units.csv"),
-    tag_columns=["subject_id", "session", "probe", "unit"],
+    tag_columns=["subject_id", "session", "probe", "unit"], tag_only_columns=True,
     source_id="units",
 )
 

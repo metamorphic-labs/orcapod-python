@@ -1806,7 +1806,11 @@ def apply_column_config(
             c for c in table.column_names if c.startswith(constants.SYSTEM_TAG_PREFIX)
         )
     if not column_config.source:
-        drop_columns.extend(f"{constants.SOURCE_PREFIX}{c}" for c in data_keys)
+        # A data-tag is also a data column with source info (ITL-1023); a
+        # plain tag has none, so naming the tags drops nothing more for it.
+        drop_columns.extend(
+            f"{constants.SOURCE_PREFIX}{c}" for c in (*data_keys, *tag_keys)
+        )
     if not column_config.context:
         drop_columns.append(constants.CONTEXT_KEY)
     if not column_config.meta:

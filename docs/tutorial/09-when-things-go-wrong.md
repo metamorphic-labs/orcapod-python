@@ -22,12 +22,12 @@ data_dir = make_dataset()
 
 units = CSVSource(
     str(data_dir / "units.csv"),
-    tag_columns=["subject_id", "session", "probe", "unit"],
+    tag_columns=["subject_id", "session", "probe", "unit"], tag_only_columns=True,
     source_id="units",
 )
 sessions = CSVSource(
     str(data_dir / "sessions.csv"),
-    tag_columns=["subject_id", "session"],
+    tag_columns=["subject_id", "session"], tag_only_columns=True,
     source_id="sessions",
 )
 ```
@@ -273,7 +273,7 @@ one.
     from orcapod.errors import InputValidationError
 
     try:
-        CSVSource(str(data_dir / "sessions.csv"), tag_columns=["subject", "session"])
+        CSVSource(str(data_dir / "sessions.csv"), tag_columns=["subject", "session"], tag_only_columns=True)
     except ValueError as err:
         print("a:", err)
     # a: tag_columns not found in table: {'subject'}. Available columns: ['subject_id', 'session', 'date', 'duration_s']

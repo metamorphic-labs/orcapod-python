@@ -612,6 +612,11 @@ class PostgreSQLConnector:
                 conn.rollback()
                 raise
 
+    @property
+    def keeps_field_metadata(self) -> bool:
+        """Whether this connector keeps Arrow field metadata: it does not (ITL-1019)."""
+        return False
+
     def unstorable_column_reason(
         self, name: str, arrow_type: pa.DataType, *, primary_key: bool
     ) -> str | None:

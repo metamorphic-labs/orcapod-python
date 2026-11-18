@@ -1,0 +1,165 @@
+{
+  "orcapod_pipeline_job_version": "0.2.0",
+  "orcapod_version": "0.2.1.dev88+g634ad40a2.d20261116",
+  "run": {
+    "run_id": "5a073dbbb8a14e7c",
+    "status": "complete",
+    "unbound_sources": [],
+    "node_job_content_hashes": {
+      "older": "semantic_v1:75700b3f357e01da5302dd7b7f40023687a0a77cf8d0c8faa5a54420ab836a95"
+    },
+    "expected_rows": {
+      "older": 2
+    }
+  },
+  "pipeline": {
+    "orcapod_pipeline_version": "0.2.0",
+    "orcapod_version": "0.2.1.dev88+g634ad40a2.d20261116",
+    "pipeline": {
+      "name": [
+        "pipeline"
+      ]
+    },
+    "nodes": {
+      "semantic_v1:2548e2642a2ca6c2abba79bb36427b615c768ea3e438bf0b78cc9c66208d8bc1": {
+        "node_type": "source",
+        "label": "subjects",
+        "content_hash": "semantic_v1:2548e2642a2ca6c2abba79bb36427b615c768ea3e438bf0b78cc9c66208d8bc1",
+        "pipeline_hash": "semantic_v1:abf9c6b36545ad9c7699392949f223d01b0986b130fec7ecac2fd0594282da09",
+        "output_schema": {
+          "tag": {
+            "subject": "large_string"
+          },
+          "data": {
+            "age": "int64"
+          },
+          "nullable": {
+            "tag": [],
+            "data": []
+          }
+        },
+        "node_uri": [
+          "source_node",
+          "subjects"
+        ],
+        "data_context_key": "std:v1:default",
+        "config": null,
+        "source_config": {
+          "source_type": "node",
+          "name": "subjects",
+          "tag_schema": {
+            "subject": "large_string"
+          },
+          "data_schema": {
+            "age": "int64"
+          },
+          "nullable": {
+            "tag": [],
+            "data": []
+          }
+        },
+        "reconstructable": true
+      },
+      "semantic_v1:0f42a34e0dac4c129e4ee8f316ccc2120fbf8b99bfd9ba050993beac449348ef": {
+        "node_type": "function",
+        "label": "older",
+        "content_hash": "semantic_v1:0f42a34e0dac4c129e4ee8f316ccc2120fbf8b99bfd9ba050993beac449348ef",
+        "pipeline_hash": "semantic_v1:c0971a6db5babe7a8ec875d17c2fce6bc047b68c450365ddb8b7b34235b81dda",
+        "output_schema": {
+          "tag": {
+            "subject": "large_string"
+          },
+          "data": {
+            "older": "int64"
+          },
+          "nullable": {
+            "tag": [],
+            "data": []
+          }
+        },
+        "node_uri": [
+          "older",
+          "2922e6c4748e85c58eda4ba122ba9a9af9430ff68e2441e6cfa3214e3dc7c51e",
+          "v0",
+          "python.function.v0"
+        ],
+        "data_context_key": "std:v1:default",
+        "config": null,
+        "function_config": {
+          "uri": [
+            "older",
+            "2922e6c4748e85c58eda4ba122ba9a9af9430ff68e2441e6cfa3214e3dc7c51e",
+            "v0",
+            "python.function.v0"
+          ],
+          "data_function": {
+            "data_function_type_id": "python.function.v0",
+            "uri": [
+              "older",
+              "2922e6c4748e85c58eda4ba122ba9a9af9430ff68e2441e6cfa3214e3dc7c51e",
+              "v0",
+              "python.function.v0"
+            ],
+            "config": {
+              "module_path": "__main__",
+              "callable_name": "older",
+              "version": "v0.0",
+              "input_data_schema": {
+                "age": "<class 'int'>"
+              },
+              "output_data_schema": {
+                "older": "<class 'int'>"
+              },
+              "output_keys": [
+                "older"
+              ]
+            }
+          },
+          "pod_config": null,
+          "ctx_arg_name": null
+        },
+        "table_scope": "pipeline_hash"
+      }
+    },
+    "edges": [
+      [
+        "semantic_v1:2548e2642a2ca6c2abba79bb36427b615c768ea3e438bf0b78cc9c66208d8bc1",
+        "semantic_v1:0f42a34e0dac4c129e4ee8f316ccc2120fbf8b99bfd9ba050993beac449348ef"
+      ]
+    ]
+  },
+  "bindings": {
+    "sources": {
+      "subjects": {
+        "source_type": "csv",
+        "file_path": "subjects.csv",
+        "tag_columns": [
+          "subject"
+        ],
+        "system_tag_columns": [],
+        "record_id_columns": null,
+        "source_id": "subjects",
+        "content_hash": "semantic_v1:cbc7f981bdf6eecfab349c169c5b831bfbd88fd14dbae638bf42535376ca1da1",
+        "pipeline_hash": "semantic_v1:abf9c6b36545ad9c7699392949f223d01b0986b130fec7ecac2fd0594282da09",
+        "tag_schema": {
+          "subject": "large_string"
+        },
+        "data_schema": {
+          "age": "int64"
+        },
+        "nullable": {
+          "tag": [],
+          "data": []
+        }
+      }
+    },
+    "database": {
+      "type": "delta_table",
+      "root_uri": "store",
+      "base_path": [],
+      "batch_size": 1000,
+      "max_hierarchy_depth": 10,
+      "allow_schema_evolution": true
+    }
+  }
+}

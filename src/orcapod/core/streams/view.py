@@ -145,7 +145,7 @@ class ColumnRoleMark:
 
 
 # The one place that says how the display marks each column role (developer, November 13,
-# 2026, ITL-1081). Roles today: "tag" and "data". A new role (e.g. a referential tag) gets
+# 2026, ITL-1081). Roles today: "tag" and "data". A new role (e.g. a data-tag) gets
 # its own entry here; the renderers need no change. The accent colour has a contrast of
 # about 4.3:1 on white and on #111; bold carries the meaning without the colour.
 COLUMN_ROLE_MARKS: dict[str, ColumnRoleMark] = {

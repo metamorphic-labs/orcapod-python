@@ -1,0 +1,53 @@
+name: Run Specification Tests
+
+on:
+  push:
+    branches: [main, dev, extension-type-system]
+  pull_request:
+  workflow_dispatch: # Allows manual triggering
+
+# Read-only token, whatever the repository default is (ITL-1193).
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # Check name `Specification tests (3.13)`: the specification-derived suite in
+    # test-specification/; distinct from the other suites' (ITL-1212).
+    name: Specification tests (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    # id-token: write lets the Codecov upload authenticate by GitHub OIDC, with no stored
+    # token (ITL-1193). A fork's pull request gets no OIDC token: the action detects the fork
+    # and uploads tokenless instead.
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --locked --all-extras --dev --python ${{ matrix.python-version }}
+
+      - name: Run specification tests
+        run: uv run --python ${{ matrix.python-version }} pytest test-specification/ -v --cov=src --cov-report=term-missing --cov-report=xml
+
+      - name: Upload coverage reports to Codecov
+        if: github.repository == 'metamorphic-labs/orcapod-python'
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f  # v7.0.0
+        with:
+          use_oidc: true
+          # A failed upload fails a push run, where it would otherwise go unseen; it never
+          # fails a pull request, whose fork uploads are tokenless (ITL-1193).
+          fail_ci_if_error: ${{ github.event_name != 'pull_request' }}

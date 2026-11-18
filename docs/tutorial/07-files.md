@@ -54,7 +54,7 @@ def spike_file_rows():
 
 spike_files = DictSource(
     data=spike_file_rows(),
-    tag_columns=["subject_id", "session", "probe"],
+    tag_columns=["subject_id", "session", "probe"], tag_only_columns=True,
     source_id="spike_files",
 )
 print(spike_files.output_schema())
@@ -95,7 +95,7 @@ def run_counts():
     with job:
         files = DictSource(
             data=spike_file_rows(),
-            tag_columns=["subject_id", "session", "probe"],
+            tag_columns=["subject_id", "session", "probe"], tag_only_columns=True,
             source_id="spike_files",
         )
         count_spikes.pod(files, label="counts")
@@ -161,7 +161,7 @@ with job:
                 "spikes": op.File(moved),
             }
         ],
-        tag_columns=["subject_id", "session", "probe"],
+        tag_columns=["subject_id", "session", "probe"], tag_only_columns=True,
         source_id="spike_files",
     )
     count_spikes.pod(one_file, label="counts")
@@ -203,7 +203,7 @@ job = PipelineJob(name="files", database=database)
 with job:
     files = DictSource(
         data=spike_file_rows(),
-        tag_columns=["subject_id", "session", "probe"],
+        tag_columns=["subject_id", "session", "probe"], tag_only_columns=True,
         source_id="spike_files",
     )
     write_summary.pod(files, label="summaries")
@@ -260,7 +260,7 @@ def run_folders():
                 }
                 for d in sorted((data_dir / "sessions").iterdir())
             ],
-            tag_columns=["subject_id", "session"],
+            tag_columns=["subject_id", "session"], tag_only_columns=True,
             source_id="session_folders",
         )
         count_spike_files.pod(folders, label="n_files")
@@ -411,7 +411,7 @@ containing the total number of spikes over both probes. (Hint: Part 4. After
                     }
                     for d in sorted((data_dir / "sessions").iterdir())
                 ],
-                tag_columns=["subject_id", "session"],
+                tag_columns=["subject_id", "session"], tag_only_columns=True,
                 source_id="session_folders",
             )
             count_spike_files.pod(folders, label="n_files")
