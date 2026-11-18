@@ -1,4 +1,4 @@
-name: Run Objective Tests
+name: Run Specification Tests
 
 on:
   push:
@@ -13,7 +13,7 @@ permissions:
 jobs:
   test:
     # Check name `Specification tests (3.13)`: the specification-derived suite in
-    # test-objective/; distinct from the other suites' (ITL-1212).
+    # test-specification/; distinct from the other suites' (ITL-1212).
     name: Specification tests (${{ matrix.python-version }})
     runs-on: ubuntu-latest
     # id-token: write lets the Codecov upload authenticate by GitHub OIDC, with no stored
@@ -40,8 +40,8 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --all-extras --dev --python ${{ matrix.python-version }}
 
-      - name: Run objective tests
-        run: uv run --python ${{ matrix.python-version }} pytest test-objective/ -v --cov=src --cov-report=term-missing --cov-report=xml
+      - name: Run specification tests
+        run: uv run --python ${{ matrix.python-version }} pytest test-specification/ -v --cov=src --cov-report=term-missing --cov-report=xml
 
       - name: Upload coverage reports to Codecov
         if: github.repository == 'metamorphic-labs/orcapod-python'

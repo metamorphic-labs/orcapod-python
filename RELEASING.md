@@ -226,8 +226,8 @@ secrets or environments:
 
 ### Coverage uploads
 
-The coverage jobs of `Run Tests`, `Run PostgreSQL Tests` and `Run Objective Tests` upload to
-Codecov without a stored token (ITL-1193). The organization secret `CODECOV_TOKEN` is shared
+The coverage jobs of `Run Tests`, `Run PostgreSQL Tests` and `Run Specification Tests` upload
+to Codecov without a stored token (ITL-1193). The organization secret `CODECOV_TOKEN` is shared
 with private and internal repositories only, so it would vanish when this repository became
 public, and a token upload would then fail silently.
 
