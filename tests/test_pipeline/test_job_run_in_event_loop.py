@@ -458,15 +458,17 @@ def caller_waits_for_the_run() -> bool:
 def press_interrupt_once_next_row_returned() -> None:
     """The second press, once the next row's work is done and the caller waits again.
 
-    Does not press once the test has stopped it (``second_press_stop``), so it never
-    interrupts the test's cleanup or a later test.
+    Does not press when that never happens (the test then fails rather than reach the
+    expected failure), nor once the test has stopped it (``second_press_stop``), so it
+    never interrupts the test's cleanup or a later test.
     """
     if not next_row_returned.wait(timeout=30):
         return
     deadline = time.monotonic() + 30
-    while time.monotonic() < deadline and not second_press_stop.is_set():
-        if pool_thread_is_done(next_row_threads[0]) and caller_waits_for_the_run():
-            break
+    while not (pool_thread_is_done(next_row_threads[0]) and caller_waits_for_the_run()):
+        if time.monotonic() > deadline or second_press_stop.is_set():
+            # No press: the run then ends without the warning, and the test fails.
+            return
         time.sleep(0.01)
     with second_press_lock:
         if not second_press_stop.is_set():
