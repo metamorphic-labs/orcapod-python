@@ -37,7 +37,8 @@ not a declared tag is an error. A source built with all its tags plain is exactl
 source v0.3 built: same columns, same hashes.
 
 The column is stored once: `as_table()` shows it once, and every row's tag and data hold
-the same value.
+the same value. The notebook preview shows it once, among the tags, marked as a tag
+([Working in notebooks](notebooks.md#a-stream-at-the-end-of-a-cell)).
 
 Data-tags come first among the data columns, in tag order, then the other data columns in
 their table order. Every stream, operator result and row follows this order, whatever the
