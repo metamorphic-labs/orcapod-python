@@ -388,8 +388,10 @@ class MergeJoin(BinaryOperator):
         canonical = self._canonical_order(left_stream, right_stream)
 
         system_tag_fields: dict[str, type] = {}
-        for stream, orig_idx in canonical:
-            canon_pos = canonical.index((stream, orig_idx))
+        # The position in the canonical order is the loop index: looking the pair up
+        # with ``index`` would compare streams by identity (``__eq__``) once the first
+        # entry is not the pair itself.
+        for canon_pos, (stream, orig_idx) in enumerate(canonical):
             stream_tag_schema, _ = stream.output_schema(columns={"system_tags": True})
             for col_name, col_type in stream_tag_schema.items():
                 if col_name.startswith(constants.SYSTEM_TAG_PREFIX):
@@ -426,8 +428,10 @@ class MergeJoin(BinaryOperator):
 
         # Get tables with source + system_tags, append system tag blocks
         tables = {}
-        for stream, orig_idx in canonical:
-            canon_pos = canonical.index((stream, orig_idx))
+        # The position in the canonical order is the loop index: looking the pair up
+        # with ``index`` would compare streams by identity (``__eq__``) once the first
+        # entry is not the pair itself.
+        for canon_pos, (stream, orig_idx) in enumerate(canonical):
             table = stream.as_table(columns={"source": True, "system_tags": True})
             table = arrow_utils.append_to_system_tags(
                 table, f"{stream.pipeline_hash().to_hex(n_char)}:{canon_pos}"

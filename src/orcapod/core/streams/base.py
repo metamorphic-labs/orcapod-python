@@ -172,8 +172,9 @@ def typed_arrow_schemas(stream: object) -> tuple[pa.Schema, pa.Schema]:
     """Return the Arrow schemas of ``stream``'s tag and data columns (ITL-640).
 
     The Arrow types its rows have, from ``typed_zero_row_table`` (never computing,
-    reading or polling a row): the tag schema holds the user tag columns, the data
-    schema the data columns, a data-tag in both, each in the stream's key order. A
+    reading or polling a row): the tag schema holds the columns of the stream's Python
+    tag schema, the data schema those of its data schema (a data-tag in both), each in
+    that order. A
     stream that cannot type itself without rows (an unbound input, a polling source not
     yet polled) answers with the data context's conversion of its declared Python
     schema, the Arrow types its identity is then fixed to.
@@ -185,20 +186,22 @@ def typed_arrow_schemas(stream: object) -> tuple[pa.Schema, pa.Schema]:
         The tag and data Arrow schemas.
     """
     typed = cast(StreamProtocol, stream)
-    tag_keys, data_keys = typed.keys()
+    # The columns are those of the Python output schema, which the identity has always
+    # named; only their types come from the zero-row table.
+    tag_schema, data_schema = typed.output_schema()
     table = typed_zero_row_table(stream)
     if table is None:
-        tag_schema, data_schema = typed.output_schema()
+        from orcapod.utils.schema_utils import declared_arrow_schema
+
         converter = cast(Any, stream).data_context.type_converter
-        converter.ensure_types_registered_for_schemas(tag_schema, data_schema)
         return (
-            converter.python_schema_to_arrow_schema(tag_schema),
-            converter.python_schema_to_arrow_schema(data_schema),
+            declared_arrow_schema(tag_schema, converter),
+            declared_arrow_schema(data_schema, converter),
         )
     schema = table.schema
     return (
-        pa.schema([schema.field(name) for name in tag_keys]),
-        pa.schema([schema.field(name) for name in data_keys]),
+        pa.schema([schema.field(name) for name in tag_schema]),
+        pa.schema([schema.field(name) for name in data_schema]),
     )
 
 

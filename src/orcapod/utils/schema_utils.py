@@ -509,6 +509,28 @@ def arrow_schema_identity(
     return hasher.hash_schema(tag_schema), hasher.hash_schema(data_schema)
 
 
+def declared_arrow_schema(schema: SchemaLike, converter: Any) -> "pa.Schema":
+    """The Arrow schema a declared Python schema stands for: the converter's (ITL-640).
+
+    Each declared Python type means exactly one Arrow type (``int`` is ``int64``,
+    ``datetime`` is ``timestamp[us, tz=UTC]``); ``T | None`` is a nullable field. A
+    class a factory covers (a dataclass, a pydantic model) that nothing has registered
+    yet is registered first, as hashing it registers it.
+
+    Args:
+        schema: The declared Python schema.
+        converter: The data context's type converter.
+
+    Returns:
+        The Arrow schema.
+    """
+    try:
+        return converter.python_schema_to_arrow_schema(schema)
+    except (TypeError, ValueError):
+        converter.ensure_types_registered_for_schemas(Schema(dict(schema)))
+        return converter.python_schema_to_arrow_schema(schema)
+
+
 def compute_schema_hash(
     tag_schema: "pa.Schema",
     data_schema: "pa.Schema",

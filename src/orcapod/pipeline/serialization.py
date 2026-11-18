@@ -18,6 +18,8 @@ from orcapod.logical_types.identifier import (
 )
 
 if TYPE_CHECKING:
+    import pyarrow as pa
+
     from orcapod.protocols.database_protocols import DatabaseRegistryProtocol
 
 logger = logging.getLogger(__name__)
@@ -658,6 +660,10 @@ def _serialize_arrow_type(arrow_type: Any) -> str:
             for field in arrow_type
         ]
         return "struct<" + ", ".join(fields) + ">"
+    if pa.types.is_dictionary(arrow_type):
+        # Dictionary encoding is a layout, not part of a schema's identity (ITL-640):
+        # the saved type is the value type.
+        return _serialize_arrow_type(arrow_type.value_type)
     if pa.types.is_map(arrow_type):
         ordered = ", keys_sorted" if arrow_type.keys_sorted else ""
         return (
@@ -832,6 +838,64 @@ def deserialize_schema(
         except Exception:
             result[name] = type_str
     return result
+
+
+def serialize_arrow_schema(schema: "pa.Schema") -> dict[str, str]:
+    """Return the saved type strings of an Arrow schema, its own types (ITL-640).
+
+    The text of each field's own Arrow type (``_serialize_arrow_type``: nested
+    nullability, units, zones, widths and logical type identifiers), never a type
+    re-derived from a Python type. Top-level nullability is saved apart
+    (``arrow_nullable_names``).
+
+    Args:
+        schema: The Arrow schema.
+
+    Returns:
+        A dict mapping field names to Arrow type strings, in the schema's order.
+    """
+    return {field.name: _serialize_arrow_type(field.type) for field in schema}
+
+
+def arrow_nullable_names(schema: "pa.Schema") -> list[str]:
+    """Return the names of the nullable top-level fields of ``schema``, in order."""
+    return [field.name for field in schema if field.nullable]
+
+
+def deserialize_arrow_schema(
+    schema_dict: dict[str, str],
+    type_converter: Any,
+    nullable: Collection[str] | None,
+) -> "pa.Schema":
+    """Rebuild the Arrow schema saved by ``serialize_arrow_schema`` (ITL-640).
+
+    Args:
+        schema_dict: The saved type strings.
+        type_converter: The saved node's converter, for logical type identifiers.
+        nullable: The saved nullable column names; ``None`` when the file records no
+            nullability, and every column is then non-nullable.
+
+    Returns:
+        The Arrow schema.
+
+    Raises:
+        ValueError: If a type string cannot be parsed (a class this process has not
+            registered yet), or ``nullable`` names a column not in ``schema_dict``.
+    """
+    import pyarrow as pa
+
+    if nullable is not None:
+        _check_nullable_names(schema_dict, nullable)
+    fields = []
+    for name, type_str in schema_dict.items():
+        try:
+            arrow_type = parse_arrow_type_string(type_str, type_converter)
+        except LogicalTypeIdentifierError as exc:
+            raise exc.for_column(name) from exc
+        fields.append(
+            pa.field(name, arrow_type, nullable=nullable is not None and name in nullable)
+        )
+    return pa.schema(fields)
 
 
 def serialize_output_schema(

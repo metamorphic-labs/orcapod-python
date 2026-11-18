@@ -185,9 +185,10 @@ class DataFunctionBase(TraceableBase, Generic[E]):
 
         The schema is hashed as the Arrow schema the data context's type converter
         gives the declared output types (the Arrow types the function's results are
-        stored with), by ``arrow_hasher.hash_schema`` (ITL-640). The digest is part of
-        the function ``uri`` and so of table paths and source-info tokens: a hash inside
-        a name carries no label. It is computed lazily on first access and cached for
+        stored with), by ``arrow_hasher.hash_schema`` (ITL-640); that labelled hash is
+        hashed by the semantic hasher, as every hash fed into another. The digest is
+        part of the function ``uri`` and so of table paths and source-info tokens: a
+        hash inside a name carries no label. It is computed lazily on first access and cached for
         subsequent calls.
 
         Returns:
@@ -195,14 +196,16 @@ class DataFunctionBase(TraceableBase, Generic[E]):
         """
         if self._output_data_schema_hash is None:
             context = self.data_context
-            converter = context.type_converter
-            # A class a factory covers is registered first, as hashing it did.
-            converter.ensure_types_registered_for_schemas(self.output_data_schema)
-            arrow_schema = converter.python_schema_to_arrow_schema(
-                self.output_data_schema
+            arrow_schema = schema_utils.declared_arrow_schema(
+                self.output_data_schema, context.type_converter
             )
-            self._output_data_schema_hash = context.arrow_hasher.hash_schema(
-                arrow_schema
+            # The labelled schema hash is fed into the semantic hasher as a one-schema
+            # tuple (a hash fed into a hash carries its label; a source's system-tag
+            # names hash the tag and data pair the same way), and the name holds the
+            # bare digest.
+            schema_hash = context.arrow_hasher.hash_schema(arrow_schema)
+            self._output_data_schema_hash = context.semantic_hasher.hash_object(
+                (schema_hash,)
             ).to_hex()
         return self._output_data_schema_hash
 

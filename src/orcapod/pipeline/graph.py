@@ -158,6 +158,8 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         from orcapod.pipeline.serialization import (
             FALL_THROUGH_TAGS_KEY,
             PIPELINE_FORMAT_VERSION,
+            arrow_nullable_names,
+            serialize_arrow_schema,
             serialize_nullability,
             serialize_output_schema,
             serialize_schema,
@@ -208,7 +210,24 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
             }
 
             match node:
+                case SourceNodeClass() if not node._pending_types:  # pyright: ignore[reportPrivateUsage]  # the saver is the one caller
+                    # The slot's own Arrow types are the saved authority (ITL-640):
+                    # its identity is built from them, and a load rebuilds them.
+                    arrow_tag, arrow_data = node.arrow_schemas
+                    descriptor["source_config"] = {
+                        "source_type": "node",
+                        "name": node.name,
+                        "tag_schema": serialize_arrow_schema(arrow_tag),
+                        "data_schema": serialize_arrow_schema(arrow_data),
+                        "nullable": {
+                            "tag": arrow_nullable_names(arrow_tag),
+                            "data": arrow_nullable_names(arrow_data),
+                        },
+                    }
+                    descriptor["reconstructable"] = True
                 case SourceNodeClass():
+                    # A column whose class this process has not registered keeps its
+                    # saved text (ITL-1138); the other columns are written as before.
                     descriptor["source_config"] = {
                         "source_type": "node",
                         "name": node.name,
@@ -290,6 +309,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
             FALL_THROUGH_TAGS_KEY,
             SUPPORTED_FORMAT_VERSIONS,
             check_saved_output_schema_is_plain,
+            deserialize_arrow_schema,
             deserialize_schema,
             saved_fall_through_tags,
         )
@@ -428,13 +448,34 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                             else saved_nullable["data"],
                         )
                     )
+                    saved_context = resolve_saved_context(
+                        descriptor.get("data_context_key")
+                    )
+                    # The slot's Arrow types, rebuilt from the saved text (ITL-640);
+                    # none while a column's class is not registered in this process.
+                    try:
+                        arrow_schemas = (
+                            deserialize_arrow_schema(
+                                saved_tag,
+                                context.type_converter,
+                                None if saved_nullable is None else saved_nullable["tag"],
+                            ),
+                            deserialize_arrow_schema(
+                                saved_data,
+                                context.type_converter,
+                                None
+                                if saved_nullable is None
+                                else saved_nullable["data"],
+                            ),
+                        )
+                    except (ValueError, TypeError, KeyError):
+                        arrow_schemas = None
                     node = SourceNodeClass(
                         name=node_name,
                         tag_schema=tag_schema,
                         data_schema=data_schema,
-                        data_context=resolve_saved_context(
-                            descriptor.get("data_context_key")
-                        ),
+                        data_context=saved_context,
+                        arrow_schemas=arrow_schemas,
                     )
                     # The saved hashes, and the saved type text of a column whose
                     # class this process has not registered yet (ITL-1138).

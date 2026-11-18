@@ -48,6 +48,7 @@ from orcapod.utils.lazy_module import LazyModule
 from orcapod.utils.schema_utils import (
     arrow_schema_identity,
     compute_source_schema_hash,
+    declared_arrow_schema,
 )
 
 if TYPE_CHECKING:
@@ -117,6 +118,11 @@ def _is_narrower(declared: Any, given: Any) -> bool:
         given: The bound source's Python type of that column.
     """
     return declared != given and equivalent_hints(_without_none(declared), given)
+
+
+def _arrow_field_text(field: "pa.Field[Any]") -> str:
+    """The Arrow type of ``field`` with its top-level nullability, for a message."""
+    return f"{field.type}{'' if field.nullable else ' not null'}"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -545,12 +551,9 @@ class SourceNodeBase(TraceableBase, ABC):
         if self._given_arrow_schemas is not None:
             return self._given_arrow_schemas
         converter = self.data_context.type_converter
-        converter.ensure_types_registered_for_schemas(
-            self._tag_schema, self._data_schema
-        )
         return (
-            converter.python_schema_to_arrow_schema(self._tag_schema),
-            converter.python_schema_to_arrow_schema(self._data_schema),
+            declared_arrow_schema(self._tag_schema, converter),
+            declared_arrow_schema(self._data_schema, converter),
         )
 
     def _schema_identity(self) -> "tuple[ContentHash, ContentHash]":
@@ -775,9 +778,11 @@ class SourceNodeBase(TraceableBase, ABC):
             for name in declared.keys():
                 if name in unrestored:
                     continue
-                if name not in given or equivalent_hints(given[name], declared[name]):
+                if name not in given:
                     continue
-                if _is_narrower(declared[name], given[name]):
+                if equivalent_hints(given[name], declared[name]):
+                    pass
+                elif _is_narrower(declared[name], given[name]):
                     narrower.add(name)
                 else:
                     issues.append(
@@ -785,6 +790,10 @@ class SourceNodeBase(TraceableBase, ABC):
                         f"{_type_text(declared[name])} but the source has "
                         f"{_type_text(given[name])}"
                     )
+                    continue
+                arrow_issue = self._arrow_type_issue(role, name, source)
+                if arrow_issue is not None:
+                    issues.append(arrow_issue)
 
         # A name whose roles differ only because one side holds it as a data-tag
         # (a tag and a data column of one name) is refused like any role difference
@@ -827,6 +836,58 @@ class SourceNodeBase(TraceableBase, ABC):
                 + "; ".join(issues)
             )
         return source_tag, source_data, frozenset(narrower)
+
+    def _arrow_type_issue(
+        self, role: str, name: str, source: "StreamProtocol"
+    ) -> str | None:
+        """Compare one column's Arrow type in the slot and in *source* (ITL-640).
+
+        The slot's identity is built from its Arrow schemas, so a source fits only
+        with the same Arrow type, as ``hash_schema`` compares it (column order, large
+        and non-large variants, list item names, dictionary encoding and field
+        metadata aside), at every depth; the one difference accepted is a non-null
+        column where the slot's column is nullable (``T`` into ``T | None``). Nested
+        nullability must match exactly.
+
+        Args:
+            role: ``"tag"`` or ``"data"``.
+            name: The column name.
+            source: The source being bound.
+
+        Returns:
+            The issue text, or ``None`` when the types agree.
+        """
+        slot_tag, slot_data = self.arrow_schemas
+        source_tag, source_data = typed_arrow_schemas(source)
+        slot_schema, source_schema = (
+            (slot_tag, source_tag) if role == "tag" else (slot_data, source_data)
+        )
+        if name not in slot_schema.names or name not in source_schema.names:
+            return None
+        declared = slot_schema.field(name)
+        given = source_schema.field(name)
+        if declared.nullable and not given.nullable:
+            given = given.with_nullable(True)
+        hasher = self.data_context.arrow_hasher
+        if hasher.hash_schema(pa.schema([declared])) == hasher.hash_schema(
+            pa.schema([given])
+        ):
+            return None
+        issue = (
+            f"{role} column {name!r} has the Arrow type {_arrow_field_text(declared)} "
+            f"in the slot but {_arrow_field_text(source_schema.field(name))} in the "
+            "source"
+        )
+        if self._given_arrow_schemas is None:
+            python_type = (self._tag_schema if role == "tag" else self._data_schema)[
+                name
+            ]
+            issue += (
+                f" (declared {_type_text(python_type)} means "
+                f"{_arrow_field_text(declared)}; declare the slot from the source or "
+                "with an Arrow schema)"
+            )
+        return issue
 
     def as_table(
         self,
