@@ -56,7 +56,12 @@ TUTORIAL = ROOT / "docs" / "tutorial"
 THEMES = {"light": "JupyterLab Light", "dark": "JupyterLab Dark"}
 # The device pixel ratio of the pictures: sharp when the site shows them scaled down.
 SCALE = 2
-VIEWPORT = {"width": 1180, "height": 1400}
+# The browser window's width for each picture, in CSS pixels: about as wide as the
+# picture needs, so the site (a content column of about 750 pixels) scales it down little.
+WIDTHS = {"preview": 820, "run-summary": 820, "diagram": 820}
+HEIGHT = 1400
+# CSS pixels cut from the top of each cell picture.
+TOP_TRIM = 4
 
 SETUP = f"""\
 import sys
@@ -199,27 +204,40 @@ def _pictures(url: str, notebook: str, settings: Path) -> list[Path]:
         browser = p.chromium.launch(channel="chrome", headless=True)
         for name, theme in THEMES.items():
             _write_settings(settings, theme)
-            page = browser.new_page(viewport=VIEWPORT, device_scale_factor=SCALE)
-            page.goto(f"{url}lab/tree/{notebook}?reset")
-            page.wait_for_selector(".jp-Notebook .jp-CodeCell", timeout=60_000)
-            page.wait_for_selector(".op-dag-node", timeout=60_000)
-            page.wait_for_timeout(2_000)  # fonts, the theme, the diagram's script
-            # Collapse the left side bar: the notebook takes the width.
-            page.keyboard.press("ControlOrMeta+b")
-            page.wait_for_timeout(500)
-            cells = page.locator(".jp-Notebook .jp-CodeCell")
             for index, (picture, _) in enumerate(CELLS, start=1):
-                cell = cells.nth(index)
+                page = browser.new_page(
+                    viewport={"width": WIDTHS[picture], "height": HEIGHT},
+                    device_scale_factor=SCALE,
+                )
+                page.goto(f"{url}lab/tree/{notebook}?reset")
+                page.wait_for_selector(".jp-Notebook .jp-CodeCell", timeout=60_000)
+                page.wait_for_selector(".op-dag-node", timeout=60_000)
+                page.wait_for_timeout(2_000)  # fonts, the theme, the diagram's script
+                # Collapse the left side bar: the notebook takes the width.
+                page.keyboard.press("ControlOrMeta+b")
+                page.wait_for_timeout(500)
+                cell = page.locator(".jp-Notebook .jp-CodeCell").nth(index)
                 cell.scroll_into_view_if_needed()
                 if picture == "diagram":
                     if not page.evaluate(SELECT_RATES):
                         raise RuntimeError("the diagram has no 'rates' node")
                     page.wait_for_timeout(500)
                 target = OUT / f"notebooks-{picture}-{name}.png"
-                cell.screenshot(path=str(target), animations="disabled")
+                # The top edge of the cell holds the focus line of the cell above it.
+                box = cell.bounding_box()
+                page.screenshot(
+                    path=str(target),
+                    animations="disabled",
+                    clip={
+                        "x": box["x"],
+                        "y": box["y"] + TOP_TRIM,
+                        "width": box["width"],
+                        "height": box["height"] - TOP_TRIM,
+                    },
+                )
                 _compress(target)
                 written.append(target)
-            page.close()
+                page.close()
         browser.close()
     return written
 
