@@ -16,7 +16,7 @@ from __future__ import annotations
 import itertools
 import json
 import struct
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 import pytest
@@ -24,6 +24,7 @@ import pytest
 import orcapod as op
 from orcapod.core.streams.base import StreamBase
 from orcapod.databases import InMemoryArrowDatabase
+from orcapod.logical_types import make_arrow_extension_type
 from orcapod.pipeline import (
     AsyncPipelineOrchestrator,
     PipelineJob,
@@ -315,3 +316,117 @@ def test_a_signaling_nan_key_groups_the_same_sync_and_async(
             if not seen:
                 seen = [fingerprint]
             assert fingerprint == seen[0], orchestrator.__name__
+
+
+# ── a float-backed logical type, and a key that is not a float ──────────────
+
+# A logical (extension) type over float64 storage, like ``example.celsius`` in
+# docs/concepts/logical-type-identifiers.md.
+FLOAT_BACKED_CLASS = make_arrow_extension_type(
+    "test.group_by_float_key", pa.float64(), b"v1"
+)
+# The made class takes no arguments; the stubs see pyarrow's base constructor.
+FLOAT_BACKED = FLOAT_BACKED_CLASS()  # pyright: ignore[reportCallIssue]
+
+LOGICAL_ROWS: list[dict[str, Any]] = [
+    {"k": "nan", "rid": "r1", "v": 1},
+    {"k": "-nan", "rid": "r2", "v": 2},
+    {"k": "payload_nan", "rid": "r3", "v": 3},
+    {"k": "-0", "rid": "r4", "v": 4},
+    {"k": "0", "rid": "r5", "v": 5},
+    {"k": None, "rid": "r6", "v": 6},
+]
+
+
+def _logical_source(rows: list[dict[str, Any]]) -> StreamBase:
+    storage = pa.array(
+        [None if r["k"] is None else BITS[r["k"]][64] for r in rows], pa.uint64()
+    ).view(pa.float64())
+    table = pa.table(
+        {
+            "k": pa.ExtensionArray.from_storage(FLOAT_BACKED, storage),
+            "rid": [r["rid"] for r in rows],
+            "v": [r["v"] for r in rows],
+        }
+    )
+    return op.sources.ArrowTableSource(
+        table,
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="s",
+        record_id_columns="rid",
+    )
+
+
+def _logical_key_bits(table: pa.Table) -> list[int | None]:
+    column = table.column("k").combine_chunks()
+    assert column.type == FLOAT_BACKED  # the output keeps the logical type
+    assert isinstance(column, pa.ExtensionArray)
+    return column.storage.view(pa.uint64()).to_pylist()
+
+
+def test_a_float_backed_logical_key_emits_the_smallest_bits() -> None:
+    """The bits are read from the extension's float storage, in every row order."""
+    seen: dict[str, Any] = {}
+    for rows in itertools.permutations(LOGICAL_ROWS):
+        grouped = _logical_source(list(rows)).group_by("k")
+        table = grouped.as_table()
+        assert table.column("v").to_pylist() == [[4, 5], [1, 2, 3], [6]]
+        assert _logical_key_bits(table) == [BITS["0"][64], BITS["nan"][64], None]
+        fingerprint = _fingerprint(grouped)
+        if not seen:
+            seen = fingerprint
+        assert fingerprint == seen
+
+
+# The pipeline's Polars round trip reads the unregistered test type as its storage.
+@pytest.mark.filterwarnings("ignore:Extension type 'test.group_by_float_key'")
+def test_a_float_backed_logical_key_groups_the_same_sync_and_async() -> None:
+    seen: list[str] = []
+    for rows in (LOGICAL_ROWS, LOGICAL_ROWS[::-1]):
+        for orchestrator in (SyncPipelineOrchestrator, AsyncPipelineOrchestrator):
+            job = PipelineJob(name="logical_key", database=InMemoryArrowDatabase())
+            with job:
+                _ = _logical_source(list(rows)).group_by("k", label="grouped")
+            job.run(orchestrator=orchestrator())
+            node = job.nodes["grouped"]
+            out = node.as_table(all_info=True)
+            assert _logical_key_bits(out) == [BITS["0"][64], BITS["nan"][64], None]
+            fingerprint = json.dumps(
+                {
+                    "rows": _with_bits(out.to_pylist()),
+                    "hashes": [
+                        (
+                            tag.content_hash().to_string(),
+                            data.content_hash().to_string(),
+                        )
+                        for tag, data in node.iter_data()
+                    ],
+                },
+                sort_keys=True,
+                default=str,
+            )
+            if not seen:
+                seen = [fingerprint]
+            assert fingerprint == seen[0], orchestrator.__name__
+
+
+def test_a_time64_ns_key_is_rebuilt_from_its_python_value() -> None:
+    """Pins today's grouping of a key that is not a float, whatever the row order.
+
+    ``GroupBy`` compares keys as Python values, and a ``time64[ns]`` value reads as a
+    ``datetime.time`` of microseconds: 1 ns and 2 ns form one group, which emits
+    the Python value rebuilt (0 ns), as on ``main``. Grouping by the exact value is
+    ITL-1250. Only a float key is taken from the Arrow column.
+    """
+    for values in ([1, 2], [2, 1]):
+        table = pa.table(
+            {"k": pa.array(values, pa.int64()).cast(pa.time64("ns")), "v": values}
+        )
+        source = op.sources.ArrowTableSource(
+            table, tag_columns=["k"], tag_only_columns=True, source_id="s"
+        )
+        out = source.group_by("k").as_table()
+        assert out.column("k").cast(pa.int64()).to_pylist() == [0]
+        members = cast(list[list[int]], out.column("v").to_pylist())
+        assert sorted(members[0]) == sorted(values)

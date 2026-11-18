@@ -1200,7 +1200,12 @@ data. The rules:
   over a negative one; a signaling NaN has smaller bits than the canonical quiet NaN, so it
   wins), taken from the input's Arrow column, never through Python (a float32 signaling NaN
   comes back quiet from Python): always a value a member holds, never the first row's, never
-  chosen by `member_order`. Bits are read only for a group whose key is zero or NaN.
+  chosen by `member_order`. Bits are read only for a group whose key is zero or NaN. A logical
+  type stored as a float is a float key, read through its storage (`_float_storage`). Every
+  other key is rebuilt from its Python value, as before: equal Python values that differ in
+  Arrow (`time64[ns]` within a microsecond) are one group with one rebuilt key; grouping by
+  the exact value is ITL-1250. The stance on `0.0`/`-0.0` and NaN for the whole library
+  (match by value, as Polars does; show the smallest bit pattern; rewrite nothing) is ITL-1251.
 - Data source-info values may be str, None, or list[...], nested to any depth; Arrow/Python
   types are derived from the value, with None mapping to large_string. That rule has one
   definition, arrow_utils.source_info_arrow_type, and applies only to tokens supplied as

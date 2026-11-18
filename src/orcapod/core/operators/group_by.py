@@ -71,6 +71,27 @@ def _grouping_key(key: tuple[Any, ...]) -> tuple[Any, ...]:
     )
 
 
+def _float_storage(arrow_type: "pa.DataType") -> "pa.DataType | None":
+    """Return the float type a column is stored as, or ``None`` when it is not a float.
+
+    A logical (extension) type over float storage, such as a temperature stored as
+    ``float64``, is stored as that float.
+
+    Args:
+        arrow_type: The Arrow type of a key column.
+
+    Returns:
+        The ``float16``, ``float32`` or ``float64`` type of the column's storage, or
+        ``None``.
+    """
+    storage = (
+        arrow_type.storage_type
+        if isinstance(arrow_type, pa.ExtensionType)
+        else arrow_type
+    )
+    return storage if pa.types.is_floating(storage) else None
+
+
 def _emitted_key_row(column: "pa.ChunkedArray[Any]", indices: Sequence[int]) -> int:
     """Return the input row whose value of one key column a group emits.
 
@@ -94,22 +115,19 @@ def _emitted_key_row(column: "pa.ChunkedArray[Any]", indices: Sequence[int]) -> 
         The row, one of ``indices``, whose value the group emits for this column.
     """
     first = indices[0]
-    arrow_type = column.type
-    if len(indices) == 1 or not pa.types.is_floating(arrow_type):
+    storage_type = _float_storage(column.type)
+    if len(indices) == 1 or storage_type is None:
         return first
-    value = column[first].as_py()
+    members = column.take(pa.array(indices, pa.int64())).combine_chunks()
+    if isinstance(members, pa.ExtensionArray):
+        members = members.storage
+    value = cast(float | None, members[0].as_py())
     if value is None or (value != 0.0 and not math.isnan(value)):
         return first
     # The unsigned integer of the float's width, to read its bits; no value of the
     # group is null, since a null key equals no float.
-    unsigned = {16: pa.uint16, 32: pa.uint32, 64: pa.uint64}[arrow_type.bit_width]()
-    bits = cast(
-        list[int],
-        column.take(pa.array(indices, pa.int64()))
-        .combine_chunks()
-        .view(unsigned)
-        .to_pylist(),
-    )
+    unsigned = {16: pa.uint16, 32: pa.uint32, 64: pa.uint64}[storage_type.bit_width]()
+    bits = cast(list[int], members.view(unsigned).to_pylist())
     return indices[min(range(len(indices)), key=bits.__getitem__)]
 
 
@@ -530,10 +548,17 @@ class GroupBy(UnaryOperator):
             stream.data_context.type_converter,
         )
 
-        # Each key column holds the chosen member's value as the input's Arrow
-        # column has it, never through Python: a conversion can change a float's
-        # bits (a float32 signaling NaN comes back quiet).
+        # A float key column (a float, or a logical type stored as one) holds the
+        # chosen member's value as the input's Arrow column has it, never through
+        # Python: a conversion can change a float's bits (a float32 signaling NaN
+        # comes back quiet).  Every other key keeps the value rebuilt from Python,
+        # as before: its members may differ in Arrow although equal in Python (two
+        # time64[ns] values within one microsecond read as one ``datetime.time``),
+        # and taking one member's would make the key depend on the row order.
+        # Grouping such keys by their exact value is ITL-1250.
         for position, c in enumerate(self.by):
+            if _float_storage(table.column(c).type) is None:
+                continue
             chosen = pa.array([r[position] for r in key_rows], pa.int64())
             grouped_table = grouped_table.set_column(
                 grouped_table.schema.get_field_index(c),
