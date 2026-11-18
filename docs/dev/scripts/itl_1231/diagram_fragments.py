@@ -7,6 +7,8 @@ two-node job after a run, made by the code checked out. Run it once on ``main`` 
 ``diagram_jupyterlab.py`` shows both in JupyterLab. From the repository root:
 
     uv run python docs/dev/scripts/itl_1231/diagram_fragments.py --label after
+
+``--out <folder>`` writes into another folder (``diagram_layouts.py`` of ITL-1232 does).
 """
 
 # The jobs are built from a script loaded by path, so their objects are Any here: a
@@ -62,7 +64,12 @@ def _two_node_job() -> Any:
 def main() -> None:
     parser = argparse.ArgumentParser()
     _ = parser.add_argument("--label", required=True, choices=["before", "after"])
-    label = parser.parse_args().label
+    _ = parser.add_argument(
+        "--out", type=Path, default=OUT, help="the folder to write into"
+    )
+    arguments = parser.parse_args()
+    label: str = arguments.label
+    out: Path = arguments.out
     warnings.simplefilter("ignore")
     with tempfile.TemporaryDirectory() as tmp:
         tutorial = _tutorial_job(Path(tmp))
@@ -74,8 +81,8 @@ def main() -> None:
             "tutorial-tb": tutorial.diagram(direction="TB").to_html(),
             "two-node": small.diagram().to_html(),
         }
-    OUT.mkdir(parents=True, exist_ok=True)
-    target = OUT / f"{label}.json"
+    out.mkdir(parents=True, exist_ok=True)
+    target = out / f"{label}.json"
     _ = target.write_text(
         json.dumps(fragments, indent=1, sort_keys=True), encoding="utf-8"
     )

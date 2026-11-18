@@ -90,8 +90,8 @@ not follow the order you wrote them in.
 The whole graph, rather than one node's lineage, is what the job draws when it is the last
 line of a notebook cell (see [Part 5](05-pipeline-job.md#nodes-where-the-results-are)).
 Clicking a node there shows its columns and its row counts in the last run.
-`job.diagram(direction="TB")` lays it out top to bottom, and `print(job.diagram())` lists
-it as text.
+`job.diagram(direction="TB")` lays it out top to bottom (in the notebook, the `vertical`
+checkbox above the diagram does the same), and `print(job.diagram())` lists it as text.
 
 ## Which rows did a value come from?
 
