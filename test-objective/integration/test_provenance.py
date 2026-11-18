@@ -23,7 +23,9 @@ from orcapod.system_constants import constants
 def _make_source(tag_data: dict, data_data: dict, tag_columns: list[str]):
     all_data = {**tag_data, **data_data}
     table = pa.table(all_data)
-    return ArrowTableSource(table, tag_columns=tag_columns, infer_nullable=True)
+    return ArrowTableSource(
+        table, tag_columns=tag_columns, tag_only_columns=True, infer_nullable=True
+    )
 
 
 def _get_system_tag_columns(table: pa.Table) -> list[str]:

@@ -60,8 +60,27 @@ class ArrowTableStream(StreamBase):
         source_info: dict[str, SourceInfoValue] | None = None,
         producer: PodProtocol | None = None,
         upstreams: tuple[StreamProtocol, ...] = (),
-        **kwargs,
+        data_tags: Collection[str] = (),
+        **kwargs: Any,
     ) -> None:
+        """Wrap ``table`` as a stream.
+
+        Args:
+            table: The rows: tag, data, system-tag and source-info columns.
+            tag_columns: The user tag columns.
+            system_tag_columns: Columns to rename into system tags.
+            source_info: Source-info tokens to add, by column.
+            producer: The pod that produced the stream, if any.
+            upstreams: The streams the producer read.
+            data_tags: The tag columns that are data-tags: each is also a data
+                column of the same name, stored once (specification "Referential
+                Tags", section 4). Must be a subset of ``tag_columns``.
+            **kwargs: Passed to ``StreamBase``.
+
+        Raises:
+            ValueError: If a tag column or a data-tag is not a tag column of
+                the table, or the stream has no data column.
+        """
         super().__init__(**kwargs)
 
         self._producer = producer
@@ -120,14 +139,30 @@ class ArrowTableStream(StreamBase):
             raise ValueError(
                 f"Specified tag columns {delta} are not present in the table."
             )
+        if unknown := set(data_tags) - set(self._tag_columns):
+            raise ValueError(
+                f"Data-tags {sorted(unknown)} are not tag columns of the stream."
+            )
+        # A data-tag is one column in both roles: a tag, and a data column of
+        # the same name (tag order).
+        self._data_tags = tuple(c for c in self._tag_columns if c in set(data_tags))
+        tag_only = tuple(c for c in self._all_tag_columns if c not in self._data_tags)
         table, prefix_tables = arrow_utils.prepare_prefixed_columns(
             table,
             prefix_info,
-            exclude_columns=self._all_tag_columns,
+            exclude_columns=tag_only,
         )
         # now table should only contain tag columns and data columns
-        self._data_columns = tuple(
-            c for c in table.column_names if c not in self._all_tag_columns
+        # Data-tags come first among the data columns, in tag order, then the other
+        # data columns in table order (developer decision, November 17, 2026,
+        # ITL-1205): a table built from rows lays a data-tag out among the tags, so
+        # this is the order of every row, on every path. Only the keys follow it: the
+        # table keeps its column order, and no stream, schema, row or table hash
+        # depends on the order of a stream's columns.
+        self._data_columns = self._data_tags + tuple(
+            c
+            for c in table.column_names
+            if c not in tag_only and c not in self._data_tags
         )
         # No user column name holds the source-info separator (ITL-1154).
         schema_utils.require_names_without_separator(
@@ -152,7 +187,7 @@ class ArrowTableStream(StreamBase):
         )
         all_tag_schema = arrow_utils.join_arrow_schemas(tag_schema, system_tag_schema)
         data_schema = pa.schema(
-            f for f in self._table.schema if f.name in self._data_columns
+            self._table.schema.field(name) for name in self._data_columns
         )
 
         self._tag_schema = tag_schema
@@ -173,7 +208,16 @@ class ArrowTableStream(StreamBase):
             self.__class__.__name__,
             self._identity_table(),
             self._tag_columns,
+        ) + (
+            # Only when there is one: a plain stream keeps its v0.3 identity, and a
+            # stream with data-tags and a plain one over one table differ (ITL-1023).
+            (("data_tags", self._data_tags),) if self._data_tags else ()
         )
+
+    @property
+    def data_tags(self) -> tuple[str, ...]:
+        """The data-tags: tag columns that are also data columns (tag order)."""
+        return self._data_tags
 
     def _identity_table(self) -> "pa.Table":
         """Return the rows in the order and columns that ``identity_structure`` hashes.
@@ -415,7 +459,8 @@ class ArrowTableStream(StreamBase):
             yield from self._cached_elements
 
     def __repr__(self) -> str:
+        refs = f", data_tags={self._data_tags}" if self._data_tags else ""
         return (
             f"{self.__class__.__name__}(table={self._table.column_names}, "
-            f"tag_columns={self._tag_columns})"
+            f"tag_columns={self._tag_columns}{refs})"
         )

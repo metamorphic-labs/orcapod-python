@@ -296,6 +296,7 @@ class SourceStreamResult:
     source_id: str
     tag_columns: tuple[str, ...]
     system_tag_columns: tuple[str, ...]
+    data_tags: tuple[str, ...] = ()
 
 
 class SourceStreamBuilder:
@@ -318,6 +319,7 @@ class SourceStreamBuilder:
         record_id_columns: str | Collection[str] | None = (),
         system_tag_columns: Collection[str] = (),
         source_kind: str | None = None,
+        data_tags: Collection[str] = (),
     ) -> SourceStreamResult:
         """Run the full enrichment pipeline.
 
@@ -344,6 +346,10 @@ class SourceStreamBuilder:
             source_kind: Kind prefix of the default source id, for example
                 ``dict``. Required when ``source_id`` is not given; not used
                 otherwise.
+            data_tags: The tag columns that are data-tags: also data columns
+                of the same name, stored once (ITL-1023). Empty (the builder's
+                default) gives plain tags, exactly as in v0.3; sources pass their
+                declared tags minus ``tag_only_columns``.
 
         Returns:
             SourceStreamResult with enriched stream and metadata.
@@ -356,6 +362,14 @@ class SourceStreamBuilder:
         """
         tag_columns_tuple = tuple(tag_columns)
         system_tag_columns_tuple = tuple(system_tag_columns)
+        data_tags_tuple = tuple(c for c in tag_columns_tuple if c in data_tags)
+        if unknown := set(data_tags) - set(tag_columns_tuple):
+            raise ValueError(
+                f"data_tags {sorted(unknown)} are not in tag_columns "
+                f"{list(tag_columns_tuple)}"
+            )
+        # Tag-only columns: the tags that are not also data.
+        tag_only_tuple = tuple(c for c in tag_columns_tuple if c not in data_tags_tuple)
 
         # A tag never has a meta column's name; the meta columns are dropped next,
         # so say so here rather than report the tag as missing (ITL-1080).
@@ -390,7 +404,7 @@ class SourceStreamBuilder:
         # set them correctly before calling build().
         non_sys = arrow_utils.drop_system_columns(table)
         tag_schema = non_sys.select(list(tag_columns_tuple)).schema
-        data_schema = non_sys.drop(list(tag_columns_tuple)).schema
+        data_schema = non_sys.drop(list(tag_only_tuple)).schema
         tag_python = self._data_context.type_converter.arrow_schema_to_python_schema(
             tag_schema
         )
@@ -442,6 +456,7 @@ class SourceStreamBuilder:
             schema_hash=schema_hash,
             source_id=source_id,
             row_identifiers=identifiers,
+            data_tags=data_tags_tuple,
         )
 
         return SourceStreamResult(
@@ -451,6 +466,7 @@ class SourceStreamBuilder:
             source_id=source_id,
             tag_columns=tag_columns_tuple,
             system_tag_columns=system_tag_columns_tuple,
+            data_tags=data_tags_tuple,
         )
 
     def attach_provenance(
@@ -462,6 +478,7 @@ class SourceStreamBuilder:
         schema_hash: str,
         source_id: str,
         row_identifiers: Sequence[str],
+        data_tags: Sequence[str] = (),
     ) -> ArrowTableStream:
         """Add source-info and system-tag columns to ``table`` and wrap it as a stream.
 
@@ -481,6 +498,8 @@ class SourceStreamBuilder:
             source_id: The canonical source name.
             row_identifiers: One identifier per row, identifying the row within the
                 source.
+            data_tags: The tag columns that are also data columns (data-tags);
+                they get source info like any data column.
 
         Returns:
             The stream over the enriched table.
@@ -490,7 +509,9 @@ class SourceStreamBuilder:
             for identifier in row_identifiers
         ]
         table = arrow_utils.add_source_info(
-            table, source_info, exclude_columns=tag_columns
+            table,
+            source_info,
+            exclude_columns=[c for c in tag_columns if c not in data_tags],
         )
         table = arrow_utils.add_system_tag_columns(
             table,
@@ -503,4 +524,5 @@ class SourceStreamBuilder:
             table=table,
             tag_columns=tag_columns,
             system_tag_columns=system_tag_columns,
+            data_tags=data_tags,
         )

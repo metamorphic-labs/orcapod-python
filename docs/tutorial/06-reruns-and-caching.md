@@ -25,7 +25,7 @@ calls = []
 
 sessions = CSVSource(
     str(data_dir / "sessions.csv"),
-    tag_columns=["subject_id", "session"],
+    tag_columns=["subject_id", "session"], tag_only_columns=True,
     source_id="sessions",
 )
 
@@ -34,7 +34,7 @@ def run(pod, units_file="units.csv"):
     """Build the firing-rate job over ``database``, run it, and return the rates as a DataFrame."""
     units = CSVSource(
         str(data_dir / units_file),
-        tag_columns=["subject_id", "session", "probe", "unit"],
+        tag_columns=["subject_id", "session", "probe", "unit"], tag_only_columns=True,
         source_id="units",
     )
     job = PipelineJob(name="workshop", database=database)
@@ -209,12 +209,12 @@ Orcapod, but they explain the rule:
 ```python
 units = CSVSource(
     str(data_dir / "units.csv"),
-    tag_columns=["subject_id", "session", "probe", "unit"],
+    tag_columns=["subject_id", "session", "probe", "unit"], tag_only_columns=True,
     source_id="units",
 )
 units_more = CSVSource(
     str(data_dir / "units_more.csv"),
-    tag_columns=["subject_id", "session", "probe", "unit"],
+    tag_columns=["subject_id", "session", "probe", "unit"], tag_only_columns=True,
     source_id="units",
 )
 

@@ -38,7 +38,9 @@ def _make_source(n: int = 3) -> ArrowTableSource:
             "x": pa.array(list(range(n)), type=pa.int64()),
         }
     )
-    return ArrowTableSource(table, tag_columns=["id"], infer_nullable=True)
+    return ArrowTableSource(
+        table, tag_columns=["id"], tag_only_columns=True, infer_nullable=True
+    )
 
 
 # ===================================================================
@@ -141,6 +143,7 @@ class TestOperatorNodeCaching:
                 }
             ),
             tag_columns=["id"],
+            tag_only_columns=True,
             infer_nullable=True,
         )
         source_b = ArrowTableSource(
@@ -151,6 +154,7 @@ class TestOperatorNodeCaching:
                 }
             ),
             tag_columns=["id"],
+            tag_only_columns=True,
             infer_nullable=True,
         )
         join = Join()
@@ -175,6 +179,7 @@ class TestOperatorNodeCaching:
                 }
             ),
             tag_columns=["id"],
+            tag_only_columns=True,
             infer_nullable=True,
         )
         source_b = ArrowTableSource(
@@ -185,6 +190,7 @@ class TestOperatorNodeCaching:
                 }
             ),
             tag_columns=["id"],
+            tag_only_columns=True,
             infer_nullable=True,
         )
         join = Join()

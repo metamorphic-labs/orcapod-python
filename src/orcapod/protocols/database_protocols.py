@@ -243,6 +243,58 @@ class ColumnCheckingDatabaseProtocol(Protocol):
 
 
 @runtime_checkable
+class RecordValidatingDatabaseProtocol(Protocol):
+    """A database that can say, before writing, whether it can store some rows.
+
+    A database whose backend cannot keep every part of an Arrow table (the SQLite and
+    PostgreSQL connector databases keep no field metadata) refuses such rows on
+    write. ``validate_records`` applies the same check without writing, so a caller
+    can refuse up front (ITL-1019: a data-tag marker).
+    """
+
+    def validate_records(self, records: pa.Table) -> None:
+        """Raise ``ValueError`` if the database could not store ``records`` as given."""
+        ...
+
+
+@runtime_checkable
+class FieldMetadataKeepingDatabaseProtocol(Protocol):
+    """A database that states whether it keeps Arrow field metadata.
+
+    A stored data-tag is marked with Arrow field metadata (ITL-1019), so a node
+    stores one only in a database that keeps it on every write path (first write,
+    append, merge, schema evolution where the database supports it) and reads it back.
+    A database states this with ``keeps_field_metadata``. One that does not have the
+    member is treated as not keeping field metadata: a node refuses it before
+    anything is written (``data_tags.require_database_keeps_marker``).
+
+    ``InMemoryArrowDatabase`` and ``DeltaTableDatabase`` keep it. A
+    ``ConnectorArrowDatabase`` keeps it when its connector does: a connector states it
+    with the same member (``SpiralDBConnector`` does; ``SQLiteConnector`` and
+    ``PostgreSQLConnector`` do not). ``ExtensionAwareDatabase`` states what the
+    database it wraps states. ``NoOpArrowDatabase`` keeps nothing.
+    """
+
+    @property
+    def keeps_field_metadata(self) -> bool:
+        """Whether every write path keeps Arrow field metadata and reads give it back."""
+        ...
+
+
+def keeps_field_metadata(database: object) -> bool:
+    """Return whether ``database`` states that it keeps Arrow field metadata.
+
+    Args:
+        database: A database, or a connector.
+
+    Returns:
+        ``True`` only when it has ``keeps_field_metadata`` and that is ``True``; a
+        database without the member does not keep field metadata.
+    """
+    return getattr(database, "keeps_field_metadata", False) is True
+
+
+@runtime_checkable
 class DatabaseRegistryProtocol(Protocol):
     """Protocol for a database config registry used during pipeline save/load.
 

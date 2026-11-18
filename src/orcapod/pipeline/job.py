@@ -1620,7 +1620,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         from orcapod.pipeline.graph import Pipeline
         from orcapod.pipeline.serialization import (
             SUPPORTED_JOB_FORMAT_VERSIONS,
+            check_source_config_binding,
             resolve_source_from_config,
+            source_config_at_version,
         )
 
         path = _Path(path)
@@ -1640,6 +1642,12 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             _json.dump(data["pipeline"], tmp)
         try:
             pipeline = Pipeline.load(tmp_path)
+        except ValueError as exc:
+            # The embedded pipeline was read from a temporary file: name the job file.
+            message = str(exc)
+            if tmp_path in message:
+                exc.args = (message.replace(tmp_path, str(path)),)
+            raise
         finally:
             os.unlink(tmp_path)
 
@@ -1654,6 +1662,17 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             data.get("bindings", {}).get("sources", {}).items()
         ):
             source_type = src_config.get("source_type")
+            # The file's version decides which tags are plain (ITL-1019): a refusal
+            # is the file's error, not a source that could not be rebuilt.
+            try:
+                src_config = source_config_at_version(src_config, version)
+                if spec_name in slots:
+                    slot = slots[spec_name]
+                    check_source_config_binding(
+                        src_config, slot.tag_schema.keys(), slot.data_schema.keys()
+                    )
+            except ValueError as exc:
+                raise ValueError(f"{path}: source {spec_name!r}: {exc}") from exc
             try:
                 source = resolve_source_from_config(src_config)
                 if source is not None:

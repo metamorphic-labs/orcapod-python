@@ -1,5 +1,5 @@
 from collections.abc import Collection, Mapping, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.channels import ReadableChannel, WritableChannel
@@ -8,6 +8,7 @@ from orcapod.core.operators.column_selection import (
     is_meta_column,
     require_a_data_column,
 )
+from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
@@ -56,6 +57,10 @@ def _with_other_group_note(
 class MapData(UnaryOperator):
     """Rename data columns.
 
+    Renaming data is always a data-only move (developer, November 12, 2026,
+    ITL-1023): renaming the data column of a data-tag ``x`` gives the new
+    data column and leaves ``x`` a plain tag with the same values.
+
     Args:
         name_map: Each data column to rename, mapped to its new name.
         drop_unmapped: When ``True``, the data columns not in ``name_map`` are
@@ -65,6 +70,9 @@ class MapData(UnaryOperator):
             ``False`` it is ignored. Part of the operator's identity, as for
             ``SelectTagColumns`` and the other column operators.
     """
+
+    # Data-tags (ITL-1023): handled.
+    DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def __init__(
         self,
@@ -153,11 +161,12 @@ class MapData(UnaryOperator):
             columns={"source": True, "system_tags": True, "sort_by_tags": False}
         )
 
-        name_map = {
-            c: c
-            for c in table.column_names
-            if c not in data_columns and not c.startswith("")
-        }
+        # A data-tag column keeps its tag under its own name, now plain; the
+        # renamed data column is a copy beside it (a data-only move), added after
+        # the renames so that no rename reaches the copy.
+        data_tags = stream_data_tags(stream)
+        moved = {c: self.name_map[c] for c in data_tags if c in self.name_map}
+
         name_map = {
             tc: tc
             for tc in table.column_names
@@ -165,7 +174,7 @@ class MapData(UnaryOperator):
         }  # no renaming on tag columns
         for c in data_columns:
             if c in self.name_map:
-                name_map[c] = self.name_map[c]
+                name_map[c] = c if c in moved else self.name_map[c]
                 name_map[f"{constants.SOURCE_PREFIX}{c}"] = (
                     f"{constants.SOURCE_PREFIX}{self.name_map[c]}"
                 )
@@ -173,11 +182,34 @@ class MapData(UnaryOperator):
                 name_map[c] = c
 
         renamed_table = table.rename_columns(name_map)
+        for old, new in moved.items():
+            index = renamed_table.schema.get_field_index(old)
+            renamed_table = renamed_table.add_column(
+                index + 1,
+                renamed_table.schema.field(old).with_name(new),
+                renamed_table.column(old),
+            )
 
         if self.drop_unmapped and unmapped_columns:
-            renamed_table = renamed_table.drop_columns(list(unmapped_columns))
+            # An unmapped data-tag loses its data role and stays a plain tag.
+            renamed_table = renamed_table.drop_columns(
+                [c for c in unmapped_columns if c not in data_tags]
+                + [
+                    f"{constants.SOURCE_PREFIX}{c}"
+                    for c in unmapped_columns
+                    if c in data_tags
+                ]
+            )
 
-        return ArrowTableStream(renamed_table, tag_columns=tag_columns)
+        return ArrowTableStream(
+            renamed_table,
+            tag_columns=tag_columns,
+            data_tags=[
+                c
+                for c in data_tags
+                if c not in moved and not (self.drop_unmapped and c in unmapped_columns)
+            ],
+        )
 
     def validate_unary_input(self, stream: StreamProtocol) -> None:
         tag_columns, data_columns = stream.keys()
@@ -284,6 +316,13 @@ class MapData(UnaryOperator):
 class MapTags(UnaryOperator):
     """Rename tag columns.
 
+    Data-tags (developer, November 12, 2026, ITL-1023): renaming a
+    data-tag renames its one column in both roles, so the data-tag
+    survives under the new name. With ``tag_only=True`` only the tag is renamed:
+    the data column keeps its name and the renamed tag is a plain tag with the
+    same values. A plain tag is renamed as before. A data-tag dropped as
+    unmapped keeps its data column.
+
     Args:
         name_map: Each tag column to rename, mapped to its new name.
         drop_unmapped: When ``True``, the tag columns not in ``name_map`` are
@@ -292,13 +331,18 @@ class MapTags(UnaryOperator):
             tag column of the input raises ``InputValidationError``; when
             ``False`` it is ignored. Part of the operator's identity, as for
             ``SelectTagColumns`` and the other column operators.
+        tag_only: Rename data-tags in the tag role only.
     """
+
+    # Data-tags (ITL-1023): handled.
+    DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def __init__(
         self,
         name_map: Mapping[str, str],
         drop_unmapped: bool = False,
         strict: bool = True,
+        tag_only: bool = False,
         **kwargs,
     ):
         # A tag never gets a meta column's name (ITL-1080): refused here, so no
@@ -309,6 +353,7 @@ class MapTags(UnaryOperator):
         self.name_map = dict(name_map)
         self.drop_unmapped = drop_unmapped
         self.strict = strict
+        self.tag_only = tag_only
         super().__init__(**kwargs)
 
     def _require_tag_columns(self, tag_columns: Collection[str]) -> None:
@@ -361,11 +406,14 @@ class MapTags(UnaryOperator):
             "drop_unmapped": self.drop_unmapped,
             "strict": self.strict,
         }
+        if self.tag_only:
+            config["config"]["tag_only"] = True
         return config
 
     def unary_static_process(self, stream: StreamProtocol) -> StreamProtocol:
         tag_columns, data_columns = stream.keys()
         missing_tags = set(tag_columns) - set(self.name_map.keys())
+        data_tags = stream_data_tags(stream)
 
         if not any(n in tag_columns for n in self.name_map) and not (
             self.drop_unmapped and missing_tags
@@ -383,18 +431,49 @@ class MapTags(UnaryOperator):
             if tc in self.name_map or not self.drop_unmapped
         }  # rename the tag as necessary
         new_tag_columns = list(name_map.values())
+        renamed_refs = [c for c in data_tags if c in self.name_map]
+        if self.tag_only:
+            # The renamed tag is a plain copy beside the data column, which keeps
+            # its name and its source info. The copy is added after the renames, so
+            # that no rename of another column reaches it.
+            for old in renamed_refs:
+                name_map[old] = old
+        else:
+            # One column in both roles: its data source info follows the name.
+            for old in renamed_refs:
+                name_map[f"{constants.SOURCE_PREFIX}{old}"] = (
+                    f"{constants.SOURCE_PREFIX}{self.name_map[old]}"
+                )
         for c in data_columns:
-            name_map[c] = c  # no renaming on data columns
+            name_map.setdefault(c, c)  # no renaming on other data columns
 
         renamed_table = table.rename_columns(name_map)
+        if self.tag_only:
+            for old in renamed_refs:
+                index = renamed_table.schema.get_field_index(old)
+                renamed_table = renamed_table.add_column(
+                    index + 1,
+                    renamed_table.schema.field(old).with_name(self.name_map[old]),
+                    renamed_table.column(old),
+                )
 
         if missing_tags and self.drop_unmapped:
-            # drop any tags that are not in the name map
-            renamed_table = renamed_table.drop_columns(list(missing_tags))
+            # drop any tags that are not in the name map; a data-tag keeps
+            # its column as data.
+            renamed_table = renamed_table.drop_columns(
+                [c for c in missing_tags if c not in data_tags]
+            )
 
+        if self.tag_only:
+            new_data_tags = [c for c in data_tags if c not in self.name_map]
+        else:
+            new_data_tags = [self.name_map.get(c, c) for c in data_tags]
+        if self.drop_unmapped:
+            new_data_tags = [c for c in new_data_tags if c in new_tag_columns]
         return ArrowTableStream(
             renamed_table,
             tag_columns=new_tag_columns,
+            data_tags=new_data_tags,
         )
 
     def validate_unary_input(self, stream: StreamProtocol) -> None:
@@ -441,6 +520,15 @@ class MapTags(UnaryOperator):
             for k, v in tag_schema.items()
             if k in self.name_map or not self.drop_unmapped
         }
+        if not self.tag_only:
+            # A data-tag's data column is renamed with it (one column).
+            data_tags = set(stream_data_tags(stream))
+            data_schema = Schema(
+                {
+                    self.name_map.get(k, k) if k in data_tags else k: v
+                    for k, v in data_schema.items()
+                }
+            )
 
         return Schema(new_tag_schema), data_schema
 
@@ -485,17 +573,24 @@ class MapTags(UnaryOperator):
                     new_tag = tag.rename(rename_map) if rename_map else tag
                     if unmapped:
                         new_tag = new_tag.drop(*unmapped)
+                    # A data-tag's data column is renamed with it, unless
+                    # only the tag is renamed (ITL-1023).
+                    data_keys = data.keys()
+                    data_map = {k: v for k, v in rename_map.items() if k in data_keys}
+                    if data_map and not self.tag_only:
+                        data = data.rename(data_map)
                     await output.send((new_tag, data))
         finally:
             await output.close()
 
     def identity_structure(self) -> Any:
+        # ``tag_only`` enters only when set, so a plain renaming keeps its identity.
         return (
             self.__class__.__name__,
             self.name_map,
             self.drop_unmapped,
             self.strict,
-        )
+        ) + ((("tag_only", True),) if self.tag_only else ())
 
 
 class MapColumns(UnaryOperator):

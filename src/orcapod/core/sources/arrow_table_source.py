@@ -4,10 +4,10 @@ import logging
 from collections.abc import Collection
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from orcapod.core.referential_tags import TagOnlyColumns, check_tag_only_columns
 from orcapod.core.sources.base import RootSource
+from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
+from orcapod.core.sources.stream_builder import SourceStreamBuilder
 from orcapod.core.sources.stream_builder import (
-    SourceStreamBuilder,
     normalize_record_id_columns,
 )
 from orcapod.utils import arrow_utils
@@ -72,11 +72,12 @@ class ArrowTableSource(RootSource):
     Whenever row order can vary between runs, pass an explicit ``source_id``
     and set ``record_id_columns`` to a column that is unique per row.
 
-    Plain tags: ``tag_only_columns`` (keyword-only) is ``True``, the default, and keeps
-    every tag column a tag only, not data, as every source does in v0.3. Any other value
-    is refused: referential tags arrive in v0.4, where tags become referential by default
-    and ``tag_only_columns`` names the tags kept plain.
+    Data-tags (ITL-1023): every declared tag column is a data-tag by default,
+    also a data column of the same name. ``tag_only_columns`` (keyword-only) names the
+    tags kept plain (tag only, not data, as in v0.3); ``True`` keeps all of them plain.
     """
+
+    TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = True
 
     # The config type key; also the kind prefix of the default source id.
     SOURCE_KIND: ClassVar[str] = "arrow_table"
@@ -89,10 +90,9 @@ class ArrowTableSource(RootSource):
         record_id_columns: str | Collection[str] | None = None,
         infer_nullable: bool = False,
         *,
-        tag_only_columns: TagOnlyColumns = True,
+        tag_only_columns: TagOnlyColumns = (),
         **kwargs: Any,
     ) -> None:
-        check_tag_only_columns(tag_only_columns)
         super().__init__(**kwargs)
         tag_columns = _normalize_column_list(tag_columns)
 
@@ -108,6 +108,7 @@ class ArrowTableSource(RootSource):
         result = builder.build(
             table,
             tag_columns=tag_columns,
+            data_tags=source_data_tags(tag_columns, tag_only_columns),
             source_id=self._source_id,
             source_kind=self.SOURCE_KIND,
             record_id_columns=normalize_record_id_columns(record_id_columns) or (),
@@ -118,6 +119,9 @@ class ArrowTableSource(RootSource):
         self._schema_hash = result.schema_hash
         self._table_hash = result.table_hash
         self._tag_columns = result.tag_columns
+        self._tag_only_columns = tuple(
+            c for c in result.tag_columns if c not in result.data_tags
+        )
         self._system_tag_columns = result.system_tag_columns
         self._record_id_columns = normalize_record_id_columns(record_id_columns)
         self._key_columns = self._record_id_columns or ()
@@ -133,6 +137,7 @@ class ArrowTableSource(RootSource):
             "record_id_columns": None
             if self._record_id_columns is None
             else list(self._record_id_columns),
+            **self._tag_only_config(),
             "source_id": self.source_id,
             **self._identity_config(),
         }

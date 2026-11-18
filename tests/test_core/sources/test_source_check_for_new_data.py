@@ -107,10 +107,9 @@ def delta_path(tmp_path: Path) -> Path:
     return path
 
 
-def _delta(path: Path) -> DeltaTableSource:
-    return DeltaTableSource(
-        path, tag_columns="k", record_id_columns="k", tag_only_columns=True
-    )
+def _delta(path: Path, **kwargs: Any) -> DeltaTableSource:
+    _ = kwargs.setdefault("tag_only_columns", True)
+    return DeltaTableSource(path, tag_columns="k", record_id_columns="k", **kwargs)
 
 
 def test_delta_unchanged_finds_nothing(delta_path: Path) -> None:
@@ -335,10 +334,9 @@ def csv_path(tmp_path: Path) -> Path:
     return path
 
 
-def _csv(path: Path) -> CSVSource:
-    return CSVSource(
-        str(path), tag_columns="k", record_id_columns="k", tag_only_columns=True
-    )
+def _csv(path: Path, **kwargs: Any) -> CSVSource:
+    _ = kwargs.setdefault("tag_only_columns", True)
+    return CSVSource(str(path), tag_columns="k", record_id_columns="k", **kwargs)
 
 
 def test_csv_unchanged_finds_nothing(csv_path: Path) -> None:
