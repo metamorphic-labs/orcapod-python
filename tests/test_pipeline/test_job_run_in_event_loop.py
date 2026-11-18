@@ -10,6 +10,7 @@ from __future__ import annotations
 import _thread
 import asyncio
 import signal
+import sys
 import threading
 import time
 import warnings
@@ -404,6 +405,7 @@ def test_second_interrupt_returns_and_a_late_function_writes_nothing(
 run_ended = threading.Event()
 next_row_entered = threading.Event()
 next_row_returned = threading.Event()
+next_row_threads: list[threading.Thread] = []
 
 
 class RunEndSignal(NoOpObserver):
@@ -415,15 +417,35 @@ class RunEndSignal(NoOpObserver):
         run_ended.set()
 
 
+class NamedANodeWhoseFunctionReturned(Exception):
+    """The second-interrupt warning named a node whose function had returned (ITL-1192)."""
+
+
+def pool_thread_is_done(thread: threading.Thread) -> bool:
+    """Whether the thread-pool ``thread`` has finished the work item it ran.
+
+    It has once it is back in its loop waiting for work, or has ended (the cancelled
+    run shuts its thread pool down): the function and anything around it have returned.
+    """
+    if not thread.is_alive() or thread.ident is None:
+        return True
+    frame = sys._current_frames().get(thread.ident)  # pyright: ignore[reportPrivateUsage]  # the standard way to read another thread's frame
+    return frame is None or frame.f_code.co_name == "_worker"
+
+
 def press_interrupt_once_next_row_returned() -> None:
-    """The second press, once the next node's function has returned."""
-    if next_row_returned.wait(timeout=30):
-        _thread.interrupt_main()
+    """The second press, once the next node's function and its pool thread's work are done."""
+    if not next_row_returned.wait(timeout=30):
+        return
+    deadline = time.monotonic() + 30
+    while not pool_thread_is_done(next_row_threads[0]) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    _thread.interrupt_main()
 
 
 @function_pod(output_keys="y")
 def stuck_until_next_row_runs(x: int) -> int:
-    """Row 0 presses the interrupt button once a row of the next node is in its function."""
+    """Row 0 presses the interrupt button once the next node's row is in its function."""
     if x == 0:
         _ = next_row_entered.wait(timeout=30)
         _thread.interrupt_main()  # first press: cancels the run, which then waits
@@ -435,6 +457,7 @@ def stuck_until_next_row_runs(x: int) -> int:
 @function_pod(output_keys="z")
 def returns_after_the_run_ended(y: int) -> int:
     """In progress when the cancellation lands; returns once the cancelled run has ended."""
+    next_row_threads.append(threading.current_thread())
     next_row_entered.set()
     _ = run_ended.wait(timeout=30)
     next_row_returned.set()
@@ -443,7 +466,7 @@ def returns_after_the_run_ended(y: int) -> int:
 
 @pytest.mark.xfail(
     strict=True,
-    raises=AssertionError,
+    raises=NamedANodeWhoseFunctionReturned,
     reason=(
         "ITL-1192: a row task cancelled while its function runs gets no end event, so "
         "the warning names its node although the function has returned"
@@ -453,15 +476,18 @@ def returns_after_the_run_ended(y: int) -> int:
 def test_second_interrupt_does_not_name_a_node_whose_function_returned() -> None:
     """The warning names only the nodes whose functions have not returned.
 
-    A row of ``after`` is in its function when the first interrupt cancels the run; the
-    function returns once the cancelled run has ended, and only then is the interrupt
-    pressed again, while row 0 of ``stuck`` still runs. Every step waits for the one
+    Two rows: row 0 stays in ``stuck``, row 1 goes on to ``after``. Row 1 of ``after`` is
+    in its function when the first interrupt cancels the run; the function returns once
+    the cancelled run has ended, and the interrupt is pressed again only when its pool
+    thread has finished that work, while row 0 of ``stuck`` still runs. Every step waits for the one
     before, so the outcome does not depend on timing. Today the warning names ``after``
-    too: a known defect (ITL-1192), pinned here so the fix flips this test.
+    too: a known defect (ITL-1192), pinned here so the fix flips this test. Only that
+    defect is the expected failure; any other failed check fails the test.
     """
     for event in (stuck_release, run_ended, next_row_entered, next_row_returned):
         event.clear()
-    rows = [{"k": f"r{i}", "x": i} for i in range(N_STUCK_ROWS)]
+    next_row_threads.clear()
+    rows = [{"k": f"r{i}", "x": i} for i in range(2)]
     job = PipelineJob(name="returned_demo", database=InMemoryArrowDatabase())
     with job:
         source = DictSource(
@@ -488,9 +514,11 @@ def test_second_interrupt_does_not_name_a_node_whose_function_returned() -> None
             time.sleep(0.05)
 
     assert next_row_returned.is_set()
+    assert len(next_row_threads) == 1, next_row_threads
     messages = [str(w.message) for w in caught if w.category is RuntimeWarning]
     assert len(messages) == 1, messages
-    assert "but a function in node 'stuck' has not returned yet" in messages[0]
+    if "but a function in node 'stuck' has not returned yet" not in messages[0]:
+        raise NamedANodeWhoseFunctionReturned(messages[0])
 
 
 async def async_stuck_on_first_row(x: int) -> int:
