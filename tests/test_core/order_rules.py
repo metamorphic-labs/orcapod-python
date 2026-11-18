@@ -46,8 +46,9 @@ ORDER_EXCEPTIONS: tuple[OrderException, ...] = (
     ),
     OrderException(
         "member_order",
-        "`member_order` of `GroupBy`",
-        "The explicit order of the members inside each group's lists.",
+        "`member_order` of `GroupBy` (coming with ITL-1226; not in a release yet)",
+        "The explicit order of the members inside each group's lists, the argument that "
+        "replaces the input's tag order there.",
     ),
     OrderException(
         "non_commutative_inputs",

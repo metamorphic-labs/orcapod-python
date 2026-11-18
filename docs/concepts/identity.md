@@ -228,7 +228,7 @@ The order counts only where it is the point of the argument:
 | Order that counts | Why |
 |---|---|
 | `record_id_columns` of every source (by default a database table's primary key) | A record id is the canonical JSON of the key columns in key order, so the key order is part of every record id and of the source's identity. It is the explicit argument that states the order. |
-| `member_order` of `GroupBy` | The explicit order of the members inside each group's lists. |
+| `member_order` of `GroupBy` (coming with ITL-1226; not in a release yet) | The explicit order of the members inside each group's lists, the argument that replaces the input's tag order there. |
 | the inputs of an operator whose `argument_symmetry` is a tuple (`SemiJoin`) | The inputs have roles: `SemiJoin(left, right)` keeps the rows of `left`. |
 | the order of the ROWS given to a source without key columns | Its record ids are the row positions, so a reorder is a change (by decision). Row order, never column order. |
 | the order of the ROWS given to `Batch` | `Batch` groups consecutive rows: row order, never column order. |

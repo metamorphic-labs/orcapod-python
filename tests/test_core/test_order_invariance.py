@@ -278,6 +278,11 @@ def assert_all_equal(results: dict[str, dict[str, Any]]) -> None:
     """Every variant's result equals the first one's, naming the element that differs."""
     (first_id, first), *others = results.items()
     for variant_id, result in others:
+        # An element only one variant has (an extra stored table) is a difference too.
+        assert result.keys() == first.keys(), (
+            f"elements differ: {first_id} vs {variant_id}: "
+            f"{sorted(result.keys() ^ first.keys())}"
+        )
         for name, value in first.items():
             assert result[name] == value, f"{name} differs: {first_id} vs {variant_id}"
 

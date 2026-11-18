@@ -779,8 +779,13 @@ def job_elements(role: str, order: int, layout: str) -> dict[str, Any]:
                     )
                 )
         for i, (path, table) in enumerate(sorted(stored.items())):
-            key = path.split("/")[0] + "/.../" + path.split("/")[-1]
-            volatile = VOLATILE.get(key, set())
+            key = path
+            # Columns that differ between two identical runs of any table (timestamps,
+            # run ids, random record ids): a table's path differs by role, its columns
+            # do not.
+            volatile = set().union(
+                *(cols for name, cols in VOLATILE.items() if name != "saved")
+            )
             keep = [c for c in table.column_names if c not in volatile]
             out[f"F {mode}: stored rows [{key}]"] = sorted(
                 _v(sorted((c, r[c]) for c in keep))
@@ -829,7 +834,7 @@ def learn_volatile() -> None:
     ]
     for path, table in tables[0].items():
         other = tables[1].get(path)
-        key = path.split("/")[0] + "/.../" + path.split("/")[-1]
+        key = path
         VOLATILE[key] = {
             c
             for c in table.column_names
