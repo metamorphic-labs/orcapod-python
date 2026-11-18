@@ -1033,11 +1033,11 @@ Every row Orcapod stores names the **data context** that wrote it, in the column
 Orcapod's hashing, so rows that share it were keyed in exactly the same way (see
 [The data context of a stored row](../reference/hashing.md#the-data-context-of-a-stored-row)).
 Tables written before v0.3 have no such column and are stored at an older table layout
-(`pdb_v1`, `rdb_v1`). Orcapod **does not read them as results**: it does not refuse the
+(`pdb_v2`, `rdb_v2`). Orcapod **does not read them as results**: it does not refuse the
 store, and it does not reuse those rows.
 
 - The first run of v0.3 on a database written by v0.2 computes every input again and stores the
-  rows in its own tables (`pdb_v2`, `rdb_v2`).
+  rows in its own tables (`pdb_v1`, `rdb_v1`).
 - Reading a node (`as_table()`, `iter_data()`, `get_all_records()`) returns the rows of the
   current data context only: nothing before that first run, one row per input after it.
 - The old tables are never changed or deleted. They stay readable with the version that

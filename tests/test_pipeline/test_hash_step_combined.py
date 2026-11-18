@@ -123,7 +123,7 @@ class TestStoredPathsAndKeys:
         _ = _operator_job(store).run()
 
         paths = sorted(store.list_sources())
-        assert sorted(path[-1] for path in paths) == ["odb_v1", "pdb_v2", "rdb_v2"]
+        assert sorted(path[-1] for path in paths) == ["odb_v1", "pdb_v1", "rdb_v1"]
         for path in paths:
             for component in path:
                 assert "semantic_v" not in component, path
@@ -230,7 +230,7 @@ class TestSideEffectNodeChecksEveryRun:
         delivered.clear()
 
         # A log of the same pod at the layout Orcapod v0.2 wrote, under another hash.
-        old_path = _add_table_written_before_v03(store, "tdb_v2", "tdb_v1")
+        old_path = _add_table_written_before_v03(store, "tdb_v1", "tdb_v2")
 
         # The same job object runs the sink again (a node holding a current run is not
         # run, ITL-1095, so it is cleared first): the check is not remembered from the
@@ -252,7 +252,7 @@ class TestSideEffectNodeChecksEveryRun:
         _ = job.run()  # nothing new in the database: runs, and delivers nothing again
         assert delivered == []
 
-        old_path = _add_table_written_before_v03(store, "pdb_v2", "pdb_v1")
+        old_path = _add_table_written_before_v03(store, "pdb_v1", "pdb_v2")
 
         job.nodes["notify"].clear_cache()
         with pytest.raises(SideEffectLogDataContextError) as info:
@@ -263,7 +263,7 @@ class TestSideEffectNodeChecksEveryRun:
     def test_the_error_does_not_offer_a_fresh_store_as_a_safe_retry(self):
         """The error message warns that a fresh database repeats every side effect."""
         error = SideEffectLogDataContextError(
-            (("j", "side_effects", "notify", "schema:abc", "tdb_v1"),),
+            (("j", "side_effects", "notify", "schema:abc", "tdb_v2"),),
             "std:v0.1:default",
             CURRENT,
             node_label="notify",
@@ -298,7 +298,7 @@ class TestTablesOfNodesTheRunLeavesOut:
             )
             double.pod(unbound, label="dbl")
         key = pa.array([b"arrow_v0.1:00"], pa.large_binary())
-        old_path = (JOB_NAME, "double", "0" * 64, "v0", "python.function.v0", "pdb_v1")
+        old_path = (JOB_NAME, "double", "0" * 64, "v0", "python.function.v1", "pdb_v2")
         store.add_records(
             old_path, pa.table({"__record_id": key}), record_id_column="__record_id"
         )

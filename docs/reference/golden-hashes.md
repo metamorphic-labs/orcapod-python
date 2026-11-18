@@ -171,7 +171,10 @@ edit and the generator refuses to write over it.
    its digest into `released_manifests.json` under `releases`, and at the data context's first
    release sets `released_in` and the `manifest` pin. It refuses a version already released,
    a development or local version, and a tree that breaks a rule. Try it first on a copy with
-   `--root <dir>` (`store.copy_tree` writes one).
+   `--root <dir>` (`store.copy_tree` writes one). The same step pins the open data function
+   type snapshots (`scripts/data_function_types.py --release`, writing their sha256 and the
+   version into `src/orcapod/data_function_types/released.json`; see
+   [Data function types](data-function-types.md)).
 3. The Release workflow tags the commit it builds, which contains the release revision. From
    then on every file listed up to that revision is frozen.
 4. The tag and the PyPI wheel and sdist, which carry `v1.json` and `released_manifests.json`,

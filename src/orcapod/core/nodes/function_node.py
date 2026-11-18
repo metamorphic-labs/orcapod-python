@@ -45,6 +45,7 @@ from orcapod.core.data_tags import (
 from orcapod.channels import Channel, ReadableChannel, WritableChannel
 from orcapod.config import OrcapodConfig
 from orcapod.core.cached_function_pod import CachedFunctionPod
+from orcapod.core.data_function import declaration_for
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
@@ -142,7 +143,7 @@ _PIPELINE_RECOMPUTATION_INDEX_COL = "__pipeline_recomputation_index"
 
 
 def _pipeline_meta_schema() -> pa.Schema:
-    """The bookkeeping columns of a function node's pipeline record (``pdb_v2``).
+    """The bookkeeping columns of a function node's pipeline record (``pdb_v1``).
 
     The record holds the tags, system tags and input source-info columns, then
     these. One definition for the writer (``add_pipeline_record``) and for the
@@ -1195,11 +1196,16 @@ class _ResultDatabaseReader:
     def record_path(self) -> tuple[str, ...]:
         """Path to cached records in the result database (versioned).
 
-        Returns the v1 schema path: ``_record_path + (RESULT_DB_SCHEMA_VERSION,)``.
-        Matches ``CachedFunctionPod.record_path`` semantics so that stub nodes
-        (loaded from a saved job) resolve to the same storage location as live nodes.
+        ``_record_path + (revision, RESULT_DB_SCHEMA_VERSION)``, as
+        ``CachedFunctionPod.record_path``, so that stub nodes (loaded from a saved job)
+        resolve to the same storage location as live nodes. ``_record_path`` is the
+        saved uri, whose last part is the data function type and its major; the
+        revision is the one this version of Orcapod declares for that type (ITL-1259).
         """
-        return self._record_path + (RESULT_DB_SCHEMA_VERSION,)
+        if not self._record_path:
+            return ()
+        revision = declaration_for(self._record_path[-1]).revision_component
+        return self._record_path + (revision, RESULT_DB_SCHEMA_VERSION)
 
 
 # ---------------------------------------------------------------------------

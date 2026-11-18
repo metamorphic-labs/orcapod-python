@@ -12,7 +12,9 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+from orcapod.core.data_function_types import StoredColumn
 from orcapod.errors import OrcapodDatabaseReadError, OrcapodDatabaseWriteError
+from orcapod.hashing.arrow_hashers import ARROW_HASH_LABEL
 from orcapod.contexts.stored import (
     StaleTables,
     keep_rows_of_data_context,
@@ -46,6 +48,44 @@ def pod_timestamp_type() -> pa.DataType:
     return pa.timestamp("us", tz="UTC")
 
 
+COMMON_RESULT_COLUMNS: tuple[StoredColumn, ...] = (
+    StoredColumn(
+        constants.INPUT_DATA_HASH_COL,
+        bytes,
+        "large_binary",
+        True,
+        "the hash of the input data: the key a result is looked up by",
+        hash_label=ARROW_HASH_LABEL,
+        covers="the input data's values and types, as an Arrow row "
+        + "(docs/reference/hashing.md)",
+    ),
+    StoredColumn(
+        constants.POD_TIMESTAMP,
+        datetime,
+        "timestamp[us, tz=UTC]",
+        True,
+        "when the result was stored; the newest wins when two rows share an input",
+    ),
+    StoredColumn(
+        constants.DATA_CONTEXT_COL,
+        str,
+        "large_string",
+        False,
+        "the key of the data context that wrote the row (std:v1:default)",
+    ),
+)
+"""The columns every result table has besides its type's own and the outputs (ITL-1259).
+
+Their layout is ``RESULT_DB_SCHEMA_VERSION`` (``rdb_v1``), the last component of every
+result table path. The other common columns depend on the function: each output key,
+with its declared type, and ``_source_<key>`` (``large_string``), the output's
+source-info token ``<uri parts joined by ":">::<result record id hex>::<key>``. The
+row's record id (a UUID, 16 bytes) is kept by the database as its record id column. A
+data function type's own columns (``pf_var_*``, ``pf_exec_*``) are declared by the type
+(``core/data_function_types.py``).
+"""
+
+
 class ResultCache:
     """Shared result caching backed by an ``ArrowDatabaseProtocol``.
 
@@ -71,6 +111,7 @@ class ResultCache:
         self,
         result_database: ArrowDatabaseProtocol,
         record_path: tuple[str, ...],
+        revision: str,
         auto_flush: bool = True,
         delivers_side_effects: bool = False,
         name_path: tuple[str, ...] | None = None,
@@ -79,7 +120,11 @@ class ResultCache:
 
         Args:
             result_database: The store holding the result table.
-            record_path: Path of the result table without its layout component.
+            record_path: Path of the result table up to the data function type: the
+                function's uri.
+            revision: The revision component of the data function type's record
+                (``rev1``, ``DataFunctionTypeDeclaration.revision_component``). The
+                table is at ``record_path + (revision, RESULT_DB_SCHEMA_VERSION)``.
             auto_flush: Whether to flush the database after each stored result.
             delivers_side_effects: Whether computing a result is an external action
                 (a function pod that takes the invocation context). Such a cache
@@ -92,6 +137,7 @@ class ResultCache:
         """
         self._result_database = result_database
         self._record_path = record_path
+        self._revision = revision
         self._auto_flush = auto_flush
         self._delivers_side_effects = delivers_side_effects
         self._name_path = name_path
@@ -109,15 +155,16 @@ class ResultCache:
     def record_path(self) -> tuple[str, ...]:
         """The versioned path where records are stored.
 
-        Returns ``_record_path + (RESULT_DB_SCHEMA_VERSION,)``: the actual storage
-        location of result records. The layout version is the last component.
+        Returns ``_record_path + (revision, RESULT_DB_SCHEMA_VERSION)``: the actual
+        storage location of result records. The type's record revision and the common
+        layout are the last two components (ITL-1259).
         """
         return self._versioned_record_path
 
     @property
     def _versioned_record_path(self) -> tuple[str, ...]:
-        """Result DB path with the current schema version suffix appended."""
-        return self._record_path + (RESULT_DB_SCHEMA_VERSION,)
+        """Result DB path: the uri, the type's revision, the common layout."""
+        return self._record_path + (self._revision, RESULT_DB_SCHEMA_VERSION)
 
     def set_auto_flush(self, on: bool = True) -> None:
         """Set auto-flush behavior."""

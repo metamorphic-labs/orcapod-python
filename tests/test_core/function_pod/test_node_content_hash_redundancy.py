@@ -1,7 +1,7 @@
 """Tests proving NODE_CONTENT_HASH_COL is redundant in the record_id preimage.
 
 Design note (post-ITL-533):
-  ``__node_content_hash`` IS stored in pdb_v1 rows for per-node isolation —
+  ``__node_content_hash`` IS stored in pdb_v2 rows for per-node isolation —
   ``_fetch_joined_records()`` filters rows by this column when
   ``table_scope='pipeline_hash'`` to prevent cross-node contamination.
   However, it is NOT included in the ``record_id`` preimage (the hash
@@ -544,7 +544,7 @@ class TestLockstepPropertyRandomized:
 
 
 class TestTdbVersioning:
-    """``SideEffectJobNode.attach_databases()`` must write to the tdb_v1 path."""
+    """``SideEffectJobNode.attach_databases()`` must write to the tdb_v2 path."""
 
     def test_tdb_v1_path_used_after_attach(self):
         """After attaching a DB, ``_table_path`` ends with ``TRACKING_DB_SCHEMA_VERSION``."""
@@ -576,7 +576,7 @@ class TestTdbVersioning:
     def test_tdb_v0_entries_not_visible_to_new_code(self):
         """Entries written at the bare (tdb_v0) path are not seen by the new code.
 
-        ``SideEffectJobNode`` now reads/writes at ``...(tdb_v1,)`` — any entries
+        ``SideEffectJobNode`` now reads/writes at ``...(tdb_v2,)`` — any entries
         at the old bare path are orphaned and cause no error.
         """
         import pyarrow as pa
@@ -604,7 +604,7 @@ class TestTdbVersioning:
         )
         db.add_record(old_path, fake_record_id, fake_row)
 
-        # Attach — the new code uses the tdb_v1 path, not old_path.
+        # Attach — the new code uses the tdb_v2 path, not old_path.
         node.attach_databases(db)
 
         # The new _table_path is different from old_path → old entry is orphaned.

@@ -165,7 +165,7 @@ class TestRegistries:
         assert "SelectTagColumns" in OPERATOR_REGISTRY
 
     def test_data_function_registry(self):
-        assert "python.function.v0" in DATA_FUNCTION_REGISTRY
+        assert "python.function.v1" in DATA_FUNCTION_REGISTRY
 
 
 class TestLoadStatus:
@@ -483,7 +483,7 @@ class TestResolveDataFunctionFallbackToProxy:
         from orcapod.pipeline.serialization import resolve_data_function_from_config
 
         config = {
-            "data_function_type_id": "python.function.v0",
+            "data_function_type_id": "python.function.v1",
             "config": {
                 "module_path": "nonexistent.module.that.does.not.exist",
                 "callable_name": "some_func",
@@ -537,10 +537,10 @@ class TestFunctionPodFromConfigFallbackToProxy:
         from orcapod.core.data_function_proxy import DataFunctionProxy
 
         config = {
-            "uri": ["some_func", "hash123", "v1", "python.function.v0"],
+            "uri": ["some_func", "hash123", "v1", "python.function.v1"],
             "data_function": {
-                "data_function_type_id": "python.function.v0",
-                "uri": ["some_func", "hash123", "v1", "python.function.v0"],
+                "data_function_type_id": "python.function.v1",
+                "uri": ["some_func", "hash123", "v1", "python.function.v1"],
                 "config": {
                     "module_path": "nonexistent.module",
                     "callable_name": "some_func",
@@ -564,7 +564,7 @@ class TestFunctionPodFromConfigFallbackToProxy:
             "some_func",
             "hash123",
             "v1",
-            "python.function.v0",
+            "python.function.v1",
         )
 
 
@@ -837,14 +837,14 @@ def test_function_node_stored_node_uri_from_descriptor():
         "content_hash": f"{SEMANTIC_HASH_LABEL}:abc",
         "pipeline_hash": f"{SEMANTIC_HASH_LABEL}:def",
         "table_scope": "pipeline_hash",
-        "node_uri": ["add_one", "v0", "python.function.v0", "schema_repr"],
+        "node_uri": ["add_one", "v0", "python.function.v1", "schema_repr"],
         "output_schema": {"tag": {"x": "int64"}, "data": {"result": "int64"}},
         "data_context_key": "std:v1:default",
     }
     node = FunctionNode.from_descriptor(
         descriptor, function_pod=None, input_stream=None, databases={}
     )
-    assert node.node_uri == ("add_one", "v0", "python.function.v0", "schema_repr")
+    assert node.node_uri == ("add_one", "v0", "python.function.v1", "schema_repr")
 
 
 def test_operator_node_has_node_uri():

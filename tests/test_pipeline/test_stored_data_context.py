@@ -2,7 +2,7 @@
 
 Orcapod v0.3 writes the data context key ``std:v1:default`` into the column
 ``__data_context`` of every table it stores, and every table moved to a new layout
-(the last path component): ``pdb_v2``, ``rdb_v2``, ``tdb_v2``, ``odb_v1``, ``sdb_v1``.
+(the last path component): ``pdb_v1``, ``rdb_v1``, ``tdb_v1``, ``odb_v1``, ``sdb_v1``.
 
 - Rows of the current data context are the current entries. Rows of another data context
   in the same table are never returned or reused, are left unchanged, and are reported
@@ -199,9 +199,16 @@ def orchestrator(request: pytest.FixtureRequest) -> Orchestrator:
 
 
 def old_layout_path(path: tuple[str, ...]) -> tuple[str, ...]:
-    """Where Orcapod v0.2 stored the table that this version stores at ``path``."""
+    """Where an earlier build stored the table that this version stores at ``path``.
+
+    The earlier layouts are the v2 ones of the withdrawn 0.3.0, whose result tables had
+    no revision component (``rev1``, ITL-1259).
+    """
     layout = path[-1]
-    renamed = {"pdb_v2": "pdb_v1", "rdb_v2": "rdb_v1", "tdb_v2": "tdb_v1"}
+    renamed = {"pdb_v1": "pdb_v2", "rdb_v1": "rdb_v2", "tdb_v1": "tdb_v2"}
+    if layout == "rdb_v1":
+        assert path[-2] == "rev1", path
+        return path[:-2] + ("rdb_v2",)
     if layout in renamed:
         return path[:-1] + (renamed[layout],)
     assert layout in ("odb_v1", "sdb_v1"), path
@@ -271,7 +278,7 @@ def copy_with_results_of_other_context(written: Store, target: Store) -> None:
     for path in sorted(source.list_sources()):
         rows = source.get_all_records(path, record_id_column=RID)
         assert rows is not None
-        if path[-1] == "rdb_v2":
+        if path[-1] == "rdb_v1":
             index = rows.schema.get_field_index(COLUMN)
             other = pa.array([OTHER] * rows.num_rows, type=pa.large_string())
             rows = rows.set_column(index, rows.schema.field(index), other)
@@ -333,7 +340,7 @@ def table_path(store: Store, layout: str) -> tuple[str, ...]:
     return path
 
 
-LAYOUTS = ("pdb_v2", "rdb_v2", "odb_v1", "sdb_v1", "tdb_v2")
+LAYOUTS = ("pdb_v1", "rdb_v1", "odb_v1", "sdb_v1", "tdb_v1")
 
 
 # ---------------------------------------------------------------------------
@@ -448,7 +455,7 @@ def _stored_function_versions(store: Store, pod: Any) -> list[str]:
             label="fn",
         )
     _ = job.run()
-    records = reopened(store).get_all_records(table_path(store, "rdb_v2"))
+    records = reopened(store).get_all_records(table_path(store, "rdb_v1"))
     assert records is not None
     return cast("list[str]", records.column("__pf_var_function_version").to_pylist())
 
@@ -692,8 +699,10 @@ class TestOldLayout:
         for path in sorted(source.list_sources()):
             rows = source.get_all_records(path, record_id_column=RID)
             assert rows is not None
-            store.add_records(path[:-1], rows.drop([COLUMN]), record_id_column=RID)
-            bare_paths.append("/".join(path[:-1]))
+            # v0.1's path ends before the layout (and a result table's revision).
+            bare = path[:-2] if path[-1] == "rdb_v1" else path[:-1]
+            store.add_records(bare, rows.drop([COLUMN]), record_id_column=RID)
+            bare_paths.append("/".join(bare))
         store.flush()
         before = snapshot(store)
         calls.clear()
@@ -894,7 +903,7 @@ class TestRowsOfAnotherDataContext:
             for r in caplog.records
             if "another data context" in r.getMessage()
         ]
-        for layout in ("pdb_v2", "odb_v1"):
+        for layout in ("pdb_v1", "odb_v1"):
             path = "/".join(table_path(store, layout))
             (report,) = [r for r in reports if repr(path) in r]
             assert report.startswith("Skipped 2 rows of stored table")
@@ -941,7 +950,7 @@ class TestSideEffects:
     def test_an_old_layout_log_raises_and_nothing_is_delivered(
         self, new_store: Callable[[], Store], orchestrator: Orchestrator
     ):
-        """A ``tdb_v1`` log raises an error naming the log, both contexts and the node."""
+        """A ``tdb_v2`` log raises an error naming the log, both contexts and the node."""
         store = _sink_store(new_store, copy_as_v02)
         before = snapshot(store)
 
@@ -955,7 +964,7 @@ class TestSideEffects:
         assert error.found_context == PRE_V1
         assert error.current_context == CURRENT
         assert error.node_label == "sink"
-        assert error.record_path[-1] == "tdb_v1"
+        assert error.record_path[-1] == "tdb_v2"
         assert error.record_paths == (error.record_path,)
         message = str(error)
         assert "/".join(error.record_path) in message
@@ -967,7 +976,7 @@ class TestSideEffects:
     def test_logged_deliveries_of_another_data_context_raise(
         self, new_store: Callable[[], Store], orchestrator: Orchestrator
     ):
-        """A ``tdb_v2`` log holding rows of ``OTHER`` raises and nothing is delivered."""
+        """A ``tdb_v1`` log holding rows of ``OTHER`` raises and nothing is delivered."""
         store = _sink_store(new_store, copy_as_other_context)
         before = snapshot(store)
 
@@ -978,7 +987,7 @@ class TestSideEffects:
         assert snapshot(store) == before
         assert info.value.found_context == OTHER
         assert info.value.current_context == CURRENT
-        assert info.value.record_path[-1] == "tdb_v2"
+        assert info.value.record_path[-1] == "tdb_v1"
 
     def test_delta_log_files_are_untouched(self, tmp_path: pathlib.Path):
         """The refused run leaves every file of the Delta database byte for byte."""
@@ -1076,7 +1085,7 @@ class TestSideEffectFunctionNodes:
         assert error.found_context == PRE_V1
         assert error.current_context == CURRENT
         assert error.node_label == "notify"
-        assert sorted(path[-1] for path in error.record_paths) == ["pdb_v1", "rdb_v1"]
+        assert sorted(path[-1] for path in error.record_paths) == ["pdb_v2", "rdb_v2"]
         for path in error.record_paths:
             assert "/".join(path) in str(error)
 
@@ -1096,8 +1105,8 @@ class TestSideEffectFunctionNodes:
         assert snapshot(store) == before
         assert info.value.found_context == OTHER
         assert sorted(path[-1] for path in info.value.record_paths) == [
-            "pdb_v2",
-            "rdb_v2",
+            "pdb_v1",
+            "rdb_v1",
         ]
 
     def test_only_an_old_result_table_raises(self, new_store: Callable[[], Store]):
@@ -1106,7 +1115,7 @@ class TestSideEffectFunctionNodes:
         only_results = new_store()
         source = reopened(store)
         for path in source.list_sources():
-            if path[-1] == "rdb_v1":
+            if path[-1] == "rdb_v2":
                 rows = source.get_all_records(path, record_id_column=RID)
                 assert rows is not None
                 only_results.add_records(path, rows, record_id_column=RID)
@@ -1116,7 +1125,7 @@ class TestSideEffectFunctionNodes:
             _ = _notify_job(only_results).run()
 
         assert delivered == []
-        assert [path[-1] for path in info.value.record_paths] == ["rdb_v1"]
+        assert [path[-1] for path in info.value.record_paths] == ["rdb_v2"]
 
     def test_store_of_this_version_is_reused_without_delivering(
         self, store: Store, orchestrator: Orchestrator
@@ -1136,7 +1145,7 @@ class TestSideEffectFunctionNodes:
         written = reopened(_notify_store(new_store, copy_as_v02))
         old = new_store()
         for path in written.list_sources():
-            if path[-1] == "pdb_v1":
+            if path[-1] == "pdb_v2":
                 rows = written.get_all_records(path, record_id_column=RID)
                 assert rows is not None
                 old.add_records(path, rows, record_id_column=RID)
@@ -1175,7 +1184,7 @@ class TestSideEffectFunctionNodes:
         relabelled = reopened(_notify_store(new_store, copy_as_other_context))
         ephemeral = new_store()
         for path in relabelled.list_sources():
-            if path[-1] == "rdb_v2":
+            if path[-1] == "rdb_v1":
                 rows = relabelled.get_all_records(path, record_id_column=RID)
                 assert rows is not None
                 # An ephemeral database holds the result table at the path relative to
@@ -1183,7 +1192,7 @@ class TestSideEffectFunctionNodes:
                 assert path[:2] == (JOB_NAME, "_result")
                 ephemeral.add_records(path[2:], rows, record_id_column=RID)
         ephemeral.flush()
-        assert [path[-1] for path in reopened(ephemeral).list_sources()] == ["rdb_v2"]
+        assert [path[-1] for path in reopened(ephemeral).list_sources()] == ["rdb_v1"]
         job = _notify_job(new_store())
         if read_first:
             # The node checks its (clean) stores when it first reads them.
@@ -1196,7 +1205,7 @@ class TestSideEffectFunctionNodes:
 
         assert delivered == []
         assert info.value.found_context == OTHER
-        assert [path[-1] for path in info.value.record_paths] == ["rdb_v2"]
+        assert [path[-1] for path in info.value.record_paths] == ["rdb_v1"]
 
     def test_plain_function_node_in_the_same_store_is_only_reported(
         self, new_store: Callable[[], Store]
@@ -1529,7 +1538,7 @@ class TestStoredDataContexts:
         path = table_path(store, layout)
         assert stored_data_contexts(reopened(store), path) == {CURRENT: 2}
 
-    @pytest.mark.parametrize("layout", ["pdb_v2", "rdb_v2", "odb_v1", "sdb_v1"])
+    @pytest.mark.parametrize("layout", ["pdb_v1", "rdb_v1", "odb_v1", "sdb_v1"])
     def test_table_holding_two_data_contexts(
         self, new_store: Callable[[], Store], layout: str
     ):

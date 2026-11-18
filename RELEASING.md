@@ -70,8 +70,10 @@ Do these on `main` before the Release workflow runs:
    the `CHANGELOG.md` heading. It appends the release revision to the `golden` history of
    the current data context's manifest, writes its digest under `releases` in
    `src/orcapod/contexts/released_manifests.json`, and at the data context's first release
-   sets `released_in` and the `manifest` pin. It computes no hash and refuses a version
-   already released. Commit both files with the release pull request; the release is tagged
+   sets `released_in` and the `manifest` pin. It also pins every open data function type
+   snapshot (`scripts/data_function_types.py --release`: the sha256 and the version go into
+   `src/orcapod/data_function_types/released.json`; ITL-1259). It computes no hash and
+   refuses a version already released. Commit these files with the release pull request; the release is tagged
    on a commit that contains them. The Release workflow's build job checks this before it
    creates the tag (`scripts/check_golden_tags.py --release-version X.Y.Z`) and stops if the
    release is not recorded, or if a golden file was added after the release step (the

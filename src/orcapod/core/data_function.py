@@ -16,10 +16,12 @@ from orcapod.config import OrcapodConfig
 from orcapod.contexts import DataContext
 from orcapod.contexts.stored import require_same_data_context
 from orcapod.core.base import TraceableBase
+from orcapod.core.data_function_types import DataFunctionTypeDeclaration, StoredColumn
 from orcapod.core.datagrams import Datagram, Data
 from orcapod.hashing.hash_utils import (
     get_function_components,
 )
+from orcapod.hashing.semantic_hashing.semantic_hasher import SEMANTIC_HASH_LABEL
 from orcapod.core.result_cache import ResultCache
 from orcapod.errors import OutputTypeError
 from orcapod.protocols.core_protocols import DataFunctionProtocol, DataProtocol
@@ -196,6 +198,15 @@ class DataFunctionBase(TraceableBase, Generic[E]):
                 ).to_hex()
             )
         return self._output_data_schema_hash
+
+    @property
+    def declaration(self) -> DataFunctionTypeDeclaration:
+        """The declaration of this function's data function type (ITL-1259).
+
+        Looked up by ``data_function_type_id``: the type and its major. It gives the
+        revision of the result table and the columns the type stores.
+        """
+        return declaration_for(self.data_function_type_id)
 
     @property
     def uri(self) -> tuple[str, ...]:
@@ -393,11 +404,145 @@ class DataFunctionBase(TraceableBase, Generic[E]):
         ...
 
 
+_TEXT = "large_string"
+_BINARY = "large_binary"
+_TEXT_MAP = "large_list<item: struct<key: large_string, value: large_string>>"
+
+
+PYTHON_FUNCTION = DataFunctionTypeDeclaration(
+    type_name="python.function",
+    major=1,
+    revision=1,
+    identity=(
+        "the function's name: its __name__, or the function_name given",
+        "the hash of the output schema: each output key with its type, in no order",
+        "v<major> of the function's own version (the part before the first dot)",
+        "the type and its major: python.function.v1",
+    ),
+    run_rules=(
+        "inputs are bound to the function's parameters by name, as keyword arguments",
+        "a parameter with a default may be left out of the inputs",
+        "the returned value is mapped to the output keys by position: one key takes "
+        + "the whole value, several keys take the items of a returned sequence",
+        "a function with no output keys (-> None or no return annotation) has no "
+        + "outputs; a returned value other than None is refused",
+        "a returned value must conform to its declared output type",
+        "variadic (*args, **kwargs) and positional-only parameters are refused",
+    ),
+    variation=(
+        StoredColumn(
+            "function_name",
+            str,
+            _TEXT,
+            True,
+            "the function's name, as in the uri",
+        ),
+        StoredColumn(
+            "function_version",
+            str,
+            _TEXT,
+            True,
+            "the full version string the function was declared with (v3.7)",
+        ),
+        StoredColumn(
+            "function_signature_hash",
+            bytes,
+            _BINARY,
+            True,
+            "the hash of the function used as a value",
+            hash_label=SEMANTIC_HASH_LABEL,
+            covers="the function's module and name, each parameter's name, kind, "
+            + "annotation and default (the default's own hash), and the return "
+            + "annotation (docs/reference/hashing.md, 1d)",
+        ),
+        StoredColumn(
+            "function_content_hash",
+            bytes,
+            _BINARY,
+            True,
+            "the hash of the function's code",
+            hash_label=SEMANTIC_HASH_LABEL,
+            covers="the function's name and module, its source text as written "
+            + "(decorator lines, docstring, comments and whitespace included), its "
+            + "annotations sorted by name, and its code properties (argument counts, "
+            + "number of locals, argument names)",
+        ),
+        StoredColumn(
+            "git_hash",
+            str,
+            _TEXT,
+            True,
+            "the git commit of the function's file or working directory, with "
+            + "-dirty, -untracked and -<source> suffixes; unknown outside git",
+        ),
+    ),
+    execution=(
+        StoredColumn(
+            "executor_type",
+            str,
+            _TEXT,
+            True,
+            "the executor that ran the function (local, ray, none)",
+        ),
+        StoredColumn(
+            "executor_info",
+            dict[str, str],
+            _TEXT_MAP,
+            True,
+            "the executor's own settings, as text",
+        ),
+        StoredColumn(
+            "python_version",
+            str,
+            _TEXT,
+            True,
+            "the Python version that ran the function (3.12.3)",
+        ),
+        StoredColumn(
+            "extra_info",
+            dict[str, str],
+            _TEXT_MAP,
+            True,
+            "further facts about the run, as text; empty today",
+        ),
+    ),
+)
+"""The Python function type: ``python.function.v1``, record ``rev1``."""
+
+
+DECLARATIONS: dict[str, DataFunctionTypeDeclaration] = {
+    declaration.type_id: declaration for declaration in (PYTHON_FUNCTION,)
+}
+"""Every data function type this version of Orcapod knows, by type id."""
+
+
+def declaration_for(type_id: str) -> DataFunctionTypeDeclaration:
+    """The declaration of the data function type ``type_id``.
+
+    Args:
+        type_id: A type and its major, as the last part of a function's uri
+            (``python.function.v1``).
+
+    Returns:
+        The declaration this version of Orcapod has for that type.
+
+    Raises:
+        ValueError: If no data function type has that id.
+    """
+    try:
+        return DECLARATIONS[type_id]
+    except KeyError:
+        raise ValueError(
+            f"Unknown data function type {type_id!r}; this version of Orcapod knows "
+            + ", ".join(repr(known) for known in sorted(DECLARATIONS))
+        ) from None
+
+
 class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
     @property
     def data_function_type_id(self) -> str:
-        """Unique function type identifier."""
-        return "python.function.v0"
+        """The type and its major, from the type's declaration (``python.function.v1``)."""
+        return PYTHON_FUNCTION.type_id
 
     def __init__(
         self,
@@ -523,16 +668,11 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
         }
 
     def get_function_variation_data_schema(self) -> Schema:
-        """Schema for the data returned by ``get_function_variation_data``."""
-        return Schema(
-            {
-                "function_name": str,
-                "function_version": str,
-                "function_signature_hash": bytes,
-                "function_content_hash": bytes,
-                "git_hash": str,
-            }
-        )
+        """Schema for the data returned by ``get_function_variation_data``.
+
+        Built from the type's declaration (``PYTHON_FUNCTION.variation``).
+        """
+        return Schema({c.name: c.python_type for c in PYTHON_FUNCTION.variation})
 
     def get_execution_data(self) -> dict[str, Any]:
         """Raw data defining execution context."""
@@ -566,15 +706,11 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
         }
 
     def get_execution_data_schema(self) -> Schema:
-        """Schema for the data returned by ``get_execution_data``."""
-        return Schema(
-            {
-                "executor_type": str,
-                "executor_info": dict[str, str],
-                "python_version": str,
-                "extra_info": dict[str, str],
-            }
-        )
+        """Schema for the data returned by ``get_execution_data``.
+
+        Built from the type's declaration (``PYTHON_FUNCTION.execution``).
+        """
+        return Schema({c.name: c.python_type for c in PYTHON_FUNCTION.execution})
 
     @property
     def input_data_schema(self) -> Schema:
@@ -1041,7 +1177,7 @@ class DataFunctionWrapper(DataFunctionBase[E]):
             ValueError: If the ``data_function_type_id`` is not recognized.
         """
         type_id = config.get("data_function_type_id")
-        if type_id == "python.function.v0":
+        if type_id == PYTHON_FUNCTION.type_id:
             return PythonDataFunction
         raise ValueError(f"Unrecognized data_function_type_id: {type_id!r}")
 
@@ -1110,6 +1246,7 @@ class CachedDataFunction(DataFunctionWrapper):
         self._cache = ResultCache(
             result_database=result_database,
             record_path=record_path_prefix + self.uri,
+            revision=self.declaration.revision_component,
             auto_flush=True,
             # The first uri component is the function's name; no hash before it.
             name_path=record_path_prefix + self.uri[:1],
