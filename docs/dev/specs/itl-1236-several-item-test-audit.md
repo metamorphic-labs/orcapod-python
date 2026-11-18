@@ -137,6 +137,24 @@ Order- or role-dependent behaviour that reaches a hash or a stored table first.
 - `bind(sources=)` with two sources: both bound, nothing moves; one refused, neither bound.
   A plain or data-tag source in any arrangement binds and reads; a mixed one is ITL-1245.
 
+## Checked and found as documented (part 3)
+
+- `DropNulls` naming plain tags, data-tags holding nulls and data, in every order: one row
+  set and schema, each named column non-nullable (a data-tag in both roles), sync equal to
+  async.
+- `Index` with `out=` over a list-valued data-tag (after `Batch`): reads it as a data
+  column; the data-tag stays; sync equal to async.
+- A `DictSource` `data_schema` in another field order: the same source (rows, hashes).
+- Every stream method given several items equals its operator (rows, hashes, column
+  order); `polars_filter` keywords win over `constraint_map`.
+- Every combination of `ColumnConfig` groups gives the `all_info` columns of those groups
+  in the same order, for a source, a join and a batch, in every role and layout.
+
+## Remaining
+
+- `MapTags` has no golden entry (adding golden entries is out of scope for this issue).
+- The defects and the two undecided rules above: ITL-1241 to ITL-1247.
+
 ## Tests added
 
 `tests/test_core/operators/several_items.py` is the shared family: `MAIN` (tags `t1`,
@@ -145,4 +163,7 @@ three layouts and three role settings. `ops/test_several_items.py` uses it for e
 operator (gaps 5, 6, 7, 9, 11 and the operator half of 1, 2, 3). Part 2:
 `tests/test_core/sources/test_several_items.py` (gaps 4, 13, 14, 15: CachedSource),
 `tests/test_core/function_pod/test_several_items.py` (gaps 1, 10; ITL-1244, ITL-1246) and
-`tests/test_pipeline/test_bind_several_items.py` (gap 8; ITL-1245).
+`tests/test_pipeline/test_bind_several_items.py` (gap 8; ITL-1245). Part 3:
+`tests/test_core/data_tags/test_several_items.py` (gaps 12, 15: `Index`),
+`tests/test_core/streams/test_several_items_methods.py` (gap 15: stream methods;
+`ColumnConfig` groups) and a schema-order test in the sources file (gap 15).
