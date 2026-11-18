@@ -17,12 +17,15 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
+from typing_extensions import override
+
 import pyarrow as pa
 import pytest
 
 from orcapod import PipelineJob, function_pod
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
+from orcapod.pipeline.observer import NoOpObserver
 from orcapod.sources import DictSource
 
 # Columns that differ between any two runs by design, also between two script runs: the
@@ -285,12 +288,19 @@ after_calls: list[int] = []
 
 @function_pod(output_keys="y")
 def stuck_on_first_row(x: int) -> int:
-    """Row 0 presses the interrupt button twice and does not return until released."""
+    """Row 0 presses the interrupt button twice; no row returns until released.
+
+    Every row waits for the release, not only row 0: a row that returned would reach
+    ``after``, and a row of ``after`` still in progress when the cancellation lands is
+    named in the warning too (ITL-1192), so the nodes named would depend on timing
+    (ITL-1229).
+    """
     stuck_calls.append(x)
-    if x == 0 and press_interrupt.is_set():
-        _thread.interrupt_main()  # first press: cancels the run, which then waits
-        # Second press, while the run waits for this function to return.
-        threading.Timer(1.0, _thread.interrupt_main).start()
+    if press_interrupt.is_set():
+        if x == 0:
+            _thread.interrupt_main()  # first press: cancels the run, which then waits
+            # Second press, while the run waits for the functions to return.
+            threading.Timer(1.0, _thread.interrupt_main).start()
         _ = stuck_release.wait(timeout=30)
     return x
 
@@ -302,9 +312,14 @@ def after_stuck(y: int) -> int:
     return y + 1
 
 
+# Fewer rows than the smallest default thread pool (one CPU plus four threads), so every
+# row of ``stuck_on_first_row`` has a thread while all of them wait for the release.
+N_STUCK_ROWS = 4
+
+
 def make_stuck_job(store: Any) -> PipelineJob:
-    """Six rows through ``stuck_on_first_row`` and then ``after_stuck``."""
-    rows = [{"k": f"r{i}", "x": i} for i in range(6)]
+    """Four rows through ``stuck_on_first_row`` and then ``after_stuck``."""
+    rows = [{"k": f"r{i}", "x": i} for i in range(N_STUCK_ROWS)]
     job = PipelineJob(name="stuck_demo", database=store)
     with job:
         source = DictSource(
@@ -331,9 +346,9 @@ def test_second_interrupt_returns_and_a_late_function_writes_nothing(
 ) -> None:
     """A second interrupt returns at once; the function returning later stores nothing.
 
-    The first interrupt cancels the run, which then waits for row 0's function, still
-    running on a thread where it cannot be interrupted. The second interrupt returns
-    control with a warning naming the node. When the function returns afterwards, no
+    The first interrupt cancels the run, which then waits for the node's functions, still
+    running on threads where they cannot be interrupted. The second interrupt returns
+    control with a warning naming the node. When the functions return afterwards, no
     database write happens and no row reaches the next node, and row 0's result is never
     stored: a later run computes it.
     """
@@ -384,6 +399,98 @@ def test_second_interrupt_returns_and_a_late_function_writes_nothing(
     rerun = make_stuck_job(inner)
     _ = rerun.run()
     assert 0 in stuck_calls
+
+
+run_ended = threading.Event()
+next_row_entered = threading.Event()
+next_row_returned = threading.Event()
+
+
+class RunEndSignal(NoOpObserver):
+    """Sets ``run_ended`` when the run ends: after a cancellation, once every row task is gone."""
+
+    @override
+    def on_run_end(self, run_id: str) -> None:
+        """Signal the end of the run."""
+        run_ended.set()
+
+
+def press_interrupt_once_next_row_returned() -> None:
+    """The second press, once the next node's function has returned."""
+    if next_row_returned.wait(timeout=30):
+        _thread.interrupt_main()
+
+
+@function_pod(output_keys="y")
+def stuck_until_next_row_runs(x: int) -> int:
+    """Row 0 presses the interrupt button once a row of the next node is in its function."""
+    if x == 0:
+        _ = next_row_entered.wait(timeout=30)
+        _thread.interrupt_main()  # first press: cancels the run, which then waits
+        threading.Thread(target=press_interrupt_once_next_row_returned).start()
+        _ = stuck_release.wait(timeout=30)
+    return x
+
+
+@function_pod(output_keys="z")
+def returns_after_the_run_ended(y: int) -> int:
+    """In progress when the cancellation lands; returns once the cancelled run has ended."""
+    next_row_entered.set()
+    _ = run_ended.wait(timeout=30)
+    next_row_returned.set()
+    return y + 1
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason=(
+        "ITL-1192: a row task cancelled while its function runs gets no end event, so "
+        "the warning names its node although the function has returned"
+    ),
+)
+@pytest.mark.usefixtures("interrupt_raises_keyboard_interrupt")
+def test_second_interrupt_does_not_name_a_node_whose_function_returned() -> None:
+    """The warning names only the nodes whose functions have not returned.
+
+    A row of ``after`` is in its function when the first interrupt cancels the run; the
+    function returns once the cancelled run has ended, and only then is the interrupt
+    pressed again, while row 0 of ``stuck`` still runs. Every step waits for the one
+    before, so the outcome does not depend on timing. Today the warning names ``after``
+    too: a known defect (ITL-1192), pinned here so the fix flips this test.
+    """
+    for event in (stuck_release, run_ended, next_row_entered, next_row_returned):
+        event.clear()
+    rows = [{"k": f"r{i}", "x": i} for i in range(N_STUCK_ROWS)]
+    job = PipelineJob(name="returned_demo", database=InMemoryArrowDatabase())
+    with job:
+        source = DictSource(
+            data=rows, tag_columns=["k"], tag_only_columns=True, source_id="rows"
+        )
+        stuck = stuck_until_next_row_runs.pod(source, label="stuck")
+        _ = returns_after_the_run_ended.pod(stuck, label="after")
+
+    async def notebook_cell() -> None:
+        """A notebook cell: the job run inside the kernel's running loop."""
+        _ = job.run(orchestrator=AsyncPipelineOrchestrator(), observer=RunEndSignal())
+
+    loop = asyncio.new_event_loop()
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(KeyboardInterrupt):
+                loop.run_until_complete(notebook_cell())
+    finally:
+        loop.close()
+        stuck_release.set()
+        deadline = time.monotonic() + 30
+        while bridge_threads() and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+    assert next_row_returned.is_set()
+    messages = [str(w.message) for w in caught if w.category is RuntimeWarning]
+    assert len(messages) == 1, messages
+    assert "but a function in node 'stuck' has not returned yet" in messages[0]
 
 
 async def async_stuck_on_first_row(x: int) -> int:

@@ -68,6 +68,11 @@ jobs:
         run: uv sync --locked --all-extras --dev --python ${{ matrix.python-version }}
 
       - name: Run tests
+        # PYTHONFAULTHANDLER prints every thread's traceback if a process dies on a fatal
+        # signal, so a crash never ends the log silently (ITL-1229). Failures are listed in
+        # the closing summary by pytest's default -rfE.
+        env:
+          PYTHONFAULTHANDLER: "1"
         run: uv run --python ${{ matrix.python-version }} pytest -n logical -m "not postgres" --tb=short -q
 
   license-check:
