@@ -3903,7 +3903,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             load_only=load_only,
             target=self.label,
             unchecked_sources=unchecked_sources,
-            restrictions=restrictions_in_force([self]),
+            restricted_sources=restrictions_in_force([self]),
         )
 
     def _incomplete_inputs(self) -> list[str]:

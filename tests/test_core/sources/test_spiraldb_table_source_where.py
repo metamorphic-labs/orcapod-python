@@ -11,6 +11,7 @@ import asyncio
 import copy
 import datetime as dt
 import json
+import math
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
@@ -26,6 +27,7 @@ from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.node_run import restrictions_in_force
 from orcapod.core.sources.spiraldb_table_source import _checked_conditions
 from orcapod.sources import SpiralDBTableSource
+from orcapod.types import Condition
 from tests.test_databases import fake_pyspiral
 
 _PROJECT = "workshop-sample"
@@ -169,6 +171,16 @@ _FORMS_OF_ONE_RESTRICTION: dict[str, _Restrict] = {
     "mapping and keyword": lambda s: s.where({"flag": True}, subject_id="m1"),
     "chained": lambda s: s.where(subject_id="m1").where(flag=True),
     "chained in the other order": lambda s: s.where(flag=True).where(subject_id="m1"),
+    "a restriction": lambda s: s.where(Condition.of(subject_id="m1", flag=True)),
+    "a restriction in the other order": lambda s: s.where(
+        Condition.of({"flag": True, "subject_id": "m1"})
+    ),
+    "a restriction and a keyword": lambda s: s.where(
+        Condition.of(flag=True), subject_id="m1"
+    ),
+    "restrictions chained": lambda s: s.where(Condition.of(flag=True)).where(
+        Condition.of(subject_id="m1")
+    ),
 }
 
 # The same restriction with a condition of a several-keyword call given twice.
@@ -491,7 +503,9 @@ class TestCopyThenApply:
 
         # About the private steps themselves: the future copy() and apply_restriction.
         composed = source._copy()  # pyright: ignore[reportPrivateUsage]
-        composed._apply_restriction({"subject_id": "m1"})  # pyright: ignore[reportPrivateUsage]
+        composed._apply_restriction(  # pyright: ignore[reportPrivateUsage]
+            Condition.of(subject_id="m1")
+        )
         restricted = source.where(subject_id="m1")
 
         assert composed.to_config() == restricted.to_config()
@@ -651,14 +665,10 @@ class TestRunsAndSavedJobs:
 
         summary = job.run(orchestrator=orchestrator() if orchestrator else None)
 
-        assert summary.restrictions == {
-            "events": {
-                "source_id": source.source_id,
-                "where": {"subject_id": "m1"},
-                "limit": 3,
-            }
-        }
-        assert "events: where subject_id='m1', limit 3" in repr(summary)
+        assert summary.restrictions == {"events": Condition.of(subject_id="m1")}
+        assert summary.limits == {"events": 3}
+        assert summary.restricted_source_ids == {"events": source.source_id}
+        assert "events (events): where subject_id='m1', limit 3" in repr(summary)
         assert "subject_id=&#x27;m1&#x27;" in summary._repr_html_()
 
     @pytest.mark.parametrize("form", list(_FORMS_OF_ONE_RESTRICTION))
@@ -671,11 +681,9 @@ class TestRunsAndSavedJobs:
         summary = job.run()
 
         assert summary.restrictions == {
-            "events": {
-                "source_id": "events",
-                "where": {"subject_id": "m1", "flag": True},
-            }
+            "events": Condition.of(subject_id="m1", flag=True)
         }
+        assert summary.restricted_source_ids == {"events": "events"}
         rows = job.nodes["double"].as_table().column("timestamp").to_pylist()
         assert rows == [3]
 
@@ -689,9 +697,8 @@ class TestRunsAndSavedJobs:
 
         summary = job.run()
 
-        assert summary.restrictions == {
-            "events": {"source_id": bound.source_id, "where": {"subject_id": "m1"}}
-        }
+        assert summary.restrictions == {"events": Condition.of(subject_id="m1")}
+        assert summary.restricted_source_ids == {"events": bound.source_id}
 
     def test_a_slot_bound_to_a_stream_over_the_source_keeps_its_name(
         self, project, tmp_path
@@ -704,9 +711,8 @@ class TestRunsAndSavedJobs:
 
         summary = job.run()
 
-        assert summary.restrictions == {
-            "events": {"source_id": "events", "where": {"subject_id": "m1"}}
-        }
+        assert summary.restrictions == {"events": Condition.of(subject_id="m1")}
+        assert summary.restricted_source_ids == {"events": "events"}
 
     def test_two_unbound_sources_of_one_label_are_both_reported(self, project):
         """Sources read without a slot are keyed by label, numbered when they meet."""
@@ -717,10 +723,10 @@ class TestRunsAndSavedJobs:
         # sources of one label without a join of one table with itself.
         found = restrictions_in_force([first, second])
 
-        assert [(k, v["where"]) for k, v in found.items()] == [
-            ("events", {"subject_id": "m1"}),
-            ("events (2)", {"subject_id": "m2"}),
-        ]
+        assert found == {
+            "events": (first.source_id, Condition.of(subject_id="m1"), None),
+            "events (2)": (second.source_id, Condition.of(subject_id="m2"), None),
+        }
 
     def test_one_table_restricted_two_ways_in_one_job_is_refused(
         self, project, tmp_path
@@ -843,6 +849,37 @@ class TestRunsAndSavedJobs:
 
         assert job.run().restrictions == {}
 
+    def test_a_limit_alone_is_reported_without_a_condition(self, project, tmp_path):
+        """A slot read with a limit only is in ``limits`` and the source ids, not in
+        ``restrictions``."""
+        job = self._job(tmp_path / "store", _source(source_id="events", limit=2), [])
+
+        summary = job.run()
+
+        assert summary.restrictions == {}
+        assert summary.limits == {"events": 2}
+        assert summary.restricted_source_ids == {"events": "events"}
+        assert "events (events): limit 2" in repr(summary)
+
+    def test_one_table_with_two_limits_in_one_job_is_refused(self, project, tmp_path):
+        """The same condition with different limits reads different rows: refused."""
+
+        @function_pod(output_keys="a")
+        def first(amplitude: float | None) -> float | None:
+            """Return ``amplitude``."""
+            return amplitude
+
+        @function_pod(output_keys="b")
+        def second(channel: int | None) -> int | None:
+            """Return ``channel``."""
+            return channel
+
+        job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
+        with pytest.raises(ValueError, match="different rows in one pipeline"):
+            with job:
+                first.pod(_source(source_id="events", limit=1), label="first")
+                second.pod(_source(source_id="events", limit=2), label="second")
+
     def test_node_run_reports_the_restriction(self, project, tmp_path):
         """A node's own ``run()`` reports the restriction in the same shape."""
         source = _source(source_id="events").where(subject_id="m2")
@@ -852,9 +889,8 @@ class TestRunsAndSavedJobs:
         node.run()
 
         assert node.last_run is not None
-        assert node.last_run.restrictions == {
-            "events": {"source_id": "events", "where": {"subject_id": "m2"}}
-        }
+        assert node.last_run.restrictions == {"events": Condition.of(subject_id="m2")}
+        assert node.last_run.restricted_source_ids == {"events": "events"}
 
     def test_bound_restricted_source_runs_only_matching_rows(self, project, tmp_path):
         """Binding a restricted source runs its rows; nothing stored is removed."""
@@ -896,9 +932,8 @@ class TestRunsAndSavedJobs:
         assert loaded_source.content_hash() == source.content_hash()
         assert _timestamps(loaded_source) == [4, 5]
         summary = loaded.run(load_only=True)
-        assert summary.restrictions["events"]["where"] == {
-            "subject_id": "m2",
-            "day": _DAY,
+        assert summary.restrictions == {
+            "events": Condition.of(day=_DAY, subject_id="m2")
         }
 
 
@@ -952,3 +987,112 @@ class TestAggregationWarning:
         assert not [
             w for w in recwarn if issubclass(w.category, RestrictedAggregationWarning)
         ]
+
+
+class TestConditionInstances:
+    """``where`` and ``where=`` take a ``Condition`` built beforehand (``orcapod.types``)."""
+
+    @pytest.mark.parametrize("tag_only_columns", [(), True])
+    @pytest.mark.parametrize(
+        "conditions",
+        [
+            {"subject_id": "m1", "flag": True, "channel": 1},
+            {"channel": 1, "subject_id": "m1", "flag": True},
+        ],
+        ids=["tag first", "data first"],
+    )
+    def test_tag_data_and_data_tag_columns_in_one_condition(
+        self, project, tag_only_columns, conditions
+    ):
+        """A key column (a data-tag by default, a plain tag with ``tag_only_columns``)
+        and two data columns, in either order: the rows and identity of the keywords."""
+        source = _source(tag_only_columns=tag_only_columns)
+
+        restricted = source.where(Condition.of(conditions))
+
+        reference = source.where(**conditions)
+        assert _timestamps(restricted) == [3]
+        assert _rows_by_key(restricted) == _rows_by_key(reference)
+        assert restricted.keys() == source.keys()
+        assert restricted.content_hash() == source.content_hash()
+        assert restricted.pipeline_hash() == source.pipeline_hash()
+        assert restricted.source_id == source.source_id
+        assert restricted.to_config() == reference.to_config()
+
+    def test_the_constructor_takes_a_condition(self, project):
+        """``where=Condition`` is the constructor's ``where=`` mapping."""
+        condition = Condition.of(subject_id="m1", flag=True)
+
+        built = _source(where=condition)
+
+        assert (
+            built.to_config() == _source(where=dict(condition.equalities)).to_config()
+        )
+        assert _timestamps(built) == [3]
+
+    def test_the_limit_stays_the_source_own(self, project):
+        """``where(Condition)`` adds the condition and keeps the source's limit."""
+        restricted = _source(limit=1).where(Condition.of(subject_id="m2"))
+
+        assert _timestamps(restricted) == [4]
+        assert restricted.to_config()["limit"] == 1
+
+    def test_the_empty_condition_is_refused(self, project):
+        """``where(Condition())`` requires nothing: refused like ``where()``."""
+        with pytest.raises(ValueError, match="at least one"):
+            _source().where(Condition())
+
+    def test_a_condition_is_checked_against_the_table(self, project):
+        """The source refuses a condition its table does not fit."""
+        with pytest.raises(ValueError, match="nope"):
+            _source().where(Condition.of(nope=1))
+        with pytest.raises(TypeError, match="channel"):
+            _source().where(Condition.of(channel=1.0))
+
+    def test_a_saved_config_of_the_earlier_form_loads(self, project):
+        """The saved form is unchanged: a config written before the type existed
+        (``where`` with tagged date values, ``limit``) loads to the same restriction."""
+        source = _source(where={"subject_id": "m2", "day": _DAY}, limit=1)
+        saved = {
+            **source.to_config(),
+            "where": {"subject_id": "m2", "day": {"date": "2026-11-20"}},
+            "limit": 1,
+        }
+
+        assert source.to_config() == saved
+        loaded = SpiralDBTableSource.from_config(saved)
+        assert loaded._condition == Condition.of(  # pyright: ignore[reportPrivateUsage]
+            day=_DAY, subject_id="m2"
+        )
+        assert _timestamps(loaded) == [4]
+
+    @pytest.mark.parametrize(
+        "values",
+        [(0.0, -0.0), (-0.0, 0.0), (math.nan, math.nan)],
+        ids=["0.0 then -0.0", "-0.0 then 0.0", "NaN twice"],
+    )
+    def test_equal_float_conditions_are_one_restriction_in_a_pipeline(
+        self, project, tmp_path, values
+    ):
+        """``0.0`` and ``-0.0``, or NaN twice, are one restriction (as Polars matches
+        them), so one table read with both in one pipeline is accepted."""
+
+        @function_pod(output_keys="a")
+        def first(amplitude: float | None) -> float | None:
+            """Return ``amplitude``."""
+            return amplitude
+
+        @function_pod(output_keys="b")
+        def second(channel: int | None) -> int | None:
+            """Return ``channel``."""
+            return channel
+
+        events = _source(source_id="events", tag_only_columns=True)
+        job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
+        with job:
+            first.pod(events.where(amplitude=values[0]), label="first")
+            second.pod(events.where(amplitude=values[1]), label="second")
+
+        summary = job.run()
+
+        assert summary.restrictions == {"events": Condition.of(amplitude=values[0])}

@@ -14,12 +14,15 @@ the commit ``job.run()`` makes.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 from orcapod.errors import OrcapodDatabaseError, OrcapodDatabaseWriteError
+from orcapod.types import Condition
 from orcapod.pipeline.run_summary import (
+    restriction_text,
     RunCountingObserver,
     RunSummary,
     run_node_summaries,
@@ -247,34 +250,42 @@ def check_sources(streams: Iterable[Any]) -> tuple[str, ...]:
     return tuple(unchecked)
 
 
-def _restriction_of(stream: Any) -> dict[str, Any]:
-    """The restriction a stream's source applies (``_restriction_record``), or ``{}``."""
-    record_of = getattr(stream, "_restriction_record", None)
-    return record_of() if record_of is not None else {}
+_Restriction: TypeAlias = "tuple[Condition | None, int | None]"
+"""What a source reads under: its condition and its limit, each ``None`` when unset."""
 
 
-def _restriction_signature(record: dict[str, Any]) -> str:
-    """A restriction as text that does not depend on the order its conditions were given.
+# TODO(ITL-1219): replace this attribute probe with a typed, public way for a stream,
+# source or node to state its restriction (its ``Condition`` and limit, members of the
+# stream and source protocols that every source kind answers); then this function and
+# its ``getattr`` go, and the walks below read those members.
+def _restriction_of(stream: object) -> _Restriction | None:
+    """Return the condition and limit a source reads under, or ``None`` for neither.
 
-    Conditions are sorted by column; a value keeps its type in the text (``1`` and
-    ``True`` differ), as ``where`` compares them.
+    Only ``SpiralDBTableSource`` can be restricted today; it keeps its condition in
+    ``_condition`` and its limit in ``_limit``. Any other stream, and a source that
+    reads every row, gives ``None``.
     """
-    where = sorted(
-        (column, type(value).__name__, repr(value))
-        for column, value in record.get("where", {}).items()
-    )
-    return repr((where, record.get("limit")))
+    condition = getattr(stream, "_condition", None)
+    if not isinstance(condition, Condition):
+        return None
+    limit = getattr(stream, "_limit", None)
+    limit = limit if isinstance(limit, int) else None
+    if not condition and limit is None:
+        return None
+    return (condition or None, limit)
 
 
-def _restrictions_beneath(stream: Any) -> list[tuple[str, str]]:
-    """The restrictions of every source a stream reads, as sorted comparable pairs.
+def _restrictions_beneath(stream: Any) -> Counter[tuple[str, _Restriction]]:
+    """Return the restrictions of every source a stream reads, order-free.
 
     Walks ``upstreams`` and a ``SourceJobNode``'s bound source down to the root
-    sources; each restricted root gives ``(source name, repr of its restriction)``.
+    sources; each restricted root counts ``(source name, (condition, limit))``. Two
+    results are equal when the same sources are restricted equally (``Condition``
+    equality: by value, in any order of the columns; and the same limit).
     """
     from orcapod.core.nodes.source_node import SourceJobNode
 
-    found: list[tuple[str, str]] = []
+    found: Counter[tuple[str, _Restriction]] = Counter()
     visited: list[Any] = []
     pending = [stream]
     while pending:
@@ -282,15 +293,27 @@ def _restrictions_beneath(stream: Any) -> list[tuple[str, str]]:
         if any(current is seen for seen in visited):
             continue
         visited.append(current)
-        record = _restriction_of(current)
-        if record:
-            found.append((_source_name(current), _restriction_signature(record)))
+        restriction = _restriction_of(current)
+        if restriction is not None:
+            found[(_source_name(current), restriction)] += 1
         if isinstance(current, SourceJobNode):
             if current.bound_source is not None:
                 pending.append(current.bound_source)
         else:
             pending.extend(getattr(current, "upstreams", ()))
-    return sorted(found)
+    return found
+
+
+def _restrictions_text(found: Counter[tuple[str, _Restriction]]) -> str:
+    """The restrictions found beneath a stream, as words for a message."""
+    if not found:
+        return "no restriction"
+    return "; ".join(
+        sorted(
+            f"{name}: {restriction_text(*restriction)}"
+            for name, restriction in found.elements()
+        )
+    )
 
 
 def require_one_restriction(known: Any, other: Any) -> None:
@@ -317,14 +340,17 @@ def require_one_restriction(known: Any, other: Any) -> None:
         raise ValueError(
             f"Two inputs of one identity ({_stream_name(known)!r}) read different "
             "rows in one pipeline: their sources are restricted differently "
-            f"({known_found or 'no restriction'} and {other_found or 'no restriction'}). "
+            f"({_restrictions_text(known_found)} and "
+            f"{_restrictions_text(other_found)}). "
             "A restriction does not change a source's identity, so a pipeline "
             "holds one of them: use one restriction for the table in this pipeline, "
             "or build a separate pipeline."
         )
 
 
-def restrictions_in_force(streams: Iterable[Any]) -> dict[str, dict[str, Any]]:
+def restrictions_in_force(
+    streams: Iterable[Any],
+) -> dict[str, tuple[str, Condition | None, int | None]]:
     """The restriction of each restricted source feeding ``streams`` (ITL-1218).
 
     A restriction belongs to the source object bound to a slot, so the key is the
@@ -335,22 +361,22 @@ def restrictions_in_force(streams: Iterable[Any]) -> dict[str, dict[str, Any]]:
     conditions are both reported; two sources without a slot that share a label are
     numbered (``"<label> (2)"``).
 
-    Only a ``SpiralDBTableSource`` can be restricted today; it answers through
-    ``_restriction_record``, which every root source gets when restrictions are
-    generalized (ITL-1219).
+    Only a ``SpiralDBTableSource`` can be restricted today (``_restriction_of``;
+    every source kind when restrictions are generalized, ITL-1219).
 
     Args:
         streams: The nodes of a run, or the node whose ``run()`` it is.
 
     Returns:
-        Slot name to ``{"source_id": ..., "where": {...}, "limit": n}`` (``where`` and
-        ``limit`` only when set), for the sources that restrict their rows, in the
-        order first met.
+        Slot name to the source's id, its ``Condition`` and its limit (each ``None``
+        when unset), for the sources that restrict their rows, in the order first
+        met. ``RunSummary`` keeps the three apart (``restricted_source_ids``,
+        ``restrictions``, ``limits``).
     """
     from orcapod.core.nodes.source_node import SourceJobNode
     from orcapod.core.sources.base import RootSource
 
-    found: dict[str, dict[str, Any]] = {}
+    found: dict[str, tuple[str, Condition | None, int | None]] = {}
     visited: list[tuple[Any, str | None]] = []
     pending: list[tuple[Any, str | None]] = [(stream, None) for stream in streams]
     while pending:
@@ -363,9 +389,9 @@ def restrictions_in_force(streams: Iterable[Any]) -> dict[str, dict[str, Any]]:
             if stream.bound_source is not None:
                 pending.append((stream.bound_source, stream.name))
         elif isinstance(stream, RootSource):
-            record = _restriction_of(stream)
-            if record:
-                entry = {"source_id": _source_name(stream), **record}
+            restriction = _restriction_of(stream)
+            if restriction is not None:
+                entry = (_source_name(stream), *restriction)
                 name = slot if slot is not None else str(stream.label)
                 # A slot holds one source (bind refuses a stream of several), so
                 # only two unbound sources of one label can meet here: number them.
@@ -640,5 +666,5 @@ def run_with_dependencies(
         target=target.label,
         unchecked_sources=unchecked_sources,
         ran_nothing=not plan.to_run,
-        restrictions=restrictions_in_force(graph.nodes()),
+        restricted_sources=restrictions_in_force(graph.nodes()),
     )

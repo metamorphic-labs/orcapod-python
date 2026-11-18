@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from types import FrameType
 
     from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
-    from orcapod.types import SchemaLike
+    from orcapod.types import Condition, SchemaLike
 
 _NOOP_LOGGER = NoOpLogger()
 
@@ -80,12 +80,17 @@ class RunSummary:
             for new data at the start of the run (ITL-1102): each raised in
             ``check_for_new_data``, was reported by a ``SourceCheckFailedWarning``,
             and fed the run with the data it already held.
-        restrictions: The restriction in force of each restricted source of the run
-            (ITL-1218), by slot name (the name ``bind`` takes; a source read directly
-            by a node's ``run()`` by its label): ``{"source_id": ..., "where":
-            {column: value}, "limit": n}``, ``where`` and ``limit`` only when set. A
-            restriction chooses which rows flow and is not part of any identity, so
-            this is the record of which rows a run saw.
+        restrictions: The ``Condition`` each source of the run read under, by slot
+            name (the name ``bind`` takes; a source read directly by a node's
+            ``run()`` by its label), for the slots whose source has one (ITL-1218).
+            A restriction (a condition and/or a limit) chooses which rows flow and is
+            not part of any identity, so this and ``limits`` are the record of which
+            rows a run saw. In memory only: a run summary is not saved (a saved job
+            keeps each source's ``where`` and ``limit`` in its config).
+        limits: The limit each source of the run read with, by slot name, for the
+            slots whose source has one.
+        restricted_source_ids: The source id of every restricted source (a slot in
+            ``restrictions``, ``limits`` or both), by slot name.
         ran_nothing: Whether the run ran no node: every node held a current run
             (ITL-1095). Decided by the run's plan, which counts every kind of node, so a
             run that ran only a side-effect or operator node is not "nothing to do".
@@ -100,7 +105,9 @@ class RunSummary:
         target: str | None = None,
         unchecked_sources: Sequence[str] = (),
         ran_nothing: bool = False,
-        restrictions: Mapping[str, Mapping[str, Any]] | None = None,
+        restricted_sources: (
+            Mapping[str, tuple[str, Condition | None, int | None]] | None
+        ) = None,
     ) -> None:
         """Build the summary.
 
@@ -111,7 +118,8 @@ class RunSummary:
             target: The label of the node whose ``run()`` this was, if any.
             unchecked_sources: The sources that could not be checked for new data.
             ran_nothing: Whether the run ran no node (every node held a current run).
-            restrictions: The restricted sources of the run and their restrictions
+            restricted_sources: Slot name to the source id, the condition and the
+                limit (each ``None`` when unset) of each restricted source of the run
                 (``node_run.restrictions_in_force``).
         """
         self.job_name: str = job_name
@@ -120,8 +128,20 @@ class RunSummary:
         self.target: str | None = target
         self.unchecked_sources: tuple[str, ...] = tuple(unchecked_sources)
         self.ran_nothing: bool = ran_nothing
-        self.restrictions: Mapping[str, Mapping[str, Any]] = {
-            slot: dict(record) for slot, record in (restrictions or {}).items()
+        # One mapping split three ways, so the keys cannot disagree.
+        restricted = dict(restricted_sources or {})
+        self.restrictions: Mapping[str, Condition] = {
+            slot: condition
+            for slot, (_, condition, _) in restricted.items()
+            if condition is not None
+        }
+        self.limits: Mapping[str, int] = {
+            slot: limit
+            for slot, (_, _, limit) in restricted.items()
+            if limit is not None
+        }
+        self.restricted_source_ids: Mapping[str, str] = {
+            slot: source_id for slot, (source_id, _, _) in restricted.items()
         }
 
     @property
@@ -206,11 +226,12 @@ class RunSummary:
 
     def _restrictions_line(self) -> str | None:
         """The line naming each restricted source and its restriction, if any."""
-        if not self.restrictions:
+        if not self.restricted_source_ids:
             return None
         return "restricted sources: " + "; ".join(
-            f"{slot}: {_restriction_text(record)}"
-            for slot, record in self.restrictions.items()
+            f"{slot} ({source_id}): "
+            + restriction_text(self.restrictions.get(slot), self.limits.get(slot))
+            for slot, source_id in self.restricted_source_ids.items()
         )
 
     def _source_lines_html(self) -> str:
@@ -324,15 +345,22 @@ def _counts(node: NodeRunSummary, load_only: bool) -> str:
     return text
 
 
-def _restriction_text(record: Mapping[str, Any]) -> str:
-    """A restriction as words: ``where a='x', b=1, limit 3``."""
+def restriction_text(condition: Condition | None, limit: int | None) -> str:
+    """A source's restriction as words: ``where a='x', b=1, limit 3``.
+
+    Args:
+        condition: The condition the source reads under, if any.
+        limit: The source's limit, if any.
+
+    Returns:
+        The condition's text (``Condition.text``) after ``where``, then the limit.
+    """
     parts: list[str] = []
-    where = record.get("where")
-    if where:
-        parts.append("where " + ", ".join(f"{c}={v!r}" for c, v in where.items()))
-    if record.get("limit") is not None:
-        parts.append(f"limit {record['limit']}")
-    return ", ".join(parts)
+    if condition:
+        parts.append(f"where {condition.text()}")
+    if limit is not None:
+        parts.append(f"limit {limit}")
+    return ", ".join(parts) if parts else "no restriction"
 
 
 def _rows(n: int) -> str:

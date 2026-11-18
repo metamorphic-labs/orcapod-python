@@ -1143,15 +1143,25 @@ data. The rules:
   identity: content_hash, pipeline_hash, source_id, schema, system-tag column names and
   every row's record id equal the unrestricted source's (a positional record id is never
   renumbered). Selecting rows as part of what a pipeline computes is an operator
-  (SemiJoin, PolarsFilter). Today only SpiralDBTableSource.where(mapping=None, /,
-  **columns) exists: equality conditions, added to those of where= (one mechanism, the
-  private _Restriction the scan, head, to_config and run summary read), applied by
-  SpiralDB in the scan; a conflicting value, an unknown column, None and a value not exactly
-  of its column's Python type (no conversion) are refused. where() is _copy() then
-  _apply_restriction() in place on the copy, the future public copy() and
-  apply_restriction(); other source kinds and limit() are ITL-1219. RunSummary.restrictions
-  records each restricted source by slot ({"source_id", "where", "limit"}), the saved job
-  keeps it in the source config, bind never compares it, and a job run over a restricted
+  (SemiJoin, PolarsFilter). The conditions are one public class, orcapod.types.Condition
+  (developer, November 18, 2026): row conditions only, no limit, no source, in no hash; a
+  future in-pipeline filter operator is to take the same class (its identity then: ITL-1265).
+  Its factory Condition.of(mapping=None, /, **columns) takes where()'s arguments and does
+  every check that needs no table (None, a value not exactly bool/int/float/str/
+  bytes/datetime/date, mapping against keyword); combined adds two and refuses a
+  contradiction; equality is by value, order-free, exact types, floats as Polars matches them
+  (0.0 equals -0.0, NaN equals NaN), with a consistent hash; text()/str, and
+  to_config/from_config (the saved where mapping). Internally terms (column, operator,
+  value), equality only today; the public surface names no operator. Never add a second
+  restriction class: a limit stays the source's own (limit=). Today only
+  SpiralDBTableSource.where(mapping=None, /, **columns) exists: Condition.of, then the
+  source checks it against its table (unknown column, the column's exact Python type and
+  Arrow range, no conversion) and combines it with where='s, applied by SpiralDB in the
+  scan. where() is _copy() then _apply_restriction() in place on the copy, the future
+  public copy() and apply_restriction(); other source kinds and limit() are ITL-1219.
+  RunSummary records each restricted source by slot: restrictions (slot to Condition),
+  limits (slot to limit), restricted_source_ids (every such slot), filled by one walk;
+  the saved job keeps where and limit in the source config, bind never compares them, and a job run over a restricted
   source feeding GroupBy, Batch or MergeJoin issues one RestrictedAggregationWarning.
   A graph holds one source per content hash, so one table restricted two ways (or with and
   without a restriction) in one pipeline is refused at capture (node_run.require_one_restriction).

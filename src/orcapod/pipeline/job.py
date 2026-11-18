@@ -1444,7 +1444,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             load_only=load_only,
             unchecked_sources=unchecked_sources,
             ran_nothing=not plan.to_run,
-            restrictions=restrictions_in_force(prepared.exec_dag.nodes()),
+            restricted_sources=restrictions_in_force(prepared.exec_dag.nodes()),
         )
         return self._last_run
 

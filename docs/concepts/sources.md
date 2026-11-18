@@ -223,7 +223,11 @@ rows in which every named column equals its value. Several conditions can be giv
 call, as keywords or as a mapping, or across chained calls:
 `events.where(unit_id=106, session_index=2)` and
 `events.where(unit_id=106).where(session_index=2)` are the same restriction, reading the
-same rows. It is a **restriction**, not an operator:
+same rows. The conditions are a `Condition` (`orcapod.types`): `where(...)` builds one with
+`Condition.of(...)`, which takes the same arguments, and a `Condition` built beforehand can be
+given instead (`events.where(Condition.of(unit_id=106, session_index=2))`). A source
+restricted by a condition, a `limit=`, or both is **restricted**; a restriction is not an
+operator:
 
 - An operator (`SemiJoin`, `PolarsFilter`) is a step of the pipeline. It is a node of the
   graph and part of the pipeline's identity: a pipeline with a filter computes something
@@ -252,14 +256,17 @@ assert one_unit.content_hash() == events.content_hash()
 job.bind(sources={"spikes": one_unit})  # the slot the unrestricted source fills
 summary = job.run()
 print(summary.restrictions)
-# {'spikes': {'source_id': 'spikes', 'where': {'unit_id': 106}}}
+# {'spikes': Condition.of({'unit_id': 106})}
+print(summary.restricted_source_ids)
+# {'spikes': 'spikes'}
 ```
 
 (This sample needs a SpiralDB project, so it is not run with the documentation; `job` is a
 job built over `events`, whose slot is named by the source id.)
 
-- **One mechanism.** `where()` adds to the conditions given with `where=` when the source was
-  built, and SpiralDB applies them in the scan. A column already restricted to another value
+- **One mechanism.** `where()` adds to the conditions given with `where=` (a mapping or a
+  `Condition`) when the source was built (`Condition.combined`), and SpiralDB applies them
+  in the scan. A column already restricted to another value
   is refused, as is a column the table does not have, `None` (a null equals nothing) and
   `where()` with no condition. Everything else of the source is carried over: the pinned
   table version, `limit`, `max_rows`, the tags and data-tags, `tags_as_data`, the key
@@ -277,8 +284,15 @@ job built over `events`, whose slot is named by the source id.)
   build separate pipelines.
 - **With `limit=`.** A source built with `limit=n` reads the first `n` rows that match, in
   key order: the conditions are applied first.
-- **Recorded.** `RunSummary.restrictions` maps each restricted source's slot to its source id
-  and its conditions (and `limit`), and the summary shows them. A saved job records them in
+- **Conditions as values.** Two conditions are equal when they require the same columns to
+  equal the same values, in any order. Values of different types differ (`1`, `True` and
+  `1.0`); floats compare as Polars matches them (`0.0` equals `-0.0`, NaN equals NaN).
+  `str(condition)` (or `condition.text()`) reads `unit_id=106, session_index=2`, and
+  `condition.equalities` maps each column to its value. A `Condition` is in no hash.
+- **Recorded.** `RunSummary.restrictions` maps the slot of each source read under a condition
+  to its `Condition`, `RunSummary.limits` the slot of each source read with a `limit=` to the
+  limit, and `RunSummary.restricted_source_ids` every such slot to its source id; the
+  summary shows them (`spikes (spikes): where unit_id=106, limit 3`). A saved job records them in
   the source's config, and a loaded job reads with them. Binding does not compare
   restrictions: a restricted source fits the slot of the unrestricted one.
 - **Under an aggregation.** A `GroupBy`, `Batch` or `MergeJoin` below a restricted source
