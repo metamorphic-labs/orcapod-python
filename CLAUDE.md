@@ -896,17 +896,18 @@ current data context are the current entries.
   side effects (a `SideEffectPod` node, or a function node whose pod takes the invocation
   context, `ctx_arg`), raise `SideEffectLogDataContextError` before any delivery. A new kind
   of node goes through that function; never decide it locally.
-- A table written before v0.3 is found by NAME, never by a computed hash (ITL-954): the
-  hashes in a path differ between versions. `find_stale_tables(..., name_path=...)` lists the
+- A table of another layout is found by NAME, never by a computed hash (ITL-954): the
+  hashes in a path differ between builds. `find_stale_tables(..., name_path=...)` lists the
   store under the hash-free beginning of the node's path (`ArrowDatabaseProtocol.list_table_paths`;
   `<function>`, `side_effect_function/<function>`, `side_effects/<pod>`, relative to the
-  node's database) and every table there whose last component is not in
-  `contexts/stored.CURRENT_LAYOUTS` is pre-v0.3. A new layout constant must be added to
-  `CURRENT_LAYOUTS`, and a superseded one to the `OLD_*_SCHEMA_VERSIONS` tuples. A store that
-  cannot list raises `TableListingNotSupportedError`: side-effecting nodes then warn and
-  proceed (developer, November 11, 2026). Operator caches and cached sources have no stable
-  name; `PipelineJob.run()` reports one total for them. Every database class implements
-  `list_table_paths`.
+  node's database; `<prefix>/source` for a cached source) and every table there whose last
+  component is not in `contexts/stored.CURRENT_LAYOUTS` is of another layout
+  (`tables_of_another_layout`). A new layout constant must be added to `CURRENT_LAYOUTS`. A
+  store that cannot list raises `TableListingNotSupportedError`: side-effecting nodes then
+  warn and proceed (developer, November 11, 2026). Every database class implements
+  `list_table_paths`. Stores of the versions before 0.4 are not looked for otherwise (no
+  old-layout names, no layout-less paths, no job-wide total): nobody has one, and their
+  layouts had the names the first release uses (ITL-1259).
 - A released data context manifest (`contexts/data/<version>.json`) is frozen: the digest of
   its canonical JSON without `golden` is pinned in `contexts/released_manifests.json`
   (`manifest`), with one `releases` line per library release (ITL-946). Only its `golden`

@@ -27,7 +27,6 @@ from orcapod.contexts.stored import (
 from orcapod.protocols.core_protocols import DataProtocol
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.system_constants import (
-    OLD_RESULT_DB_SCHEMA_VERSIONS,
     RESULT_DB_SCHEMA_VERSION,
     constants,
 )
@@ -190,12 +189,6 @@ class ResultCache:
         """
         return find_stale_tables(
             self._result_database,
-            # Orcapod v0.1 stored the table at the path without a layout component.
-            tuple(
-                self._record_path + (layout,)
-                for layout in OLD_RESULT_DB_SCHEMA_VERSIONS
-            )
-            + (self._record_path,),
             current=(self._versioned_record_path, data_context_key)
             if self._delivers_side_effects and include_current
             else None,

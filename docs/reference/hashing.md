@@ -1551,27 +1551,17 @@ current data context only, and every read of a whole table (a node's `as_table()
 data context out. Those rows are never changed or deleted, and a read that leaves rows out
 logs one warning per table with their number (logger `orcapod.contexts.stored`).
 
-**Tables written before v0.3** have no `__data_context` column and sit at an older layout
-(`pdb_v2`, `rdb_v2`, `tdb_v2`; operator-node and cached-source tables, and the function
-tables of Orcapod v0.1, had no layout component). Orcapod does not read them as results and never modifies them. When it finds
-one it logs one warning with the number of rows:
-
-```text
-Found 3 rows in stored table '...' written by an earlier version of Orcapod (older table
-layout, data context std:v0.1:default). They are not used and are left unchanged; they can
-be migrated later.
-```
-
-**How they are found.** The path of a table holds hashes (of the function's output schema,
-of the pipeline), and a later version of Orcapod can compute other hashes, so an older table
-is not only looked for at the path the current version computes. The beginning of a path
-holds no hash: the job, then the name of the function (`<job>/<function>/...` and
-`<job>/_result/<function>/...`; `side_effect_function/<function>` for a function pod that
-takes the invocation context; `side_effects/<pod>` for a side-effect pod). A node lists the
-tables stored under that beginning (`list_table_paths` of the database) and tells old from
-current by the last path component, the layout: `pdb_v1`, `rdb_v1`, `tdb_v1`, `odb_v1` and
-`sdb_v1` are current, every other table under the name was written before v0.3. Tables
-found this way are not read, so they are reported without a number of rows, once per node:
+**Tables of another layout.** A table whose last path component is not one of the current
+layouts above was written by another build of Orcapod. Orcapod does not read it as results
+and never modifies it. The path of a table holds hashes (of the function's output schema, of
+the pipeline), and another build can compute other hashes, so such a table is not looked for
+at a computed path. The beginning of a path holds no hash: the job, then the name of the
+function (`<job>/<function>/...` and `<job>/_result/<function>/...`;
+`side_effect_function/<function>` for a function pod that takes the invocation context;
+`side_effects/<pod>` for a side-effect pod; `<prefix>/source` for a cached source without
+an explicit `cache_path`). A node lists the tables stored under that beginning
+(`list_table_paths` of the database) and reports, once, those whose last component is not a
+current layout. They are not read, so they are reported without a number of rows:
 
 ```text
 Found 2 tables written by an earlier version of Orcapod under 'my_job/double' (older table
@@ -1580,21 +1570,11 @@ and are left unchanged; they can be migrated later. Tables of another function o
 the same name are included.
 ```
 
-Operator caches and cached sources have no name in their path that survives a change of
-hashes. A job run lists the tables under the job's name once and reports one total of the
-older tables that no function or side-effect node of the job reports itself: operator
-caches, cached sources stored under the job, and tables of nodes the job no longer has.
-
-```text
-Store 'my_job' holds 2 more tables written by an earlier version of Orcapod (operator
-caches, cached sources, or nodes not in this job): '...'. They are not used and are left
-unchanged; they can be migrated later.
-```
-
-Two consequences of finding tables by name: a table of another function or pod with the
-same name in the same job, and a table of another node of the same function, count as well.
-A store that cannot list its tables (`TableListingNotSupportedError`) is not searched this
-way; tables at the path the current version computes are still found.
+A table of another function or pod with the same name in the same job, and a table of
+another node of the same function, count as well. A store that cannot list its tables
+(`TableListingNotSupportedError`) is not searched. Stores of the versions before 0.4 are not
+looked for otherwise: nobody has one, and their layouts had the names the first release uses
+again (ITL-1259).
 
 Nodes that perform side effects are the exception. A completion is looked up by its key, so
 completions stored under another data context would not be found and every side effect would
@@ -1602,8 +1582,8 @@ be performed again. There are two kinds: a side-effect pod (`@side_effect_pod`, 
 `@tap_pod`), whose completions are in its invocation log, and a function pod that takes the
 invocation context (`@function_pod(ctx_arg=...)`), whose completions are in its pipeline and
 result tables. Either raises `SideEffectLogDataContextError`, naming the tables, before
-doing anything when it finds a table at an older layout anywhere under its name, or
-completions of another data context in its current tables. Because every older table under
+doing anything when it finds a table of another layout anywhere under its name, or
+completions of another data context in its current tables. Because every such table under
 the name counts, an unrelated pod of the same name in the same job raises the error too;
 the error names every table so that you can tell. When the database cannot list its tables,
 the node logs one warning saying that it could not look for older completions, and

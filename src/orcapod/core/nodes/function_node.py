@@ -106,7 +106,6 @@ from orcapod.protocols.observability_protocols import (
 )
 from orcapod.system_constants import (
     constants,
-    OLD_PIPELINE_DB_SCHEMA_VERSIONS,
     PIPELINE_DB_SCHEMA_VERSION,
     RESULT_DB_SCHEMA_VERSION,
 )
@@ -1425,12 +1424,6 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         delivers = self._delivers_side_effects
         found = find_stale_tables(
             self._pipeline_database,
-            # Orcapod v0.1 stored the table at the path without a layout component.
-            tuple(
-                self.node_identity_path + (layout,)
-                for layout in OLD_PIPELINE_DB_SCHEMA_VERSIONS
-            )
-            + (self.node_identity_path,),
             current=(self._versioned_pipeline_path, context_key)
             if delivers and not self._current_tables_checked
             else None,

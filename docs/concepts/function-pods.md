@@ -1032,35 +1032,28 @@ Every row Orcapod stores names the **data context** that wrote it, in the column
 `__data_context`: `std:v1:default` since v0.3. The data context is one key for the whole of
 Orcapod's hashing, so rows that share it were keyed in exactly the same way (see
 [The data context of a stored row](../reference/hashing.md#the-data-context-of-a-stored-row)).
-Tables written before v0.3 have no such column and are stored at an older table layout
-(`pdb_v2`, `rdb_v2`). Orcapod **does not read them as results**: it does not refuse the
+A table at another layout than this build's (another last path component; see
+[Data function types](../reference/data-function-types.md) for the result table path) was
+written by another build. Orcapod **does not read it as results**: it does not refuse the
 store, and it does not reuse those rows.
 
-- The first run of v0.3 on a database written by v0.2 computes every input again and stores the
-  rows in its own tables (`pdb_v1`, `rdb_v1`).
+- A run on such a store computes every input again and stores the rows in its own tables.
 - Reading a node (`as_table()`, `iter_data()`, `get_all_records()`) returns the rows of the
-  current data context only: nothing before that first run, one row per input after it.
-- The old tables are never changed or deleted. They stay readable with the version that
-  wrote them and are kept for a later migration. To see which data contexts a table holds,
+  current data context only.
+- The other tables are never changed or deleted. To see which data contexts a table holds,
   use `orcapod.contexts.stored_data_contexts`.
-- When Orcapod finds a table at an older layout, it logs one warning with the number of
-  rows: `Found 3 rows in stored table '...' written by an earlier version of Orcapod (older
-  table layout, data context std:v0.1:default). They are not used and are left unchanged;
-  they can be migrated later.`
-- The hashes in a table path can differ between versions, so older tables are looked for
-  by name: Orcapod lists the tables stored under the job and function name and treats every
-  table that is not at a current layout as written by an earlier version. Tables found this
-  way are reported once per node, without a number of rows; a table of another function
-  with the same name in the same job is included. A job run also reports one total of the
-  older tables that belong to none of its function nodes (operator caches, cached sources,
-  nodes that left the job).
+- The hashes in a table path can differ between builds, so such tables are looked for by
+  name: Orcapod lists the tables stored under the job and function name and reports, once
+  per node, every table there that is not at a current layout; a table of another function
+  with the same name in the same job is included. Stores of the versions before 0.4 are not
+  looked for otherwise: nobody has one (ITL-1259).
 - Nodes that perform side effects are the exception: side-effect pods, and function pods
   that take the invocation context (`ctx_arg`). A side effect is an external action, and
-  completions stored by v0.2 cannot be matched with current inputs, so running the node
-  would do everything a second time. Instead the node raises
+  completions stored at another layout cannot be matched with current inputs, so running the
+  node would do everything a second time. Instead the node raises
   `SideEffectLogDataContextError` (from `orcapod.errors`, a `OrcapodDatabaseError`), naming the
-  tables, before it does anything. Every older table under the node's function or pod name
-  in the job counts. Keep using the version that wrote them. A fresh database is not a safe
+  tables, before it does anything. Every such table under the node's function or pod name
+  in the job counts. Keep using the build that wrote them. A fresh database is not a safe
   way around the error: it holds no completions, so on it the node performs every side
   effect again; use one only when a repeated delivery is acceptable. If the database cannot
   list its tables, the node warns that it could not check, and runs.

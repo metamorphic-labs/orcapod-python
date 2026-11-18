@@ -31,12 +31,6 @@ RESULT_DB_SCHEMA_VERSION = "rdb_v1"
 TRACKING_DB_SCHEMA_VERSION = "tdb_v1"
 OPERATOR_DB_SCHEMA_VERSION = "odb_v1"
 SOURCE_DB_SCHEMA_VERSION = "sdb_v1"
-# Layout components an earlier build of Orcapod wrote: the v2 layouts of the withdrawn
-# 0.3.0. The layouts of before v0.3 had the v1 names, which the first release uses again,
-# so they cannot be listed (no such store exists: nobody used a version before 0.4).
-OLD_PIPELINE_DB_SCHEMA_VERSIONS = ("pdb_v2",)
-OLD_RESULT_DB_SCHEMA_VERSIONS = ("rdb_v2",)
-OLD_TRACKING_DB_SCHEMA_VERSIONS = ("tdb_v2",)
 STORED_DATA_CONTEXT = "data_context"
 # The data context of everything Orcapod wrote before v0.3. Its manifest is not shipped:
 # stored rows that carry this key, and tables without a data context column, belong to it.
