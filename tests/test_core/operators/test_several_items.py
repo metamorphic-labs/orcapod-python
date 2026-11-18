@@ -59,6 +59,7 @@ from orcapod.protocols.core_protocols import StreamProtocol
 
 from .several_items import (
     DATA_TAGS,
+    LAYOUTS,
     MAIN,
     MIXED,
     P,
@@ -141,7 +142,17 @@ def _unary_params() -> list[object]:
 
 
 def _assert_all_equal(results: dict[str, dict[str, object]]) -> None:
-    """Assert every arrangement's fingerprint equals the first one's, naming the field."""
+    """Assert every arrangement's fingerprint equals the first one's, naming the field.
+
+    A result that holds ``async_rows`` must also have them equal to its own sync
+    ``rows``: equal across arrangements alone would pass an async path that is wrong
+    the same way every time.
+    """
+    for result_id, result in results.items():
+        if "async_rows" in result:
+            assert result["async_rows"] == result["rows"], (
+                f"async rows differ from sync rows in {result_id}"
+            )
     (first_id, first), *others = results.items()
     for arrangement_id, result in others:
         for field, value in first.items():
@@ -472,7 +483,7 @@ def test_join_result_does_not_depend_on_the_arrangement_of_its_inputs(
     specs = JOIN_INPUTS[n]
     results: dict[str, dict[str, object]] = {}
     for order_index in range(3):
-        for layout in ("tags_first", "data_first_reversed", "interleaved"):
+        for layout in LAYOUTS:
             sources = _sources(specs, order_index, layout, role)
             stream = Join()(*sources)
             results[f"{order_index}/{layout}"] = {
@@ -530,26 +541,27 @@ MAIN_OTHER = Spec(
 def test_merge_join_result_does_not_depend_on_the_order_of_its_inputs(
     role: str,
 ) -> None:
-    """Three colliding data columns: either input order, any tag order.
+    """Three colliding data columns: either input order, any tag order and layout.
 
     Swapping the inputs changes nothing, not even the column order. Another tag order
-    of the inputs changes only the column order.
+    or layout of the inputs changes only the column order.
     """
     results: dict[str, dict[str, object]] = {}
     for order_index in range(3):
-        left, right = _sources(
-            (MAIN, MAIN_OTHER), order_index, TAGS_FIRST, role, rows=NON_NULL_ROWS
-        )
-        ab, ba = MergeJoin()(left, right), MergeJoin()(right, left)
-        assert presentation(ab) == presentation(ba)
-        for label, inputs, stream in (
-            ("ab", (left, right), ab),
-            ("ba", (right, left), ba),
-        ):
-            results[f"{order_index}/{label}"] = {
-                **fingerprint(stream),
-                "async_rows": rows_fingerprint(async_rows(MergeJoin(), *inputs)),
-            }
+        for layout in LAYOUTS:
+            left, right = _sources(
+                (MAIN, MAIN_OTHER), order_index, layout, role, rows=NON_NULL_ROWS
+            )
+            ab, ba = MergeJoin()(left, right), MergeJoin()(right, left)
+            assert presentation(ab) == presentation(ba)
+            for label, inputs, stream in (
+                ("ab", (left, right), ab),
+                ("ba", (right, left), ba),
+            ):
+                results[f"{order_index}/{layout}/{label}"] = {
+                    **fingerprint(stream),
+                    "async_rows": rows_fingerprint(async_rows(MergeJoin(), *inputs)),
+                }
     _assert_all_equal(results)
 
 
@@ -594,7 +606,7 @@ def test_semijoin_matches_on_every_shared_tag_in_any_arrangement(role: str) -> N
     """The right input's tag order and layout never change which rows are kept."""
     results: dict[str, dict[str, object]] = {}
     for order_index in range(3):
-        for layout in ("tags_first", "data_first_reversed", "interleaved"):
+        for layout in LAYOUTS:
             left, right = _sources((MAIN, P), order_index, layout, role)
             stream = SemiJoin()(left, right)
             results[f"{order_index}/{layout}"] = {
@@ -602,9 +614,14 @@ def test_semijoin_matches_on_every_shared_tag_in_any_arrangement(role: str) -> N
                 "async_rows": rows_fingerprint(async_rows(SemiJoin(), left, right)),
             }
     _assert_all_equal(results)
-    left, right = _sources((MAIN, P), 0, TAGS_FIRST, role)
-    kept = SemiJoin()(
-        left, make_source(P, Arrangement(P.tags, TAGS_FIRST, role), rows=[0, 1])
-    )
-    # P's first two rows are (a, 2) and (b, 1): matched on t1 AND t2.
-    assert _sorted_values(kept, "d1") == [30, 40]
+    # A right input without every (t1, t2) pair tells a match on both keys from a
+    # match on one, or none: P's first two rows are (a, 2) and (b, 1).
+    for order_index in range(3):
+        for layout in LAYOUTS:
+            left, _ = _sources((MAIN, P), order_index, layout, role)
+            [right] = _sources((P,), order_index, layout, role, rows=[0, 1])
+            kept = SemiJoin()(left, right)
+            assert _sorted_values(kept, "d1") == [30, 40]
+            assert rows_fingerprint(async_rows(SemiJoin(), left, right)) == (
+                rows_fingerprint(list(kept.iter_data()))
+            )
