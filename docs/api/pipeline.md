@@ -12,3 +12,5 @@ blueprint; `PipelineJob` binds a pipeline to sources and a database and runs it.
 ::: orcapod.pipeline.Pipeline
 
 ::: orcapod.pipeline.PipelineJob
+
+::: orcapod.pipeline.PipelineDiagram
