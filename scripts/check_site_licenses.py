@@ -3,7 +3,8 @@
 The Python dependencies are checked by ``.github/workflows/_license-check.yml``
 (``pip-licenses``). The site under ``site/`` is built with npm packages; this script
 checks them against the same allow list, plus the permissive licenses only npm packages
-use (``BlueOak-1.0.0``, ``CC0-1.0``).
+use (``BlueOak-1.0.0``, ``CC0-1.0``) and the font license of the site's bundled fonts
+(``OFL-1.1``).
 
 Usage (the ``docs-site`` workflow runs it):
 
@@ -18,8 +19,8 @@ import json
 import sys
 from typing import cast
 
-# The license identifiers allowed, as in _license-check.yml, plus BlueOak-1.0.0 and
-# CC0-1.0.
+# The license identifiers allowed, as in _license-check.yml, plus BlueOak-1.0.0,
+# CC0-1.0 and OFL-1.1.
 ALLOWED = frozenset(
     {
         "MIT",
@@ -34,6 +35,10 @@ ALLOWED = frozenset(
         "Unlicense",
         "BlueOak-1.0.0",
         "CC0-1.0",
+        # SIL Open Font License 1.1 (OSI-approved): the brand fonts (Asap, Lexend Exa)
+        # bundled with the documentation site only, never with the Python package.
+        # Approved by the developer, November 17, 2026 (ITL-1170).
+        "OFL-1.1",
     }
 )
 
