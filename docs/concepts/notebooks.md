@@ -3,11 +3,14 @@
 Orcapod's streams, sources, job nodes, run summaries, jobs and pipelines display themselves
 when they are the last line of a notebook cell. This page is where a notebook user starts:
 what each display shows, how to see more, and which page states each rule in full. The
-pictures come from JupyterLab. `print` of the same object gives the display as text, and the
-samples below show that text.
+pictures come from JupyterLab. Outside a notebook, `print(stream.head())`, `print(summary)` and
+`print(job.diagram())` give the same displays as text (`print(stream)` or `print(job)` does
+not), and the samples below show that text.
 
 The samples use the job from [Part 5 of the tutorial](../tutorial/05-pipeline-job.md), not run
-yet:
+yet, over the tutorial's dataset: to run them, first put `workshop_data.py` in your notebook's
+working directory, as [Get the dataset](../tutorial/00-setup.md#get-the-dataset) in Part 0
+shows.
 
 ```python
 from workshop_data import make_dataset
@@ -131,9 +134,10 @@ print(summary)
 ![The run summary of the tutorial job in JupyterLab: the line "Run of job 'workshop': all rows succeeded." over a table with the columns node, rows, computed, from store, failed and first error, one row each for rates and session_means](notebooks-run-summary-light.png#gh-light-mode-only)
 ![The run summary of the tutorial job in JupyterLab's dark theme](notebooks-run-summary-dark.png#gh-dark-mode-only)
 
-One row per function node: `rows` is how many rows the node gave, `computed` how many its
-function computed in this run, `from store` how many it read back from the database instead,
-`failed` how many raised, and `first error` the first of those errors, with the call that
+One row per function node: `rows` is every input row the run accounted for in the node
+(computed, from store and failed, and for a node the run held, its held rows), `computed`
+how many its function computed in this run, `from store` how many it read back from the
+database instead, `failed` how many raised, and `first error` the first of those errors, with the call that
 prints its full traceback (`job.last_run.print_traceback("rates")`). Here one `rates` row
 was found in the store during the run itself ([Part 5](../tutorial/05-pipeline-job.md#record-then-run)
 of the tutorial explains why). A load-only run (`job.run(load_only=True)`) shows how many
