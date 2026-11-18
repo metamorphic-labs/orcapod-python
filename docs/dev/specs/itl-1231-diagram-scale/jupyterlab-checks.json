@@ -1,0 +1,458 @@
+{
+ "before-820-first": {
+  "viewBox": "0 -218.2057142857143 1663.7 570.4114285714286",
+  "clipped": []
+ },
+ "before-820": {
+  "steps": [
+   {
+    "step": "after fit (start of the checks)",
+    "viewBox": "0 -98.81727574750832 1663.7 331.63455149501664",
+    "activeCell": 0,
+    "focus": "",
+    "dialogs": 0
+   },
+   {
+    "step": "click in",
+    "viewBox": "166.37 -65.65382059800666 1330.96 265.3076411960133",
+    "activeCell": 0,
+    "focus": "",
+    "dialogs": 0
+   },
+   {
+    "step": "click in",
+    "viewBox": "299.466 -39.12305647840533 1064.768 212.24611295681066",
+    "activeCell": 0,
+    "focus": "",
+    "dialogs": 0
+   },
+   {
+    "step": "click out",
+    "viewBox": "166.37 -65.65382059800666 1330.96 265.3076411960133",
+    "activeCell": 0,
+    "focus": "",
+    "dialogs": 0
+   },
+   {
+    "step": "click fit",
+    "viewBox": "0 -98.81727574750832 1663.7 331.63455149501664",
+    "activeCell": 0,
+    "focus": "",
+    "dialogs": 0
+   },
+   {
+    "step": "click view",
+    "viewBox": "0 -98.81727574750832 1663.7 331.63455149501664",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key +",
+    "viewBox": "166.37 -65.65382059800666 1330.96 265.3076411960133",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key +",
+    "viewBox": "299.466 -39.12305647840533 1064.768 212.24611295681066",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key -",
+    "viewBox": "166.37 -65.65382059800666 1330.96 265.3076411960133",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key ArrowDown",
+    "viewBox": "166.37 -39.12305647840533 1330.96 265.3076411960133",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key ArrowRight",
+    "viewBox": "299.466 -39.12305647840533 1330.96 265.3076411960133",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key 0",
+    "viewBox": "0 -98.81727574750832 1663.7 331.63455149501664",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key 0",
+    "viewBox": "0 -98.81727574750832 1663.7 331.63455149501664",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key + (diagram not focused)",
+    "viewBox": "0 -98.81727574750832 1663.7 331.63455149501664",
+    "activeCell": 1,
+    "focus": "lm-Widget jp-Cell jp-CodeCell jp-Notebook-cell jp-mod-active jp-mod-selected",
+    "dialogs": 0
+   }
+  ],
+  "viewWidth": 602,
+  "viewHeight": 120
+ },
+ "before-1280-first": {
+  "viewBox": "0 -56.23703703703703 1663.7 246.47407407407405",
+  "clipped": []
+ },
+ "before-1280": {
+  "steps": [
+   {
+    "step": "after fit (start of the checks)",
+    "viewBox": "0 -26.994350282485883 1663.7 187.98870056497177",
+    "activeCell": 0,
+    "focus": "",
+    "dialogs": 0
+   },
+   {
+    "step": "click in",
+    "viewBox": "166.37 -8.195480225988703 1330.96 150.3909604519774",
+    "activeCell": 0,
+    "focus": "",
+    "dialogs": 0
+   },
+   {
+    "step": "click in",
+    "viewBox": "299.466 6.843615819209035 1064.768 120.31276836158193",
+    "activeCell": 0,
+    "focus": "",
+    "dialogs": 0
+   },
+   {
+    "step": "click out",
+    "viewBox": "166.37 -8.195480225988703 1330.96 150.3909604519774",
+    "activeCell": 0,
+    "focus": "",
+    "dialogs": 0
+   },
+   {
+    "step": "click fit",
+    "viewBox": "0 -26.994350282485883 1663.7 187.98870056497177",
+    "activeCell": 0,
+    "focus": "",
+    "dialogs": 0
+   },
+   {
+    "step": "click view",
+    "viewBox": "0 -26.994350282485883 1663.7 187.98870056497177",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key +",
+    "viewBox": "166.37 -8.195480225988703 1330.96 150.3909604519774",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key +",
+    "viewBox": "299.466 6.843615819209035 1064.768 120.31276836158193",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key -",
+    "viewBox": "166.37 -8.195480225988703 1330.96 150.3909604519774",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key ArrowDown",
+    "viewBox": "166.37 6.843615819209038 1330.96 150.3909604519774",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key ArrowRight",
+    "viewBox": "299.466 6.843615819209038 1330.96 150.3909604519774",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key 0",
+    "viewBox": "0 -26.994350282485883 1663.7 187.98870056497177",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key 0",
+    "viewBox": "0 -26.994350282485883 1663.7 187.98870056497177",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key + (diagram not focused)",
+    "viewBox": "0 -26.994350282485883 1663.7 187.98870056497177",
+    "activeCell": 1,
+    "focus": "lm-Widget jp-Cell jp-CodeCell jp-Notebook-cell jp-mod-active jp-mod-selected",
+    "dialogs": 0
+   }
+  ],
+  "viewWidth": 1062,
+  "viewHeight": 120
+ },
+ "before-untrusted-output": {
+  "html": "<div class=\"op-dag\"><div class=\"op-dag-head\">Job 'workshop' \u00b7 <span class=\"op-dag-count\">9</span> nodes <span class=\"op-dag-sep\">\u00b7 </span><span class=\"op-dag-preview\" title=\"In development: the diagram and its interface may change\">preview</span></div><div class=\"op-dag-view\"><img class=\"op-dag-picture\" alt=\"Diagram of Job 'workshop': 9 nodes\" width=\"1663.7\" height=\"134\" style=\"max-width:100%;height:auto\" src=\"data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIGNsYXNzPSJvcC1kYWctc3ZnIiByb2xlPSJncm91cCIgd2lkdGg9IjE2NjMuNyIgaGVpZ2h0PSIxMzQiIHZpZXdCb3g9IjAgMCAxNjYzLjcg",
+  "img": {
+   "style": "max-width:100%;height:auto",
+   "width": 1080,
+   "height": 86.984375,
+   "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz"
+  },
+  "outputWidth": 1100
+ },
+ "after-820-first": {
+  "viewBox": "0 -8 752.5 150",
+  "clipped": [
+   "op-dag-clip-right"
+  ]
+ },
+ "after-820": {
+  "steps": [
+   {
+    "step": "after fit (start of the checks)",
+    "viewBox": "0 -98.81727574750829 1663.7 331.6345514950166",
+    "activeCell": 0,
+    "focus": "",
+    "dialogs": 0
+   },
+   {
+    "step": "click in",
+    "viewBox": "166.37 -65.65382059800666 1330.96 265.3076411960133",
+    "activeCell": 0,
+    "focus": "",
+    "dialogs": 0
+   },
+   {
+    "step": "click in",
+    "viewBox": "299.4659999999999 -39.12305647840533 1064.7680000000003 212.24611295681066",
+    "activeCell": 0,
+    "focus": "",
+    "dialogs": 0
+   },
+   {
+    "step": "click out",
+    "viewBox": "166.37 -65.65382059800666 1330.96 265.3076411960133",
+    "activeCell": 0,
+    "focus": "",
+    "dialogs": 0
+   },
+   {
+    "step": "click fit",
+    "viewBox": "0 -98.81727574750829 1663.7 331.6345514950166",
+    "activeCell": 0,
+    "focus": "",
+    "dialogs": 0
+   },
+   {
+    "step": "click view",
+    "viewBox": "0 -98.81727574750829 1663.7 331.6345514950166",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key +",
+    "viewBox": "166.37 -65.65382059800666 1330.96 265.3076411960133",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key +",
+    "viewBox": "299.4659999999999 -39.12305647840533 1064.7680000000003 212.24611295681066",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key -",
+    "viewBox": "166.37 -65.65382059800666 1330.96 265.3076411960133",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key ArrowDown",
+    "viewBox": "166.37 -39.12305647840533 1330.96 265.3076411960133",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key ArrowRight",
+    "viewBox": "299.466 -39.12305647840533 1330.96 265.3076411960133",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key 0",
+    "viewBox": "0 -98.81727574750829 1663.7 331.6345514950166",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key 0",
+    "viewBox": "0 -98.81727574750829 1663.7 331.6345514950166",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key + (diagram not focused)",
+    "viewBox": "0 -98.81727574750829 1663.7 331.6345514950166",
+    "activeCell": 1,
+    "focus": "lm-Widget jp-Cell jp-CodeCell jp-Notebook-cell jp-mod-active jp-mod-selected",
+    "dialogs": 0
+   }
+  ],
+  "viewWidth": 602,
+  "viewHeight": 120
+ },
+ "after-1280-first": {
+  "viewBox": "0 -8 1327.5 150",
+  "clipped": [
+   "op-dag-clip-right"
+  ]
+ },
+ "after-1280": {
+  "steps": [
+   {
+    "step": "after fit (start of the checks)",
+    "viewBox": "0 -26.994350282485883 1663.7 187.98870056497177",
+    "activeCell": 0,
+    "focus": "",
+    "dialogs": 0
+   },
+   {
+    "step": "click in",
+    "viewBox": "166.37 -8.195480225988703 1330.96 150.3909604519774",
+    "activeCell": 0,
+    "focus": "",
+    "dialogs": 0
+   },
+   {
+    "step": "click in",
+    "viewBox": "299.466 6.843615819209035 1064.768 120.31276836158193",
+    "activeCell": 0,
+    "focus": "",
+    "dialogs": 0
+   },
+   {
+    "step": "click out",
+    "viewBox": "166.37 -8.195480225988703 1330.96 150.3909604519774",
+    "activeCell": 0,
+    "focus": "",
+    "dialogs": 0
+   },
+   {
+    "step": "click fit",
+    "viewBox": "0 -26.994350282485883 1663.7 187.98870056497177",
+    "activeCell": 0,
+    "focus": "",
+    "dialogs": 0
+   },
+   {
+    "step": "click view",
+    "viewBox": "0 -26.994350282485883 1663.7 187.98870056497177",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key +",
+    "viewBox": "166.37 -8.195480225988703 1330.96 150.3909604519774",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key +",
+    "viewBox": "299.466 6.843615819209035 1064.768 120.31276836158193",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key -",
+    "viewBox": "166.37 -8.195480225988703 1330.96 150.3909604519774",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key ArrowDown",
+    "viewBox": "166.37 6.843615819209035 1330.96 150.3909604519774",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key ArrowRight",
+    "viewBox": "299.466 6.843615819209035 1330.96 150.3909604519774",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key 0",
+    "viewBox": "0 -26.994350282485883 1663.7 187.98870056497177",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key 0",
+    "viewBox": "0 -26.994350282485883 1663.7 187.98870056497177",
+    "activeCell": 0,
+    "focus": "op-dag-view",
+    "dialogs": 0
+   },
+   {
+    "step": "key + (diagram not focused)",
+    "viewBox": "0 -26.994350282485883 1663.7 187.98870056497177",
+    "activeCell": 1,
+    "focus": "lm-Widget jp-Cell jp-CodeCell jp-Notebook-cell jp-mod-active jp-mod-selected",
+    "dialogs": 0
+   }
+  ],
+  "viewWidth": 1062,
+  "viewHeight": 120
+ },
+ "after-untrusted-output": {
+  "html": "<div class=\"op-dag\"><div class=\"op-dag-head\">Job 'workshop' \u00b7 <span class=\"op-dag-count\">9</span> nodes <span class=\"op-dag-sep\">\u00b7 </span><span class=\"op-dag-preview\" title=\"In development: the diagram and its interface may change\">preview</span></div><div class=\"op-dag-view\"><img class=\"op-dag-picture\" alt=\"Diagram of Job 'workshop': 9 nodes\" width=\"1663.7\" height=\"134\" style=\"width:100%;max-width:2079.7px;height:auto\" src=\"data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIGNsYXNzPSJvcC1kYWctc3ZnIiByb2xlPSJncm91cCIgd2lkdGg9IjE2NjMuNyIgaGVpZ2h0PSIxMzQiIHZpZXdCb3g9I",
+  "img": {
+   "style": "width:100%;max-width:2079.7px;height:auto",
+   "width": 1080,
+   "height": 86.984375,
+   "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz"
+  },
+  "outputWidth": 1100
+ }
+}
