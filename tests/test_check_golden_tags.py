@@ -455,3 +455,105 @@ def test_the_gate_passes_a_pinned_type_snapshot(repo: Path) -> None:
     _commit(repo, "a pinned snapshot")
     result = _gate(repo, "0.3.0")
     assert result.returncode == 0, result.stderr
+
+
+# ---------------------------------------------------------------------------
+# A withdrawn release (ITL-1255)
+# ---------------------------------------------------------------------------
+
+
+def _withdraw_and_change_a_released_file(repo: Path) -> None:
+    """Withdraw 0.3.0 at HEAD and change a file 0.3.0 listed, as v1 now may."""
+    store.withdraw_release(repo, VERSION, "0.3.0", "2026-11-17", "Withdrawn.")
+    path = _folder(repo) / "semantic-01.json"
+    _ = path.write_text(path.read_text().replace("semantic_v1", "semantic_v2", 1))
+    manifest = store.read_json(store.manifest_path(repo, VERSION))
+    manifest["golden"]["history"] = store.with_file(
+        manifest["golden"]["history"], path.name, store.file_digest(path), "2026-11-18"
+    )
+    store.write_json(store.manifest_path(repo, VERSION), manifest)
+    assert store.tree_problems(repo, VERSION) == []
+    _commit(repo, "withdraw 0.3.0 and change a value it listed")
+
+
+def test_a_withdrawn_release_passes_with_its_tag_and_after_it_is_deleted(
+    repo: Path,
+) -> None:
+    """The order of the withdrawal and the tag deletion does not matter."""
+    _withdraw_and_change_a_released_file(repo)
+    with_tag = _check(repo, ci=True)
+    assert with_tag.returncode == 0, with_tag.stderr
+    assert "v0.3.0: withdrawn on 2026-11-17" in with_tag.stdout
+    _git(repo, "tag", "-d", "v0.3.0")
+    without_tag = _check(repo, ci=True)
+    assert without_tag.returncode == 0, without_tag.stderr
+    assert "v0.3.0" not in without_tag.stdout
+
+
+@pytest.mark.parametrize(
+    ("field", "problem"),
+    [
+        ("revision", "does not name the release revision the tag pinned"),
+        ("manifest", "does not name the manifest pin the tag shipped"),
+    ],
+)
+def test_a_withdrawn_record_that_does_not_match_its_tag_fails(
+    repo: Path, field: str, problem: str
+) -> None:
+    _withdraw_and_change_a_released_file(repo)
+    pins = store.read_json(store.pins_path(repo))
+    pins[VERSION]["withdrawn"]["0.3.0"][field] = "0" * 64
+    store.write_json(store.pins_path(repo), pins)
+    _commit(repo, "tamper with the withdrawn record")
+    result = _check(repo)
+    assert result.returncode == 1
+    assert f"v0.3.0: the withdrawn record of 0.3.0 {problem}" in result.stderr
+
+
+def test_a_release_dropped_without_a_withdrawn_record_still_fails(repo: Path) -> None:
+    _withdraw_and_change_a_released_file(repo)
+    pins = store.read_json(store.pins_path(repo))
+    del pins[VERSION]["withdrawn"]
+    store.write_json(store.pins_path(repo), pins)
+    _commit(repo, "drop the release without a record")
+    result = _check(repo)
+    assert result.returncode == 1
+    assert "the releases line 0.3.0" in result.stderr
+    assert "semantic-01.json differs from the released file" in result.stderr
+
+
+def test_a_record_of_another_release_does_not_excuse_a_release(repo: Path) -> None:
+    _withdraw_and_change_a_released_file(repo)
+    pins = store.read_json(store.pins_path(repo))
+    withdrawn = pins[VERSION]["withdrawn"]
+    withdrawn["0.2.9"] = withdrawn.pop("0.3.0")
+    store.write_json(store.pins_path(repo), pins)
+    _commit(repo, "record the wrong release")
+    result = _check(repo)
+    assert result.returncode == 1
+    assert "the releases line 0.3.0" in result.stderr
+
+
+def test_the_release_after_a_withdrawn_one_is_checked(repo: Path) -> None:
+    """The freeze at 0.4.0: its tag is compared with HEAD; the withdrawn tag is not."""
+    _withdraw_and_change_a_released_file(repo)
+    main(["--root", str(repo), "--release", "0.4.0"])
+    _commit(repo, "release 0.4.0")
+    _git(repo, "tag", "v0.4.0")
+    assert _gate(repo, "0.4.0").returncode == 0
+    passing = _check(repo, ci=True)
+    assert passing.returncode == 0, passing.stderr
+    assert "HEAD keeps what v0.4.0 released" in passing.stdout
+    path = _folder(repo) / "semantic-01.json"
+    _ = path.write_text(path.read_text().replace("semantic_v2", "semantic_v3", 1))
+    _commit(repo, "edit a file 0.4.0 released")
+    failing = _check(repo)
+    assert failing.returncode == 1
+    assert "v0.4.0: tests/test_hashing/golden/data" in failing.stderr
+
+
+def test_the_gate_refuses_a_withdrawn_version(repo: Path) -> None:
+    _withdraw_and_change_a_released_file(repo)
+    result = _gate(repo, "0.3.0")
+    assert result.returncode == 1
+    assert "was withdrawn and is never released again" in result.stderr

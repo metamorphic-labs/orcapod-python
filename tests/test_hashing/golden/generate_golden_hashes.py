@@ -4,7 +4,7 @@ Usage::
 
     uv run python tests/test_hashing/golden/generate_golden_hashes.py            # add
     uv run python tests/test_hashing/golden/generate_golden_hashes.py --check    # report
-    uv run python tests/test_hashing/golden/generate_golden_hashes.py --release 0.3.0
+    uv run python tests/test_hashing/golden/generate_golden_hashes.py --release 0.4.0
     uv run python tests/test_hashing/golden/generate_golden_hashes.py --remove <entry>
 
 The golden values of the current data context live in
@@ -20,8 +20,15 @@ key, or embeds in a column name or a database table path. A changed value means 
 by an earlier release is no longer found, is keyed differently, or is read under another
 column name. **A changed value is a breaking change.**
 
-The rules (developer, November 15, 2026, ITL-946):
+The rules (developer, November 15, 2026, ITL-946; reopened November 17, 2026, ITL-1255):
 
+0. Data context v1 is open until the 0.4.0 release. 0.3.0 was withdrawn (2026-11-17) before
+   anyone used it: its release revision is out of the history and its pins are kept under
+   ``withdrawn`` in ``released_manifests.json``, so no file is released today. Until 0.4.0,
+   a change to any v1 value needs the developer's approval of the exact list of entries
+   that move, each explained; it is made with ``--remove`` then ``--add`` (rule 4). 0.4.0
+   freezes v1 with ``--release 0.4.0``; so would any version published before it, a
+   pre-release included (the Release workflow requires the release step for every version).
 1. A golden file listed by a released revision never changes and is never removed. This
    script never rewrites one.
 2. Adding values is allowed in any release. ``--add`` (the default) writes the entries the
@@ -56,8 +63,8 @@ Releasing
 ``--release X.Y.Z`` is the golden step of a release pull request: it appends the release
 revision (``added`` empty), pins its digest under ``releases`` in
 ``src/orcapod/contexts/released_manifests.json``, and, at the data context's first release,
-sets ``released_in`` and pins the digest of the manifest without ``golden``. It computes no
-hash. Try it on a copy first with ``--root`` (``store.copy_tree`` makes one).
+sets ``released_in`` and pins the digest of the manifest without ``golden``. It keeps the
+``withdrawn`` records and refuses a withdrawn version. It computes no hash. Try it on a copy first with ``--root`` (``store.copy_tree`` makes one).
 
 Comparing releases
 ------------------
@@ -295,6 +302,11 @@ def release(root: pathlib.Path, version: str, release_text: str) -> str:
     pin = pins[version]
     if name in pin["releases"]:
         raise SystemExit(f"{name} is already released")
+    if name in store.withdrawn_releases(pin):
+        raise SystemExit(
+            f"{name} was withdrawn and is never released again: a package index never "
+            "takes a version twice; release the next version"
+        )
     history = manifest["golden"]["history"]
     if not history:
         raise SystemExit("the golden history lists no file")
@@ -304,6 +316,7 @@ def release(root: pathlib.Path, version: str, release_text: str) -> str:
         manifest["released_in"] = name
     fixed = store.fixed_manifest_digest(manifest)
     pins[version] = {
+        **pin,
         "manifest": fixed,
         "releases": {**pin["releases"], name: history[-1]["digest"]},
     }
