@@ -36,6 +36,9 @@ class PolarsFilter(UnaryOperator):
     # A filter chooses rows and never changes a column (ITL-912).
     OUTPUT_SCHEMA_IS_INPUT_SCHEMA = True
 
+    # Its identity is not frozen with data context v1 (ITL-1266, ITL-1247).
+    PROVISIONAL = True
+
     def __init__(
         self,
         predicates: Collection[

@@ -122,6 +122,32 @@ def test_a_golden_file_added_after_the_release_passes(repo: Path) -> None:
     assert result.returncode == 0, result.stderr
 
 
+def _change_a_provisional_file(repo: Path) -> None:
+    """Remove one entry of a provisional file with the tool, as an approved change would."""
+    path = store.provisional_folder(_folder(repo)) / "semantic.json"
+    entry = sorted(store.read_json(path))[0]
+    main(["--root", str(repo), "--remove", entry])
+    assert entry not in store.read_json(path)
+    _commit(repo, f"remove {entry} from a provisional file")
+    assert store.tree_problems(repo, VERSION) == []
+
+
+def test_a_provisional_file_changed_after_the_release_passes(repo: Path) -> None:
+    """A release never freezes a provisional file (ITL-1266): the tag check ignores it."""
+    _change_a_provisional_file(repo)
+    result = _check(repo, ci=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_the_gate_passes_a_provisional_change_after_the_release_step(
+    repo: Path,
+) -> None:
+    """A provisional file changed after the release step adds no revision."""
+    _change_a_provisional_file(repo)
+    result = _gate(repo, "0.3.0")
+    assert result.returncode == 0, result.stderr
+
+
 def test_an_edited_released_file_fails(repo: Path) -> None:
     path = _folder(repo) / "semantic-01.json"
     _ = path.write_text(path.read_text().replace("semantic_v1", "semantic_v2", 1))
