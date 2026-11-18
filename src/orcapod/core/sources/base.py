@@ -326,6 +326,10 @@ class RootSource(StreamBase):
 
         Returns:
             A ``CachedSource`` that caches this source's output.
+
+        Raises:
+            ValueError: If this source is restricted (a condition or a limit): a cache
+                is kept under the table's identity, which a restriction is not part of.
         """
         from orcapod.core.sources.cached_source import CachedSource
 

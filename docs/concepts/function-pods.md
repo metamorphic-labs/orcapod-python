@@ -792,6 +792,10 @@ output, and it then reads as a zero-row table, as before the first run, until th
 An operator node attached in `CacheMode.REPLAY` does not compute: its run replays the rows
 stored under its key by `CacheMode.LOG` runs, every logged run of that key, not only the
 latest; before its run it shows nothing, like every node (a narrower replay is ITL-1098).
+A `REPLAY` run flows the logged rows whatever the current input is, so a log written from a
+restricted read (a source restricted with `where` or `limit=`; see
+[Restricting a source versus filtering in the pipeline](sources.md#restricting-a-source-versus-filtering-in-the-pipeline))
+replays only those rows.
 
 ### When the database cannot be written
 

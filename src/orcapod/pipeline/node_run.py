@@ -257,7 +257,7 @@ _Restriction: TypeAlias = "tuple[Condition | None, int | None]"
 # source or node to state its restriction (its ``Condition`` and limit, members of the
 # stream and source protocols that every source kind answers); then this function and
 # its ``getattr`` go, and the walks below read those members.
-def _restriction_of(stream: object) -> _Restriction | None:
+def restriction_of(stream: object) -> _Restriction | None:
     """Return the condition and limit a source reads under, or ``None`` for neither.
 
     Only ``SpiralDBTableSource`` can be restricted today; it keeps its condition in
@@ -294,7 +294,7 @@ def _restrictions_beneath(
         if any(current is seen for seen in visited):
             continue
         visited.append(current)
-        restriction = _restriction_of(current)
+        restriction = restriction_of(current)
         if restriction is not None:
             found.add((_source_name(current), restriction))
         if isinstance(current, SourceJobNode):
@@ -361,7 +361,7 @@ def restrictions_in_force(
     conditions are both reported; two sources without a slot that share a label are
     numbered (``"<label> (2)"``).
 
-    Only a ``SpiralDBTableSource`` can be restricted today (``_restriction_of``;
+    Only a ``SpiralDBTableSource`` can be restricted today (``restriction_of``;
     every source kind when restrictions are generalized, ITL-1219).
 
     Args:
@@ -389,7 +389,7 @@ def restrictions_in_force(
             if stream.bound_source is not None:
                 pending.append((stream.bound_source, stream.name))
         elif isinstance(stream, RootSource):
-            restriction = _restriction_of(stream)
+            restriction = restriction_of(stream)
             if restriction is not None:
                 entry = (_source_name(stream), *restriction)
                 name = slot if slot is not None else str(stream.label)

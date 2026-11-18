@@ -67,6 +67,10 @@ class CachedSource(RootSource):
         The cache is a correct cumulative record.  The union of cache + live
         data is the full set of data ever available from that source.
 
+    A restricted source (``SpiralDBTableSource.where`` or ``limit=``, ITL-1218) is
+    refused: a restriction is not part of the source's identity, so its rows would be
+    kept under the whole table's identity and read back by every cache of that table.
+
     Example::
 
         source = ArrowTableSource(table, tag_columns=["id"])
@@ -96,6 +100,21 @@ class CachedSource(RootSource):
         data_context: str | contexts.DataContext | None = None,
         config: OrcapodConfig | None = None,
     ) -> None:
+        """Wrap ``source`` in a cache kept in ``cache_database``.
+
+        Raises:
+            ValueError: If ``source`` is restricted (a condition or a limit).
+        """
+        from orcapod.pipeline.node_run import restriction_of
+        from orcapod.pipeline.run_summary import restriction_text
+
+        restriction = restriction_of(source)
+        if restriction is not None:
+            raise ValueError(
+                "A cache keeps one table's rows under the table's identity; it cannot "
+                f"hold a restricted read ({restriction_text(*restriction)}): cache the "
+                "unrestricted source, or read without a cache."
+            )
         if data_context is None:
             data_context = source.data_context_key
         if source_id is None:

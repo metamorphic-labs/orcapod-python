@@ -26,6 +26,8 @@ from orcapod.errors import RestrictedAggregationWarning
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.node_run import restrictions_in_force
 from orcapod.core.sources.spiraldb_table_source import _checked_conditions
+from orcapod.core.sources.base import RootSource
+from orcapod.core.sources.cached_source import CachedSource
 from orcapod.sources import SpiralDBTableSource
 from orcapod.types import Condition
 from tests.test_databases import fake_pyspiral
@@ -74,7 +76,7 @@ def _source(**kwargs: Any) -> SpiralDBTableSource:
     return SpiralDBTableSource(_PROJECT, "event", **kwargs)
 
 
-def _timestamps(source: SpiralDBTableSource) -> list[int]:
+def _timestamps(source: RootSource) -> list[int]:
     """Return the ``timestamp`` key of every row ``source`` reads, in order."""
     return cast("list[int]", source.as_table().column("timestamp").to_pylist())
 
@@ -1161,3 +1163,93 @@ class TestConditionInstances:
         summary = job.run()
 
         assert summary.restrictions == {"events": Condition.of(amplitude=values[0])}
+
+
+_RESTRICTED_FORMS: dict[str, tuple[Callable[[], SpiralDBTableSource], list[str]]] = {
+    "a condition": (lambda: _source().where(subject_id="m2"), ["subject_id='m2'"]),
+    "a limit": (lambda: _source(limit=2), ["limit 2"]),
+    "a condition and a limit": (
+        lambda: _source(limit=2).where(subject_id="m2"),
+        ["subject_id='m2'", "limit 2"],
+    ),
+    "several conditions in one call": (
+        lambda: _source().where(flag=True, subject_id="m1"),
+        ["flag=True", "subject_id='m1'"],
+    ),
+    "chained conditions": (
+        lambda: _source().where(subject_id="m1").where(channel=1),
+        ["subject_id='m1'", "channel=1"],
+    ),
+    "the constructor's where=": (
+        lambda: _source(where={"channel": 0, "subject_id": "m1"}),
+        ["channel=0", "subject_id='m1'"],
+    ),
+}
+
+
+class TestCachedSourceOverARestriction:
+    """A whole-table cache over a restricted source is refused at construction.
+
+    A cache is kept under its source's identity, which a restriction is not part of:
+    a restricted read would be stored as the table's rows and read back by every cache
+    of the table (and two caches in one job would be one input).
+    """
+
+    @pytest.mark.parametrize("form", list(_RESTRICTED_FORMS))
+    @pytest.mark.parametrize("via", ["CachedSource", "cached()"])
+    def test_a_restricted_source_is_refused(self, project, tmp_path, form, via):
+        """Every form of a restriction is refused, naming it, by both entry points."""
+        build, named = _RESTRICTED_FORMS[form]
+        restricted = build()
+        cache = DeltaTableDatabase(tmp_path / "cache")
+
+        with pytest.raises(ValueError, match="cannot hold a restricted read") as caught:
+            if via == "CachedSource":
+                CachedSource(restricted, cache_database=cache)
+            else:
+                restricted.cached(cache_database=cache)
+
+        for text in named:
+            assert text in str(caught.value)
+        assert fake_pyspiral.scan_log == []
+
+    def test_an_unrestricted_cache_still_works(self, project, tmp_path):
+        """A cache over the whole table reads every row."""
+        cached = _source().cached(cache_database=DeltaTableDatabase(tmp_path / "c"))
+
+        assert _timestamps(cached) == [1, 2, 3, 4, 5]
+
+    def test_a_restricted_read_after_a_cache_reads_its_own_rows(
+        self, project, tmp_path
+    ):
+        """A plain restricted read beside a cache of the whole table is not affected."""
+        events = _source(source_id="events", tag_only_columns=True)
+        cached = events.cached(cache_database=DeltaTableDatabase(tmp_path / "c"))
+        cached.as_table()
+
+        assert _timestamps(events.where(subject_id="m2", flag=True)) == [4, 5]
+        assert _timestamps(events.where(flag=True, subject_id="m1")) == [3]
+
+    def test_a_second_cache_in_one_job_is_refused_when_restricted(
+        self, project, tmp_path
+    ):
+        """In a job over a cache of the table, a restricted cache of it is refused
+        where it is built, before it could become a second branch's input."""
+
+        @function_pod(output_keys="a")
+        def first(amplitude: float | None) -> float | None:
+            """Return ``amplitude``."""
+            return amplitude
+
+        events = _source(source_id="events", tag_only_columns=True)
+        cache = DeltaTableDatabase(tmp_path / "cache")
+        job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
+        with job:
+            first.pod(events.cached(cache_database=cache), label="first")
+            with pytest.raises(ValueError, match="cannot hold a restricted read"):
+                events.where(subject_id="m2", flag=True).cached(cache_database=cache)
+
+        job.run()
+
+        rows = job.nodes["first"].as_table().column("timestamp").to_pylist()
+        assert sorted(rows) == [1, 2, 3, 4, 5]

@@ -296,6 +296,13 @@ job built over `events`, whose slot is named by the source id.)
   summary shows them (`spikes (spikes): where unit_id=106, limit 3`). A saved job records them in
   the source's config, and a loaded job reads with them. Binding does not compare
   restrictions: a restricted source fits the slot of the unrestricted one.
+- **No cache over a restriction.** `CachedSource` (and `source.cached(...)`) refuses a
+  restricted source with `ValueError`, naming the restriction: a cache keeps the table's rows
+  under the table's identity, which a restriction is not part of, so a restricted read would
+  be read back as the whole table by every cache of it. Cache the unrestricted source, or read
+  without a cache. An operator node in `CacheMode.REPLAY` flows the rows its `LOG` runs stored
+  whatever the current input is, so a log written from a restricted read replays only those
+  rows.
 - **Under an aggregation.** A `GroupBy`, `Batch` or `MergeJoin` below a restricted source
   builds its groups from the rows the restriction lets through. That is allowed (each
   aggregated row lists its members), and a job run issues one

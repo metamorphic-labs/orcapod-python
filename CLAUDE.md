@@ -1206,7 +1206,11 @@ data. The rules:
   the saved job keeps `where` and `limit` in the source config, bind never compares them, and a job run over a restricted
   source feeding `GroupBy`, `Batch` or `MergeJoin` issues one `RestrictedAggregationWarning`.
   A graph holds one source per content hash, so one table restricted two ways (or with and
-  without a restriction) in one pipeline is refused at capture (`node_run.require_one_restriction`).
+  without a restriction) in one pipeline is refused at capture (`node_run.require_one_restriction`),
+  also when a stream built before the capture has the hash of a captured step. A `CachedSource`
+  over a restricted source is refused at construction (a cache is kept under the table's
+  identity; developer, November 18, 2026); an operator's `REPLAY` replays what its `LOG` runs
+  stored, restricted or not.
 - Empty data → `ArrowTableSource` raises `ValueError("Table is empty")`.
 - A side-effect job node delivers only when it runs (developer, November 13, 2026, ITL-1091):
   `job.run()`, `node.run()` (state-driven, ITL-1095: a node holding a current run delivers
