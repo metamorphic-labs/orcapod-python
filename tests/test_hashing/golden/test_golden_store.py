@@ -558,3 +558,183 @@ def test_release_refuses_a_version_it_cannot_record(tree: Path, version: str) ->
 def test_allow_errors_is_only_for_stdout(tree: Path) -> None:
     with pytest.raises(SystemExit):
         main(["--root", str(tree), "--allow-errors", "--group", "schema"])
+
+
+# ---------------------------------------------------------------------------
+# A withdrawn release (ITL-1255)
+# ---------------------------------------------------------------------------
+
+REASON = "Withdrawn before anyone used it."
+
+
+def _released_and_withdrawn(tree: Path) -> Path:
+    """Release 0.3.0 on the copy, add a file after it, then withdraw 0.3.0."""
+    main(["--root", str(tree), "--release", "0.3.0"])
+    _record(tree, NEXT_SCHEMA, {"later.entry": "x"})
+    store.withdraw_release(tree, VERSION, "0.3.0", "2026-11-17", REASON)
+    return tree
+
+
+def test_a_withdrawn_release_freezes_nothing(tree: Path) -> None:
+    """After the withdrawal the tree is sound and open, and the record keeps the pins."""
+    main(["--root", str(tree), "--release", "0.3.0"])
+    released = _pin(tree)
+    files = _snapshot(_folder(tree))
+    store.withdraw_release(tree, VERSION, "0.3.0", "2026-11-17", REASON)
+    manifest = _manifest(tree)
+    assert store.tree_problems(tree, VERSION) == []
+    assert manifest["released_in"] is None
+    assert store.released_files(manifest["golden"]["history"]) == set()
+    assert [r["release"] for r in manifest["golden"]["history"]] == [None]
+    assert _pin(tree) == {
+        "manifest": None,
+        "releases": {},
+        "withdrawn": {
+            "0.3.0": {
+                "date": "2026-11-17",
+                "reason": REASON,
+                "manifest": released["manifest"],
+                "revision": released["releases"]["0.3.0"],
+            }
+        },
+    }
+    assert _snapshot(_folder(tree)) == files
+
+
+def test_withdrawing_rechains_the_revisions_after_the_release(tree: Path) -> None:
+    _ = _released_and_withdrawn(tree)
+    history = _history(tree)
+    assert [r["release"] for r in history] == [None, None]
+    assert NEXT_SCHEMA in history[1]["added"]
+    assert history[1]["previous"] == history[0]["digest"]
+    assert store.history_problems(history) == []
+
+
+def test_withdrawing_only_takes_the_last_release(tree: Path) -> None:
+    main(["--root", str(tree), "--release", "0.3.0"])
+    _record(tree, NEXT_SCHEMA, {"later.entry": "x"})
+    main(["--root", str(tree), "--release", "0.3.1"])
+    with pytest.raises(ValueError, match="not the last release"):
+        store.withdraw_release(tree, VERSION, "0.3.0", "2026-11-17", REASON)
+    store.withdraw_release(tree, VERSION, "0.3.1", "2026-11-17", REASON)
+    pin = _pin(tree)
+    assert set(pin["releases"]) == {"0.3.0"}
+    assert pin["manifest"] is not None
+    assert _manifest(tree)["released_in"] == "0.3.0"
+    assert store.tree_problems(tree, VERSION) == []
+
+
+def test_a_value_a_withdrawn_release_listed_can_change(tree: Path) -> None:
+    """The approved-change procedure works on a file the withdrawn release listed."""
+    main(["--root", str(tree), "--release", "0.3.0"])
+    name = NEWEST_SCHEMA
+    entries = list(store.read_json(_folder(tree) / name))
+    with pytest.raises(SystemExit, match="released"):
+        main(["--root", str(tree), "--remove", entries[0]])
+    store.withdraw_release(tree, VERSION, "0.3.0", "2026-11-17", REASON)
+    main(["--root", str(tree), "--remove", entries[-1], "--remove", entries[0]])
+    remaining = store.read_json(_folder(tree) / name)
+    assert entries[0] not in remaining and entries[-1] not in remaining
+    assert store.tree_problems(tree, VERSION) == []
+    main(["--root", str(tree), "--group", "schema"])
+    assert list(store.read_json(_folder(tree) / name)) == sorted(entries)
+    assert store.tree_problems(tree, VERSION) == []
+
+
+def test_release_refuses_a_withdrawn_version_and_writes_nothing(tree: Path) -> None:
+    _ = _released_and_withdrawn(tree)
+    before = (
+        _snapshot(tree / store.CONTEXTS_DIR),
+        _snapshot(tree / store.CONTEXTS_DIR / "data"),
+    )
+    for version in ("0.3.0", "v0.3.0"):
+        with pytest.raises(SystemExit, match="withdrawn"):
+            main(["--root", str(tree), "--release", version])
+    after = (
+        _snapshot(tree / store.CONTEXTS_DIR),
+        _snapshot(tree / store.CONTEXTS_DIR / "data"),
+    )
+    assert after == before
+
+
+def test_the_next_release_freezes_again_and_keeps_the_record(tree: Path) -> None:
+    """The freeze at 0.4.0: the release step after a withdrawal."""
+    _ = _released_and_withdrawn(tree)
+    withdrawn = _pin(tree)["withdrawn"]
+    main(["--root", str(tree), "--release", "0.4.0"])
+    manifest = _manifest(tree)
+    history = manifest["golden"]["history"]
+    assert manifest["released_in"] == "0.4.0"
+    assert [r["release"] for r in history] == [None, None, "0.4.0"]
+    assert _pin(tree) == {
+        "manifest": store.fixed_manifest_digest(manifest),
+        "releases": {"0.4.0": history[-1]["digest"]},
+        "withdrawn": withdrawn,
+    }
+    assert store.released_files(history) == set(_snapshot(_folder(tree)))
+    assert store.tree_problems(tree, VERSION) == []
+    assert store.final_release_problems(_pin(tree), "0.4.0") == []
+
+
+def _set_record(field: str, value: Any) -> Any:
+    def change(pin: dict[str, Any], history: list[dict[str, Any]]) -> None:
+        pin["withdrawn"]["0.3.0"][field] = value
+
+    return change
+
+
+def _drop_record_field(pin: dict[str, Any], history: list[dict[str, Any]]) -> None:
+    del pin["withdrawn"]["0.3.0"]["reason"]
+
+
+def _rename_record(pin: dict[str, Any], history: list[dict[str, Any]]) -> None:
+    pin["withdrawn"]["v0.3.0"] = pin["withdrawn"].pop("0.3.0")
+
+
+def _pin_withdrawn_as_release(
+    pin: dict[str, Any], history: list[dict[str, Any]]
+) -> None:
+    pin["releases"]["0.3.0"] = pin["withdrawn"]["0.3.0"]["revision"]
+
+
+@pytest.mark.parametrize(
+    ("change", "problem"),
+    [
+        (_set_record("date", "17 November 2026"), "no YYYY-MM-DD date"),
+        (_set_record("reason", " "), "gives no reason"),
+        (_set_record("manifest", "not a digest"), "manifest is neither null"),
+        (_set_record("revision", None), "revision is not a sha256 digest"),
+        (_drop_record_field, "does not have exactly the fields"),
+        (_rename_record, "not a normalized release version"),
+        (lambda pin, h: pin.update(withdrawn=["0.3.0"]), "withdrawn is not a mapping"),
+        (_pin_withdrawn_as_release, "withdrawn release 0.3.0 is pinned under releases"),
+        (lambda pin, h: pin.update(extra={}), "the pin is not"),
+    ],
+)
+def test_a_withdrawn_record_that_breaks_the_rules_is_reported(
+    tree: Path, change: Any, problem: str
+) -> None:
+    _ = _released_and_withdrawn(tree)
+    pins = store.read_json(store.pins_path(tree))
+    change(pins[VERSION], _history(tree))
+    store.write_json(store.pins_path(tree), pins)
+    problems = store.tree_problems(tree, VERSION)
+    assert any(problem in p for p in problems), problems
+
+
+def test_a_withdrawn_release_left_in_the_history_is_reported(tree: Path) -> None:
+    """A record does not withdraw a release whose revision is still in the history."""
+    main(["--root", str(tree), "--release", "0.3.0"])
+    pins = store.read_json(store.pins_path(tree))
+    pin = pins[VERSION]
+    pin["withdrawn"] = {
+        "0.3.0": {
+            "date": "2026-11-17",
+            "reason": REASON,
+            "manifest": pin["manifest"],
+            "revision": pin["releases"].pop("0.3.0"),
+        }
+    }
+    store.write_json(store.pins_path(tree), pins)
+    problems = store.tree_problems(tree, VERSION)
+    assert any("is a release revision of the history" in p for p in problems), problems

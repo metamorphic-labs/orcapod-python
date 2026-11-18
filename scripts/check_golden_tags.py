@@ -13,6 +13,13 @@ context, it checks in HEAD:
 - the pins of the current data context at the tag (the manifest pin and every ``releases``
   line) are present unchanged.
 
+A withdrawn release is not compared with HEAD (ITL-1255): when HEAD's
+``released_manifests.json`` records release ``X.Y.Z`` under ``withdrawn`` of the current data
+context, the tag ``v<X.Y.Z>`` is checked against that record instead: the record's
+``revision`` and ``manifest`` must be the release digest and the manifest pin the tag
+shipped. So the check passes the same way whether the tag still exists or was deleted, and
+a record never excuses a release it does not describe.
+
 The current data context is the one manifest in ``src/orcapod/contexts/data/`` at HEAD.
 
 Usage:
@@ -126,8 +133,69 @@ def _current_version(repo: Path) -> str:
     return names[0].removesuffix(".json")
 
 
+def _head_withdrawn(repo: Path, version: str) -> dict[str, Any]:
+    """HEAD's records of the withdrawn releases of a data context, by version."""
+    pins = _show_json(repo, "HEAD", PINS)
+    pin = pins.get(version) if isinstance(pins, dict) else None
+    withdrawn = pin.get("withdrawn") if isinstance(pin, dict) else None
+    return withdrawn if isinstance(withdrawn, dict) else {}
+
+
+def tag_release(repo: Path, tag: str, version: str) -> str | None:
+    """The release of ``version`` a tag shipped, or ``None`` when it is not one.
+
+    Args:
+        repo: Repository root.
+        tag: Tag name.
+        version: Current data context version.
+
+    Returns:
+        ``X.Y.Z`` when the tag is ``v<X.Y.Z>`` and its ``released_manifests.json`` pins
+        release ``X.Y.Z`` of ``version``; otherwise ``None``.
+    """
+    release = tag.removeprefix("v")
+    tag_pins = _show_json(repo, tag, PINS)
+    pin = tag_pins.get(version) if isinstance(tag_pins, dict) else None
+    if not isinstance(pin, dict) or not isinstance(pin.get("releases"), dict):
+        return None
+    return release if release in pin["releases"] else None
+
+
+def check_withdrawn_tag(repo: Path, tag: str, version: str, release: str) -> list[str]:
+    """Check HEAD's record of a withdrawn release against the tag of that release.
+
+    Args:
+        repo: Repository root.
+        tag: Tag name.
+        version: Current data context version.
+        release: The release the tag shipped, recorded as withdrawn at HEAD.
+
+    Returns:
+        One sentence per difference between the record and what the tag pinned.
+    """
+    record = _head_withdrawn(repo, version).get(release)
+    if not isinstance(record, dict):
+        return [f"{tag}: the withdrawn record of {release} is not a record"]
+    pin = _show_json(repo, tag, PINS)[version]
+    problems: list[str] = []
+    if record.get("revision") != pin["releases"][release]:
+        problems.append(
+            f"{tag}: the withdrawn record of {release} does not name the release "
+            "revision the tag pinned"
+        )
+    if record.get("manifest") != pin.get("manifest"):
+        problems.append(
+            f"{tag}: the withdrawn record of {release} does not name the manifest pin "
+            "the tag shipped"
+        )
+    return problems
+
+
 def check_tag(repo: Path, tag: str, version: str) -> list[str] | None:
     """Check HEAD against one tag.
+
+    A tag whose release HEAD records as withdrawn is checked by ``check_withdrawn_tag``
+    instead.
 
     Args:
         repo: Repository root.
@@ -138,13 +206,12 @@ def check_tag(repo: Path, tag: str, version: str) -> list[str] | None:
         ``None`` when the tag is not a release of ``version``; otherwise one sentence per
         difference (empty when HEAD keeps everything the tag released).
     """
-    release = tag.removeprefix("v")
-    tag_pins = _show_json(repo, tag, PINS)
-    pin = tag_pins.get(version) if isinstance(tag_pins, dict) else None
-    if not isinstance(pin, dict) or not isinstance(pin.get("releases"), dict):
+    release = tag_release(repo, tag, version)
+    if release is None:
         return None
-    if release not in pin["releases"]:
-        return None
+    if release in _head_withdrawn(repo, version):
+        return check_withdrawn_tag(repo, tag, version, release)
+    pin = _show_json(repo, tag, PINS)[version]
     problems: list[str] = []
     head_pins = _show_json(repo, "HEAD", PINS)
     head_pin = head_pins.get(version) if isinstance(head_pins, dict) else None
@@ -316,6 +383,11 @@ def check_release(repo: Path, release: str) -> list[str]:
     releases = pin.get("releases") if isinstance(pin, dict) else None
     if not isinstance(pin, dict) or not isinstance(releases, dict):
         return [f"HEAD has no pin of data context {version}: {step}"]
+    if release in _head_withdrawn(repo, version):
+        return [
+            f"release {release} of data context {version} was withdrawn and is never "
+            "released again: a package index never takes a version twice"
+        ]
     if release not in releases:
         return [
             f"HEAD does not record release {release} of data context {version}: {step}"
@@ -396,6 +468,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"skipped: cannot check the release tags: {exc}")
         return 0
     version = _current_version(args.repo)
+    withdrawn = _head_withdrawn(args.repo, version)
     checked: list[str] = []
     problems: list[str] = []
     for tag in sorted(tags):
@@ -403,6 +476,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         problems.extend(check_type_snapshots(args.repo, tag))
         found = check_tag(args.repo, tag, version)
         if found is None:
+            continue
+        release = tag.removeprefix("v")
+        if release in withdrawn and not found:
+            record = withdrawn[release]
+            print(
+                f"{tag}: withdrawn on {record.get('date')}, not compared with HEAD; "
+                "the record matches the tag"
+            )
             continue
         checked.append(tag)
         problems.extend(found)

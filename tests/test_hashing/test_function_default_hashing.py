@@ -352,7 +352,8 @@ class TestParameterKind:
     """``f(a, *, b)``, ``f(a, /, b)`` and ``f(a, b)`` are three signatures as values.
 
     The stored signature hash is the declared interface (ITL-1256): a pod binds its
-    inputs by name, so the parameter kind is not in it, and the three are one.
+    inputs by name, so the parameter kind is not in it: ``f(a, *, b)`` and ``f(a, b)``
+    are one, and ``f(a, /, b)`` is refused by a data function (ITL-1258).
     """
 
     def test_keyword_only_marker(self, site: Callable[..., Any]):
@@ -372,7 +373,11 @@ class TestParameterKind:
         assert site(plain) != site(kinds)
 
     def test_positional_only_marker(self, site: Callable[..., Any]):
-        """``f(a, /, b)`` differs from ``f(a, b)``."""
+        """``f(a, /, b)`` differs from ``f(a, b)`` as a value.
+
+        A data function refuses a positional-only parameter (ITL-1258: a pod passes its
+        inputs by name), so ``f(a, /, b)`` has no stored signature hash at all.
+        """
 
         def kinds(a: int, b: int) -> int:
             return a
@@ -383,7 +388,8 @@ class TestParameterKind:
             return a
 
         if site is _stored_signature_hash:
-            assert site(plain) == site(kinds)
+            with pytest.raises(ValueError, match="positional-only"):
+                site(kinds)
             return
         assert site(plain) != site(kinds)
 

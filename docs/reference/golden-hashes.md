@@ -14,9 +14,15 @@ again, or writes a second copy next to the first.
 A **golden entry** is one named case and the exact value Orcapod computes for it, for
 example the `semantic` entry `value.uuid.nil`, whose value is `semantic_v1:...`. The golden
 test computes every entry again from the code on every CI run. A **data context version**
-(today `v1`, key `std:v1:default`, first shipped in Orcapod 0.3) names one generation of
-hashing. A hash change that is wanted on purpose starts a new data context version. It never
-edits a released value.
+(today `v1`, key `std:v1:default`) names one generation of hashing. A hash change that is
+wanted on purpose starts a new data context version. It never edits a released value.
+
+!!! note "v1 is open until 0.4.0"
+    Orcapod 0.3.0 first shipped `v1` and was withdrawn on 2026-11-17, before anyone used it
+    (ITL-1255). A withdrawn release freezes nothing, so no `v1` value is released today: until
+    0.4.0, a change to a `v1` value is made with the developer's approval of the exact list of
+    entries that move, each explained. 0.4.0 freezes `v1`. See
+    [Withdrawing a release](#withdrawing-a-release).
 
 ## The pieces at a glance
 
@@ -48,20 +54,20 @@ only at the tags and on PyPI.
 
 Three places hold the mechanism: the golden folder of the current data context, the
 `golden` section of its manifest, and the release pins. The examples below show the state
-after a hypothetical patch release 0.3.1 that added one file; digests are shortened.
+after a hypothetical patch release 0.4.1 that added one file; digests are shortened.
 
 ### Golden files: `tests/test_hashing/golden/data/v1/`
 
 ```text
 tests/test_hashing/golden/data/
   v1/
-    arrow-01.json      # the files of 0.3.0
+    arrow-01.json      # the files of 0.4.0
     datagram-01.json
     pipeline-01.json
     schema-01.json
     semantic-01.json
     torch-01.json
-    semantic-02.json   # added after 0.3.0: new semantic entries only
+    semantic-02.json   # added after 0.4.0: new semantic entries only
 ```
 
 - A file is named after the group of cases it pins plus a two-digit counter:
@@ -86,12 +92,12 @@ tests/test_hashing/golden/data/
                "pipeline-01.json": "e4e4...", "schema-01.json": "315a...",
                "semantic-01.json": "187c...", "torch-01.json": "99af..."},
      "previous": null, "digest": "2bc7..."},
-    {"date": "2026-11-16", "release": "0.3.0", "added": {},
+    {"date": "2026-11-30", "release": "0.4.0", "added": {},
      "previous": "2bc7...", "digest": "d002..."},
-    {"date": "2026-11-24", "release": null,
+    {"date": "2026-12-02", "release": null,
      "added": {"semantic-02.json": "e810..."},
      "previous": "d002...", "digest": "d003..."},
-    {"date": "2026-12-01", "release": "0.3.1", "added": {},
+    {"date": "2026-12-09", "release": "0.4.1", "added": {},
      "previous": "d003...", "digest": "d004..."}
   ]
 }
@@ -111,13 +117,18 @@ tests/test_hashing/golden/data/
 
 ```json
 {"v1": {"manifest": "b249...",
-        "releases": {"0.3.0": "d002...", "0.3.1": "d004..."}}}
+        "releases": {"0.4.0": "d002...", "0.4.1": "d004..."},
+        "withdrawn": {"0.3.0": {"date": "2026-11-17", "reason": "Withdrawn before ...",
+                                "manifest": "18e7...", "revision": "6cdd..."}}}}
 ```
 
 - `manifest` pins the rest of `v1.json` (the hashers, `definitions`, `libraries`,
   `previous`, `released_in`). It is `null` while the data context is open and is set once,
   at the data context's first release.
 - `releases` gains one line per library release: the digest of that release's revision.
+- `withdrawn` (optional) holds one record per withdrawn release: the date, the reason, and
+  the `manifest` pin and release revision digest (`revision`) that release shipped. A
+  withdrawn release has no `releases` line and no release revision, so it freezes nothing.
 
 ### Digest definitions
 
@@ -180,6 +191,30 @@ edit and the generator refuses to write over it.
 4. The tag and the PyPI wheel and sdist, which carry `v1.json` and `released_manifests.json`,
    are records of what shipped, outside the repository.
 
+Every published version needs the release step, a pre-release included: the release gate
+refuses to tag a version without it. So the first version of a data context published on
+PyPI freezes it; for `v1`, publishing `0.4.0rc1` would freeze `v1` at the release candidate.
+
+### Withdrawing a release
+
+A release is withdrawn only by the developer's decision, when nobody has used it. One
+release has been: 0.3.0, withdrawn on 2026-11-17 (ITL-1255), so that `v1` is frozen at 0.4.0
+instead, after the open questions that can move a golden value are settled. The developer
+withdraws the version from PyPI (yanked or deleted) and deletes its tag and GitHub Release; in
+the repository:
+
+1. The release revision is taken out of the golden history and the open revisions after it
+   are chained again (`store.withdraw_release`, which only takes the last release). The
+   golden files are not touched.
+2. Its pins move to a `withdrawn` record in `released_manifests.json`, with the date and the
+   reason. Without a release left, `released_in` and the `manifest` pin become `null`: the
+   data context is open again, and every file it listed can change by the approved-change
+   procedure (`--remove`, then `--add`).
+3. The version is never released again: `--release` and the release gate refuse it, and PyPI
+   never takes a version twice.
+4. The tag check compares the release's tag, while it exists, with the record instead of with
+   HEAD, so it passes before and after the tag is deleted.
+
 ### Starting a new data context version
 
 Within `v1` a change to a released golden value is refused, with no exemption: also not for
@@ -220,6 +255,7 @@ of the whole tree is caught only by records outside it, the tags and PyPI.
 | 16 | A release tag is moved or deleted | deliberate | Tag protection, PyPI | GitHub refuses it; PyPI never accepts a second upload of a version |
 | 17 | The checks themselves are edited to pass | deliberate | Review only | nothing automatic: see the residual risks |
 | 18 | `main` is force-pushed with rewritten history | deliberate | Branch protection | outside this mechanism |
+| 19 | A release is recorded as withdrawn to free its files | deliberate | Tag check, review, PyPI | a record that does not name exactly the pins its tag shipped fails the tag check; a record that does is a visible decision in review, and the version stays on PyPI unless it was withdrawn there |
 
 ## Each component in detail
 
@@ -297,8 +333,8 @@ PyPI protect everything against a rewrite of the tree.
 `scripts/check_golden_tags.py --release-version X.Y.Z`, a step of the Release workflow's
 build job before the tag is made; tested by `tests/test_check_golden_tags.py`
 
-- **Checks:** HEAD's `released_manifests.json` pins release `X.Y.Z` of the current data
-  context, its `manifest` pin is set, and the pinned digest is the release revision of
+- **Checks:** `X.Y.Z` is not a withdrawn release; HEAD's `released_manifests.json` pins
+  release `X.Y.Z` of the current data context, its `manifest` pin is set, and the pinned digest is the release revision of
   `X.Y.Z`, which is the last revision of HEAD's golden history: a golden file added after
   the release step would ship unreleased, so such a commit is not tagged. It fails without
   git.
@@ -316,9 +352,13 @@ rewrote an earlier release is refused); tested by `tests/test_check_golden_tags.
   the current data context (the one manifest at HEAD): every golden file listed by the
   revisions up to that release exists in HEAD with the bytes it has at the tag; those
   revisions are unchanged in HEAD's history; and the pins of the data context at the tag (the
-  manifest pin and every `releases` line) are unchanged in HEAD.
-- **Protects against:** a full rewrite of files, chain and pins inside the tree (14, 15).
-  This is the anchor outside the tree.
+  manifest pin and every `releases` line) are unchanged in HEAD. For a tag whose release
+  HEAD records as withdrawn, it checks instead that the record's `revision` and `manifest`
+  are the release digest and manifest pin the tag shipped; once the tag is deleted there is
+  nothing to compare.
+- **Protects against:** a full rewrite of files, chain and pins inside the tree (14, 15), and
+  a withdrawn record that does not describe the release it names (19). This is the anchor
+  outside the tree.
 - **Relies on:** protected tags and history. In CI (`CI=true`) it fails, never skips, when
   git, the history (a shallow clone) or the tags are missing; outside CI it skips with a
   message. With no release tag of the current data context it passes with nothing to check.
@@ -354,7 +394,7 @@ so the bytes that are hashed are the bytes that were committed (4).
 
 | Risk or assumption | Why it matters | What covers it |
 | --- | --- | --- |
-| Git history and `v*` tags are protected on both repositories | The tag check trusts the tags | The `protect-release-tags` ruleset on both repositories (in place since 2026-11-15) and branch protection |
+| Git history and `v*` tags are protected on both repositories | The tag check trusts the tags | The `protect-release-tags` ruleset on both repositories (in place since 2026-11-15) and branch protection; the one exception is the tag of the withdrawn 0.3.0, deleted by the developer |
 | The checks themselves can be edited (17) | A weakened check passes | Review: changes to these tests and scripts get explicit review |
 | Golden values are computed only with the `uv.lock` versions | A user's newer pyarrow, polars or numpy could hash differently unnoticed | ITL-1151: CI against the lowest and highest allowed dependency versions |
 | A hash with no golden entry is not protected | Coverage is only as wide as `cases.py` | Add cases whenever a new stored or embedded hash appears |
@@ -368,6 +408,11 @@ check inside the repository can stop; the PyPI artifacts remain the record of wh
 ## Rules
 
 - A released golden file never changes, and is never removed or renamed.
+- `v1` is open until 0.4.0 (0.3.0 was withdrawn on 2026-11-17): until then, a change to a
+  `v1` value needs the developer's approval of the exact list of entries that move, each
+  explained. Never edit or regenerate a golden file to make a test pass.
+- A withdrawn release freezes nothing; its record stays under `withdrawn`, and its version is
+  never released again.
 - New golden values can be added in any release, a patch included, with
   `generate_golden_hashes.py`.
 - No exemption: any change to a released golden value, including one caused by a logical

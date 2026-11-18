@@ -1,6 +1,9 @@
 # Changelog
 
-## [0.3.0] — 2026-11-17
+## [0.3.0] — 2026-11-17 (withdrawn)
+
+Withdrawn on 2026-11-17, before anyone used it: removed from PyPI, its tag and GitHub Release
+deleted. Its changes ship in 0.4.0; data context v1 freezes there.
 
 ### Breaking changes and migration
 

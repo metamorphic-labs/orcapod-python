@@ -498,6 +498,15 @@ Orcapod stores or embeds in a name is pinned in the golden folder of the current
 
 - A failing golden entry means a hash moved. Treat it as a bug in the change, not a stale
   file. Never edit or regenerate a golden file to make a test pass.
+- Data context v1 is open until the 0.4.0 release (developer, November 17, 2026, ITL-1255).
+  0.3.0 was withdrawn on 2026-11-17, before anyone used it: its release revision is out of the
+  golden history, and the pins it shipped are kept under `withdrawn` in
+  `released_manifests.json`, with the date and the reason, so no v1 file is released today.
+  Until 0.4.0, a change to any v1 golden value needs the developer's approval of the exact
+  list of entries that move, each explained; it is made with `--remove <entry>`, then the
+  generator writes the new value. `--release 0.4.0` freezes v1. Any version published
+  before it, a pre-release included, would freeze v1 there: the Release workflow requires
+  the release step for every version. A withdrawn version is never released again.
 - The unit of immutability is the golden file. The manifest's `golden.history`
   (`src/orcapod/contexts/data/<version>.json`) lists every file with the sha256 of its bytes;
   a release appends a revision with `added: {}`, pinned in
@@ -517,8 +526,10 @@ Orcapod stores or embeds in a name is pinned in the golden folder of the current
   a migration assessment: `generate_golden_hashes.py --remove <entry>` (refuses an entry a
   release lists), then the generator writes the new value.
 - The release pull request runs `generate_golden_hashes.py --release X.Y.Z`. CI checks HEAD
-  against every release tag (`scripts/check_golden_tags.py`). Never mark a golden entry
-  `skip` or `xfail`; the only skip is the optional-package rule (`torch`).
+  against every release tag (`scripts/check_golden_tags.py`); the tag of a withdrawn release
+  is checked against its `withdrawn` record instead, so the check passes whether or not that
+  tag still exists. Never mark a golden entry `skip` or `xfail`; the only skip is the
+  optional-package rule (`torch`).
 - Never move or rename the fixtures in `tests/test_hashing/golden/cases.py`: function pods,
   dataclasses and pydantic models hash with their module path.
 
@@ -593,6 +604,18 @@ Tests and golden fixtures that build a source with tag columns pass `tag_only_co
 unless the test is about the default (developer, November 16, 2026, ITL-1159). This covers the
 sources that take the option (the table, file and database sources); `ListSource`,
 `DerivedSource`, `CachedSource` and `PollingSource` do not take it.
+
+Every argument or input that can take several items (column names, a mapping, keywords,
+input streams, sources to bind, output keys) is tested (developer, November 17, 2026,
+ITL-1236): with two or more items; in more than one order, asserting what the order does or
+must not change (rows, column order, content hash, pipeline hash, system-tag column names);
+in each role it accepts (plain tag, data, data-tag: build the role you test, whatever the
+`tag_only_columns` default above says); on inputs with two or more tag columns AND two or
+more data columns, in more than one arrangement (tag order, table layout); and on the sync
+and the async path. A test whose streams have one tag and one data column does not test an
+operator. The shared family of such inputs is `tests/test_core/operators/several_items.py`;
+the inventory is `docs/dev/specs/itl-1236-several-item-test-audit.md`. The docs show the
+several-item form of such an argument, not only the one-item form.
 
 ---
 
@@ -914,7 +937,8 @@ current data context are the current entries.
   (`manifest`), with one `releases` line per library release (ITL-946). Only its `golden`
   history grows, by appending. A change that moves a released golden hash value, for any
   reason (a logical type's own change included), needs a new data context version with its
-  own manifest file, never an edit of a released one.
+  own manifest file, never an edit of a released one. A withdrawn release freezes nothing:
+  its pins move to a `withdrawn` record (0.3.0, ITL-1255: v1 is open until 0.4.0).
 - In memory the data context column is still `_context_key` (`ColumnConfig(context=True)`).
 - A writer refuses an input of another data context than its own
   (`contexts/stored.require_same_data_context`, `InputValidationError` naming both keys)

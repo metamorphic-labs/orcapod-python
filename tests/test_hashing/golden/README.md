@@ -13,6 +13,11 @@ In short:
   `src/orcapod/contexts/released_manifests.json`.
 - A file listed by a released revision never changes. New values go into new files, in any
   release. A change to a released value needs a new data context version.
+- Data context v1 is open until 0.4.0: 0.3.0 was withdrawn on 2026-11-17 (ITL-1255). Its
+  release revision is out of the history, and the pins it shipped are kept under `withdrawn`
+  in `released_manifests.json`, with the date and the reason. Until 0.4.0 a change to a v1
+  value needs the developer's approval of the exact list of entries that move, each
+  explained (`--remove`, then `--add`); never regenerate to make a test pass.
 
 | File | Role |
 | --- | --- |
@@ -23,4 +28,5 @@ In short:
 | `test_golden_store.py` | The rules and the generator, on copies of the tree. |
 
 `tests/test_contexts/test_data_context_v1.py` checks the repository's history and pins, and
-`scripts/check_golden_tags.py` (a CI step) checks HEAD against every release tag.
+`scripts/check_golden_tags.py` (a CI step) checks HEAD against every release tag, and the tag
+of a withdrawn release against its record.
