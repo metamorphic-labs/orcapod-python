@@ -127,6 +127,7 @@ export default defineConfig({
 						page('Function Pods', 'concepts/function-pods'),
 						page('Data-tags', 'concepts/data-tags'),
 						page('Pipelines and Jobs', 'concepts/pipeline-job'),
+						page('Working in Notebooks', 'concepts/notebooks'),
 						page('Your Own Data Types', 'concepts/your-own-data-types'),
 						page('Arrays and Tensors', 'concepts/arrays'),
 						page('Logical Type Identifiers', 'concepts/logical-type-identifiers'),

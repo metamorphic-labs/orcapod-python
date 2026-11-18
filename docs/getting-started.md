@@ -46,7 +46,9 @@ The `source_id` is a human-readable name used for provenance tracking.
 ## Inspecting the stream
 
 In Orcapod, a source *is* a stream. You can inspect it immediately without any extra
-conversion step.
+conversion step. In a notebook, put `source` on the last line of a cell to see a table of
+its first rows; [Working in notebooks](concepts/notebooks.md) shows what that table and
+Orcapod's other notebook displays show.
 
 ### Schema
 
@@ -226,6 +228,8 @@ Now that you have the basics, explore these topics:
 - [Sources](concepts/sources.md) -- learn about the different source types and how
   provenance tracking works.
 - [Streams](concepts/streams.md) -- understand the immutable (Tag, Data) stream model.
+- [Working in notebooks](concepts/notebooks.md) -- what streams, run summaries and pipeline
+  diagrams show at the end of a notebook cell.
 - [Function Pods](concepts/function-pods.md) -- advanced function pod usage, including
   caching with databases.
 - [Operators](concepts/operators.md) -- structural transforms like Join, Batch, and Filter
