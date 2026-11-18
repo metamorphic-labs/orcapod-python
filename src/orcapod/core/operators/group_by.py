@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Collection, Sequence, Set
 from typing import Any, ClassVar, TYPE_CHECKING, get_origin
 
@@ -23,20 +24,26 @@ else:
 
 
 def _null_last_key(value: Any) -> tuple[Any, ...]:
-    """Build an order key that sorts nulls last, at any list depth.
+    """Build an order key that sorts NaN after every number and nulls last, at any depth.
 
-    The leading integer keeps a null comparable against a real value of any
-    type.  A list is keyed element by element, so a list-valued non-key tag
-    that holds a null (a list-typed tag column of a source) still compares.
+    The leading integer keeps a NaN and a null comparable against a real value of
+    any type.  A NaN never compares with ``<``, so without its own place a sort that
+    meets one keeps the input's row order; here every NaN ties every other NaN and
+    the next sort column (the record id) breaks the tie (ITL-1226), as Arrow and
+    Polars order a NaN.  A list is keyed element by element, so a list-valued tag
+    that holds a NaN or a null (a list-typed tag column of a source) still compares.
 
     Args:
         value: A tag or system-tag value: a scalar, ``None``, or a list of
             these nested to any depth.
 
     Returns:
-        A tuple that orders values ascending, with nulls after every value.
+        A tuple that orders values ascending, NaN after every number and nulls
+        after everything.
     """
     if value is None:
+        return (2,)
+    if isinstance(value, float) and math.isnan(value):
         return (1,)
     if isinstance(value, list):
         return (0, tuple(_null_last_key(v) for v in value))

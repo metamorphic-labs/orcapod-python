@@ -20,7 +20,7 @@ from __future__ import annotations
 import itertools
 import json
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 import pytest
@@ -373,3 +373,103 @@ def test_a_name_that_is_not_a_tag_of_the_input_is_refused(
     source = _input("plain", "source", TAGS, LAYOUTS[0])
     with pytest.raises(InputValidationError, match=match):
         _ = source.group_by(["g", "k"], member_order=[name])
+
+
+# ── NaN in a tag (ITL-1226, CodeRabbit on #434) ─────────────────────────────
+
+NAN = float("nan")
+# ``x`` holds NaN at the top level, ``y`` inside a list; ``rid`` names each row, so
+# reordering the rows leaves every record id as it is.
+NAN_ROWS: list[dict[str, Any]] = [
+    {"g": "a", "x": 0.0, "y": [1.0, NAN], "rid": "r1", "v": 1},
+    {"g": "a", "x": NAN, "y": [NAN], "rid": "r2", "v": 2},
+    {"g": "a", "x": 1.0, "y": [1.0, 0.0], "rid": "r3", "v": 3},
+    {"g": "a", "x": NAN, "y": [1.0, None], "rid": "r4", "v": 4},
+    {"g": "a", "x": None, "y": [NAN, 1.0], "rid": "r5", "v": 5},
+]
+
+
+def _nan_source(rows: list[dict[str, Any]]) -> StreamBase:
+    table = pa.table(
+        {
+            "g": [r["g"] for r in rows],
+            "x": pa.array([r["x"] for r in rows], pa.float64()),
+            "y": pa.array([r["y"] for r in rows], pa.list_(pa.float64())),
+            "rid": [r["rid"] for r in rows],
+            "v": [r["v"] for r in rows],
+        }
+    )
+    return op.sources.ArrowTableSource(
+        table,
+        tag_columns=["g", "x", "y"],
+        tag_only_columns=True,
+        source_id="s",
+        record_id_columns="rid",
+    )
+
+
+@pytest.mark.parametrize(
+    ("member_order", "expected"),
+    [
+        # x: 0.0, 1.0, then the two NaN (tied; y breaks the tie), then null.
+        (None, [1, 3, 4, 2, 5]),
+        # y element by element: NaN after every number, null after NaN, and a
+        # shorter list before a longer one it starts.
+        (["y"], [3, 1, 4, 2, 5]),
+    ],
+    ids=["default", "member_order_y"],
+)
+def test_a_nan_tag_has_one_place_in_the_member_order(
+    member_order: list[str] | None, expected: list[int]
+) -> None:
+    """NaN sorts after every number and before null, at any depth, whatever the row order.
+
+    Without its own place a NaN compares with nothing, and the sort kept the input's
+    row order: the lists, folds and hashes then depended on it.
+    """
+    seen: dict[str, Any] = {}
+    for rows in itertools.permutations(NAN_ROWS):
+        grouped = _nan_source(list(rows)).group_by(["g"], member_order=member_order)
+        assert grouped.as_table().column("v").to_pylist() == [expected]
+        fingerprint = _fingerprint(grouped, content_hash=True)
+        if not seen:
+            seen = fingerprint
+        assert fingerprint == seen
+
+
+def test_a_nan_tag_orders_the_same_sync_and_async() -> None:
+    seen: list[str] = []
+    for rows in (NAN_ROWS, NAN_ROWS[::-1], NAN_ROWS[2:] + NAN_ROWS[:2]):
+        for orchestrator in (SyncPipelineOrchestrator, AsyncPipelineOrchestrator):
+            job = PipelineJob(name="nan", database=InMemoryArrowDatabase())
+            with job:
+                _ = _nan_source(rows).group_by(["g"], label="grouped")
+            job.run(orchestrator=orchestrator())
+            out = job.nodes["grouped"].as_table(all_info=True)
+            assert out.column("v").to_pylist() == [[1, 3, 4, 2, 5]]
+            row = json.dumps(out.to_pylist(), sort_keys=True, default=str)
+            if not seen:
+                seen = [row]
+            assert row == seen[0], orchestrator.__name__
+
+
+def test_a_nan_group_key_is_a_group_of_its_own_row() -> None:
+    """Pins today's behaviour, unchanged here: NaN never equals NaN as a key.
+
+    Each row whose key is NaN is a group of its own; the groups with a number come
+    first, in key order, then the NaN groups.
+    """
+    nan = float("nan")
+    for values in ([0.0, nan, 1.0, nan], [nan, 1.0, nan, 0.0]):
+        source = op.sources.ArrowTableSource(
+            pa.table({"g": pa.array(values, pa.float64()), "v": [1, 2, 3, 4]}),
+            tag_columns=["g"],
+            tag_only_columns=True,
+            source_id="s",
+        )
+        out = source.group_by(["g"]).as_table()
+        keys = out.column("g").to_pylist()
+        assert keys[:2] == [0.0, 1.0]
+        assert all(k != k for k in keys[2:]) and len(keys) == 4
+        members = cast(list[list[int]], out.column("v").to_pylist())
+        assert [len(m) for m in members] == [1, 1, 1, 1]
