@@ -29,7 +29,9 @@ pip install orcapod
 If your workshop organiser asked you to install a release candidate, name it:
 `uv add "orcapod==0.4.0rc1"` (a plain `uv add orcapod` takes the latest stable release). For
 the development version, replace `orcapod` with
-`git+https://github.com/metamorphic-labs/orcapod-python.git` in either command.
+`git+https://github.com/metamorphic-labs/orcapod-python.git` in either command. Until 0.4.0
+is released, use one of these: PyPI has no current stable release (0.3.0 was withdrawn), so a
+plain `uv add orcapod` installs 0.1.4, which this tutorial does not cover.
 
 The tutorial needs nothing beyond this. Orcapod already depends on `pandas`, `polars` and
 `pyarrow`, which the samples use.

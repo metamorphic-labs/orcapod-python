@@ -25,8 +25,15 @@ In an environment not managed by uv, use `pip install orcapod` instead. A plain
 `uv add orcapod` installs the latest stable release; to try a release candidate, name it,
 for example `uv add "orcapod==0.4.0rc1"`.
 
-0.3.0 is the first release on PyPI since 0.1.4; 0.2.0 was never published to PyPI. Tables
-written by 0.2.0 or earlier are not read by 0.3.0: see
+No release after 0.1.4 is available on PyPI yet: 0.2.0 was never published, and 0.3.0 was
+withdrawn on 2026-11-17. The next release is 0.4.0; `uv add orcapod` installs it once it is
+out. Until then, install the development version from the repository:
+
+```bash
+uv add git+https://github.com/metamorphic-labs/orcapod-python
+```
+
+Tables written by 0.2.0 or earlier are not read by this version: see
 [Upgrading from 0.2.0](https://github.com/metamorphic-labs/orcapod-python/blob/main/CHANGELOG.md#upgrading-from-020)
 (it also covers 0.1.4).
 
@@ -112,11 +119,12 @@ session.
 
 ## Status
 
-Orcapod is before version 1.0. In 0.3.0:
+Orcapod is before version 1.0. In the development version (0.4.0 is next):
 
-- **Hash values are frozen for data context v1.** Hashes name stored tables and find stored
-  results again, so a hash value released in 0.3.0 does not change in a later release of the
-  same data context; CI checks this. See
+- **Hash values of data context v1 freeze at 0.4.0.** Hashes name stored tables and find
+  stored results again, so a hash value released in 0.4.0 will not change in a later release
+  of the same data context; CI checks this. Until 0.4.0 a v1 hash may still change, only by
+  an approved and explained change (0.3.0, which first shipped v1, was withdrawn). See
   [Golden hashes](https://github.com/metamorphic-labs/orcapod-python/blob/main/docs/reference/golden-hashes.md).
 - **Library value types are provisional.** The hashes of `numpy.ndarray`, `torch.Tensor`, and
   pandas and polars `DataFrame` and `Series` values are provisional until the library value
@@ -124,8 +132,9 @@ Orcapod is before version 1.0. In 0.3.0:
   computed again. Using one issues `ProvisionalHashWarning` once per
   type per process.
 - **Stores from earlier versions are not read as current.** Tables written by 0.1.x or 0.2.0
-  are neither read as results nor modified, and results stored by a development build of 0.3
-  are not found again: 0.3.0 computes them again. Read
+  are neither read as results nor modified, and results stored by a development build before
+  v1 was released may not be found again by a later build, which then computes them again.
+  Read
   [Upgrading from 0.2.0](https://github.com/metamorphic-labs/orcapod-python/blob/main/CHANGELOG.md#upgrading-from-020)
   before running a job over an old store, in particular one with side-effect nodes.
 - **Connector databases cannot hold function nodes yet.** A job over a SQLite, PostgreSQL or

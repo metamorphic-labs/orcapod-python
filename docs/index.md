@@ -22,8 +22,15 @@ In an environment not managed by uv, use `pip install orcapod` instead. A plain
 `uv add orcapod` installs the latest stable release; to try a release candidate, name it,
 for example `uv add "orcapod==0.4.0rc1"`.
 
-`0.3.0` is the first release on PyPI since `0.1.4`; `0.2.0` was never published to PyPI.
-Tables written by `0.2.0` or earlier are not read by `0.3.0`: see
+No release after `0.1.4` is available on PyPI yet: `0.2.0` was never published, and `0.3.0`
+was withdrawn on 2026-11-17. The next release is `0.4.0`; `uv add orcapod` installs it once
+it is out. Until then, install the development version from the repository:
+
+```bash
+uv add git+https://github.com/metamorphic-labs/orcapod-python
+```
+
+Tables written by `0.2.0` or earlier are not read by this version: see
 `CHANGELOG.md` in the repository, *Upgrading from 0.2.0*
 (it also covers `0.1.4`).
 

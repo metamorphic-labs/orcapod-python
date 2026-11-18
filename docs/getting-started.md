@@ -17,6 +17,10 @@ uv run python my_pipeline.py
 
 In an environment not managed by uv, `pip install orcapod` installs it instead.
 
+Until 0.4.0 is released, PyPI has no current version (0.3.0 was withdrawn, and a plain
+`uv add orcapod` would install 0.1.4): add the development version instead,
+`uv add git+https://github.com/metamorphic-labs/orcapod-python`.
+
 ## Creating a source
 
 A **source** is the entry point for data in an Orcapod pipeline. The simplest way to
