@@ -329,11 +329,18 @@ The options:
 - `collapse=True` folds the steps that only choose, rename or join columns (joins, column
   selections, drops and maps, among them the join and select a function pod adds for you)
   into the edge they lie on: the edge is dashed, and the node it leads to lists them. A step
-  is folded by what its operator is, whatever label it was given. In a notebook that runs
-  scripts, a `collapse` checkbox next to the zoom buttons switches between the two
-  layouts (`collapse=` sets the one shown first, and the one shown where scripts do not
-  run); it appears only when there is something to fold.
+  is folded by what its operator is, whatever label it was given.
 - `max_nodes` (400 by default): a larger graph is shown as the text listing instead.
+
+In a notebook that runs scripts, two checkboxes next to the zoom buttons switch the layout
+in place: `vertical` (top to bottom, or left to right when unticked) and `collapse` (which
+appears only when there is something to fold). `direction=` and `collapse=` set the layout
+shown first, and the one shown where scripts do not run. A selected node stays selected
+when it is in the new layout. The checkboxes appear for graphs of up to 100 nodes: a larger
+diagram carries only the layout its arguments ask for, which keeps a notebook small.
+
+In each node, the kind line under the name (kind, what it is, status) is wrapped onto
+short lines, so a node is about as wide as its name.
 
 Drawing a diagram never computes anything. Like `head()`, it reads only what is already
 known: each node's columns (which Orcapod knows without computing) and the run state the job

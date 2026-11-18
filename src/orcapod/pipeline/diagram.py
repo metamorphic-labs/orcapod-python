@@ -389,7 +389,8 @@ _FONT_PX = 13
 _SMALL_PX = 11
 _CHAR_W = 7.4  # average advance of a 13 px sans-serif character
 _SMALL_CHAR_W = _CHAR_W * _SMALL_PX / _FONT_PX
-_NODE_H = 44.0
+_NODE_H = 44.0  # a node with one kind line
+_LINE_H = 13.0  # each further kind line
 _PAD = 14.0
 _MIN_W = 96.0
 _MAX_W = 260.0
@@ -422,10 +423,40 @@ class _Layout:
     edges: list[tuple[_Edge, list[tuple[float, float]]]] = field(default_factory=list)
 
 
-def _node_width(node: _Node) -> float:
-    """A node's width: room for its label and kind line, within limits."""
-    text = max(len(node.label) * _CHAR_W, len(node.kind_line) * _SMALL_CHAR_W)
-    return max(_MIN_W, min(_MAX_W, text + 2 * _PAD))
+def _text_room(node: _Node) -> float:
+    """The width of a node's text: its label or the widest part of its kind line (the
+    kind, the detail, the status), within the node width limits (ITL-1232)."""
+    parts = node.kind_line.split(" · ")
+    text = max(
+        len(node.label) * _CHAR_W, max(len(part) for part in parts) * _SMALL_CHAR_W
+    )
+    return max(_MIN_W - 2 * _PAD, min(_MAX_W - 2 * _PAD, text))
+
+
+def _kind_lines(node: _Node) -> tuple[str, ...]:
+    """The kind line wrapped at its separators to the node's text width.
+
+    The parts are kept in order and joined with `` · `` while they fit; a part wider
+    than the largest node is clipped when drawn. Nothing is dropped: the joined lines
+    are the kind line.
+    """
+    room = _text_room(node)
+    lines: list[str] = []
+    for part in node.kind_line.split(" · "):
+        joined = f"{lines[-1]} · {part}" if lines else part
+        if lines and len(joined) * _SMALL_CHAR_W <= room:
+            lines[-1] = joined
+        else:
+            lines.append(part)
+    return tuple(lines)
+
+
+def _node_size(node: _Node) -> tuple[float, float]:
+    """A node's width and height: room for its label and its wrapped kind line."""
+    return (
+        _text_room(node) + 2 * _PAD,
+        _NODE_H + _LINE_H * (len(_kind_lines(node)) - 1),
+    )
 
 
 def _crossings(
@@ -480,8 +511,8 @@ def _layout(
 
     boxes: dict[int, _Box] = {}
     for node in nodes:
-        width = _node_width(node)
-        boxes[node.index] = _Box(node.index, layer[node.index], width, _NODE_H)
+        width, height = _node_size(node)
+        boxes[node.index] = _Box(node.index, layer[node.index], width, height)
     chains: dict[tuple[int, int], list[int]] = {}
     links: dict[int, list[int]] = {}
     back: dict[int, list[int]] = {}
@@ -794,7 +825,11 @@ def _svg(
         x, y, w, h = layout.boxes[node.index]
         colour = _KIND_COLOUR.get(node.kind, "#888888")
         radius = (
-            h / 2 if node.kind == "source" else 3.0 if node.kind == "operator" else 8.0
+            min(h, _NODE_H) / 2
+            if node.kind == "source"
+            else 3.0
+            if node.kind == "operator"
+            else 8.0
         )
         stroke_width = "1.4" if node.kind == "operator" else "2.2"
         dash = ' stroke-dasharray="4 3"' if node.status in _DASHED_STATUSES else ""
@@ -819,12 +854,16 @@ def _svg(
             parts.append(
                 f'<circle cx="{_num(w - 9)}" cy="9" r="4" fill="{status_colour}"/>'
             )
-        kind_line = _clip(node.kind_line, w, _SMALL_CHAR_W)
+        kind_lines = _kind_lines(node)
+        for line_number, line in enumerate(kind_lines):
+            parts.append(
+                f'<text x="{_num(w / 2)}" y="{_num(16 + _LINE_H * line_number)}" '
+                f'text-anchor="middle" font-size="{_SMALL_PX}" fill="currentColor" '
+                f'fill-opacity="0.75">{_escape(_clip(line, w, _SMALL_CHAR_W))}</text>'
+            )
+        label_y = 34 + _LINE_H * (len(kind_lines) - 1)
         parts.append(
-            f'<text x="{_num(w / 2)}" y="16" text-anchor="middle" '
-            f'font-size="{_SMALL_PX}" fill="currentColor" fill-opacity="0.75">'
-            f"{_escape(kind_line)}</text>"
-            f'<text x="{_num(w / 2)}" y="34" text-anchor="middle" '
+            f'<text x="{_num(w / 2)}" y="{_num(label_y)}" text-anchor="middle" '
             f'font-size="{_FONT_PX}" font-weight="600" fill="currentColor">'
             f"{_escape(_clip(node.label, w, _CHAR_W))}</text></g>"
         )
@@ -935,6 +974,15 @@ def _json_for_script(value: object) -> str:
 # line (11 px) at 13.75 px, about the size of a notebook's own text. The script has the
 # same maximum (``MAX_SCALE`` in ``diagram_assets/diagram.js``).
 _MAX_SCALE = 1.25
+
+
+# Above this many nodes, the output embeds only the shown layout, without the other
+# direction or the other collapse state, so the view has no direction or collapse
+# control (ITL-1232). Each further layout adds about the size of the first: the
+# tutorial job's output is 31 KiB with one layout and 61 KiB with four; at this limit
+# four layouts make about 0.5 MiB (one layout of 400 nodes, the default max_nodes,
+# about 0.65 MiB).
+_MAX_EMBEDDED_NODES = 100
 
 
 # Shown next to the title, in the rendered view and in the no-script fallback: the
@@ -1103,37 +1151,63 @@ class PipelineDiagram:
         Returns:
             The ``<svg>`` element; it uses no style sheet and no script.
         """
-        layout = _layout(self._nodes, self._edges, self._direction)
-        return self._svg(self._nodes, self._edges, layout, standalone=False)
+        return self._svg(
+            self._nodes, self._edges, direction=self._direction, standalone=False
+        )
 
     def _svg(
         self,
         nodes: list[_Node],
         edges: list[_Edge],
-        layout: _Layout,
         *,
+        direction: Direction,
         standalone: bool,
     ) -> str:
-        across = self._direction == "LR"
+        layout = _layout(nodes, edges, direction)
         inputs = _inputs(nodes, edges)
-        return _svg(self.title, nodes, inputs, layout, across, standalone)
+        return _svg(self.title, nodes, inputs, layout, direction == "LR", standalone)
 
-    def _other_view(self) -> dict[str, Any] | None:
-        """The other layout (folded or not) for the collapse checkbox, or ``None``.
+    def _views(self) -> dict[str, Any] | None:
+        """The other layouts, for the view's direction and collapse controls.
 
-        ``None`` when folding changes nothing, or when the other layout has more than
-        ``max_nodes`` nodes. Its picture is the standalone SVG, base64-encoded, as the
-        image's; the script draws it inline when the checkbox is switched.
+        The shown layout is the one ``direction=`` and ``collapse=`` ask for; this adds
+        the other direction and, when folding changes something and the other model has
+        at most ``max_nodes`` nodes, both directions of the other model: up to three
+        pictures (the standalone SVG, base64-encoded, as the image's) and the other
+        model. ``None`` above ``_MAX_EMBEDDED_NODES`` nodes, which keeps a large graph's
+        output at one layout: the controls then do not appear (ITL-1232).
         """
-        if self._other is None or len(self._other[0]) > self._max_nodes:
+        if len(self._nodes) > _MAX_EMBEDDED_NODES:
             return None
-        nodes, edges = self._other
-        layout = _layout(nodes, edges, self._direction)
-        svg = self._svg(nodes, edges, layout, standalone=True)
+        other_direction: Direction = "TB" if self._direction == "LR" else "LR"
+        layouts: list[tuple[Direction, bool, list[_Node], list[_Edge]]] = [
+            (other_direction, self._collapse, self._nodes, self._edges)
+        ]
+        models: list[dict[str, Any]] = []
+        if self._other is not None and len(self._other[0]) <= min(
+            self._max_nodes, _MAX_EMBEDDED_NODES
+        ):
+            nodes, edges = self._other
+            models.append(self._model(nodes, edges))
+            layouts.append((self._direction, not self._collapse, nodes, edges))
+            layouts.append((other_direction, not self._collapse, nodes, edges))
+        views = [
+            {
+                "direction": direction,
+                "collapse": collapse,
+                "picture": base64.b64encode(
+                    self._svg(
+                        nodes, edges, direction=direction, standalone=True
+                    ).encode("utf-8")
+                ).decode("ascii"),
+            }
+            for direction, collapse, nodes, edges in layouts
+        ]
         return {
-            "collapse": not self._collapse,
-            "model": self._model(nodes, edges),
-            "picture": base64.b64encode(svg.encode("utf-8")).decode("ascii"),
+            "direction": self._direction,
+            "collapse": self._collapse,
+            "models": models,
+            "views": views,
         }
 
     def _picture(self) -> str:
@@ -1148,7 +1222,14 @@ class PipelineDiagram:
         notebook removes the style.
         """
         layout = _layout(self._nodes, self._edges, self._direction)
-        svg = self._svg(self._nodes, self._edges, layout, standalone=True)
+        svg = _svg(
+            self.title,
+            self._nodes,
+            self._inputs(),
+            layout,
+            self._direction == "LR",
+            standalone=True,
+        )
         encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")
         alt = f"Diagram of {self.title}: {len(self._nodes)} nodes"
         return (
@@ -1178,12 +1259,12 @@ class PipelineDiagram:
                 f"<div>{_PREVIEW_TAG}</div>"
                 f"<pre>{_escape(self.to_text())}\n\n{_escape(note)}</pre>"
             )
-        other = self._other_view()
-        other_block = (
+        views = self._views()
+        views_block = (
             ""
-            if other is None
-            else '<script type="application/json" class="op-dag-other">'
-            f"{_json_for_script(other)}</script>"
+            if views is None
+            else '<script type="application/json" class="op-dag-views">'
+            f"{_json_for_script(views)}</script>"
         )
         return (
             f'<div class="op-dag"><style>{_asset("diagram.css")}</style>'
@@ -1195,7 +1276,7 @@ class PipelineDiagram:
             f"{_table(self._nodes, self._inputs())}"
             '<script type="application/json" class="op-dag-model">'
             f"{_json_for_script(self.to_dict())}</script>"
-            f"{other_block}</div><script>{_asset('diagram.js')}</script>"
+            f"{views_block}</div><script>{_asset('diagram.js')}</script>"
         )
 
     def save(self, path: str | Path) -> None:
