@@ -657,18 +657,19 @@ class TestRunsAndSavedJobs:
             """Return ``channel``."""
             return channel
 
-        def events() -> SpiralDBTableSource:
-            """Return the events source, restricted to ``m1`` when asked."""
+        def events(*conditions: tuple[str, object]) -> SpiralDBTableSource:
+            """Return the events source, with ``conditions`` in the order given."""
             source = _source(source_id="events", tag_only_columns=True)
-            return source.where(subject_id="m1") if restrict else source
+            return source.where(dict(conditions)) if restrict else source
 
         job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
         with job:
-            first.pod(events(), label="first")
-            second.pod(events(), label="second")
+            # The same conditions given in another order are the same restriction.
+            first.pod(events(("subject_id", "m1"), ("flag", True)), label="first")
+            second.pod(events(("flag", True), ("subject_id", "m1")), label="second")
 
         job.run()
-        expected = [1, 2, 3] if restrict else [1, 2, 3, 4, 5]
+        expected = [3] if restrict else [1, 2, 3, 4, 5]
         for label in ("first", "second"):
             rows = job.nodes[label].as_table().column("timestamp").to_pylist()
             assert sorted(rows) == expected

@@ -253,6 +253,19 @@ def _restriction_of(stream: Any) -> dict[str, Any]:
     return record_of() if record_of is not None else {}
 
 
+def _restriction_signature(record: dict[str, Any]) -> str:
+    """A restriction as text that does not depend on the order its conditions were given.
+
+    Conditions are sorted by column; a value keeps its type in the text (``1`` and
+    ``True`` differ), as ``where`` compares them.
+    """
+    where = sorted(
+        (column, type(value).__name__, repr(value))
+        for column, value in record.get("where", {}).items()
+    )
+    return repr((where, record.get("limit")))
+
+
 def _restrictions_beneath(stream: Any) -> list[tuple[str, str]]:
     """The restrictions of every source a stream reads, as sorted comparable pairs.
 
@@ -271,7 +284,7 @@ def _restrictions_beneath(stream: Any) -> list[tuple[str, str]]:
         visited.append(current)
         record = _restriction_of(current)
         if record:
-            found.append((_source_name(current), repr(sorted(record.items()))))
+            found.append((_source_name(current), _restriction_signature(record)))
         if isinstance(current, SourceJobNode):
             if current.bound_source is not None:
                 pending.append(current.bound_source)
