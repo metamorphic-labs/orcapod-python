@@ -322,8 +322,10 @@ cache keys:
   When the members of a group hold a float key with different bits (`0.0` and `-0.0`, or
   NaN with another sign or payload), the group emits the one with the smallest bit pattern
   at the column's own width (`float16`, `float32` or `float64`), for each key column: `0.0`
-  over `-0.0`, and the canonical NaN over any other. The emitted key is always a value a
-  member holds, and neither the order of the rows nor `member_order` decides it.
+  over `-0.0`, and a positive NaN over a negative one. A signaling NaN has smaller bits than
+  the canonical quiet NaN, so when a member holds one, it is the key emitted. The emitted key
+  is always a value a member holds, bit for bit, and neither the order of the rows nor
+  `member_order` decides it.
 - **No arrangement of the input changes the result.** The order of its tags, the order of
   its data columns and the layout of its table leave every value, record id and hash of the
   output unchanged. A reordered input produces a byte-identical output table. The output

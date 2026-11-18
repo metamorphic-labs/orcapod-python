@@ -1242,9 +1242,11 @@ data. The rules:
   sorts after every number and before null, as in the member order (`_null_last_key`, which
   also sorts a NaN tag after every number). The hashes read a float's bits, so a group emits,
   for each float key column, its members' value with the smallest bit pattern at the column's
-  own width, float16, float32 or float64 (`_float_key_bits`, `_emitted_key_value`: `0.0` over
-  `-0.0`, the canonical NaN over any other): always a value a member holds, never the first
-  row's, never chosen by `member_order`.
+  own width, float16, float32 or float64 (`_emitted_key_row`: `0.0` over `-0.0`, a positive NaN
+  over a negative one; a signaling NaN has smaller bits than the canonical quiet NaN, so it
+  wins), taken from the input's Arrow column, never through Python (a float32 signaling NaN
+  comes back quiet from Python): always a value a member holds, never the first row's, never
+  chosen by `member_order`. Bits are read only for a group whose key is zero or NaN.
 - `Data` source-info values may be `str`, `None`, or `list[...]`, nested to any depth; the
   Arrow and Python types are derived from the value, with `None` mapping to `large_string`.
   That rule has one definition, `arrow_utils.source_info_arrow_type`, and applies only to

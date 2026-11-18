@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Collection, Sequence, Set
-from typing import Any, ClassVar, TYPE_CHECKING, get_origin
+from typing import Any, ClassVar, TYPE_CHECKING, cast, get_origin
 
 from orcapod.core.operators.base import UnaryOperator
 from orcapod.core.data_tags import stream_data_tags
@@ -71,49 +71,46 @@ def _grouping_key(key: tuple[Any, ...]) -> tuple[Any, ...]:
     )
 
 
-def _float_key_bits(column: "pa.ChunkedArray[Any]") -> list[int] | None:
-    """Return the bit pattern of each value of a float key column, at its own width.
+def _emitted_key_row(column: "pa.ChunkedArray[Any]", indices: Sequence[int]) -> int:
+    """Return the input row whose value of one key column a group emits.
+
+    The members of a group hold equal key values, but equal floats may differ in
+    their bits: ``0.0`` and ``-0.0``, and NaN with another sign or payload (equal
+    floats of any other value have the same bits).  The hashes of the emitted row
+    read the bits, so for a zero or NaN key the group emits the member value with
+    the smallest bit pattern at the column's own width (ITL-1234), chosen per key
+    column.  That is ``0.0`` over ``-0.0``, a positive NaN over a negative one, and
+    the NaN with the smallest payload; a signaling NaN has smaller bits than the
+    canonical quiet NaN, so it is the one emitted when a member holds it.  A group
+    whose members agree emits their value.  Neither the row order nor
+    ``member_order`` decides it, and the caller takes the value from the Arrow
+    column, so its bits are kept exactly.
 
     Args:
         column: A key column of the input table.
+        indices: The rows of one group, at least one, all with equal keys.
 
     Returns:
-        For a ``float16``, ``float32`` or ``float64`` column, each value's IEEE 754
-        bits as an unsigned integer of the column's width (``0`` for a null: a null
-        key's group holds nulls only, so its bits never decide); otherwise ``None``.
+        The row, one of ``indices``, whose value the group emits for this column.
     """
+    first = indices[0]
     arrow_type = column.type
-    if not pa.types.is_floating(arrow_type):
-        return None
-    unsigned = {16: pa.uint16(), 32: pa.uint32(), 64: pa.uint64()}[arrow_type.bit_width]
-    return [
-        0 if bits is None else bits
-        for bits in column.combine_chunks().view(unsigned).to_pylist()
-    ]
-
-
-def _emitted_key_value(values: Sequence[Any], bits: Sequence[int] | None) -> Any:
-    """Return the value a group emits for one key column, whatever its row order.
-
-    The members of a group hold equal key values, but equal floats may differ in
-    their bits (``0.0`` and ``-0.0``, NaN with another sign or payload), and the
-    hashes of the emitted row read the bits.  So a float key is the members' value
-    with the smallest bit pattern at the column's own width (ITL-1234), chosen per
-    key column: the value is always one a member holds, a group whose members agree
-    keeps it, and a mixed group emits ``0.0`` over ``-0.0`` and the canonical quiet
-    NaN over any other NaN.  Neither the row order nor ``member_order`` decides it.
-
-    Args:
-        values: The key column's value in each member of one group (at least one).
-        bits: The bit pattern of each of those values, from ``_float_key_bits``;
-            ``None`` for a column that is not a float.
-
-    Returns:
-        The key value the group emits.
-    """
-    if bits is None:
-        return values[0]
-    return values[min(range(len(values)), key=bits.__getitem__)]
+    if len(indices) == 1 or not pa.types.is_floating(arrow_type):
+        return first
+    value = column[first].as_py()
+    if value is None or (value != 0.0 and not math.isnan(value)):
+        return first
+    # The unsigned integer of the float's width, to read its bits; no value of the
+    # group is null, since a null key equals no float.
+    unsigned = {16: pa.uint16, 32: pa.uint32, 64: pa.uint64}[arrow_type.bit_width]()
+    bits = cast(
+        list[int],
+        column.take(pa.array(indices, pa.int64()))
+        .combine_chunks()
+        .view(unsigned)
+        .to_pylist(),
+    )
+    return indices[min(range(len(indices)), key=bits.__getitem__)]
 
 
 GROUP_BY_FOLD_LABEL = "group_v1"
@@ -248,9 +245,10 @@ class GroupBy(UnaryOperator):
     ``0.0`` equals ``-0.0`` (ITL-1234).  A NaN key sorts after every number and
     before null.  A float key that the members hold with different bits is
     emitted, per key column, as the one with the smallest bit pattern at the
-    column's own width (``0.0`` over ``-0.0``, the canonical NaN over any other),
-    so the emitted key is a value a member holds and never depends on the row
-    order or on ``member_order``.
+    column's own width (``0.0`` over ``-0.0``, a positive NaN over a negative
+    one, a signaling NaN over the canonical quiet NaN), taken from the input's
+    Arrow column, so the emitted key is a value a member holds, bit for bit, and
+    never depends on the row order or on ``member_order``.
 
     Tag tuples are expected to be unique within a stream, but nothing enforces
     that.  If the input does contain duplicate tag tuples, the members sharing
@@ -476,28 +474,29 @@ class GroupBy(UnaryOperator):
         for index, row in enumerate(rows):
             key = _grouping_key(tuple(row[c] for c in self.by))
             groups.setdefault(key, []).append(index)
-        key_bits = {c: _float_key_bits(table.column(c)) for c in self.by}
-        keyed_groups: list[tuple[tuple[Any, ...], list[dict[str, Any]]]] = []
-        for indices in groups.values():
-            emitted = tuple(
-                _emitted_key_value(
-                    [rows[i][c] for i in indices],
-                    None
-                    if (bits := key_bits[c]) is None
-                    else [bits[i] for i in indices],
-                )
-                for c in self.by
+        # For each group, the row whose value each key column emits.
+        keyed_groups: list[tuple[tuple[int, ...], list[dict[str, Any]]]] = [
+            (
+                tuple(_emitted_key_row(table.column(c), indices) for c in self.by),
+                [rows[i] for i in indices],
             )
-            keyed_groups.append((emitted, [rows[i] for i in indices]))
+            for indices in groups.values()
+        ]
 
         grouped_rows: list[dict[str, Any]] = []
         # Emit groups in key order rather than first-appearance order, so a
         # reordered input produces a byte-identical output table.  The keys are in
         # name order (``by`` is sorted); a NaN key sorts after every number and
         # before null, as a member's tag does.
-        for key, members in sorted(
-            keyed_groups, key=lambda km: tuple(_null_last_key(v) for v in km[0])
+        key_rows: list[tuple[int, ...]] = []
+        for group_key_rows, members in sorted(
+            keyed_groups,
+            key=lambda km: tuple(
+                _null_last_key(rows[r][c]) for r, c in zip(km[0], self.by)
+            ),
         ):
+            key_rows.append(group_key_rows)
+            key = tuple(rows[r][c] for r, c in zip(group_key_rows, self.by))
             if sort_columns:
                 members.sort(
                     key=lambda r: tuple(_null_last_key(r[c]) for c in sort_columns)
@@ -530,6 +529,17 @@ class GroupBy(UnaryOperator):
             member_columns,
             stream.data_context.type_converter,
         )
+
+        # Each key column holds the chosen member's value as the input's Arrow
+        # column has it, never through Python: a conversion can change a float's
+        # bits (a float32 signaling NaN comes back quiet).
+        for position, c in enumerate(self.by):
+            chosen = pa.array([r[position] for r in key_rows], pa.int64())
+            grouped_table = grouped_table.set_column(
+                grouped_table.schema.get_field_index(c),
+                grouped_table.schema.field(c),
+                table.column(c).take(chosen),
+            )
 
         n_char = self.orcapod_config.hashing.system_tag_n_char
         grouped_table = arrow_utils.append_to_system_tags(

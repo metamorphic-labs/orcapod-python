@@ -33,11 +33,13 @@ from orcapod.protocols.core_protocols import StreamProtocol
 
 
 # Each float key value by name, as its bit pattern at each width: the canonical quiet
-# NaN, NaN with the sign bit set, NaN with a payload, -0.0, 0.0 and 1.0.
+# NaN, NaN with the sign bit set, NaN with a payload, a signaling NaN (smaller bits than
+# the quiet one), -0.0, 0.0 and 1.0.
 BITS: dict[str, dict[int, int]] = {
     "nan": {16: 0x7E00, 32: 0x7FC00000, 64: 0x7FF8000000000000},
     "-nan": {16: 0xFE00, 32: 0xFFC00000, 64: 0xFFF8000000000000},
     "payload_nan": {16: 0x7E01, 32: 0x7FC00001, 64: 0x7FF8000000000001},
+    "signaling_nan": {16: 0x7C01, 32: 0x7F800001, 64: 0x7FF0000000000001},
     "-0": {16: 0x8000, 32: 0x80000000, 64: 0x8000000000000000},
     "0": {16: 0x0, 32: 0x0, 64: 0x0},
     "1": {16: 0x3C00, 32: 0x3F800000, 64: 0x3FF0000000000000},
@@ -68,7 +70,14 @@ TWO_KEY_ROWS: list[dict[str, Any]] = [
 ]
 
 
-def _source(rows: list[dict[str, Any]], keys: list[str], width: int) -> StreamBase:
+def _source(
+    rows: list[dict[str, Any]],
+    keys: list[str],
+    width: int,
+    *,
+    data_tag_key: bool = False,
+) -> StreamBase:
+    """The rows as a source; with ``data_tag_key``, the keys are data-tags too."""
     columns: dict[str, Any] = {
         name: pa.array(
             [None if r[name] is None else BITS[r[name]][width] for r in rows],
@@ -81,7 +90,7 @@ def _source(rows: list[dict[str, Any]], keys: list[str], width: int) -> StreamBa
     return op.sources.ArrowTableSource(
         pa.table(columns),
         tag_columns=[*keys, "t", "u"],
-        tag_only_columns=True,
+        tag_only_columns=["t", "u"] if data_tag_key else True,
         source_id="s",
         record_id_columns="rid",
     )
@@ -222,11 +231,87 @@ def test_nan_keys_group_the_same_sync_and_async(width: int) -> None:
 
 
 @pytest.mark.parametrize("width", WIDTHS)
-@pytest.mark.parametrize("name", ["-nan", "payload_nan", "-0"])
+@pytest.mark.parametrize("name", ["-nan", "payload_nan", "signaling_nan", "-0"])
 def test_a_group_whose_members_agree_keeps_their_key_bits(
     name: str, width: int
 ) -> None:
-    """The emitted key is always a value a member holds: nothing is rewritten."""
+    """The emitted key is always a value a member holds, bit for bit.
+
+    A ``float32`` signaling NaN comes back quiet through a Python float, so the key is
+    taken from the Arrow column.
+    """
     rows = [dict(r, k=name) for r in ONE_KEY_ROWS[:2]]
     grouped = _source(rows, ["k"], width).group_by("k")
     assert _key_bits(grouped, "k", width) == [BITS[name][width]]
+
+
+# A signaling NaN among the NaN keys: its bits are the smallest, so it is emitted.
+SIGNALING_ROWS: list[dict[str, Any]] = [
+    {"k": "nan", "t": 1, "u": 0, "rid": "r1", "v": 1},
+    {"k": "signaling_nan", "t": 2, "u": 0, "rid": "r2", "v": 2},
+    {"k": "-nan", "t": 3, "u": 0, "rid": "r3", "v": 3},
+    {"k": "payload_nan", "t": 4, "u": 0, "rid": "r4", "v": 4},
+    {"k": "0", "t": 0, "u": 0, "rid": "r5", "v": 5},
+]
+
+
+@pytest.mark.parametrize("data_tag_key", [False, True], ids=["tag_key", "data_tag_key"])
+@pytest.mark.parametrize("width", WIDTHS)
+def test_a_signaling_nan_key_is_emitted_with_its_bits(
+    width: int, data_tag_key: bool
+) -> None:
+    """In every row order, the NaN group emits the signaling NaN, bit for bit.
+
+    With a data-tag key, the key's data hash and folded source-info token are the
+    same for every row order too.
+    """
+    seen: dict[str, Any] = {}
+    for rows in itertools.permutations(SIGNALING_ROWS):
+        grouped = _source(list(rows), ["k"], width, data_tag_key=data_tag_key)
+        grouped = grouped.group_by("k")
+        assert grouped.as_table().column("v").to_pylist() == [[5], [1, 2, 3, 4]]
+        assert _key_bits(grouped, "k", width) == [
+            BITS["0"][width],
+            BITS["signaling_nan"][width],
+        ]
+        fingerprint = _fingerprint(grouped)
+        if not seen:
+            seen = fingerprint
+        assert fingerprint == seen
+
+
+@pytest.mark.parametrize("data_tag_key", [False, True], ids=["tag_key", "data_tag_key"])
+@pytest.mark.parametrize("width", WIDTHS)
+def test_a_signaling_nan_key_groups_the_same_sync_and_async(
+    width: int, data_tag_key: bool
+) -> None:
+    seen: list[str] = []
+    for rows in (SIGNALING_ROWS, SIGNALING_ROWS[::-1]):
+        for orchestrator in (SyncPipelineOrchestrator, AsyncPipelineOrchestrator):
+            job = PipelineJob(name="signaling_nan", database=InMemoryArrowDatabase())
+            with job:
+                _ = _source(
+                    list(rows), ["k"], width, data_tag_key=data_tag_key
+                ).group_by("k", label="grouped")
+            job.run(orchestrator=orchestrator())
+            node = job.nodes["grouped"]
+            out = node.as_table(all_info=True)
+            keys = out.column("k").combine_chunks().view(UNSIGNED[width])
+            assert keys.to_pylist() == [BITS["0"][width], BITS["signaling_nan"][width]]
+            fingerprint = json.dumps(
+                {
+                    "rows": _with_bits(out.to_pylist()),
+                    "hashes": [
+                        (
+                            tag.content_hash().to_string(),
+                            data.content_hash().to_string(),
+                        )
+                        for tag, data in node.iter_data()
+                    ],
+                },
+                sort_keys=True,
+                default=str,
+            )
+            if not seen:
+                seen = [fingerprint]
+            assert fingerprint == seen[0], orchestrator.__name__
