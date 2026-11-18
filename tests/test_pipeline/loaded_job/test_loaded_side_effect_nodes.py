@@ -227,6 +227,11 @@ def test_a_file_without_recorded_nullability_restores_side_effect_nodes(
     for descriptor in data["pipeline"]["nodes"].values():
         del descriptor["output_schema"]["nullable"]
         descriptor.get("source_config", {}).pop("nullable", None)
+        # A 0.1.0 file holds only plain tags and never names them (ITL-1019).
+        descriptor.pop("fall_through_tags", None)
+        descriptor.get("function_config", {}).pop("fall_through_tags", None)
+    for config in data["bindings"]["sources"].values():
+        config.pop("tag_only_columns", None)
     old = tmp_path / "format_0_1_0.json"
     old.write_text(json.dumps(data))
 

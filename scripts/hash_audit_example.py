@@ -60,6 +60,7 @@ def main() -> None:
             {"student": "bob", "math": 75},
         ],
         tag_columns=["student"],
+        tag_only_columns=True,
         source_id="scores_v1",
     )
     attendance = DictSource(
@@ -68,6 +69,7 @@ def main() -> None:
             {"student": "bob", "days": 160},
         ],
         tag_columns=["student"],
+        tag_only_columns=True,
         source_id="attendance_v1",
     )
 
@@ -238,6 +240,7 @@ def main() -> None:
                 {"student": "bob", "math": 75},
             ],
             tag_columns=["student"],
+            tag_only_columns=True,
             source_id="scores_v1",
         )
         simple_pod.process(job_scores)

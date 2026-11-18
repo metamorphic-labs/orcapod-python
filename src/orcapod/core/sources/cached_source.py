@@ -9,6 +9,7 @@ from typing import Any, ClassVar, TYPE_CHECKING
 from typing_extensions import override
 
 from orcapod import contexts
+from orcapod.core.data_tags import stream_data_tags
 from orcapod.config import OrcapodConfig
 from orcapod.core.sources.base import RootSource
 from orcapod.errors import UnstorableColumnError
@@ -491,7 +492,10 @@ class CachedSource(RootSource):
         tag_keys = self._source.keys()[0]
         # Cached rows are this source's: give them its data context, not the default.
         return ArrowTableStream(
-            all_records, tag_columns=tag_keys, data_context=self.data_context
+            all_records,
+            tag_columns=tag_keys,
+            data_context=self.data_context,
+            data_tags=stream_data_tags(self._source),
         )
 
     def _empty_table(self) -> pa.Table:

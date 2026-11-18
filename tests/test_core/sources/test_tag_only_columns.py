@@ -1,12 +1,13 @@
-"""``tag_only_columns`` in v0.3: ``True`` (all tags plain) only, identity-neutral (ITL-1159).
+"""``tag_only_columns`` on every table source (ITL-1159, ITL-1023).
 
-Every source that declares tag columns accepts ``tag_only_columns``. In v0.3 its one
-accepted value is ``True``, which is also the default: building a source with it gives
-exactly the source built without it (hashes, source id, record ids, rows, stored paths,
-saved config). Any value that would make a tag referential is refused, naming v0.4.
+Every source that declares tag columns accepts ``tag_only_columns``. On ``main`` (v0.3)
+its one accepted value is ``True``; with data-tags (v0.4) every declared tag is
+a data-tag by default (also a data column of the same name), and ``tag_only_columns``
+names the tags kept plain, ``True`` for all of them.
 
-These tests are about the default, so they build the same source both with and without
-the option.
+These tests build the same source with and without the option: ``True`` gives the v0.3
+source (plain tags), the default one with data-tags, with the same source id and record
+ids.
 """
 
 from __future__ import annotations
@@ -23,9 +24,7 @@ import pytest
 from deltalake import write_deltalake
 from typing_extensions import Unpack
 
-from orcapod import function_pod
-from orcapod.core.nodes import FunctionNode
-from orcapod.core.referential_tags import TagOnlyColumns
+from orcapod.core.data_tags import TagOnlyColumns
 from orcapod.core.sources import (
     ArrowTableSource,
     CachedSource,
@@ -169,12 +168,6 @@ def build(request: pytest.FixtureRequest, tmp_path: Path) -> Build:
     return lambda **option: factory(tmp_path, **option)
 
 
-@function_pod(output_keys="out")
-def _pass_x(x: int | None) -> int | None:
-    """Pass the data column ``x`` through: a function pod over every source here."""
-    return x
-
-
 def _system_tag_values(source: SourceProtocol) -> Sequence[Sequence[object]]:
     table = source.as_table(columns=ColumnConfig(system_tags=True))
     return [
@@ -184,65 +177,66 @@ def _system_tag_values(source: SourceProtocol) -> Sequence[Sequence[object]]:
     ]
 
 
-class TestTrueIsTheDefault:
-    """``tag_only_columns=True`` gives exactly the source built without it."""
-
-    def test_same_identity(self, build: Build) -> None:
-        default = build()
-        explicit = build(tag_only_columns=True)
-        assert explicit.source_id == default.source_id
-        assert explicit.content_hash() == default.content_hash()
-        assert explicit.pipeline_hash() == default.pipeline_hash()
-        assert explicit.output_schema() == default.output_schema()
-        assert explicit.keys() == default.keys()
-
-    def test_same_rows_and_record_ids(self, build: Build) -> None:
-        default = build()
-        explicit = build(tag_only_columns=True)
-        values = _system_tag_values(explicit)
-        assert len(values) == 2  # the source id and the record id columns
-        assert values == _system_tag_values(default)
-        assert explicit.as_table(all_info=True).equals(default.as_table(all_info=True))
-
-    def test_same_saved_config_without_the_key(self, build: Build) -> None:
-        default = build()
-        explicit = build(tag_only_columns=True)
-        assert explicit.to_config() == default.to_config()
-        # Plain is decided by the saved format version, not by this key (ITL-1159).
-        assert "tag_only_columns" not in explicit.to_config()
+class TestTrueKeepsEveryTagPlain:
+    """``tag_only_columns=True`` gives the source v0.3 built: no tag is data."""
 
     def test_tags_stay_out_of_the_data(self, build: Build) -> None:
         tag_keys, data_keys = build(tag_only_columns=True).keys()
         assert tag_keys
         assert not set(tag_keys) & set(data_keys)
 
-    def test_same_stored_paths(self, build: Build) -> None:
+    def test_naming_every_tag_is_true(self, build: Build) -> None:
+        explicit = build(tag_only_columns=True)
+        tag_keys, _ = explicit.keys()
+        named = build(tag_only_columns=list(tag_keys))
+        assert named.keys() == explicit.keys()
+        assert named.content_hash() == explicit.content_hash()
+        assert named.pipeline_hash() == explicit.pipeline_hash()
+
+    def test_plain_saved_config_states_true(self, build: Build) -> None:
+        # Format 0.3.0 states every binding (ITL-1019): a plain source writes True.
+        assert build(tag_only_columns=True).to_config()["tag_only_columns"] is True
+
+
+class TestTheDefaultIsDataTag:
+    """Without the option every declared tag is also a data column (ITL-1023)."""
+
+    def test_every_tag_is_data(self, build: Build) -> None:
+        tag_keys, data_keys = build().keys()
+        assert tag_keys
+        assert set(tag_keys) <= set(data_keys)
+
+    def test_an_empty_collection_or_false_is_the_default(self, build: Build) -> None:
+        default = build()
+        for value in (False, (), []):
+            assert (
+                build(tag_only_columns=value).content_hash() == default.content_hash()
+            )
+
+    def test_another_source_than_the_plain_one(self, build: Build) -> None:
         default = build()
         explicit = build(tag_only_columns=True)
+        assert explicit.content_hash() != default.content_hash()
+        assert explicit.pipeline_hash() != default.pipeline_hash()
         cache_db = InMemoryArrowDatabase()
         assert (
             CachedSource(explicit, cache_db).cache_path
-            == CachedSource(default, cache_db).cache_path
-        )
-        # The decorator's pod meets FunctionPodProtocol at run time; the checker does not
-        # see it (the same false positive is in the baseline for other FunctionNode tests).
-        pod: object = _pass_x.pod
-        assert (
-            FunctionNode(function_pod=pod, input_stream=explicit).node_identity_path  # pyright: ignore[reportArgumentType]
-            == FunctionNode(function_pod=pod, input_stream=default).node_identity_path  # pyright: ignore[reportArgumentType]
+            != CachedSource(default, cache_db).cache_path
         )
 
+    def test_same_source_id_and_record_ids_as_the_plain_one(self, build: Build) -> None:
+        default = build()
+        explicit = build(tag_only_columns=True)
+        assert explicit.source_id == default.source_id
+        values = _system_tag_values(explicit)
+        assert len(values) == 2  # the source id and the record id columns
+        assert values == _system_tag_values(default)
 
-_REFUSED: list[object] = [False, (), [], "id", ["id"], ("id",), 1, None]
 
-
-class TestOtherValuesAreRefused:
-    """Any value but ``True`` would make a tag referential, which arrives in v0.4."""
-
-    @pytest.mark.parametrize("value", _REFUSED, ids=repr)
-    def test_refused(self, build: Build, value: object) -> None:
-        with pytest.raises(ValueError, match=r"tag_only_columns=.*v0\.4"):
-            _ = build(tag_only_columns=value)
+class TestTheOption:
+    def test_unknown_name_is_refused(self, build: Build) -> None:
+        with pytest.raises(ValueError, match="not in tag_columns"):
+            _ = build(tag_only_columns=["nope"])
 
     def test_keyword_only(self) -> None:
         with pytest.raises(TypeError):
@@ -250,7 +244,7 @@ class TestOtherValuesAreRefused:
 
 
 class TestFromConfig:
-    """A saved config reads back plain; a hand-edited non-``True`` value is refused."""
+    """A config states its binding and reads back as saved; one without it is refused."""
 
     def test_config_reads_back_plain(self, tmp_path: Path) -> None:
         source = _csv(tmp_path, tag_only_columns=True)
@@ -258,11 +252,19 @@ class TestFromConfig:
         assert loaded.content_hash() == source.content_hash()
         assert loaded.keys() == source.keys()
 
-    def test_explicit_true_in_config_is_accepted(self, tmp_path: Path) -> None:
-        config = {**_csv(tmp_path).to_config(), "tag_only_columns": True}
-        assert CSVSource.from_config(config).keys() == _csv(tmp_path).keys()
+    def test_data_tag_config_reads_back_data_tag(self, tmp_path: Path) -> None:
+        source = _csv(tmp_path)
+        loaded = CSVSource.from_config(source.to_config())
+        assert loaded.content_hash() == source.content_hash()
+        assert loaded.keys() == source.keys()
 
-    def test_referential_config_is_refused(self, tmp_path: Path) -> None:
-        config = {**_csv(tmp_path).to_config(), "tag_only_columns": []}
-        with pytest.raises(ValueError, match=r"v0\.4"):
+    def test_data_tag_config_states_no_plain_tag(self, tmp_path: Path) -> None:
+        assert _csv(tmp_path).to_config()["tag_only_columns"] == []
+
+    def test_config_without_the_key_is_refused(self, tmp_path: Path) -> None:
+        # The saved format version decides plain tags, never a missing key (ITL-1159):
+        # a 0.1.0 or 0.2.0 file is given True by the loader before a source reads it.
+        config = {**_csv(tmp_path).to_config()}
+        del config["tag_only_columns"]
+        with pytest.raises(ValueError, match="tag_only_columns"):
             _ = CSVSource.from_config(config)

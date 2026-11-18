@@ -317,10 +317,14 @@ What runs where (developer, November 16, 2026; ITL-1181):
   private (ITL-1193).
 - `lint.yml` (job `Ruff and basedpyright`) runs the first three on every pull request and
   push to `main`, on both repositories. `run-tests.yml` runs pytest with coverage: on a pull
-  request one job, `test (3.13)`, whose coverage is the one reported to Codecov; on a push
+  request one job, `Tests (3.13)`, whose coverage is the one reported to Codecov; on a push
   to `main`, Python 3.11, 3.12 and 3.13. Once the required CI no longer applies, a pull
   request is tested on Python 3.13 only, and a failure only 3.11 or 3.12 shows is first
   seen on `main`.
+- Each test job names its suite, so no two checks share a name (ITL-1212): `Tests (3.x)`
+  (`run-tests.yml`), `Specification tests (3.x)` (`run-specification-tests.yml`, `test-specification/`)
+  and `PostgreSQL tests (3.x)` (`run-postgres-tests.yml`). A new test job gets its own
+  `name:` with the suite and the Python version; the job id `test` stays.
 - In CI the tests run in parallel, one worker per logical CPU (pytest-xdist, `-n logical`;
   `-n auto` counts physical cores, one on a GitHub runner). One place turns it on,
   `tests/conftest.py`, when `CI` is `true` and no `-n` is given; `-n 0` keeps a run serial
@@ -949,6 +953,14 @@ data. The rules:
   path (_kept_output: a job run, sync or async, and node.run() on its own; ITL-1133),
   and reads a stored operator cache in row order (_in_row_order_on_read). Never change
   the order of any other populated table: stored tables depend on it.
+- Data-tags come first among the data columns (developer, November 17, 2026, ITL-1205):
+  a stream lists its data-tags first in its data keys and data schema, in tag order, then
+  its other data columns in table order. A table built from rows lays a data-tag out among
+  the tags, so this is every row's order, on every path. ArrowTableStream applies it to
+  its keys (its table keeps its column order) and every operator's prediction applies it
+  through data_tags.data_tags_first. No hash of a stream, schema, row or table depends on
+  the order of a stream's columns, so the order moves none; a library value's own hash (a
+  polars or pandas DataFrame in a cell) does include that value's column order.
 - Type strictness (developer, November 10, 2026): Orcapod is type strict. It never
   expands or converts a type implicitly; the only exception is normalization to large variants.
   Inputs that disagree on a column's type are an error naming the column and both types, on

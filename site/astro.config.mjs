@@ -125,6 +125,7 @@ export default defineConfig({
 						page('Streams', 'concepts/streams'),
 						page('Operators', 'concepts/operators'),
 						page('Function Pods', 'concepts/function-pods'),
+						page('Data-tags', 'concepts/data-tags'),
 						page('Pipelines and Jobs', 'concepts/pipeline-job'),
 						page('Your Own Data Types', 'concepts/your-own-data-types'),
 						page('Arrays and Tensors', 'concepts/arrays'),

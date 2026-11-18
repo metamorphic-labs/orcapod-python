@@ -31,7 +31,9 @@ content.
 
 One rule holds for every operator: **no data element comes from a tag value**. An operator may
 use tags to join, filter, group or order rows, but it never turns a tag column into a data
-column, so a function pod never receives tag content.
+column, so a function pod never receives the content of a plain tag. A
+[data-tag](data-tags.md) is different: it is a tag and a data column at once, so a function
+reads its data role.
 
 An operator may add a tag, never data. A tag labels rows; it is not a data value, so
 [`AddTags`](#addtags) can add tags with constant values while every data column passes through
@@ -85,7 +87,7 @@ and `SemiJoin`. In the output of `Join` and `MergeJoin` the column is `T` when a
 input's type. Any other type difference is still an error, and a data column is never
 reconciled this way.
 
-A name is a tag or a data column, never both: if one input has `x` as a tag column and another has it as a data column, `Join` (and `MergeJoin`) raises `InputValidationError` when the graph is built; rename one with `map_tags` or `map_data`.
+A plain tag and a data column never share a name across inputs: if one input has `x` as a plain tag column and another has it as a data column only, `Join` (and `MergeJoin`) raises `InputValidationError` when the graph is built; rename one with `map_tags` or `map_data`. A data-tag is the exception: it is one column in both roles, and `Join` merges a key that is a data-tag on its inputs (or plain on one and a data-tag on another) into a data-tag with one data column (see [Data-tags](data-tags.md)).
 
 Column order follows each operator's argument symmetry: commutative operators (`Join`,
 `MergeJoin`) list tag and data columns by first appearance across their inputs in canonical
@@ -102,7 +104,7 @@ subjects = DictSource(
         {"subject_id": "mouse_01", "age": 12},
         {"subject_id": "mouse_02", "age": 8},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 measurements = DictSource(
@@ -110,7 +112,7 @@ measurements = DictSource(
         {"subject_id": "mouse_01", "weight": 25.3},
         {"subject_id": "mouse_02", "weight": 22.1},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 join = Join()
@@ -136,14 +138,14 @@ scale_a = DictSource(
         {"subject_id": "mouse_01", "weight": 25.3},
         {"subject_id": "mouse_02", "weight": 22.1},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 scale_b = DictSource(
     data=[
         {"subject_id": "mouse_01", "weight": 24.9},
         {"subject_id": "mouse_02", "weight": 22.6},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 merged = MergeJoin()(scale_a, scale_b)
@@ -184,14 +186,14 @@ all_subjects = DictSource(
         {"subject_id": "mouse_02", "age": 8},
         {"subject_id": "mouse_03", "age": 15},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 weighed = DictSource(
     data=[
         {"subject_id": "mouse_01", "weight": 25.3},
         {"subject_id": "mouse_02", "weight": 22.1},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 only_weighed = SemiJoin()(all_subjects, weighed)
@@ -215,7 +217,7 @@ source = DictSource(
         {"subject_id": "mouse_01", "age": 12},
         {"subject_id": "mouse_02", "age": 8},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 batch = Batch()
@@ -255,7 +257,7 @@ source = DictSource(
         {"subject_id": "mouse_01", "probe": "imec1", "spike_count": 980},
         {"subject_id": "mouse_02", "probe": "imec0", "spike_count": 1450},
     ],
-    tag_columns=["subject_id", "probe"],
+    tag_columns=["subject_id", "probe"], tag_only_columns=True,
 )
 
 grouped = GroupBy(by=["subject_id"])(source)
@@ -272,14 +274,17 @@ The output schema follows three rules:
 - **Group keys stay scalar tag columns** (`subject_id: str`), in the input's tag order. They are
   the only tag columns of the output.
 - **A tag that is not a key is dropped** (`probe`). A list of the members' values is not a key
-  for the group, just as SQL drops a non-key, non-aggregated column after `GROUP BY`.
+  for the group, just as SQL drops a non-key, non-aggregated column after `GROUP BY`. A
+  [data-tag](data-tags.md) that is not a key loses its tag role only: its data
+  column stays, as a list like any other.
 - **Data columns become `list[T]`** (`spike_count: list[int]`), one element per member.
 
 !!! warning "Member tag values are not carried"
-    `GroupBy` does not keep the members' values of a non-key tag, as a tag or as data. If a
-    later step needs to know which member each element came from, make the column data
-    *before* grouping: declare it as data at the source, or derive a source that offers the tag
-    as data with `DerivedSource(origin, tags_as_data={...})`.
+    `GroupBy` does not keep the members' values of a plain non-key tag, as a tag or as data.
+    If a later step needs to know which member each element came from, make the column data
+    *before* grouping: keep the tag a data-tag at the source (the default without
+    `tag_only_columns`), declare it as data at the source, or derive a source that offers the
+    tag as data with `DerivedSource(origin, tags_as_data={...})`.
 
 ```python
 from orcapod.sources import DerivedSource
@@ -296,7 +301,8 @@ for tag, data in by_subject.iter_data():
 
 The data columns of the output are exactly the data columns of the input: a function pod that
 follows `GroupBy` receives `spike_count` (and `probe_name`, when the source offers it), never a
-tag.
+plain tag. A data-tag group key stays a data column too (scalar, in both roles), so a
+following function can read its value (see [Data-tags](data-tags.md)).
 
 Ordering is deterministic by construction, because orcapod hashes the emitted lists to build
 cache keys: members are sorted by the input's non-key tag values (with the internal record id
@@ -338,7 +344,7 @@ source = DictSource(
         {"subject_id": "mouse_02", "age": 8, "weight": 22.1},
         {"subject_id": "mouse_03", "age": 15, "weight": 27.8},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 select = SelectDataColumns(columns=["weight"])
@@ -366,7 +372,7 @@ sessions = DictSource(
         {"subject_id": "mouse_01", "session": 1, "age": 12, "weight": 25.3},
         {"subject_id": "mouse_02", "session": 2, "age": 8, "weight": 22.1},
     ],
-    tag_columns=["subject_id", "session"],
+    tag_columns=["subject_id", "session"], tag_only_columns=True,
 )
 
 dropped = sessions.drop_columns("session", "age")
@@ -530,7 +536,7 @@ recordings = ArrowTableSource(
             ]
         ),
     ),
-    tag_columns=["session"],
+    tag_columns=["session"], tag_only_columns=True,
 )
 print(recordings.output_schema()[1])
 # Schema({'start_ms': int | None})
@@ -606,7 +612,7 @@ visits = ArrowTableSource(
             "notes": pa.array([None, "noisy", None, "ok"], pa.large_string()),
         }
     ),
-    tag_columns=["session"],
+    tag_columns=["session"], tag_only_columns=True,
 )
 print(visits.output_schema())
 # (Schema({'session': str | None}), Schema({'start_ms': int | None, 'notes': str | None}))
@@ -684,6 +690,9 @@ except InputValidationError as error:
 The names and values, in order, are the operator's identity, so two different values are two
 operators, with different hashes and stored tables.
 
+On a stream with [data-tags](data-tags.md), the data-tags stay data-tags and the new tags are
+plain: a constant tag is never a data value.
+
 ### Pick and Index
 
 `Pick(column, key)` extracts one entry from a struct- or dict-typed data column, and
@@ -755,7 +764,7 @@ def counts(values):
             "count": pa.array(values, type=pa.int8()),
         }
     )
-    return ArrowTableSource(table, tag_columns=["subject_id"])
+    return ArrowTableSource(table, tag_columns=["subject_id"], tag_only_columns=True)
 
 merged = MergeJoin()(counts([1, 2]), counts([3, 4]))
 print(merged.as_table().schema.field("count").type)

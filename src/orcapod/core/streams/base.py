@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import logging
 from abc import abstractmethod
-from collections.abc import AsyncIterator, Callable, Collection, Iterator, Mapping
+from collections.abc import (
+    AsyncIterator,
+    Callable,
+    Collection,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from contextvars import ContextVar
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
@@ -349,6 +356,7 @@ class StreamBase(TraceableBase):
         drop_unmapped: bool = False,
         strict: bool = True,
         label: str | None = None,
+        tag_only: bool = False,
         **renames: str,
     ) -> StreamBase:
         """Rename tag columns. See ``orcapod.core.operators.MapTags``.
@@ -356,7 +364,9 @@ class StreamBase(TraceableBase):
         The renames are one dict, the only positional argument (``map_tags({"subject":
         "animal"})``), or keyword arguments (``map_tags(subject="animal")``), not both.
         A name that is not a Python identifier, or a column named ``drop_unmapped``,
-        ``strict`` or ``label`` (the options), is renamed through the dict.
+        ``strict``, ``label`` or ``tag_only`` (the options), is renamed through the
+        dict. A data-tag is renamed in both roles unless ``tag_only`` is
+        ``True``; see ``MapTags``.
 
         Args:
             name_map: Each tag column to rename, mapped to its new name.
@@ -365,6 +375,7 @@ class StreamBase(TraceableBase):
                 a tag column raises ``InputValidationError``; when ``False`` it is
                 ignored.
             label: Optional node label for the pipeline graph.
+            tag_only: Rename data-tags in the tag role only (ITL-1023).
             **renames: Each column to rename, mapped to its new name, as
                 keyword arguments.
 
@@ -379,9 +390,12 @@ class StreamBase(TraceableBase):
         """
         from orcapod.core.operators import MapTags
 
-        return MapTags(_rename_map(name_map, renames), drop_unmapped, strict=strict)(
-            self, label=label
-        )
+        return MapTags(
+            _rename_map(name_map, renames),
+            drop_unmapped,
+            strict=strict,
+            tag_only=tag_only,
+        )(self, label=label)
 
     def map_data(
         self,
@@ -557,6 +571,41 @@ class StreamBase(TraceableBase):
         from orcapod.core.operators import DropNulls
 
         return DropNulls(columns)(self, label=label)
+
+    def tag_by(
+        self,
+        *columns: str | Sequence[str],
+        label: str | None = None,
+    ) -> StreamBase:
+        """Give the named data columns the tag role, as data-tags.
+
+        ``s.tag_by("x", "y")`` equals ``s.tag_by(["x", "y"])``. Each named data
+        column becomes a data-tag: one column, both a tag and the data column
+        it was, with its values and source info unchanged. The new tags follow this
+        stream's tags, in the order given. See ``orcapod.core.operators.TagBy``.
+
+        Args:
+            *columns: One or more data column names, or one list or tuple of names
+                as the only positional argument (not a set: the order matters).
+            label: Optional node label for the pipeline graph.
+
+        Returns:
+            The stream with the named columns as data-tags.
+
+        Raises:
+            TypeError: When no name is given, the names are a set, or a name is not
+                a string.
+            ValueError: When a name is repeated.
+            InputValidationError: When a name is reserved, is not a data column of
+                this stream, is already a tag, or has a type that cannot be a tag.
+        """
+        from orcapod.core.operators import TagBy
+
+        if len(columns) == 1 and not isinstance(columns[0], str):
+            names: str | Sequence[str] = columns[0]
+        else:
+            names = cast("tuple[str, ...]", columns)
+        return TagBy(names)(self, label=label)
 
     def add_tags(
         self,
@@ -1118,13 +1167,17 @@ class StreamBase(TraceableBase):
         Returns:
             The table, or ``None`` when the stream cannot type it without rows.
         """
+        from orcapod.core.data_tags import stream_data_tags
         from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 
         typed = typed_zero_row_table(self)
         if typed is None:
             return None
         return ArrowTableStream(
-            typed, tag_columns=self.keys()[0], data_context=self.data_context_key
+            typed,
+            tag_columns=self.keys()[0],
+            data_tags=stream_data_tags(self),
+            data_context=self.data_context_key,
         ).as_table(columns=config)
 
     def _typed_zero_row_table(self) -> pa.Table | None:

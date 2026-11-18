@@ -3,10 +3,11 @@ import contextlib
 import warnings
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Collection, Sequence
-from typing import TYPE_CHECKING, Any, final
+from typing import TYPE_CHECKING, Any, ClassVar, final
 
 from orcapod.channels import ChannelClosed, ReadableChannel, WritableChannel
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
+from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.operators.base import BinaryOperator, require_shared_arrow_type
 from orcapod.core.operators.key_nullability import reconcile_key_nullability
 from orcapod.core.operators.match_keys import frozen_scalar
@@ -74,7 +75,9 @@ class SemiJoin(BinaryOperator):
         """Return the shared names that are not match keys, with each side's role.
 
         The decision is by name only: no value or type is read. Meta (``__``)
-        columns are not user columns and never count.
+        columns are not user columns and never count. A match key is never
+        reported, in either role: a data-tag (ITL-1023) is a tag and a data
+        column of one name, one column, so its data role is the key's column.
 
         Args:
             left_tag_keys: The left input's tag column names.
@@ -93,12 +96,13 @@ class SemiJoin(BinaryOperator):
         left_roles = [(name, "tag") for name in left_tag_keys] + [
             (name, "data") for name in left_data_keys
         ]
+        keys = set(left_tag_keys) & set(right_tag_keys)
         return tuple(
             (name, left_role, right_roles[name])
             for name, left_role in left_roles
             if name in right_roles
+            and name not in keys
             and not name.startswith(constants.META_PREFIX)
-            and (left_role, right_roles[name]) != ("tag", "tag")
         )
 
     def _warn_once_per_application(
@@ -174,6 +178,9 @@ class SemiJoin(BinaryOperator):
         )
         return self._match_keys(tuple(left_tag_schema), tuple(right_tag_schema))
 
+    # Data-tags (ITL-1023): handled.
+    DATA_TAGS_ISSUE: ClassVar[str | None] = None
+
     def binary_static_process(
         self, left_stream: StreamProtocol, right_stream: StreamProtocol
     ) -> StreamProtocol:
@@ -233,6 +240,7 @@ class SemiJoin(BinaryOperator):
         return ArrowTableStream(
             semi_joined_table,
             tag_columns=tuple(left_tag_schema.keys()),
+            data_tags=stream_data_tags(left_stream),
         )
 
     def binary_output_schema(
