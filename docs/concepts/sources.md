@@ -219,7 +219,11 @@ sent downstream during a run are only the rows that run read.
 #### Restricting a source versus filtering in the pipeline
 
 `source.where(column=value, ...)` returns a new source on the same table that reads only the
-rows in which every named column equals its value. It is a **restriction**, not an operator:
+rows in which every named column equals its value. Several conditions can be given in one
+call, as keywords or as a mapping, or across chained calls:
+`events.where(unit_id=106, session_index=2)` and
+`events.where(unit_id=106).where(session_index=2)` are the same restriction, reading the
+same rows. It is a **restriction**, not an operator:
 
 - An operator (`SemiJoin`, `PolarsFilter`) is a step of the pipeline. It is a node of the
   graph and part of the pipeline's identity: a pipeline with a filter computes something
@@ -241,7 +245,9 @@ column is allowed.
 events = SpiralDBTableSource("my-project-123456", "spike_event", source_id="spikes")
 one_unit = events.where(unit_id=106)  # or events.where({"unit_id": 106})
 one_session = one_unit.where(session_index=2)  # conditions add up
+same_session = events.where(unit_id=106, session_index=2)  # both in one call
 
+assert same_session.to_config() == one_session.to_config()
 assert one_unit.content_hash() == events.content_hash()
 job.bind(sources={"spikes": one_unit})  # the slot the unrestricted source fills
 summary = job.run()

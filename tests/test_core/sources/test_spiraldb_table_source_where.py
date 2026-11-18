@@ -11,6 +11,7 @@ import asyncio
 import copy
 import datetime as dt
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
@@ -156,6 +157,150 @@ class TestSurface:
     def test_each_scalar_type_can_be_matched(self, project, column, value, expected):
         """A value of the column's own Python type matches."""
         assert _timestamps(_source().where({column: value})) == expected
+
+
+_Restrict = Callable[[SpiralDBTableSource], SpiralDBTableSource]
+
+# One restriction (subject_id "m1" and flag True), given in every form ``where`` takes.
+_FORMS_OF_ONE_RESTRICTION: dict[str, _Restrict] = {
+    "keywords": lambda s: s.where(subject_id="m1", flag=True),
+    "keywords in the other order": lambda s: s.where(flag=True, subject_id="m1"),
+    "mapping": lambda s: s.where({"subject_id": "m1", "flag": True}),
+    "mapping and keyword": lambda s: s.where({"flag": True}, subject_id="m1"),
+    "chained": lambda s: s.where(subject_id="m1").where(flag=True),
+    "chained in the other order": lambda s: s.where(flag=True).where(subject_id="m1"),
+}
+
+# The same restriction with a condition of a several-keyword call given twice.
+_REPEATED_CONDITIONS: dict[str, _Restrict] = {
+    "keywords then chained": lambda s: s.where(subject_id="m1", flag=True).where(
+        subject_id="m1"
+    ),
+    "chained then keywords": lambda s: s.where(subject_id="m1").where(
+        subject_id="m1", flag=True
+    ),
+    "mapping repeats": lambda s: s.where(flag=True).where(
+        {"subject_id": "m1", "flag": True}
+    ),
+}
+
+
+class TestSeveralConditionsInOneCall:
+    """``where(a=x, b=y)``: every condition of one call must hold.
+
+    Rows of ``event``: ``subject_id="m1"`` alone lets 1, 2, 3 through and ``flag=True``
+    alone 3, 4, 5, so only row 3 holds both: a dropped condition lets more rows through.
+    """
+
+    def test_two_keywords_read_only_the_rows_where_both_hold(self, project):
+        """Each condition alone lets more rows through than both together."""
+        assert _timestamps(_source().where(subject_id="m1")) == [1, 2, 3]
+        assert _timestamps(_source().where(flag=True)) == [3, 4, 5]
+
+        assert _timestamps(_source().where(subject_id="m1", flag=True)) == [3]
+
+    def test_three_keywords_read_only_the_rows_where_all_hold(self, project):
+        """With three conditions, leaving out any one lets more rows through."""
+        project.create_table(
+            "default.grid", key_schema=pa.schema([pa.field("id", pa.string())])
+        ).write(
+            pa.table(
+                {
+                    "id": [
+                        f"r{x}{y}{z}" for x in (0, 1) for y in (0, 1) for z in (0, 1)
+                    ],
+                    "x": [x for x in (0, 1) for _ in (0, 1) for _ in (0, 1)],
+                    "y": [y for _ in (0, 1) for y in (0, 1) for _ in (0, 1)],
+                    "z": [z for _ in (0, 1) for _ in (0, 1) for z in (0, 1)],
+                }
+            )
+        )
+        grid = SpiralDBTableSource(_PROJECT, "grid")
+
+        def ids(source: SpiralDBTableSource) -> list[str]:
+            """Return the ``id`` of every row ``source`` reads, in order."""
+            return cast("list[str]", source.as_table().column("id").to_pylist())
+
+        assert ids(grid.where(x=1, y=0, z=1)) == ["r101"]
+        assert ids(grid.where(y=0, z=1)) == ["r001", "r101"]
+        assert ids(grid.where(x=1, z=1)) == ["r101", "r111"]
+        assert ids(grid.where(x=1, y=0)) == ["r100", "r101"]
+
+    @pytest.mark.parametrize(
+        "conditions, expression",
+        [
+            (
+                {"subject_id": "m1", "flag": True},
+                "subject_id == 'm1' & flag == True",
+            ),
+            (
+                {"flag": True, "subject_id": "m1"},
+                "flag == True & subject_id == 'm1'",
+            ),
+        ],
+    )
+    def test_two_keywords_reach_the_scan_in_the_order_given(
+        self, project, conditions, expression
+    ):
+        """SpiralDB receives one expression joining both equalities, in call order."""
+        _source().where(**conditions).as_table()
+
+        assert repr(fake_pyspiral.scan_log[-1].kwargs["where"]) == expression
+
+    @pytest.mark.parametrize("form", list(_FORMS_OF_ONE_RESTRICTION))
+    def test_every_form_is_the_same_restriction(self, project, form):
+        """Keywords, a mapping, both, or a chain: the same rows, config and identity."""
+        reference = _source().where(subject_id="m1", flag=True)
+
+        restricted = _FORMS_OF_ONE_RESTRICTION[form](_source())
+
+        assert _rows_by_key(restricted) == _rows_by_key(reference)
+        assert restricted.to_config() == reference.to_config()
+        assert restricted.content_hash() == reference.content_hash()
+        assert restricted.pipeline_hash() == reference.pipeline_hash()
+
+    def test_two_keywords_are_saved_in_the_config(self, project):
+        """``to_config()["where"]`` holds both conditions, each as given."""
+        restricted = _source().where(subject_id="m1", day=_DAY)
+
+        assert restricted.to_config()["where"] == {
+            "subject_id": "m1",
+            "day": {"date": _DAY.isoformat()},
+        }
+
+    @pytest.mark.parametrize(
+        "conditions, column",
+        [
+            ({"subject_id": "m1", "channel": 1.0}, "channel"),
+            ({"subject_id": b"m1", "channel": 1}, "subject_id"),
+            ({"flag": True, "subject_id": "m1", "amplitude": 3}, "amplitude"),
+        ],
+    )
+    def test_a_value_of_another_type_among_several_is_refused(
+        self, project, conditions, column
+    ):
+        """One wrong value refuses the whole call, naming its column; nothing is read."""
+        source = _source()
+
+        with pytest.raises(TypeError, match=rf"{column}.*convert"):
+            source.where(**conditions)
+        assert fake_pyspiral.scan_log == []
+        assert source.to_config()["where"] == {}
+
+    @pytest.mark.parametrize("form", list(_REPEATED_CONDITIONS))
+    def test_repeating_a_condition_across_calls_is_allowed(self, project, form):
+        """A condition of a several-keyword call given again with its value is kept once."""
+        restricted = _REPEATED_CONDITIONS[form](_source())
+
+        assert _timestamps(restricted) == [3]
+        assert restricted.to_config()["where"] == {"subject_id": "m1", "flag": True}
+
+    def test_a_conflict_with_a_several_keyword_call_is_refused(self, project):
+        """A later call giving one of the columns another value is refused, naming it."""
+        restricted = _source().where(subject_id="m1", flag=True)
+
+        with pytest.raises(ValueError, match=r"flag.*True.*False"):
+            restricted.where(flag=False)
 
 
 class TestRefusals:
@@ -515,6 +660,24 @@ class TestRunsAndSavedJobs:
         }
         assert "events: where subject_id='m1', limit 3" in repr(summary)
         assert "subject_id=&#x27;m1&#x27;" in summary._repr_html_()
+
+    @pytest.mark.parametrize("form", list(_FORMS_OF_ONE_RESTRICTION))
+    def test_the_run_summary_records_both_conditions(self, project, tmp_path, form):
+        """``RunSummary.restrictions`` is the same for every form of the restriction."""
+        source = _source(source_id="events", tag_only_columns=True)
+        restricted = _FORMS_OF_ONE_RESTRICTION[form](source)
+        job = self._job(tmp_path / "store", restricted, [])
+
+        summary = job.run()
+
+        assert summary.restrictions == {
+            "events": {
+                "source_id": "events",
+                "where": {"subject_id": "m1", "flag": True},
+            }
+        }
+        rows = job.nodes["double"].as_table().column("timestamp").to_pylist()
+        assert rows == [3]
 
     def test_the_key_is_the_slot_and_the_value_names_the_source(
         self, project, tmp_path
