@@ -411,6 +411,8 @@ CASES = [
     Case("batch_2", lambda: Batch(batch_size=2), lambda: (source_a(),)),
     Case("batch_all", Batch, lambda: (source_a(),)),
     Case("group_by", lambda: GroupBy(["ta"]), lambda: (source_a(),)),
+    # A bare string is one column name (ITL-1221).
+    Case("group_by_bare_string", lambda: GroupBy("ta"), lambda: (source_a(),)),
     Case(
         "polars_filter",
         lambda: PolarsFilter(constraints={"ta": 5}),

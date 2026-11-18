@@ -507,7 +507,7 @@ class StreamBase(TraceableBase):
 
     def group_by(
         self,
-        by: Collection[str],
+        by: str | Collection[str],
         label: str | None = None,
     ) -> StreamBase:
         """Reduce rows sharing a key into one row per group.
@@ -519,7 +519,7 @@ class StreamBase(TraceableBase):
         ``orcapod.core.operators.GroupBy``.
 
         Args:
-            by: Tag column names to group on.
+            by: Tag column names to group on, or one name as a string.
             label: Optional node label for the pipeline graph.
 
         Returns:

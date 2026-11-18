@@ -113,7 +113,8 @@ names, in an order that can differ from one Python session to the next.)
 - Operators are named after their kind, numbered when there are several.
 
 To see how the nodes connect, put `job` on the last line of a notebook cell: the job draws
-itself as a diagram.
+itself as a diagram. [Working in notebooks](../concepts/notebooks.md#the-pipeline-diagram)
+has a picture of this job's diagram and what each display in a notebook shows.
 
 !!! caution "In development"
     `Pipeline.diagram()`, `PipelineJob.diagram()`, `PipelineDiagram` and its methods and
