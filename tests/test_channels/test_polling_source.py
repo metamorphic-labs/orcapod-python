@@ -1762,7 +1762,7 @@ class TestPollingSourceTagOrder:
     """The order of ``tag_columns`` is not part of the identity (ITL-1271)."""
 
     @staticmethod
-    def _source(tags: list[str], keys: list[str]) -> PollingSource:
+    def _source(tags: list[str], keys: list[str]) -> PollingSource[Any]:
         batch = pa.table(
             {
                 "a": pa.array(["x", "y"], pa.large_string()),
