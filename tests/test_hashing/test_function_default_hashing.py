@@ -365,7 +365,11 @@ class TestParameterKind:
         assert site(plain) != site(kinds)
 
     def test_positional_only_marker(self, site: Callable[..., Any]):
-        """``f(a, /, b)`` differs from ``f(a, b)``."""
+        """``f(a, /, b)`` differs from ``f(a, b)`` as a value.
+
+        A data function refuses a positional-only parameter (ITL-1258: a pod passes its
+        inputs by name), so ``f(a, /, b)`` has no stored signature hash at all.
+        """
 
         def kinds(a: int, b: int) -> int:
             return a
@@ -375,6 +379,10 @@ class TestParameterKind:
         def kinds(a: int, /, b: int) -> int:  # noqa: F811  (same name on purpose)
             return a
 
+        if site is _stored_signature_hash:
+            with pytest.raises(ValueError, match="positional-only"):
+                site(kinds)
+            return
         assert site(plain) != site(kinds)
 
 
