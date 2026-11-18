@@ -1,7 +1,10 @@
-"""Shared fixtures and helpers for specification-derived objective tests.
+"""Shared fixtures and helpers for the specification tests.
 
 These tests are derived from design documents, protocol definitions, and
 interface contracts — NOT from reading implementation code.
+
+This suite was called ``test-objective`` before 2026-11-17 (ITL-1212); older
+plans, specs and changelog entries use that name.
 """
 
 from __future__ import annotations
