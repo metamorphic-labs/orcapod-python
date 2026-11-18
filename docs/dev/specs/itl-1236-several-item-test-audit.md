@@ -100,7 +100,7 @@ Legend: **yes** (with the best test as evidence), **no** (with what the closest 
 | 4 | Swapping `output_keys` keeps the function's uri, so a job serves stored values under swapped names | result cache: wrong values served | ITL-1244 (rule undecided) |
 | 5 | Binding a source with mixed tag roles in another column order is accepted, then the source node's `as_table` raises | error on read; the run is right | ITL-1245 |
 | 6 | A function pod over data-tags (`FallThroughPod`) hashes its fall-through tags in the input's tag order: two sources that differ only in tag order give the function node another content and pipeline hash | pipeline hash, pipeline table path | ITL-1246 |
-| 7 | Input whose table layout differs from its tag order: every unary operator's result keys list the tags in the physical order while its rows use the tag order; Join, SemiJoin, MergeJoin (and, with data-tags, the tag select/drop and `MapTags` forms) give the async rows another column order than the sync rows | column order only; no hash | pending |
+| 7 | Input whose table layout differs from its tag order: every unary operator's result keys list the tags in the physical order while its rows use the tag order; Join, SemiJoin, MergeJoin (and, with data-tags, the tag select/drop and `MapTags` forms) give the async rows another column order than the sync rows. In a job, an operator node stores one column order on both orchestrators (measured, tested) | column order only; no hash, no stored table | ITL-1249 |
 | Q1 | `PolarsFilter`: the order of the predicates is in the identity (and the stored path); the order of the constraints is not | pipeline hash | ITL-1247 (rule undecided) |
 
 ## Gaps, ranked
