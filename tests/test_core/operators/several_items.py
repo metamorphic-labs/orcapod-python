@@ -249,6 +249,27 @@ def rows_fingerprint(
     )
 
 
+def ordered_rows_fingerprint(rows: Sequence[Row]) -> list[tuple[str, ...]]:
+    """``rows_fingerprint`` plus each row's column order, system-tag order and Arrow schemas.
+
+    For comparing the async rows with the sync rows of one arrangement, where the
+    column order must be the same too (as ``assert_equivalent`` in
+    ``test_async_sync_equivalence.py``); across arrangements only the order-free
+    ``rows_fingerprint`` must be.
+    """
+    return sorted(
+        (
+            *row_fingerprint(tag, data),
+            repr(list(tag.keys())),
+            repr(list(data.keys())),
+            repr(list(tag.system_tags())),
+            str(tag.arrow_schema(columns={"system_tags": True})),
+            str(data.arrow_schema(columns={"source": True})),
+        )
+        for tag, data in rows
+    )
+
+
 def fingerprint(stream: StreamProtocol, *, source_info: bool = True) -> dict[str, Any]:
     """What must not depend on the input's arrangement or a set argument's order.
 
