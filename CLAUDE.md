@@ -824,7 +824,11 @@ Every pipeline element has two parallel hashes:
    identity: the default `source_id` of the in-memory sources
    (`<source kind>:<algorithm label>:<hex>` of the table hash, used when none is given) and the elements of a `ListSource`. A downstream stream or node hashes its
    pod's identity plus its upstreams' content hashes; a function pod's identity is its uri,
-   not its body. Only a datagram (one row's tags or data) has a `content_hash()` that is a
+   not its body. The uri holds the hash of the output schema, a set of named, typed outputs
+   in no order (developer, November 17, 2026, ITL-1244): reordering `output_keys` changes it
+   only when a key's type changes; a swap among same-typed outputs changes what the function
+   computes, like a body edit, and needs a version bump (no check on a cache hit yet:
+   ITL-1253). The input parameters (names and order) are in no part of the uri. Only a datagram (one row's tags or data) has a `content_hash()` that is a
    digest of its values; that row hash, not the node's content hash, is what results are
    memoized by. The node's content hash tells apart, inside a shared table, the rows of
    pipelines bound to different sources (`__node_content_hash`).

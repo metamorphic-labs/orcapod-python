@@ -178,6 +178,43 @@ print(step.pod(source).pipeline_hash() == original)
 When you change what a function computes, bump its major version (or rename it) so that
 stale results are not reused.
 
+The output schema is a set of named, typed outputs: each output key with its type, in no
+order, like every other schema. `output_keys` also says which position of the returned
+tuple each name takes, and that mapping belongs with the body. So reordering the output keys
+changes the identity only when a key's type changes. Swapping two keys of the same type
+keeps the identity, as a body edit does, and it changes what the function computes: bump
+the major version. Until stored results are checked against the current function on a cache
+hit (ITL-1253), a run serves the earlier results without a warning. The function's input
+parameters (their names and their order) are not part of the identity either.
+
+```python
+@function_pod(output_keys=["total", "doubled"])
+def pair(age: int) -> tuple[int, int]:
+    return age + 1, age * 2
+
+original = pair.pod(source).pipeline_hash()
+
+@function_pod(output_keys=["doubled", "total"])  # same types: same identity
+def pair(age: int) -> tuple[int, int]:
+    return age + 1, age * 2
+
+print(pair.pod(source).pipeline_hash() == original)
+# True
+
+@function_pod(output_keys=["label", "next_age"])
+def describe(age: int) -> tuple[str, int]:
+    return f"age {age}", age + 1
+
+original = describe.pod(source).pipeline_hash()
+
+@function_pod(output_keys=["next_age", "label"])  # next_age is now a str: new identity
+def describe(age: int) -> tuple[str, int]:
+    return f"age {age}", age + 1
+
+print(describe.pod(source).pipeline_hash() == original)
+# False
+```
+
 ## Your own classes in the identity
 
 A class enters both chains through its **identity**: its kind, its name and the names and
