@@ -135,7 +135,7 @@ def test_a_source_in_another_arrangement_is_bound_as_the_slot_declares(
             _bind_in(role, order, layout)
 
 
-BIND_MIXED_ISSUE = "ITL-1236 defect 5, issue pending"
+BIND_MIXED_ISSUE = "ITL-1245"
 
 
 @pytest.mark.xfail(

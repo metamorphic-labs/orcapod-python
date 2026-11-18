@@ -50,7 +50,7 @@ Legend: **yes** (with the best test as evidence), **no** (with what the closest 
 | `Join` inputs, 4+ | async only: `tests/test_channels/test_native_async_operators.py::TestJoinNativeAsync::test_four_way_join` | no → NEW (all 24 permutations) | no → NEW (plain, data-tags, mixed) | no → NEW | no sync comparison → NEW |
 | `Join` shared keys, several | schema only: `tests/test_pipeline/test_zero_row_column_order.py` step `join` | no (keys never in another order in one input) → NEW (tag orders per input) | plain, data-tag | no → NEW | schema only → NEW |
 | `MergeJoin` colliding columns | yes: `ops/test_merge_join.py::TestMergeJoinBasic::test_values_sorted_independently_per_column`; ASE `merge_source` | left/right only, distinct values → NEW `test_merge_join_result_does_not_depend_on_the_order_of_its_inputs`; ties: **defect ITL-1241** | yes: ASE `merge_join`, `ref_merge_join_*` | no → NEW | yes: ASE |
-| `MergeJoin` nullable colliding column with a null | no | n/a | n/a | n/a | n/a: **defect 3** (raises `TypeError`) → NEW xfail |
+| `MergeJoin` nullable colliding column with a null | no | n/a | n/a | n/a | n/a: **ITL-1243** (raises `TypeError`) → NEW xfail |
 | `SemiJoin` match keys | rows with 1 key only (`ops/test_semijoin_tag_keys.py::test_semijoin_keys_on_shared_tags_only`) | no → NEW `test_semijoin_matches_on_every_shared_tag_in_any_arrangement` | yes: plain, `ref_semijoin`, mixed | no → NEW | 1 key: `test_semijoin_tag_keys.py::test_async_rows_equal_sync_rows` → NEW (2 keys) |
 | `Batch` (tags and data become lists) | yes: ASE `batch_2` (2 tags, 9 data) | n/a (no column argument); member order is identity: `WHF::TestBatchGroupByFold::test_member_order_is_identity` | yes: `dt/test_batch.py` | no → NEW `test_unary_result_does_not_depend_on_the_input_arrangement[batch*]` | yes: ASE |
 | `GroupBy` `by`, member order | yes: `ops/test_group_by.py::TestGroupByShape::test_one_row_per_distinct_key` | keys only on `main` | yes | no on `main` | 1 key on `main` |
@@ -66,7 +66,7 @@ Legend: **yes** (with the best test as evidence), **no** (with what the closest 
 | `MapTags` name_map | **almost none**: one chained rename with `tag_only` (`dt/test_operators.py::test_map_tags_tag_only_keeps_a_chained_rename_of_another_tag`) → NEW | **no** → NEW | yes; a swap of data-tags is refused: **defect ITL-1242** → NEW xfail | no → NEW | single rename only → NEW |
 | `MapData` name_map | yes: `dt/test_operators.py::test_map_data_chained_rename_does_not_reach_the_data_tag_copy` | **no** → NEW (incl. a swap) | yes | no → NEW | single rename → NEW |
 | `MapColumns` name_map | yes: `ops/test_mappers_strict.py::test_map_columns_renames_tags_and_data`; ASE `map_columns` | **no** → NEW | plain; refused with data-tags (ITL-1022): `dt/test_operators.py::test_uncovered_operators_raise` | no → NEW | yes |
-| `PolarsFilter` predicates | **no** (always one) → NEW | **no**; the order IS in the identity (`filters.py` hashes an ordered tuple): **question Q1** | data | no → NEW | yes |
+| `PolarsFilter` predicates | **no** (always one) → NEW | **no**; the order IS in the identity (`filters.py` hashes an ordered tuple): **ITL-1247** | data | no → NEW | yes |
 | `PolarsFilter` constraints | **no** (never two keys) → NEW | **no** → NEW (not in identity) | tag, data, data-tag | no → NEW | yes |
 | `stream.polars_filter(*predicates, constraint_map, **constraints)` | **no** | no | — | no | sync only |
 | `DropNulls` columns | yes: `ops/test_drop_nulls.py::test_tag_and_data_columns_in_one_call` | hashes: `test_identity_is_the_set_of_names`; rows → NEW | tag, data; a nullable data-tag holding a null: **no** | one layout → NEW | yes: ASE `drop_nulls_many` |
@@ -84,10 +84,10 @@ Legend: **yes** (with the best test as evidence), **no** (with what the closest 
 | `CachedSource` | 1 tag | no | **plain only** (data-tag read-back untested) | no | no |
 | `DerivedSource(tags_as_data=)` | yes: `sources/test_derived_source_tags_as_data.py::TestColumns::test_several_copies_follow_map_order` | content hash only: `TestIdentity::test_mapping_order_does_not_change_content_hash` | plain; data-tag origin `dt/test_derived_source.py::test_tags_as_data_over_a_data_tag_node` | one arrangement | yes |
 | function pod, several inputs | 2: `function_pod/test_function_pod_auto_select.py::test_call_selects_once_after_the_join`; 3: `dt/test_edi_end_to_end.py` | **no**: `pod(b, a)` never compared with `pod(a, b)` | data-tag parameter (EDI) | no | yes |
-| `output_keys`, several | yes: `data_function/test_data_function.py::test_multiple_output_keys` | **no**; order is not in the identity: **defect or decision 4** | — | — | value only |
+| `output_keys`, several | yes: `data_function/test_data_function.py::test_multiple_output_keys` | **no**; order is not in the identity: **ITL-1244** | — | — | value only |
 | automatic select of several extra columns | yes: `test_dropping_logs_one_info_message_naming_the_columns` | no (kept list sorted) | one data-tag falls through | no | yes |
 | `PipelineJob.bind(sources=)`, several | yes: `test_pipeline/test_pipeline_job.py::TestPipelineJobBind::test_bind_sources_mutates_job` (membership) | n/a (dict order unused) | plain only | — | — |
-| bind a source in another column order | yes: `test_bind_type_check.py::test_columns_match_by_name_within_each_group_whatever_their_order` (plain, run ok only) | yes (plain) | **mixed roles: defect 5** (accepted, then the node's table breaks) | partly | async read in `test_bind_narrower_source.py::test_columns_follow_the_declared_order` |
+| bind a source in another column order | yes: `test_bind_type_check.py::test_columns_match_by_name_within_each_group_whatever_their_order` (plain, run ok only) | yes (plain) | **mixed roles: ITL-1245** (accepted, then the node's table breaks) | partly | async read in `test_bind_narrower_source.py::test_columns_follow_the_declared_order` |
 | `ColumnConfig` groups | all_info: `tests/test_types_column_config_all_info.py`; each group alone: `test_zero_row_column_order.py` | n/a | data-tag variants | one arrangement | yes |
 
 ## Defects and questions found
@@ -96,24 +96,24 @@ Legend: **yes** (with the best test as evidence), **no** (with what the closest 
 |---|---|---|---|
 | 1 | `MergeJoin(A, B)` and `MergeJoin(B, A)` give the source-info lists of tied values in argument order | stored source info (operator cache, downstream tables); not the hashes | ITL-1241 |
 | 2 | `MapTags` refuses a swap or cycle of data-tags that it accepts for plain tags (`MapData` is right: a data-only move) | error only | ITL-1242 |
-| 3 | `MergeJoin` raises `TypeError` on a null in a colliding column | error only | pending |
-| 4 | Swapping `output_keys` keeps the function's uri, so a job serves stored values under swapped names | result cache: wrong values served | pending (decision) |
-| 5 | Binding a source with mixed tag roles in another column order is accepted, then the source node's `as_table` raises | error on read; the run is right | pending |
-| 6 | A function pod over data-tags (`FallThroughPod`) hashes its fall-through tags in the input's tag order: two sources that differ only in tag order give the function node another content and pipeline hash | pipeline hash, pipeline table path | pending |
-| Q1 | `PolarsFilter`: the order of the predicates is in the identity (and the stored path); the order of the constraints is not | pipeline hash | question |
+| 3 | `MergeJoin` raises `TypeError` on a null in a colliding column | error only | ITL-1243 |
+| 4 | Swapping `output_keys` keeps the function's uri, so a job serves stored values under swapped names | result cache: wrong values served | ITL-1244 (rule undecided) |
+| 5 | Binding a source with mixed tag roles in another column order is accepted, then the source node's `as_table` raises | error on read; the run is right | ITL-1245 |
+| 6 | A function pod over data-tags (`FallThroughPod`) hashes its fall-through tags in the input's tag order: two sources that differ only in tag order give the function node another content and pipeline hash | pipeline hash, pipeline table path | ITL-1246 |
+| Q1 | `PolarsFilter`: the order of the predicates is in the identity (and the stored path); the order of the constraints is not | pipeline hash | ITL-1247 (rule undecided) |
 
 ## Gaps, ranked
 
 Order- or role-dependent behaviour that reaches a hash or a stored table first.
 
-1. `output_keys` order: not in identity, stored values served under swapped names (defect 4).
+1. `output_keys` order: not in identity, stored values served under swapped names (ITL-1244).
 2. `MergeJoin` tied values: source-info order follows the inputs (ITL-1241).
-3. `PolarsFilter` predicate order in identity, constraint order not; never tested with two (Q1).
+3. `PolarsFilter` predicate order in identity, constraint order not; never tested with two (ITL-1247).
 4. `record_id_columns` key order: moves record ids, tokens and the content hash; never compared.
 5. `Join` with 3 and 4 inputs: content and pipeline hash under every permutation; 4 inputs never run sync. Closed by NEW.
 6. `MapTags` / `MapData` / `MapColumns`: several renames, mapping order, swaps, sync and async; `MapTags` has no golden entry. Closed by NEW (except golden: out of scope).
 7. Column arrangement (d) never varied for any operator but `GroupBy` (PR #434). Closed by NEW for every operator.
-8. Bind of a mixed-role source in another column order (defect 5); several sources with one refused.
+8. Bind of a mixed-role source in another column order (ITL-1245); several sources with one refused.
 9. `SelectTagColumns` / `DropTagColumns` with two or more names, in two orders. Closed by NEW.
 10. `function_pod` over several inputs: `pod(b, a)` against `pod(a, b)` (hashes, system-tag names, stored rows).
 11. `SemiJoin` with two or more keys, rows sync and async. Closed by NEW.
@@ -135,7 +135,7 @@ Order- or role-dependent behaviour that reaches a hash or a stored table first.
   in another order finds every result stored (sync and async). The in-memory output's
   source info names a fresh random record per computation, so comparisons leave it out.
 - `bind(sources=)` with two sources: both bound, nothing moves; one refused, neither bound.
-  A plain or data-tag source in any arrangement binds and reads; a mixed one is defect 5.
+  A plain or data-tag source in any arrangement binds and reads; a mixed one is ITL-1245.
 
 ## Tests added
 
@@ -144,5 +144,5 @@ Order- or role-dependent behaviour that reaches a hash or a stored table first.
 three layouts and three role settings. `ops/test_several_items.py` uses it for every
 operator (gaps 5, 6, 7, 9, 11 and the operator half of 1, 2, 3). Part 2:
 `tests/test_core/sources/test_several_items.py` (gaps 4, 13, 14, 15: CachedSource),
-`tests/test_core/function_pod/test_several_items.py` (gaps 1, 10; defect 6) and
-`tests/test_pipeline/test_bind_several_items.py` (gap 8; defect 5).
+`tests/test_core/function_pod/test_several_items.py` (gaps 1, 10; ITL-1244, ITL-1246) and
+`tests/test_pipeline/test_bind_several_items.py` (gap 8; ITL-1245).

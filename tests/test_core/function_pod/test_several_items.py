@@ -167,7 +167,7 @@ def test_a_layout_of_the_input_does_not_change_a_fall_through_pods_hashes(
     assert all(result == first for result in hashes.values())
 
 
-FALL_THROUGH_ORDER_ISSUE = "ITL-1236 defect 6, issue pending"
+FALL_THROUGH_ORDER_ISSUE = "ITL-1246"
 
 
 @pytest.mark.xfail(
@@ -190,7 +190,7 @@ def test_the_tag_order_of_the_input_does_not_change_a_fall_through_pods_hashes(
     assert all(result == first for result in results.values())
 
 
-OUTPUT_KEYS_ISSUE = "ITL-1236 defect 4, decision pending"
+OUTPUT_KEYS_ISSUE = "ITL-1244 (rule undecided)"
 
 
 @pytest.mark.xfail(
