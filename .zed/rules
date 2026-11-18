@@ -521,7 +521,8 @@ algorithm produced it.**
 - A label names the algorithm that produced a digest (the whole procedure: canonical form,
   preparation, encoding, digest function) and nothing else. Format `<algorithm>_v<N>`,
   integer `N`: `semantic_v1`, `arrow_v1`, `arrow_ordered_v1`, `directory_v1`, `ndarray_v1`,
-  `polars_expr_v1`, `batch_v1`, `group_v1`. The file content hash keeps `sha256`, the only
+  `polars_expr_v1`, `batch_v1`, `group_v1`, `function_signature_v1`, `function_content_v1`.
+  The file content hash keeps `sha256`, the only
   exception. A logical type's implementer picks its label.
 - Change a label only when its algorithm would give an existing input a different digest.
 - Define each label in exactly one place, as a constant beside its algorithm. Never write a

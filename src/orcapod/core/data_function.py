@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import ast
 import inspect
 import logging
 import re
 import sys
+import textwrap
 import uuid
 from abc import abstractmethod
 from collections.abc import Callable, Iterable, Sequence
@@ -18,10 +20,7 @@ from orcapod.contexts.stored import require_same_data_context
 from orcapod.core.base import TraceableBase
 from orcapod.core.data_function_types import DataFunctionTypeDeclaration, StoredColumn
 from orcapod.core.datagrams import Datagram, Data
-from orcapod.hashing.hash_utils import (
-    get_function_components,
-)
-from orcapod.hashing.semantic_hashing.semantic_hasher import SEMANTIC_HASH_LABEL
+from orcapod.hashing.semantic_hashing.builtin_handlers import hash_default_value
 from orcapod.core.result_cache import ResultCache
 from orcapod.errors import OutputTypeError
 from orcapod.protocols.core_protocols import DataFunctionProtocol, DataProtocol
@@ -34,7 +33,7 @@ from orcapod.semantic_types.output_conformance import (
     check_conformance,
     normalize_output_numbers,
 )
-from orcapod.types import DataValue, Schema, SchemaLike
+from orcapod.types import ContentHash, DataValue, Schema, SchemaLike
 from orcapod.utils import schema_utils
 from orcapod.utils.canonical_type_names import stabilize_type_names
 from orcapod.utils.git_utils import get_git_info_for_python_object
@@ -404,6 +403,120 @@ class DataFunctionBase(TraceableBase, Generic[E]):
         ...
 
 
+FUNCTION_SIGNATURE_HASH_LABEL = "function_signature_v1"
+"""Label of the stored function signature hash (``function_signature_hash``)."""
+
+FUNCTION_CONTENT_HASH_LABEL = "function_content_v1"
+"""Label of the stored function content hash (``function_content_hash``)."""
+
+
+def function_signature_hash(
+    function: Callable[..., Any],
+    input_schema: Schema,
+    output_schema: Schema,
+    hasher: Any,
+) -> ContentHash:
+    """The hash of a function's declared interface, as a data function runs it.
+
+    One hash over two named components, built from the effective values (ITL-1256):
+
+    ``{"inputs": {<name>: {"type": <type hash>, "default": <value hash>}},
+    "outputs": [{"key": <output key>, "type": <type hash>}, ...]}``
+
+    Inputs are keyed by name and in no order (a pod binds its inputs by name); a
+    parameter without a default has no ``"default"`` entry. Outputs are in declared
+    order: the mapping of the returned positions to the output keys. Not in it: the
+    function's name and module, the parameters' kind and order, the version, the body.
+
+    Args:
+        function: The function, for its parameters' defaults.
+        input_schema: The effective input types (``input_schema=``, else annotations).
+        output_schema: The effective output types, keys in declared order.
+        hasher: The semantic hasher.
+
+    Returns:
+        The hash, labelled ``FUNCTION_SIGNATURE_HASH_LABEL``.
+
+    Raises:
+        TypeError: If a parameter's default cannot be hashed; the message names the
+            parameter and the function.
+    """
+    parameters = inspect.signature(function).parameters
+    inputs: dict[str, dict[str, ContentHash]] = {}
+    for name, python_type in input_schema.items():
+        entry = {"type": hasher.hash_object(python_type)}
+        parameter = parameters.get(name)
+        if parameter is not None and parameter.default is not inspect.Parameter.empty:
+            try:
+                entry["default"] = hash_default_value(parameter.default, hasher)
+            except TypeError as exc:
+                module = getattr(function, "__module__", None)
+                qualname = getattr(function, "__qualname__", None) or repr(function)
+                function_name = f"{module}.{qualname}" if module else qualname
+                raise TypeError(
+                    f"Cannot hash the default value of parameter {name!r} of function "
+                    f"{function_name}: {exc} A default value is part of the "
+                    "function's signature hash: use a default the hasher can hash, or "
+                    "remove the default and supply the value as an input."
+                ) from exc
+        inputs[name] = entry
+    outputs = [
+        {"key": key, "type": hasher.hash_object(python_type)}
+        for key, python_type in output_schema.items()
+    ]
+    digest = hasher.hash_object({"inputs": inputs, "outputs": outputs}).digest
+    return ContentHash(FUNCTION_SIGNATURE_HASH_LABEL, digest)
+
+
+def function_source(function: Callable[..., Any]) -> str | None:
+    """A function's source text from its ``def`` line on, as written.
+
+    Docstring, comments and whitespace are kept; decorator lines are not. For a lambda
+    the enclosing source line (or lines) count as its source.
+
+    Args:
+        function: The function.
+
+    Returns:
+        The text, or ``None`` when the source cannot be read (a function defined in a
+        plain REPL, with ``python -c`` or through ``exec``).
+    """
+    try:
+        source = inspect.getsource(function)
+    except (OSError, TypeError):
+        return None
+    try:
+        tree = ast.parse(textwrap.dedent(source))
+    except SyntaxError:
+        return source
+    first = tree.body[0] if tree.body else None
+    if isinstance(first, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        # The node's line is its ``def`` line; its decorators are above it.
+        return "".join(source.splitlines(keepends=True)[first.lineno - 1 :])
+    return source
+
+
+def function_content_hash(
+    function: Callable[..., Any], hasher: Any
+) -> ContentHash | None:
+    """The hash of a function as written: ``{"source": <function_source text>}``.
+
+    Args:
+        function: The function.
+        hasher: The semantic hasher.
+
+    Returns:
+        The hash, labelled ``FUNCTION_CONTENT_HASH_LABEL``, or ``None`` when the source
+        cannot be read: the record then holds no content hash rather than one that
+        would claim a match it cannot support.
+    """
+    source = function_source(function)
+    if source is None:
+        return None
+    digest = hasher.hash_object({"source": source}).digest
+    return ContentHash(FUNCTION_CONTENT_HASH_LABEL, digest)
+
+
 _TEXT = "large_string"
 _BINARY = "large_binary"
 _TEXT_MAP = "large_list<item: struct<key: large_string, value: large_string>>"
@@ -445,27 +558,37 @@ PYTHON_FUNCTION = DataFunctionTypeDeclaration(
             "the full version string the function was declared with (v3.7)",
         ),
         StoredColumn(
+            "function_module",
+            str | None,
+            _TEXT,
+            True,
+            "the function's module (__module__)",
+        ),
+        StoredColumn(
             "function_signature_hash",
             bytes,
             _BINARY,
             True,
-            "the hash of the function used as a value",
-            hash_label=SEMANTIC_HASH_LABEL,
-            covers="the function's module and name, each parameter's name, kind, "
-            + "annotation and default (the default's own hash), and the return "
-            + "annotation (docs/reference/hashing.md, 1d)",
+            "the hash of the function's declared interface",
+            hash_label=FUNCTION_SIGNATURE_HASH_LABEL,
+            covers='{"inputs": {<name>: {"type": <type hash>, "default": <value hash, '
+            + 'only when the parameter has one>}}, "outputs": [{"key": <output key>, '
+            + '"type": <type hash>}]}: effective types (input_schema= / output_schema=, '
+            + "else the annotations); inputs keyed by name in no order, outputs in "
+            + "declared order; not the name, module, parameter kind or order, version "
+            + "or body",
         ),
         StoredColumn(
             "function_content_hash",
-            bytes,
+            bytes | None,
             _BINARY,
             True,
-            "the hash of the function's code",
-            hash_label=SEMANTIC_HASH_LABEL,
-            covers="the function's name and module, its source text as written "
-            + "(decorator lines, docstring, comments and whitespace included), its "
-            + "annotations sorted by name, and its code properties (argument counts, "
-            + "number of locals, argument names)",
+            "the hash of the function as written; absent when its source cannot be "
+            + "read (a plain REPL, python -c, exec)",
+            hash_label=FUNCTION_CONTENT_HASH_LABEL,
+            covers='{"source": <the source text from the def line on, as written: '
+            + "docstring, comments and whitespace included, decorator lines excluded; "
+            + "for a lambda the enclosing line>}",
         ),
         StoredColumn(
             "git_hash",
@@ -637,16 +760,16 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
         self._git_hash = git_hash
 
         semantic_hasher = self.data_context.semantic_hasher
-        # The signature hash is the hash of the function used as a value: one
-        # structured description of the signature (module, name, each parameter's
-        # name, kind, annotation and default, return annotation), with every default
-        # hashed by the semantic hasher (ITL-953).
-        self._function_signature_hash = semantic_hasher.hash_object(
-            function
+        # The record of PYTHON_FUNCTION rev1 (ITL-1256): the declared interface and the
+        # function as written, each with its own label.
+        self._function_module: str | None = getattr(function, "__module__", None)
+        self._function_signature_hash = function_signature_hash(
+            function, self._input_schema, self._output_schema, semantic_hasher
         ).to_prefixed_digest()
-        self._function_content_hash = semantic_hasher.hash_object(
-            get_function_components(self._function)
-        ).to_prefixed_digest()
+        content_hash = function_content_hash(function, semantic_hasher)
+        self._function_content_hash: bytes | None = (
+            None if content_hash is None else content_hash.to_prefixed_digest()
+        )
 
     @property
     def canonical_function_name(self) -> str:
@@ -662,6 +785,7 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
         return {
             "function_name": self._function_name,
             "function_version": self._version,
+            "function_module": self._function_module,
             "function_signature_hash": self._function_signature_hash,
             "function_content_hash": self._function_content_hash,
             "git_hash": self._git_hash,

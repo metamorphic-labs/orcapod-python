@@ -349,10 +349,14 @@ class TestDefaultsOfCommonTypes:
 
 @HASH_SITES
 class TestParameterKind:
-    """``f(a, *, b)``, ``f(a, /, b)`` and ``f(a, b)`` are three signatures."""
+    """``f(a, *, b)``, ``f(a, /, b)`` and ``f(a, b)`` are three signatures as values.
+
+    The stored signature hash is the declared interface (ITL-1256): a pod binds its
+    inputs by name, so the parameter kind is not in it, and the three are one.
+    """
 
     def test_keyword_only_marker(self, site: Callable[..., Any]):
-        """``f(a, *, b)`` differs from ``f(a, b)``."""
+        """``f(a, *, b)`` differs from ``f(a, b)`` as a value."""
 
         def kinds(a: int, b: int) -> int:
             return a
@@ -362,6 +366,9 @@ class TestParameterKind:
         def kinds(a: int, *, b: int) -> int:  # noqa: F811  (same name on purpose)
             return a
 
+        if site is _stored_signature_hash:
+            assert site(plain) == site(kinds)
+            return
         assert site(plain) != site(kinds)
 
     def test_positional_only_marker(self, site: Callable[..., Any]):
@@ -375,6 +382,9 @@ class TestParameterKind:
         def kinds(a: int, /, b: int) -> int:  # noqa: F811  (same name on purpose)
             return a
 
+        if site is _stored_signature_hash:
+            assert site(plain) == site(kinds)
+            return
         assert site(plain) != site(kinds)
 
 

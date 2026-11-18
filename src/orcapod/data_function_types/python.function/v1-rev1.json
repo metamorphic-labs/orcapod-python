@@ -64,22 +64,29 @@
       "python_type": "str"
     },
     {
+      "arrow_type": "large_string",
+      "meaning": "the function's module (__module__)",
+      "name": "function_module",
+      "nullable": true,
+      "python_type": "str | None"
+    },
+    {
       "arrow_type": "large_binary",
-      "covers": "the function's module and name, each parameter's name, kind, annotation and default (the default's own hash), and the return annotation (docs/reference/hashing.md, 1d)",
-      "hash_label": "semantic_v1",
-      "meaning": "the hash of the function used as a value",
+      "covers": "{\"inputs\": {<name>: {\"type\": <type hash>, \"default\": <value hash, only when the parameter has one>}}, \"outputs\": [{\"key\": <output key>, \"type\": <type hash>}]}: effective types (input_schema= / output_schema=, else the annotations); inputs keyed by name in no order, outputs in declared order; not the name, module, parameter kind or order, version or body",
+      "hash_label": "function_signature_v1",
+      "meaning": "the hash of the function's declared interface",
       "name": "function_signature_hash",
       "nullable": true,
       "python_type": "bytes"
     },
     {
       "arrow_type": "large_binary",
-      "covers": "the function's name and module, its source text as written (decorator lines, docstring, comments and whitespace included), its annotations sorted by name, and its code properties (argument counts, number of locals, argument names)",
-      "hash_label": "semantic_v1",
-      "meaning": "the hash of the function's code",
+      "covers": "{\"source\": <the source text from the def line on, as written: docstring, comments and whitespace included, decorator lines excluded; for a lambda the enclosing line>}",
+      "hash_label": "function_content_v1",
+      "meaning": "the hash of the function as written; absent when its source cannot be read (a plain REPL, python -c, exec)",
       "name": "function_content_hash",
       "nullable": true,
-      "python_type": "bytes"
+      "python_type": "bytes | None"
     },
     {
       "arrow_type": "large_string",
