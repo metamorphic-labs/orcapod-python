@@ -1,10 +1,12 @@
-"""The data context of v0.3 is ``std:v1:default``, and released manifests are frozen (ITL-944).
+"""The default data context is ``std:v1:default``, and released manifests are frozen (ITL-944).
 
 A data context version names one generation of hashing. ``released_manifests.json`` pins,
 for each version, the sha256 of its manifest without the ``golden`` section (``null`` while
 the manifest is open) and, under ``releases``, the digest of each library release's
-revision in the manifest's golden history (ITL-946). The rules of the golden history and
-its folder are stated in ``tests/test_hashing/golden/store.py``.
+revision in the manifest's golden history (ITL-946). A withdrawn release is recorded under
+``withdrawn`` and freezes nothing: 0.3.0 was withdrawn on 2026-11-17, so v1 is open until
+0.4.0 (ITL-1255). The rules of the golden history and its folder are stated in
+``tests/test_hashing/golden/store.py``.
 """
 
 from __future__ import annotations
@@ -29,7 +31,9 @@ MANIFEST_DIR = CONTEXTS_DIR / "data"
 
 
 def _pins() -> dict[str, dict[str, Any]]:
-    """The pin of each manifest, by version: ``{"manifest": ..., "releases": {...}}``."""
+    """The pin of each manifest, by version: ``{"manifest": ..., "releases": {...}}``,
+    with ``"withdrawn": {...}`` when a release was withdrawn.
+    """
     return json.loads((CONTEXTS_DIR / "released_manifests.json").read_text())
 
 
@@ -120,6 +124,37 @@ def test_the_pins_agree_with_the_golden_history(version: str) -> None:
         manifest, _pins()[version], manifest["golden"]["history"]
     )
     assert problems == []
+
+
+# ---------------------------------------------------------------------------
+# 0.3.0 is withdrawn: v1 is open until 0.4.0 (developer, November 17, 2026; ITL-1255)
+# ---------------------------------------------------------------------------
+
+
+def test_0_3_0_is_recorded_as_withdrawn_with_the_pins_it_shipped() -> None:
+    """The record keeps the date, the reason and the exact pins 0.3.0 shipped."""
+    withdrawn = _pins()["v1"]["withdrawn"]
+    assert list(withdrawn) == ["0.3.0"]
+    record = withdrawn["0.3.0"]
+    assert record["date"] == "2026-11-17"
+    assert "0.4.0" in record["reason"]
+    assert record["manifest"] == (
+        "18e7c15a446014b3e6a3178bb5daf331774f8a5214006bec40fc80442c08da09"
+    )
+    assert record["revision"] == (
+        "6cdd29cdc6fa98df322931e2ab0ff9df151fdb47d3381adecd9f58fd55d2fb22"
+    )
+
+
+def test_v1_is_open_until_0_4_0() -> None:
+    """No release of v1 stands: no manifest pin, no releases line, no release revision."""
+    pin = _pins()["v1"]
+    assert pin["manifest"] is None
+    assert pin["releases"] == {}
+    assert _manifest("v1")["released_in"] is None
+    history = _history("v1")
+    assert [revision["release"] for revision in history] == [None] * len(history)
+    assert store.released_files(history) == set()
 
 
 # ---------------------------------------------------------------------------
