@@ -118,12 +118,20 @@ def _emitted_key_row(column: "pa.ChunkedArray[Any]", indices: Sequence[int]) -> 
     storage_type = _float_storage(column.type)
     if len(indices) == 1 or storage_type is None:
         return first
+    # Only a zero or NaN key can differ in bits among equal values, so the first
+    # member's value decides whether the group is gathered at all.
+    scalar = column[first]
+    if isinstance(scalar, pa.ExtensionScalar):
+        # A null extension scalar has no storage scalar.
+        storage = scalar.value
+        value = None if storage is None else cast(float | None, storage.as_py())
+    else:
+        value = cast(float | None, scalar.as_py())
+    if value is None or (value != 0.0 and not math.isnan(value)):
+        return first
     members = column.take(pa.array(indices, pa.int64())).combine_chunks()
     if isinstance(members, pa.ExtensionArray):
         members = members.storage
-    value = cast(float | None, members[0].as_py())
-    if value is None or (value != 0.0 and not math.isnan(value)):
-        return first
     # The unsigned integer of the float's width, to read its bits; no value of the
     # group is null, since a null key equals no float.
     unsigned = {16: pa.uint16, 32: pa.uint32, 64: pa.uint64}[storage_type.bit_width]()
