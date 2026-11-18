@@ -425,9 +425,10 @@ PYTHON_FUNCTION = DataFunctionTypeDeclaration(
         "a parameter with a default may be left out of the inputs",
         "the returned value is mapped to the output keys by position: one key takes "
         + "the whole value, several keys take the items of a returned sequence",
-        "a function with no output keys and no return annotation has no outputs",
+        "a function with no output keys (-> None or no return annotation) has no "
+        + "outputs; a returned value other than None is refused",
         "a returned value must conform to its declared output type",
-        "variadic (*args, **kwargs) parameters are refused",
+        "variadic (*args, **kwargs) and positional-only parameters are refused",
     ),
     variation=(
         StoredColumn(

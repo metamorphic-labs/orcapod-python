@@ -86,9 +86,10 @@ A function's uri has four parts, in order:
 - A parameter with a default may be left out of the inputs.
 - The returned value is mapped to the output keys by position: one key takes the whole
   value, several keys take the items of a returned sequence.
-- A function with no output keys and no return annotation has no outputs.
+- A function with no output keys (`-> None`, or no return annotation) has no outputs; a
+  returned value other than `None` is refused.
 - A returned value must conform to its declared output type.
-- Variadic (`*args`, `**kwargs`) parameters are refused.
+- Variadic (`*args`, `**kwargs`) and positional-only parameters are refused.
 
 ### Its record, revision 1
 
