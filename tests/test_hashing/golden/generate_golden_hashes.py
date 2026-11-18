@@ -313,27 +313,65 @@ def release(root: pathlib.Path, version: str, release_text: str) -> str:
     return history[-1]["digest"]
 
 
-def pin_data_function_types(root: pathlib.Path, release_text: str) -> None:
-    """Pin the open data function type snapshots as released (ITL-1259).
+def _data_function_types_script(root: pathlib.Path) -> Any | None:
+    """The module ``scripts/data_function_types.py`` of ``root``, with its folder.
 
-    The same release step as the golden files: ``scripts/data_function_types.py``
-    pins every open snapshot under ``src/orcapod/data_function_types``. A root without
-    that folder (a test's copy of the golden store) has nothing to pin.
-
-    Args:
-        root: Project root.
-        release_text: The library version, e.g. ``0.4.0``.
+    Returns ``None`` for a root without the snapshot folder or the script (a test's
+    copy of the golden store): it has nothing to check or pin.
     """
     import importlib.util
 
     snapshots = root / "src" / "orcapod" / "data_function_types"
     script = root / "scripts" / "data_function_types.py"
     if not snapshots.is_dir() or not script.is_file():
-        return
+        return None
     spec = importlib.util.spec_from_file_location("data_function_types_script", script)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    return module
+
+
+def check_data_function_types(root: pathlib.Path) -> None:
+    """Refuse a release whose data function type snapshots are not sound (ITL-1259).
+
+    Runs before anything of the release is written, so that a snapshot to fix never
+    leaves the golden history released and the snapshots unpinned.
+
+    Args:
+        root: Project root.
+
+    Raises:
+        SystemExit: Naming every problem ``scripts/data_function_types.py --check``
+            finds.
+    """
+    module = _data_function_types_script(root)
+    if module is None:
+        return
+    problems = module.check(root / "src" / "orcapod" / "data_function_types")
+    if problems:
+        raise SystemExit(
+            "the data function type snapshots are not sound; nothing was released:\n"
+            + "\n".join(problems)
+        )
+
+
+def pin_data_function_types(root: pathlib.Path, release_text: str) -> None:
+    """Pin the open data function type snapshots as released (ITL-1259).
+
+    The same release step as the golden files: ``scripts/data_function_types.py``
+    pins every open snapshot under ``src/orcapod/data_function_types``. A root without
+    that folder (a test's copy of the golden store) has nothing to pin. Run
+    ``check_data_function_types`` first.
+
+    Args:
+        root: Project root.
+        release_text: The library version, e.g. ``0.4.0``.
+    """
+    module = _data_function_types_script(root)
+    if module is None:
+        return
+    snapshots = root / "src" / "orcapod" / "data_function_types"
     for relative in module.release(snapshots, release_text):
         print(f"pinned data function type snapshot {relative} for {release_text}")
 
@@ -398,6 +436,7 @@ def main(argv: list[str] | None = None) -> None:
         _ = remove(args.root, version, args.remove)
         return
     if args.release is not None:
+        check_data_function_types(args.root)
         _ = release(args.root, version, args.release)
         pin_data_function_types(args.root, args.release)
         return

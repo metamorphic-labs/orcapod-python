@@ -205,6 +205,49 @@ def check_tag(repo: Path, tag: str, version: str) -> list[str] | None:
     return problems
 
 
+TYPE_SNAPSHOTS = PurePosixPath("src/orcapod/data_function_types")
+"""The data function type snapshots and their pins (``released.json``; ITL-1259)."""
+
+
+def check_type_snapshots(repo: Path, tag: str) -> list[str]:
+    """What HEAD changed of the data function type snapshots ``tag`` released.
+
+    Every snapshot the tag's ``released.json`` pins (a ``sha256`` that is not null)
+    must be at HEAD with the same bytes, and pinned there with the same ``sha256`` and
+    version: rewriting a released snapshot together with its pin is caught here, as a
+    released golden file is. A tag without the folder released no snapshot.
+
+    Args:
+        repo: The repository.
+        tag: The release tag.
+
+    Returns:
+        One problem per changed snapshot or pin; empty when HEAD keeps them.
+    """
+    pins_path = TYPE_SNAPSHOTS / "released.json"
+    released = _show_json(repo, tag, pins_path)
+    if not isinstance(released, dict):
+        return []
+    current = _show_json(repo, "HEAD", pins_path)
+    current = current if isinstance(current, dict) else {}
+    problems: list[str] = []
+    for relative, pin in sorted(released.items()):
+        if not isinstance(pin, dict) or pin.get("sha256") is None:
+            continue
+        if current.get(relative) != pin:
+            problems.append(
+                f"{tag}: the pin of data function type snapshot {relative} changed "
+                f"({pin} at the tag, {current.get(relative)} at HEAD)"
+            )
+        path = TYPE_SNAPSHOTS / relative
+        if _show(repo, "HEAD", path) != _show(repo, tag, path):
+            problems.append(
+                f"{tag}: data function type snapshot {relative} changed or is missing; "
+                "a released snapshot never changes (give the type a new revision)"
+            )
+    return problems
+
+
 def check_release(repo: Path, release: str) -> list[str]:
     """Check that HEAD records a release of the current data context, before it is tagged.
 
@@ -312,6 +355,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     checked: list[str] = []
     problems: list[str] = []
     for tag in sorted(tags):
+        # The data function type snapshots do not belong to a data context.
+        problems.extend(check_type_snapshots(args.repo, tag))
         found = check_tag(args.repo, tag, version)
         if found is None:
             continue
