@@ -37,7 +37,9 @@ def _make_stream(n: int = 3) -> ArrowTableSource:
             "x": pa.array(list(range(n)), type=pa.int64()),
         }
     )
-    return ArrowTableSource(table, tag_columns=["id"], infer_nullable=True)
+    return ArrowTableSource(
+        table, tag_columns=["id"], tag_only_columns=True, infer_nullable=True
+    )
 
 
 def _make_two_col_stream(n: int = 3) -> ArrowTableSource:
@@ -48,7 +50,9 @@ def _make_two_col_stream(n: int = 3) -> ArrowTableSource:
             "y": pa.array([i * 10 for i in range(n)], type=pa.int64()),
         }
     )
-    return ArrowTableSource(table, tag_columns=["id"], infer_nullable=True)
+    return ArrowTableSource(
+        table, tag_columns=["id"], tag_only_columns=True, infer_nullable=True
+    )
 
 
 # ---------------------------------------------------------------------------

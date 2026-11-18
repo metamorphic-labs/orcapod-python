@@ -44,21 +44,26 @@ Two construction rules apply to every source and are the most common first error
 
 - Every name in `tag_columns` must be a column of the data, otherwise the source raises
   `ValueError: tag_columns not found in table`.
-- At least one column must be left over as a data column, otherwise it raises
-  `ValueError: No data columns found in the table`.
+- At least one data column must remain, otherwise the source raises
+  `ValueError: No data columns found in the table`. A data-tag is also a data column, so
+  this happens only when every tag is kept plain (`tag_only_columns`) and no other column
+  is left.
 
-**Plain tags and `tag_only_columns`.** The sources built from a table (`ArrowTableSource`,
-`DictSource`, `DataFrameSource`, `CSVSource`, `DeltaTableSource` and the database sources) also
-take the keyword-only option `tag_only_columns`. In v0.3 every tag column is plain: it is a tag only,
-never also a data column. `tag_only_columns=True` says so explicitly; it is the default and
-the only value v0.3 accepts, and it changes no hash, source id, record id or saved config. Any
-other value is refused. In v0.4 tags become referential by default (a tag that is also the
-data column of the same name), and `tag_only_columns` keeps a tag plain, so code that must
-keep today's behaviour passes `tag_only_columns=True` now.
+**Data-tags and plain tags: `tag_only_columns`.** The sources built from a table
+(`ArrowTableSource`, `DictSource`, `DataFrameSource`, `CSVSource`, `DeltaTableSource` and the
+database sources) take the keyword-only option `tag_only_columns`. By default every declared
+tag is a data-tag: it is also the data column of the same name (see
+[Data-tags](data-tags.md)). `tag_only_columns` names the tags kept plain, a tag
+only and never a data column, as every tag was in v0.3; `tag_only_columns=True` keeps all of
+them plain. A source with plain tags and one with data-tags over one table have the same source id and record
+ids, but different schemas and so different hashes.
 
 ```python
 from orcapod.sources import DictSource
 
+with_data_tags = DictSource(data=[{"k": "a", "x": 1}], tag_columns=["k"])
+print(with_data_tags.keys())
+# (('k',), ('k', 'x'))
 plain = DictSource(
     data=[{"k": "a", "x": 1}], tag_columns=["k"], tag_only_columns=True
 )
@@ -374,10 +379,13 @@ the system tags of every joined source, and binding refuses it with `SourceSpecM
 (support is planned, ITL-1127).
 
 **Using a tag value as an input to a computation.** Tags identify a row and data is what a
-function computes on, so a function pod never receives a tag. Sometimes one value is needed
-for both: a session's start time identifies the session, and it is also what you subtract to
-get an elapsed time. Pass `tags_as_data` to get a source that keeps the tag and also offers
-its value as a data column under a name you choose:
+function computes on. A data-tag (the default for a declared tag) is both: a function
+reads it through its data role, under the same name (see
+[Data-tags](data-tags.md)). A plain tag is a tag only, and a function pod
+never receives it. When a plain tag's value is also needed as data (a session's start time
+identifies the session, and it is also what you subtract to get an elapsed time), or you want
+the value as a data column under another name, pass `tags_as_data` to get a source that keeps
+the tag and also offers its value as a data column under a name you choose:
 
 ```python
 from datetime import datetime, timezone
@@ -397,7 +405,7 @@ experiments = DictSource(
         {"subject_id": "m1", "session_start": start_2, "experiment_index": 0,
          "experiment_start": datetime(2026, 1, 6, 9, 32, tzinfo=timezone.utc)},
     ],
-    tag_columns=["subject_id", "session_start", "experiment_index"],
+    tag_columns=["subject_id", "session_start", "experiment_index"], tag_only_columns=True,
     source_id="experiments",
 )
 
@@ -570,7 +578,7 @@ from orcapod.sources import DictSource
 
 source = DictSource(
     data=[{"subject_id": "mouse_01", "age": 12, "weight": 25.3}],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
     source_id="mice",
 )
 
@@ -608,7 +616,7 @@ source = DictSource(
         {"subject_id": "mouse_02", "age": 8, "weight": 22.1},
         {"subject_id": "mouse_03", "age": 15, "weight": 27.8},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 # Inspect the schema

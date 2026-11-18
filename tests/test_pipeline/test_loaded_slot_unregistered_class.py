@@ -147,6 +147,9 @@ _SCRIPT = textwrap.dedent(
                 if descriptor["node_type"] == "source":
                     descriptor.pop("pipeline_hash", None)
                     descriptor.pop("content_hash", None)
+            # A 0.1.0 job file never names plain tags (ITL-1019).
+            for config in data["bindings"]["sources"].values():
+                config.pop("tag_only_columns", None)
             with open(work + "/job.json", "w") as f:
                 json.dump(data, f)
         # Nothing registers the class before the load.

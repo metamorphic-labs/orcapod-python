@@ -5,9 +5,10 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from orcapod.channels import ReadableChannel, WritableChannel
+from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.datagrams import Tag
 from orcapod.core.operators.base import UnaryOperator
 from orcapod.core.operators.column_selection import is_meta_column
@@ -98,6 +99,10 @@ class AddTags(UnaryOperator):
     The operator's identity is its tags, names and values in order, so two
     different values are two operators with two stored paths.
 
+    Data-tags (ITL-1023): the input's data-tags stay data-tags, one column in
+    both roles with its values and source info; the new tags are plain. A new
+    tag named like any column of the input, a data-tag included, is refused.
+
     Args:
         tags: Each new tag's name mapped to its value.
 
@@ -109,6 +114,9 @@ class AddTags(UnaryOperator):
         InputValidationError: When a name is reserved (meta or system prefix,
             ``::`` separator).
     """
+
+    # Data-tags pass through as they are; the new tags are plain (ITL-1023).
+    DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def __init__(self, tags: Mapping[str, TagConstant], **kwargs: Any):
         if not tags:
@@ -312,6 +320,7 @@ class AddTags(UnaryOperator):
         return ArrowTableStream(
             self._with_constants(table, tag_keys, data_context.type_converter),
             tag_columns=[*tag_keys, *self._tags],
+            data_tags=stream_data_tags(stream),
             data_context=data_context,
         )
 

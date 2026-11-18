@@ -10,6 +10,7 @@ from orcapod.core.operators.meta_columns import (
     without_meta_fields,
 )
 from orcapod.channels import ReadableChannel, WritableChannel
+from orcapod.core.data_tags import data_tags_first
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import (
@@ -88,9 +89,12 @@ def require_tag_data_roles_agree(
             in which role (``first`` or ``second`` of the two given) and
             suggests the remedy.
     """
-    for name in sorted(set(first_tags) & set(second_data)):
+    # A name that is a tag and a data column of one input is a data-tag
+    # (ITL-1023): it may meet a tag of that name in the other input (a join then
+    # equates the two), so only a data-only column counts here.
+    for name in sorted(set(first_tags) & (set(second_data) - set(second_tags))):
         raise _tag_data_error(name, "first", "second")
-    for name in sorted(set(second_tags) & set(first_data)):
+    for name in sorted(set(second_tags) & (set(first_data) - set(first_tags))):
         raise _tag_data_error(name, "second", "first")
 
 
@@ -98,8 +102,8 @@ def _tag_data_error(name: str, tag_side: str, data_side: str) -> InputValidation
     return InputValidationError(
         f"column {name!r} is a tag in the {tag_side} input and a data column in the "
         + f"{data_side}, and a name cannot be both. Rename it in one input with "
-        + "map_tags or map_data, or declare it a tag at the source that has it as "
-        + "a data column."
+        + "map_tags or map_data, or make it a tag of the input that has it as a data column (declare it "
+        + "a tag at its source, or mark it with tag_by)."
     )
 
 
@@ -153,8 +157,9 @@ class UnaryOperator(StaticOutputOperatorPod):
         tag_schema, data_schema = self.unary_output_schema(
             stream, columns=columns, all_info=all_info
         )
-        # The prediction of ``without_input_meta`` in ``static_process``.
-        return tag_schema, without_meta_fields(data_schema)
+        # The prediction of ``without_input_meta`` in ``static_process``, with
+        # data-tags first among the data columns (ITL-1205).
+        return tag_schema, data_tags_first(tag_schema, without_meta_fields(data_schema))
 
     def argument_symmetry(self, streams: Collection[StreamProtocol]) -> ArgumentGroup:
         # return single stream as a tuple
@@ -255,8 +260,9 @@ class BinaryOperator(StaticOutputOperatorPod):
         tag_schema, data_schema = self.binary_output_schema(
             left_stream, right_stream, columns=columns, all_info=all_info
         )
-        # The prediction of ``without_input_meta`` in ``static_process``.
-        return tag_schema, without_meta_fields(data_schema)
+        # The prediction of ``without_input_meta`` in ``static_process``, with
+        # data-tags first among the data columns (ITL-1205).
+        return tag_schema, data_tags_first(tag_schema, without_meta_fields(data_schema))
 
     def validate_inputs(self, *streams: StreamProtocol) -> None:
         if len(streams) != 2:

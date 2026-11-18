@@ -20,8 +20,8 @@ from typing import Any, ClassVar, TYPE_CHECKING
 
 from typing_extensions import override
 
-from orcapod.core.referential_tags import TagOnlyColumns, check_tag_only_columns
 from orcapod.core.sources.base import RootSource
+from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
 from orcapod.core.sources.source_ids import location_source_id
 from orcapod.core.sources.reload import keep_nullable_columns, same_rows
 from orcapod.core.sources.stream_builder import (
@@ -74,10 +74,8 @@ class DBTableSource(RootSource):
         data_context: Data context governing type conversion and hashing.
         config: Orcapod configuration (controls hash character counts, etc.).
         tag_only_columns: Tag columns kept as tags only, not data, exactly as in
-            v0.3; ``True`` for all of them. Keyword-only. ``True`` is the default and
-            the only value v0.3 accepts: any other value is refused, because
-            referential tags arrive in v0.4 (tags then become referential by default
-            and ``tag_only_columns`` keeps a tag plain).
+            v0.3; ``True`` for all of them. Keyword-only. Every other tag column is
+            a data-tag: also a data column of the same name (ITL-1023).
 
     Raises:
         ValueError: If no ``source_id`` is given and the source knows no address of
@@ -87,6 +85,7 @@ class DBTableSource(RootSource):
 
     SOURCE_KIND: ClassVar[str] = "db_table"
     """Config type key and default source-id kind of this source (one vocabulary)."""
+    TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -100,10 +99,9 @@ class DBTableSource(RootSource):
         data_context: str | contexts.DataContext | None = None,
         config: OrcapodConfig | None = None,
         *,
-        tag_only_columns: TagOnlyColumns = True,
+        tag_only_columns: TagOnlyColumns = (),
         _query: str | None = None,
     ) -> None:
-        check_tag_only_columns(tag_only_columns)
         if source_id is None:
             address = self._table_address(connector, table_name)
             if address is None:
@@ -171,6 +169,12 @@ class DBTableSource(RootSource):
         # Step 4: Enrich via SourceStreamBuilder (same pipeline as all other RootSources)
         self._tag_columns: Collection[str] = resolved_tag_columns
         self._system_tag_columns: Collection[str] = system_tag_columns
+        # Every declared tag is a data-tag unless kept tag-only (ITL-1023); a
+        # rebuild after a check (ITL-1102) applies the same choice.
+        data_tags = source_data_tags(self._tag_columns, tag_only_columns)
+        self._tag_only_columns: tuple[str, ...] = tuple(
+            c for c in self._tag_columns if c not in data_tags
+        )
         result = self._build(table)
         self._stream = result.stream
         self._tag_columns = result.tag_columns
@@ -246,6 +250,7 @@ class DBTableSource(RootSource):
         return builder.build(
             table,
             tag_columns=self._tag_columns,
+            data_tags=source_data_tags(self._tag_columns, self._tag_only_columns),
             source_id=self._source_id,
             record_id_columns=self._key_columns,
             system_tag_columns=self._system_tag_columns,
@@ -301,6 +306,7 @@ class DBTableSource(RootSource):
             "connector": self._connector.to_config(),
             "table_name": self._table_name,
             "tag_columns": list(self._tag_columns),
+            **self._tag_only_config(),
             "system_tag_columns": list(self._system_tag_columns),
             "record_id_columns": None
             if self._record_id_columns is None

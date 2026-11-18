@@ -163,7 +163,15 @@ class TestArrowTableSourceSchema:
         tag_keys, data_keys = source.keys()
         assert "name" in tag_keys
         assert "age" in data_keys
-        assert "name" not in data_keys
+        # A declared tag is a data-tag by default (ITL-1023): also a data column.
+        assert "name" in data_keys
+        plain = ArrowTableSource(
+            _simple_table(),
+            tag_columns=["name"],
+            infer_nullable=True,
+            tag_only_columns=True,
+        )
+        assert "name" not in plain.keys()[1]
 
 
 class TestArrowTableSourceIteration:

@@ -113,10 +113,13 @@ compute a boolean column in a function pod and filter on it. See
 
 ### `AttributeError: 'PipelineJob' has no attribute 'show_graph'. Available node labels: [...]`
 
-**Cause.** `show_graph` is a method of the job's pipeline.
+**Cause.** `show_graph()` (and `render_graph()`, the Graphviz renderer) was removed,
+with Orcapod's dependencies on Graphviz and matplotlib. A `Pipeline` gives the same error,
+naming `'Pipeline'`.
 
-**Fix.** `job.pipeline.show_graph()`. It needs the Graphviz `dot` program; without it you
-get `ExecutableNotFound`.
+**Fix.** Show `job` (or `job.diagram()`) at the end of a notebook cell, `print(job.diagram())`
+for a text listing, or `job.diagram().save("pipeline.html")` for a page; the same works for a
+`Pipeline`. See [Seeing the graph](concepts/pipeline-job.md#seeing-the-graph).
 
 ### `FileNotFoundError: File: path does not exist: ...` / `IsADirectoryError: File: path is a directory: ...`
 
@@ -310,7 +313,4 @@ Reading a Delta table yourself with `deltalake.DeltaTable(...).to_pyarrow_table(
 - **`pygraphviz` fails to build** (`fatal error: 'graphviz/cgraph.h' file not found`). You
   are installing a version of Orcapod older than 0.2, which required the Graphviz
   development headers. Install Orcapod 0.2 or newer.
-- **`ExecutableNotFound: failed to execute 'dot'`** when calling `show_graph()`. Install
-  Graphviz (`brew install graphviz`, `apt install graphviz`, or `conda install graphviz`),
-  or do without the picture.
 - **Python version.** Orcapod needs Python 3.11 or newer.

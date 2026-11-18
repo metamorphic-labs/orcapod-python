@@ -5,6 +5,11 @@ from collections.abc import Collection, Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from orcapod.core.data_tags import (
+    stored_data_tags,
+    stream_data_tags,
+    without_tag_kind_marks,
+)
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource
@@ -168,6 +173,16 @@ class DerivedSource(RootSource):
     rows with the correct columns. In the ``tags_as_data`` form the rows appear
     once the node has run.
 
+    Data-tags (ITL-1019): the source carries the bindings of what it reads,
+    in both forms. Over a job node they are the ones the node's stored table states
+    (the marker of ``data_tags``), which must be the node's own (a name in
+    both halves of its keys); a table that disagrees is refused. Over a source they
+    are the source's own. A ``tags_as_data`` copy of a data-tag is a new,
+    plain data column. Nothing is added to the identity for the binding, because it
+    is already there: the plain form's ``content_hash`` is the origin's, which carries
+    it, and every ``pipeline_hash`` and the ``tags_as_data`` form's ``content_hash``
+    hash the output schema, in which a data-tag is in both halves.
+
     Args:
         origin: The source or DB-backed job node to derive from.
         source_id: Canonical source name. Defaults as described above.
@@ -274,6 +289,8 @@ class DerivedSource(RootSource):
         self._key_columns = key_columns or ()
         self._cached_table: pa.Table | None = None
         self._cached_stream: ArrowTableStream | None = None
+        # The ``tags_as_data`` form over no rows: its columns, without reading the origin.
+        self._zero_row_stream: ArrowTableStream | None = None
         # The origin job node's modified time when its rows were cached: a check reads
         # its stored rows again only after it ran again (ITL-1102).
         self._origin_seen: datetime | None = None
@@ -384,7 +401,9 @@ class DerivedSource(RootSource):
     ) -> tuple[Schema, Schema]:
         if self._tags_as_data is None:
             return self._origin.output_schema(columns=columns, all_info=all_info)
-        return self._get_stream().output_schema(columns=columns, all_info=all_info)
+        return self._columns_stream(self._tags_as_data).output_schema(
+            columns=columns, all_info=all_info
+        )
 
     def keys(
         self,
@@ -394,13 +413,68 @@ class DerivedSource(RootSource):
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         if self._tags_as_data is None:
             return self._origin.keys(columns=columns, all_info=all_info)
-        return self._get_stream().keys(columns=columns, all_info=all_info)
+        return self._columns_stream(self._tags_as_data).keys(
+            columns=columns, all_info=all_info
+        )
+
+    def _columns_stream(self, tags_as_data: Mapping[str, str]) -> ArrowTableStream:
+        """A stream with this ``tags_as_data`` source's columns, read without its rows.
+
+        The rows held, or else the derivation over the origin's zero-row table: the
+        schema is never computed from rows (ITL-912), so asking for it never reads the
+        origin's database (ITL-1197: a diagram or a downstream schema prediction must
+        not read).
+
+        Args:
+            tags_as_data: The source's ``tags_as_data`` mapping.
+        """
+        if self._cached_stream is not None:
+            return self._cached_stream
+        if self._zero_row_stream is None:
+            self._zero_row_stream = self._derive_from(
+                self._empty_origin_table(), tags_as_data
+            )
+        return self._zero_row_stream
+
+    def _data_tags(self) -> tuple[str, ...]:
+        """Return the data-tags this source presents: its origin's.
+
+        A derived source carries the bindings of what it reads (gap audit Q7). Over a
+        job node they are the ones its stored table states, which ``_origin_records``
+        checks against the node's keys on every read; over a source, the source's own.
+        """
+        return stream_data_tags(self._origin)
 
     def _origin_records(self) -> "pa.Table | None":
-        """Return the origin's rows, or ``None`` when a job node has none stored."""
+        """Return the origin's rows, or ``None`` when a job node has none stored.
+
+        A job node's stored rows state their data-tags with a marker on the
+        column (ITL-1019). The derived source presents exactly those: the marker must
+        name the tags the node's keys share between tag and data, and is then
+        dropped, since in a stream the binding is the shared name.
+
+        Raises:
+            InputValidationError: If a job node's stored rows mark other data-tags than the node's keys declare, or carry an invalid marker.
+        """
         if isinstance(self._origin, RootSource):
             return self._origin.as_table()
-        return self._origin.get_all_records()
+        records = self._origin.get_all_records()
+        if records is None:
+            return None
+        try:
+            stored = stored_data_tags(records.schema)
+        except ValueError as exc:
+            raise InputValidationError(
+                f"DerivedSource over {self._origin.label!r}: {exc}"
+            ) from exc
+        declared = self._data_tags()
+        if set(stored) != set(declared):
+            raise InputValidationError(
+                f"DerivedSource over {self._origin.label!r}: the stored records mark "
+                f"the data-tags {sorted(stored)}, but the node declares "
+                f"{sorted(declared)}; nothing was read."
+            )
+        return without_tag_kind_marks(records)
 
     def _empty_origin_table(self) -> "pa.Table":
         """Return a zero-row table with the origin's declared columns."""
@@ -449,6 +523,7 @@ class DerivedSource(RootSource):
         result = builder.build(
             table,
             tag_columns=self._origin.keys()[0],
+            data_tags=self._data_tags(),
             source_id=self.source_id,
             record_id_columns=self._record_id_columns or (),
         )
@@ -473,8 +548,7 @@ class DerivedSource(RootSource):
                 self._cached_table = self._empty_origin_table()
             else:
                 self._cached_table = records
-        tag_keys = self._origin.keys()[0]
-        return ArrowTableStream(self._cached_table, tag_columns=tag_keys)
+        return self._stream_over(self._cached_table)
 
     def _held_rows(self) -> "pa.Table | None":
         """The rows this source holds from its origin, or ``None`` before a read."""
@@ -566,9 +640,7 @@ class DerivedSource(RootSource):
                 self, origin=origin_kind
             )
         if self._tags_as_data is None and self._cached_table is not None:
-            stream = ArrowTableStream(
-                self._cached_table, tag_columns=self._origin.keys()[0]
-            )
+            stream = self._stream_over(self._cached_table)
             return stream.head(n, columns=config).for_stream(self, origin=origin_kind)
         if isinstance(self._origin, RootSource):
             origin_head = self._origin.head(n)
@@ -634,7 +706,11 @@ class DerivedSource(RootSource):
         """Return this source's stream over the origin rows ``table``."""
         if self._tags_as_data is not None:
             return self._derive_from(table, self._tags_as_data)
-        return ArrowTableStream(table, tag_columns=self._origin.keys()[0])
+        return ArrowTableStream(
+            table,
+            tag_columns=self._origin.keys()[0],
+            data_tags=self._data_tags(),
+        )
 
     def iter_data(self):
         return self._get_stream().iter_data()

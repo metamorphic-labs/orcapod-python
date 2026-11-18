@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
-import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -23,7 +21,6 @@ from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
     import networkx as nx
-    from orcapod.pipeline.dag import GraphProtocol
 else:
     nx = LazyModule("networkx")
 
@@ -134,21 +131,6 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
             self.compile()
 
     # ------------------------------------------------------------------
-    # Graph display
-    # ------------------------------------------------------------------
-
-    def show_graph(self, **kwargs: Any) -> str | None:
-        """Render the pipeline's node graph.
-
-        Args:
-            **kwargs: Forwarded to ``render_graph``.
-
-        Raises:
-            RuntimeError: If the pipeline has not been compiled yet.
-        """
-        return render_graph(self.dag, **kwargs)
-
-    # ------------------------------------------------------------------
     # Serialization
     # ------------------------------------------------------------------
 
@@ -174,6 +156,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
 
         import json as _json
         from orcapod.pipeline.serialization import (
+            FALL_THROUGH_TAGS_KEY,
             PIPELINE_FORMAT_VERSION,
             serialize_nullability,
             serialize_output_schema,
@@ -257,6 +240,8 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                     if node._function_pod is not None:
                         descriptor["function_config"] = node._function_pod.to_config()
                     descriptor["table_scope"] = node._table_scope
+                    # Written for every function node, also a plain one (ITL-1019).
+                    descriptor[FALL_THROUGH_TAGS_KEY] = list(node.declared_data_tags())
 
                 case OperatorNode():
                     if node._operator is not None:
@@ -302,8 +287,11 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         """
         import json as _json
         from orcapod.pipeline.serialization import (
+            FALL_THROUGH_TAGS_KEY,
             SUPPORTED_FORMAT_VERSIONS,
+            check_saved_output_schema_is_plain,
             deserialize_schema,
+            saved_fall_through_tags,
         )
         from orcapod.core.nodes import FunctionNode, OperatorNode
         from orcapod.core.nodes.source_node import SourceNode as SourceNodeClass
@@ -364,6 +352,19 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                 SavedSchemaVersionError,
                 deserialize_output_schema,
             )
+
+            # The format version decides which tags may be data-tags (ITL-1019).
+            try:
+                check_saved_output_schema_is_plain(descriptor, version)
+                if descriptor.get("node_type") == "function":
+                    # Stated explicitly from here on, whatever the version.
+                    descriptor[FALL_THROUGH_TAGS_KEY] = list(
+                        saved_fall_through_tags(descriptor, version)
+                    )
+            except ValueError as exc:
+                raise ValueError(
+                    f"{path}: saved node {descriptor.get('label')!r}: {exc}"
+                ) from exc
 
             # Validate even a leaf node's saved identifiers before exposing the job.
             context = resolve_saved_context(descriptor.get("data_context_key"))
@@ -631,367 +632,3 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
 
     def __dir__(self) -> list[str]:
         return list(super().__dir__()) + list(self._nodes.keys())
-
-
-# ===========================================================================
-# Graph Rendering Utilities
-# ===========================================================================
-
-
-class GraphRenderer:
-    """Improved GraphRenderer with centralized default styling"""
-
-    # ====================
-    # CENTRALIZED DEFAULTS
-    # ====================
-    DEFAULT_STYLES = {
-        "rankdir": "TB",
-        "node_shape": "box",
-        "node_style": "filled",
-        "node_color": "navy",
-        "font_color": "white",
-        "type_font_color": "#54508C",  # muted navy blue
-        "font_name": "sans-serif",
-        "font_path": None,  # Set to None by default
-        # 'font_path': './assets/fonts/LexendDeca-Medium.ttf',
-        "edge_color": "black",
-        "dpi": 150,
-        # HTML Label defaults
-        "main_font_size": 14,  # Main label font size
-        "type_font_size": 11,  # PodProtocol type font size (small)
-        "type_style": "normal",  # PodProtocol type text style
-    }
-
-    DEFAULT_STYLE_RULES = {
-        "source": {
-            "fillcolor": "white",
-            "shape": "rect",
-            "fontcolor": "black",
-            "style": "filled",
-            "typefontcolor": "#3A3737",  # dark gray
-        },
-        "operator": {
-            "fillcolor": "#DFD6CF",  # pale beige
-            "shape": "diamond",
-            "fontcolor": "black",
-            "style": "filled",
-            "typefontcolor": "#3A3737",  # dark gray
-        },
-        "function": {
-            "fillcolor": "#f5f5f5",  # off white
-            "shape": "cylinder",
-            "fontcolor": "#090271",  # darker navy blue
-            "style": "filled",
-            "typefontcolor": "#3A3737",  # dark gray
-        },
-    }
-
-    DARK_THEME_RULES = {
-        "source": {
-            "fillcolor": "black",
-            "shape": "rect",
-            "fontcolor": "white",
-            "style": "filled",
-            "typefontcolor": "lightgray",  # Light text for dark background
-        },
-        "operator": {
-            "fillcolor": "#026e8e",  # ocean blue
-            "shape": "diamond",
-            "fontcolor": "white",
-            "style": "filled",
-            "typefontcolor": "lightgray",  # Light text for dark background
-        },
-        "function": {
-            "fillcolor": "#090271",  # darker navy blue
-            "shape": "cylinder",
-            "fontcolor": "white",
-            "style": "filled",
-            "typefontcolor": "lightgray",  # Light text for dark background
-        },
-    }
-
-    def __init__(self):
-        pass
-
-    def _sanitize_node_id(self, node_id: GraphNode) -> str:
-        return f"node_{hash(node_id)}"
-
-    def _create_default_html_label(
-        self, node: GraphNode, node_attrs: dict[str, str]
-    ) -> str:
-        """Create HTML for the label (text) section of the node.
-
-        Format:
-        node_type      (11pt, small text)
-        main_label     (14pt, normal text)
-        """
-        main_label = str(node.label)
-        node_type = node.node_type
-
-        # Create HTML label: small node_type above, main label below
-        main_size = self.DEFAULT_STYLES["main_font_size"]
-        type_size = self.DEFAULT_STYLES["type_font_size"]
-        font_name = self.DEFAULT_STYLES["font_name"]
-        type_font_color = node_attrs.get(
-            "typefontcolor", self.DEFAULT_STYLES["type_font_color"]
-        )
-
-        html_label = f'''<
-        <TABLE BORDER="0" CELLBORDER="0" CELLSPACING="0">
-            <TR><TD ALIGN="CENTER"><FONT POINT-SIZE="{type_size}" COLOR="{type_font_color}" FACE="{font_name}, bold">{node_type}</FONT></TD></TR>
-            <TR><TD ALIGN="CENTER"><FONT POINT-SIZE="{main_size}">{main_label}</FONT></TD></TR>
-        </TABLE>
-        >'''
-
-        return html_label
-
-    def _get_node_label(
-        self,
-        node: GraphNode,
-        label_lut: dict[GraphNode, str] | None = None,
-    ) -> str:
-        if label_lut and node in label_lut:
-            return label_lut[node]
-        return str(node.label)
-
-    def _get_node_attributes(
-        self,
-        node: GraphNode,
-        style_rules: dict[str, dict[str, str]] | None = None,
-    ) -> dict[str, str]:
-        """Get styling attributes for a specific node based on its node_type."""
-        rules = style_rules or self.DEFAULT_STYLE_RULES
-
-        default_attrs = {
-            "fillcolor": self.DEFAULT_STYLES["node_color"],
-            "shape": self.DEFAULT_STYLES["node_shape"],
-            "fontcolor": self.DEFAULT_STYLES["font_color"],
-            "fontname": self.DEFAULT_STYLES["font_name"],
-            "fontsize": self.DEFAULT_STYLES.get("fontsize", "14"),
-            "style": self.DEFAULT_STYLES["node_style"],
-            "typefontcolor": self.DEFAULT_STYLES["type_font_color"],
-        }
-
-        if node.node_type in rules:
-            default_attrs.update(rules[node.node_type])
-
-        return default_attrs
-
-    def _merge_styles(self, **override_styles) -> dict:
-        """
-        CENTRAL STYLE MERGING
-        Takes the default styles and overrides them with any user-provided styles.
-        """
-        merged = self.DEFAULT_STYLES.copy()
-        merged.update(override_styles)  # Override defaults with user choices
-        return merged
-
-    def generate_dot(
-        self,
-        graph: "GraphProtocol[GraphNode]",
-        label_lut: dict[GraphNode, str] | None = None,
-        style_rules: dict[str, dict[str, str]] | None = None,
-        **style_overrides,
-    ) -> str:
-        styles = self._merge_styles(**style_overrides)
-
-        import graphviz
-
-        dot = graphviz.Digraph(comment="NetworkX Graph")
-
-        # Apply global styles
-        dot.attr(rankdir=styles["rankdir"], dpi=str(styles["dpi"]))
-        dot.attr(fontname=styles["font_name"])
-        if styles.get("fontsize"):
-            dot.attr(fontsize=str(styles["fontsize"]))
-        if styles["font_path"]:
-            dot.attr(fontpath=styles["font_path"])
-
-        # Set default edge attributes
-        dot.attr("edge", color=styles["edge_color"])
-
-        # Add nodes with styling based on node_type
-        for node in graph.nodes():
-            sanitized_id = self._sanitize_node_id(node)
-            node_attrs = self._get_node_attributes(node, style_rules)
-
-            if label_lut and node in label_lut:
-                label = label_lut[node]
-            else:
-                label = self._create_default_html_label(node, node_attrs)
-
-            dot.node(sanitized_id, label=label, **node_attrs)
-
-        # Add edges
-        for source, target in graph.edges():
-            source_id = self._sanitize_node_id(source)
-            target_id = self._sanitize_node_id(target)
-            dot.edge(source_id, target_id)
-
-        return dot.source
-
-    def render_graph(
-        self,
-        graph: "GraphProtocol[GraphNode]",
-        label_lut: dict[GraphNode, str] | None = None,
-        show: bool = True,
-        output_path: str | None = None,
-        raw_output: bool = False,
-        figsize: tuple = (12, 8),
-        dpi: int = 150,
-        style_rules: dict[str, dict[str, str]] | None = None,
-        **style_overrides,
-    ) -> str | None:
-        # Always generate DOT first
-        dot_text = self.generate_dot(graph, label_lut, style_rules, **style_overrides)
-
-        if raw_output:
-            return dot_text
-
-        # For rendering, continue with the existing logic but return DOT text
-        styles = self._merge_styles(**style_overrides)
-
-        import graphviz
-
-        dot = graphviz.Digraph(comment="NetworkX Graph")
-
-        # Apply styles directly
-        dot.attr(rankdir=styles["rankdir"], dpi=str(dpi))
-        dot.attr(fontname=styles["font_name"])
-        if styles.get("fontsize"):
-            dot.attr(fontsize=styles["fontsize"])
-        if styles["font_path"]:
-            dot.attr(fontpath=styles["font_path"])
-
-        # Set default edge attributes
-        dot.attr("edge", color=styles["edge_color"])
-
-        # Add nodes with specific styling
-        for node in graph.nodes():
-            sanitized_id = self._sanitize_node_id(node)
-            node_attrs = self._get_node_attributes(node, style_rules)
-
-            if label_lut and node in label_lut:
-                label = label_lut[node]
-            else:
-                label = self._create_default_html_label(node, node_attrs)
-
-            dot.node(sanitized_id, label=label, **node_attrs)
-
-        # Add edges
-        for source, target in graph.edges():
-            source_id = self._sanitize_node_id(source)
-            target_id = self._sanitize_node_id(target)
-            dot.edge(source_id, target_id)
-
-        if output_path:
-            name, ext = os.path.splitext(output_path)
-            format_type = ext[1:] if ext else "png"
-            dot.render(name, format=format_type, cleanup=True)
-            print(f"Graph saved to {output_path}")
-
-        import matplotlib.image as mpimg
-        import matplotlib.pyplot as plt
-
-        if show:
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                dot.render(tmp.name[:-4], format="png", cleanup=True)
-                img = mpimg.imread(tmp.name)
-                plt.figure(figsize=figsize, dpi=dpi)
-                plt.imshow(img)
-                plt.axis("off")
-                plt.tight_layout()
-                plt.show()
-                os.unlink(tmp.name)
-
-        # Always return DOT text (like the spec)
-        return dot_text
-
-
-# =====================
-# CONVENIENCE FUNCTION
-# =====================
-def render_graph(
-    graph: "GraphProtocol[GraphNode]",
-    label_lut: dict[GraphNode, str] | None = None,
-    style_rules: dict[str, dict[str, str]] | None = None,
-    **kwargs,
-) -> str | None:
-    """Convenience function with conditional node styling.
-
-    Args:
-        graph: NetworkX DiGraph whose nodes are GraphNode instances.
-        label_lut: Optional mapping from node to custom display label.
-        style_rules: Mapping from node_type to graphviz attribute overrides.
-        **kwargs: Other styling arguments forwarded to GraphRenderer.
-    """
-    renderer = GraphRenderer()
-    return renderer.render_graph(graph, label_lut, style_rules=style_rules, **kwargs)
-
-
-def render_graph_dark_theme(
-    graph: "GraphProtocol[GraphNode]",
-    label_lut: dict[GraphNode, str] | None = None,
-    **kwargs,
-) -> str | None:
-    """Render with dark theme — dark backgrounds, light fonts."""
-    renderer = GraphRenderer()
-    return renderer.render_graph(
-        graph, label_lut, style_rules=renderer.DARK_THEME_RULES, **kwargs
-    )
-
-
-# =============================================
-# STYLE RULE SETS
-# =============================================
-
-
-class StyleRuleSets:
-    """Access to different theme style rules"""
-
-    @staticmethod
-    def get_default_rules():
-        """Mixed theme - light node fill colors with dark colored fonts"""
-        return GraphRenderer.DEFAULT_STYLE_RULES
-
-    @staticmethod
-    def get_dark_rules():
-        """Dark theme - dark node fill colors with light colored fonts"""
-        return GraphRenderer.DARK_THEME_RULES
-
-    @staticmethod
-    def create_custom_rules(
-        source_bg="lightgreen",
-        operator_bg="orange",
-        pod_bg="darkslateblue",
-        source_main_fcolor="black",
-        operator_main_fcolor="black",
-        pod_main_fcolor="white",
-        source_type_fcolor="darkgray",
-        operator_type_fcolor="darkgray",
-        node_type_fcolor="lightgray",
-    ) -> dict[str, dict[str, str]]:
-        """Create custom theme rules."""
-        return {
-            "source": {
-                "fillcolor": source_bg,
-                "shape": "ellipse",
-                "fontcolor": source_main_fcolor,
-                "style": "filled",
-                "typefontcolor": source_type_fcolor,
-            },
-            "operator": {
-                "fillcolor": operator_bg,
-                "shape": "diamond",
-                "fontcolor": operator_main_fcolor,
-                "style": "filled",
-                "typefontcolor": operator_type_fcolor,
-            },
-            "function": {
-                "fillcolor": pod_bg,
-                "shape": "box",
-                "fontcolor": pod_main_fcolor,
-                "style": "filled,rounded",
-                "typefontcolor": node_type_fcolor,
-            },
-        }

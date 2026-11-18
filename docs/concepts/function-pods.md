@@ -68,7 +68,7 @@ source = DictSource(
         {"subject_id": "mouse_01", "weight": 25.3, "height": 0.12},
         {"subject_id": "mouse_02", "weight": 22.1, "height": 0.10},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 # Apply the function pod to the source stream
@@ -88,7 +88,9 @@ for tag, data in result.iter_data():
 # {'subject_id': 'mouse_02'} -> {'bmi': 2209.9999999999995}
 ```
 
-The function pod preserves tags and replaces data columns with the function's output.
+The function pod preserves tags and replaces data columns with the function's output. A
+data-tag is the exception: called as `pod(stream)`, the pod lets it fall through, so it stays
+both a tag and a data column of the output (see [Data-tags](data-tags.md)).
 
 !!! tip
     Calling a function pod, `compute_bmi.pod(source)`, is the convenient form of
@@ -108,7 +110,7 @@ wide = DictSource(
         {"subject_id": "mouse_01", "weight": 25.3, "height": 0.12, "age": 12},
         {"subject_id": "mouse_02", "weight": 22.1, "height": 0.10, "age": 8},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 result = compute_bmi.pod(wide)  # 'age' is not a parameter: it is dropped
@@ -200,7 +202,7 @@ from orcapod.errors import OutputTypeError
 def halve(weight: float) -> int:
     return weight / 2  # a float, although the function says it returns an int
 
-weights = DictSource(data=[{"subject_id": "mouse_01", "weight": 25.3}], tag_columns=["subject_id"])
+weights = DictSource(data=[{"subject_id": "mouse_01", "weight": 25.3}], tag_columns=["subject_id"], tag_only_columns=True)
 
 try:
     list(halve.pod(weights).iter_data())
@@ -322,7 +324,7 @@ db = InMemoryArrowDatabase()
 
 job = PipelineJob(name="bmi_demo", database=db)
 with job:
-    source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     compute_bmi.pod(source, label="bmi")
 
 job.run()
@@ -371,7 +373,7 @@ mice.append({"subject_id": "mouse_03", "weight": 27.8, "height": 0.11})
 
 job = PipelineJob(name="bmi_demo", database=db)
 with job:
-    source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     compute_bmi.pod(source, label="bmi")
 
 job.run()
@@ -437,7 +439,7 @@ from orcapod.pipeline import AsyncPipelineOrchestrator
 
 job = PipelineJob(name="bmi_async", database=InMemoryArrowDatabase())
 with job:
-    source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     compute_bmi.pod(source, label="bmi")
 
 job.run(orchestrator=AsyncPipelineOrchestrator())
@@ -476,7 +478,7 @@ import asyncio
 
 job = PipelineJob(name="bmi_awaited", database=InMemoryArrowDatabase())
 with job:
-    source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     compute_bmi.pod(source, label="bmi")
 
 
@@ -501,7 +503,7 @@ Running the same job again computes nothing new, and the summary says so:
 ```python
 job = PipelineJob(name="bmi_demo", database=db)
 with job:
-    source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     compute_bmi.pod(source, label="bmi")
 
 summary = job.run()
@@ -523,7 +525,7 @@ def careless_bmi(weight: float, height: float) -> float:
 
 job = PipelineJob(name="bmi_typo", database=InMemoryArrowDatabase())
 with job:
-    source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     careless_bmi.pod(source, label="bmi")
 
 summary = job.run()
@@ -566,7 +568,7 @@ more_mice = mice + [{"subject_id": "mouse_04", "weight": 30.0, "height": 0.12}]
 
 load_job = PipelineJob(name="bmi_demo", database=db)
 with load_job:
-    source = DictSource(data=more_mice, tag_columns=["subject_id"], source_id="mice")
+    source = DictSource(data=more_mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     compute_bmi.pod(source, label="bmi")
 
 print(load_job.nodes["bmi"].as_table().num_rows)  # not run in this process: empty
@@ -666,7 +668,7 @@ from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 for orchestrator in (SyncPipelineOrchestrator, AsyncPipelineOrchestrator):
     job = PipelineJob(name="bmi_typo_fast", database=InMemoryArrowDatabase())
     with job:
-        source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+        source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
         careless_bmi.pod(source, label="bmi")
     try:
         job.run(orchestrator=orchestrator(error_policy="fail_fast"))
@@ -854,7 +856,7 @@ def notify(ctx, weight: float, height: float) -> None:
 
 notify_job = PipelineJob(name="notify_demo", database=InMemoryArrowDatabase())
 with notify_job:
-    mice_source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+    mice_source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     SideEffectPod(notify)(mice_source, label="notify")
 
 notify_job.run()
@@ -889,8 +891,11 @@ source was configured. `PipelineJob.load(path)` reads it back, for example in a 
 session, so that you can read the results the job stored. The file also records
 `orcapod_version`, the Orcapod release that wrote it (the same text as `orcapod.__version__`;
 a development checkout gives a development version). It is informational: loading never
-depends on it. Adding the field moved the file format version from `0.1.0` to `0.2.0`; a
-`0.1.0` file, written by v0.2.0, still loads as before, and any other version is rejected.
+depends on it. Adding the field moved the file format version from `0.1.0` to `0.2.0`, and
+stating every tag binding (data-tags) moved it to `0.3.0`, the version written now. A
+`0.1.0` file, written by v0.2.0, and a `0.2.0` file, written by v0.3.0, still load, with every
+source tag plain as they were written, within the schema limits described below (a file with
+name-only extension type text cannot be loaded); any other version is rejected.
 The reverse does not hold: v0.2.0 cannot load a file saved by v0.3.0, because hashes differ
 between the two releases.
 
@@ -906,7 +911,7 @@ workdir = Path(tempfile.mkdtemp())  # any directory you keep
 
 job = PipelineJob(name="bmi_demo", database=DeltaTableDatabase(workdir / "store"))
 with job:
-    source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     compute_bmi.pod(source, label="bmi")
 
 job.run()
@@ -932,7 +937,7 @@ the results stored for those inputs. Nodes below a source that is not available 
 `node.run(load_only=True)` does the same for one node and what it depends on.
 
 ```python
-loaded.bind(sources={"mice": DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")})
+loaded.bind(sources={"mice": DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")})
 summary = loaded.run(load_only=True)
 print(loaded.nodes["bmi"].as_table().num_rows, summary.nodes["bmi"].not_stored)
 # 3 0
@@ -1123,7 +1128,7 @@ def count_rows(readings: pl.DataFrame) -> int:
 
 recordings = DictSource(
     data=[{"session": "s1", "n_samples": 2}, {"session": "s2", "n_samples": 3}],
-    tag_columns=["session"],
+    tag_columns=["session"], tag_only_columns=True,
 )
 readings = load_readings.pod(recordings)
 for tag, data in readings.iter_data():
@@ -1160,7 +1165,7 @@ ITL-1144.
 try:
     DictSource(
         data=[{"sample": "s1", "labels": [{1, 2}, None]}],
-        tag_columns=["sample"],
+        tag_columns=["sample"], tag_only_columns=True,
         data_schema={"sample": str, "labels": list[set[int] | None]},
     )
 except ValueError as error:
@@ -1169,7 +1174,7 @@ except ValueError as error:
 
 labels = DictSource(
     data=[{"sample": "s1", "counts": [3, None, 1]}],
-    tag_columns=["sample"],
+    tag_columns=["sample"], tag_only_columns=True,
     data_schema={"sample": str, "counts": list[int | None]},
 )
 for tag, data in labels.iter_data():
@@ -1202,14 +1207,14 @@ weights = DictSource(
         {"subject_id": "mouse_01", "weight": 25.3},
         {"subject_id": "mouse_02", "weight": 22.1},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 heights = DictSource(
     data=[
         {"subject_id": "mouse_01", "height": 0.12},
         {"subject_id": "mouse_02", "height": 0.10},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 result = compute_bmi.pod(weights, heights)
@@ -1233,7 +1238,7 @@ Two consequences:
 ```python
 chosen = DictSource(
     data=[{"subject_id": "mouse_02", "cohort": "b"}],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 result = compute_bmi.pod(weights, heights, chosen)

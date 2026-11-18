@@ -83,7 +83,21 @@ export default defineConfig({
 			title: 'Orcapod',
 			description:
 				'Intuitive and powerful library for highly reproducible scientific data pipelines',
+			// orcapod.org's logo and favicon, unmodified (src/assets). The content build
+			// writes the favicon into public/ (SITE_PUBLIC_FILES in docs_site_content.py).
+			logo: { src: './src/assets/orcapod-icon.png' },
+			favicon: '/favicon.ico',
+			// The brand fonts, bundled with the site (OFL-1.1; served from the site itself,
+			// never from a font host): Asap for the text, Lexend Exa bold for the name.
+			// Then the colour scheme (src/styles/orcapod.css).
+			customCss: [
+				'@fontsource-variable/asap',
+				'@fontsource/lexend-exa/700.css',
+				'./src/styles/orcapod.css',
+			],
 			plugins: [starlightLinksValidator()],
+			// The banner on every page: the site documents main, not a release.
+			routeMiddleware: './src/routeData.ts',
 			sidebar: [
 				{ label: 'Home', link: '/' },
 				page('Getting Started', 'getting-started'),
@@ -111,6 +125,7 @@ export default defineConfig({
 						page('Streams', 'concepts/streams'),
 						page('Operators', 'concepts/operators'),
 						page('Function Pods', 'concepts/function-pods'),
+						page('Data-tags', 'concepts/data-tags'),
 						page('Pipelines and Jobs', 'concepts/pipeline-job'),
 						page('Your Own Data Types', 'concepts/your-own-data-types'),
 						page('Arrays and Tensors', 'concepts/arrays'),

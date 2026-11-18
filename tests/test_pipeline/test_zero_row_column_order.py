@@ -62,6 +62,13 @@ ORCHESTRATORS = {
     "async": AsyncPipelineOrchestrator,
 }
 
+TAG_ONLY: bool = True
+"""The sources' ``tag_only_columns``: plain tags, as v0.3 (ITL-1023).
+
+The data-tag classes at the end set it to ``False`` (every tag a data-tag) for
+the steps that handle data-tags (``DATA_TAG_STEPS``).
+"""
+
 WITH_ROWS = ("g1", "g1", "g2")
 """Groups of the sources' rows: the filter on ``g1`` keeps two rows."""
 NO_ROWS = ("g2", "g2", "g3")
@@ -100,8 +107,8 @@ def _source(
     source = ArrowTableSource(
         _table(groups, data),
         tag_columns=["g", "id"],
+        tag_only_columns=TAG_ONLY,
         source_id=name,
-        tag_only_columns=True,
     )
     return PolarsFilter(constraints={"g": "g1"})(source)
 
@@ -493,12 +500,23 @@ _NULLABLE_MEMBER = pytest.mark.xfail(
         "(ITL-1136: the Arrow-to-Python reading drops list item nullability)"
     ),
 )
-PREDICTION_STEPS = [
-    pytest.param(step, marks=_NULLABLE_MEMBER)
-    if step in ("batch", "group_by")
-    else step
-    for step in OPERATOR_STEPS
-]
+
+
+def _prediction_steps(steps: list[str]) -> list[Any]:
+    """``steps`` as prediction cases, with the known failure marked on its steps.
+
+    Filter the raw step names before calling this: a marked step is a
+    ``pytest.param``, which is not equal to its name.
+    """
+    return [
+        pytest.param(step, marks=_NULLABLE_MEMBER)
+        if step in ("batch", "group_by")
+        else step
+        for step in steps
+    ]
+
+
+PREDICTION_STEPS = _prediction_steps(OPERATOR_STEPS)
 
 
 @pytest.mark.parametrize("config", list(COLUMN_CONFIGS))
@@ -520,3 +538,114 @@ class TestOutputSchemaPrediction:
         predicted = job.nodes["op"].output_schema(**kwargs)
         computed = _computed(step, pairs).output_schema(**kwargs)
         assert _schema_items(predicted) == _schema_items(computed)
+
+
+# ── data-tags (ITL-1023) ─────────────────────────────────────────────
+
+# Not supported with data-tags yet: MergeJoin (ITL-1018).
+DATA_TAG_STEPS = [step for step in STEPS if step != "merge_join"]
+
+
+@pytest.fixture
+def with_data_tags(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every source tag a data-tag."""
+    monkeypatch.setattr(f"{__name__}.TAG_ONLY", False)
+
+
+def _methods(cls: type) -> dict[str, Any]:
+    """The test methods (and helpers) of ``cls``, without its class marks."""
+    return {
+        name: value
+        for name, value in vars(cls).items()
+        if name.startswith(("test_", "_expected"))
+    }
+
+
+TestDataTagPlainStream = pytest.mark.usefixtures("with_data_tags")(
+    pytest.mark.parametrize("pairs", PAIRS)(
+        pytest.mark.parametrize("step", DATA_TAG_STEPS)(
+            type(
+                "TestDataTagPlainStream",
+                (),
+                {"__doc__": "TestPlainStream over sources with data-tags."}
+                | _methods(TestPlainStream),
+            )
+        )
+    )
+)
+
+TestDataTagJobNode = pytest.mark.usefixtures("with_data_tags")(
+    pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))(
+        pytest.mark.parametrize("pairs", PAIRS)(
+            pytest.mark.parametrize("step", DATA_TAG_STEPS)(
+                type(
+                    "TestDataTagJobNode",
+                    (),
+                    {"__doc__": "TestJobNode over sources with data-tags."}
+                    | _methods(TestJobNode),
+                )
+            )
+        )
+    )
+)
+
+TestDataTagOutputSchemaPrediction = pytest.mark.usefixtures("with_data_tags")(
+    pytest.mark.parametrize("config", list(COLUMN_CONFIGS))(
+        pytest.mark.parametrize("pairs", PAIRS)(
+            pytest.mark.parametrize(
+                "step",
+                _prediction_steps(
+                    [step for step in OPERATOR_STEPS if step in DATA_TAG_STEPS]
+                ),
+            )(
+                type(
+                    "TestDataTagOutputSchemaPrediction",
+                    (),
+                    {
+                        "__doc__": "TestOutputSchemaPrediction over sources with data-tags."
+                    }
+                    | _methods(TestOutputSchemaPrediction),
+                )
+            )
+        )
+    )
+)
+
+
+def _without_n(schemas: Any) -> tuple[list[Any], list[Any]]:
+    """``_schema_items`` of ``schemas`` without the data column ``n``."""
+    tag_items, data_items = _schema_items(schemas)
+    return tag_items, [(name, hint) for name, hint in data_items if name != "n"]
+
+
+@pytest.mark.parametrize("tag_only", [True, False], ids=["plain", "data-tag"])
+@pytest.mark.parametrize("config", list(COLUMN_CONFIGS))
+@pytest.mark.parametrize("pairs", PAIRS)
+@pytest.mark.parametrize("step", ["batch", "group_by"])
+class TestAggregatedPredictionApartFromItemNullability:
+    """Batch and GroupBy predict every column but ``n`` of their computed result.
+
+    Their whole-schema prediction cases are strict expected failures for ITL-1136 alone
+    (``n``'s nullable list items read as ``list[int]``). These cases leave ``n`` out, so
+    a regression in any other column, the tags in either role included, still fails.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _tag_mode(self, tag_only: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(f"{__name__}.TAG_ONLY", tag_only)
+
+    def test_plain_stream(self, step: str, pairs: int, config: str) -> None:
+        kwargs = COLUMN_CONFIGS[config]
+        predicted = _stream(step, pairs, WITH_ROWS).output_schema(**kwargs)
+        computed = _computed(step, pairs).output_schema(**kwargs)
+        assert predicted[1]["n"] == list[int | None]
+        assert _without_n(predicted) == _without_n(computed)
+
+    def test_job_node(self, step: str, pairs: int, config: str) -> None:
+        kwargs = COLUMN_CONFIGS[config]
+        job = _job(step, pairs, WITH_ROWS)
+        _ = job.run(orchestrator=SyncPipelineOrchestrator())
+        predicted = job.nodes["op"].output_schema(**kwargs)
+        computed = _computed(step, pairs).output_schema(**kwargs)
+        assert predicted[1]["n"] == list[int | None]
+        assert _without_n(predicted) == _without_n(computed)

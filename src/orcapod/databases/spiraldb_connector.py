@@ -920,14 +920,46 @@ class SpiralDBConnector:
         meta_kv = _serialize_arrow_metadata(records)
 
         def write_rows(rows: pa.Table) -> None:
+            # The Arrow metadata entry as it was before this write, put back if the
+            # write fails. Read before anything is written, so a failed read leaves
+            # nothing to clean up.
+            previous_meta = (
+                tbl.get_metadata().get(_ARROW_METADATA_KEY)
+                if meta_kv is not None
+                else None
+            )
             # Record first, so rows are never stored without their record; if the rows
             # then fail, remove the record again, since it names columns the table lacks.
             wrote_record = record_first and write_nullability_record(
                 tbl, records.schema
             )
             try:
+                # The Arrow metadata too goes before the rows, so rows never land
+                # without the metadata that states them (a data-tag's marker,
+                # ITL-1019): a failed metadata write stores no row, and its retry
+                # writes both.
+                if meta_kv is not None:
+                    tbl.set_metadata(meta_kv)
                 tbl.write(rows)
             except BaseException:
+                # The Arrow metadata went in before the rows: put the entry back as it
+                # was, so the rows already stored keep theirs and a later write without
+                # metadata does not read back with this one.
+                if meta_kv is not None:
+                    try:
+                        if previous_meta is None:
+                            tbl.drop_metadata([_ARROW_METADATA_KEY])
+                        else:
+                            tbl.set_metadata({_ARROW_METADATA_KEY: previous_meta})
+                    except Exception as cleanup_exc:
+                        logger.warning(
+                            "Could not restore the Arrow metadata of %s after a failed "
+                            "write (%s: %s); its rows may read back with the metadata "
+                            "of the failed write.",
+                            qualified,
+                            type(cleanup_exc).__name__,
+                            cleanup_exc,
+                        )
                 # Remove the record only while the table still has no value columns:
                 # once another writer's rows have landed, they rely on it.
                 if wrote_record:
@@ -944,8 +976,6 @@ class SpiralDBConnector:
                             cleanup_exc,
                         )
                 raise
-            if meta_kv is not None:
-                tbl.set_metadata(meta_kv)
 
         if not skip_existing:
             # Always upsert-by-key: existing rows overwritten, novel rows inserted.
@@ -965,6 +995,13 @@ class SpiralDBConnector:
         novel = records.filter(mask)
         if len(novel) > 0:
             write_rows(novel)
+
+    @property
+    def keeps_field_metadata(self) -> bool:
+        """Whether this connector keeps Arrow field metadata: it does, in the native KV
+        store (ITL-1019). Verified against the pyspiral fake only; schema evolution
+        is refused by ``ConnectorArrowDatabase``."""
+        return True
 
     def unstorable_column_reason(
         self, name: str, arrow_type: pa.DataType, *, primary_key: bool

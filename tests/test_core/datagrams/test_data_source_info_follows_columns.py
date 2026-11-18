@@ -142,3 +142,12 @@ def test_source_info_given_out_of_column_order_follows_the_columns(
         d = d.select("x", "m")
     expected = [c for c in ("x", "s", "m") if c in d.keys()]
     assert_source_follows(d, expected)
+
+
+def test_with_columns_of_keeps_the_imported_columns_source_info() -> None:
+    """A stale entry for a column the data does not hold does not override (ITL-1023)."""
+    output = Data({"y": 2}, source_info={"y": "out::row_0::y", "x": "stale"})
+    incoming = Data({"x": 1}, source_info={"x": "input::row_0::x"})
+    combined = output.with_columns_of(incoming, ["x"])
+    assert combined.source_info()["x"] == "input::row_0::x"
+    assert combined.source_info()["y"] == "out::row_0::y"

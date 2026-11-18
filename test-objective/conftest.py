@@ -187,7 +187,9 @@ def joinable_streams() -> tuple[ArrowTableStream, ArrowTableStream]:
 
 @pytest.fixture
 def simple_source() -> ArrowTableSource:
-    return ArrowTableSource(make_simple_table(), tag_columns=["id"])
+    return ArrowTableSource(
+        make_simple_table(), tag_columns=["id"], tag_only_columns=True
+    )
 
 
 @pytest.fixture
@@ -195,6 +197,7 @@ def dict_source() -> DictSource:
     return DictSource(
         {"id": [1, 2, 3], "value": [10, 20, 30]},
         tag_columns=["id"],
+        tag_only_columns=True,
         infer_nullable=True,
     )
 
