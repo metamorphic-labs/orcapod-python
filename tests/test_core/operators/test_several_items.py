@@ -269,16 +269,43 @@ def test_the_order_of_a_set_argument_changes_nothing(
     _assert_all_equal(results)
 
 
-def test_polars_filter_predicates_in_any_order_choose_the_same_rows() -> None:
-    """Two predicates in either order keep the same rows (identity: see ITL-1236 doc)."""
-    predicates = (pl.col("d1") > 10, pl.col("t3") == 1, pl.col("d3") != "y")
-    rows = {
-        repr(order): rows_fingerprint(
-            list(PolarsFilter(predicates=list(order))(make_source(MAIN)).iter_data())
-        )
-        for order in itertools.permutations(predicates)
-    }
+PREDICATES = (pl.col("d1") > 10, pl.col("t3") == 1, pl.col("d3") != "y")
+
+
+@pytest.mark.parametrize("role", ROLES)
+def test_polars_filter_predicates_in_any_order_choose_the_same_rows(
+    role: str,
+) -> None:
+    """Three predicates over a data column, a tag and a data column, in every order."""
+    source = make_source(MAIN, Arrangement(MAIN.tags, TAGS_FIRST, role))
+    rows = {}
+    for order in itertools.permutations(PREDICATES):
+        op = PolarsFilter(predicates=list(order))
+        stream = op(source)
+        rows[repr(order)] = rows_fingerprint(list(stream.iter_data()))
+        assert rows_fingerprint(async_rows(op, source)) == rows[repr(order)]
+        assert _sorted_values(stream, "d1") == [50]
     assert len({repr(v) for v in rows.values()}) == 1
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="ITL-1247 (rule undecided): the order of PolarsFilter's predicates is in "
+    + "its identity; proposed: predicates are AND-ed, so their order is not",
+)
+@pytest.mark.parametrize("role", ROLES)
+def test_polars_filter_predicate_order_is_not_identity(role: str) -> None:
+    source = make_source(MAIN, Arrangement(MAIN.tags, TAGS_FIRST, role))
+    results = {
+        repr(order): {
+            "operator_identity": PolarsFilter(predicates=list(order))
+            .content_hash()
+            .to_string(),
+            **fingerprint(PolarsFilter(predicates=list(order))(source)),
+        }
+        for order in itertools.permutations(PREDICATES)
+    }
+    _assert_all_equal(results)
 
 
 @pytest.mark.parametrize("role", ROLES)
@@ -521,7 +548,7 @@ def test_join_of_four_inputs_matches_on_every_shared_tag() -> None:
 
 # MergeJoin: two inputs with the same columns; every data column collides. The rows
 # of ``MAIN`` without a null (``NON_NULL_ROWS``), and other values in every data column,
-# so no merged pair ties: a tie is ITL-1241, a null ``MERGE_NULL_ISSUE``.
+# so no merged pair ties: a tie is ITL-1241, a null ITL-1243.
 NON_NULL_ROWS = [0, 2, 3, 4]
 MAIN_OTHER = Spec(
     source_id="s2",
@@ -582,7 +609,7 @@ def test_merge_join_of_tied_values_does_not_depend_on_the_order_of_its_inputs(
     )
 
 
-MERGE_NULL_ISSUE = "ITL-1236 defect 3, issue pending"
+MERGE_NULL_ISSUE = "ITL-1243"
 
 
 @pytest.mark.xfail(
