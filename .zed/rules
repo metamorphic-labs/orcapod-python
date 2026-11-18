@@ -593,6 +593,18 @@ unless the test is about the default (developer, November 16, 2026, ITL-1159). T
 sources that take the option (the table, file and database sources); `ListSource`,
 `DerivedSource`, `CachedSource` and `PollingSource` do not take it.
 
+Every argument or input that can take several items (column names, a mapping, keywords,
+input streams, sources to bind, output keys) is tested (developer, November 17, 2026,
+ITL-1236): with two or more items; in more than one order, asserting what the order does or
+must not change (rows, column order, content hash, pipeline hash, system-tag column names);
+in each role it accepts (plain tag, data, data-tag: build the role you test, whatever the
+`tag_only_columns` default above says); on inputs with two or more tag columns AND two or
+more data columns, in more than one arrangement (tag order, table layout); and on the sync
+and the async path. A test whose streams have one tag and one data column does not test an
+operator. The shared family of such inputs is `tests/test_core/operators/several_items.py`;
+the inventory is `docs/dev/specs/itl-1236-several-item-test-audit.md`. The docs show the
+several-item form of such an argument, not only the one-item form.
+
 ---
 
 ## Project layout

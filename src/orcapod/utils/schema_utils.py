@@ -134,6 +134,25 @@ def schema_incompatibility(
     return None
 
 
+def _declares_none(annotation: object) -> bool:
+    """Whether a return annotation, as read, is ``-> None``.
+
+    ``typing.get_type_hints`` turns ``-> None`` into ``NoneType``. When it fails on
+    another annotation, a postponed annotation (``from __future__ import annotations``)
+    is still text: ``"None"``, or ``"'None'"`` when it was written as a string
+    (``-> "None"``).
+
+    Args:
+        annotation: The return annotation as ``get_type_hints`` or the signature gives it.
+
+    Returns:
+        True when it is ``None`` written in one of those forms.
+    """
+    if annotation is type(None):
+        return True
+    return isinstance(annotation, str) and annotation.strip("'\"") == "None"
+
+
 def extract_function_schemas(
     func: Callable,
     output_keys: Collection[str],
@@ -259,6 +278,10 @@ def extract_function_schemas(
 
     # get_type_hints stores the return annotation under the key 'return'
     return_annot = resolved_hints.get("return", signature.return_annotation)
+    # ``-> None`` declares no outputs (ITL-1257), which is not an output whose value is
+    # None: the number of outputs is the number of output keys.
+    if _declares_none(return_annot):
+        return_annot = None
     inferred_output_types: Schema = {}
     if return_annot is not inspect.Signature.empty and return_annot is not None:
         output_item_types = []
