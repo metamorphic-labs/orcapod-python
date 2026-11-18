@@ -456,6 +456,16 @@ def golden_scaled(age: int, factor: float = 2.0) -> float:
     return age * factor
 
 
+def golden_stats2(a: int, b: int) -> tuple[int, int]:
+    """Two outputs of one type: the order of the output keys is in the stored signature."""
+    return a + b, a * b
+
+
+def golden_stats3(a: int, b: int) -> tuple[int, str, float]:
+    """Three outputs of three types."""
+    return a + b, f"{a}-{b}", a / 4
+
+
 @case("semantic", "function")
 def semantic_functions() -> dict[str, Any]:
     """Pin the hash of a function used as a value and the stored signature hash.
@@ -484,6 +494,65 @@ def semantic_functions() -> dict[str, Any]:
         out[f"stored_signature.{name}"] = _bytes_text(
             variation["function_signature_hash"]
         )
+        # ITL-1256: the function as written, from its def line on.
+        out[f"stored_content.{name}"] = _bytes_text(variation["function_content_hash"])
+    out.update(_stored_record_cases())
+    return out
+
+
+def _stored_record_cases() -> dict[str, Any]:
+    """The record of python.function.v1 rev1 (ITL-1256) in more declarations.
+
+    Output keys in two orders (two and three keys), an ``input_schema=`` override, the
+    three ways of making a pod, and a function whose source cannot be read (its content
+    hash is absent: ``None``).
+    """
+    from orcapod import function_pod
+    from orcapod.core.data_function import PythonDataFunction
+    from orcapod.core.function_pod import FunctionPod
+
+    def signature(data_function: Any) -> str:
+        return _bytes_text(
+            data_function.get_function_variation_data()["function_signature_hash"]
+        )
+
+    out: dict[str, Any] = {
+        "stored_signature.stats2.forward": signature(
+            PythonDataFunction(golden_stats2, output_keys=["sum", "product"])
+        ),
+        "stored_signature.stats2.backward": signature(
+            PythonDataFunction(golden_stats2, output_keys=["product", "sum"])
+        ),
+        "stored_signature.stats3.forward": signature(
+            PythonDataFunction(golden_stats3, output_keys=["total", "label", "quarter"])
+        ),
+        "stored_signature.stats3.rotated": signature(
+            PythonDataFunction(golden_stats3, output_keys=["label", "quarter", "total"])
+        ),
+        "stored_signature.scaled.input_schema": signature(
+            PythonDataFunction(
+                golden_scaled, output_keys="scaled", input_schema={"age": float}
+            )
+        ),
+        "stored_signature.stats2.from_fn": signature(
+            FunctionPod.from_fn(
+                golden_stats2, output_keys=["sum", "product"]
+            ).data_function
+        ),
+        "stored_signature.stats2.decorator": signature(
+            function_pod(output_keys=["sum", "product"])(
+                golden_stats2
+            ).pod.data_function
+        ),
+    }
+    namespace: dict[str, Any] = {"__name__": "golden_repl"}
+    exec("def typed_in(x: int) -> int:\n    return x + 1\n", namespace)
+    without_source = PythonDataFunction(namespace["typed_in"], output_keys="y")
+    variation = without_source.get_function_variation_data()
+    out["stored_signature.without_source"] = _bytes_text(
+        variation["function_signature_hash"]
+    )
+    out["stored_content.without_source"] = variation["function_content_hash"]
     return out
 
 
