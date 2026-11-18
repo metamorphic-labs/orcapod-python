@@ -20,3 +20,12 @@ def log_value_unannotated(x: int):  # no return annotation on purpose
 def maybe(x: int) -> int | None:
     """One output that may be null."""
     return None if x < 0 else x
+
+
+def unresolvable_input(x: Missing) -> None:  # noqa: F821  # pyright: ignore[reportUndefinedVariable]  # unresolvable on purpose
+    """Declares no outputs; its parameter annotation cannot be resolved.
+
+    ``typing.get_type_hints`` fails on it, so the return annotation stays the text
+    ``"None"``; the input type is supplied with ``input_schema``.
+    """
+    del x

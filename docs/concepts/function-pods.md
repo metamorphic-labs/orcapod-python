@@ -28,7 +28,10 @@ Key points:
   takes no `output_keys`; its pod has no output columns. `-> None` together with
   `output_keys` raises `ValueError` when the pod is created, and a value other than
   `None` returned by a function with no outputs raises `NoOutputsDeclaredError` (an
-  `OutputTypeError`): add an output key for it, or return nothing. An output that may be
+  `OutputTypeError`): add an output key for it, or return nothing. Such a pod is
+  limited for now: in a job its rows fail, over data-tags and before an operator it
+  raises (ITL-1260); for a function run for its effect, use a `SideEffectPod`. An
+  output that may be
   missing is not "no outputs": it is one output key typed `T | None`, and a returned
   `None` is stored as a null.
 - **Function parameters** are matched to the input stream's data columns by name: one data

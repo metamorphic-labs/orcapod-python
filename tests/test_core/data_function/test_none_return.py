@@ -245,3 +245,30 @@ def test_the_error_pickles_with_its_arguments() -> None:
         3,
         str(error),
     )
+
+
+def test_none_is_read_when_another_annotation_cannot_be_resolved() -> None:
+    """``get_type_hints`` fails on ``x: Missing``; the postponed ``-> None`` still counts.
+
+    The input type comes from ``input_schema`` (Copilot, #447).
+    """
+    data_function = PythonDataFunction(
+        strings.unresolvable_input, input_schema={"x": int}
+    )
+    assert dict(data_function.output_data_schema) == {}
+    with pytest.raises(ValueError, match=REFUSAL):
+        PythonDataFunction(
+            strings.unresolvable_input, output_keys="out", input_schema={"x": int}
+        )
+
+
+def test_the_error_keeps_the_attributes_of_an_output_type_error() -> None:
+    """Every attribute ``OutputTypeError`` documents is present (Copilot, #447)."""
+    error = NoOutputsDeclaredError("f", 3)
+    for restored in (error, pickle.loads(pickle.dumps(error))):
+        assert restored.function_name == "f"
+        assert restored.value == 3
+        assert restored.output_key is None
+        assert restored.declared_type is None
+        assert restored.detail is None
+        assert restored.hint == "Add an output key for the value, or return nothing"
