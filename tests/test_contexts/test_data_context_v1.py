@@ -25,6 +25,7 @@ from orcapod.hashing.semantic_hashing.type_handler_registry import (
 )
 from orcapod.semantic_types.universal_converter import UniversalTypeConverter
 from tests.test_hashing.golden import store
+from tests.test_hashing.golden.generate_golden_hashes import main
 
 CONTEXTS_DIR = Path(str(resources.files("orcapod.contexts")))
 MANIFEST_DIR = CONTEXTS_DIR / "data"
@@ -146,15 +147,37 @@ def test_0_3_0_is_recorded_as_withdrawn_with_the_pins_it_shipped() -> None:
     )
 
 
-def test_v1_is_open_until_0_4_0() -> None:
-    """No release of v1 stands: no manifest pin, no releases line, no release revision."""
+def test_the_withdrawn_0_3_0_freezes_nothing() -> None:
+    """0.3.0 is neither a releases line nor a release revision of v1.
+
+    Until the next release v1 is open: no manifest pin, no releases line, no release
+    revision. The release step of 0.4.0 (or of any version published before it) freezes v1
+    again and keeps this test passing.
+    """
     pin = _pins()["v1"]
-    assert pin["manifest"] is None
-    assert pin["releases"] == {}
-    assert _manifest("v1")["released_in"] is None
     history = _history("v1")
-    assert [revision["release"] for revision in history] == [None] * len(history)
-    assert store.released_files(history) == set()
+    assert "0.3.0" not in pin["releases"]
+    assert "0.3.0" not in [revision["release"] for revision in history]
+    assert _manifest("v1")["released_in"] != "0.3.0"
+    if not pin["releases"]:
+        assert pin["manifest"] is None
+        assert _manifest("v1")["released_in"] is None
+        assert [revision["release"] for revision in history] == [None] * len(history)
+        assert store.released_files(history) == set()
+
+
+def test_releasing_after_the_withdrawal_keeps_the_record(tmp_path: Path) -> None:
+    """The release step on a copy of the repository tree freezes v1 and keeps the record."""
+    store.copy_tree(store.PROJECT_ROOT, tmp_path, "v1")
+    withdrawn = _pins()["v1"]["withdrawn"]
+    released = set(_pins()["v1"]["releases"])
+    next_release = "99.0.0"
+    main(["--root", str(tmp_path), "--release", next_release])
+    pin = store.read_json(store.pins_path(tmp_path))["v1"]
+    assert set(pin["releases"]) == {*released, next_release}
+    assert pin["manifest"] is not None
+    assert pin["withdrawn"] == withdrawn
+    assert store.tree_problems(tmp_path, "v1") == []
 
 
 # ---------------------------------------------------------------------------
