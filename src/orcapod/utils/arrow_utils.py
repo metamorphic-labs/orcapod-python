@@ -1893,8 +1893,8 @@ def sort_by_tag_columns(table: "pa.Table", tag_keys: tuple[str, ...]) -> "pa.Tab
     """Return ``table`` with its rows in tag order: the sort every presentation uses.
 
     This is the order of ``as_table(sort_by_tags=True)``, ``head`` and the notebook
-    preview. It is not a hash input: a stream's identity keeps its own ordering
-    (``ArrowTableStream._identity_table``).
+    preview. It is not a hash input: a stream's identity does not depend on row order
+    (``ArrowTableStream._row_hashes``, a multiset of row hashes).
 
     The rows are ordered ascending by the tag columns ``tag_keys``, nulls last. Rows with
     equal tags are then ordered by the system tag columns ``table`` has (they hold the

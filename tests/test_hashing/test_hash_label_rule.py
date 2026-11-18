@@ -779,17 +779,26 @@ class TestProducerlessStreamIdentity:
         assert _bare_stream().content_hash() != _bare_stream(**changed).content_hash()
 
     def test_identity_does_not_cover_the_derived_content_hash_column(self) -> None:
-        """The identity table leaves out the ``_content_hash`` column and nothing else."""
+        """Each identity row hash covers every column but ``_content_hash`` (ITL-1227).
+
+        The identity holds the rows as a multiset of labelled row hashes; each is the
+        Arrow hash of the row with every column group but the derived content hash.
+        """
         stream = _bare_stream()
         with_hashes = stream.as_table(all_info=True)
         row_hashes = cast("list[str]", with_hashes.column("_content_hash").to_pylist())
         assert row_hashes[0].startswith("arrow_v1:")
         # The public identity_structure() is what content_hash() hashes.
-        _, identity_table, _ = stream.identity_structure()
-        assert "_content_hash" not in identity_table.column_names
-        assert set(with_hashes.column_names) - set(identity_table.column_names) == {
-            "_content_hash"
-        }
+        _, identity_rows, _ = stream.identity_structure()
+        assert identity_rows.column_names == ["row_hash"]
+        hasher = stream.data_context.arrow_hasher
+        without = with_hashes.drop_columns(["_content_hash"])
+        assert identity_rows.column("row_hash").to_pylist() == [
+            hasher.hash_table(without.slice(0, 1)).to_prefixed_digest()
+        ]
+        assert identity_rows.column("row_hash").to_pylist() != [
+            hasher.hash_table(with_hashes.slice(0, 1)).to_prefixed_digest()
+        ]
 
 
 # ---------------------------------------------------------------------------

@@ -2353,8 +2353,8 @@ def torch_datagram() -> dict[str, Any]:
 def pipeline_tagless_producerless_stream() -> dict[str, Any]:
     """Pin the content hash of a stream with no tag column and no producer (ITL-1053).
 
-    Its identity hashes the rows sorted by their system tags, so the hash is the same
-    for rows given in any order.
+    Its identity holds the rows as a multiset of row hashes (ITL-1227), so the hash is
+    the same for rows given in any order.
 
     Returns:
         The content hash for two orders of the same rows.
@@ -2387,8 +2387,9 @@ def pipeline_tagless_producerless_stream() -> dict[str, Any]:
 def pipeline_list_tag_producerless_stream() -> dict[str, Any]:
     """Pin the content hash of a stream with a list-valued tag and no producer (ITL-1053).
 
-    Arrow cannot order a list column, so the stream's identity hashes its rows in the
-    order given: the hash of the same rows in two orders differs.
+    Arrow cannot order a list column. The stream's identity holds its rows as a multiset
+    of row hashes (ITL-1227), so it needs no order: the same rows in two orders hash the
+    same.
 
     Returns:
         The content hash for two orders of the same rows.
