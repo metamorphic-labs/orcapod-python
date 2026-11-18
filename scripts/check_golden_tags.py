@@ -248,6 +248,49 @@ def check_type_snapshots(repo: Path, tag: str) -> list[str]:
     return problems
 
 
+def unpinned_type_snapshots(repo: Path) -> list[str]:
+    """The data function type snapshots at HEAD that a release would ship unpinned.
+
+    Every snapshot file under ``TYPE_SNAPSHOTS`` (other than ``released.json``) must be
+    listed in HEAD's ``released.json`` with a ``sha256`` that is not null and equals the
+    file's: a snapshot added or changed after the release step would otherwise ship open,
+    and no later tag check would protect it (ITL-1259).
+
+    Args:
+        repo: The repository.
+
+    Returns:
+        One problem per open, missing or mismatched pin; empty when every snapshot is
+        pinned.
+    """
+    import hashlib
+
+    listed = _git(repo, "ls-tree", "-r", "--name-only", "HEAD", str(TYPE_SNAPSHOTS))
+    if listed.returncode != 0:
+        return []
+    pins = _show_json(repo, "HEAD", TYPE_SNAPSHOTS / "released.json")
+    pins = pins if isinstance(pins, dict) else {}
+    problems: list[str] = []
+    for name in sorted(listed.stdout.decode().split()):
+        path = PurePosixPath(name)
+        relative = path.relative_to(TYPE_SNAPSHOTS).as_posix()
+        if relative == "released.json" or path.suffix != ".json":
+            continue
+        pin = pins.get(relative)
+        sha = pin.get("sha256") if isinstance(pin, dict) else None
+        data = _show(repo, "HEAD", path) or b""
+        if sha is None:
+            problems.append(
+                f"data function type snapshot {relative} is not pinned: run "
+                "generate_golden_hashes.py --release after adding it (a new version)"
+            )
+        elif sha != hashlib.sha256(data).hexdigest():
+            problems.append(
+                f"data function type snapshot {relative} does not match its pin"
+            )
+    return problems
+
+
 def check_release(repo: Path, release: str) -> list[str]:
     """Check that HEAD records a release of the current data context, before it is tagged.
 
@@ -301,6 +344,7 @@ def check_release(repo: Path, release: str) -> list[str]:
             f"tag the commit of the release step, or run --release {release} again after "
             "the addition (a new version)"
         )
+    problems.extend(unpinned_type_snapshots(repo))
     return problems
 
 
