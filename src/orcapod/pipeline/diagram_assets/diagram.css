@@ -25,9 +25,17 @@
   padding-right: 96px;
 }
 
-/* Wider room when the collapse checkbox sits beside the buttons. */
-.op-dag.op-dag-has-other .op-dag-head {
+/* Wider room when the direction or collapse checkbox sits beside the buttons. */
+.op-dag.op-dag-has-collapse .op-dag-head {
   padding-right: 190px;
+}
+
+.op-dag.op-dag-has-direction .op-dag-head {
+  padding-right: 180px;
+}
+
+.op-dag.op-dag-has-direction.op-dag-has-collapse .op-dag-head {
+  padding-right: 270px;
 }
 
 /* The separator before the "preview" tag shows only without this style sheet. */
@@ -163,7 +171,7 @@
   gap: 4px;
 }
 
-.op-dag .op-dag-collapse {
+.op-dag .op-dag-check {
   font: 12px system-ui, sans-serif;
   display: flex;
   align-items: center;
@@ -172,7 +180,7 @@
   cursor: pointer;
 }
 
-.op-dag .op-dag-collapse input {
+.op-dag .op-dag-check input {
   margin: 0;
 }
 

@@ -87,6 +87,23 @@ The developer confirmed the diagram as the default rich display of `Pipeline` an
   fallback shows the `collapse=` layout. Output is deterministic. Size: the other layout
   adds about half again (100 joined branches, 401 nodes, 201 folded: 923 KiB of HTML
   instead of about 613 KiB; built in 0.03 s). Default False (the tutorial teaches the node names, SelectDataColumns_1 etc.).
+- Direction checkbox (developer, November 17, 2026; ITL-1232): the output embeds every
+  layout of both directions and both collapse states, in one JSON block (`op-dag-views`,
+  which replaced `op-dag-other`): the shown direction and collapse state, the other
+  collapse state's model (when folding changes something and it has at most `max_nodes`
+  nodes) and the other layouts' standalone SVGs, base64: up to three. The script builds a
+  `vertical` checkbox (ticked for top to bottom) and the `collapse` checkbox for the
+  layouts the block holds, and fits each new picture as on first display. Above
+  `_MAX_EMBEDDED_NODES` (100) nodes no other layout is embedded and neither checkbox
+  appears. Sizes (wrapped node text): the tutorial job 31 KiB with one layout, 61 KiB
+  with four; 100 foldable nodes 174 KiB with one, 516 KiB with four; 200 nodes 335 KiB
+  and 1,019 KiB; 400 nodes (the default `max_nodes`, one layout above the limit) 659 KiB.
+- Node text (ITL-1232): the kind line is wrapped at its ` · ` separators to the width of
+  the label or its widest part (within the node width limits), one 13 px line more per
+  wrapped line; nothing is dropped from it. Tutorial job left to right: 1,664 x 134 px
+  before, 1,213 x 186 px after (top to bottom 428 x 668, 383 x 772); a two-node job
+  499 x 68 before, 279 x 94 after. At a 1,280 px JupyterLab window (a 1,062 px view)
+  the tutorial job now fits at 0.88, above the 0.8 floor of ITL-1231: shown whole.
 
 ## 3. Rendering approach
 

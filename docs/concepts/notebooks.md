@@ -228,10 +228,11 @@ laid out left to right. Here is `job` as the last line of a cell, after its run,
 - **Statuses.** Each node of a job shows one: `not run`, `current`, `stale`, `failed`,
   `loaded only`, `partial`, or `bound` or `unbound` for a source slot. Before `job.run()`
   every node but the sources says `not run`.
-- **The `collapse` checkbox.** `collapse=True` folds the steps that only choose, rename or
-  join columns into the edge they lie on. In a notebook that runs scripts, a `collapse`
-  checkbox next to the zoom buttons switches between the two layouts; it appears only when
-  there is something to fold.
+- **The `vertical` and `collapse` checkboxes.** `direction="TB"` lays the graph out top to
+  bottom, and `collapse=True` folds the steps that only choose, rename or join columns into
+  the edge they lie on. In a notebook that runs scripts, the `vertical` and `collapse`
+  checkboxes next to the zoom buttons switch between these layouts in place (`collapse`
+  appears only when there is something to fold; neither appears above 100 nodes).
 - **Nothing is computed.** Drawing a diagram never computes anything.
 - **Saved with the notebook.** The picture is part of the cell's output, so it stays in a
   saved notebook and in an HTML export. `job.diagram().save("pipeline.html")` writes it as a
@@ -281,7 +282,7 @@ a pydantic model run again is a new class, and pods built for the earlier one re
 ## Other notebook front ends
 
 The displays are HTML in the cell's output, with the diagram's pan, zoom, selection and
-`collapse` checkbox done by a script in that output; the pictures on this page come from
+`vertical` and `collapse` checkboxes done by a script in that output; the pictures on this page come from
 JupyterLab, the front end they are checked in.
 
 - **Jupyter Notebook 7** is built on JupyterLab and runs the scripts of trusted outputs as

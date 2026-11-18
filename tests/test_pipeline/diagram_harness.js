@@ -121,6 +121,7 @@ function parseSvg(text) {
     const attrs = {};
     for (const a of m[3].matchAll(/([\w:-]+)="([^"]*)"/g)) attrs[a[1]] = a[2];
     const el = new El(m[2], attrs);
+    if (m[2] === 'svg') el.natural = [+attrs.width, +attrs.height];
     stack[stack.length - 1].appendChild(el);
     if (!m[4]) stack.push(el);
   }
@@ -166,6 +167,15 @@ function observe() {
     observed: observers.map((o) => o.el && o.el.className),
     clipped: ['left', 'right', 'top', 'bottom'].filter(
       (side) => root.classList.contains('op-dag-clip-' + side)),
+    picture: svg ? svg.natural || null : null,
+    selected: svg ? svg.querySelectorAll('.op-dag-node')
+      .filter((g) => g.classList.contains('op-dag-selected'))
+      .map((g) => g.getAttribute('aria-label').split(', ')[0]) : [],
+    panel: root.querySelector('.op-dag-panel').classList.contains('op-dag-open'),
+    count: root.querySelector('.op-dag-count').textContent,
+    controls: Object.fromEntries(['direction', 'collapse']
+      .filter((name) => root.querySelector('.op-dag-' + name))
+      .map((name) => [name, root.querySelector('.op-dag-' + name).children[0].checked])),
   };
 }
 
@@ -189,8 +199,14 @@ for (const step of kase.steps) {
     view.dispatch('pointerdown', {clientX: 0, clientY: 0, pointerId: 1});
     view.dispatch('pointermove', {clientX: step.dx, clientY: step.dy, pointerId: 1});
     view.dispatch('pointerup', {pointerId: 1});
-  } else if (step.op === 'collapse') {
-    root.querySelector('.op-dag-collapse').children[0].dispatch('change');
+  } else if (step.op === 'collapse' || step.op === 'direction') {
+    const box = root.querySelector('.op-dag-' + step.op).children[0];
+    box.checked = !box.checked;
+    box.dispatch('change');
+  } else if (step.op === 'select') {
+    svgNow().querySelectorAll('.op-dag-node')
+      .find((g) => g.getAttribute('aria-label').startsWith(step.label + ', '))
+      .dispatch('click');
   } else if (step.op === 'observe') {
     out.push(observe());
   } else {
