@@ -266,7 +266,11 @@ class DerivedSource(RootSource):
                 )
             self._tags_as_data: dict[str, str] | None = None
         else:
-            self._tags_as_data = dict(tags_as_data)
+            # The mapping names a set of copies: they are placed in the order of their
+            # new names, so the order it is given in changes nothing (ITL-1271).
+            self._tags_as_data = dict(
+                sorted(tags_as_data.items(), key=lambda item: item[1])
+            )
             tag_keys, data_keys = origin.keys()
             validate_tags_as_data(self._tags_as_data, tag_keys, data_keys)
             kwargs.setdefault("data_context", origin.data_context_key)

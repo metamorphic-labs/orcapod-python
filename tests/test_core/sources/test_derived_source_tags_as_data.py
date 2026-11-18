@@ -11,6 +11,7 @@ Fixtures are shaped like the EDI ``session`` and ``experiment`` tables, where
 from __future__ import annotations
 
 import datetime as dt
+import itertools
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -26,6 +27,8 @@ from orcapod.operators import Join
 from orcapod.pipeline import AsyncPipelineOrchestrator
 from orcapod.types import ColumnConfig
 from orcapod.sources import ArrowTableSource, DictSource, SQLiteTableSource
+
+from ..operators.several_items import MAIN, TAGS_FIRST, Arrangement, make_source
 
 UTC = dt.timezone.utc
 TS = pa.timestamp("us", tz="UTC")
@@ -822,3 +825,38 @@ class TestZeroRowOrigin:
         assert copy_field.type == pa.large_string()
         assert copy_field.nullable is False
         assert list(derived.iter_data()) == []
+
+
+# ── the order of the mapping (ITL-1271) ─────────────────────────────────────
+
+
+@pytest.mark.parametrize("roles", ["plain", "data_tags", "mixed"])
+def test_the_order_of_the_mapping_changes_nothing_not_even_the_column_order(
+    roles: str,
+) -> None:
+    """Three copies in every mapping order: one identity, one table, copies in name order.
+
+    The mapping names a set of copies: its identity was already sorted; the copies are
+    placed after the origin's data columns in the order of their new names, so the
+    mapping's order changes neither the columns nor their order (ITL-1271).
+    """
+    origin = make_source(MAIN, Arrangement(MAIN.tags, TAGS_FIRST, roles))
+    # The new names sort in another order than the tags they copy.
+    items = (("t1", "z1"), ("t2", "y2"), ("t3", "x3"))
+    results = set()
+    for order in itertools.permutations(items):
+        source = DerivedSource(origin, tags_as_data=dict(order))
+        tag_keys, data_keys = source.keys()
+        assert data_keys[-3:] == ("x3", "y2", "z1")
+        table = source.as_table(all_info=True)
+        results.add(
+            (
+                source.content_hash().to_string(),
+                source.pipeline_hash().to_string(),
+                tag_keys,
+                data_keys,
+                tuple(table.column_names),
+                tuple(map(str, table.to_pylist())),
+            )
+        )
+    assert len(results) == 1
