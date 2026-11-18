@@ -2651,3 +2651,43 @@ def pipeline_group_by_arrangement() -> dict[str, Any]:
             )
         )
     return out
+
+
+# GroupBy over a float key with NaN and -0.0 (ITL-1234)
+# ---------------------------------------------------------------------------
+
+
+@case("pipeline", "group_by_nan_keys")
+def pipeline_group_by_nan_keys() -> dict[str, Any]:
+    """Pin ``GroupBy`` over a float key whose NaN and zero values differ in bits.
+
+    The three NaN keys (the canonical quiet NaN, one with the sign bit set, one with
+    a payload) form one group, which emits the canonical NaN; ``0.0`` and ``-0.0``
+    form one group, which emits ``0.0``; the null keys form one group.
+    """
+    from orcapod.operators import GroupBy
+    from orcapod.sources import ArrowTableSource
+
+    key_bits = [
+        0xFFF8000000000000,
+        0x8000000000000000,
+        0x7FF8000000000001,
+        None,
+        0x0,
+        0x7FF8000000000000,
+        None,
+    ]
+    table = pa.table(
+        {
+            "k": pa.array(key_bits, pa.uint64()).view(pa.float64()),
+            "t": pa.array([1, 2, 3, 4, 5, 6, 7], pa.int64()),
+            "v": pa.array([10, 20, 30, 40, 50, 60, 70], pa.int64()),
+        }
+    )
+    source = ArrowTableSource(
+        table,
+        tag_columns=["k", "t"],
+        tag_only_columns=True,
+        source_id="golden_group_by_nan_keys",
+    )
+    return stream_summary(GroupBy(by=["k"])(source))

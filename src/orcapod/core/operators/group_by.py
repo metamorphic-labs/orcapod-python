@@ -50,6 +50,72 @@ def _null_last_key(value: Any) -> tuple[Any, ...]:
     return (0, value)
 
 
+# The grouping form of a NaN key value: one shared object, so every row whose key
+# is NaN falls into one group (ITL-1234), as the joins match a NaN key
+# (``match_keys``).  ``0.0`` and ``-0.0`` already fall into one group: they are equal.
+_NAN_KEY = object()
+
+
+def _grouping_key(key: tuple[Any, ...]) -> tuple[Any, ...]:
+    """Return a group key in the form that groups rows: every NaN as one value.
+
+    Args:
+        key: The values of the ``by`` columns of one row, in the order of ``by``.
+
+    Returns:
+        The key with each NaN replaced by one shared object.
+    """
+    return tuple(
+        _NAN_KEY if isinstance(value, float) and math.isnan(value) else value
+        for value in key
+    )
+
+
+def _float_key_bits(column: "pa.ChunkedArray[Any]") -> list[int] | None:
+    """Return the bit pattern of each value of a float key column, at its own width.
+
+    Args:
+        column: A key column of the input table.
+
+    Returns:
+        For a ``float16``, ``float32`` or ``float64`` column, each value's IEEE 754
+        bits as an unsigned integer of the column's width (``0`` for a null: a null
+        key's group holds nulls only, so its bits never decide); otherwise ``None``.
+    """
+    arrow_type = column.type
+    if not pa.types.is_floating(arrow_type):
+        return None
+    unsigned = {16: pa.uint16(), 32: pa.uint32(), 64: pa.uint64()}[arrow_type.bit_width]
+    return [
+        0 if bits is None else bits
+        for bits in column.combine_chunks().view(unsigned).to_pylist()
+    ]
+
+
+def _emitted_key_value(values: Sequence[Any], bits: Sequence[int] | None) -> Any:
+    """Return the value a group emits for one key column, whatever its row order.
+
+    The members of a group hold equal key values, but equal floats may differ in
+    their bits (``0.0`` and ``-0.0``, NaN with another sign or payload), and the
+    hashes of the emitted row read the bits.  So a float key is the members' value
+    with the smallest bit pattern at the column's own width (ITL-1234), chosen per
+    key column: the value is always one a member holds, a group whose members agree
+    keeps it, and a mixed group emits ``0.0`` over ``-0.0`` and the canonical quiet
+    NaN over any other NaN.  Neither the row order nor ``member_order`` decides it.
+
+    Args:
+        values: The key column's value in each member of one group (at least one).
+        bits: The bit pattern of each of those values, from ``_float_key_bits``;
+            ``None`` for a column that is not a float.
+
+    Returns:
+        The key value the group emits.
+    """
+    if bits is None:
+        return values[0]
+    return values[min(range(len(values)), key=bits.__getitem__)]
+
+
 GROUP_BY_FOLD_LABEL = "group_v1"
 """Label of the folds of ``GroupBy``: the folded source id and record id are
 ``"group_v1:<hex>"`` (ITL-1154), and so is the one source-info token of a data-tag
@@ -176,6 +242,15 @@ class GroupBy(UnaryOperator):
     are emitted sorted by their keys, in name order, for the same reason: a
     reordered input or a reordered ``by`` must
     produce an identical output.
+
+    Rows with equal keys form one group, as the joins match keys, except that all
+    rows with a null key form one group too.  So do all rows with a NaN key, and
+    ``0.0`` equals ``-0.0`` (ITL-1234).  A NaN key sorts after every number and
+    before null.  A float key that the members hold with different bits is
+    emitted, per key column, as the one with the smallest bit pattern at the
+    column's own width (``0.0`` over ``-0.0``, the canonical NaN over any other),
+    so the emitted key is a value a member holds and never depends on the row
+    order or on ``member_order``.
 
     Tag tuples are expected to be unique within a stream, but nothing enforces
     that.  If the input does contain duplicate tag tuples, the members sharing
@@ -394,15 +469,34 @@ class GroupBy(UnaryOperator):
                 sorted(c for c in system_tag_columns if c.startswith(prefix))
             )
 
-        groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
-        for row in table.to_pylist():
-            groups.setdefault(tuple(row[c] for c in self.by), []).append(row)
+        # Every NaN key is one value here (ITL-1234), so the rows whose key is NaN
+        # form one group, as the joins match them.
+        rows = table.to_pylist()
+        groups: dict[tuple[Any, ...], list[int]] = {}
+        for index, row in enumerate(rows):
+            key = _grouping_key(tuple(row[c] for c in self.by))
+            groups.setdefault(key, []).append(index)
+        key_bits = {c: _float_key_bits(table.column(c)) for c in self.by}
+        keyed_groups: list[tuple[tuple[Any, ...], list[dict[str, Any]]]] = []
+        for indices in groups.values():
+            emitted = tuple(
+                _emitted_key_value(
+                    [rows[i][c] for i in indices],
+                    None
+                    if (bits := key_bits[c]) is None
+                    else [bits[i] for i in indices],
+                )
+                for c in self.by
+            )
+            keyed_groups.append((emitted, [rows[i] for i in indices]))
 
         grouped_rows: list[dict[str, Any]] = []
         # Emit groups in key order rather than first-appearance order, so a
-        # reordered input produces a byte-identical output table.
+        # reordered input produces a byte-identical output table.  The keys are in
+        # name order (``by`` is sorted); a NaN key sorts after every number and
+        # before null, as a member's tag does.
         for key, members in sorted(
-            groups.items(), key=lambda kv: tuple(_null_last_key(v) for v in kv[0])
+            keyed_groups, key=lambda km: tuple(_null_last_key(v) for v in km[0])
         ):
             if sort_columns:
                 members.sort(

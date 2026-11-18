@@ -1226,7 +1226,7 @@ data. The rules:
   orders its members by the first grouping's keys outside the coarser key, then by record id. An opt-in mode that keeps non-key tags is ITL-1071.
 - GroupBy never depends on how its input's columns are arranged (developer, November 17,
   2026, ITL-1226). Members are ordered by the non-key tags in name order (each ascending,
-  nulls last), then the record-id and source-id columns; `member_order` (non-key TAG names
+  NaN after every number, nulls last), then the record-id and source-id columns; `member_order` (non-key TAG names
   only: a data column, a key, a repeat, a set or an empty list is refused; `"name"` is the
   default; an ordering function is reserved, refused for now) names tags to order by first,
   the rest follow in name order. A member is never ordered by a data value. The keys in `by`
@@ -1236,6 +1236,15 @@ data. The rules:
   record ids, folds, source-info tokens and hashes; only the output's column order follows
   the input, as presentation. `TagBy`'s identity is its sorted names, and its new tags are
   placed in name order.
+- `GroupBy` groups keys as the joins match them, except null (developer, November 17, 2026,
+  ITL-1234): all rows with a null key form one group, and so do all rows with a NaN key (the
+  grouping key holds every NaN as one object, `_grouping_key`); `0.0` equals `-0.0`. A NaN key
+  sorts after every number and before null, as in the member order (`_null_last_key`, which
+  also sorts a NaN tag after every number). The hashes read a float's bits, so a group emits,
+  for each float key column, its members' value with the smallest bit pattern at the column's
+  own width, float16, float32 or float64 (`_float_key_bits`, `_emitted_key_value`: `0.0` over
+  `-0.0`, the canonical NaN over any other): always a value a member holds, never the first
+  row's, never chosen by `member_order`.
 - `Data` source-info values may be `str`, `None`, or `list[...]`, nested to any depth; the
   Arrow and Python types are derived from the value, with `None` mapping to `large_string`.
   That rule has one definition, `arrow_utils.source_info_arrow_type`, and applies only to

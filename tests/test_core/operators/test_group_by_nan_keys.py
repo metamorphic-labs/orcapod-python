@@ -1,0 +1,232 @@
+"""A NaN group key (ITL-1234).
+
+Developer decision, November 17, 2026: all rows whose ``by`` key is NaN form one group,
+as the joins match a NaN key; before, each such row was a group of its own, in the
+input's row order. A NaN key sorts after every number and before null, as a NaN tag
+does in the member order. ``0.0`` and ``-0.0`` are one key. The hashes of a grouped row
+read a float's bits, so a group emits, for each float key, its members' value with the
+smallest bit pattern: the emitted key never depends on which row came first.
+
+Every test runs every order of the input rows: the values, the bits of every float,
+the record ids, the folds and every hash must be the same for all of them.
+"""
+
+from __future__ import annotations
+
+import itertools
+import json
+import struct
+from typing import Any
+
+import pyarrow as pa
+import pytest
+
+import orcapod as op
+from orcapod.core.streams.base import StreamBase
+from orcapod.databases import InMemoryArrowDatabase
+from orcapod.pipeline import (
+    AsyncPipelineOrchestrator,
+    PipelineJob,
+    SyncPipelineOrchestrator,
+)
+from orcapod.protocols.core_protocols import StreamProtocol
+
+
+# Each float key value by name, as its bit pattern at each width: the canonical quiet
+# NaN, NaN with the sign bit set, NaN with a payload, -0.0, 0.0 and 1.0.
+BITS: dict[str, dict[int, int]] = {
+    "nan": {16: 0x7E00, 32: 0x7FC00000, 64: 0x7FF8000000000000},
+    "-nan": {16: 0xFE00, 32: 0xFFC00000, 64: 0xFFF8000000000000},
+    "payload_nan": {16: 0x7E01, 32: 0x7FC00001, 64: 0x7FF8000000000001},
+    "-0": {16: 0x8000, 32: 0x80000000, 64: 0x8000000000000000},
+    "0": {16: 0x0, 32: 0x0, 64: 0x0},
+    "1": {16: 0x3C00, 32: 0x3F800000, 64: 0x3FF0000000000000},
+}
+FLOAT = {16: pa.float16(), 32: pa.float32(), 64: pa.float64()}
+UNSIGNED = {16: pa.uint16(), 32: pa.uint32(), 64: pa.uint64()}
+WIDTHS = [16, 32, 64]
+
+# One key column ``k``; ``t`` and ``u`` are non-key tags that order the members; ``rid``
+# names each row, so a reordered input keeps every record id.
+ONE_KEY_ROWS: list[dict[str, Any]] = [
+    {"k": "nan", "t": 2, "u": 1, "rid": "r1", "v": 1},
+    {"k": "-nan", "t": 1, "u": 2, "rid": "r2", "v": 2},
+    {"k": "payload_nan", "t": 3, "u": 0, "rid": "r3", "v": 3},
+    {"k": "-0", "t": 1, "u": 1, "rid": "r4", "v": 4},
+    {"k": "0", "t": 0, "u": 2, "rid": "r5", "v": 5},
+    {"k": None, "t": 0, "u": 0, "rid": "r6", "v": 6},
+]
+
+# Two key columns, both floats.
+TWO_KEY_ROWS: list[dict[str, Any]] = [
+    {"g": "0", "k": "nan", "t": 1, "u": 0, "rid": "r1", "v": 1},
+    {"g": "0", "k": "-nan", "t": 0, "u": 1, "rid": "r2", "v": 2},
+    {"g": "nan", "k": "nan", "t": 1, "u": 0, "rid": "r3", "v": 3},
+    {"g": "-0", "k": "1", "t": 0, "u": 0, "rid": "r4", "v": 4},
+    {"g": "-nan", "k": None, "t": 0, "u": 0, "rid": "r5", "v": 5},
+    {"g": "payload_nan", "k": "-nan", "t": 0, "u": 1, "rid": "r6", "v": 6},
+]
+
+
+def _source(rows: list[dict[str, Any]], keys: list[str], width: int) -> StreamBase:
+    columns: dict[str, Any] = {
+        name: pa.array(
+            [None if r[name] is None else BITS[r[name]][width] for r in rows],
+            UNSIGNED[width],
+        ).view(FLOAT[width])
+        for name in keys
+    }
+    for name in ("t", "u", "rid", "v"):
+        columns[name] = [r[name] for r in rows]
+    return op.sources.ArrowTableSource(
+        pa.table(columns),
+        tag_columns=[*keys, "t", "u"],
+        tag_only_columns=True,
+        source_id="s",
+        record_id_columns="rid",
+    )
+
+
+def _bits(value: float) -> int:
+    bits: int = struct.unpack("<Q", struct.pack("<d", value))[0]
+    return bits
+
+
+def _with_bits(value: Any) -> Any:
+    """Replace every float by its bit pattern, so a comparison sees NaN and -0.0."""
+    if isinstance(value, float):
+        return f"float:{_bits(value):016x}"
+    if isinstance(value, list):
+        return [_with_bits(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _with_bits(v) for k, v in value.items()}
+    return value
+
+
+def _fingerprint(stream: StreamProtocol) -> dict[str, Any]:
+    """The rows (floats by their bits), the row hashes and the stream's hashes."""
+    return {
+        "rows": [
+            json.dumps(_with_bits(row), sort_keys=True, default=str)
+            for row in stream.as_table(all_info=True).to_pylist()
+        ],
+        "row_hashes": [
+            (tag.content_hash().to_string(), data.content_hash().to_string())
+            for tag, data in stream.iter_data()
+        ],
+        "content_hash": stream.content_hash().to_string(),
+        "pipeline_hash": stream.pipeline_hash().to_string(),
+    }
+
+
+def _key_bits(stream: StreamProtocol, name: str, width: int) -> list[int | None]:
+    """The emitted key values of one column, as bit patterns at the column's width."""
+    column = stream.as_table().column(name).combine_chunks()
+    assert column.type == FLOAT[width]
+    return column.view(UNSIGNED[width]).to_pylist()
+
+
+@pytest.mark.parametrize("width", WIDTHS)
+@pytest.mark.parametrize(
+    ("member_order", "members"),
+    [
+        # 0.0 group by t (r5, r4); NaN group by t (r2, r1, r3); null group.
+        (None, [[5, 4], [2, 1, 3], [6]]),
+        # by u first: 0.0 group (r4, r5); NaN group (r3, r1, r2).
+        (["u"], [[4, 5], [3, 1, 2], [6]]),
+    ],
+    ids=["default", "member_order_u"],
+)
+def test_nan_keys_form_one_group_in_every_row_order(
+    member_order: list[str] | None, members: list[list[int]], width: int
+) -> None:
+    """Three NaN keys with different bits are one group, after 0.0 and before null."""
+    seen: dict[str, Any] = {}
+    for rows in itertools.permutations(ONE_KEY_ROWS):
+        grouped = _source(list(rows), ["k"], width).group_by(
+            "k", member_order=member_order
+        )
+        assert grouped.as_table().column("v").to_pylist() == members
+        # 0.0 over -0.0 and the canonical NaN over the others, whichever came first.
+        assert _key_bits(grouped, "k", width) == [
+            BITS["0"][width],
+            BITS["nan"][width],
+            None,
+        ]
+        fingerprint = _fingerprint(grouped)
+        if not seen:
+            seen = fingerprint
+        assert fingerprint == seen
+
+
+@pytest.mark.parametrize("width", WIDTHS)
+@pytest.mark.parametrize(
+    ("member_order", "members"),
+    [
+        (None, [[4], [2, 1], [6, 3], [5]]),
+        (["u"], [[4], [1, 2], [3, 6], [5]]),
+    ],
+    ids=["default", "member_order_u"],
+)
+def test_two_keys_compare_element_wise_in_every_row_order(
+    member_order: list[str] | None, members: list[list[int]], width: int
+) -> None:
+    """Key tuples compare element by element, NaN equal to NaN, in name order.
+
+    Each key column picks its own emitted value.
+    """
+    seen: dict[str, Any] = {}
+    for rows in itertools.permutations(TWO_KEY_ROWS):
+        # The order of ``by`` is not identity: either order gives the same result.
+        by = ["k", "g"] if rows[0]["rid"] < "r4" else ["g", "k"]
+        grouped = _source(list(rows), ["g", "k"], width).group_by(
+            by, member_order=member_order
+        )
+        assert grouped.as_table().column("v").to_pylist() == members
+        # A group whose members agree emits their value (-0.0 and the sign-set NaN
+        # here); a mixed group emits the smallest bit pattern.
+        assert _key_bits(grouped, "g", width) == [
+            BITS[name][width] for name in ("-0", "0", "nan", "-nan")
+        ]
+        assert _key_bits(grouped, "k", width) == [
+            BITS["1"][width],
+            BITS["nan"][width],
+            BITS["nan"][width],
+            None,
+        ]
+        fingerprint = _fingerprint(grouped)
+        if not seen:
+            seen = fingerprint
+        assert fingerprint == seen
+
+
+@pytest.mark.parametrize("width", [32, 64])
+def test_nan_keys_group_the_same_sync_and_async(width: int) -> None:
+    seen: list[str] = []
+    for rows in (ONE_KEY_ROWS, ONE_KEY_ROWS[::-1], ONE_KEY_ROWS[3:] + ONE_KEY_ROWS[:3]):
+        for orchestrator in (SyncPipelineOrchestrator, AsyncPipelineOrchestrator):
+            job = PipelineJob(name="nan_keys", database=InMemoryArrowDatabase())
+            with job:
+                _ = _source(list(rows), ["k"], width).group_by("k", label="grouped")
+            job.run(orchestrator=orchestrator())
+            out = job.nodes["grouped"].as_table(all_info=True)
+            assert out.column("v").to_pylist() == [[5, 4], [2, 1, 3], [6]]
+            keys = out.column("k").combine_chunks().view(UNSIGNED[width])
+            assert keys.to_pylist() == [BITS["0"][width], BITS["nan"][width], None]
+            fingerprint = json.dumps(
+                _with_bits(out.to_pylist()), sort_keys=True, default=str
+            )
+            if not seen:
+                seen = [fingerprint]
+            assert fingerprint == seen[0], orchestrator.__name__
+
+
+@pytest.mark.parametrize("width", WIDTHS)
+@pytest.mark.parametrize("name", ["-nan", "payload_nan", "-0"])
+def test_a_group_whose_members_agree_keeps_their_key_bits(
+    name: str, width: int
+) -> None:
+    """The emitted key is always a value a member holds: nothing is rewritten."""
+    rows = [dict(r, k=name) for r in ONE_KEY_ROWS[:2]]
+    grouped = _source(rows, ["k"], width).group_by("k")
+    assert _key_bits(grouped, "k", width) == [BITS[name][width]]

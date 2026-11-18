@@ -308,14 +308,22 @@ Ordering is deterministic by construction, because orcapod hashes the emitted li
 cache keys:
 
 - **Members** are sorted by the input's non-key tags, even though those tags are dropped.
-  The tags are taken in name order, each ascending with nulls last, and the internal record
-  id breaks ties. `member_order` names tags to sort by first, in its order; the other
+  The tags are taken in name order, each ascending with NaN after every number and nulls
+  last, and the internal record id breaks ties. `member_order` names tags to sort by first, in its order; the other
   non-key tags follow in name order. A member is never ordered by a data value: a name in
   `member_order` must be a tag of the input (a data-tag counts), and a data column is
   refused (make it a tag first with `tag_by`).
 - **Groups** are emitted sorted by their keys, taken in name order. The order of the names
   in `by` is not part of the operator: `GroupBy(by=["a", "b"])` and `GroupBy(by=["b", "a"])`
   are one operator.
+- **Keys** group as the joins match them, except for null: rows with equal keys form one
+  group, all rows with a null key form one group, and so do all rows with a NaN key (NaN
+  equals NaN here; `0.0` equals `-0.0`). A NaN key sorts after every number and before null.
+  When the members of a group hold a float key with different bits (`0.0` and `-0.0`, or
+  NaN with another sign or payload), the group emits the one with the smallest bit pattern
+  at the column's own width (`float16`, `float32` or `float64`), for each key column: `0.0`
+  over `-0.0`, and the canonical NaN over any other. The emitted key is always a value a
+  member holds, and neither the order of the rows nor `member_order` decides it.
 - **No arrangement of the input changes the result.** The order of its tags, the order of
   its data columns and the layout of its table leave every value, record id and hash of the
   output unchanged. A reordered input produces a byte-identical output table. The output
