@@ -247,6 +247,38 @@ def check_sources(streams: Iterable[Any]) -> tuple[str, ...]:
     return tuple(unchecked)
 
 
+def _restriction_of(stream: Any) -> dict[str, Any]:
+    """The restriction a stream's source applies (``_restriction_record``), or ``{}``."""
+    record_of = getattr(stream, "_restriction_record", None)
+    return record_of() if record_of is not None else {}
+
+
+def require_one_restriction(known: Any, other: Any) -> None:
+    """Refuse two sources of one identity with different restrictions in one graph.
+
+    A restriction (ITL-1218) does not change a source's identity, so a pipeline
+    records one source per content hash and every node over that hash reads it.
+    Two sources of one table restricted differently would be one source of the
+    graph and the second restriction would be lost: refused instead.
+
+    Args:
+        known: The source the graph already holds for the content hash.
+        other: Another stream with the same content hash.
+
+    Raises:
+        ValueError: If the two restrict their rows differently.
+    """
+    known_record, other_record = _restriction_of(known), _restriction_of(other)
+    if known_record != other_record:
+        raise ValueError(
+            f"Two sources of one identity ({_source_name(known)!r}) read different "
+            f"rows in one pipeline: {known_record or 'every row'} and "
+            f"{other_record or 'every row'}. A restriction does not change a "
+            "source's identity, so a pipeline holds one of them: use one restriction "
+            "for the table in this pipeline, or build a separate pipeline."
+        )
+
+
 def restrictions_in_force(streams: Iterable[Any]) -> dict[str, dict[str, Any]]:
     """The restriction of each restricted source feeding ``streams`` (ITL-1218).
 
@@ -286,8 +318,7 @@ def restrictions_in_force(streams: Iterable[Any]) -> dict[str, dict[str, Any]]:
             if stream.bound_source is not None:
                 pending.append((stream.bound_source, stream.name))
         elif isinstance(stream, RootSource):
-            record_of = getattr(stream, "_restriction_record", None)
-            record = record_of() if record_of is not None else {}
+            record = _restriction_of(stream)
             if record:
                 entry = {"source_id": _source_name(stream), **record}
                 name = slot if slot is not None else str(stream.label)

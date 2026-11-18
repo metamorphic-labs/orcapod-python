@@ -293,15 +293,24 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
 
         Args:
             invocation: The pod invocation to record.
+
+        Raises:
+            ValueError: If an input has the content hash of a source the graph
+                already holds but restricts its rows differently (ITL-1218).
         """
+        from orcapod.pipeline.node_run import require_one_restriction
+
         key = invocation.content_hash().to_string()
         self._invocation_lut[key] = invocation
         self._hash_graph.add_node(key)
         for upstream in invocation.input_streams:
             upstream_hash = upstream.content_hash().to_string()
             self._hash_graph.add_edge(upstream_hash, key)
-            if upstream_hash not in self._source_streams:
+            known = self._source_streams.get(upstream_hash)
+            if known is None:
                 self._source_streams[upstream_hash] = upstream
+            elif known is not upstream:
+                require_one_restriction(known, upstream)
 
     # ------------------------------------------------------------------
     # Diagram (ITL-1197)

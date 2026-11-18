@@ -264,6 +264,11 @@ job built over `events`, whose slot is named by the source id.)
   a string: use `date.fromisoformat`), and it must fit the column's Arrow type. Anything else
   raises `TypeError`, naming the column and both types. Columns of other types (lists,
   structs) take no condition.
+- **One restriction per table in a pipeline.** A restricted source has the unrestricted
+  source's identity, so a pipeline holds one source for the table: building a pipeline in
+  which one table is read with two different restrictions (or with and without one) raises
+  `ValueError` instead of silently reading one of them. Use one restriction per pipeline, or
+  build separate pipelines.
 - **With `limit=`.** A source built with `limit=n` reads the first `n` rows that match, in
   key order: the conditions are applied first.
 - **Recorded.** `RunSummary.restrictions` maps each restricted source's slot to its source id

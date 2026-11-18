@@ -220,6 +220,16 @@ class TestRefusals:
             _checked_conditions({"x": 1e300}, schema)
         assert _checked_conditions({"x": 0.1}, schema) == {"x": 0.1}
 
+    @pytest.mark.parametrize("value", [1e300, -1e300])
+    def test_a_float_overflow_is_refused_by_where_and_the_constructor(
+        self, project, value
+    ):
+        """``amplitude`` is float32: a value beyond its range is refused either way."""
+        with pytest.raises(TypeError, match="amplitude"):
+            _source().where(amplitude=value)
+        with pytest.raises(TypeError, match="amplitude"):
+            _source(where={"amplitude": value})
+
     def test_an_out_of_range_integer_is_refused(self, project):
         """An integer the column's Arrow type cannot hold is refused."""
         with pytest.raises(TypeError, match="channel"):
@@ -548,6 +558,60 @@ class TestRunsAndSavedJobs:
             ("events", {"subject_id": "m1"}),
             ("events (2)", {"subject_id": "m2"}),
         ]
+
+    def test_one_table_restricted_two_ways_in_one_job_is_refused(
+        self, project, tmp_path
+    ):
+        """Two restrictions of one table in one graph would be one source: refused."""
+
+        @function_pod(output_keys="a")
+        def first(amplitude: float | None) -> float | None:
+            """Return ``amplitude``."""
+            return amplitude
+
+        @function_pod(output_keys="b")
+        def second(channel: int | None) -> int | None:
+            """Return ``channel``."""
+            return channel
+
+        events = _source(source_id="events", tag_only_columns=True)
+        job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
+        with pytest.raises(ValueError, match="different rows in one pipeline"):
+            with job:
+                first.pod(events.where(subject_id="m1"), label="first")
+                second.pod(events.where(subject_id="m2"), label="second")
+
+    @pytest.mark.parametrize("restrict", [False, True])
+    def test_one_restriction_twice_in_one_job_is_accepted(
+        self, project, tmp_path, restrict
+    ):
+        """Two source objects with the same restriction (or none) are one source."""
+
+        @function_pod(output_keys="a")
+        def first(amplitude: float | None) -> float | None:
+            """Return ``amplitude``."""
+            return amplitude
+
+        @function_pod(output_keys="b")
+        def second(channel: int | None) -> int | None:
+            """Return ``channel``."""
+            return channel
+
+        def events() -> SpiralDBTableSource:
+            """Return the events source, restricted to ``m1`` when asked."""
+            source = _source(source_id="events", tag_only_columns=True)
+            return source.where(subject_id="m1") if restrict else source
+
+        job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
+        with job:
+            first.pod(events(), label="first")
+            second.pod(events(), label="second")
+
+        job.run()
+        expected = [1, 2, 3] if restrict else [1, 2, 3, 4, 5]
+        for label in ("first", "second"):
+            rows = job.nodes[label].as_table().column("timestamp").to_pylist()
+            assert sorted(rows) == expected
 
     def test_an_unrestricted_source_is_not_reported(self, project, tmp_path):
         """A source with no condition and no limit has no entry."""
