@@ -1213,7 +1213,8 @@ data. The rules:
   wins), taken from the input's Arrow column, never through Python (a float32 signaling NaN
   comes back quiet from Python): always a value a member holds, never the first row's, never
   chosen by `member_order`. Bits are read only for a group whose key is zero or NaN. A logical
-  type stored as a float is a float key, read through its storage (`_float_storage`). Every
+  type stored as a float, or a dictionary-encoded float, is a float key, read through its
+  storage or its values (`_float_storage`). Every
   other key is rebuilt from its Python value, as before: equal Python values that differ in
   Arrow (`time64[ns]` within a microsecond) are one group with one rebuilt key; grouping by
   the exact value is ITL-1250. The stance on `0.0`/`-0.0` and NaN for the whole library

@@ -13,6 +13,7 @@ the record ids, the folds and every hash must be the same for all of them.
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import json
 import struct
@@ -22,6 +23,8 @@ import pyarrow as pa
 import pytest
 
 import orcapod as op
+from orcapod.channels import Channel
+from orcapod.core.operators import GroupBy
 from orcapod.core.streams.base import StreamBase
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.logical_types import make_arrow_extension_type
@@ -430,3 +433,130 @@ def test_a_time64_ns_key_is_rebuilt_from_its_python_value() -> None:
         assert out.column("k").cast(pa.int64()).to_pylist() == [0]
         members = cast(list[list[int]], out.column("v").to_pylist())
         assert sorted(members[0]) == sorted(values)
+
+
+# ── a dictionary-encoded float key ──────────────────────────────────────────
+
+DICTIONARY_ROWS: list[dict[str, Any]] = [
+    {"k": "nan", "rid": "r1", "v": 1},
+    {"k": "-nan", "rid": "r2", "v": 2},
+    {"k": "payload_nan", "rid": "r3", "v": 3},
+    {"k": "-0", "rid": "r4", "v": 4},
+    {"k": "0", "rid": "r5", "v": 5},
+    {"k": None, "rid": "r6", "v": 6},
+]
+
+
+def _dictionary_source(rows: list[dict[str, Any]], width: int) -> StreamBase:
+    values = pa.array(
+        [None if r["k"] is None else BITS[r["k"]][width] for r in rows],
+        UNSIGNED[width],
+    ).view(FLOAT[width])
+    table = pa.table(
+        {
+            "k": values.dictionary_encode(),
+            "rid": [r["rid"] for r in rows],
+            "v": [r["v"] for r in rows],
+        }
+    )
+    return op.sources.ArrowTableSource(
+        table,
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="s",
+        record_id_columns="rid",
+    )
+
+
+def _dictionary_key_bits(table: pa.Table, width: int) -> list[int | None]:
+    column = table.column("k").combine_chunks()
+    assert pa.types.is_dictionary(column.type)  # the output keeps the encoding
+    assert column.type.value_type == FLOAT[width]
+    return column.cast(FLOAT[width]).view(UNSIGNED[width]).to_pylist()
+
+
+@pytest.mark.parametrize("width", [32, 64])
+def test_a_dictionary_encoded_float_key_emits_the_smallest_bits(width: int) -> None:
+    """A dictionary over floats is chosen by its values' bits, in every row order."""
+    seen: dict[str, Any] = {}
+    for rows in itertools.permutations(DICTIONARY_ROWS):
+        grouped = _dictionary_source(list(rows), width).group_by("k")
+        table = grouped.as_table()
+        assert table.column("v").to_pylist() == [[4, 5], [1, 2, 3], [6]]
+        assert _dictionary_key_bits(table, width) == [
+            BITS["0"][width],
+            BITS["nan"][width],
+            None,
+        ]
+        # ``all_info`` sorts by the tags, which a dictionary tag cannot be yet: the
+        # rows come in key order already, with every system tag and source token.
+        fingerprint = {
+            "rows": [
+                json.dumps(_with_bits(row), sort_keys=True, default=str)
+                for row in grouped.as_table(
+                    columns={"system_tags": True, "source": True}
+                ).to_pylist()
+            ],
+            "row_hashes": _row_identity(grouped.iter_data()),
+            "content_hash": grouped.content_hash().to_string(),
+        }
+        if not seen:
+            seen = fingerprint
+        assert fingerprint == seen
+
+
+async def _async_grouped_rows(source: StreamBase) -> list[Any]:
+    """The rows of ``GroupBy("k")``'s async path, over a channel.
+
+    A pipeline job cannot carry a dictionary-typed tag yet (its stored-table sort and
+    nullability restore refuse a dictionary), so the operator's async path is driven
+    directly, as ``test_async_sync_equivalence.py`` does.
+    """
+    channel: Channel[Any] = Channel(buffer_size=64)
+    output: Channel[Any] = Channel(buffer_size=64)
+    for row in source.iter_data():
+        await channel.writer.send(row)
+    await channel.writer.close()
+    await GroupBy("k").async_execute(
+        [channel.reader],
+        output.writer,
+        input_pipeline_hashes=[source.pipeline_hash()],
+    )
+    return await output.reader.collect()
+
+
+def _row_identity(rows: Any) -> list[tuple[str, str, Any]]:
+    """Each row's tag hash, data hash and key bits (as hex), in row order."""
+    out: list[tuple[str, str, Any]] = []
+    for tag, data in rows:
+        key = tag.as_table().column("k").combine_chunks()
+        key = key.cast(key.type.value_type)
+        unsigned = UNSIGNED[key.type.bit_width]
+        out.append(
+            (
+                tag.content_hash().to_string(),
+                data.content_hash().to_string(),
+                key.view(unsigned).to_pylist(),
+            )
+        )
+    return out
+
+
+@pytest.mark.parametrize("width", [32, 64])
+def test_a_dictionary_encoded_float_key_groups_the_same_sync_and_async(
+    width: int,
+) -> None:
+    seen: list[Any] = []
+    for rows in (DICTIONARY_ROWS, DICTIONARY_ROWS[::-1]):
+        source = _dictionary_source(list(rows), width)
+        sync = _row_identity(source.group_by("k").iter_data())
+        asynchronous = _row_identity(asyncio.run(_async_grouped_rows(source)))
+        assert sorted(asynchronous, key=repr) == sorted(sync, key=repr)
+        assert [bits for _, _, bits in sync] == [
+            [BITS["0"][width]],
+            [BITS["nan"][width]],
+            [None],
+        ]
+        if not seen:
+            seen = sync
+        assert sync == seen

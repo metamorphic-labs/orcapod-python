@@ -75,7 +75,8 @@ def _float_storage(arrow_type: "pa.DataType") -> "pa.DataType | None":
     """Return the float type a column is stored as, or ``None`` when it is not a float.
 
     A logical (extension) type over float storage, such as a temperature stored as
-    ``float64``, is stored as that float.
+    ``float64``, is stored as that float, and a dictionary-encoded column as the
+    float type of its values.
 
     Args:
         arrow_type: The Arrow type of a key column.
@@ -89,6 +90,8 @@ def _float_storage(arrow_type: "pa.DataType") -> "pa.DataType | None":
         if isinstance(arrow_type, pa.ExtensionType)
         else arrow_type
     )
+    if pa.types.is_dictionary(storage):
+        storage = storage.value_type
     return storage if pa.types.is_floating(storage) else None
 
 
@@ -132,6 +135,9 @@ def _emitted_key_row(column: "pa.ChunkedArray[Any]", indices: Sequence[int]) -> 
     members = column.take(pa.array(indices, pa.int64())).combine_chunks()
     if isinstance(members, pa.ExtensionArray):
         members = members.storage
+    if isinstance(members, pa.DictionaryArray):
+        # The values each member's index points at, bits as stored.
+        members = members.dictionary_decode()
     # The unsigned integer of the float's width, to read its bits; no value of the
     # group is null, since a null key equals no float.
     unsigned = {16: pa.uint16, 32: pa.uint32, 64: pa.uint64}[storage_type.bit_width]()
