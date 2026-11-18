@@ -27,6 +27,7 @@ from __future__ import annotations
 import itertools
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import polars as pl
@@ -52,12 +53,18 @@ from orcapod.core.operators import (
     SemiJoin,
     TagBy,
 )
+from orcapod import PipelineJob
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.sources import ArrowTableSource
+from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.errors import InputValidationError
+from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
+from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
+from orcapod.types import CacheMode
 from orcapod.protocols.core_protocols import StreamProtocol
 
 from .several_items import (
+    DATA_FIRST_REVERSED,
     DATA_TAGS,
     LAYOUTS,
     MAIN,
@@ -191,7 +198,7 @@ def test_unary_async_rows_equal_sync_rows_in_every_arrangement(
         )
 
 
-COLUMN_ORDER_ISSUE = "ITL-1236 defect 7, issue pending"
+COLUMN_ORDER_ISSUE = "ITL-1249"
 KEYS_XFAIL = pytest.mark.xfail(
     strict=True,
     reason=f"{COLUMN_ORDER_ISSUE}: with a table layout other than the tag order, the "
@@ -788,3 +795,41 @@ def test_several_input_async_column_order_equals_sync(label: str, role: str) -> 
         for layout in LAYOUTS:
             op, sources = _several_input_sources(label, order_index, layout, role)
             assert_async_column_order_equals_sync(op, *sources)
+
+
+@pytest.mark.parametrize(
+    "make_op",
+    [Join, lambda: SelectTagColumns(["t3", "t1"])],
+    ids=["join", "select_tag_columns"],
+)
+@pytest.mark.parametrize("role", ROLES)
+def test_an_operator_node_stores_one_column_order_on_both_orchestrators(
+    make_op: Callable[[], StaticOutputOperatorPod], role: str, tmp_path: Path
+) -> None:
+    """A job run by each orchestrator over one store: one column order, rows once.
+
+    The input's layout is not its tag order (ITL-1249 concerns the bare streams); in a
+    job, an operator node keeps its output in row order on both paths (ITL-1133).
+    """
+    for database in (InMemoryArrowDatabase(), DeltaTableDatabase(tmp_path / role)):
+        tables = []
+        for orchestrator in (SyncPipelineOrchestrator, AsyncPipelineOrchestrator):
+            job = PipelineJob(name="order", database=database)
+            sources = _sources((MAIN, P), 0, DATA_FIRST_REVERSED, role)
+            with job:
+                make_op()(*sources[: 2 if make_op is Join else 1], label="op")
+            job.nodes["op"].attach_databases(
+                pipeline_database=database.at("order"), cache_mode=CacheMode.LOG
+            )
+            job.run(orchestrator=orchestrator())
+            tables.append(job.nodes["op"].as_table(all_info=True))
+        assert tables[0].column_names == tables[1].column_names
+        # The tags first, in the input's tag order.
+        tags = ["t1", "t2", "t3"] if make_op is Join else ["t1", "t3"]
+        assert tables[0].column_names[: len(tags)] == tags
+        stored = [
+            database.get_all_records(path) for path in database.list_table_paths()
+        ]
+        stored = [table for table in stored if table is not None]
+        assert len(stored) == 1
+        assert stored[0].num_rows == tables[0].num_rows
