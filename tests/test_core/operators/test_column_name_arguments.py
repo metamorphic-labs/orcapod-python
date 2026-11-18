@@ -112,9 +112,11 @@ class TestGroupByBareString:
         assert GroupBy(by).identity_structure() == ("GroupBy", tuple(by))
 
     def test_bytes_are_not_a_name(self):
-        """``bytes`` is neither a name nor a collection of names."""
+        """``bytes`` is neither a name nor a collection of names, empty or not."""
         with pytest.raises(TypeError, match="str"):
             GroupBy(b"subject")  # pyright: ignore[reportArgumentType]
+        with pytest.raises(TypeError, match="bytes"):
+            DropColumns(b"")  # pyright: ignore[reportArgumentType]
 
     def test_a_name_that_is_not_a_string_is_refused(self):
         """A collection holding a non-string is refused."""
@@ -160,7 +162,7 @@ class TestTheRule:
         assert column_names("subject") == ("subject",)
         assert column_names(["b", "a"]) == ("b", "a")
 
-    @pytest.mark.parametrize("value", [b"ab", 3, None])
+    @pytest.mark.parametrize("value", [b"ab", b"", bytearray(b"ab"), 3, None])
     def test_other_values_are_refused(self, value):
         """Bytes, numbers and ``None`` are not column names."""
         with pytest.raises(TypeError):

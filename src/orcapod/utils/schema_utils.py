@@ -535,12 +535,17 @@ def column_names(columns: str | Iterable[str]) -> tuple[str, ...]:
         The names, in the order given.
 
     Raises:
-        TypeError: If ``columns`` is neither a string nor an iterable (``bytes`` is
-            an iterable of integers, so it is refused too), or an element is not a
-            string.
+        TypeError: If ``columns`` is ``bytes`` or ``bytearray`` (empty or not),
+            neither a string nor an iterable, or an element is not a string.
     """
     if isinstance(columns, str):
         return (columns,)
+    if isinstance(columns, (bytes, bytearray)):
+        # Iterable, but of integers; an empty one would pass as no names.
+        raise TypeError(
+            "column names must be a string or iterable of strings, "
+            f"got {type(columns).__name__!r}"
+        )
     try:
         names = tuple(columns)
     except TypeError:
