@@ -163,11 +163,14 @@
     mode = 'first';
     apply();
   }
+  // Zooms by the factor f about a screen point (the view's centre by default), within
+  // the scales .02 to 20; a scale already beyond a limit (a very large picture fitted
+  // below .02) never moves against the zoom's direction.
   function zoom(f, px, py) {
     var r = view.getBoundingClientRect();
     var ox = px === undefined ? 0 : px - (r.left + r.width / 2);
     var oy = py === undefined ? 0 : py - (r.top + r.height / 2);
-    var nz = Math.min(Math.max(z * f, .02), 20);
+    var nz = f < 1 ? Math.max(z * f, Math.min(.02, z)) : Math.min(z * f, Math.max(20, z));
     cx += ox / z - ox / nz;
     cy += oy / z - oy / nz;
     z = nz;

@@ -819,6 +819,34 @@ def test_zoom_buttons_and_keys_change_the_picture(tmp_path: Any) -> None:
 
 
 @needs_node
+def test_zoom_never_moves_against_its_direction(tmp_path: Any) -> None:
+    """A picture that fits below the smallest zoom step (a very large graph in a
+    narrow view): zooming out never enlarges it, zooming in never shrinks it."""
+    document = _job().diagram().to_html()
+    w, h = _size(document)
+    width = 10
+    seen = _run_view(
+        document,
+        [
+            {"op": "run", "width": width},
+            {"op": "key", "key": "0"},
+            {"op": "observe"},
+            {"op": "click", "act": "out"},
+            {"op": "observe"},
+            {"op": "click", "act": "in"},
+            {"op": "observe"},
+        ],
+        tmp_path,
+    )
+    fitted, out, back = [view for view in seen if "viewBox" in view]
+    assert fitted["scale"] == pytest.approx(_fit_scale(width, fitted["height"], w, h))
+    assert fitted["scale"] < 0.02
+    assert out["scale"] <= fitted["scale"]
+    assert back["scale"] >= out["scale"]
+    assert back["scale"] <= 0.02
+
+
+@needs_node
 def test_keys_the_diagram_uses_go_no_further(tmp_path: Any) -> None:
     """In JupyterLab the arrow keys also move between cells and 0 twice restarts the
     kernel: a key the diagram handles stops there; any other key passes on."""
