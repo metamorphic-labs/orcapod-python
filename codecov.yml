@@ -2,8 +2,8 @@ codecov:
   notify:
     # Post the project and patch statuses only once the uploads that carry the main test
     # coverage are in (ITL-1193). A pull request uploads 7 reports (Run Tests on Python 3.13,
-    # Run Objective Tests and Run PostgreSQL Tests on 3.11, 3.12 and 3.13); a push uploads 9
-    # (Run Tests on all three). The objective and PostgreSQL uploads come first and cover
+    # Run Specification Tests and Run PostgreSQL Tests on 3.11, 3.12 and 3.13); a push uploads 9
+    # (Run Tests on all three). The specification and PostgreSQL uploads come first and cover
     # about a quarter of the code each, so without this the statuses went red until Run Tests'
     # upload was processed. 7 is every upload of a pull request, and on a push the seventh
     # upload is always a Run Tests one. Change this number with any change to those matrices.
