@@ -73,7 +73,8 @@ def _make_mock_connector(
 
     mock.get_table_names.return_value = table_names
     mock.get_pk_columns.return_value = pk_columns
-    mock.current_location.return_value = ("orcapod", "public")
+    mock.current_location.return_value = ("localhost", 5432, "orcapod", "public")
+    mock.names_several_servers.return_value = False
     mock.get_column_info.return_value = []
     mock.iter_batches.return_value = iter(batches)
     return mock
@@ -176,13 +177,16 @@ class TestPKAsDefaultTags:
         assert "user_id" in tag_schema
         assert "event_id" in tag_schema
 
-    def test_default_source_id_is_table_name(self):
+    def test_default_source_id_names_server_and_table(self):
         from orcapod.core.sources import PostgreSQLTableSource
 
         with patch(_PATCH) as mock_cls:
             mock_cls.return_value = _make_mock_connector()
             src = PostgreSQLTableSource(DSN, "measurements", tag_only_columns=True)
-        assert src.source_id == "postgresql_table:orcapod.public.measurements"
+        assert (
+            src.source_id
+            == "postgresql_table:localhost:5432/orcapod.public.measurements"
+        )
 
     def test_explicit_source_id_overrides_default(self):
         from orcapod.core.sources import PostgreSQLTableSource
@@ -444,7 +448,7 @@ class TestToConfig:
     def test_has_source_id(self):
         assert (
             self._make_src().to_config()["source_id"]
-            == "postgresql_table:orcapod.public.measurements"
+            == "postgresql_table:localhost:5432/orcapod.public.measurements"
         )
 
     def test_has_content_hash(self):
@@ -536,3 +540,194 @@ def test_resolve_source_from_config_dispatches_to_postgresql_table_source():
         src2 = resolve_source_from_config(config)
 
     assert isinstance(src2, PostgreSQLTableSource)
+
+
+# ===========================================================================
+# 12. The default source id names the server (ITL-1267)
+# ===========================================================================
+
+
+def _server_connector(
+    host: str,
+    port: int,
+    database: str = "orcapod",
+    schema: str = "public",
+    *,
+    several_servers: bool = False,
+) -> MagicMock:
+    """A mocked connector whose connection reports ``host``, ``port`` and location."""
+    mock = _make_mock_connector()
+    mock.current_location.return_value = (host, port, database, schema)
+    mock.names_several_servers.return_value = several_servers
+    return mock
+
+
+class TestTableAddress:
+    """``postgresql_table_address``: the location of the default source id."""
+
+    @pytest.mark.parametrize(
+        ("host", "port", "expected"),
+        [
+            ("db.example.org", 5432, "db.example.org:5432/orcapod.public.t"),
+            ("db.example.org", 5433, "db.example.org:5433/orcapod.public.t"),
+            # A DNS name is case-insensitive: one spelling.
+            ("DB.Example.ORG", 5432, "db.example.org:5432/orcapod.public.t"),
+            ("LOCALHOST", 5432, "localhost:5432/orcapod.public.t"),
+            # An IPv4 address as reported.
+            ("127.0.0.1", 5432, "127.0.0.1:5432/orcapod.public.t"),
+            # An IPv6 address: bracketed, in the exploded form (never '::').
+            (
+                "::1",
+                5432,
+                "[0000:0000:0000:0000:0000:0000:0000:0001]:5432/orcapod.public.t",
+            ),
+            (
+                "2001:DB8::1",
+                5432,
+                "[2001:0db8:0000:0000:0000:0000:0000:0001]:5432/orcapod.public.t",
+            ),
+            (
+                "2001:db8:0:0:0:0:0:1",
+                5432,
+                "[2001:0db8:0000:0000:0000:0000:0000:0001]:5432/orcapod.public.t",
+            ),
+            (
+                "fe80::1%eth0",
+                5432,
+                "[fe80:0000:0000:0000:0000:0000:0000:0001%eth0]:5432/orcapod.public.t",
+            ),
+            # A Unix-domain socket directory, as reported, case kept.
+            (
+                "/var/run/postgresql",
+                5432,
+                "/var/run/postgresql:5432/orcapod.public.t",
+            ),
+            ("/Tmp/PG", 5433, "/Tmp/PG:5433/orcapod.public.t"),
+            # A Linux abstract-namespace socket, as reported.
+            ("@pgsock", 5432, "@pgsock:5432/orcapod.public.t"),
+        ],
+    )
+    def test_address(self, host: str, port: int, expected: str) -> None:
+        from orcapod.core.sources.postgresql_table_source import (
+            postgresql_table_address,
+        )
+
+        assert postgresql_table_address(host, port, "orcapod", "public", "t") == (
+            expected
+        )
+
+    def test_spellings_of_one_ipv6_address_give_one_address(self) -> None:
+        from orcapod.core.sources.postgresql_table_source import (
+            postgresql_table_address,
+        )
+
+        addresses = {
+            postgresql_table_address(host, 5432, "d", "s", "t")
+            for host in ("::1", "0::1", "0:0:0:0:0:0:0:1")
+        }
+        assert len(addresses) == 1
+
+    @pytest.mark.parametrize(
+        ("database", "schema", "table"),
+        [
+            ("a/b", "public", "t"),
+            ("orcapod", "a/b", "t"),
+            ("orcapod", "public", "a/b"),
+            ("a.b", "public", "t"),
+            ("orcapod", "a.b", "t"),
+            ("orcapod", "public", "a.b"),
+        ],
+    )
+    def test_separator_in_a_name_has_no_address(
+        self, database: str, schema: str, table: str
+    ) -> None:
+        from orcapod.core.sources.postgresql_table_source import (
+            postgresql_table_address,
+        )
+
+        with pytest.raises(ValueError, match="source_id"):
+            postgresql_table_address("localhost", 5432, database, schema, table)
+
+    def test_empty_host_has_no_address(self) -> None:
+        from orcapod.core.sources.postgresql_table_source import (
+            postgresql_table_address,
+        )
+
+        with pytest.raises(ValueError, match="source_id"):
+            postgresql_table_address("", 5432, "orcapod", "public", "t")
+
+
+class TestDefaultSourceIdNamesServer:
+    def _source(
+        self, connector: MagicMock, dsn: str = DSN, source_id: str | None = None
+    ):
+        from orcapod.core.sources import PostgreSQLTableSource
+
+        with patch(_PATCH) as mock_cls:
+            mock_cls.return_value = connector
+            return PostgreSQLTableSource(
+                dsn, "measurements", source_id=source_id, tag_only_columns=True
+            )
+
+    def test_one_table_name_on_several_servers_gives_several_ids(self) -> None:
+        servers = [
+            ("db.example.org", 5432),
+            ("db.example.org", 5433),
+            ("db2.example.org", 5432),
+            ("/var/run/postgresql", 5432),
+        ]
+        ids = [self._source(_server_connector(h, p)).source_id for h, p in servers]
+        assert ids == [
+            "postgresql_table:db.example.org:5432/orcapod.public.measurements",
+            "postgresql_table:db.example.org:5433/orcapod.public.measurements",
+            "postgresql_table:db2.example.org:5432/orcapod.public.measurements",
+            "postgresql_table:/var/run/postgresql:5432/orcapod.public.measurements",
+        ]
+        # In the reverse order each source keeps its own id.
+        reversed_ids = [
+            self._source(_server_connector(h, p)).source_id
+            for h, p in reversed(servers)
+        ]
+        assert reversed_ids == list(reversed(ids))
+
+    def test_one_server_gives_one_id_whatever_the_dsn(self) -> None:
+        dsns = [
+            "postgresql://alice:s3cret@db.example.org:5432/orcapod",
+            "host=db.example.org port=5432 dbname=orcapod user=alice password=s3cret",
+            "host=DB.EXAMPLE.ORG dbname=orcapod user=bob",
+        ]
+        ids = {
+            self._source(_server_connector("db.example.org", 5432), dsn).source_id
+            for dsn in dsns
+        }
+        assert ids == {
+            "postgresql_table:db.example.org:5432/orcapod.public.measurements"
+        }
+
+    @pytest.mark.parametrize(
+        "dsn",
+        [
+            "postgresql://alice:s3cret@db.example.org:5432/orcapod",
+            "host=db.example.org port=5432 dbname=orcapod user=alice password=s3cret",
+        ],
+    )
+    def test_id_never_holds_user_or_password(self, dsn: str) -> None:
+        source_id = self._source(
+            _server_connector("db.example.org", 5432), dsn
+        ).source_id
+        assert "alice" not in source_id
+        assert "s3cret" not in source_id
+
+    def test_several_servers_have_no_default(self) -> None:
+        connector = _server_connector("db.example.org", 5432, several_servers=True)
+        with pytest.raises(ValueError, match="several servers.*source_id"):
+            self._source(connector)
+
+    def test_given_source_id_is_used_as_given(self) -> None:
+        for connector in (
+            _server_connector("db.example.org", 5432),
+            _server_connector("db.example.org", 5432, several_servers=True),
+        ):
+            src = self._source(connector, source_id="measurements_v1")
+            assert src.source_id == "measurements_v1"
+            connector.current_location.assert_not_called()

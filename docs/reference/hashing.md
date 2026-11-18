@@ -170,7 +170,7 @@ category, but we should make it totally overridable"; November 16, 2026, ITL-115
 | `CSVSource` | `csv` | `csv:<file path as passed>` |
 | `DeltaTableSource` | `delta_table` | `delta_table:<path or URI of the table folder as passed>` |
 | `SQLiteTableSource` | `sqlite_table` | `sqlite_table:<db path as passed>:main.<table>` (SQLite names a table `<schema>.<table>`; the main database's schema is `main`) |
-| `PostgreSQLTableSource` | `postgresql_table` | `postgresql_table:<database>.<schema>.<table>` (the three-part name, from `current_database()` and `current_schema()`) |
+| `PostgreSQLTableSource` | `postgresql_table` | `postgresql_table:<host>:<port>/<database>.<schema>.<table>` (the server the connection reached, then the three-part name, from `current_database()` and `current_schema()`; see below) |
 | `DBTableSource` (any other connector) | `db_table` | none: `source_id` is required. The connector protocol exposes no database address, and the table name alone does not say which database the table is in (developer decision, November 16, 2026) |
 | `SpiralDBTableSource` | `spiraldb_table` | `spiraldb_table:<project>.<dataset>.<table>@<table id>` (Spiral's own table identifier, then SpiralDB's table id; `SPIRALDB_SOURCE_ID_HAS_TABLE_ID`) |
 | `PollingSource` | `polling_source` | `polling_source:semantic_v1:<hex>` of `impl.identity()` (never its `repr`) |
@@ -181,8 +181,22 @@ A location default names the data where it lives, so two sources of one kind sha
 when they read the same data. The generic `DBTableSource` knows no database, so it has no
 default and refuses to be built without a `source_id`. A location whose parts cannot be
 told apart has no default (`joined_location`): a SQLite table name holding `:`, a PostgreSQL or
-SpiralDB name holding `.`, a SpiralDB address or table id holding `@`. Such a source needs a
-`source_id`.
+SpiralDB name holding `.`, a PostgreSQL name holding `/`, a SpiralDB address or table id
+holding `@`. Such a source needs a `source_id`.
+
+A PostgreSQL default names the server the connection reached (developer, November 18, 2026,
+ITL-1267), as libpq reports it, so one database, schema and table name on two servers gives
+two ids. The host is the name or address as given (with `host` and `hostaddr` both given,
+the host), or the directory of a Unix-domain socket; never the address a name resolved to.
+A host name is written in lower case (`DB.Example.ORG` and `db.example.org` are one id); an
+IPv6 address in brackets and in its exploded form, which holds no `::`
+(`[0000:0000:0000:0000:0000:0000:0000:0001]` for `::1`); an IPv4 address and a socket
+directory as given. The port is always the number used, the default `5432` included, so a
+DSN with `port=5432` and one without it give one id. Two spellings of one server are two
+ids (`localhost` and `127.0.0.1`), as two spellings of one CSV path are. A DSN, a `PGHOST`
+or `PGHOSTADDR` setting or a service file that names several servers (`host=a,b`) gives no
+default: the server reached can change from one connection to the next. No user name,
+password or other connection parameter enters the id.
 
 A row's record id is its row identifier (site 5), chosen by `record_id_columns` (a column name
 or several, in key order; every source accepts it):

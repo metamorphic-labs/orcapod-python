@@ -12,6 +12,7 @@ Example::
 
 from __future__ import annotations
 
+import ipaddress
 from collections.abc import Collection, Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, ClassVar, cast
@@ -28,6 +29,68 @@ from orcapod.protocols.db_connector_protocol import DBConnectorProtocol
 if TYPE_CHECKING:
     from orcapod import contexts
     from orcapod.config import OrcapodConfig
+
+
+def _server_name(host: str) -> str:
+    """Return the host as it is written in a default source id.
+
+    A host name is lower-cased (DNS names are case-insensitive); an IPv6 address is
+    bracketed, as in a URI, in its exploded form, so it never holds ``::`` and has one
+    spelling (a zone, ``%eth0``, is kept as given); an IPv4 address and a socket path
+    (``/...``, or ``@...`` for a Linux abstract socket) are kept as given.
+
+    Args:
+        host: The host the connection reports (``PQhost``).
+
+    Returns:
+        The host's name in the id.
+    """
+    address, zone_mark, zone = host.partition("%")
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        ip = None
+    if isinstance(ip, ipaddress.IPv6Address):
+        return f"[{ip.exploded}{zone_mark}{zone}]"
+    if ip is not None or host.startswith(("/", "@")):
+        return host
+    return host.lower()
+
+
+def postgresql_table_address(
+    host: str, port: int, database: str, schema: str, table: str
+) -> str:
+    """Return ``<host>:<port>/<database>.<schema>.<table>``, a PostgreSQL table's address.
+
+    The location of the default source id (``postgresql_table:<address>``, ITL-1267):
+    the server the connection reached, then the table's three-part name. The host is
+    written by ``_server_name``; the port is always the number. The address names one
+    table only: the parts of the three-part name hold neither ``.`` nor ``/``, so the
+    last ``/`` ends the server and the last ``:`` before it ends the host.
+
+    Args:
+        host: The host the connection reports: a host name, an IP address or a
+            socket directory.
+        port: The port the connection used.
+        database: The connection's ``current_database()``.
+        schema: The connection's ``current_schema()``.
+        table: The table's name.
+
+    Returns:
+        The table's address.
+
+    Raises:
+        ValueError: If the host is empty, or the database, schema or table name is
+            empty or holds ``.`` or ``/``; give the source a ``source_id``.
+    """
+    if not host:
+        raise ValueError(
+            "the PostgreSQL connection reports no host, so the table has no default "
+            "source id; give the source a source_id"
+        )
+    joined_location("/", database, schema, table)
+    name = joined_location(".", database, schema, table)
+    return f"{_server_name(host)}:{port}/{name}"
 
 
 class PostgreSQLTableSource(DBTableSource):
@@ -59,7 +122,9 @@ class PostgreSQLTableSource(DBTableSource):
         record_id_columns: The key columns that identify a row; ``None``: the
             primary key (a table without one is refused); ``()``: the position.
         source_id: Canonical source name. Defaults to
-            ``postgresql_table:<database>.<schema>.<table>``.
+            ``postgresql_table:<host>:<port>/<database>.<schema>.<table>``
+            (``postgresql_table_address``); a DSN that names several servers has
+            no default.
         label: Human-readable label for this source node.
         data_context: Data context governing type conversion and hashing.
         config: OrcaPod configuration.
@@ -115,12 +180,13 @@ class PostgreSQLTableSource(DBTableSource):
 
     @override
     def _table_address(self, connector: DBConnectorProtocol, table_name: str) -> str:
-        """Return ``<database>.<schema>.<table>``, the table's three-part name.
+        """Return ``<host>:<port>/<database>.<schema>.<table>``, the table's address.
 
-        The SQL standard's catalog.schema.table, which PostgreSQL documents as
-        ``database.schema.table``; the database and schema are the connection's
-        ``current_database()`` and ``current_schema()``, where the connector finds
-        the table (ITL-1154).
+        The server the connection reached (host and port as libpq reports them),
+        then the table's three-part name, ``database.schema.table``, from the
+        connection's ``current_database()`` and ``current_schema()``, where the
+        connector finds the table (ITL-1154, ITL-1267). Built by
+        ``postgresql_table_address``.
 
         Args:
             connector: The connector the source reads through.
@@ -128,9 +194,23 @@ class PostgreSQLTableSource(DBTableSource):
 
         Returns:
             The table's address.
+
+        Raises:
+            ValueError: If the connection parameters name several servers: the one
+                reached can change from one connection to the next, so it is no
+                name for the table.
         """
-        database, schema = cast("PostgreSQLConnector", connector).current_location()
-        return joined_location(".", database, schema, table_name)
+        pg = cast("PostgreSQLConnector", connector)
+        if pg.names_several_servers():
+            raise ValueError(
+                f"the connection parameters of the PostgreSQL source over table "
+                f"{table_name!r} (its DSN, PGHOST or PGHOSTADDR, or a service file) "
+                "name several servers, and the one reached can change from one "
+                "connection to the next, so the table has no default source id; give "
+                "the source a source_id"
+            )
+        host, port, database, schema = pg.current_location()
+        return postgresql_table_address(host, port, database, schema, table_name)
 
     @contextmanager
     @override

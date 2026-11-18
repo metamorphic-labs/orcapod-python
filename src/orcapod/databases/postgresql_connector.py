@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import os
 import re
 import threading
 import uuid
@@ -403,23 +404,57 @@ class PostgreSQLConnector:
                 )
                 return [row[0] for row in cur.fetchall()]
 
-    def current_location(self) -> tuple[str, str]:
-        """Return ``(current_database(), current_schema())`` of the connection.
+    def current_location(self) -> tuple[str, int, str, str]:
+        """Return the server, database and schema the connection reached.
 
-        Where the connector finds its tables: the first two parts of a table's
-        three-part name, ``database.schema.table``.
+        ``(host, port, current_database(), current_schema())``: where the connector
+        finds its tables. The host and port are what libpq reports for the live
+        connection (``PQhost``, ``PQport``): the host name or IP address as given
+        (with ``host`` and ``hostaddr`` both given, the host), or the directory of a
+        Unix-domain socket; the port is the one used, the compiled default when none
+        was given. Never the resolved address, the user, the password or any other
+        connection parameter (ITL-1267).
 
         Returns:
-            The database and schema names.
+            The host, the port, the database and the schema.
+
+        Raises:
+            ValueError: If the connection has no current schema.
         """
         with self._lock:
             conn = self._require_open()
+            host, port = conn.info.host, conn.info.port
             with conn.cursor() as cur:
                 cur.execute("SELECT current_database(), current_schema()")
                 row = cur.fetchone()
         if row is None or row[0] is None or row[1] is None:
             raise ValueError("the PostgreSQL connection has no current schema")
-        return str(row[0]), str(row[1])
+        return str(host), int(port), str(row[0]), str(row[1])
+
+    def names_several_servers(self) -> bool:
+        """Return whether the connection parameters name more than one server.
+
+        libpq accepts a comma-separated list of hosts (``host=a,b``, or
+        ``postgresql://a:5432,b:5433/db``) and connects to the first that answers.
+        The list may come from the DSN, from ``PGHOST`` / ``PGHOSTADDR`` when the DSN
+        names no host, or from a service file; the first two are read from the DSN
+        and the environment, a service file from the parameters the connection
+        reports (psycopg tries the hosts of the DSN and the environment one by one,
+        so its connection reports only the one it reached).
+
+        Returns:
+            ``True`` when ``host`` or ``hostaddr`` holds more than one entry.
+        """
+        from psycopg.conninfo import conninfo_to_dict
+
+        given = conninfo_to_dict(self._dsn)
+        with self._lock:
+            reported = self._require_open().info.get_parameters()
+        for key, envvar in (("host", "PGHOST"), ("hostaddr", "PGHOSTADDR")):
+            value = given[key] if key in given else os.environ.get(envvar)
+            if "," in str(value or "") or "," in reported.get(key, ""):
+                return True
+        return False
 
     def get_pk_columns(self, table_name: str) -> list[str]:
         """Return primary-key column names in key-sequence order."""

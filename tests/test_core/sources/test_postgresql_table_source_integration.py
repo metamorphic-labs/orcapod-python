@@ -260,3 +260,190 @@ class TestPipelineIntegration:
 
         tag_values = sorted([tags["session_id"] for tags, _ in fn_outputs[0]])
         assert tag_values == ["s1", "s2", "s3"]
+
+
+# ---------------------------------------------------------------------------
+# The default source id names the server (ITL-1267)
+# ---------------------------------------------------------------------------
+
+
+def _server() -> dict[str, str]:
+    """The test server's connection parameters, from the PG* environment."""
+    return {
+        "host": os.environ.get("PGHOST", "localhost"),
+        "port": os.environ.get("PGPORT", "5432"),
+        "dbname": os.environ.get("PGDATABASE", "testdb"),
+        "user": os.environ.get("PGUSER", "postgres"),
+        "password": os.environ.get("PGPASSWORD", "postgres"),
+    }
+
+
+def _keyword_dsn(schema: str, **params: str | None) -> str:
+    """A keyword DSN for the test server; a parameter given as None is left out."""
+    merged: dict[str, str | None] = {**_server(), **params}
+    parts = [f"{key}={value}" for key, value in merged.items() if value is not None]
+    return " ".join([*parts, f"options=-csearch_path={schema}"])
+
+
+@pytest.fixture
+def server_table(pg_schema: str) -> str:
+    """A one-row table ``t`` in the test schema; returns the schema."""
+    with psycopg.connect(_keyword_dsn(pg_schema)) as conn:
+        with conn.cursor() as cur:
+            cur.execute('CREATE TABLE "t" (k TEXT PRIMARY KEY, x INTEGER)')
+            cur.execute("INSERT INTO \"t\" VALUES ('a', 1)")
+        conn.commit()
+    return pg_schema
+
+
+@pytest.fixture
+def no_server_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the PG* host and port variables out of the DSNs a test builds."""
+    for envvar in ("PGHOST", "PGHOSTADDR", "PGPORT"):
+        monkeypatch.delenv(envvar, raising=False)
+
+
+def _source_id(dsn: str) -> str:
+    from orcapod.core.sources import PostgreSQLTableSource
+
+    return PostgreSQLTableSource(dsn, "t", tag_only_columns=True).source_id
+
+
+def _expected(host: str, schema: str, port: str | None = None) -> str:
+    server = _server()
+    return (
+        f"postgresql_table:{host}:{port or server['port']}/"
+        f"{server['dbname']}.{schema}.t"
+    )
+
+
+def _requires_localhost() -> None:
+    if _server()["host"] != "localhost":
+        pytest.skip("needs the test server at PGHOST=localhost, as in CI")
+
+
+@pytest.mark.postgres
+class TestDefaultSourceIdOnTheServer:
+    """What the connection reports, measured on the test server.
+
+    The CI server is reached as ``localhost:5432`` over TCP; Unix sockets are covered
+    by unit tests only (the CI server runs in a container and has no local socket).
+    """
+
+    def test_uri_and_keyword_dsn_give_one_id(self, server_table: str) -> None:
+        server = _server()
+        uri = (
+            f"postgresql://{server['user']}:{server['password']}@{server['host']}:"
+            f"{server['port']}/{server['dbname']}"
+            f"?options=-csearch_path%3D{server_table}"
+        )
+        ids = [_source_id(uri), _source_id(_keyword_dsn(server_table))]
+        assert ids == [_expected(server["host"].lower(), server_table)] * 2
+
+    def test_id_never_holds_user_or_password(self, server_table: str) -> None:
+        server = _server()
+        uri = (
+            f"postgresql://{server['user']}:{server['password']}@{server['host']}:"
+            f"{server['port']}/{server['dbname']}"
+            f"?options=-csearch_path%3D{server_table}"
+        )
+        for dsn in (uri, _keyword_dsn(server_table)):
+            location = _source_id(dsn).removeprefix("postgresql_table:")
+            assert server["user"] not in location
+            assert server["password"] not in location
+
+    def test_upper_case_host_name_gives_the_lower_case_id(
+        self, server_table: str
+    ) -> None:
+        _requires_localhost()
+        ids = [
+            _source_id(_keyword_dsn(server_table, host=host))
+            for host in ("LOCALHOST", "localhost", "LocalHost")
+        ]
+        assert ids == [_expected("localhost", server_table)] * 3
+
+    def test_omitted_port_is_written_as_the_port_used(
+        self, server_table: str, no_server_env: None
+    ) -> None:
+        if _server()["port"] != "5432":
+            pytest.skip("needs the test server on the default port 5432")
+        omitted = _source_id(_keyword_dsn(server_table, host="localhost", port=None))
+        given = _source_id(_keyword_dsn(server_table, host="localhost", port="5432"))
+        assert omitted == given == _expected("localhost", server_table, "5432")
+
+    def test_two_spellings_of_one_server_give_two_ids(self, server_table: str) -> None:
+        _requires_localhost()
+        ids = [
+            _source_id(_keyword_dsn(server_table, host=host))
+            for host in ("localhost", "127.0.0.1")
+        ]
+        assert ids == [
+            _expected("localhost", server_table),
+            _expected("127.0.0.1", server_table),
+        ]
+
+    def test_hostaddr_alone_names_the_address(
+        self, server_table: str, no_server_env: None
+    ) -> None:
+        _requires_localhost()
+        dsn = _keyword_dsn(server_table, host=None, hostaddr="127.0.0.1")
+        assert _source_id(dsn) == _expected("127.0.0.1", server_table)
+
+    def test_host_with_hostaddr_names_the_host(
+        self, server_table: str, no_server_env: None
+    ) -> None:
+        _requires_localhost()
+        dsn = _keyword_dsn(server_table, host="LocalHost", hostaddr="127.0.0.1")
+        assert _source_id(dsn) == _expected("localhost", server_table)
+
+    def test_ipv6_host_is_bracketed_and_exploded(self, server_table: str) -> None:
+        _requires_localhost()
+        dsn = _keyword_dsn(server_table, host="::1")
+        try:
+            psycopg.connect(dsn).close()
+        except psycopg.OperationalError:
+            pytest.skip("the test server is not reachable over IPv6")
+        assert _source_id(dsn) == _expected(
+            "[0000:0000:0000:0000:0000:0000:0000:0001]", server_table
+        )
+
+    @pytest.mark.parametrize("hosts", ["localhost,127.0.0.1", "127.0.0.1,localhost"])
+    def test_several_hosts_in_the_dsn_have_no_default(
+        self, server_table: str, hosts: str
+    ) -> None:
+        _requires_localhost()
+        from orcapod.core.sources import PostgreSQLTableSource
+
+        dsn = _keyword_dsn(server_table, host=hosts)
+        with pytest.raises(ValueError, match="several servers"):
+            _source_id(dsn)
+        given = PostgreSQLTableSource(
+            dsn, "t", source_id="t_on_the_pool", tag_only_columns=True
+        )
+        assert given.source_id == "t_on_the_pool"
+
+    def test_several_hosts_from_pghost_have_no_default(
+        self, server_table: str, no_server_env: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _requires_localhost()
+        monkeypatch.setenv("PGHOST", "localhost,127.0.0.1")
+        with pytest.raises(ValueError, match="several servers"):
+            _source_id(_keyword_dsn(server_table, host=None))
+
+    def test_several_hosts_from_a_service_file_have_no_default(
+        self,
+        server_table: str,
+        no_server_env: None,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ) -> None:
+        _requires_localhost()
+        server = _server()
+        service_file = tmp_path / "pg_service.conf"
+        service_file.write_text(
+            f"[pool]\nhost=localhost,127.0.0.1\nport={server['port']}\n"
+        )
+        monkeypatch.setenv("PGSERVICEFILE", str(service_file))
+        dsn = _keyword_dsn(server_table, host=None, port=None, service="pool")
+        with pytest.raises(ValueError, match="several servers"):
+            _source_id(dsn)

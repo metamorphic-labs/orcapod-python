@@ -309,3 +309,122 @@ class TestSchemaIntrospectionUnit:
         result = connector.get_pk_columns("my_table")
         assert result == []
         connector._conn = None
+
+
+class TestServerLocationUnit:
+    """``current_location`` and ``names_several_servers`` (ITL-1267), mocked connection.
+
+    The values a live server reports are asserted by the postgres-marked tests in
+    ``tests/test_core/sources/test_postgresql_table_source_integration.py``.
+    """
+
+    @staticmethod
+    def _connector(
+        dsn: str = "postgresql://localhost/test",
+        *,
+        host: str = "localhost",
+        port: int = 5432,
+        parameters: dict[str, str] | None = None,
+    ) -> PostgreSQLConnector:
+        with patch("psycopg.connect") as mock_connect:
+            conn = MagicMock()
+            conn.info.host = host
+            conn.info.port = port
+            conn.info.get_parameters.return_value = (
+                {"host": host} if parameters is None else parameters
+            )
+            cursor = MagicMock()
+            cursor.__enter__ = lambda s: s
+            cursor.__exit__ = MagicMock(return_value=False)
+            cursor.fetchone.return_value = ("testdb", "public")
+            conn.cursor.return_value = cursor
+            mock_connect.return_value = conn
+            return PostgreSQLConnector(dsn)
+
+    @pytest.mark.parametrize(
+        ("host", "port"),
+        [("db.example.org", 5433), ("/var/run/postgresql", 5432), ("::1", 6543)],
+    )
+    def test_current_location_reports_the_connection(
+        self, host: str, port: int
+    ) -> None:
+        connector = self._connector(host=host, port=port)
+        assert connector.current_location() == (host, port, "testdb", "public")
+        connector._conn = None
+
+    @pytest.mark.parametrize(
+        "dsn",
+        [
+            "host=a.example.org,b.example.org port=5432 dbname=x",
+            "host=a.example.org,b.example.org port=5432,5433 dbname=x",
+            "postgresql://u:p@a.example.org:5432,b.example.org:5433/x",
+            "postgresql://u@b.example.org,a.example.org/x",
+            "hostaddr=192.0.2.1,192.0.2.2 dbname=x",
+        ],
+    )
+    def test_several_hosts_in_the_dsn(
+        self, dsn: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("PGHOST", raising=False)
+        monkeypatch.delenv("PGHOSTADDR", raising=False)
+        connector = self._connector(dsn)
+        assert connector.names_several_servers()
+        connector._conn = None
+
+    @pytest.mark.parametrize(
+        ("envvar", "value"),
+        [
+            ("PGHOST", "a.example.org,b.example.org"),
+            ("PGHOSTADDR", "192.0.2.1,192.0.2.2"),
+        ],
+    )
+    def test_several_hosts_from_the_environment(
+        self, envvar: str, value: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("PGHOST", raising=False)
+        monkeypatch.delenv("PGHOSTADDR", raising=False)
+        monkeypatch.setenv(envvar, value)
+        connector = self._connector("dbname=x user=u")
+        assert connector.names_several_servers()
+        connector._conn = None
+
+    def test_the_dsn_host_overrides_the_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PGHOST", "a.example.org,b.example.org")
+        monkeypatch.delenv("PGHOSTADDR", raising=False)
+        connector = self._connector("host=db.example.org dbname=x")
+        assert not connector.names_several_servers()
+        connector._conn = None
+
+    @pytest.mark.parametrize("key", ["host", "hostaddr"])
+    def test_several_hosts_the_connection_reports(
+        self, key: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A service file can name several hosts; the DSN then names none, and only
+        # the connection's own parameters show them.
+        monkeypatch.delenv("PGHOST", raising=False)
+        monkeypatch.delenv("PGHOSTADDR", raising=False)
+        connector = self._connector(
+            "service=pool dbname=x",
+            parameters={key: "a.example.org,b.example.org"},
+        )
+        assert connector.names_several_servers()
+        connector._conn = None
+
+    @pytest.mark.parametrize(
+        "dsn",
+        [
+            "postgresql://u:p@db.example.org:5432/x",
+            "host=db.example.org port=5432 dbname=x",
+            "host=db.example.org hostaddr=192.0.2.1 dbname=x",
+            "host=/var/run/postgresql dbname=x",
+            "dbname=x",
+        ],
+    )
+    def test_one_server(self, dsn: str, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("PGHOST", raising=False)
+        monkeypatch.delenv("PGHOSTADDR", raising=False)
+        connector = self._connector(dsn, parameters={"host": "db.example.org"})
+        assert not connector.names_several_servers()
+        connector._conn = None

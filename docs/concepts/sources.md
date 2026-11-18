@@ -36,9 +36,14 @@ hashing) and produces the final immutable stream.
 `orcapod.sources` also provides database-backed sources (`SQLiteTableSource`,
 `PostgreSQLTableSource`, `SpiralDBTableSource`) and `PollingSource` for data that arrives over
 time; see the [API reference](../api/sources.md). Their default `source_id` names the table
-where it lives (`sqlite_table:<db path>:main.<table>`). `DBTableSource`, the base they share,
-can also be used directly over any connector; a connector gives no address of its database,
-so it then has no default and needs a `source_id`.
+where it lives (`sqlite_table:<db path>:main.<table>`,
+`postgresql_table:<host>:<port>/<database>.<schema>.<table>`, with the server the connection
+reached; the
+[hashing reference](../reference/hashing.md#default-source-ids-and-row-identifiers) has
+every form). A PostgreSQL DSN that names several servers (`host=a,b`) has no default: give
+such a source a `source_id`. `DBTableSource`, the base they share, can also be used directly
+over any connector; a connector gives no address of its database, so it then has no default
+and needs a `source_id`.
 
 Two construction rules apply to every source and are the most common first errors:
 
