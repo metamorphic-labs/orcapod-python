@@ -1,4 +1,5 @@
 # Astro's optional image optimizer (sharp, with libvips under LGPL-3.0-or-later) is not
-# installed: the site has no images to optimize and uses Astro's passthrough image service.
+# installed: the site's one image (the logo) is served as it is, by Astro's passthrough
+# image service.
 overrides:
   sharp: '-'
