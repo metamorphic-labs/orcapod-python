@@ -22,6 +22,7 @@ from orcapod import PipelineJob, function_pod
 from orcapod.databases import DeltaTableDatabase
 from orcapod.errors import RestrictedAggregationWarning
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
+from orcapod.pipeline.node_run import restrictions_in_force
 from orcapod.core.sources.spiraldb_table_source import _checked_conditions
 from orcapod.sources import SpiralDBTableSource
 from tests.test_databases import fake_pyspiral
@@ -209,6 +210,15 @@ class TestRefusals:
         """The constructor's ``where`` is checked by the same rule."""
         with pytest.raises(TypeError, match="channel"):
             _source(where={"channel": "1"})
+
+    def test_a_float_beyond_the_column_range_is_refused(self):
+        """A finite float a float32 column cannot reach is refused; rounding is not."""
+        schema = pa.schema([pa.field("x", pa.float32())])
+
+        # About the condition check itself: the fake has no float32 data to match.
+        with pytest.raises(TypeError, match="range"):
+            _checked_conditions({"x": 1e300}, schema)
+        assert _checked_conditions({"x": 0.1}, schema) == {"x": 0.1}
 
     def test_an_out_of_range_integer_is_refused(self, project):
         """An integer the column's Arrow type cannot hold is refused."""
@@ -509,6 +519,35 @@ class TestRunsAndSavedJobs:
         assert summary.restrictions == {
             "events": {"source_id": bound.source_id, "where": {"subject_id": "m1"}}
         }
+
+    def test_a_slot_bound_to_a_stream_over_the_source_keeps_its_name(
+        self, project, tmp_path
+    ):
+        """A slot bound to an operator's stream over a restricted source names it."""
+        job = self._job(tmp_path / "store", _source(source_id="events"), [])
+        restricted = _source(source_id="events").where(subject_id="m1")
+        data_columns = list(restricted.keys()[1])
+        job.bind(sources={"events": restricted.select_data_columns(data_columns)})
+
+        summary = job.run()
+
+        assert summary.restrictions == {
+            "events": {"source_id": "events", "where": {"subject_id": "m1"}}
+        }
+
+    def test_two_unbound_sources_of_one_label_are_both_reported(self, project):
+        """Sources read without a slot are keyed by label, numbered when they meet."""
+        first = _source(label="events").where(subject_id="m1")
+        second = _source(label="events").where(subject_id="m2")
+
+        # About the summary's collector itself: no public run reaches two unbound
+        # sources of one label without a join of one table with itself.
+        found = restrictions_in_force([first, second])
+
+        assert [(k, v["where"]) for k, v in found.items()] == [
+            ("events", {"subject_id": "m1"}),
+            ("events (2)", {"subject_id": "m2"}),
+        ]
 
     def test_an_unrestricted_source_is_not_reported(self, project, tmp_path):
         """A source with no condition and no limit has no entry."""

@@ -253,7 +253,10 @@ def restrictions_in_force(streams: Iterable[Any]) -> dict[str, dict[str, Any]]:
     A restriction belongs to the source object bound to a slot, so the key is the
     slot's name (the ``SourceJobNode``'s, the name ``bind`` takes); a source read
     directly by the node whose ``run()`` it is has no slot and is keyed by its label.
-    Two slots bound to one table with different conditions are both reported.
+    A slot bound to a stream over a source (a pod's or an operator's stream) reports
+    that source under the slot's name. Two slots bound to one table with different
+    conditions are both reported; two sources without a slot that share a label are
+    numbered (``"<label> (2)"``).
 
     Only a ``SpiralDBTableSource`` can be restricted today; it answers through
     ``_restriction_record``, which every root source gets when restrictions are
@@ -271,27 +274,32 @@ def restrictions_in_force(streams: Iterable[Any]) -> dict[str, dict[str, Any]]:
     from orcapod.core.sources.base import RootSource
 
     found: dict[str, dict[str, Any]] = {}
-    visited: list[Any] = []
+    visited: list[tuple[Any, str | None]] = []
     pending: list[tuple[Any, str | None]] = [(stream, None) for stream in streams]
     while pending:
         stream, slot = pending.pop(0)
-        if isinstance(stream, RootSource):
-            # Not deduplicated: one source object bound to two slots is reported
-            # under each.
-            record_of = getattr(stream, "_restriction_record", None)
-            record = record_of() if record_of is not None else {}
-            if record:
-                name = slot if slot is not None else str(stream.label)
-                found[name] = {"source_id": _source_name(stream), **record}
+        # One object reached through two slots is reported under each.
+        if any(stream is seen and slot == seen_slot for seen, seen_slot in visited):
             continue
-        if any(stream is seen for seen in visited):
-            continue
-        visited.append(stream)
+        visited.append((stream, slot))
         if isinstance(stream, SourceJobNode):
             if stream.bound_source is not None:
                 pending.append((stream.bound_source, stream.name))
+        elif isinstance(stream, RootSource):
+            record_of = getattr(stream, "_restriction_record", None)
+            record = record_of() if record_of is not None else {}
+            if record:
+                entry = {"source_id": _source_name(stream), **record}
+                name = slot if slot is not None else str(stream.label)
+                # A slot holds one source (bind refuses a stream of several), so
+                # only two unbound sources of one label can meet here: number them.
+                key, n = name, 2
+                while key in found and found[key] != entry:
+                    key, n = f"{name} ({n})", n + 1
+                found[key] = entry
         else:
-            pending.extend((up, None) for up in getattr(stream, "upstreams", ()))
+            # A slot bound to a stream over a source keeps its name down to it.
+            pending.extend((up, slot) for up in getattr(stream, "upstreams", ()))
     return found
 
 

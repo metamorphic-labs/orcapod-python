@@ -40,6 +40,7 @@ import asyncio
 import copy
 import dataclasses
 import datetime
+import math
 import types
 from collections.abc import AsyncIterator, Collection, Generator, Iterator, Mapping
 from contextlib import contextmanager
@@ -331,7 +332,16 @@ def _checked_conditions(
                     f"where: column {column!r} holds {arrow_type}, so the value must "
                     f"be {'an aware' if zoned else 'a naive'} datetime; got {value!r}"
                 )
-        if expected is not float:
+        if isinstance(value, float):
+            # Rounding to the column's precision is how a float column stores any
+            # value, so it is not refused; a finite value beyond its range is.
+            stored = pa.scalar(value, type=arrow_type).as_py()
+            if math.isfinite(value) and not math.isfinite(stored):
+                raise TypeError(
+                    f"where: column {column!r} holds {arrow_type}, whose range does "
+                    f"not reach {value!r}"
+                )
+        else:
             try:
                 exact = pa.scalar(value, type=arrow_type).as_py() == value
             except (pa.ArrowInvalid, OverflowError) as exc:
