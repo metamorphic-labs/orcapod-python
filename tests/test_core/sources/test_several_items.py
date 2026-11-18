@@ -160,7 +160,9 @@ def test_tags_as_data_order_is_the_order_of_the_new_columns_only(role: str) -> N
 
 
 @pytest.mark.parametrize("role", ROLES)
-def test_a_cached_source_reads_back_every_role_and_arrangement(role: str) -> None:
+def test_a_cached_source_reads_back_every_role_and_arrangement(
+    role: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     for order in MAIN.tag_orders():
         for layout in LAYOUTS:
             arrangement = Arrangement(order, layout, role)
@@ -169,9 +171,14 @@ def test_a_cached_source_reads_back_every_role_and_arrangement(role: str) -> Non
                 make_source(MAIN, arrangement), cache_database=database
             )
             assert fingerprint(cached) == fingerprint(make_source(MAIN, arrangement))
-            # A second CachedSource reads the stored rows back.
-            again = CachedSource(
-                make_source(MAIN, arrangement), cache_database=database
-            )
+            # A second CachedSource over the same source (same schema and identity)
+            # that cannot provide rows: it serves the stored rows only.
+            unavailable = make_source(MAIN, arrangement)
+
+            def no_rows(*args: object, **kwargs: object) -> pa.Table:
+                raise NotImplementedError("rows are not available")
+
+            monkeypatch.setattr(unavailable, "as_table", no_rows)
+            again = CachedSource(unavailable, cache_database=database)
             assert presentation(again) == presentation(make_source(MAIN, arrangement))
             assert fingerprint(again) == fingerprint(cached)
