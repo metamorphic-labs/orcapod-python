@@ -11,15 +11,15 @@ with `uv init` (in a new directory), add Orcapod to it, and run your scripts wit
 
 ```bash
 uv init
-uv add orcapod
+uv add git+https://github.com/metamorphic-labs/orcapod-python
 uv run python my_pipeline.py
 ```
 
-In an environment not managed by uv, `pip install orcapod` installs it instead.
+In an environment not managed by uv, `pip install git+https://github.com/metamorphic-labs/orcapod-python` installs it instead.
 
-Until 0.4.0 is released, PyPI has no current version (0.3.0 was withdrawn, and a plain
-`uv add orcapod` would install 0.1.4): add the development version instead,
-`uv add git+https://github.com/metamorphic-labs/orcapod-python`.
+Until 0.4.0 is released, these commands install the development version from the repository:
+PyPI has no current version (0.3.0 was withdrawn, and a plain `uv add orcapod` would install
+0.1.4). Once 0.4.0 is out, `uv add orcapod` (or `pip install orcapod`) installs it.
 
 ## Creating a source
 
