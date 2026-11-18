@@ -319,10 +319,13 @@ Every name in `by` must be a **scalar tag column** of the input. `GroupBy` raise
 the last usually means the stream came from `Batch`, so group *before* batching rather than
 after.
 
-Streams also expose this as a fluent method:
+Streams also expose this as a fluent method. A single column may be given as a string, as
+for every operator that takes column names (a string is one name, never its characters):
 
 ```python
 grouped = source.group_by(["subject_id"])
+same = source.group_by("subject_id")
+assert same.content_hash() == grouped.content_hash()
 ```
 
 ### Column selection
