@@ -168,7 +168,9 @@ def typed_zero_row_input(stream: object) -> pa.Table | None:
     )
 
 
-def typed_arrow_schemas(stream: object) -> tuple[pa.Schema, pa.Schema]:
+def typed_arrow_schemas(
+    stream: object, *, own: bool = True
+) -> tuple[pa.Schema, pa.Schema]:
     """Return the Arrow schemas of ``stream``'s tag and data columns (ITL-640).
 
     The Arrow types its rows have, from ``typed_zero_row_table`` (never computing,
@@ -179,12 +181,21 @@ def typed_arrow_schemas(stream: object) -> tuple[pa.Schema, pa.Schema]:
     yet polled) answers with the data context's conversion of its declared Python
     schema, the Arrow types its identity is then fixed to.
 
+    A source or an input slot states its Arrow schemas itself (``arrow_schemas``),
+    which is what this returns for one.
+
     Args:
         stream: The stream, source or node.
+        own: Whether to return the ``arrow_schemas`` the stream states, when it has
+            them; ``False`` derives them (the stream's own derivation).
 
     Returns:
         The tag and data Arrow schemas.
     """
+    if own:
+        stated = getattr(stream, "arrow_schemas", None)
+        if isinstance(stated, tuple):
+            return cast("tuple[pa.Schema, pa.Schema]", stated)
     typed = cast(StreamProtocol, stream)
     # The columns are those of the Python output schema, which the identity has always
     # named; only their types come from the zero-row table.

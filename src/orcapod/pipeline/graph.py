@@ -458,7 +458,9 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                             deserialize_arrow_schema(
                                 saved_tag,
                                 context.type_converter,
-                                None if saved_nullable is None else saved_nullable["tag"],
+                                None
+                                if saved_nullable is None
+                                else saved_nullable["tag"],
                             ),
                             deserialize_arrow_schema(
                                 saved_data,

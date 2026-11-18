@@ -38,9 +38,8 @@ from orcapod.contexts.stored import (
 from orcapod.protocols.core_protocols import DataProtocol, SourceProtocol, TagProtocol
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.system_constants import SOURCE_DB_SCHEMA_VERSION, constants
-from orcapod.types import ColumnConfig, ContentHash, Schema
+from orcapod.types import ColumnConfig, Schema
 from orcapod.utils.lazy_module import LazyModule
-from orcapod.utils.schema_utils import arrow_schema_identity
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -229,13 +228,9 @@ class CachedSource(RootSource):
     def identity_structure(self) -> Any:
         return self._source.identity_structure()
 
-    def _schema_identity(self) -> "tuple[ContentHash, ContentHash]":
-        """The wrapped source's schema identity: the cache stores that source's rows."""
-        if isinstance(self._source, RootSource):
-            return self._source._schema_identity()  # pyright: ignore[reportPrivateUsage]  # one rule for a source and its cache
-        return arrow_schema_identity(
-            *typed_arrow_schemas(self._source), self.data_context
-        )
+    def _compute_arrow_schemas(self) -> "tuple[pa.Schema, pa.Schema]":
+        """The wrapped source's Arrow schemas: the cache stores that source's rows."""
+        return typed_arrow_schemas(self._source)
 
     # -------------------------------------------------------------------------
     # Cache path — scoped to source's content hash

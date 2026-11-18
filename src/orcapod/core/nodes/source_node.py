@@ -556,8 +556,15 @@ class SourceNodeBase(TraceableBase, ABC):
             declared_arrow_schema(self._data_schema, converter),
         )
 
-    def _schema_identity(self) -> "tuple[ContentHash, ContentHash]":
-        """The hashes of the slot's Arrow schemas: ``schema_utils.arrow_schema_identity``."""
+    def _schema_identity(self) -> Any:
+        """The hashes of the slot's Arrow schemas: ``schema_utils.arrow_schema_identity``.
+
+        A slot rebuilt from a saved job with a column whose class this process has not
+        registered (ITL-1138) has no Arrow type for it yet: until the class is
+        registered, the saved type text stands in, as the saved hashes do.
+        """
+        if self._given_arrow_schemas is None and self._pending_types:
+            return (self._tag_schema, self._data_schema)
         return arrow_schema_identity(*self.arrow_schemas, self.data_context)
 
     def identity_structure(self) -> Any:
@@ -614,6 +621,11 @@ class SourceNodeBase(TraceableBase, ABC):
         Returns:
             Hex string schema hash.
         """
+        if self._given_arrow_schemas is None and self._pending_types:
+            # The saved type text stands in until the class is registered (ITL-1138).
+            return self.data_context.semantic_hasher.hash_object(
+                (self._tag_schema, self._data_schema)
+            ).to_hex(char_count=self.orcapod_config.hashing.schema_n_char)
         tag_schema, data_schema = self.arrow_schemas
         return compute_source_schema_hash(
             tag_schema,
@@ -765,6 +777,17 @@ class SourceNodeBase(TraceableBase, ABC):
                 "pod that uses it before binding"
             )
         narrower: set[str] = set()
+        # The Arrow types of the slot's and the source's columns, read once (ITL-640);
+        # a slot with a column it cannot restore has no Arrow schema to compare.
+        compare_arrow = not unrestored
+        source_arrow = (
+            dict(zip(("tag", "data"), typed_arrow_schemas(source)))
+            if compare_arrow
+            else {}
+        )
+        slot_arrow = (
+            dict(zip(("tag", "data"), self.arrow_schemas)) if compare_arrow else {}
+        )
         for role, declared, given in (
             ("tag", self._tag_schema, source_tag),
             ("data", self._data_schema, source_data),
@@ -791,7 +814,11 @@ class SourceNodeBase(TraceableBase, ABC):
                         f"{_type_text(given[name])}"
                     )
                     continue
-                arrow_issue = self._arrow_type_issue(role, name, source)
+                if not compare_arrow:
+                    continue
+                arrow_issue = self._arrow_type_issue(
+                    role, name, slot_arrow[role], source_arrow[role]
+                )
                 if arrow_issue is not None:
                     issues.append(arrow_issue)
 
@@ -838,7 +865,11 @@ class SourceNodeBase(TraceableBase, ABC):
         return source_tag, source_data, frozenset(narrower)
 
     def _arrow_type_issue(
-        self, role: str, name: str, source: "StreamProtocol"
+        self,
+        role: str,
+        name: str,
+        slot_schema: "pa.Schema",
+        source_schema: "pa.Schema",
     ) -> str | None:
         """Compare one column's Arrow type in the slot and in *source* (ITL-640).
 
@@ -852,16 +883,12 @@ class SourceNodeBase(TraceableBase, ABC):
         Args:
             role: ``"tag"`` or ``"data"``.
             name: The column name.
-            source: The source being bound.
+            slot_schema: The slot's Arrow schema of that role.
+            source_schema: The source's Arrow schema of that role.
 
         Returns:
             The issue text, or ``None`` when the types agree.
         """
-        slot_tag, slot_data = self.arrow_schemas
-        source_tag, source_data = typed_arrow_schemas(source)
-        slot_schema, source_schema = (
-            (slot_tag, source_tag) if role == "tag" else (slot_data, source_data)
-        )
         if name not in slot_schema.names or name not in source_schema.names:
             return None
         declared = slot_schema.field(name)
@@ -1132,7 +1159,7 @@ class SourceNode(SourceNodeBase):
             tag_schema=tag_schema,
             data_schema=data_schema,
             arrow_schemas=(
-                stream.arrow_schemas
+                stream._given_arrow_schemas  # pyright: ignore[reportPrivateUsage]  # one slot copied into another
                 if isinstance(stream, SourceNodeBase)
                 else typed_arrow_schemas(stream)
             ),

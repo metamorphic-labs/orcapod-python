@@ -34,7 +34,6 @@ from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, ContentHash, Schema
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
-from orcapod.utils.schema_utils import arrow_schema_identity
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -489,9 +488,9 @@ class DerivedSource(RootSource):
         """Refuse stored rows whose Arrow types are not the origin's (ITL-640).
 
         This source's identity is built from the origin's Arrow types; a store that
-        gave a column back as another type (a fixed-size list read back as a list, a
-        non-null column read back as nullable) would present rows of another schema
-        under that identity, so nothing is read.
+        gave a column back as another type (a fixed-size list read back as a list)
+        would present rows of another schema under that identity, so nothing is read.
+        A column's top-level nullability is not compared: the stored rows say it.
 
         Raises:
             InputValidationError: Naming the column and both types.
@@ -502,9 +501,12 @@ class DerivedSource(RootSource):
             if field.name not in records.column_names:
                 continue
             stored = records.schema.field(field.name)
-            if hasher.hash_schema(pa.schema([stored])) != hasher.hash_schema(
-                pa.schema([field])
-            ):
+            # The column's own nullability is the stored rows' (a job saved without
+            # its nullability record reads its columns as non-null); every type, and
+            # nullability below the top level, must be the origin's.
+            if hasher.hash_schema(
+                pa.schema([stored.with_nullable(True)])
+            ) != hasher.hash_schema(pa.schema([field.with_nullable(True)])):
                 raise InputValidationError(
                     f"DerivedSource over {self._origin.label!r}: the stored column "
                     f"{field.name!r} reads back as {_field_text(stored)}, but the "
@@ -531,24 +533,24 @@ class DerivedSource(RootSource):
         python_schema.update(data_schema)
         return arrow_utils.make_empty_table(python_schema, tc)
 
-    def _schema_identity(self) -> "tuple[ContentHash, ContentHash]":
-        """The identity of this source's Arrow schemas: its origin's columns (ITL-640).
+    def _compute_arrow_schemas(self) -> "tuple[pa.Schema, pa.Schema]":
+        """This source's Arrow schemas: its origin's columns (ITL-640).
 
         Taken from the origin's typed zero-row table (``_empty_origin_table``) with the
-        ``tags_as_data`` copies, never from rows, so it does not change when the origin
-        stores rows. Rows read later must have these types (``_origin_records``).
+        ``tags_as_data`` copies, never from rows, so its identity does not change when
+        the origin stores rows. Rows read later must have these types
+        (``_origin_records``).
         """
         table = self._empty_origin_table()
         for tag, name in (self._tags_as_data or {}).items():
             table = table.append_column(
                 table.schema.field(tag).with_name(name), table.column(tag)
             )
-        tag_keys, data_keys = self.keys()
+        tag_schema, data_schema = self.output_schema()
         schema = table.schema
-        return arrow_schema_identity(
-            pa.schema([schema.field(name) for name in tag_keys]),
-            pa.schema([schema.field(name) for name in data_keys]),
-            self.data_context,
+        return (
+            pa.schema([schema.field(name) for name in tag_schema]),
+            pa.schema([schema.field(name) for name in data_schema]),
         )
 
     def _build_derived_stream(

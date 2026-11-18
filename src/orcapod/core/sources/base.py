@@ -133,6 +133,23 @@ class RootSource(StreamBase):
     """The resolved key columns of the record ids, in key order; ``()`` for the
     position. Every concrete source sets it in ``__init__``."""
 
+    _arrow_schemas_cache: "tuple[pa.Schema, pa.Schema] | None" = None
+
+    @property
+    def arrow_schemas(self) -> "tuple[pa.Schema, pa.Schema]":
+        """The Arrow schemas of this source's tag and data columns (ITL-640).
+
+        The Arrow types its rows have (``_compute_arrow_schemas``), derived once: a
+        source's schema is fixed when it is built, whatever rows it reads later.
+        """
+        if self._arrow_schemas_cache is None:
+            self._arrow_schemas_cache = self._compute_arrow_schemas()
+        return self._arrow_schemas_cache
+
+    def _compute_arrow_schemas(self) -> "tuple[pa.Schema, pa.Schema]":
+        """Derive ``arrow_schemas``: the typed zero-row table's types (``typed_arrow_schemas``)."""
+        return typed_arrow_schemas(self, own=False)
+
     def _schema_identity(self) -> tuple[ContentHash, ContentHash]:
         """The identity of this source's schema: its Arrow tag and data schemas (ITL-640).
 
@@ -141,8 +158,7 @@ class RootSource(StreamBase):
         in an Arrow type (``int32`` and ``int64``) are two identities, with two pipeline
         hashes, stored paths and system-tag column names.
         """
-        tag_schema, data_schema = typed_arrow_schemas(self)
-        return arrow_schema_identity(tag_schema, data_schema, self.data_context)
+        return arrow_schema_identity(*self.arrow_schemas, self.data_context)
 
     def identity_structure(self) -> Any:
         """Identity from the class name, Arrow schema, ``source_id`` and key columns.

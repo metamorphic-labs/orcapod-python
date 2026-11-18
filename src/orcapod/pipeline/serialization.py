@@ -893,7 +893,9 @@ def deserialize_arrow_schema(
         except LogicalTypeIdentifierError as exc:
             raise exc.for_column(name) from exc
         fields.append(
-            pa.field(name, arrow_type, nullable=nullable is not None and name in nullable)
+            pa.field(
+                name, arrow_type, nullable=nullable is not None and name in nullable
+            )
         )
     return pa.schema(fields)
 
