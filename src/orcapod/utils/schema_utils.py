@@ -259,6 +259,11 @@ def extract_function_schemas(
 
     # get_type_hints stores the return annotation under the key 'return'
     return_annot = resolved_hints.get("return", signature.return_annotation)
+    # get_type_hints turns ``-> None`` into ``NoneType``. ``-> None`` declares no
+    # outputs (ITL-1257), which is not an output whose value is None: the number of
+    # outputs is the number of output keys.
+    if return_annot is type(None):
+        return_annot = None
     inferred_output_types: Schema = {}
     if return_annot is not inspect.Signature.empty and return_annot is not None:
         output_item_types = []

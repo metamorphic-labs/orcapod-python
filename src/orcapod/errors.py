@@ -362,6 +362,42 @@ class OutputTypeError(TypeError, ValueError):
         )
 
 
+class NoOutputsDeclaredError(OutputTypeError):
+    """A function that declares no outputs returned a value (ITL-1257).
+
+    A function with no ``output_keys``, annotated ``-> None`` or not annotated, declares
+    an empty return: the number of outputs is the number of output keys. A returned value
+    other than ``None`` contradicts the declaration, so it is refused rather than
+    dropped. It is an ``OutputTypeError``, so a pipeline treats it as one: a row failure
+    under ``error_policy``.
+
+    Attributes:
+        function_name: Name of the function pod's function.
+        value: The value the function returned.
+    """
+
+    def __init__(self, function_name: str, value: object) -> None:
+        """Create the error for one call.
+
+        Args:
+            function_name: Name of the function pod's function.
+            value: The value the function returned.
+        """
+        self.function_name: str = function_name
+        self.value: object = value
+        # Types only, never the value (see ``OutputTypeError``).
+        TypeError.__init__(
+            self,
+            f"Function {function_name!r} declares no outputs (no output_keys) but "
+            + f"returned {type_text(type(value))}. Add an output key for the value, "
+            + "or return nothing.",
+        )
+
+    def __reduce__(self) -> tuple[object, ...]:
+        """Pickle with the constructor arguments (executors send errors across processes)."""
+        return (type(self), (self.function_name, self.value))
+
+
 class UnboundSourceError(RuntimeError):
     """Raised when a data-producing method is called on an unbound SourceNode.
 

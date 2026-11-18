@@ -23,7 +23,14 @@ def compute_bmi(weight: float, height: float) -> float:
 Key points:
 
 - **`output_keys`** names the output data column(s). A single string means one output
-  column; a list of strings means the function returns multiple values.
+  column; a list of strings means the function returns multiple values. A function with
+  no outputs (it only reads its inputs) is annotated `-> None`, or not annotated, and
+  takes no `output_keys`; its pod has no output columns. `-> None` together with
+  `output_keys` raises `ValueError` when the pod is created, and a value other than
+  `None` returned by a function with no outputs raises `NoOutputsDeclaredError` (an
+  `OutputTypeError`): add an output key for it, or return nothing. An output that may be
+  missing is not "no outputs": it is one output key typed `T | None`, and a returned
+  `None` is stored as a null.
 - **Function parameters** are matched to the input stream's data columns by name: one data
   column per parameter. A parameter with a default value may be left out of the stream, and
   the default is used. Data columns the function does not take are dropped when the pod is
@@ -34,6 +41,9 @@ Key points:
   dataclass instance, raises `TypeError` when the pod is created, naming the parameter. Use
   a hashable default and build the object inside the function, or supply the value as an
   input column. See [Function values and parameter defaults](../reference/hashing.md#1d-function-values-and-parameter-defaults).
+- **Inputs are passed by name.** A parameter may be keyword-only (after `*`), but a
+  positional-only parameter (before `/`) and `*args` / `**kwargs` raise `ValueError`
+  when the pod is created.
 - **Parameter types** are used to validate schema compatibility. Give each parameter a type
   annotation, or supply its type through the decorator's `input_schema` mapping. A parameter
   with neither raises `ValueError` when the pod is created.
