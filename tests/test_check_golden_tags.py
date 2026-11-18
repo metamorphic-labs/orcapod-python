@@ -419,3 +419,39 @@ def test_a_removed_type_snapshot_pin_fails(repo: Path) -> None:
     result = _check(repo, ci=True)
     assert result.returncode == 1
     assert "pin of data function type snapshot" in result.stderr
+
+
+def test_the_gate_refuses_a_type_snapshot_added_after_the_release_step(
+    repo: Path,
+) -> None:
+    """An open (unpinned) snapshot is never tagged (Copilot, #448)."""
+    import json
+
+    snapshot = repo / SNAPSHOT
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    _ = snapshot.write_text('{"revision": 2}\n')
+    key = SNAPSHOT.relative_to(PINS.parent).as_posix()
+    _ = (repo / PINS).write_text(
+        json.dumps({key: {"released_in": None, "sha256": None}}, indent=2) + "\n"
+    )
+    _commit(repo, "add a snapshot after the release step")
+    result = _gate(repo, "0.3.0")
+    assert result.returncode == 1
+    assert "python.function/v1-rev1.json is not pinned" in result.stderr
+
+
+def test_the_gate_passes_a_pinned_type_snapshot(repo: Path) -> None:
+    import hashlib
+    import json
+
+    snapshot = repo / SNAPSHOT
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    _ = snapshot.write_text('{"revision": 1}\n')
+    key = SNAPSHOT.relative_to(PINS.parent).as_posix()
+    digest = hashlib.sha256(snapshot.read_bytes()).hexdigest()
+    _ = (repo / PINS).write_text(
+        json.dumps({key: {"released_in": "0.3.0", "sha256": digest}}, indent=2) + "\n"
+    )
+    _commit(repo, "a pinned snapshot")
+    result = _gate(repo, "0.3.0")
+    assert result.returncode == 0, result.stderr
