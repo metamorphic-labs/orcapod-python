@@ -562,10 +562,10 @@ class GroupBy(UnaryOperator):
             stream.data_context.type_converter,
         )
 
-        # A float key column (a float, or a logical type stored as one) holds the
-        # chosen member's value as the input's Arrow column has it, never through
-        # Python: a conversion can change a float's bits (a float32 signaling NaN
-        # comes back quiet).  Every other key keeps the value rebuilt from Python,
+        # A float key column (a float, a logical type stored as one, or a dictionary
+        # over floats) holds the chosen member's value as the input's Arrow column
+        # has it, never through Python: a conversion can change a float's bits (a
+        # float32 signaling NaN comes back quiet).  Every other key keeps the value rebuilt from Python,
         # as before: its members may differ in Arrow although equal in Python (two
         # time64[ns] values within one microsecond read as one ``datetime.time``),
         # and taking one member's would make the key depend on the row order.
@@ -573,7 +573,17 @@ class GroupBy(UnaryOperator):
         for position, c in enumerate(self.by):
             if _float_storage(table.column(c).type) is None:
                 continue
-            chosen = pa.array([r[position] for r in key_rows], pa.int64())
+            # A null key is taken through a null index, so it is a null at the top
+            # level whichever member came first: a dictionary column can hold a null
+            # as a null index or as an index to a null entry, and only the first is
+            # a null to a reader of validity (``DropNulls``).
+            chosen = pa.array(
+                [
+                    None if rows[r[position]][c] is None else r[position]
+                    for r in key_rows
+                ],
+                pa.int64(),
+            )
             grouped_table = grouped_table.set_column(
                 grouped_table.schema.get_field_index(c),
                 grouped_table.schema.field(c),

@@ -561,3 +561,45 @@ def test_a_dictionary_encoded_float_key_groups_the_same_sync_and_async(
         if not seen:
             seen = sync
         assert sync == seen
+
+
+def _null_dictionary_source(indices: list[int | None], rids: list[str]) -> StreamBase:
+    """A dictionary key whose null is a null index in one row and an index to a null
+    entry in the other: both read as null."""
+    key = pa.DictionaryArray.from_arrays(
+        pa.array(indices, pa.int32()), pa.array([1.0, None], pa.float64())
+    )
+    table = pa.table({"k": key, "rid": rids, "v": [int(r[1:]) for r in rids]})
+    return op.sources.ArrowTableSource(
+        table,
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="s",
+        record_id_columns="rid",
+    )
+
+
+@pytest.mark.parametrize(
+    ("indices", "rids"),
+    [([None, 1], ["r1", "r2"]), ([1, None], ["r2", "r1"])],
+    ids=["null_index_first", "null_entry_first"],
+)
+def test_a_null_dictionary_key_is_emitted_as_a_null(
+    indices: list[int | None], rids: list[str]
+) -> None:
+    """Whichever null comes first, the group's key is a null index.
+
+    ``DropNulls`` reads the top-level validity, which an index to a null entry does
+    not carry: without this, the row order decided whether the group was dropped.
+    """
+    source = _null_dictionary_source(indices, rids)
+    grouped = source.group_by("k")
+    key = grouped.as_table().column("k").combine_chunks()
+    assert isinstance(key, pa.DictionaryArray)
+    assert key.indices.to_pylist() == [None]
+    assert grouped.drop_nulls(["k"]).as_table().num_rows == 0
+    for rows in (list(grouped.iter_data()), asyncio.run(_async_grouped_rows(source))):
+        [(tag, _)] = rows
+        tag_key = tag.as_table().column("k").combine_chunks()
+        assert isinstance(tag_key, pa.DictionaryArray)
+        assert tag_key.indices.to_pylist() == [None]
