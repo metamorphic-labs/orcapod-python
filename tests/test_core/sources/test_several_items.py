@@ -121,6 +121,14 @@ def test_record_ids_follow_the_key_order(role: str) -> None:
         if keys != ("t1", "t2", "t3"):
             assert source.content_hash() != first.content_hash()
             assert _record_ids(source) != _record_ids(first)
+    # The same key columns in another order, compared with each other.
+    for one, other in (
+        (("t1", "t2", "t3"), ("t3", "t1", "t2")),
+        (("d3", "t1"), ("t1", "d3")),
+    ):
+        assert by_keys[one].content_hash() != by_keys[other].content_hash()
+        assert by_keys[one].pipeline_hash() == by_keys[other].pipeline_hash()
+        assert _record_ids(by_keys[one]) != _record_ids(by_keys[other])
     # Same keys, same order: the same source.
     again = ArrowTableSource(
         _table(),

@@ -71,22 +71,27 @@ def test_several_sources_bound_in_one_call(role: str, orchestrator: type) -> Non
     assert _slot_names(job) == ("s", "p")
     before = _snapshot(job)
     arrangement = Arrangement(MAIN.tags, TAGS_FIRST, role)
-    job.bind(
-        sources={
-            "s": make_source(MAIN, arrangement, source_id="s_new", rows=[0, 1]),
-            "p": make_source(
-                P, Arrangement(P.tags, TAGS_FIRST, role), source_id="p_new"
-            ),
-        }
-    )
+    # Both replacements hold other rows than the slots' sources, so the result shows
+    # that both were bound.
+    sources: dict[str, StreamProtocol] = {
+        "s": make_source(MAIN, arrangement, source_id="s_new", rows=[0, 1]),
+        "p": make_source(
+            P, Arrangement(P.tags, TAGS_FIRST, role), source_id="p_new", rows=[1, 3]
+        ),
+    }
+    job.bind(sources=sources)
+    for name, source in sources.items():
+        assert job.nodes[name].bound_source is source
     assert _snapshot(job) == before
     job.run(orchestrator=orchestrator())
     rows = sorted(
         (tag["t1"], tag["t2"], data["total"])
         for tag, data in job.nodes["total"].iter_data()
     )
-    # Rows 0 and 1 of MAIN: (b, 2, d1=10) with p1=6; (a, 1, d1=20) with p1=9.
-    assert rows == [("a", 1, 29), ("b", 2, 16)]
+    # MAIN's rows 0 and 1 are (b, 2, d1=10) and (a, 1, d1=20); P's rows 1 and 3 are
+    # (b, 1, p1=8) and (b, 2, p1=6). Only (b, 2) matches: with all of P, (a, 1) would
+    # match too.
+    assert rows == [("b", 2, 16)]
 
 
 @pytest.mark.parametrize("refused", ["s", "p"])

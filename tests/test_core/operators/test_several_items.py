@@ -74,6 +74,7 @@ from .several_items import (
     async_rows,
     fingerprint,
     make_source,
+    ordered_rows_fingerprint,
     presentation,
     rows_fingerprint,
 )
@@ -144,18 +145,21 @@ def _unary_params() -> list[object]:
 def _assert_all_equal(results: Mapping[str, Mapping[str, object]]) -> None:
     """Assert every arrangement's fingerprint equals the first one's, naming the field.
 
-    A result that holds ``async_rows`` must also have them equal to its own sync
-    ``rows``: equal across arrangements alone would pass an async path that is wrong
-    the same way every time.
+    A result that holds ``async_rows`` must also have them equal to its own
+    ``sync_rows``: equal across arrangements alone would pass an async path that is
+    wrong the same way every time. (Column order is compared separately, in
+    ``test_async_column_order_equals_sync_in_every_arrangement``.)
     """
     for result_id, result in results.items():
         if "async_rows" in result:
-            assert result["async_rows"] == result["rows"], (
+            assert result["async_rows"] == result["sync_rows"], (
                 f"async rows differ from sync rows in {result_id}"
             )
     (first_id, first), *others = results.items()
     for arrangement_id, result in others:
         for field, value in first.items():
+            if field in ("async_rows", "sync_rows"):
+                continue
             assert result[field] == value, (
                 f"{field} differs between {first_id} and {arrangement_id}"
             )
@@ -184,6 +188,93 @@ def test_unary_async_rows_equal_sync_rows_in_every_arrangement(
         sync = rows_fingerprint(list(case.make_op()(source).iter_data()))
         assert rows_fingerprint(async_rows(case.make_op(), source)) == sync, (
             arrangement.id
+        )
+
+
+COLUMN_ORDER_ISSUE = "ITL-1236 defect 7, issue pending"
+KEYS_XFAIL = pytest.mark.xfail(
+    strict=True,
+    reason=f"{COLUMN_ORDER_ISSUE}: with a table layout other than the tag order, the "
+    + "result's keys list the tags in the input table's physical order, its rows in "
+    + "tag order",
+)
+ASYNC_ORDER_XFAIL = pytest.mark.xfail(
+    strict=True,
+    reason=f"{COLUMN_ORDER_ISSUE}: with a table layout other than the tag order, the "
+    + "async rows' column order differs from the sync rows'",
+)
+
+
+def assert_keys_equal_row_keys(stream: StreamProtocol) -> None:
+    """Every row of ``stream`` lists its columns in the order of ``stream.keys()``."""
+    keys = stream.keys()
+    for tag, data in stream.iter_data():
+        assert (tuple(tag.keys()), tuple(data.keys())) == keys
+
+
+def assert_async_column_order_equals_sync(
+    op: Callable[[], StaticOutputOperatorPod], *sources: StreamProtocol
+) -> None:
+    """Async rows equal sync rows with column order, system-tag order and Arrow schemas."""
+    sync = list(op()(*sources).iter_data())
+    assert ordered_rows_fingerprint(async_rows(op(), *sources)) == (
+        ordered_rows_fingerprint(sync)
+    )
+
+
+# (operator, role) pairs that fail today (defect 7). Every unary case but one fails
+# the keys check; DropTagColumns(["t3", "t1"]) leaves one tag, so nothing to order.
+KEYS_PASS = {("drop_tag_columns", PLAIN)}
+ASYNC_ORDER_FAILS = {
+    ("select_tag_columns", DATA_TAGS),
+    ("drop_tag_columns", DATA_TAGS),
+    ("drop_tag_columns", MIXED),
+    ("map_tags_drop_unmapped", DATA_TAGS),
+    ("map_tags_tag_only", DATA_TAGS),
+    ("map_tags_tag_only", MIXED),
+}
+
+
+def _marked_unary_params(
+    fails: Callable[[str, str], bool], mark: pytest.MarkDecorator
+) -> list[Any]:
+    return [
+        pytest.param(
+            case,
+            role,
+            id=f"{case.label}/{role}",
+            marks=[mark] if fails(case.label, role) else [],
+        )
+        for case in UNARY_CASES
+        for role in case.roles
+    ]
+
+
+@pytest.mark.parametrize(
+    ("case", "role"),
+    _marked_unary_params(
+        lambda label, role: (label, role) not in KEYS_PASS, KEYS_XFAIL
+    ),
+)
+def test_unary_result_keys_equal_its_row_keys_in_every_arrangement(
+    case: UnaryCase, role: str
+) -> None:
+    for arrangement in arrangements(MAIN, roles=(role,)):
+        assert_keys_equal_row_keys(case.make_op()(make_source(MAIN, arrangement)))
+
+
+@pytest.mark.parametrize(
+    ("case", "role"),
+    _marked_unary_params(
+        lambda label, role: (label, role) in ASYNC_ORDER_FAILS, ASYNC_ORDER_XFAIL
+    ),
+)
+def test_unary_async_column_order_equals_sync_in_every_arrangement(
+    case: UnaryCase, role: str
+) -> None:
+    for arrangement in arrangements(MAIN, roles=(role,)):
+        assert_async_column_order_equals_sync(
+            case.make_op, make_source(MAIN, arrangement)
         )
 
 
@@ -262,6 +353,7 @@ def test_the_order_of_a_set_argument_changes_nothing(
             **fingerprint(stream),
             "presentation": presentation(stream),
             "operator_identity": op.content_hash().to_string(),
+            "sync_rows": rows_fingerprint(list(stream.iter_data())),
             "async_rows": rows_fingerprint(
                 async_rows(op, make_source(MAIN, arrangement))
             ),
@@ -283,7 +375,9 @@ def test_polars_filter_predicates_in_any_order_choose_the_same_rows(
         op = PolarsFilter(predicates=list(order))
         stream = op(source)
         rows[repr(order)] = rows_fingerprint(list(stream.iter_data()))
-        assert rows_fingerprint(async_rows(op, source)) == rows[repr(order)]
+        assert ordered_rows_fingerprint(async_rows(op, source)) == (
+            ordered_rows_fingerprint(list(stream.iter_data()))
+        )
         assert _sorted_values(stream, "d1") == [50]
     assert len({repr(v) for v in rows.values()}) == 1
 
@@ -405,9 +499,9 @@ def test_names_of_several_roles_in_one_call(case: RoleCase) -> None:
     source = make_source(MAIN, Arrangement(MAIN.tags, TAGS_FIRST, MIXED))
     result = case.make_op()(source)
     assert result.keys() == case.keys
-    assert rows_fingerprint(async_rows(case.make_op(), source)) == rows_fingerprint(
-        list(result.iter_data())
-    )
+    assert ordered_rows_fingerprint(
+        async_rows(case.make_op(), source)
+    ) == ordered_rows_fingerprint(list(result.iter_data()))
 
 
 def _sorted_values(stream: StreamProtocol, name: str, role: str = "data") -> list[Any]:
@@ -498,6 +592,7 @@ def test_join_result_does_not_depend_on_the_order_of_its_inputs(
             **fingerprint(stream),
             "presentation": presentation(stream),
             "system_tag_order": stream.keys(columns={"system_tags": True})[0],
+            "sync_rows": rows_fingerprint(list(stream.iter_data())),
             "async_rows": rows_fingerprint(async_rows(Join(), *ordered)),
         }
     _assert_all_equal(results)
@@ -515,6 +610,7 @@ def test_join_result_does_not_depend_on_the_arrangement_of_its_inputs(
             stream = Join()(*sources)
             results[f"{order_index}/{layout}"] = {
                 **fingerprint(stream),
+                "sync_rows": rows_fingerprint(list(stream.iter_data())),
                 "async_rows": rows_fingerprint(async_rows(Join(), *sources)),
             }
     _assert_all_equal(results)
@@ -587,6 +683,7 @@ def test_merge_join_result_does_not_depend_on_the_order_of_its_inputs(
             ):
                 results[f"{order_index}/{layout}/{label}"] = {
                     **fingerprint(stream),
+                    "sync_rows": rows_fingerprint(list(stream.iter_data())),
                     "async_rows": rows_fingerprint(async_rows(MergeJoin(), *inputs)),
                 }
     _assert_all_equal(results)
@@ -638,6 +735,7 @@ def test_semijoin_matches_on_every_shared_tag_in_any_arrangement(role: str) -> N
             stream = SemiJoin()(left, right)
             results[f"{order_index}/{layout}"] = {
                 **fingerprint(stream),
+                "sync_rows": rows_fingerprint(list(stream.iter_data())),
                 "async_rows": rows_fingerprint(async_rows(SemiJoin(), left, right)),
             }
     _assert_all_equal(results)
@@ -652,3 +750,41 @@ def test_semijoin_matches_on_every_shared_tag_in_any_arrangement(role: str) -> N
             assert rows_fingerprint(async_rows(SemiJoin(), left, right)) == (
                 rows_fingerprint(list(kept.iter_data()))
             )
+
+
+SEVERAL_INPUT_CASES: dict[
+    str, tuple[Callable[[], StaticOutputOperatorPod], tuple[Spec, ...]]
+] = {
+    "join_2": (Join, (MAIN, P)),
+    "join_3": (Join, (MAIN, P, Q)),
+    "join_4": (Join, (MAIN, P, Q, R)),
+    "semijoin": (SemiJoin, (MAIN, P)),
+    "merge_join": (MergeJoin, (MAIN, MAIN_OTHER)),
+}
+
+
+def _several_input_sources(
+    label: str, order_index: int, layout: str, role: str
+) -> tuple[Callable[[], StaticOutputOperatorPod], list[ArrowTableSource]]:
+    op, specs = SEVERAL_INPUT_CASES[label]
+    rows = NON_NULL_ROWS if label == "merge_join" else None
+    return op, _sources(specs, order_index, layout, role, rows=rows)
+
+
+@pytest.mark.parametrize("role", ROLES)
+@pytest.mark.parametrize("label", list(SEVERAL_INPUT_CASES))
+def test_several_input_result_keys_equal_its_row_keys(label: str, role: str) -> None:
+    for order_index in range(3):
+        for layout in LAYOUTS:
+            op, sources = _several_input_sources(label, order_index, layout, role)
+            assert_keys_equal_row_keys(op()(*sources))
+
+
+@ASYNC_ORDER_XFAIL
+@pytest.mark.parametrize("role", ROLES)
+@pytest.mark.parametrize("label", list(SEVERAL_INPUT_CASES))
+def test_several_input_async_column_order_equals_sync(label: str, role: str) -> None:
+    for order_index in range(3):
+        for layout in LAYOUTS:
+            op, sources = _several_input_sources(label, order_index, layout, role)
+            assert_async_column_order_equals_sync(op, *sources)
