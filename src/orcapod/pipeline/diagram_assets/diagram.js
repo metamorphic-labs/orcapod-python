@@ -9,8 +9,10 @@
 // not set up yet), reads the model from the JSON block and adds pan (drag, arrow keys),
 // zoom (buttons, + and - keys, Ctrl or Cmd with the wheel), fit (button, 0 key), a
 // details panel built with ``textContent`` only and, when the output holds the other
-// layout, a collapse checkbox that switches to it (keeping the selected node if it is
-// in both).
+// layouts (ITL-1232), a ``vertical`` checkbox that switches between the left-to-right
+// and top-to-bottom layouts and a ``collapse`` checkbox that switches between the
+// folded and full ones, keeping the selected node if it is in both and fitting the
+// new picture as on first display.
 //
 // Scale (ITL-1231): the view keeps a scale (screen pixels per picture unit) and the
 // picture point at its centre, and derives the viewBox from its own size each time, so
@@ -49,19 +51,34 @@
       Uint8Array.from(atob(b64), function (c) { return c.charCodeAt(0); }));
   }
 
-  // The shown layout, and the other one (folded or not) when the output holds it.
-  var views = [{
-    model: JSON.parse(root.querySelector('script.op-dag-model').textContent),
-    picture: img.getAttribute('src').split(',')[1]
-  }];
-  var otherBlock = root.querySelector('script.op-dag-other');
-  var other = otherBlock && JSON.parse(otherBlock.textContent);
-  if (other) views.push({model: other.model, picture: other.picture});
+  // The layouts, by direction and collapse state: the shown one (the image and the
+  // model block) and those the views block holds, whose model is the shown one's or,
+  // for the other collapse state, the block's.
+  var shown = JSON.parse(root.querySelector('script.op-dag-model').textContent);
+  var block = root.querySelector('script.op-dag-views');
+  var extra = block ? JSON.parse(block.textContent) : null;
+  var dir = extra ? extra.direction : 'LR', col = extra ? extra.collapse : false;
+  var layouts = {};
+  function key(d, c) {
+    return d + (c ? ' folded' : '');
+  }
+  layouts[key(dir, col)] = {model: shown, picture: img.getAttribute('src').split(',')[1]};
+  if (extra) {
+    extra.views.forEach(function (v) {
+      layouts[key(v.direction, v.collapse)] = {
+        model: v.collapse === col ? shown : extra.models[0],
+        picture: v.picture
+      };
+    });
+  }
+  function flip(d) {
+    return d === 'LR' ? 'TB' : 'LR';
+  }
 
   var view = root.querySelector('.op-dag-view');
   var panel = root.querySelector('.op-dag-panel');
   var count = root.querySelector('.op-dag-count');
-  var cur = 0, model = views[0].model, svg = img, selected = null;
+  var model = shown, svg = img, selected = null;
   // The largest scale (also the no-script image's, ``diagram._MAX_SCALE``): the node
   // labels (13 pixels) at 16 pixels and the kind line (11) at 13.75, about a notebook's
   // own text size; so a two-node job is not blown up. The smallest scale of the first
@@ -72,22 +89,31 @@
   // null (after a zoom or pan) keeping the scale and centre.
   var W = 1, H = 1, z = 1, cx = .5, cy = .5, mode = 'first';
 
-  // The tools, top right: the collapse checkbox (with the other layout) and the zoom
-  // buttons.
+  // The tools, top right: the direction and collapse checkboxes (where the output
+  // holds the layouts they switch to) and the zoom buttons.
   var tools = document.createElement('div');
   tools.className = 'op-dag-tools';
-  if (other) {
-    root.classList.add('op-dag-has-other');
+  function checkbox(name, text, title, checked, change) {
+    root.classList.add('op-dag-has-' + name);
     var label = document.createElement('label');
-    label.className = 'op-dag-collapse';
-    label.title = 'Fold the steps that only join, choose or rename columns into the edges';
+    label.className = 'op-dag-check op-dag-' + name;
+    label.title = title;
     var box = document.createElement('input');
     box.type = 'checkbox';
-    box.checked = !other.collapse;
+    box.checked = checked;
     label.appendChild(box);
-    label.appendChild(document.createTextNode('collapse'));
+    label.appendChild(document.createTextNode(text));
     tools.appendChild(label);
-    box.addEventListener('change', function () { show(1 - cur); });
+    box.addEventListener('change', function () { change(box.checked); });
+  }
+  if (layouts[key(flip(dir), col)]) {
+    checkbox('direction', 'vertical', 'Lay the graph out top to bottom',
+      dir === 'TB', function (on) { show(on ? 'TB' : 'LR', col); });
+  }
+  if (layouts[key(dir, !col)]) {
+    checkbox('collapse', 'collapse',
+      'Fold the steps that only join, choose or rename columns into the edges',
+      col, function (on) { show(dir, on); });
   }
   [['in', '+', 'Zoom in'], ['out', '\u2212', 'Zoom out'], ['fit', 'fit', 'Fit to view']].forEach(
     function (b) {
@@ -310,11 +336,15 @@
   // Draws a layout: its SVG inline (in the page's colours, without the background the
   // image needs), sized to the view, its nodes selectable; keeps the selected node if
   // it is in this layout too.
-  function show(v) {
-    cur = v;
-    model = views[v].model;
+  // Draws the layout of a direction and collapse state (when the output holds it).
+  function show(d, c) {
+    var layout = layouts[key(d, c)];
+    if (!layout) return;
+    dir = d;
+    col = c;
+    model = layout.model;
     var el = document.importNode(new DOMParser().parseFromString(
-      decode(views[v].picture), 'image/svg+xml').documentElement, true);
+      decode(layout.picture), 'image/svg+xml').documentElement, true);
     var bg = el.querySelector('.op-dag-bg');
     if (bg) bg.parentNode.removeChild(bg);
     el.removeAttribute('color');
@@ -353,5 +383,5 @@
     height();
     first();
   }
-  show(0);
+  show(dir, col);
 })();

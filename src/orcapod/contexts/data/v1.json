@@ -1,8 +1,8 @@
 {
     "context_key": "std:v1:default",
     "version": "v1",
-    "description": "Data context of Orcapod v0.3: the hashing generation H1. Frozen when v0.3.0 is released, except its golden history, which only grows; editable in place while that release is prepared.",
-    "released_in": "0.3.0",
+    "description": "Data context std:v1, the hashing generation H1, first released in Orcapod 0.4.0. Frozen when 0.4.0 is released, except its golden history, which only grows; editable in place until then.",
+    "released_in": null,
     "previous": "std:v0.1:default",
     "file_hasher": {
         "_class": "orcapod.hashing.file_hashers.FileHasher",
@@ -244,20 +244,13 @@
                 "digest": "0a789cf9e8d1df9fb762d6dc2fabffcd3383cd6a21ef147e8c6583f963280c2e"
             },
             {
-                "date": "2026-11-17",
-                "release": "0.3.0",
-                "added": {},
-                "previous": "0a789cf9e8d1df9fb762d6dc2fabffcd3383cd6a21ef147e8c6583f963280c2e",
-                "digest": "6cdd29cdc6fa98df322931e2ab0ff9df151fdb47d3381adecd9f58fd55d2fb22"
-            },
-            {
-                "date": "2026-11-17",
+                "date": "2026-11-18",
                 "release": null,
                 "added": {
                     "pipeline-02.json": "7778b4c69ff706debbcbd9fc67dbe5b723df56252158be8253f8751326a5bd41"
                 },
-                "previous": "6cdd29cdc6fa98df322931e2ab0ff9df151fdb47d3381adecd9f58fd55d2fb22",
-                "digest": "838e8b0023619f2192415496893e3c4b35981980e388c6a617202d9cb1991d40"
+                "previous": "0a789cf9e8d1df9fb762d6dc2fabffcd3383cd6a21ef147e8c6583f963280c2e",
+                "digest": "b0988d0fa1eb437f87ff825ae4a29ba82a4161afab9e30101c049f2266ad57ed"
             }
         ]
     },

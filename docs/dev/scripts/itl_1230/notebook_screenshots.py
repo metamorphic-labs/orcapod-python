@@ -7,7 +7,9 @@ theme:
 - ``notebooks-preview-{light,dark}.png``: the cell ``units`` and its table preview;
 - ``notebooks-run-summary-{light,dark}.png``: the cell ``job.run()`` and its run summary;
 - ``notebooks-diagram-{light,dark}.png``: the cell ``job`` and its diagram after the run,
-  with the ``rates`` node selected.
+  with the ``rates`` node selected;
+- ``notebooks-diagram-vertical-{light,dark}.png``: the same, after ticking the
+  ``vertical`` and ``collapse`` checkboxes, as a reader does (ITL-1235).
 
 The job is the one of Part 5 of the tutorial, over the tutorial's synthetic dataset. The
 script writes a notebook, executes it with ``nbclient`` (the ``python3`` kernelspec of this
@@ -58,7 +60,14 @@ THEMES = {"light": "JupyterLab Light", "dark": "JupyterLab Dark"}
 SCALE = 2
 # The browser window's width for each picture, in CSS pixels: about as wide as the
 # picture needs, so the site (a content column of about 750 pixels) scales it down little.
-WIDTHS = {"preview": 820, "run-summary": 820, "diagram": 820}
+# The diagram fits its picture to the width of the cell, so it is taken in a window as
+# wide as a reader's (ITL-1235).
+WIDTHS = {
+    "preview": 820,
+    "run-summary": 820,
+    "diagram": 1280,
+    "diagram-vertical": 1280,
+}
 HEIGHT = 1400
 # CSS pixels cut from the top of each cell picture.
 TOP_TRIM = 4
@@ -114,12 +123,31 @@ with job:
 # The cells pictured, in notebook order after the setup cell: (picture name, source).
 CELLS = [("preview", "units"), ("run-summary", "job.run()"), ("diagram", "job")]
 
+# The pictures: (picture name, index of the cell after the setup cell, the diagram's
+# checkboxes ticked in order before the picture is taken).
+PICTURES = [
+    ("preview", 1, ()),
+    ("run-summary", 2, ()),
+    ("diagram", 3, ()),
+    ("diagram-vertical", 3, ("direction", "collapse")),
+]
+
 # Selects the ``rates`` node, as a reader's click does.
 SELECT_RATES = """() => {
   const g = [...document.querySelectorAll('.op-dag-node')].find(
     (n) => (n.getAttribute('aria-label') || '').startsWith('rates,'));
   if (!g) return false;
   g.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+  return true;
+}"""
+
+# Ticks one of the diagram's checkboxes (``direction`` is the one labelled ``vertical``),
+# as a reader's click does, without making the cell the active one: a click event only,
+# no pointer press, so the picture shows no active-cell bar or cell toolbar.
+TICK = """(control) => {
+  const input = document.querySelector('.op-dag-' + control + ' input');
+  if (!input) return false;
+  input.click();
   return true;
 }"""
 
@@ -204,7 +232,7 @@ def _pictures(url: str, notebook: str, settings: Path) -> list[Path]:
         browser = p.chromium.launch(channel="chrome", headless=True)
         for name, theme in THEMES.items():
             _write_settings(settings, theme)
-            for index, (picture, _) in enumerate(CELLS, start=1):
+            for picture, index, ticks in PICTURES:
                 page = browser.new_page(
                     viewport={"width": WIDTHS[picture], "height": HEIGHT},
                     device_scale_factor=SCALE,
@@ -218,10 +246,17 @@ def _pictures(url: str, notebook: str, settings: Path) -> list[Path]:
                 page.wait_for_timeout(500)
                 cell = page.locator(".jp-Notebook .jp-CodeCell").nth(index)
                 cell.scroll_into_view_if_needed()
-                if picture == "diagram":
+                if picture.startswith("diagram"):
                     if not page.evaluate(SELECT_RATES):
                         raise RuntimeError("the diagram has no 'rates' node")
                     page.wait_for_timeout(500)
+                    for control in ticks:
+                        if not page.evaluate(TICK, control):
+                            raise RuntimeError(
+                                f"the diagram has no {control!r} checkbox"
+                            )
+                        page.wait_for_timeout(500)
+                    cell.scroll_into_view_if_needed()
                 target = OUT / f"notebooks-{picture}-{name}.png"
                 # The top edge of the cell holds the focus line of the cell above it.
                 box = cell.bounding_box()

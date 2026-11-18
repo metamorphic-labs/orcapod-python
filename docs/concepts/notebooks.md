@@ -214,8 +214,8 @@ nodes (sources, operators, function pods, side-effect pods) and the streams betw
 laid out left to right. Here is `job` as the last line of a cell, after its run, with the
 `rates` node selected:
 
-![The diagram of the tutorial job in JupyterLab: the sources sessions and units on the left, through column selections and a join into the function pod rates, then GroupBy, a selection and the function pod session_means on the right; every node is marked current, and the details panel of the selected node rates lists its tag and data columns, the node it reads from and the row counts of the last run](notebooks-diagram-light.png#gh-light-mode-only)
-![The diagram of the tutorial job in JupyterLab's dark theme, with the rates node selected](notebooks-diagram-dark.png#gh-dark-mode-only)
+![The diagram of the tutorial job in JupyterLab: the sources sessions and units on the left, through column selections and a join into the function pod rates, then GroupBy, a selection and the function pod session_means on the right; the sources are marked bound and every other node current, the vertical and collapse checkboxes next to the zoom buttons are unticked, and the details panel of the selected node rates lists its tag and data columns, the node it reads from and the row counts of the last run](notebooks-diagram-light.png#gh-light-mode-only)
+![The diagram of the tutorial job in JupyterLab's dark theme: the sources sessions and units on the left, through column selections and a join into the function pod rates, then GroupBy, a selection and the function pod session_means on the right; the sources are marked bound and every other node current, the vertical and collapse checkboxes next to the zoom buttons are unticked, and the details panel of the selected node rates lists its tag and data columns, the node it reads from and the row counts of the last run](notebooks-diagram-dark.png#gh-dark-mode-only)
 
 [Seeing the graph](pipeline-job.md#seeing-the-graph) states each of these in full:
 
@@ -228,14 +228,22 @@ laid out left to right. Here is `job` as the last line of a cell, after its run,
 - **Statuses.** Each node of a job shows one: `not run`, `current`, `stale`, `failed`,
   `loaded only`, `partial`, or `bound` or `unbound` for a source slot. Before `job.run()`
   every node but the sources says `not run`.
-- **The `collapse` checkbox.** `collapse=True` folds the steps that only choose, rename or
-  join columns into the edge they lie on. In a notebook that runs scripts, a `collapse`
-  checkbox next to the zoom buttons switches between the two layouts; it appears only when
-  there is something to fold.
+- **The `vertical` and `collapse` checkboxes.** `direction="TB"` lays the graph out top to
+  bottom, and `collapse=True` folds the steps that only choose, rename or join columns into
+  the edge they lie on. In a notebook that runs scripts, the `vertical` and `collapse`
+  checkboxes next to the zoom buttons switch between these layouts in place (`collapse`
+  appears only when there is something to fold; neither appears above 100 nodes).
 - **Nothing is computed.** Drawing a diagram never computes anything.
 - **Saved with the notebook.** The picture is part of the cell's output, so it stays in a
   saved notebook and in an HTML export. `job.diagram().save("pipeline.html")` writes it as a
   page that opens in any browser.
+
+Here is the same diagram after ticking `vertical` and then `collapse`: five nodes, top to
+bottom, with the column selections and the join folded into the dashed edges. `rates` stays
+selected, and its details now list the steps folded into its inputs:
+
+![The same diagram with the vertical and collapse checkboxes ticked: five nodes from top to bottom, the sources sessions and units joined by dashed edges into the function pod rates, then GroupBy and, by a dashed edge, the function pod session_means; the details panel of the selected node rates lists sessions and units as its inputs and SelectDataColumns_1, Join and SelectDataColumns_3 as its folded steps](notebooks-diagram-vertical-light.png#gh-light-mode-only)
+![The same diagram in JupyterLab's dark theme with the vertical and collapse checkboxes ticked: five nodes from top to bottom, the sources sessions and units joined by dashed edges into the function pod rates, then GroupBy and, by a dashed edge, the function pod session_means; the details panel of the selected node rates lists sessions and units as its inputs and SelectDataColumns_1, Join and SelectDataColumns_3 as its folded steps](notebooks-diagram-vertical-dark.png#gh-dark-mode-only)
 
 `job.diagram()` makes the same diagram with options (`direction="TB"`, `collapse=True`), and
 `print` shows it as text, one node per line with the nodes it reads from. A `Pipeline`, such
@@ -281,7 +289,7 @@ a pydantic model run again is a new class, and pods built for the earlier one re
 ## Other notebook front ends
 
 The displays are HTML in the cell's output, with the diagram's pan, zoom, selection and
-`collapse` checkbox done by a script in that output; the pictures on this page come from
+`vertical` and `collapse` checkboxes done by a script in that output; the pictures on this page come from
 JupyterLab, the front end they are checked in.
 
 - **Jupyter Notebook 7** is built on JupyterLab and runs the scripts of trusted outputs as
