@@ -1,8 +1,8 @@
 # The Orcapod documentation site
 
 An [Astro Starlight](https://starlight.astro.build) site, built from `../docs/` and the
-source code. It is to be published at <https://metamorphic-labs.github.io/orcapod-python/>,
-the default address (see [The site's address](#the-sites-address)).
+source code. It is published from `main` at
+<https://metamorphic-labs.github.io/orcapod-python/>, the default address (see [The site's address](#the-sites-address)).
 
 ## Build and preview
 
@@ -78,21 +78,77 @@ DOCS_SITE_URL=https://docs.example.org DOCS_SITE_BASE=/ pnpm build
 ```
 
 In CI, the build step takes them from the repository variables of the same names
-(Settings > Secrets and variables > Actions > Variables). A custom domain is
-`DOCS_SITE_URL=https://<domain>` with `DOCS_SITE_BASE=/`.
+(Settings > Secrets and variables > Actions > Variables).
+
+A custom domain is set in two places, both repository settings:
+
+1. the variables: `DOCS_SITE_URL=https://<domain>` and `DOCS_SITE_BASE=/`;
+2. Settings > Pages > Custom domain: `<domain>`, with the DNS record GitHub asks for
+   (a `CNAME` to `metamorphic-labs.github.io` for a subdomain). A site deployed by
+   GitHub Actions needs no `CNAME` file.
+
+Then run the deploy by hand (see [CI and publishing](#ci-and-publishing)) so that the
+site's links use the new address.
 
 ## What is committed
 
 `package.json`, `pnpm-lock.yaml` (exact versions), `pnpm-workspace.yaml`,
-`astro.config.mjs` (site settings, sidebar), `src/content.config.ts` and
-this file. `node_modules/`, `dist/`, `.astro/`, `src/content/docs/` and `public/` are
+`astro.config.mjs` (site settings, sidebar, logo, favicon), `src/content.config.ts`,
+`src/routeData.ts` (the banner every page shows), `src/styles/orcapod.css` (the theme),
+`src/assets/` (the logo and the favicon) and this file. `node_modules/`, `dist/`, `.astro/`, `src/content/docs/` and `public/` are
 generated.
 
 Astro's optional image optimizer, `sharp`, is not installed (`pnpm-workspace.yaml`): the
-site has no images, and its `libvips` is under a license the project does not allow.
+site's one image, the logo, is served as it is, and `libvips` is under a license the
+project does not allow.
+
+## The theme
+
+The site follows [orcapod.org](https://orcapod.org), the project's home page, with a blue
+accent of its own:
+
+- the logo (`src/assets/orcapod-icon.png`) and the favicon (`src/assets/favicon.ico`)
+  are orcapod.org's files, unmodified. The logo is black on a transparent background;
+  in dark mode it is shown inverted. The content build writes the favicon into
+  `public/` (`SITE_PUBLIC_FILES` in `../scripts/docs_site_content.py`);
+- the text is set in Asap and the site's name in Lexend Exa (bold, lower case), the
+  fonts of orcapod.org, with the system fonts after them. Both are bundled with the site
+  (`@fontsource-variable/asap`, `@fontsource/lexend-exa` weight 700; the `customCss`
+  entries in `astro.config.mjs`) and served from it, never from a font host. They are
+  under the SIL Open Font License 1.1, which `../scripts/check_site_licenses.py` allows
+  (developer, November 17, 2026);
+- the light theme has orcapod.org's background (`#fcfafc`) and text (`#0a0a0a`), the
+  dark theme a near-black with a blue tint; links, the current sidebar entry, the
+  banner and note asides are blue (`#1565c0` light, `#3d8fe8` and `#a8d0ff` dark).
+  Every text colour meets WCAG AA against its background.
+
+The home page opens with a hero (Starlight's `splash` template, so it has no sidebar):
+the logo, the name in Lexend Exa, a tagline and three buttons (Get started, Tutorial,
+GitHub). `docs/index.md` stays a plain page; the content build adds the hero as its front
+matter (`HOME_HERO` in `../scripts/docs_site_content.py`), and its buttons are links
+checked like any other. The hero's logo is the header's file: Astro could only resize
+orcapod.org's 3001 x 3001 full logo with `sharp`, which the site does not install.
+
+`src/styles/orcapod.css` holds the colours and fonts (Starlight's `--sl-color-*` and
+`--sl-font` variables).
 
 ## CI and publishing
 
 `.github/workflows/docs-site.yml` builds the site on every pull request and push to `main`,
-and checks the npm packages' licenses (`../scripts/check_site_licenses.py`). It publishes
-nothing: publishing to GitHub Pages is a separate step the developer enables.
+and checks the npm packages' licenses (`../scripts/check_site_licenses.py`).
+
+The same workflow publishes the site to GitHub Pages. Its `deploy` job
+([`actions/deploy-pages`](https://github.com/actions/deploy-pages)) runs after the build:
+
+- on every push to `main`;
+- by hand: Actions > Documentation site > Run workflow, with the branch `main` (or
+  `gh workflow run docs-site.yml --ref main`);
+- never on a pull request, from another branch, or in a fork.
+
+Only a run that deploys uploads the built site (`site/dist`) as the Pages artifact. The
+job deploys in the `github-pages` environment and needs Settings > Pages > Source =
+GitHub Actions. Two deploys never run at once, and a running one is never cancelled.
+
+The site documents the development version: what is on `main`, not the latest release.
+Every page says so in a banner (`src/routeData.ts`), which links to PyPI and the changelog
+and never names a release.

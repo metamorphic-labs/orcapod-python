@@ -157,7 +157,8 @@ class ArrowTableStream(StreamBase):
         # data columns in table order (developer decision, November 17, 2026,
         # ITL-1205): a table built from rows lays a data-tag out among the tags, so
         # this is the order of every row, on every path. Only the keys follow it: the
-        # table keeps its column order, and no hash depends on the order of columns.
+        # table keeps its column order, and no stream, schema, row or table hash
+        # depends on the order of a stream's columns.
         self._data_columns = self._data_tags + tuple(
             c
             for c in table.column_names

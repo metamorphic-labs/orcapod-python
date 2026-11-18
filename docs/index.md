@@ -21,10 +21,6 @@ Tables written by `0.2.0` or earlier are not read by `0.3.0`: see
 `CHANGELOG.md` in the repository, *Upgrading from 0.2.0*
 (it also covers `0.1.4`).
 
-Rendering pipeline graphs additionally requires the [Graphviz](https://graphviz.org/download/)
-`dot` binary on your `PATH`. It is optional: everything else works without it, and no
-Graphviz development headers are needed.
-
 ## Quick example
 
 Create a data source, apply a transformation, and inspect the results -- all in a few lines:

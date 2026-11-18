@@ -148,7 +148,13 @@ class Index(UnaryOperator):
         data_columns = list(data_schema.keys())
         # Data-tags (ITL-1023): the output is a new data column, never a tag's
         # value replaced in place or a name shared with a tag (section 4).
-        if self.out is None and self.column in tag_schema:
+        # A data-tag is a name in both schemas; a plain tag is not a data column
+        # and gets the missing-data error below (Copilot on PR #342).
+        if (
+            self.out is None
+            and self.column in tag_schema
+            and self.column in data_schema
+        ):
             raise InputValidationError(
                 f"Index: column {self.column!r} is a data-tag; replacing it "
                 "in place would change the tag's value. Give out=<new name>."

@@ -35,9 +35,6 @@ Optional features are installed as extras:
 | `orcapod[torch]` | PyTorch, for `torch.Tensor` values (any installed `torch` works) |
 | `orcapod[all]` | All of the above |
 
-Rendering pipeline graphs needs the [Graphviz](https://graphviz.org/download/) `dot` binary on
-your `PATH`. It is optional; everything else works without it.
-
 ## A quick example
 
 A source of two rows, one function pod, and a job that stores its results in a database:

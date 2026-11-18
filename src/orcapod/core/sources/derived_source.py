@@ -289,6 +289,8 @@ class DerivedSource(RootSource):
         self._key_columns = key_columns or ()
         self._cached_table: pa.Table | None = None
         self._cached_stream: ArrowTableStream | None = None
+        # The ``tags_as_data`` form over no rows: its columns, without reading the origin.
+        self._zero_row_stream: ArrowTableStream | None = None
         # The origin job node's modified time when its rows were cached: a check reads
         # its stored rows again only after it ran again (ITL-1102).
         self._origin_seen: datetime | None = None
@@ -399,7 +401,9 @@ class DerivedSource(RootSource):
     ) -> tuple[Schema, Schema]:
         if self._tags_as_data is None:
             return self._origin.output_schema(columns=columns, all_info=all_info)
-        return self._get_stream().output_schema(columns=columns, all_info=all_info)
+        return self._columns_stream(self._tags_as_data).output_schema(
+            columns=columns, all_info=all_info
+        )
 
     def keys(
         self,
@@ -409,7 +413,28 @@ class DerivedSource(RootSource):
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         if self._tags_as_data is None:
             return self._origin.keys(columns=columns, all_info=all_info)
-        return self._get_stream().keys(columns=columns, all_info=all_info)
+        return self._columns_stream(self._tags_as_data).keys(
+            columns=columns, all_info=all_info
+        )
+
+    def _columns_stream(self, tags_as_data: Mapping[str, str]) -> ArrowTableStream:
+        """A stream with this ``tags_as_data`` source's columns, read without its rows.
+
+        The rows held, or else the derivation over the origin's zero-row table: the
+        schema is never computed from rows (ITL-912), so asking for it never reads the
+        origin's database (ITL-1197: a diagram or a downstream schema prediction must
+        not read).
+
+        Args:
+            tags_as_data: The source's ``tags_as_data`` mapping.
+        """
+        if self._cached_stream is not None:
+            return self._cached_stream
+        if self._zero_row_stream is None:
+            self._zero_row_stream = self._derive_from(
+                self._empty_origin_table(), tags_as_data
+            )
+        return self._zero_row_stream
 
     def _data_tags(self) -> tuple[str, ...]:
         """Return the data-tags this source presents: its origin's.

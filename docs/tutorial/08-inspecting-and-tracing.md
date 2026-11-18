@@ -87,17 +87,11 @@ two-stream call to `firing_rate` added for you. When a job has several steps of 
 kind, it numbers them (`SelectDataColumns_1`, ...); the numbers tell the steps apart but do
 not follow the order you wrote them in.
 
-If you have Graphviz installed (the `dot` program), the job's pipeline can draw the same
-graph as a picture:
-
-<!-- docs-test: skip -->
-
-```python
-job.pipeline.show_graph()
-```
-
-`show_graph` is a method of `job.pipeline`, not of the job. Without Graphviz it raises
-`ExecutableNotFound`; use `print_lineage` instead.
+The whole graph, rather than one node's lineage, is what the job draws when it is the last
+line of a notebook cell (see [Part 5](05-pipeline-job.md#nodes-where-the-results-are)).
+Clicking a node there shows its columns and its row counts in the last run.
+`job.diagram(direction="TB")` lays it out top to bottom, and `print(job.diagram())` lists
+it as text.
 
 ## Which rows did a value come from?
 
