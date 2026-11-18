@@ -340,8 +340,10 @@ def test_a_saved_and_loaded_job_keeps_the_declared_order(tmp_path: Path) -> None
 
 @pytest.mark.xfail(
     strict=True,
-    reason="ITL-1253: a cache hit whose stored function variation data differs from "
-    + "the current function is served silently",
+    raises=AssertionError,
+    reason="ITL-1253 (needs ITL-1256: the output keys in the stored signature hash): "
+    + "a cache hit whose stored function variation data differs from the current "
+    + "function is served silently",
 )
 @pytest.mark.parametrize("n", [2, 3])
 def test_a_same_typed_swap_is_never_served_the_other_orders_rows_silently(
@@ -351,7 +353,11 @@ def test_a_same_typed_swap_is_never_served_the_other_orders_rows_silently(
 
     What the safety net must do: either compute the second order's own values, or
     say so (a warning or an error); never serve the first order's values under the
-    second order's names without a word.
+    second order's names without a word. It needs two changes: the stored variation
+    data must tell the two orders apart (ITL-1256: the output keys enter the stored
+    signature hash) and a cache hit must compare it (ITL-1253). Only the assertion is
+    the expected failure (``raises=AssertionError``): an error from the run, such as a
+    future mismatch error, fails the test instead of hiding as an expected failure.
     """
     fn = FUNCTIONS[("same", n)]
     first, second = _orders(n)[0], _orders(n)[-1]
