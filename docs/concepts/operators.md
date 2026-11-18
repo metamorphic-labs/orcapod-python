@@ -343,6 +343,10 @@ By default the members are ordered by `probe`, then `unit` (name order), whateve
 of `tag_columns`. With `member_order=["unit"]`, they are ordered by `unit`, then `probe`. The
 option is part of the operator's identity only when it is given, so a `GroupBy` without it
 keeps its hash.
+A pipeline written with Orcapod 0.3.0 whose `GroupBy` has two or more non-key tags not in
+name order gets a new member order with the same hashes and stored tables, so delete the
+tables stored for it, or attach a new database, before running it again (see *Breaking changes and migration* in the
+[changelog](https://github.com/metamorphic-labs/orcapod-python/blob/main/CHANGELOG.md)).
 
 A grouped stream can be grouped again on a coarser key; its data lists then nest one level
 deeper (`list[list[T]]`). The members of the second grouping are ordered by the first
