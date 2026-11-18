@@ -29,6 +29,7 @@ from ..test_core.operators.several_items import (
     P,
     make_source,
     presentation,
+    rows_fingerprint,
 )
 
 
@@ -110,8 +111,29 @@ def test_one_refused_source_leaves_every_binding_as_it_was(refused: str) -> None
     assert {name: job.nodes[name].bound_source for name in ("s", "p")} == bound_before
 
 
-def _bind_in(role: str, order: tuple[str, ...], layout: str) -> None:
-    """Bind ``MAIN`` in another arrangement to slot ``s``: nothing moves, all reads."""
+def _total_rows(job: PipelineJob) -> list[tuple[str, ...]]:
+    return rows_fingerprint(list(job.nodes["total"].iter_data()), source_info=False)
+
+
+def _total_values(job: PipelineJob) -> list[tuple[str, str]]:
+    """The rows' tag and data values only: the bound source has another source id."""
+    return sorted(
+        (repr(sorted(tag.as_dict().items())), repr(sorted(data.as_dict().items())))
+        for tag, data in job.nodes["total"].iter_data()
+    )
+
+
+def _bind_in(
+    role: str,
+    order: tuple[str, ...],
+    layout: str,
+    orchestrator: type = SyncPipelineOrchestrator,
+) -> PipelineJob:
+    """Bind ``MAIN`` in another arrangement to slot ``s``: nothing moves, all reads.
+
+    Returns:
+        The job, run on ``orchestrator``.
+    """
     job = _job(role)
     before = _snapshot(job)
     # The columns of the table, not their order: CLAUDE.md promises the declared names,
@@ -127,17 +149,24 @@ def _bind_in(role: str, order: tuple[str, ...], layout: str) -> None:
         order,
         layout,
     )
-    job.run()
-    assert len(job.nodes["total"].as_table()) == 6
+    job.run(orchestrator=orchestrator())
+    return job
 
 
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("order", MAIN.tag_orders(), ids="-".join)
 @pytest.mark.parametrize("role", [PLAIN, DATA_TAGS])
 def test_a_source_in_another_arrangement_is_bound_as_the_slot_declares(
-    role: str,
+    role: str, order: tuple[str, ...], layout: str
 ) -> None:
-    for order in MAIN.tag_orders():
-        for layout in LAYOUTS:
-            _bind_in(role, order, layout)
+    """Both orchestrators: the same rows, with the values of the slot's own source."""
+    reference = _job(role)
+    reference.run()
+    sync = _bind_in(role, order, layout, SyncPipelineOrchestrator)
+    asynchronous = _bind_in(role, order, layout, AsyncPipelineOrchestrator)
+    assert _total_rows(asynchronous) == _total_rows(sync)
+    assert _total_values(sync) == _total_values(reference)
+    assert len(_total_values(sync)) == 6
 
 
 BIND_MIXED_ISSUE = "ITL-1245"

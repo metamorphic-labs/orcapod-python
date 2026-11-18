@@ -46,7 +46,8 @@ INPUTS: tuple[Spec, ...] = (MAIN, P, Q)
 # Parameters in another order than the columns: q2 is in Q, d1 in MAIN, p1 in P.
 @function_pod(output_keys=["total", "product"])
 def combine(q2: int, d1: int, p1: int) -> tuple[int, int]:
-    return q2 + d1 + p1, d1 * p1
+    # Weighted: no two parameters can be swapped without changing ``total``.
+    return q2 + 2 * d1 + 3 * p1, d1 * p1
 
 
 def _inputs(role: str) -> list[ArrowTableSource]:
@@ -87,14 +88,14 @@ def test_values_are_matched_by_parameter_name(role: str) -> None:
         (tag["t1"], tag["t2"], tag["t3"], data["total"], data["product"])
         for tag, data in stream.iter_data()
     )
-    # MAIN x P on (t1, t2) x Q on (t2, t3); total = q2 + d1 + p1, product = d1 * p1.
+    # MAIN x P on (t1, t2) x Q on (t2, t3); total = q2 + 2 d1 + 3 p1, product = d1 p1.
     assert rows == [
-        ("a", 1, 1, 400 + 50 + 9, 50 * 9),
-        ("a", 1, 2, 100 + 20 + 9, 20 * 9),
-        ("a", 2, 1, 200 + 30 + 7, 30 * 7),
-        ("b", 1, 2, 100 + 40 + 8, 40 * 8),
-        ("b", 2, 1, 200 + 10 + 6, 10 * 6),
-        ("b", 2, 2, 300 + 60 + 6, 60 * 6),
+        ("a", 1, 1, 400 + 2 * 50 + 3 * 9, 50 * 9),
+        ("a", 1, 2, 100 + 2 * 20 + 3 * 9, 20 * 9),
+        ("a", 2, 1, 200 + 2 * 30 + 3 * 7, 30 * 7),
+        ("b", 1, 2, 100 + 2 * 40 + 3 * 8, 40 * 8),
+        ("b", 2, 1, 200 + 2 * 10 + 3 * 6, 10 * 6),
+        ("b", 2, 2, 300 + 2 * 60 + 3 * 6, 60 * 6),
     ]
 
 
@@ -150,6 +151,34 @@ def test_a_function_reads_several_data_tags_and_data_in_any_arrangement(
             assert values == ["a1v", "a1y", "a2x", "b1w", "b2u", "b2z"]
     first = next(iter(results.values()))
     assert all(result == first for result in results.values())
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("order", MAIN.tag_orders(), ids="-".join)
+@pytest.mark.parametrize("role", [DATA_TAGS, MIXED])
+def test_a_function_over_several_data_tags_gives_the_same_rows_on_both_orchestrators(
+    role: str, order: tuple[str, ...], layout: str
+) -> None:
+    """In a job, sync and async: same rows, column order and stored results."""
+    tables = []
+    for orchestrator in (SyncPipelineOrchestrator, AsyncPipelineOrchestrator):
+        job = PipelineJob(name="labels", database=InMemoryArrowDatabase())
+        with job:
+            label_rows.pod(
+                make_source(MAIN, Arrangement(order, layout, role)), label="labels"
+            )
+        job.run(orchestrator=orchestrator())
+        node = job.nodes["labels"]
+        tables.append(
+            (
+                presentation(node),
+                [(tuple(t.keys()), tuple(d.keys())) for t, d in node.iter_data()],
+                rows_fingerprint(list(node.iter_data()), source_info=False),
+                sorted(str(data["labelled"]) for _, data in node.iter_data()),
+            )
+        )
+    assert tables[0] == tables[1]
+    assert tables[0][3] == ["a1v", "a1y", "a2x", "b1w", "b2u", "b2z"]
 
 
 @pytest.mark.parametrize("role", [DATA_TAGS, MIXED])
