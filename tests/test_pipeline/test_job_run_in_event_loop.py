@@ -482,7 +482,8 @@ def test_second_interrupt_does_not_name_a_node_whose_function_returned() -> None
     thread has finished that work, while row 0 of ``stuck`` still runs. Every step waits for the one
     before, so the outcome does not depend on timing. Today the warning names ``after``
     too: a known defect (ITL-1192), pinned here so the fix flips this test. Only that
-    defect is the expected failure; any other failed check fails the test.
+    warning, naming exactly ``stuck`` and ``after``, is the expected failure; any other
+    failed check, or any other wrong warning, fails the test.
     """
     for event in (stuck_release, run_ended, next_row_entered, next_row_returned):
         event.clear()
@@ -517,8 +518,10 @@ def test_second_interrupt_does_not_name_a_node_whose_function_returned() -> None
     assert len(next_row_threads) == 1, next_row_threads
     messages = [str(w.message) for w in caught if w.category is RuntimeWarning]
     assert len(messages) == 1, messages
-    if "but a function in node 'stuck' has not returned yet" not in messages[0]:
+    # The known defect, exactly; any other wrong warning fails the assertion below.
+    if "but a function in nodes 'stuck', 'after' has not returned yet" in messages[0]:
         raise NamedANodeWhoseFunctionReturned(messages[0])
+    assert "but a function in node 'stuck' has not returned yet" in messages[0]
 
 
 async def async_stuck_on_first_row(x: int) -> int:
