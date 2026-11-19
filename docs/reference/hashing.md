@@ -196,7 +196,7 @@ never the address a name resolved to. A `hostaddr` given alone is the host.
 A host name is written in lower case (`DB.Example.ORG` and `db.example.org` are one id); an
 IPv6 address in brackets and in its exploded form, which holds no `::`
 (`[0000:0000:0000:0000:0000:0000:0000:0001]` for `::1`); an IPv4 address and a socket
-directory as given. The port is always the number used: a DSN without one uses the port of
+directory as given (a Windows one with its drive, `C:/PgSockets`, keeps its case too). The port is always the number used: a DSN without one uses the port of
 a service file, else `PGPORT`, else libpq's compiled default (normally `5432`), so a DSN that
 gives the port the connection would use anyway and one without it give one id. Two spellings of one server are two
 ids (`localhost` and `127.0.0.1`), as two spellings of one CSV path are. A DSN, a `PGHOST`
@@ -218,7 +218,11 @@ sends the connection to the address, so
 the host name does not name the server, and two such DSNs with one host and two addresses
 would share an id. A name that DNS, a hosts file or a tunnel sends to another server is not
 seen in the parameters: two servers reached under one name that way share a default id and
-need a `source_id`. No user name, password or other connection parameter enters the id.
+need a `source_id`. The same holds for a name that means this machine: a socket directory
+(`/var/run/postgresql`), `localhost` or a loopback address (`127.0.0.1`, `::1`). Two
+machines that each read their own server that way get one default id for one table name
+(`postgresql_table:/var/run/postgresql:5432/d.public.t` on both), so when their rows or
+provenance are combined, give each source a distinct `source_id`. No user name, password or other connection parameter enters the id.
 
 A row's record id is its row identifier (site 5), chosen by `record_id_columns` (a column name
 or several, in key order; every source accepts it):

@@ -13,6 +13,7 @@ Example::
 from __future__ import annotations
 
 import ipaddress
+import re
 from collections.abc import Collection, Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, ClassVar, cast
@@ -31,13 +32,19 @@ if TYPE_CHECKING:
     from orcapod.config import OrcapodConfig
 
 
+# A drive-qualified Windows socket directory (``C:/PgSockets``, ``c:\\pg``): libpq takes
+# it as a path, not a host name, so it keeps its case.
+_WINDOWS_DIRECTORY = re.compile(r"[A-Za-z]:[\\/]")
+
+
 def _server_name(host: str) -> str:
     """Return the host as it is written in a default source id.
 
     A host name is lower-cased (DNS names are case-insensitive); an IPv6 address is
     bracketed, as in a URI, in its exploded form, so it never holds ``::`` and has one
     spelling (a zone, ``%eth0``, is kept as given); an IPv4 address and a socket path
-    (``/...``, or ``@...`` for a Linux abstract socket) are kept as given.
+    (``/...``, ``@...`` for a Linux abstract socket, or a drive-qualified Windows
+    directory such as ``C:/PgSockets`` or ``c:\\pg``) are kept as given.
 
     Args:
         host: The host the connection reports (``PQhost``).
@@ -52,7 +59,7 @@ def _server_name(host: str) -> str:
         ip = None
     if isinstance(ip, ipaddress.IPv6Address):
         return f"[{ip.exploded}{zone_mark}{zone}]"
-    if ip is not None or host.startswith(("/", "@")):
+    if ip is not None or host.startswith(("/", "@")) or _WINDOWS_DIRECTORY.match(host):
         return host
     return host.lower()
 

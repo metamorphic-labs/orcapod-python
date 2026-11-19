@@ -19,8 +19,9 @@ from __future__ import annotations
 import ipaddress
 import os
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from types import MappingProxyType
+from urllib.parse import quote, urlencode
 
 import pytest
 
@@ -308,8 +309,8 @@ def server_table(pg_schema: str) -> str:
 
 @pytest.fixture
 def no_server_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the PG* host and port variables out of the DSNs a test builds."""
-    for envvar in ("PGHOST", "PGHOSTADDR", "PGPORT"):
+    """Keep the PG* host, port and service variables out of the DSNs a test builds."""
+    for envvar in ("PGHOST", "PGHOSTADDR", "PGPORT", "PGSERVICE"):
         monkeypatch.delenv(envvar, raising=False)
 
 
@@ -336,9 +337,25 @@ def _id_host(host: str) -> str:
     return f"[{ip.exploded}]" if ip.version == 6 else host
 
 
-def _uri_host(host: str) -> str:
-    """The test server's host in a URI: an IPv6 address in brackets."""
-    return f"[{host}]" if ":" in host else host
+def _uri(
+    schema: str, *, host: str | None = None, query: Sequence[tuple[str, str]] = ()
+) -> str:
+    """A URI DSN for the test server, every component percent-encoded.
+
+    ``host`` defaults to the test server's; ``""`` leaves it out (the query then
+    names the server). An IPv6 literal is bracketed, its zone's ``%`` encoded.
+    """
+    server = _SERVER["host"] if host is None else host
+    if ":" in server:
+        netloc_host = "[" + server.replace("%", "%25") + "]"
+    else:
+        netloc_host = quote(server, safe="")
+    params = [*query, ("options", f"-csearch_path={schema}")]
+    return (
+        f"postgresql://{quote(_SERVER['user'], safe='')}:"
+        f"{quote(_SERVER['password'], safe='')}@{netloc_host}:{_SERVER['port']}/"
+        f"{quote(_SERVER['dbname'], safe='')}?{urlencode(params, quote_via=quote)}"
+    )
 
 
 def _requires_localhost() -> None:
@@ -355,11 +372,7 @@ class TestDefaultSourceIdOnTheServer:
     """
 
     def test_uri_and_keyword_dsn_give_one_id(self, server_table: str) -> None:
-        uri = (
-            f"postgresql://{_SERVER['user']}:{_SERVER['password']}@{_uri_host(_SERVER['host'])}:"
-            f"{_SERVER['port']}/{_SERVER['dbname']}"
-            f"?options=-csearch_path%3D{server_table}"
-        )
+        uri = _uri(server_table)
         ids = [_source_id(uri), _source_id(_keyword_dsn(server_table))]
         assert ids == [_expected(_id_host(_SERVER["host"]), server_table)] * 2
 
@@ -368,11 +381,7 @@ class TestDefaultSourceIdOnTheServer:
         # port and the three-part name, with room for nothing else. (A substring
         # check would fail a correct id whenever the user's name is also the
         # database's, as with PGUSER=postgres PGDATABASE=postgres.)
-        uri = (
-            f"postgresql://{_SERVER['user']}:{_SERVER['password']}@{_uri_host(_SERVER['host'])}:"
-            f"{_SERVER['port']}/{_SERVER['dbname']}"
-            f"?options=-csearch_path%3D{server_table}"
-        )
+        uri = _uri(server_table)
         for dsn in (uri, _keyword_dsn(server_table)):
             assert _source_id(dsn) == _expected(_id_host(_SERVER["host"]), server_table)
 
@@ -441,11 +450,8 @@ class TestDefaultSourceIdOnTheServer:
         if form == "keyword":
             dsn = _keyword_dsn(server_table, **{key: server[key] for key in order})
         else:
-            query = "&".join(f"{key}={server[key]}" for key in order)
-            dsn = (
-                f"postgresql://{_SERVER['user']}:{_SERVER['password']}@:"
-                f"{_SERVER['port']}/{_SERVER['dbname']}?{query}"
-                f"&options=-csearch_path%3D{server_table}"
+            dsn = _uri(
+                server_table, host="", query=[(key, server[key]) for key in order]
             )
         with pytest.raises(ValueError, match="host name alone does not identify"):
             _source_id(dsn)

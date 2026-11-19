@@ -610,6 +610,13 @@ class TestTableAddress:
             ("/Tmp/PG", 5433, "/Tmp/PG:5433/orcapod.public.t"),
             # A Linux abstract-namespace socket, as reported.
             ("@pgsock", 5432, "@pgsock:5432/orcapod.public.t"),
+            # A drive-qualified Windows socket directory, as reported, case kept.
+            ("C:/PgSockets", 5432, "C:/PgSockets:5432/orcapod.public.t"),
+            ("c:\\Pg", 5433, "c:\\Pg:5433/orcapod.public.t"),
+            ("D:/X/Y", 5432, "D:/X/Y:5432/orcapod.public.t"),
+            # A one-letter or two-letter DNS name is still a name: lower-cased.
+            ("C", 5432, "c:5432/orcapod.public.t"),
+            ("Db", 5433, "db:5433/orcapod.public.t"),
         ],
     )
     def test_address(self, host: str, port: int, expected: str) -> None:
