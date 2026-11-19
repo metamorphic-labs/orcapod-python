@@ -569,9 +569,10 @@ def function_content_hash(
 
     Returns:
         The hash, labelled ``FUNCTION_CONTENT_HASH_LABEL``, or ``None`` when
-        ``function_source`` gives no text (the source cannot be read, or does not start
-        at a ``def`` statement): the record then holds no content hash rather than one
-        that would claim a match it cannot support.
+        ``function_source`` gives no text (the source cannot be read, or the source of a
+        function other than a lambda does not start at a ``def`` statement): the record
+        then holds no content hash rather than one that would claim a match it cannot
+        support.
     """
     source = function_source(function)
     if source is None:
@@ -646,8 +647,9 @@ PYTHON_FUNCTION = DataFunctionTypeDeclaration(
             bytes | None,
             _BINARY,
             True,
-            "the hash of the function as written; absent when its source cannot be "
-            + "read (a plain REPL, python -c, exec) or does not start at a def statement",
+            "the hash of the function as written (a lambda: its enclosing lines); absent "
+            + "when its source cannot be read (a plain REPL, python -c, exec) or, for a "
+            + "function other than a lambda, does not start at a def statement",
             hash_label=FUNCTION_CONTENT_HASH_LABEL,
             covers='{"source": <the source text from the def line on, as written: '
             + "docstring, comments and whitespace included, decorator lines excluded; "

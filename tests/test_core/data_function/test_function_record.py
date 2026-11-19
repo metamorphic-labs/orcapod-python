@@ -8,8 +8,9 @@ Every result row records, beside the function's name and version:
   from the effective types: inputs by name in no order, outputs in declared order; no
   name, module, parameter kind or order, version or body;
 * ``function_content_hash`` (``function_content_v1``): the source text from the ``def``
-  line on, as written (no decorator lines; a lambda's enclosing line), absent (null)
-  when the source cannot be read or does not start at a ``def`` statement.
+  line on, as written (no decorator lines; a lambda's enclosing line, always present
+  when readable), absent (null) when the source cannot be read or, for a function other
+  than a lambda, does not start at a ``def`` statement.
 
 Reuse is unchanged: on the function's identity only (ITL-1253 will make comparing an
 aspect opt-in).
@@ -388,6 +389,24 @@ def test_a_source_that_does_not_start_at_a_def_has_no_content_hash(
     f.__code__ = f.__code__.replace(co_firstlineno=1)
     assert function_source(f) is None
     assert _content_hash(f) is None
+
+
+def test_a_lambda_keeps_its_enclosing_lines_and_a_content_hash(tmp_path: Path) -> None:
+    """A lambda is never cut at a ``def``: its enclosing lines count, so it has a hash."""
+    path = tmp_path / "lambda_case.py"
+    path.write_text("g = (\n    lambda x: x + 1\n)\n")
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    source = function_source(module.g)
+    assert source is not None and "lambda x: x + 1" in source
+    record = _record(
+        PythonDataFunction(
+            module.g, output_keys="v", input_schema={"x": int}, output_schema={"v": int}
+        )
+    )
+    assert record["function_content_hash"] is not None
 
 
 def _repl_function() -> Any:
