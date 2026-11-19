@@ -51,18 +51,31 @@ for name in ("int64 (control)", "date64 off midnight", "struct<a: date64>"):
     )
 
 
-def stored_two(db: InMemoryArrowDatabase) -> dict[str, list[str]]:
+# Columns that differ between any two runs: a random data id, the source-info tokens
+# naming it, a time stamp.
+PER_RUN = ("__data_id", "_source_y", "__pod_ts")
+
+
+def stored_two(db: InMemoryArrowDatabase) -> dict[str, dict[str, str]]:
+    """Node two's stored entries: per record id (the stable identity of an input row),
+    every column's exact value; columns that differ between runs are left out."""
     [table] = [
         db.get_all_records(p)
         for p in db.list_table_paths()
         if p[1] == "dbl" and p[-1] == "pdb_v1"
     ]
     assert table is not None
-    return {
-        c: sorted(map(repr, m.exact(table.column(c))))
+    [record_id] = [c for c in table.column_names if c.startswith("_tag_record_id")]
+    columns = {
+        c: m.exact(table.column(c))
         for c in table.column_names
-        if c != "__pod_ts" and "timestamp" not in c
+        if c not in PER_RUN and "timestamp" not in c
     }
+    rows: dict[str, dict[str, str]] = {}
+    for i, key in enumerate(table.column(record_id).to_pylist()):
+        assert key not in rows, f"two entries for record {key}"
+        rows[key] = {c: repr(values[i]) for c, values in columns.items()}
+    return rows
 
 
 print("Entries of 'two' stored after a reuse of 'one' vs. in one fresh job (date64):")
@@ -82,5 +95,8 @@ with fresh:
     m.dbl.pod(m.inc.pod(m.source(values), label="one"), label="two")
 fresh.run(orchestrator=SyncPipelineOrchestrator())
 a, b = stored_two(db_a), stored_two(db_b)
-for column in a:
-    print(f"   {column[:60]:60} {'same' if a[column] == b.get(column) else 'DIFFER'}")
+print(f"   records: {sorted(a)} vs {sorted(b)}")
+for record in sorted(a):
+    for column, value in a[record].items():
+        verdict = "same" if b.get(record, {}).get(column) == value else "DIFFER"
+        print(f"   {record} {column[:50]:50} {verdict}")
