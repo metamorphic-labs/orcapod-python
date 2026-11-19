@@ -113,6 +113,33 @@ class TestLabelFormat:
         table = pa.table({"x": [1]})
         assert hasher.hash_table_ordered(table).method == "arrow_ordered_v1"
 
+    def test_strict_table_hash_has_its_own_label(self) -> None:
+        """A pyarrow table given as a value is hashed strictly, by a procedure of its own:
+        ``arrow_strict_v1`` (ITL-1179). Orcapod's own tables keep ``arrow_v1``.
+        """
+        arrow_hasher = get_default_context().arrow_hasher
+        hasher = get_default_context().semantic_hasher
+        table = pa.table({"x": [1.5], "y": ["a"]})
+        assert arrow_hasher.hash_table_strict(table).method == "arrow_strict_v1"
+        assert hasher.hash_object(table).method == "arrow_strict_v1"
+        assert hasher.hash_object(table.to_batches()[0]).method == "arrow_strict_v1"
+        # The same digest as hash_table where the float rule changes nothing.
+        assert (
+            arrow_hasher.hash_table_strict(table).digest
+            == arrow_hasher.hash_table(table).digest
+        )
+
+    def test_renaming_the_strict_label_moves_exactly_the_value_hash(
+        self, renamed_labels: dict[str, str]
+    ) -> None:
+        """Renaming ``arrow_strict_v1`` moves a pyarrow value's hash and the structures
+        it feeds, never an Orcapod table's hash."""
+        arrow_hasher = get_default_context().arrow_hasher
+        hasher = get_default_context().semantic_hasher
+        table = pa.table({"x": [1.5]})
+        assert hasher.hash_object(table).method == renamed_labels["arrow_strict_v1"]
+        assert arrow_hasher.hash_table(table).method == renamed_labels["arrow_v1"]
+
     def test_value_hash_labels(self, tmp_path: Path) -> None:
         """Array, pandas, Polars expression and directory values carry their own label."""
         hasher = get_default_context().semantic_hasher
@@ -236,6 +263,7 @@ def renamed_labels() -> Iterator[dict[str, str]]:
         (polars_expr, "POLARS_EXPR_HASH_LABEL"),
         (directory_hashers, "DIRECTORY_HASH_LABEL"),
         (arrow_hashers, "ARROW_ORDERED_HASH_LABEL"),
+        (arrow_hashers, "ARROW_STRICT_HASH_LABEL"),
     ):
         if hasattr(module, name):
             saved.append((module, name, getattr(module, name)))
@@ -784,8 +812,10 @@ class TestProducerlessStreamIdentity:
         with_hashes = stream.as_table(all_info=True)
         row_hashes = cast("list[str]", with_hashes.column("_content_hash").to_pylist())
         assert row_hashes[0].startswith("arrow_v1:")
-        # The public identity_structure() is what content_hash() hashes.
-        _, identity_table, _ = stream.identity_structure()
+        # The public identity_structure() is what content_hash() hashes; its table is
+        # marked as one Orcapod built (OrcapodTable, ITL-1179).
+        _, marked, _ = stream.identity_structure()
+        identity_table = marked.table
         assert "_content_hash" not in identity_table.column_names
         assert set(with_hashes.column_names) - set(identity_table.column_names) == {
             "_content_hash"
@@ -801,6 +831,7 @@ LABEL_DEFINITIONS = {
     "semantic_v1": "hashing/semantic_hashing/semantic_hasher.py",
     "arrow_v1": "hashing/arrow_hashers.py",
     "arrow_ordered_v1": "hashing/arrow_hashers.py",
+    "arrow_strict_v1": "hashing/arrow_hashers.py",
     "directory_v1": "hashing/directory_hashers.py",
     "ndarray_v1": "hashing/semantic_hashing/builtin_handlers.py",
     "polars_expr_v1": "hashing/semantic_hashing/polars_expr.py",

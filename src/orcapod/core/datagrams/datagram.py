@@ -12,7 +12,8 @@ Principles
 - **Dict for value access**: ``__getitem__``, ``get``, ``as_dict()`` always operate through
   the Python dict (loaded lazily from Arrow when needed).
 - **Arrow for hashing**: ``content_hash()`` always uses the Arrow table (loaded lazily from
-  dict when needed) via the data context's ``ArrowTableHandler``.
+  dict when needed), marked ``OrcapodTable`` and hashed by the data context's Arrow
+  hasher's ``hash_table`` (``OrcapodTableHandler``; the float rule, ITL-1179).
 - **Meta is always dict**: meta columns are stored as a Python dict regardless of how the
   primary data was provided; the Arrow meta table is built lazily.
 """
@@ -26,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Self, cast
 
 from uuid_utils import uuid7
 
+from orcapod.hashing.orcapod_table import OrcapodTable
 from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.core.base import ContentIdentifiableBase
@@ -446,15 +448,16 @@ class Datagram(ContentIdentifiableBase):
         return arrow_utils.join_arrow_schemas(*all_schemas)
 
     def identity_structure(self) -> Any:
-        """Return the primary data table as this datagram's identity.
+        """Return the primary data table, marked as a table Orcapod built.
 
-        The semantic hasher dispatches ``pa.Table`` to ``ArrowTableHandler``,
-        which delegates to the data context's ``arrow_hasher``.  This means
-        ``content_hash()`` (inherited from ``ContentIdentifiableBase``) produces
-        a stable, content-addressed hash of the data columns without any
-        special-casing in ``Datagram`` itself.
+        The semantic hasher dispatches ``OrcapodTable`` to ``OrcapodTableHandler``,
+        which delegates to the data context's ``arrow_hasher.hash_table``: Orcapod's
+        float rule applies (``-0.0`` as ``0.0``, every NaN as the ordinary NaN;
+        ITL-1179), where a bare ``pa.Table`` given as a value would be hashed strictly.
+        So ``content_hash()`` (inherited from ``ContentIdentifiableBase``) is the table
+        hash, without any special-casing in ``Datagram`` itself.
         """
-        return self._ensure_data_table()
+        return OrcapodTable(self._ensure_data_table())
 
     @property
     def datagram_uuid(self) -> uuid.UUID:

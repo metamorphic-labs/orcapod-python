@@ -320,7 +320,12 @@ class UnionTypeHandler:
 
 
 class ArrowTableHandler:
-    """Hasher for ``pa.Table`` and ``pa.RecordBatch`` objects.
+    """Hasher for ``pa.Table`` and ``pa.RecordBatch`` objects given as values.
+
+    A pyarrow table given as a value is a library value: it is hashed strictly, every bit
+    counts (``hash_table_strict``, label ``arrow_strict_v1``; ITL-1179). The tables Orcapod
+    builds (datagrams, streams) are hashed by the Arrow hasher's ``hash_table`` directly
+    and never reach this handler.
 
     Args:
         arrow_hasher: Any object satisfying ``ArrowHasherProtocol``.  When
@@ -348,7 +353,37 @@ class ArrowTableHandler:
             raise TypeError(
                 f"ArrowTableHandler: expected pa.Table or pa.RecordBatch, got {type(obj)!r}"
             )
-        return self._get_arrow_hasher().hash_table(obj)
+        return self._get_arrow_hasher().hash_table_strict(obj)
+
+
+class OrcapodTableHandler:
+    """Hasher for ``OrcapodTable``: a table Orcapod built, under Orcapod's float rule.
+
+    Delegates to the Arrow hasher's ``hash_table`` (label ``arrow_v1``): ``-0.0`` hashes
+    as ``0.0`` and every NaN as the ordinary NaN (ITL-1179). A bare ``pa.Table`` is a
+    value and goes to ``ArrowTableHandler`` instead.
+
+    Args:
+        arrow_hasher: Any object satisfying ``ArrowHasherProtocol``; ``None`` resolves
+            the default data context's at call time, as ``ArrowTableHandler`` does.
+    """
+
+    def __init__(self, arrow_hasher: "ArrowHasherProtocol | None" = None) -> None:
+        self._arrow_hasher = arrow_hasher
+
+    def handle(self, obj: Any, hasher: "SemanticHasherProtocol") -> ContentHash:
+        from orcapod.hashing.orcapod_table import OrcapodTable
+
+        if not isinstance(obj, OrcapodTable):
+            raise TypeError(
+                f"OrcapodTableHandler: expected OrcapodTable, got {type(obj)!r}"
+            )
+        arrow_hasher = self._arrow_hasher
+        if arrow_hasher is None:
+            from orcapod.contexts import get_default_context
+
+            arrow_hasher = get_default_context().arrow_hasher
+        return arrow_hasher.hash_table(obj.table)
 
 
 class SchemaHandler:
@@ -896,6 +931,9 @@ def register_builtin_python_type_handlers(
 
     arrow_table_hasher = ArrowTableHandler(arrow_hasher)
     registry.register(_pa.Table, arrow_table_hasher)
+    from orcapod.hashing.orcapod_table import OrcapodTable
+
+    registry.register(OrcapodTable, OrcapodTableHandler(arrow_hasher))
     registry.register(_pa.RecordBatch, arrow_table_hasher)
 
     import numpy as _np

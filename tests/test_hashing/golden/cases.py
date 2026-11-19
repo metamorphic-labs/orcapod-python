@@ -1165,6 +1165,90 @@ def arrow_extension_schema_hashes() -> dict[str, Any]:
     }
 
 
+_FLOAT_RULE_BITS: dict[str, dict[int, int]] = {
+    "0": {16: 0x0000, 32: 0x00000000, 64: 0x0000000000000000},
+    "-0": {16: 0x8000, 32: 0x80000000, 64: 0x8000000000000000},
+    "nan": {16: 0x7E00, 32: 0x7FC00000, 64: 0x7FF8000000000000},
+    "-nan": {16: 0xFE00, 32: 0xFFC00000, 64: 0xFFF8000000000000},
+    "payload_nan": {16: 0x7E01, 32: 0x7FC00001, 64: 0x7FF8000000000001},
+    "signaling_nan": {16: 0x7C01, 32: 0x7F800001, 64: 0x7FF0000000000001},
+}
+"""Bit patterns of the float rule cases: every NaN pins the value of ``nan``, ``-0`` that
+of ``0`` (ITL-1251, ITL-1179)."""
+
+
+def _float_rule_array(name: str, width: int) -> Any:  # pyright: ignore[reportExplicitAny]  # an Arrow array
+    unsigned = {16: pa.uint16(), 32: pa.uint32(), 64: pa.uint64()}[width]
+    floating = {16: pa.float16(), 32: pa.float32(), 64: pa.float64()}[width]
+    bits = _FLOAT_RULE_BITS[name][width]
+    return pa.array([bits, _FLOAT_RULE_BITS["0"][width], None], unsigned).view(floating)
+
+
+@case("arrow", "float_rule")
+def arrow_float_rule_hashes() -> dict[str, Any]:
+    """Tables Orcapod builds holding -0.0 and NaNs of several bit patterns (ITL-1179).
+
+    ``hash_table`` hashes -0.0 as 0.0 and every NaN as the ordinary NaN, so every
+    ``-0`` entry equals its ``0`` twin and every NaN entry equals its ``nan`` twin: in a
+    column of each width, a list, a struct, a dictionary, and a source's tag and data
+    hashes.
+    """
+    from orcapod.sources import ArrowTableSource
+
+    hasher = _ctx().arrow_hasher
+    out: dict[str, Any] = {}
+    for name in _FLOAT_RULE_BITS:
+        for width in (16, 32, 64):
+            column = _float_rule_array(name, width)
+            out[f"f{width}.{name}.column"] = hasher.hash_table(
+                pa.table({"x": column})
+            ).to_string()
+            out[f"f{width}.{name}.list"] = hasher.hash_table(
+                pa.table(
+                    {
+                        "x": pa.ListArray.from_arrays(
+                            pa.array([0, 2, 3], pa.int32()), column
+                        )
+                    }
+                )
+            ).to_string()
+            out[f"f{width}.{name}.struct"] = hasher.hash_table(
+                pa.table(
+                    {
+                        "x": pa.StructArray.from_arrays(
+                            [column, pa.array([1, 2, 3], pa.int64())], names=["f", "i"]
+                        )
+                    }
+                )
+            ).to_string()
+            out[f"f{width}.{name}.dictionary"] = hasher.hash_table(
+                pa.table(
+                    {
+                        "x": pa.DictionaryArray.from_arrays(
+                            pa.array([2, 0, 1, 0], pa.int32()), column
+                        )
+                    }
+                )
+            ).to_string()
+        source = ArrowTableSource(
+            pa.table(
+                {
+                    "g": pa.array(["a", "b", "c"], pa.large_string()),
+                    "k": _float_rule_array(name, 64),
+                    "x": _float_rule_array(name, 32),
+                    "y": pa.array([1.5, 2.5, 3.5], pa.float64()),
+                }
+            ),
+            tag_columns=["g", "k"],
+            tag_only_columns=True,
+            source_id="golden_float_rule",
+        )
+        tag, data = next(iter(source.iter_data()))
+        out[f"source.{name}.tag_hash"] = tag.content_hash().to_string()
+        out[f"source.{name}.data_hash"] = data.content_hash().to_string()
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Group: datagram — public sources carrying each logical type
 # ---------------------------------------------------------------------------

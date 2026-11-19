@@ -40,7 +40,8 @@ can leave out ``column_order`` and ``struct_field_order`` for a frame, ``series_
 ``struct_field_order`` for a Series; the list a data context uses is declared under
 ``hash_ignore`` in ``contexts/logical_types.json`` and is empty by default.
 
-``starfix_digest`` is ``starfix.ArrowDigester.hash_table`` of a hash-only Arrow projection of
+``starfix_digest`` is starfix's strict digest (``starfix_digest.digest_library_value``: a
+library value, so every bit counts, ``-0.0`` and NaN payloads included) of a hash-only Arrow projection of
 the values (see ``_hash_projection``), taken in starfix's ordered mode
 (``ordered_columns=True, ordered_struct_fields=True``), so column order and struct field
 order at every depth are part of the digest. starfix hashes a dictionary-encoded column by
@@ -90,8 +91,8 @@ from typing import TYPE_CHECKING, Any
 
 import polars as pl
 import pyarrow as pa
-from starfix import ArrowDigester
 
+from orcapod.hashing.starfix_digest import digest_library_value
 from orcapod.logical_types.ignore_list import IgnoreListLogicalType
 
 if TYPE_CHECKING:
@@ -376,8 +377,9 @@ def _values_digest(
             with a field ``b``). The message names the path.
     """
     try:
-        return ArrowDigester.hash_table(
+        return digest_library_value(
             _hash_projection(df),
+            include_metadata=False,
             ordered_columns=ordered_columns,
             ordered_struct_fields=ordered_struct_fields,
         )

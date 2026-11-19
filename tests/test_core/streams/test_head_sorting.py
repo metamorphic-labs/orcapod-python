@@ -421,7 +421,7 @@ def test_the_presentation_sort_orders_a_list_tag_while_identity_keeps_stream_ord
         10,
         20,
     ]
-    identity = stream.identity_structure()[1]
+    identity = stream.identity_structure()[1].table  # an OrcapodTable (ITL-1179)
     assert identity.column("x").to_pylist() == [20, 10]
 
 

@@ -33,6 +33,7 @@ RENAMED: dict[str, str] = {
     "semantic_v1": "renamedsemantic_v9",
     "arrow_v1": "renamedarrow_v9",
     "arrow_ordered_v1": "renamedarrowordered_v9",
+    "arrow_strict_v1": "renamedarrowstrict_v9",
     "ndarray_v1": "renamedndarray_v9",
     "pandas_dataframe_v1": "renamedpandasdataframe_v9",
     "pandas_series_v1": "renamedpandasseries_v9",
@@ -64,6 +65,8 @@ def rename_labels() -> None:
     context.arrow_hasher._hasher_id = RENAMED["arrow_v1"]  # pyright: ignore[reportAttributeAccessIssue]
     if hasattr(arrow_hashers, "ARROW_ORDERED_HASH_LABEL"):
         arrow_hashers.ARROW_ORDERED_HASH_LABEL = RENAMED["arrow_ordered_v1"]  # pyright: ignore[reportConstantRedefinition]
+    if hasattr(arrow_hashers, "ARROW_STRICT_HASH_LABEL"):
+        arrow_hashers.ARROW_STRICT_HASH_LABEL = RENAMED["arrow_strict_v1"]  # pyright: ignore[reportConstantRedefinition]
     builtin_handlers.NumpyArrayHandler.HASH_LABEL = RENAMED["ndarray_v1"]
     pandas_value_hash.PANDAS_DATAFRAME_HASH_LABEL = RENAMED["pandas_dataframe_v1"]  # pyright: ignore[reportConstantRedefinition]
     pandas_value_hash.PANDAS_SERIES_HASH_LABEL = RENAMED["pandas_series_v1"]  # pyright: ignore[reportConstantRedefinition]

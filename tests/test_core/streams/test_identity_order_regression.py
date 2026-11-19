@@ -17,6 +17,7 @@ from typing import Any
 import pyarrow as pa
 import pytest
 
+from orcapod.hashing.orcapod_table import OrcapodTable
 from orcapod.core.streams import ArrowTableStream
 from orcapod.types import ColumnConfig
 
@@ -96,5 +97,7 @@ def test_the_identity_table_has_the_row_order_main_gave_it(
         return
     name, table, tag_columns = stream.identity_structure()
     assert name == "ArrowTableStream"
-    assert table.equals(expected)
+    # The table, marked as one Orcapod built (hashed under the float rule, ITL-1179).
+    assert isinstance(table, OrcapodTable)
+    assert table.table.equals(expected)
     assert tag_columns == tuple(c for c in shape[0])

@@ -167,6 +167,15 @@
                 ],
                 [
                     {
+                        "_type": "orcapod.hashing.orcapod_table.OrcapodTable"
+                    },
+                    {
+                        "_class": "orcapod.hashing.semantic_hashing.builtin_handlers.OrcapodTableHandler",
+                        "_config": {}
+                    }
+                ],
+                [
+                    {
                         "_type": "polars.Expr"
                     },
                     {
@@ -222,7 +231,7 @@
         "type_conversion": "type_conversion_v1"
     },
     "libraries": {
-        "starfix": "0.6.0, the Rust implementation (hash format 2, digest prefix 000002; byte-identical to starfix-python 0.5.0 here): Arrow table and schema hashes",
+        "starfix": "0.6.0 or newer, the Rust implementation (hash format 2, digest prefix 000002): Arrow table and schema hashes, with normalize_negative_zero and normalize_nan explicitly on for the Arrow tables Orcapod builds (starfix's own default is off) and off for library values; stored values are never rewritten",
         "pyarrow": "23.0.1: conversion of Python values to Arrow types, which are hashed",
         "polars": "1.41.2: serialisation of filter expressions, which is hashed"
     },
@@ -233,7 +242,7 @@
                 "date": "2026-11-18",
                 "release": null,
                 "added": {
-                    "arrow-01.json": "c66fa55619178f2631d04232555cd58059813e97e9ecd2b9de9e63699e60c964",
+                    "arrow-01.json": "3bb8a033757ef0a8945f2fb3f56328ace1460528e6f03d1a4fcabf50b166a457",
                     "datagram-01.json": "598d4a2851819d76ba674e189222e61733ca1861ca82a59e990a8ee5e1b0a7b3",
                     "pipeline-01.json": "2a9b0c96c1cd7950243e76cf8ad04733c1e2497f1c35b2145c725960599b105a",
                     "schema-01.json": "79aa2a068e0724891cf43ee528ce8f569e65f08864faa5e34773bfc69ac9576e",
@@ -241,16 +250,16 @@
                     "torch-01.json": "af2e8b68d66dffaa37e1d0ad75acd42f595d65b9fae00ddcde81bf9e13a265c8"
                 },
                 "previous": null,
-                "digest": "6e85a3a8c6078a2481f3cbdb9883e7ccd651b6ad89890afecff1a94b1fd7fc62"
+                "digest": "7a415389e8841c13fe7cbfb56518dbea5b0de409ee3447654383d06ff040d0d6"
             },
             {
                 "date": "2026-11-18",
                 "release": null,
                 "added": {
-                    "pipeline-02.json": "bde22087ae6bce75ba3234d13b5c7cd92a8625a8e314ccb062e2292d60b56803"
+                    "pipeline-02.json": "9020aba10fa1d50891ba06cf40ee8d98f6089d636cd0cb8aa03bc80a8d73e756"
                 },
-                "previous": "6e85a3a8c6078a2481f3cbdb9883e7ccd651b6ad89890afecff1a94b1fd7fc62",
-                "digest": "ad2eb8a6f86a18846a600f54af3420c19253ad989aaeaf8f456430b0fe1fd030"
+                "previous": "7a415389e8841c13fe7cbfb56518dbea5b0de409ee3447654383d06ff040d0d6",
+                "digest": "22b467a377d3d60e156ec4b7ec71f61cd297dea219184d7e6b062dbcb3cdf17d"
             }
         ]
     },
@@ -258,6 +267,10 @@
         {
             "definition": "arrow_hasher",
             "change": "starfix hash format 1 (starfix 0.4) to hash format 2 (starfix 0.5): every Arrow-derived hash value (ITL-910)"
+        },
+        {
+            "definition": "arrow_hasher",
+            "change": "starfix 0.6 (the Rust implementation, byte-identical to 0.5.0 for every other input) with the float rule for the Arrow tables Orcapod builds: -0.0 hashes as 0.0 and every NaN as the ordinary NaN; a pyarrow table given as a value is hashed strictly under its own label; library values unchanged (ITL-1179, ITL-1251)"
         },
         {
             "definition": "semantic_hasher",

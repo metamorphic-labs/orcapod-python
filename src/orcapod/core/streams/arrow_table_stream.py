@@ -5,6 +5,7 @@ import logging
 from collections.abc import Collection, Iterator
 from typing import TYPE_CHECKING, Any
 
+from orcapod.hashing.orcapod_table import OrcapodTable
 from orcapod import contexts
 from orcapod.core.datagrams import Data, Tag
 from orcapod.core.streams.base import (
@@ -206,7 +207,9 @@ class ArrowTableStream(StreamBase):
         # hash label, which must never enter a hash input.
         return (
             self.__class__.__name__,
-            self._identity_table(),
+            # A table Orcapod built: hashed by ``hash_table`` (Orcapod's float rule),
+            # never as a pyarrow value (ITL-1179).
+            OrcapodTable(self._identity_table()),
             self._tag_columns,
         ) + (
             # Only when there is one: a plain stream keeps its v0.3 identity, and a

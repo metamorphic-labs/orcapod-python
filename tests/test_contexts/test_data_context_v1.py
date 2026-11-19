@@ -226,7 +226,8 @@ def test_v1_lists_no_logical_types() -> None:
 def test_logical_type_registration_is_unchanged_by_the_move() -> None:
     """The default context registers exactly what the single file registered before.
 
-    The Polars value types were added afterwards (ITL-578).
+    The Polars value types were added afterwards (ITL-578), and ``OrcapodTable`` (a table
+    Orcapod built, hashed under the float rule; ITL-1179).
     """
     context = contexts.create_registry().get_context()
     handlers = context.semantic_hasher.type_handler_registry
@@ -242,6 +243,7 @@ def test_logical_type_registration_is_unchanged_by_the_move() -> None:
         "builtins.method=FunctionHandler",
         "builtins.type=TypeObjectHandler",
         "numpy.ndarray=NumpyArrayHandler",
+        "orcapod.hashing.orcapod_table.OrcapodTable=OrcapodTableHandler",
         "orcapod.logical_types.directory_type.Directory=DirectoryHandler",
         "orcapod.logical_types.file_type.File=FileHandler",
         "orcapod.types.Schema=SchemaHandler",
