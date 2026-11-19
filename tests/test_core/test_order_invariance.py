@@ -1107,7 +1107,12 @@ def _jobs_by_arrangement(role: str, tmp: Path, *, pod: bool) -> dict[str, Any]:
 def test_a_jobs_operators_and_side_effect_do_not_depend_on_the_arrangement(
     role: str, tmp_path: Path
 ) -> None:
-    """Node hashes, stored paths and rows, as_source and a loaded job; sync and async."""
+    """Node hashes, stored paths and rows, as_source and a loaded job; sync and async.
+
+    The loaded job must have the saved job's pipeline hash at every node and content
+    hash at every node but the source slots, which are left out because an in-memory
+    table is not saved, so a loaded source slot is unbound and has another content hash.
+    """
     assert_all_equal(_jobs_by_arrangement(role, tmp_path, pod=False))
 
 
