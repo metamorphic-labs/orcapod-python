@@ -33,22 +33,27 @@ before stage 2 starts.
 6. Proof D: the 0.6.0 wheel list against Orcapod's matrix.
 7. Report to the coordinator and wait.
 
-## Stage 2: float normalization on
+## Stage 2: float normalization on, for Orcapod's own tables only
 
-1. `StarfixArrowHasher`: `normalize_negative_zero=True, normalize_nan=True` on every starfix
-   call that digests data (`hash_table`, `hash_table_ordered`); the Polars value digest too.
-   Both are unconditional (not ignore-list options): they make the hash agree with Orcapod's
-   value equality (Polars matching), which no data context may turn off.
-2. Semantic hasher: a Python `float` -0.0 hashes as 0.0, every NaN as the ordinary NaN, at
-   every depth (containers, dataclasses, signature defaults). Library value hashes (numpy,
-   torch, pandas, polars): each one's route is stated (starfix or its own bytes) and made to
-   agree.
-3. Tests (several items, every float width, every nesting, tags and data, sync and async):
-   equal hashes for 0.0 / -0.0 and for every NaN bit pattern; stored bits kept; row, datagram,
-   table, value hash and default source id; hash(data) == hash(normalized data); matching keys
-   have equal hashes.
-4. Golden: `--check` reports nothing moved (the golden cases hold no -0.0 and no other NaN);
-   then golden cases pinning the normalized values are added.
+Scope as decided by the developer on 2026-11-19 (it replaces the first draft of this stage,
+which also normalized library values and the semantic hasher's Python floats):
+
+1. `hashing/starfix_digest.py` is the one module that calls starfix. It passes both float
+   options on every call: on for the Arrow tables Orcapod builds (`digest_orcapod_table`),
+   off for a library value's digest (`digest_library_value`); schemas take the own-table
+   options (no effect).
+2. `StarfixArrowHasher.hash_table` (own tables, `arrow_v1`): options on.
+   `hash_table_ordered` (pandas values, `arrow_ordered_v1`) and the Polars value digest:
+   off, as on main. A pyarrow table given as a value: `hash_table_strict`, label
+   `arrow_strict_v1` (the developer's name). Datagrams and raw streams put their table in
+   their identity as `OrcapodTable`, hashed by `hash_table`; a bare `pa.Table` is a value.
+3. numpy, torch and the semantic hasher are unchanged.
+4. Tests: the guard (`test_starfix_calls.py`, both directions), the rule at Orcapod level
+   (`test_float_rule.py`, every width and layout, a property against a reference
+   normalization, stored bits, rows, default source ids, the value boundary), matching
+   agrees with hashing (`test_float_key_hashes.py`, Join, MergeJoin, SemiJoin, GroupBy, sync
+   and async, two tags and two data columns in both orders and both roles).
+5. Golden: exactly the two approved entries move; the `arrow.float_rule` case adds pins.
 
 ## Stage 3: docs and wrap-up
 

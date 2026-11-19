@@ -76,3 +76,31 @@ and Windows amd64, plus the sdist. abi3 covers Python 3.11, 3.12 and 3.13, so Or
 installs from wheels with no Rust toolchain. No wheel: Windows on ARM64, 32-bit platforms, other
 Linux architectures, and free-threaded CPython builds (abi3 does not cover them): those build
 from the sdist and need Rust.
+
+# Stage 2: the float rule, for the Arrow tables Orcapod builds
+
+Scope (developer, November 19, 2026): starfix's `normalize_negative_zero` and
+`normalize_nan` are explicitly on only for the Arrow tables Orcapod builds
+(`StarfixArrowHasher.hash_table`, `arrow_v1`); library values (numpy, torch, pandas, Polars,
+a pyarrow table given as a value: `arrow_strict_v1`) and the semantic hasher's Python floats
+stay strict. `hashing/starfix_digest.py` is the one module that calls starfix.
+
+## Golden values
+
+`float_rule_golden_proof.py` computes every golden value with the own-table options as
+shipped and with them off: outside the new `arrow.float_rule` case (which pins the rule
+itself), exactly two values differ, both approved by the developer (November 19, 2026):
+
+- `pipeline:group_by_nan_keys.data_tag_key.row[{"k":NaN}].tag_hash`
+- `pipeline:group_by_nan_keys.data_tag_key.row[{"k":NaN}].data_hash`
+
+The float32 data-tag key of that case is the signalling NaN `0x7F800001` (the group's
+smallest NaN bits, PR 441); under the rule it hashes as the ordinary NaN `0x7FC00000`. With
+the options off every computed value equals main's pin, so routing datagram and stream
+tables through `OrcapodTable` / `hash_table` changes no digest and no label. The two
+entries were regenerated with `generate_golden_hashes.py --remove` and the generator; a
+union comparison of every pinned entry against `origin/main` differs in these two only.
+
+The `arrow.float_rule` case adds 84 pins (no value changed): for 0.0, -0.0 and four NaN
+patterns, a column of each width, a list, a struct, a dictionary, and a source's tag and
+data hashes. Every `-0` pin equals its `0` twin and every NaN pin equals the `nan` one.
