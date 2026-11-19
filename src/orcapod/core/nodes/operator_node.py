@@ -66,9 +66,7 @@ from orcapod.contexts.stored import (
     require_storable,
     keep_rows_of_data_context,
     require_same_data_context,
-    account_for_stale_tables,
     describe_database_table,
-    find_stale_tables,
     report_rows_of_other_data_contexts,
     report_unexpected_row_count,
     with_data_context,
@@ -727,8 +725,6 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
     # Set once a read has reported the stored rows it skipped (rows of another data
     # context); a class default so nodes rebuilt from a saved descriptor start unset.
     _skipped_rows_reported: bool = False
-    # Set once a table found at the older layout has been accounted for.
-    _stale_tables_checked: bool = False
     # The job file's expected row count for a loaded node, and whether it was checked
     # against the attached database (ITL-1043). Advisory: a mismatch only warns.
     _expected_row_count: int | None = None
@@ -738,26 +734,9 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
     def _stored_table_path(self) -> tuple[str, ...]:
         """Path of this node's stored table: the identity path plus the layout version.
 
-        Every read and write of the operator-cache table uses this path. The identity
-        path itself is where Orcapod up to v0.2 stored the table (the old layout).
+        Every read and write of the operator-cache table uses this path.
         """
         return self.node_identity_path + (OPERATOR_DB_SCHEMA_VERSION,)
-
-    def _account_for_stale_tables(self) -> None:
-        """Report, once per node object, a table found at the older layout.
-
-        A table written by an earlier version of Orcapod holds no ``__data_context``
-        column. Its rows are not read as results and are left unchanged; their number
-        is reported (ITL-944).
-        """
-        if self._stale_tables_checked or self._pipeline_database is None:
-            return
-        self._stale_tables_checked = True
-        account_for_stale_tables(
-            find_stale_tables(self._pipeline_database, (self.node_identity_path,)),
-            delivers_side_effects=False,
-            current_context=self.data_context_key,
-        )
 
     def __init__(
         self,
@@ -904,8 +883,6 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         # A database that cannot store the cache refuses it now, before anything
         # runs or changes (ITL-1162).
         self.require_storable_tables(pipeline_database, cache_mode)
-        # Another database has its own tables of other generations to account for.
-        self._stale_tables_checked = False
         self._skipped_rows_reported = False
         self._row_count_checked = False
         self._pipeline_database = pipeline_database
@@ -1341,7 +1318,6 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         # deduplicates exact re-runs of the same node within a single run.
         # The data context column is appended after the record hashes are computed:
         # it names the generation of hashing that produced them and is not hashed.
-        self._account_for_stale_tables()
         try:
             pipeline_database.add_records(
                 self._stored_table_path,
@@ -1402,7 +1378,6 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
                 data-tags (ITL-1019).
         """
         assert self._pipeline_database is not None
-        self._account_for_stale_tables()
         records = self._pipeline_database.get_all_records(
             self._stored_table_path, record_id_column=self.HASH_COLUMN_NAME
         )

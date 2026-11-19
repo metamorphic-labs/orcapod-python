@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Collection, Sequence, Set
-from typing import Any, ClassVar, TYPE_CHECKING, get_origin
+from typing import Any, ClassVar, TYPE_CHECKING, cast, get_origin
 
 from orcapod.core.operators.base import UnaryOperator
 from orcapod.core.data_tags import stream_data_tags
@@ -48,6 +48,101 @@ def _null_last_key(value: Any) -> tuple[Any, ...]:
     if isinstance(value, list):
         return (0, tuple(_null_last_key(v) for v in value))
     return (0, value)
+
+
+# The grouping form of a NaN key value: one shared object, so every row whose key
+# is NaN falls into one group (ITL-1234), as the joins match a NaN key
+# (``match_keys``).  ``0.0`` and ``-0.0`` already fall into one group: they are equal.
+_NAN_KEY = object()
+
+
+def _grouping_key(key: tuple[Any, ...]) -> tuple[Any, ...]:
+    """Return a group key in the form that groups rows: every NaN as one value.
+
+    Args:
+        key: The values of the ``by`` columns of one row, in the order of ``by``.
+
+    Returns:
+        The key with each NaN replaced by one shared object.
+    """
+    return tuple(
+        _NAN_KEY if isinstance(value, float) and math.isnan(value) else value
+        for value in key
+    )
+
+
+def _float_storage(arrow_type: "pa.DataType") -> "pa.DataType | None":
+    """Return the float type a column is stored as, or ``None`` when it is not a float.
+
+    A logical (extension) type over float storage, such as a temperature stored as
+    ``float64``, is stored as that float, and a dictionary-encoded column as the
+    float type of its values.
+
+    Args:
+        arrow_type: The Arrow type of a key column.
+
+    Returns:
+        The ``float16``, ``float32`` or ``float64`` type of the column's storage, or
+        ``None``.
+    """
+    storage = (
+        arrow_type.storage_type
+        if isinstance(arrow_type, pa.ExtensionType)
+        else arrow_type
+    )
+    if pa.types.is_dictionary(storage):
+        storage = storage.value_type
+    return storage if pa.types.is_floating(storage) else None
+
+
+def _emitted_key_row(column: "pa.ChunkedArray[Any]", indices: Sequence[int]) -> int:
+    """Return the input row whose value of one key column a group emits.
+
+    The members of a group hold equal key values, but equal floats may differ in
+    their bits: ``0.0`` and ``-0.0``, and NaN with another sign or payload (equal
+    floats of any other value have the same bits).  The hashes of the emitted row
+    read the bits, so for a zero or NaN key the group emits the member value with
+    the smallest bit pattern at the column's own width (ITL-1234), chosen per key
+    column.  That is ``0.0`` over ``-0.0``, a positive NaN over a negative one, and
+    the NaN with the smallest payload; a signaling NaN has smaller bits than the
+    canonical quiet NaN, so it is the one emitted when a member holds it.  A group
+    whose members agree emits their value.  Neither the row order nor
+    ``member_order`` decides it, and the caller takes the value from the Arrow
+    column, so its bits are kept exactly.
+
+    Args:
+        column: A key column of the input table.
+        indices: The rows of one group, at least one, all with equal keys.
+
+    Returns:
+        The row, one of ``indices``, whose value the group emits for this column.
+    """
+    first = indices[0]
+    storage_type = _float_storage(column.type)
+    if len(indices) == 1 or storage_type is None:
+        return first
+    # Only a zero or NaN key can differ in bits among equal values, so the first
+    # member's value decides whether the group is gathered at all.
+    scalar = column[first]
+    if isinstance(scalar, pa.ExtensionScalar):
+        # A null extension scalar has no storage scalar.
+        storage = scalar.value
+        value = None if storage is None else cast(float | None, storage.as_py())
+    else:
+        value = cast(float | None, scalar.as_py())
+    if value is None or (value != 0.0 and not math.isnan(value)):
+        return first
+    members = column.take(pa.array(indices, pa.int64())).combine_chunks()
+    if isinstance(members, pa.ExtensionArray):
+        members = members.storage
+    if isinstance(members, pa.DictionaryArray):
+        # The values each member's index points at, bits as stored.
+        members = members.dictionary_decode()
+    # The unsigned integer of the float's width, to read its bits; no value of the
+    # group is null, since a null key equals no float.
+    unsigned = {16: pa.uint16, 32: pa.uint32, 64: pa.uint64}[storage_type.bit_width]()
+    bits = cast(list[int], members.view(unsigned).to_pylist())
+    return indices[min(range(len(indices)), key=bits.__getitem__)]
 
 
 GROUP_BY_FOLD_LABEL = "group_v1"
@@ -176,6 +271,16 @@ class GroupBy(UnaryOperator):
     are emitted sorted by their keys, in name order, for the same reason: a
     reordered input or a reordered ``by`` must
     produce an identical output.
+
+    Rows with equal keys form one group, as the joins match keys, except that all
+    rows with a null key form one group too.  So do all rows with a NaN key, and
+    ``0.0`` equals ``-0.0`` (ITL-1234).  A NaN key sorts after every number and
+    before null.  A float key that the members hold with different bits is
+    emitted, per key column, as the one with the smallest bit pattern at the
+    column's own width (``0.0`` over ``-0.0``, a positive NaN over a negative
+    one, a signaling NaN over the canonical quiet NaN), taken from the input's
+    Arrow column, so the emitted key is a value a member holds, bit for bit, and
+    never depends on the row order or on ``member_order``.
 
     Tag tuples are expected to be unique within a stream, but nothing enforces
     that.  If the input does contain duplicate tag tuples, the members sharing
@@ -394,16 +499,36 @@ class GroupBy(UnaryOperator):
                 sorted(c for c in system_tag_columns if c.startswith(prefix))
             )
 
-        groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
-        for row in table.to_pylist():
-            groups.setdefault(tuple(row[c] for c in self.by), []).append(row)
+        # Every NaN key is one value here (ITL-1234), so the rows whose key is NaN
+        # form one group, as the joins match them.
+        rows = table.to_pylist()
+        groups: dict[tuple[Any, ...], list[int]] = {}
+        for index, row in enumerate(rows):
+            key = _grouping_key(tuple(row[c] for c in self.by))
+            groups.setdefault(key, []).append(index)
+        # For each group, the row whose value each key column emits.
+        keyed_groups: list[tuple[tuple[int, ...], list[dict[str, Any]]]] = [
+            (
+                tuple(_emitted_key_row(table.column(c), indices) for c in self.by),
+                [rows[i] for i in indices],
+            )
+            for indices in groups.values()
+        ]
 
         grouped_rows: list[dict[str, Any]] = []
         # Emit groups in key order rather than first-appearance order, so a
-        # reordered input produces a byte-identical output table.
-        for key, members in sorted(
-            groups.items(), key=lambda kv: tuple(_null_last_key(v) for v in kv[0])
+        # reordered input produces a byte-identical output table.  The keys are in
+        # name order (``by`` is sorted); a NaN key sorts after every number and
+        # before null, as a member's tag does.
+        key_rows: list[tuple[int, ...]] = []
+        for group_key_rows, members in sorted(
+            keyed_groups,
+            key=lambda km: tuple(
+                _null_last_key(rows[r][c]) for r, c in zip(km[0], self.by)
+            ),
         ):
+            key_rows.append(group_key_rows)
+            key = tuple(rows[r][c] for r, c in zip(group_key_rows, self.by))
             if sort_columns:
                 members.sort(
                     key=lambda r: tuple(_null_last_key(r[c]) for c in sort_columns)
@@ -436,6 +561,34 @@ class GroupBy(UnaryOperator):
             member_columns,
             stream.data_context.type_converter,
         )
+
+        # A float key column (a float, a logical type stored as one, or a dictionary
+        # over floats) holds the chosen member's value as the input's Arrow column
+        # has it, never through Python: a conversion can change a float's bits (a
+        # float32 signaling NaN comes back quiet).  Every other key keeps the value rebuilt from Python,
+        # as before: its members may differ in Arrow although equal in Python (two
+        # time64[ns] values within one microsecond read as one ``datetime.time``),
+        # and taking one member's would make the key depend on the row order.
+        # Grouping such keys by their exact value is ITL-1250.
+        for position, c in enumerate(self.by):
+            if _float_storage(table.column(c).type) is None:
+                continue
+            # A null key is taken through a null index, so it is a null at the top
+            # level whichever member came first: a dictionary column can hold a null
+            # as a null index or as an index to a null entry, and only the first is
+            # a null to a reader of validity (``DropNulls``).
+            chosen = pa.array(
+                [
+                    None if rows[r[position]][c] is None else r[position]
+                    for r in key_rows
+                ],
+                pa.int64(),
+            )
+            grouped_table = grouped_table.set_column(
+                grouped_table.schema.get_field_index(c),
+                grouped_table.schema.field(c),
+                table.column(c).take(chosen),
+            )
 
         n_char = self.orcapod_config.hashing.system_tag_n_char
         grouped_table = arrow_utils.append_to_system_tags(

@@ -20,7 +20,7 @@ from __future__ import annotations
 import itertools
 import json
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any
 
 import pyarrow as pa
 import pytest
@@ -451,25 +451,3 @@ def test_a_nan_tag_orders_the_same_sync_and_async() -> None:
             if not seen:
                 seen = [row]
             assert row == seen[0], orchestrator.__name__
-
-
-def test_a_nan_group_key_is_a_group_of_its_own_row() -> None:
-    """Pins today's behaviour, unchanged here: NaN never equals NaN as a key.
-
-    Each row whose key is NaN is a group of its own; the groups with a number come
-    first, in key order, then the NaN groups.
-    """
-    nan = float("nan")
-    for values in ([0.0, nan, 1.0, nan], [nan, 1.0, nan, 0.0]):
-        source = op.sources.ArrowTableSource(
-            pa.table({"g": pa.array(values, pa.float64()), "v": [1, 2, 3, 4]}),
-            tag_columns=["g"],
-            tag_only_columns=True,
-            source_id="s",
-        )
-        out = source.group_by(["g"]).as_table()
-        keys = out.column("g").to_pylist()
-        assert keys[:2] == [0.0, 1.0]
-        assert all(k != k for k in keys[2:]) and len(keys) == 4
-        members = cast(list[list[int]], out.column("v").to_pylist())
-        assert [len(m) for m in members] == [1, 1, 1, 1]
