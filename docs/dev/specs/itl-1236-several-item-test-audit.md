@@ -99,6 +99,7 @@ Legend: **yes** (with the best test as evidence), **no** (with what the closest 
 | 3 | `MergeJoin` raises `TypeError` on a null in a colliding column | error only | ITL-1243 |
 | 4 | Swapping `output_keys` keeps the function's uri, so a job serves stored values under swapped names | result cache: wrong values served | ITL-1244 (rule undecided) |
 | 5 | Binding a source with mixed tag roles in another column order is accepted, then the source node's `as_table` raises | error on read; the run is right | ITL-1245 |
+| 6 | A function pod over data-tags (`FallThroughPod`) hashes its fall-through tags in the input's tag order: two sources that differ only in tag order give the function node another content and pipeline hash | pipeline hash, pipeline table path | ITL-1246 |
 | 7 | Input whose table layout differs from its tag order: every unary operator's result keys list the tags in the physical order while its rows use the tag order; Join, SemiJoin, MergeJoin (and, with data-tags, the tag select/drop and `MapTags` forms) give the async rows another column order than the sync rows. In a job, an operator node stores one column order on both orchestrators (measured, tested) | column order only; no hash, no stored table | ITL-1249 |
 | Q1 | `PolarsFilter`: the order of the predicates is in the identity (and the stored path); the order of the constraints is not | pipeline hash | ITL-1247 (rule undecided) |
 
@@ -122,9 +123,48 @@ Order- or role-dependent behaviour that reaches a hash or a stored table first.
 14. `DerivedSource(tags_as_data=)` reversed: default `source_id` and pipeline hash.
 15. `CachedSource` over a data-tag source; `Pick` / `Index` from a data-tag with `out=`; schema arguments in another field order; the stream methods' several-argument forms (`polars_filter` with `constraint_map` and keywords).
 
+## Checked and found as documented (part 2)
+
+- A source's `tag_columns` order and table layout: keys follow the tag order; rows, record
+  ids, system tags, content and pipeline hashes do not change (plain, data-tags, mixed).
+- `tag_only_columns` given in two orders: no change.
+- `record_id_columns` in another key order: record ids follow the key order; the content
+  hash changes, the pipeline hash and the source id do not; a set is refused.
+- `DerivedSource(tags_as_data=)` reversed: only the new columns' order changes.
+- `CachedSource` over a source of each role and arrangement: reads back as the source.
+- `pod(a, b, c)` in every input order: same rows, hashes and columns; a job over the inputs
+  in another order finds every result stored (sync and async). The in-memory output's
+  source info names a fresh random record per computation, so comparisons leave it out.
+- `bind(sources=)` with two sources: both bound, nothing moves; one refused, neither bound.
+  A plain or data-tag source in any arrangement binds and reads; a mixed one is ITL-1245.
+
+## Checked and found as documented (part 3)
+
+- `DropNulls` naming plain tags, data-tags holding nulls and data, in every order: one row
+  set and schema, each named column non-nullable (a data-tag in both roles), sync equal to
+  async.
+- `Index` with `out=` over a list-valued data-tag (after `Batch`): reads it as a data
+  column; the data-tag stays; sync equal to async.
+- A `DictSource` `data_schema` in another field order: the same source (rows, hashes).
+- Every stream method given several items equals its operator (rows, hashes, column
+  order); `polars_filter` keywords win over `constraint_map`.
+- Every combination of `ColumnConfig` groups gives the `all_info` columns of those groups
+  in the same order, for a source, a join and a batch, in every role and layout.
+
+## Remaining
+
+- `MapTags` has no golden entry (adding golden entries is out of scope for this issue).
+- The defects and the two undecided rules above: ITL-1241 to ITL-1247.
+
 ## Tests added
 
 `tests/test_core/operators/several_items.py` is the shared family: `MAIN` (tags `t1`,
 `t2`, `t3`; data `d1`, `d2`, `d3`) and join partners `P`, `Q`, `R`, each in any tag order,
 three layouts and three role settings. `ops/test_several_items.py` uses it for every
-operator (gaps 5, 6, 7, 9, 11 and the operator half of 1, 2, 3).
+operator (gaps 5, 6, 7, 9, 11 and the operator half of 1, 2, 3). Part 2:
+`tests/test_core/sources/test_several_items.py` (gaps 4, 13, 14, 15: CachedSource),
+`tests/test_core/function_pod/test_several_items.py` (gaps 1, 10; ITL-1244, ITL-1246) and
+`tests/test_pipeline/test_bind_several_items.py` (gap 8; ITL-1245). Part 3:
+`tests/test_core/data_tags/test_several_items.py` (gaps 12, 15: `Index`),
+`tests/test_core/streams/test_several_items_methods.py` (gap 15: stream methods;
+`ColumnConfig` groups) and a schema-order test in the sources file (gap 15).

@@ -595,7 +595,7 @@ class OrcapodDatabaseContentWarning(UserWarning):
 
 
 class ProvisionalHashWarning(UserWarning):
-    """A value type was used whose value hash and stored identity are provisional.
+    """A value type or an operator was used whose identity is provisional.
 
     The library value types (``numpy.ndarray``, ``torch.Tensor``, pandas and polars
     ``DataFrame`` and ``Series``) are hashed and stored with formats that may still
@@ -605,6 +605,12 @@ class ProvisionalHashWarning(UserWarning):
     hashed, a column converted to or from Arrow, a function pod annotated with the type,
     a stored column read. Which types are provisional is declared in the ``provisional``
     list of ``orcapod/contexts/logical_types.json``.
+
+    A provisional operator (``orcapod.operators.PROVISIONAL_OPERATORS``, ITL-1266) has an
+    identity that is not frozen with data context v1: it may change in a later release,
+    and with it the stored paths and record ids of its results and of every step
+    downstream of it, which are then computed again. The warning is issued once per
+    operator per process, when the operator is constructed.
 
     To silence it, call ``warnings.filterwarnings("ignore",
     category=ProvisionalHashWarning)`` after importing Orcapod. Python's ``-W`` option
