@@ -14,11 +14,16 @@ type, in no order (the schema hash sorts field names, as for every schema). So:
 
 ``@function_pod``, ``FunctionPod.from_fn`` and ``PythonDataFunction`` give one uri, and
 ``to_config`` / ``from_config`` and a saved and loaded job keep the declared order.
+
+Every test over a source runs it in two arrangements: the declared tag order with the tags
+first, and the reversed tag order with the data first (``SHAPES``); neither changes a
+value, a hash or a stored path.
 """
 
 from __future__ import annotations
 
 import itertools
+import json
 import warnings
 from pathlib import Path
 from typing import Any
@@ -35,14 +40,32 @@ from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 
 from ..operators.several_items import (
+    DATA_FIRST_REVERSED,
     DATA_TAGS,
     MAIN,
     MIXED,
     PLAIN,
     TAGS_FIRST,
     Arrangement,
+    fingerprint,
     make_source,
 )
+
+GOLDEN_FOLDER = Path(__file__).resolve().parents[2] / "test_hashing/golden/data/v1"
+
+# (tag order, table layout) of the source: the control, and its reverse with the data
+# first.
+SHAPES = {
+    "t1-t2-t3/tags_first": (MAIN.tags, TAGS_FIRST),
+    "t3-t2-t1/data_first_reversed": (tuple(reversed(MAIN.tags)), DATA_FIRST_REVERSED),
+}
+CONTROL = "t1-t2-t3/tags_first"
+
+
+def _source(role: str, shape: str = CONTROL) -> Any:
+    tag_order, layout = SHAPES[shape]
+    return make_source(MAIN, Arrangement(tag_order, layout, role))
+
 
 # Output names in sorted order; the tests declare them in every order.
 TWO_KEYS = ("first", "second")
@@ -156,17 +179,18 @@ def test_renaming_an_output_key_is_another_function() -> None:
 def test_a_one_output_function_has_the_identity_the_golden_values_pin() -> None:
     """The uri ``pod_default_version.decorator.uri`` pins for ``golden_ratio``.
 
-    Pinned in ``tests/test_hashing/golden/data/v1/pipeline-01.json``.
+    Read from the pipeline golden file that pins it, so the test follows the pin.
     """
     from tests.test_hashing.golden.cases import golden_ratio
 
-    pod = golden_ratio.pod
-    assert pod.uri == (
-        "golden_ratio",
-        "21e6485805726eb7ceed63ef6b677f0b6b11d2eaf48bd9fc44c1dccdf718aa1d",
-        "v0",
-        "python.function.v0",
-    )
+    pinned = [
+        entries["pod_default_version.decorator.uri"]
+        for path in sorted(GOLDEN_FOLDER.glob("pipeline-*.json"))
+        if "pod_default_version.decorator.uri"
+        in (entries := json.loads(path.read_text()))
+    ]
+    assert len(pinned) == 1
+    assert list(golden_ratio.pod.uri) == pinned[0]
 
 
 def test_the_input_parameters_are_in_no_part_of_the_uri() -> None:
@@ -223,18 +247,27 @@ def test_the_config_keeps_the_declared_order_and_the_uri(keys: tuple[str, ...]) 
 def test_in_memory_each_order_names_its_own_values(
     kind: str, n: int, role: str
 ) -> None:
+    """In every arrangement of the source: the same values, rows and hashes."""
     fn = FUNCTIONS[(kind, n)]
     for keys in _orders(n):
-        source = make_source(MAIN, Arrangement(MAIN.tags, TAGS_FIRST, role))
-        stream = FunctionPod.from_fn(fn, output_keys=list(keys))(source)
-        _, data_keys = stream.keys()
-        assert tuple(k for k in data_keys if k in keys) == keys
-        rows = sorted(tuple(data[k] for k in keys) for _, data in stream.iter_data())
         expected = sorted(
             tuple(_expected(fn, keys, d1, d3)[k] for k in keys)
             for d1, d3 in _main_values()
         )
-        assert rows == expected, keys
+        fingerprints = []
+        for shape in SHAPES:
+            stream = FunctionPod.from_fn(fn, output_keys=list(keys))(
+                _source(role, shape)
+            )
+            _, data_keys = stream.keys()
+            assert tuple(k for k in data_keys if k in keys) == keys
+            rows = sorted(
+                tuple(data[k] for k in keys) for _, data in stream.iter_data()
+            )
+            assert rows == expected, (keys, shape)
+            # Each computation names fresh output records: leave source info out.
+            fingerprints.append(fingerprint(stream, source_info=False))
+        assert all(f == fingerprints[0] for f in fingerprints), keys
 
 
 def test_a_cached_data_function_stores_differently_typed_orders_apart() -> None:
@@ -280,14 +313,21 @@ def _expected_values(fn: Any, keys: tuple[str, ...]) -> list[tuple[Any, ...]]:
     ids=["sync", "async"],
 )
 @pytest.mark.parametrize("database_kind", ["in_memory", "delta"])
+@pytest.mark.parametrize("shape", list(SHAPES))
 @pytest.mark.parametrize("role", [PLAIN, DATA_TAGS])
 @pytest.mark.parametrize("n", [2, 3])
 def test_jobs_with_differently_typed_orders_on_one_database_store_their_own_rows(
-    n: int, role: str, database_kind: str, orchestrator: type, tmp_path: Path
+    n: int,
+    role: str,
+    shape: str,
+    database_kind: str,
+    orchestrator: type,
+    tmp_path: Path,
 ) -> None:
     """Every order in turn on one database: each computes and stores its own rows.
 
     A second pass over every order finds each order's rows stored, under its names.
+    Each order's node path is the one it has over the control arrangement.
     """
     fn = FUNCTIONS[("mixed", n)]
     database = _database(database_kind, tmp_path)
@@ -298,12 +338,19 @@ def test_jobs_with_differently_typed_orders_on_one_database_store_their_own_rows
             job = PipelineJob(name="outputs", database=database)
             with job:
                 FunctionPod.from_fn(fn, output_keys=list(keys))(
-                    make_source(MAIN, Arrangement(MAIN.tags, TAGS_FIRST, role)),
-                    label="outputs",
+                    _source(role, shape), label="outputs"
+                )
+            control = PipelineJob(name="outputs", database=InMemoryArrowDatabase())
+            with control:
+                FunctionPod.from_fn(fn, output_keys=list(keys))(
+                    _source(role), label="outputs"
                 )
             summary = job.run(orchestrator=orchestrator())
             node = job.nodes["outputs"]
             counts = summary.nodes["outputs"]
+            assert (
+                node.node_identity_path == control.nodes["outputs"].node_identity_path
+            )
             if pass_number == 1:
                 assert (counts.computed, counts.reused) == (6, 0), keys
                 paths.add(node.node_identity_path)
@@ -313,13 +360,15 @@ def test_jobs_with_differently_typed_orders_on_one_database_store_their_own_rows
     assert len(paths) == len(orders)
 
 
-def test_a_saved_and_loaded_job_keeps_the_declared_order(tmp_path: Path) -> None:
+@pytest.mark.parametrize("shape", list(SHAPES))
+def test_a_saved_and_loaded_job_keeps_the_declared_order(
+    shape: str, tmp_path: Path
+) -> None:
     keys = ("third", "first", "second")
     job = PipelineJob(name="outputs", database=DeltaTableDatabase(tmp_path / "store"))
     with job:
         FunctionPod.from_fn(mixed3, output_keys=list(keys))(
-            make_source(MAIN, Arrangement(MAIN.tags, TAGS_FIRST, PLAIN)),
-            label="outputs",
+            _source(PLAIN, shape), label="outputs"
         )
     job.run()
     uri = job.nodes["outputs"].node_uri
@@ -345,9 +394,10 @@ def test_a_saved_and_loaded_job_keeps_the_declared_order(tmp_path: Path) -> None
     + "a cache hit whose stored function variation data differs from the current "
     + "function is served silently",
 )
+@pytest.mark.parametrize("shape", list(SHAPES))
 @pytest.mark.parametrize("n", [2, 3])
 def test_a_same_typed_swap_is_never_served_the_other_orders_rows_silently(
-    n: int,
+    n: int, shape: str
 ) -> None:
     """Same-typed swapped keys share a uri, so the second job finds the first's rows.
 
@@ -368,8 +418,7 @@ def test_a_same_typed_swap_is_never_served_the_other_orders_rows_silently(
         job = PipelineJob(name="outputs", database=database)
         with job:
             FunctionPod.from_fn(fn, output_keys=list(keys))(
-                make_source(MAIN, Arrangement(MAIN.tags, TAGS_FIRST, PLAIN)),
-                label="outputs",
+                _source(PLAIN, shape), label="outputs"
             )
         with warnings.catch_warnings(record=True) as recorded:
             warnings.simplefilter("always")
