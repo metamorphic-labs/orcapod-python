@@ -1532,8 +1532,9 @@ whenever any existing hash value can change (the hashers, the identity definitio
 record-id recipes, the libraries behind them). Orcapod v0.3 writes `std:v1:default`;
 everything stored before v0.3 is the earlier generation, `std:v0.1:default`. The manifest of
 the current data context is `orcapod/contexts/data/v1.json`. It is frozen at the release of
-the library version that contains it and never edited afterwards, except that its `golden`
-history gains revisions as golden values are added and released
+the library version that contains it and never edited afterwards, except in its `golden`
+section: the history gains revisions as golden values are added and released, and the
+digests of the provisional files, which no release freezes, follow those files
 ([Golden Hashes](golden-hashes.md)). It names the hashers, the
 definitions that live in code, the libraries the hashes depend on and what changed from the
 previous data context. Logical types are not part of it: they are registered in

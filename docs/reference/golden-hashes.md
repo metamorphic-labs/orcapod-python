@@ -278,9 +278,11 @@ a logical type's own identifier change. When such a change is wanted on purpose,
 a new data context version, only in a minor release (before 1.0) or a major one, never in a
 patch:
 
-1. The new manifest `v2.json` starts with `"golden": {"folder": "v2", "history": []}`, an
-   empty folder `data/v2/`, and the pin `"v2": {"manifest": null, "releases": {}}`. The
-   generator then writes `v2/<group>-01.json` from the new code.
+1. The new manifest `v2.json` starts with
+   `"golden": {"folder": "v2", "history": [], "provisional": {}}`, an empty folder
+   `data/v2/`, and the pin `"v2": {"manifest": null, "releases": {}}`. The generator then
+   writes `v2/<group>-01.json` from the new code, and `v2/provisional/<group>.json` for the
+   cases that depend on a provisional operator.
 2. The `v1` code, manifest, golden folder and pins move to `orcapod-sanctuary`, which keeps
    them computable.
 3. This repository then carries only the `v2` folder and chain.
