@@ -366,13 +366,9 @@ OPERATOR_CASES: dict[str, tuple[OperatorCase, ...]] = {
     ),
     "Batch": (OperatorCase("batch", _plain(lambda: Batch(batch_size=4))),),
     "GroupBy": (
-        OperatorCase(
-            "group_by_t1_t2", _names(GroupBy), ("t1", "t2"), argument_issue="ITL-1226"
-        ),
-        # Two tags outside the key order the members (ITL-1226).
-        OperatorCase(
-            "group_by_t1", _plain(lambda: GroupBy("t1")), arrangement_issue="ITL-1226"
-        ),
+        OperatorCase("group_by_t1_t2", _names(GroupBy), ("t1", "t2")),
+        # Two tags outside the key order the members, in name order (ITL-1226).
+        OperatorCase("group_by_t1", _plain(lambda: GroupBy("t1"))),
     ),
     "SelectTagColumns": (
         OperatorCase("select_tag_columns", _names(SelectTagColumns), ("t1", "t3")),
@@ -419,9 +415,7 @@ OPERATOR_CASES: dict[str, tuple[OperatorCase, ...]] = {
         OperatorCase("pick", _plain(lambda: Pick("d4", "speed")), inputs=(NESTED,)),
     ),
     "Index": (OperatorCase("index", _plain(lambda: Index("d5", 1)), inputs=(NESTED,)),),
-    "TagBy": (
-        OperatorCase("tag_by", _names(TagBy), ("d3", "d1"), argument_issue="ITL-1226"),
-    ),
+    "TagBy": (OperatorCase("tag_by", _names(TagBy), ("d3", "d1")),),
 }
 
 

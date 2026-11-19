@@ -46,7 +46,7 @@ ORDER_EXCEPTIONS: tuple[OrderException, ...] = (
     ),
     OrderException(
         "member_order",
-        "`member_order` of `GroupBy` (coming with ITL-1226; not in a release yet)",
+        "`member_order` of `GroupBy` (ITL-1226; not in a release yet)",
         "The explicit order of the members inside each group's lists, the argument that "
         "replaces the input's tag order there.",
     ),
@@ -83,8 +83,6 @@ ORDER_EXCEPTIONS: tuple[OrderException, ...] = (
 
 # Open issues whose cases the test marks as expected failures.
 KNOWN_VIOLATIONS: dict[str, str] = {
-    "ITL-1226": "GroupBy: the members follow the input's tag order; `by` order is in its "
-    "identity; TagBy's names are in its identity in the order given (PR #434)",
     "ITL-1227": "a raw ArrowTableStream's content hash depends on the order of its tags",
     "ITL-1246": "a function pod over data-tags: its content and pipeline hash (and its "
     "node's stored paths) depend on the input's tag order and table layout",
