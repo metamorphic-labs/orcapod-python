@@ -1033,16 +1033,20 @@ polars, torch) keeps its library's own distinction. `list_view` and `large_list_
 supported: a source refuses them (the Arrow hasher cannot hash them) and a raw `ArrowTableStream`
 holds them as given (ITL-1129).
 
-Dictionary-encoded tags are refused (developer, November 18, 2026, ITL-1264): "Say it is not
-currently supported in orcapod. We MAY support but not immediately in the plan." A tag column
-(a data-tag too) whose Arrow type is, or contains, a dictionary (list or list-view item, struct child, map
-key or item, extension storage) raises `InputValidationError` naming each such column, its type
-and its decoded type (`arrow_utils.decode_dictionaries`). One rule,
-`schema_utils.require_tags_not_dictionary`, called by `ArrowTableStream.__init__` (every source
+Dictionary-encoded columns are refused, tags and data alike (developer, November 18, 2026,
+ITL-1264: "Say it is not currently supported in orcapod. We MAY support but not immediately in
+the plan"; November 19, 2026, ITL-1277: "safe default, though could be inconvenient, is to
+reject working with it"). Every column of a stream (tag, data-tag, data, and Orcapod's own
+system-tag, source-info, context and meta columns, which only a hand-built table could encode)
+whose Arrow type is, or contains, a dictionary (list, list-view or fixed-size list item, struct
+child, map key or item, extension storage) raises `InputValidationError` naming each such
+column with its role, its type and its decoded type (`arrow_utils.decode_dictionaries`), then
+the pyarrow and polars ways to decode. One rule, `schema_utils.dictionary_columns` with
+`schema_utils.dictionary_columns_error`, applied by `ArrowTableStream.__init__` (every source
 and operator result) and first by `SourceStreamBuilder.build` (before the key columns and the
-hash); never check it elsewhere. Dictionary-encoded DATA columns are accepted as before (their
-Python type is `Any`); what to do about them is ITL-1277: change nothing for them without a
-decision.
+hash); never check it elsewhere. A library value in a cell (a pandas or polars data frame with
+a categorical column) is an extension column, not a dictionary, and is accepted. Supporting
+dictionary columns later is ITL-1277.
 
 Respect the Arrow types the inputs already have, normalized to their large variants (developer,
 November 10, 2026: large and non-large variants hash identically, so always normalize to large

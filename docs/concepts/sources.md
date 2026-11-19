@@ -86,14 +86,14 @@ logical types are kept, and the two variants hash identically, so no hash depend
 one you gave. The Arrow `list_view` and `large_list_view` types are not supported: a source
 refuses a column of either type.
 
-Dictionary-encoded tags are not currently supported in Orcapod. A tag column whose Arrow type
-is a `dictionary`, or holds one inside it (a list of dictionary values, a struct with a
-dictionary field), is refused with `InputValidationError` when the source or stream is built.
-The message names every such tag column, its type and the type it decodes to. A data-tag is a
-tag, so it is refused too. Such columns come from an Arrow table of your own, a pandas
-`Categorical` of strings, or a polars `Categorical` or `Enum`; CSV files, Delta tables,
-database tables and Python values never give one. Decode the column before building the
-source:
+Dictionary-encoded columns are not currently supported in Orcapod, tags and data alike. A
+column whose Arrow type is a `dictionary`, or holds one inside it (a list of dictionary values,
+a struct with a dictionary field), is refused with `InputValidationError` when the source or
+stream is built. The message names every such column with its role (tag, data-tag or data), its
+type and the type it decodes to, then says how to decode it. Such columns come from an Arrow
+table of your own, a pandas `Categorical` of strings, or a polars `Categorical` or `Enum`; CSV
+files, Delta tables, database tables and Python values never give one. If keeping the encoding
+is not important, decode the column before building the source:
 
 ```python
 import pyarrow as pa
@@ -105,17 +105,23 @@ coded = pa.table(
     {
         "session": pa.array(["s1", "s2", "s1"]).dictionary_encode(),
         "trial": [1, 1, 2],
-        "response": [0.4, 0.7, 0.5],
+        "response": pa.array([0.4, 0.7, 0.5]).dictionary_encode(),
     }
 )
 try:
     ArrowTableSource(coded, tag_columns=["session", "trial"], tag_only_columns=True)
 except InputValidationError as exc:
-    print(str(exc).split(": tag column")[0])
-# dictionary-encoded tags are not currently supported in Orcapod
+    print("\n".join(str(exc).splitlines()[:3]))
+# dictionary-encoded columns are not currently supported in Orcapod:
+#   - tag column 'session' has type dictionary<values=string, indices=int32, ordered=0> (decoded: string)
+#   - data column 'response' has type dictionary<values=double, indices=int32, ordered=0> (decoded: double)
 
-session = coded["session"]
-decoded = coded.set_column(0, "session", session.cast(session.type.value_type))
+decoded = coded
+for name in ("session", "response"):
+    column = decoded[name]
+    decoded = decoded.set_column(
+        decoded.schema.get_field_index(name), name, column.cast(column.type.value_type)
+    )
 source = ArrowTableSource(decoded, tag_columns=["session", "trial"], tag_only_columns=True)
 print(source.as_table().schema.field("session").type)
 # large_string
@@ -127,9 +133,10 @@ a `Categorical` of strings; a `Categorical` of integers that holds a missing val
 cast to an integer dtype this way (fill or drop the missing values first). A pandas
 `Categorical` of integers reaches the source as plain integers, so it needs no decoding.
 
-A dictionary-encoded data column is accepted as before. Its Python type is `Any`, so a
-function pod with a typed parameter refuses it, and a filter or a join on a stream that holds
-a dictionary of integers or floats fails; decode it the same way.
+A data frame kept whole as a value in a cell (a pandas or polars `DataFrame` holding a
+categorical column) is not a dictionary column: it is a library value, stored and hashed as one
+(see [Arrays and other library values](arrays.md)), and is accepted. Supporting
+dictionary-encoded columns themselves is future work (ITL-1277).
 
 ### SpiralDB tables
 

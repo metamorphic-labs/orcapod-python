@@ -80,9 +80,9 @@ class ArrowTableStream(StreamBase):
         Raises:
             ValueError: If a tag column or a data-tag is not a tag column of
                 the table, or the stream has no data column.
-            InputValidationError: If a tag column's type is, or contains, a
-                dictionary: dictionary-encoded tags are not currently supported
-                (ITL-1264).
+            InputValidationError: If a column's type is, or contains, a
+                dictionary: dictionary-encoded columns are not currently supported
+                (ITL-1264, ITL-1277).
         """
         super().__init__(**kwargs)
 
@@ -91,6 +91,13 @@ class ArrowTableStream(StreamBase):
 
         # Every table Orcapod presents is in its large variants (ITL-1122).
         table = arrow_utils.normalize_table_to_large_types(table, keep_null=True)
+        # Dictionary-encoded columns are not currently supported (ITL-1264,
+        # ITL-1277): every source and operator result becomes a stream here, so this
+        # refuses them all, tags and data alike.
+        if found := schema_utils.dictionary_columns(table.schema):
+            raise schema_utils.dictionary_columns_error(
+                found, tag_columns, data_tags, system_tag_columns
+            )
 
         data_table, data_context_table = arrow_utils.split_by_column_groups(
             table, [constants.CONTEXT_KEY]
@@ -146,9 +153,6 @@ class ArrowTableStream(StreamBase):
             raise ValueError(
                 f"Data-tags {sorted(unknown)} are not tag columns of the stream."
             )
-        # Dictionary-encoded tags are not currently supported (ITL-1264): every
-        # source and operator result becomes a stream here, so this refuses them all.
-        schema_utils.require_tags_not_dictionary(table.schema, self._tag_columns)
         # A data-tag is one column in both roles: a tag, and a data column of
         # the same name (tag order).
         self._data_tags = tuple(c for c in self._tag_columns if c in set(data_tags))

@@ -685,58 +685,107 @@ def require_names_not_meta(names: Collection[str]) -> None:
             )
 
 
-DICTIONARY_TAGS_NOT_SUPPORTED = (
-    "dictionary-encoded tags are not currently supported in Orcapod"
+DICTIONARY_COLUMNS_NOT_SUPPORTED = (
+    "dictionary-encoded columns are not currently supported in Orcapod"
 )
-"""The start of the error for a dictionary-encoded tag (ITL-1264)."""
+"""The start of the error for a dictionary-encoded column (ITL-1264, ITL-1277)."""
 
 
-def require_tags_not_dictionary(
-    arrow_schema: "pa.Schema", tag_columns: Sequence[str]
-) -> None:
-    """Raise if a tag column's Arrow type is, or contains, a dictionary (ITL-1264).
+def dictionary_columns(
+    arrow_schema: "pa.Schema",
+) -> "list[tuple[str, pa.DataType, pa.DataType]]":
+    """Return every column whose Arrow type is, or contains, a dictionary.
 
-    Developer decision, November 18, 2026: dictionary-encoded tags are not currently
-    supported in Orcapod. A dictionary at the top level of a tag's type, or inside it
-    (a list or list-view item, a struct child, a map key or item, an extension type's
-    storage),
-    is refused here, where a stream gets its tags, and not far from the cause (a
-    sort by tags, a nullability restore, ``Batch``, ``GroupBy``). This is the one
-    rule: ``ArrowTableStream`` calls it for every source and operator result, and
-    the source builder first, before its key columns and its hash. Data columns are
-    not checked; a data-tag is a tag, so it is.
+    Developer decisions, November 18 and 19, 2026 (ITL-1264, ITL-1277): dictionary-encoded
+    columns are not currently supported in Orcapod, tags and data alike. A dictionary at
+    the top level of a column's type or inside it (a list, list-view or fixed-size list
+    item, a struct child, a map key or item, an extension type's storage) counts. A
+    library value in a cell (a pandas or polars data frame holding a categorical column)
+    is an extension column stored as bytes, not a dictionary, and does not count.
+
+    ``ArrowTableStream.__init__`` (every source and operator result becomes a stream
+    there) and the source builder (first, before its key columns and its hash) refuse
+    what this finds, with ``dictionary_columns_error``.
 
     Args:
-        arrow_schema: The Arrow schema of the table the tags are in.
-        tag_columns: The tag column names, in tag order; names the schema does not
-            have are skipped (the caller reports them).
+        arrow_schema: The Arrow schema of a table about to become a stream.
 
-    Raises:
-        InputValidationError: If a tag column holds a dictionary. The message names
-            every such column in tag order, with its type and the type it decodes to.
+    Returns:
+        ``(name, type, decoded type)`` for each such column, in schema order.
     """
     from orcapod.utils.arrow_utils import decode_dictionaries
 
-    found: list[str] = []
-    for name in tag_columns:
-        if name not in arrow_schema.names:
-            continue
-        arrow_type = arrow_schema.field(name).type
-        decoded = decode_dictionaries(arrow_type)
-        if decoded != arrow_type:
-            found.append(
-                f"tag column {name!r} has type {arrow_type} (decoded: {decoded})"
-            )
-    if found:
-        raise InputValidationError(
-            f"{DICTIONARY_TAGS_NOT_SUPPORTED}: "
-            + "; ".join(found)
-            + ". Decode each such column to its decoded type before building the "
-            "source or stream: with pyarrow, column.cast(column.type.value_type) "
-            "decodes a dictionary column (cast a column holding a dictionary inside "
-            "it to its decoded type); with polars, pl.col(name).cast(pl.String) "
-            "decodes a Categorical or Enum column."
-        )
+    found: list[tuple[str, pa.DataType, pa.DataType]] = []
+    for field in arrow_schema:
+        decoded = decode_dictionaries(field.type)
+        if decoded != field.type:
+            found.append((field.name, field.type, decoded))
+    return found
+
+
+def dictionary_columns_error(
+    found: "Sequence[tuple[str, pa.DataType, pa.DataType]]",
+    tag_columns: Collection[str],
+    data_tags: Collection[str],
+    system_tag_columns: Collection[str] = (),
+) -> InputValidationError:
+    """Return the error refusing the dictionary-encoded columns ``found``.
+
+    Its job is the report, so it takes the roles it names. A user's table can hold a
+    dictionary only in its own columns: Orcapod writes system tags, source info, the
+    data context and meta columns as plain strings, so a dictionary there comes from a
+    hand-built table, and is refused the same way.
+
+    Args:
+        found: The columns, as ``dictionary_columns`` returns them.
+        tag_columns: The stream's tag columns, in tag order.
+        data_tags: The tags that are data-tags.
+        system_tag_columns: Names the stream will read as system tags beside those with
+            the system-tag prefix.
+
+    Returns:
+        An ``InputValidationError`` naming each column (tags first, in tag order, then
+        the others in table order) with its role, its type and the type it decodes to,
+        and how to decode it.
+    """
+    from orcapod.system_constants import constants
+
+    tags = list(tag_columns)
+    refs = set(data_tags)
+    system = set(system_tag_columns)
+
+    def role(name: str) -> str:
+        if name in refs:
+            return "data-tag"
+        if name in tags:
+            return "tag"
+        if name in system or name.startswith(constants.SYSTEM_TAG_PREFIX):
+            return "system-tag"
+        if name.startswith(constants.SOURCE_PREFIX):
+            return "source-info"
+        if name == constants.CONTEXT_KEY:
+            return "data context"
+        if name.startswith(constants.META_PREFIX):
+            return "meta"
+        return "data"
+
+    ordered = sorted(
+        found,
+        key=lambda item: (0, tags.index(item[0])) if item[0] in tags else (1, 0),
+    )
+    lines = [
+        f"  - {role(name)} column {name!r} has type {arrow_type} (decoded: {decoded})"
+        for name, arrow_type, decoded in ordered
+    ]
+    return InputValidationError(
+        f"{DICTIONARY_COLUMNS_NOT_SUPPORTED}:\n"
+        + "\n".join(lines)
+        + "\nIf keeping the dictionary encoding is not important, decode each such "
+        "column before building the source or stream: with pyarrow, "
+        "column.cast(column.type.value_type) decodes a dictionary column (cast a "
+        "column holding a dictionary inside it to the decoded type shown); with "
+        "polars, pl.col(name).cast(pl.String) decodes a Categorical or Enum column."
+    )
 
 
 def require_names_not_system(names: Collection[str]) -> None:

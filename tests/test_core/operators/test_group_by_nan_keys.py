@@ -436,9 +436,9 @@ def test_a_time64_ns_key_is_rebuilt_from_its_python_value() -> None:
 
 # ── a dictionary-encoded key is refused (ITL-1264) ──────────────────────────
 #
-# Developer decision, November 18, 2026: dictionary-encoded tags are not currently
-# supported. Every stream refuses one when it is built (``ArrowTableStream`` and the
-# source builder, ``schema_utils.require_tags_not_dictionary``), so a dictionary-encoded
+# Developer decisions, November 18 and 19, 2026: dictionary-encoded columns (tags and
+# data) are not currently supported. Every stream refuses one when it is built
+# (``ArrowTableStream`` and the source builder, ``schema_utils.dictionary_columns``), so a dictionary-encoded
 # key never reaches ``GroupBy``: before ITL-1264, ITL-1234 chose such a float key by
 # the bits of its values. A hand-built channel fed to ``async_execute`` is not a
 # supported way to make a stream and is not covered.
@@ -489,7 +489,7 @@ def test_a_dictionary_encoded_key_is_refused_before_grouping(
         with pytest.raises(InputValidationError) as raised:
             build().group_by("k")
         message = str(raised.value)
-        assert "dictionary-encoded tags are not currently supported" in message
+        assert "dictionary-encoded columns are not currently supported" in message
         # Every encoded tag is named, in tag order.
         named = [name for name in tag_order if f"tag column {name!r}" in message]
         assert named == [name for name in tag_order if name in encoded]

@@ -359,9 +359,9 @@ class SourceStreamBuilder:
                 tag_columns or a key column are not in the table, a key column's
                 type is not allowed, a key value is null or repeated, or if
                 neither ``source_id`` nor ``source_kind`` is given.
-            InputValidationError: If a tag column's type is, or contains, a
-                dictionary: dictionary-encoded tags are not currently supported
-                (ITL-1264).
+            InputValidationError: If a column's type is, or contains, a
+                dictionary: dictionary-encoded columns are not currently supported
+                (ITL-1264, ITL-1277).
         """
         tag_columns_tuple = tuple(tag_columns)
         system_tag_columns_tuple = tuple(system_tag_columns)
@@ -397,10 +397,13 @@ class SourceStreamBuilder:
                 f"Available columns: {list(table.column_names)}"
             )
 
-        # Dictionary-encoded tags are not currently supported (ITL-1264). The stream
-        # refuses them too; checking first reports the dictionary, not a key column
-        # error, and before anything is hashed.
-        schema_utils.require_tags_not_dictionary(table.schema, tag_columns_tuple)
+        # Dictionary-encoded columns are not currently supported (ITL-1264,
+        # ITL-1277). The stream refuses them too; checking first reports the
+        # dictionary, not a key column error, and before anything is hashed.
+        if found := schema_utils.dictionary_columns(table.schema):
+            raise schema_utils.dictionary_columns_error(
+                found, tag_columns_tuple, data_tags_tuple, system_tag_columns_tuple
+            )
 
         # 3. The row identifiers (validates the key columns).
         identifiers = row_identifiers(
