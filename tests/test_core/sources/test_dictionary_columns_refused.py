@@ -46,6 +46,7 @@ from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.job import PipelineJob
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 from orcapod.types import Cursor, PollingConfig, Schema
+from orcapod.utils.arrow_utils import decode_dictionaries
 
 NOT_SUPPORTED = "dictionary-encoded columns are not currently supported in Orcapod"
 
@@ -125,6 +126,9 @@ def _assert_refused(
         if name not in named:
             assert f"column {name!r}" not in message
     assert "column.cast(column.type.value_type)" in message
+    assert (
+        "table.set_column(i, field.with_type(decoded), column.cast(decoded))" in message
+    )
     assert "pl.col(name).cast(pl.String)" in message
 
 
@@ -571,6 +575,46 @@ def test_a_table_decoded_with_pyarrow_builds(kind: str) -> None:
         )
     source = ArrowTableSource(table, tag_columns=["a", "b"], tag_only_columns=True)
     assert source.as_table(all_info=True).num_rows == 3
+
+
+def _decoded_type(message: str, name: str) -> str:
+    """The decoded type the error message gives for column ``name``."""
+    line = next(
+        text for text in message.splitlines() if f"column {name!r} has type" in text
+    )
+    return line.rsplit("(decoded: ", 1)[1].rstrip(")")
+
+
+@pytest.mark.parametrize("kind", ["list", "struct"])
+def test_a_nested_dictionary_decoded_as_the_message_says_builds(kind: str) -> None:
+    """The recipe for a column holding a dictionary inside it: cast it to the decoded type
+    the message gives, keeping the field (nullability and metadata).
+
+    Lists and structs: pyarrow cannot cast a list view or a run-end-encoded column, and a
+    source refuses those types whatever they hold (the Arrow hasher cannot hash them).
+    """
+    nested = _nested(kind)
+    table = _nested_table(nested, "w", "tags_first")
+    schema = table.schema.set(
+        table.schema.get_field_index("w"),
+        table.schema.field("w").with_nullable(False).with_metadata({"note": "kept"}),
+    )
+    table = pa.Table.from_arrays(table.columns, schema=schema)
+    with pytest.raises(InputValidationError) as info:
+        ArrowTableSource(table, tag_columns=["a", "b"], tag_only_columns=True)
+    assert _decoded_type(str(info.value), "w") == DECODED[kind]
+    decoded = decode_dictionaries(table.schema.field("w").type)
+    assert str(decoded) == DECODED[kind]
+    field = table.schema.field("w")
+    table = table.set_column(
+        table.schema.get_field_index("w"),
+        field.with_type(decoded),
+        table["w"].cast(decoded),
+    )
+    stream = ArrowTableStream(table, tag_columns=["a", "b"])
+    kept = stream.as_table().schema.field("w")
+    assert not kept.nullable
+    assert (kept.metadata or {}).get(b"note") == b"kept"
 
 
 @pytest.mark.parametrize("dtype", ["Categorical", "Enum"])

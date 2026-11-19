@@ -782,10 +782,12 @@ def dictionary_columns_error(
         f"{DICTIONARY_COLUMNS_NOT_SUPPORTED}:\n"
         + "\n".join(lines)
         + "\nIf keeping the dictionary encoding is not important, decode each such "
-        "column before building the source or stream: with pyarrow, "
-        "column.cast(column.type.value_type) decodes a dictionary column (cast a "
-        "column holding a dictionary inside it to the decoded type shown); with "
-        "polars, pl.col(name).cast(pl.String) decodes a Categorical or Enum column."
+        "column before building the source or stream. With pyarrow, cast it to its "
+        "decoded type (column.cast(column.type.value_type) for a dictionary column, "
+        "the decoded type shown for a column holding a dictionary inside it) and "
+        "replace it keeping its field: table.set_column(i, field.with_type(decoded), "
+        "column.cast(decoded)). With polars, pl.col(name).cast(pl.String) decodes a "
+        "Categorical or Enum column."
     )
 
 

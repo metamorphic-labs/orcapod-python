@@ -1091,6 +1091,20 @@ class _TestDictExt(pa.ExtensionType):
 _DICT = pa.dictionary(pa.int32(), pa.string())
 
 
+class _StorageExt(pa.ExtensionType):
+    """An extension type over any storage, for the decode_dictionaries tests."""
+
+    def __init__(self, storage: pa.DataType) -> None:
+        super().__init__(storage, "orcapod.test.storage_ext")
+
+    def __arrow_ext_serialize__(self) -> bytes:
+        return b"{}"
+
+    @classmethod
+    def __arrow_ext_deserialize__(cls, storage_type, serialized):
+        return cls(storage_type)
+
+
 class TestDecodeDictionaries:
     """``decode_dictionaries`` (ITL-1264): every dictionary becomes its value type."""
 
@@ -1140,6 +1154,18 @@ class TestDecodeDictionaries:
                 pa.large_list(pa.large_list(pa.string())),
             ),
             (_TestDictExt(), pa.string()),
+            (pa.dictionary(pa.int32(), _DICT), pa.string()),  # pyright: ignore[reportArgumentType]  # the stubs accept only basic value types; Arrow takes a dictionary
+            (
+                pa.sparse_union([pa.field("s", _DICT), pa.field("i", pa.int8())]),
+                pa.sparse_union([pa.field("s", pa.string()), pa.field("i", pa.int8())]),
+            ),
+            (pa.map_(_DICT, pa.int64()), pa.map_(pa.string(), pa.int64())),
+            (_StorageExt(pa.large_list(_DICT)), pa.large_list(pa.string())),
+            (_StorageExt(pa.large_list_view(_DICT)), pa.large_list_view(pa.string())),
+            (
+                _StorageExt(pa.run_end_encoded(pa.int32(), _DICT)),  # pyright: ignore[reportArgumentType]  # the stubs accept only basic value types; Arrow takes a dictionary
+                pa.run_end_encoded(pa.int32(), pa.string()),
+            ),
         ],
     )
     def test_every_dictionary_is_decoded(self, arrow_type, decoded):
