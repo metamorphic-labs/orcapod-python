@@ -16,7 +16,7 @@ from __future__ import annotations
 import itertools
 import json
 import struct
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 import pytest
