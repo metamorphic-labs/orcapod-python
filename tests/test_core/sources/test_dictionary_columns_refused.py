@@ -80,7 +80,7 @@ TAG_ORDERS = [("a", "b"), ("b", "a")]
 # Tags, data, both, one of each, all.
 ENCODED = [("a",), ("a", "b"), ("v",), ("v", "w"), ("b", "w"), ("a", "b", "v", "w")]
 DATA = ("v", "w")
-ALL = ("a", "b", "v", "w")
+ALL: tuple[str, ...] = ("a", "b", "v", "w")
 
 
 def _table(kind: str, encoded: tuple[str, ...], data_first: bool = False) -> pa.Table:
