@@ -322,6 +322,8 @@ def _mock_source_with_the_slots_system_tags(
     mock_source = MagicMock()
     mock_source.output_schema.side_effect = output_schema
     mock_source.keys.return_value = (tag_keys, tuple(data_schema.keys()))
+    # The Arrow schemas a source states, which bind compares (ITL-640).
+    mock_source.arrow_schemas = node.arrow_schemas
     return mock_source
 
 

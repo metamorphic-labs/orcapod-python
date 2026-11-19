@@ -26,7 +26,11 @@ from __future__ import annotations
 
 import pyarrow as pa
 
-from orcapod.hashing.arrow_hashers import ARROW_HASH_LABEL, StarfixArrowHasher
+from orcapod.hashing.arrow_hashers import (
+    ARROW_HASH_LABEL,
+    ARROW_SCHEMA_HASH_LABEL,
+    StarfixArrowHasher,
+)
 from orcapod.hashing.versioned_hashers import (
     get_versioned_semantic_arrow_hasher,
 )
@@ -64,10 +68,11 @@ class TestHashSchema:
         h = _make_hasher().hash_schema(schema)
         assert isinstance(h, ContentHash)
 
-    def test_method_is_hasher_id(self):
+    def test_method_is_the_schema_label(self):
+        """A schema hash is its own procedure, with its own label (ITL-640)."""
         schema = pa.schema([pa.field("x", pa.int32())])
         h = _make_hasher().hash_schema(schema)
-        assert h.method == HASHER_ID
+        assert h.method == ARROW_SCHEMA_HASH_LABEL == "arrow_schema_v1"
 
     def test_digest_length(self):
         schema = pa.schema([pa.field("x", pa.int32())])

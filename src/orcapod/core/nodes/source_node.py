@@ -24,6 +24,7 @@ from orcapod.core.datagrams import Data, Tag
 from orcapod.core.operators.drop_nulls import _without_none  # pyright: ignore[reportPrivateUsage]  # DropNulls' rule for removing None from a type, shared, never copied
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
+    ZERO_ROW_INPUT_COLUMNS,
     schema_requires_io,
     typed_arrow_schemas,
     typed_zero_row_table,
@@ -1474,10 +1475,37 @@ class SourceJobNode(SourceNodeBase):
         table (ITL-1112, ITL-912). ``None`` when unbound or when the source cannot type
         its rows without rows. See ``typed_zero_row_table``.
         """
+        if self._bound_source is None:
+            return self._declared_zero_row_table()
         table = typed_zero_row_table(self._bound_source)
         if table is None or self._declared_form is None:
             return table
         return self._declared_form.apply(table)
+
+    def _declared_zero_row_table(self) -> "pa.Table | None":
+        """An unbound slot's zero-row table, typed by the slot's own Arrow schemas.
+
+        A slot made from a stream, or rebuilt from a saved job, holds the Arrow types
+        of its columns (ITL-640): its rows will have them, since a bind accepts only a
+        source of those types. A slot declared with Python types only, or one with a
+        column whose class is not registered, answers ``None`` (the declared Python
+        schema stands in, ITL-1089).
+        """
+        if self._given_arrow_schemas is None or self._pending_types:
+            return None
+        tag_schema, data_schema = self.output_schema(columns=ZERO_ROW_INPUT_COLUMNS)
+        own = {field.name: field for schema in self.arrow_schemas for field in schema}
+        fields = []
+        for name, python_type in {**tag_schema, **data_schema}.items():
+            if name in own:
+                fields.append(own[name])
+            else:
+                fields.append(
+                    declared_arrow_schema(
+                        {name: python_type}, self.data_context.type_converter
+                    ).field(name)
+                )
+        return pa.Table.from_batches([], schema=pa.schema(fields))
 
     def _schema_requires_io(self, config: ColumnConfig) -> bool:
         """Whether reading the schema with ``config`` would poll: as for the bound source."""

@@ -12,6 +12,10 @@ from orcapod.types import ContentHash, Schema, SchemaLike
 
 if TYPE_CHECKING:
     import pyarrow as pa
+else:
+    from orcapod.utils.lazy_module import LazyModule
+
+    pa = LazyModule("pyarrow")
 
 logger = logging.getLogger(__name__)
 
@@ -505,8 +509,25 @@ def arrow_schema_identity(
     Returns:
         The labelled hashes of the tag schema and of the data schema.
     """
+    return _hash_schema(tag_schema, data_context), _hash_schema(
+        data_schema, data_context
+    )
+
+
+def _hash_schema(schema: "pa.Schema", data_context: Any) -> ContentHash:
+    """``hash_schema`` of ``schema``; a logical type it cannot read names its column."""
+    from orcapod.logical_types.identifier import LogicalTypeIdentifierError
+
     hasher = data_context.arrow_hasher
-    return hasher.hash_schema(tag_schema), hasher.hash_schema(data_schema)
+    try:
+        return hasher.hash_schema(schema)
+    except LogicalTypeIdentifierError as exc:
+        for field in schema:
+            try:
+                hasher.hash_schema(pa.schema([field]))
+            except LogicalTypeIdentifierError as column_exc:
+                raise column_exc.for_column(field.name) from exc
+        raise
 
 
 def declared_arrow_schema(schema: SchemaLike, converter: Any) -> "pa.Schema":

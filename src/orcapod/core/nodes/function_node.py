@@ -738,8 +738,34 @@ class FunctionNodeBase(StreamBase):
         from orcapod.core.function_pod import function_zero_row_table
 
         return function_zero_row_table(
-            self._input_stream, self.output_schema()[1], self.data_context
+            self._input_stream,
+            self.output_schema()[1],
+            self.data_context,
+            output_arrow_schema=self._saved_output_arrow_schema(),
         )
+
+    def _saved_output_arrow_schema(self) -> "pa.Schema | None":
+        """A loaded node's output data types as saved, or ``None`` for a live one.
+
+        The saved text holds the Arrow types the node's rows were stored with; the
+        Python types restored from it can stand for several (``set[int8]`` reads as
+        ``set[int]``), so the zero-row table of a loaded node takes the saved Arrow
+        types themselves (ITL-640).
+        """
+        if self._function_pod is not None or not self._stored_schema:
+            return None
+        from orcapod.pipeline.serialization import deserialize_arrow_schema
+
+        saved = self._stored_schema
+        nullable = saved.get("nullable")
+        try:
+            return deserialize_arrow_schema(
+                saved.get("data", {}),
+                self.data_context.type_converter,
+                None if nullable is None else nullable.get("data", []),
+            )
+        except (ValueError, TypeError):
+            return None
 
     def _typed_zero_row_table(self) -> "pa.Table | None":
         """This node's zero-row table, without calling the function (ITL-912)."""

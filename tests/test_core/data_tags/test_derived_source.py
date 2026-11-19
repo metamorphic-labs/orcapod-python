@@ -33,6 +33,7 @@ from orcapod.pipeline import (
 )
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.types import CacheMode, NodeConfig
+from orcapod.utils.schema_utils import arrow_schema_identity
 
 JOB = "derived"
 DATA_TAG_KEYS = (("unit", "time"), ("unit", "y"))
@@ -274,9 +275,13 @@ def test_the_binding_enters_the_identity_through_the_origin_and_the_schema() -> 
         with_data_tags._origin.content_hash(),  # pyright: ignore[reportPrivateUsage]  # the identity rule under test
     )
     assert with_data_tags.content_hash() != plain.content_hash()
-    # Pipeline hash: schema only; a data-tag is in both halves of it.
-    assert (
-        with_data_tags.pipeline_identity_structure() == with_data_tags.output_schema()
+    # Pipeline hash: schema only, the Arrow schemas (ITL-640); a data-tag is in both
+    # halves of it.
+    tag_schema, data_schema = with_data_tags.arrow_schemas
+    assert "unit" in tag_schema.names
+    assert "unit" in data_schema.names
+    assert with_data_tags.pipeline_identity_structure() == arrow_schema_identity(
+        tag_schema, data_schema, with_data_tags.data_context
     )
     assert with_data_tags.pipeline_hash() != plain.pipeline_hash()
     # The default source id keeps its construction: derived:<label>:<hex> of the origin.

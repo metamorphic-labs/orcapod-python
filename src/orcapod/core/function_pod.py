@@ -1075,6 +1075,7 @@ def function_zero_row_table(
     output_schema: Schema,
     data_context: contexts.DataContext,
     meta_python_schema: Schema | None = None,
+    output_arrow_schema: pa.Schema | None = None,
 ) -> pa.Table | None:
     """The table a function pod's output rows give over ``input_stream``, with no row.
 
@@ -1092,6 +1093,8 @@ def function_zero_row_table(
         output_schema: The function's declared output schema.
         data_context: The data context the output rows are typed in.
         meta_python_schema: The meta columns every output row carries, if any.
+        output_arrow_schema: The output columns' Arrow types when known apart from
+            ``output_schema`` (a loaded node's saved types, ITL-640).
 
     Returns:
         User tags, system tags, data, ``_context_key``, meta and source-info columns, or
@@ -1110,7 +1113,7 @@ def function_zero_row_table(
     tag_keys = input_stream.keys()[0]
     tags = input_table.select([*tag_keys, *system_tags])
     data = Data.function_output_zero_row_table(
-        output_schema, data_context, meta_python_schema
+        output_schema, data_context, meta_python_schema, output_arrow_schema
     )
     # A data-tag that falls through the pod is one column, laid out from the
     # tags with its source info in the data, as rows lay it out (ITL-1023).
