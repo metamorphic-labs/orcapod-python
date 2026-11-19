@@ -76,7 +76,7 @@ class TestSideEffectFunctionPodSchema:
             FunctionPod.from_fn(my_fn, output_keys=["result"], ctx_arg_name="ctx")
 
     def test_sf10_node_uri_shape(self):
-        """SF-10: uri[0]=='side_effect_function', uri[-1]=='python.function.v0', len==5."""
+        """SF-10: uri[0]=='side_effect_function', uri[-1]=='python.function.v1', len==5."""
         from orcapod.core.function_pod import FunctionPod
 
         def my_fn(value: int, ctx: InvocationContext) -> str:
@@ -84,7 +84,7 @@ class TestSideEffectFunctionPodSchema:
 
         pod = FunctionPod.from_fn(my_fn, output_keys=["result"], ctx_arg_name="ctx")
         assert pod.uri[0] == "side_effect_function"
-        assert pod.uri[-1] == "python.function.v0"
+        assert pod.uri[-1] == "python.function.v1"
         assert len(pod.uri) == 5
         assert (
             pod.uri[3] == "v0"

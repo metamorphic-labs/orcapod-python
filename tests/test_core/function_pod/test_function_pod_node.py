@@ -715,4 +715,4 @@ class TestFunctionNodeResultPath:
         from orcapod.system_constants import RESULT_DB_SCHEMA_VERSION
 
         result_path = node._cached_function_pod.record_path
-        assert result_path == pod.uri + (RESULT_DB_SCHEMA_VERSION,)
+        assert result_path == pod.uri + ("rev1", RESULT_DB_SCHEMA_VERSION)

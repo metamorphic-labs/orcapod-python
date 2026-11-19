@@ -517,7 +517,7 @@ def test_newer_unavailable_result_does_not_expose_old_persistent_result(
 
     path = _save_small_job(tmp_path, _record_double)
     store = DeltaTableDatabase(str(tmp_path / "store"))
-    (table_path,) = [p for p in store.list_sources() if p[-1] == "pdb_v2"]
+    (table_path,) = [p for p in store.list_sources() if p[-1] == "pdb_v1"]
     records = store.get_all_records(table_path, record_id_column="__rid")
     assert records is not None
     # Public database writes reproduce historical recomputations without executing a pod.

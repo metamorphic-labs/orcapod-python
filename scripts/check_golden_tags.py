@@ -275,6 +275,100 @@ def check_tag(repo: Path, tag: str, version: str) -> list[str] | None:
     return problems
 
 
+TYPE_SNAPSHOTS = PurePosixPath("src/orcapod/data_function_types")
+"""The data function type snapshots and their pins (``released.json``; ITL-1259)."""
+
+
+def check_type_snapshots(repo: Path, tag: str) -> list[str]:
+    """What HEAD changed of the data function type snapshots ``tag`` released.
+
+    Every snapshot the tag's ``released.json`` pins (a ``sha256`` that is not null)
+    must be at HEAD with the same bytes, and pinned there with the same ``sha256`` and
+    version: rewriting a released snapshot together with its pin is caught here, as a
+    released golden file is. A tag without the folder released no snapshot.
+
+    Args:
+        repo: The repository.
+        tag: The release tag.
+
+    Returns:
+        One problem per changed snapshot or pin; empty when HEAD keeps them.
+    """
+    pins_path = TYPE_SNAPSHOTS / "released.json"
+    released = _show_json(repo, tag, pins_path)
+    if not isinstance(released, dict):
+        return []
+    current = _show_json(repo, "HEAD", pins_path)
+    current = current if isinstance(current, dict) else {}
+    problems: list[str] = []
+    for relative, pin in sorted(released.items()):
+        if not isinstance(pin, dict) or pin.get("sha256") is None:
+            continue
+        if current.get(relative) != pin:
+            problems.append(
+                f"{tag}: the pin of data function type snapshot {relative} changed "
+                f"({pin} at the tag, {current.get(relative)} at HEAD)"
+            )
+        path = TYPE_SNAPSHOTS / relative
+        if _show(repo, "HEAD", path) != _show(repo, tag, path):
+            problems.append(
+                f"{tag}: data function type snapshot {relative} changed or is missing; "
+                "a released snapshot never changes (give the type a new revision)"
+            )
+    return problems
+
+
+def unpinned_type_snapshots(repo: Path) -> list[str]:
+    """The data function type snapshots at HEAD that a release would ship unpinned.
+
+    Every snapshot file under ``TYPE_SNAPSHOTS`` (other than ``released.json``) must be
+    listed in HEAD's ``released.json`` with a ``sha256`` that is not null and equals the
+    file's: a snapshot added or changed after the release step would otherwise ship open,
+    and no later tag check would protect it (ITL-1259). A HEAD without the folder has no
+    snapshot to pin; a listing or a file git cannot read is a problem, never a pass.
+
+    Args:
+        repo: The repository.
+
+    Returns:
+        One problem per open, missing or mismatched pin, or per path git cannot read;
+        empty when every snapshot is pinned.
+    """
+    import hashlib
+
+    listed = _git(
+        repo, "ls-tree", "-r", "-z", "--name-only", "HEAD", str(TYPE_SNAPSHOTS)
+    )
+    if listed.returncode != 0:
+        detail = listed.stderr.decode(errors="replace").strip()
+        return [f"git cannot list the data function type snapshots at HEAD: {detail}"]
+    pins = _show_json(repo, "HEAD", TYPE_SNAPSHOTS / "released.json")
+    pins = pins if isinstance(pins, dict) else {}
+    problems: list[str] = []
+    names = [name for name in listed.stdout.decode().split("\0") if name]
+    for name in sorted(names):
+        path = PurePosixPath(name)
+        relative = path.relative_to(TYPE_SNAPSHOTS).as_posix()
+        if relative == "released.json" or path.suffix != ".json":
+            continue
+        pin = pins.get(relative)
+        sha = pin.get("sha256") if isinstance(pin, dict) else None
+        if sha is None:
+            problems.append(
+                f"data function type snapshot {relative} is not pinned: run "
+                "generate_golden_hashes.py --release after adding it (a new version)"
+            )
+            continue
+        data = _show(repo, "HEAD", path)
+        if data is None:
+            problems.append(f"git cannot read data function type snapshot {relative}")
+        elif sha != hashlib.sha256(data).hexdigest():
+            problems.append(
+                f"data function type snapshot {relative} does not match its pin"
+            )
+    return problems
+
+
 def check_release(repo: Path, release: str) -> list[str]:
     """Check that HEAD records a release of the current data context, before it is tagged.
 
@@ -333,6 +427,7 @@ def check_release(repo: Path, release: str) -> list[str]:
             f"tag the commit of the release step, or run --release {release} again after "
             "the addition (a new version)"
         )
+    problems.extend(unpinned_type_snapshots(repo))
     return problems
 
 
@@ -388,6 +483,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     checked: list[str] = []
     problems: list[str] = []
     for tag in sorted(tags):
+        # The data function type snapshots do not belong to a data context.
+        problems.extend(check_type_snapshots(args.repo, tag))
         found = check_tag(args.repo, tag, version)
         if found is None:
             continue

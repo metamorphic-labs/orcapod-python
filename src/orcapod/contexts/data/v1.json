@@ -235,26 +235,26 @@
                 "added": {
                     "arrow-01.json": "c66fa55619178f2631d04232555cd58059813e97e9ecd2b9de9e63699e60c964",
                     "datagram-01.json": "598d4a2851819d76ba674e189222e61733ca1861ca82a59e990a8ee5e1b0a7b3",
-                    "pipeline-01.json": "a17a0c3690cb28c7a1d3f1509e90870b92ca5e9ba3eb9c2fdc77353b1dc9f9c8",
+                    "pipeline-01.json": "538958d92057f903d72d5c9e9b35fad23f40078638f4f2291865a536fb643035",
                     "schema-01.json": "79aa2a068e0724891cf43ee528ce8f569e65f08864faa5e34773bfc69ac9576e",
                     "semantic-01.json": "45840a7406d232a7686e55805aabe5953594409b447ed175fdff791c49a3f947",
                     "torch-01.json": "af2e8b68d66dffaa37e1d0ad75acd42f595d65b9fae00ddcde81bf9e13a265c8"
                 },
                 "previous": null,
-                "digest": "ba5b3f91710cfa607d16df622635b944b47ecd4b027573ab42a0b2b9a97d9357"
+                "digest": "28731f440e29a6004d4cfc9318909a10013abcf9488975e15d4864e9544e73c9"
             },
             {
                 "date": "2026-11-18",
                 "release": null,
                 "added": {
-                    "pipeline-02.json": "7778b4c69ff706debbcbd9fc67dbe5b723df56252158be8253f8751326a5bd41"
+                    "pipeline-02.json": "e5fbe9dd43df61554209ec5261a9c1bdd8059ec6d0d0959f882d1c42170bbb6b"
                 },
-                "previous": "ba5b3f91710cfa607d16df622635b944b47ecd4b027573ab42a0b2b9a97d9357",
-                "digest": "6b58f517a408ddd48a5742e4e83cd15079c8508840f462107e758c2c7bd98af0"
+                "previous": "28731f440e29a6004d4cfc9318909a10013abcf9488975e15d4864e9544e73c9",
+                "digest": "0aeb96ad884544d3d8e9374834a3520041fe693b1c0aa2edacacff17a07ab146"
             }
         ],
         "provisional": {
-            "pipeline.json": "e3825b41865f33b8ae1e2166a191be7f453b997c974e3a83eebcd389bf6349e7",
+            "pipeline.json": "42d588512ad1ba11acf6725f8424e28bd85c7a75c0dda5ac129d79e4c07a3322",
             "semantic.json": "0adfab60f8ced647d841d0a74a0603096b00fab310a8f4686246309d5fb39d3d"
         }
     },
