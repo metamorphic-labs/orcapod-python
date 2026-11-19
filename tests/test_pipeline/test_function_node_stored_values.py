@@ -151,13 +151,13 @@ ORCHESTRATORS: dict[str, Callable[[], Any]] = {
 
 
 # Delta Lake stores fixed_size_binary as large_binary: a reused node's tag comes back
-# with another type, so a node over it records new entries (also on main; not this
-# read path).
+# with another type, so a node over it records new entries (ITL-999; also on main; not
+# this read path).
 DELTA_CHANGES_TYPE = pytest.mark.xfail(
     strict=True,
-    reason="Delta Lake stores fixed_size_binary as large_binary, so the downstream node's "
-    + "entries repeat on a reuse run; a type the database does not keep (reported "
-    + "with ITL-1295, not the Polars read)",
+    reason="ITL-999: Delta Lake stores fixed_size_binary as large_binary, so the "
+    + "downstream node's entries repeat on a reuse run (a type the database does not "
+    + "keep, not the Polars read)",
 )
 
 
