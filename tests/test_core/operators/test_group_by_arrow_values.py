@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import decimal
 import itertools
+import json
 from typing import Any, TypeAlias, cast
 
 import pyarrow as pa
@@ -22,6 +23,7 @@ import pytest
 
 import orcapod as op
 from orcapod.core.operators import GroupBy
+from orcapod.core.operators.group_by import GROUP_BY_FOLD_LABEL
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import InputValidationError
@@ -32,6 +34,8 @@ from orcapod.pipeline import (
 )
 from orcapod.core.streams.base import StreamBase
 from orcapod.protocols.core_protocols import StreamProtocol
+from orcapod.system_constants import constants
+from orcapod.utils import arrow_utils
 
 from .several_items import async_rows
 
@@ -568,3 +572,54 @@ def test_a_tag_without_an_order_is_refused_in_every_role(name: str) -> None:
             _ = async_rows(GroupBy(by), stream)
     kept = stream.select_tag_columns(["g", "u"])
     assert GroupBy("g")(kept).as_table().column("v").to_pylist() == [[0, 1], [2]]
+
+
+# ── every list follows one member order: the lists are parallel by origin row ──
+
+
+@pytest.mark.parametrize("roles", ["plain", "data_tags", "mixed"])
+def test_every_list_and_fold_follows_one_member_order(roles: str) -> None:
+    """Element i of every data list, every source-info list and the folded record id
+    belong to one origin row, in every row order (developer, November 19, 2026).
+
+    The data columns are anti-correlated (``a`` rises where ``b`` falls), so a list
+    sorted by its own values would come out in another order than its neighbours.
+    """
+    columns: dict[str, Column] = {
+        "g": pa.array([1, 2, 1, 1, 2, 1], pa.int64()),
+        "t": pa.array([3, 0, 1, 2, 1, 0], pa.int64()),
+        "u": pa.array([0, 1, 1, 0, 0, 1], pa.int64()),
+        "rid": pa.array([f"r{i}" for i in range(6)], pa.large_string()),
+        "a": pa.array([10, 11, 12, 13, 14, 15], pa.int64()),
+        "b": pa.array([5.0, 4.0, 3.0, 2.0, 1.0, 0.0], pa.float64()),
+        "c": _ints([600, 500, 400, 300, 200, 100], NS),
+    }
+    row_of_a = {10 + i: f"r{i}" for i in range(6)}
+    plain = {"plain": None, "data_tags": [], "mixed": ["u"]}[roles]
+    for order in itertools.permutations(range(6)):
+        source = _source(_permuted(columns, order), ["g", "t", "u"], plain=plain)
+        for member_order in (None, ["u"]):
+            table = source.group_by("g", member_order=member_order).as_table(
+                all_info=True
+            )
+            [record_column] = [
+                name
+                for name in table.column_names
+                if name.startswith(constants.SYSTEM_TAG_RECORD_ID_PREFIX)
+            ]
+            exact_c = _exact(table.column("c"))
+            for index, row in enumerate(table.to_pylist()):
+                rows = [row_of_a[a] for a in row["a"]]
+                # Every data list holds the values of those rows, in that order
+                # (``c`` read from Arrow: as Python it would lose its nanoseconds).
+                assert row["b"] == [5.0 - int(r[1:]) for r in rows]
+                assert exact_c[index] == [600 - 100 * int(r[1:]) for r in rows]
+                # Every source-info list names the same rows, in the same order.
+                for name in ("a", "b", "c"):
+                    tokens = row[f"{constants.SOURCE_PREFIX}{name}"]
+                    assert [json.loads(t.split("::")[1])["rid"] for t in tokens] == rows
+                # The folded record id is the fold of the same rows, in that order.
+                assert row[record_column] == arrow_utils.fold_system_tag_values(
+                    [json.dumps({"rid": r}, separators=(",", ":")) for r in rows],
+                    label=GROUP_BY_FOLD_LABEL,
+                )
