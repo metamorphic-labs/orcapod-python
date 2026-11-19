@@ -1939,7 +1939,9 @@ def sort_by_tag_columns(table: "pa.Table", tag_keys: tuple[str, ...]) -> "pa.Tab
     result does not depend on the order the rows arrived in whenever the table has system
     tags. A table with neither is returned as it is. A caller that must keep the order of
     a stream with no regular tag column does not call this for it. A tag type Arrow cannot
-    order (a list) is ordered with Polars, nulls last.
+    order (a list, or a struct holding one) is ordered with Polars over the prepared keys
+    only, nulls last at every depth, inside a list or a struct too, as Arrow orders a
+    struct (``_tag_order_by_polars``); the rows are taken from ``table``.
 
     Whole rows move together: a column added to ``table`` before the sort (a content hash)
     stays with its row. Column types and nullability are those of ``table``. Sort before
@@ -1961,14 +1963,53 @@ def sort_by_tag_columns(table: "pa.Table", tag_keys: tuple[str, ...]) -> "pa.Tab
     try:
         return table.sort_by([(key, "ascending") for key in keys])
     except (pa.ArrowNotImplementedError, pa.ArrowTypeError):
-        import polars as pl
+        return table.take(_tag_order_by_polars(table, keys))
 
-        sorted_table = (
-            pl.DataFrame(table)
-            .sort(by=keys, descending=False, nulls_last=True, maintain_order=True)
-            .to_arrow()
-        )
-        return restore_schema_nullability(sorted_table, table.schema)
+
+def _tag_order_by_polars(table: "pa.Table", keys: list[str]) -> "pa.Array[Any]":
+    """Return the row numbers of ``table`` in tag order, ordered with Polars.
+
+    For a tag Arrow cannot order (a list, or a struct holding one). Polars sees only the key
+    columns, prepared (``arrow_keys.polars_key_frame``: a ``date64`` as its integer, a
+    ``decimal256`` as its limbs, ...), and the row numbers; the caller takes the rows
+    from ``table``, so every value is the table's own (ITL-1295). The order is
+    ``arrow_keys.sort_key``: ascending, nulls last, inside a list or a struct too; rows
+    equal on every key keep their order.
+
+    Args:
+        table: The table to order.
+        keys: The columns to order by, in priority.
+
+    Returns:
+        The row numbers, as an ``int64`` array.
+
+    Raises:
+        TypeError: When a key's type holds a part with no order (a map, an interval, a
+            union, a list view), naming the column.
+    """
+    from orcapod.core.operators import arrow_keys
+
+    for key in keys:
+        arrow_type = table.schema.field(key).type
+        part = arrow_keys.part_without_rule(arrow_type, structs=True)
+        if part is not None:
+            raise TypeError(
+                f"cannot order rows by the tag {key!r}: its type {arrow_type} holds "
+                + f"{part}, which has no order (a map, an interval, a union or a list "
+                + "view has none)"
+            )
+    names = [f"key{index}" for index in range(len(keys))]
+    # Frame names of the frame's own: no key can clash with the row-number column.
+    frame = arrow_keys.polars_key_frame(
+        table.select(keys).rename_columns(names), names, "row"
+    )
+    ordered = frame.sort(
+        [arrow_keys.sort_key(name, frame.schema[name]) for name in names],
+        descending=False,
+        nulls_last=True,
+        maintain_order=True,
+    )
+    return ordered.get_column("row").to_arrow()
 
 
 if __name__ == "__main__":

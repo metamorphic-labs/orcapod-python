@@ -22,8 +22,10 @@ Prepared for equality and order alike:
 Every other type (a map, an interval, a union, a list view, ...) has no rule:
 ``part_without_rule`` names it, and the caller refuses the column, naming it.
 
-``Join`` and ``SemiJoin`` use this module. ``GroupBy`` keeps its own copy until
-ITL-1281 makes it import this one (its rule refuses structs: ``structs=False``).
+``Join`` and ``SemiJoin`` use this module, and so does the order every presentation
+uses (``arrow_utils.sort_by_tag_columns``, when Arrow cannot sort: a list or struct
+tag), which orders by ``sort_key``. ``GroupBy`` keeps its own copy until ITL-1281
+makes it import this one (its rule refuses structs: ``structs=False``).
 """
 
 from __future__ import annotations
@@ -306,3 +308,59 @@ def polars_key_frame(
     return cast(
         "pl.DataFrame", pl.from_arrow(pa.Table.from_arrays(arrays, names=names))
     )
+
+
+def _null_last(expr: "pl.Expr", dtype: object) -> "pl.Expr":
+    """Return a list element or struct field as an ``(is_null, value)`` pair: null last."""
+    return pl.struct(
+        expr.is_null().alias("null"), _nulls_inside_last(expr, dtype).alias("value")
+    )
+
+
+def _nulls_inside_last(expr: "pl.Expr", dtype: object) -> "pl.Expr":
+    """Return ``expr`` with every null inside it ordered after the values beside it.
+
+    The elements of a list and the fields of a struct, at every depth, become
+    ``(is_null, value)`` pairs. A null list or struct stays null: the sort's
+    ``nulls_last`` (or the pair it is in) puts it last.
+
+    Args:
+        expr: A prepared column, or a part of one.
+        dtype: Its Polars type.
+
+    Returns:
+        The expression to order by.
+    """
+    if isinstance(dtype, pl.List):
+        return expr.list.eval(_null_last(pl.element(), dtype.inner))
+    if isinstance(dtype, pl.Struct):
+        return pl.when(expr.is_not_null()).then(
+            pl.struct(
+                _null_last(expr.struct.field(field.name), field.dtype).alias(field.name)
+                for field in dtype.fields
+            )
+        )
+    return expr
+
+
+def sort_key(name: str, dtype: object) -> "pl.Expr":
+    """Return the expression a prepared key column is ordered by: nulls last, at every depth.
+
+    Sorted with ``nulls_last``, a null value orders last. Polars puts a null INSIDE a
+    list or a struct first, so every list element and struct field, at every depth, is
+    ordered through an ``(is_null, value)`` pair: a null after every value, as Arrow
+    orders a struct's fields and ``GroupBy`` a list's elements (ITL-1226). A list orders
+    element by element, a shorter one first when it is a prefix; a struct field by
+    field. A NaN orders after every number and before null; Polars ties ``0.0`` with
+    ``-0.0``.
+
+    Args:
+        name: The column's name in the frame.
+        dtype: Its Polars type (``frame.schema[name]``).
+
+    Returns:
+        The expression to sort by.
+    """
+    # ``object``: a Polars data type is an instance or a class (``PolarsDataType``,
+    # which Polars keeps private).
+    return _nulls_inside_last(pl.col(name), dtype)

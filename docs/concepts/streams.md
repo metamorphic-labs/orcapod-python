@@ -112,6 +112,12 @@ only what is readily available, never compute, poll or deliver a row (they read 
 code (a function, a predicate, a side effect) and never write to a database. `run()` computes
 (see "Computing a stream outside a job" below).
 
+Tag order is ascending by the tag columns, in the stream's tag order, then by the record
+ids. A null goes last, and so does a null inside a list or a struct: a list tag is ordered
+element by element (a shorter list first when it is the start of a longer one), a struct
+field by field. Sorting moves whole rows and never changes a value: every value shown is
+the stream's own, whatever its Arrow type.
+
 With no rows to show, a head still has the columns and Arrow types the rows would have. To
 learn them it applies each operator to empty (zero-row) tables, which processes no data: a
 chain of N operators applies up to N operators to empty tables (about 60 ms for 20). A filter
