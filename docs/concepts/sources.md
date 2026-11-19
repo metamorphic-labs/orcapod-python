@@ -235,8 +235,11 @@ operator:
 - A restriction is attached to the source. It chooses which of the source's rows flow and
   changes nothing else: the restricted source has the same `source_id`, `content_hash`,
   `pipeline_hash`, schema and system-tag columns as the unrestricted one, and every row it
-  reads is the unrestricted source's row, record ID included. It adds no node, so a job
-  bound to a restricted source is the same job, run over fewer rows.
+  reads is a row of the table with every column, record ID included, as the unrestricted
+  source reads it. With `limit=`, the conditions apply before the limit, so a restricted read
+  with a limit is not a part of an unrestricted read with the same limit; each matching row
+  still keeps its record ID. It adds no node, so a job bound to a restricted source is the
+  same job, run over fewer rows.
 
 Use a restriction to work on part of a table (one subject, one session) with the pipeline you
 will later run on all of it: results computed under the restriction are stored under the same
@@ -302,11 +305,12 @@ print(Condition.of(day=day, started=started, recorded=recorded))
   inside the pipeline (`PolarsFilter`). A NaN or infinite value is saved as
   `{"float": "nan"}`, `{"float": "inf"}` or `{"float": "-inf"}`, since JSON has no such number.
 - **One restriction per table in a pipeline.** A restricted source has the unrestricted
-  source's identity, so a pipeline holds one source for the table: building a pipeline in
-  which one table is read with two different restrictions (or with and without one) raises
-  `ValueError` instead of silently reading one of them. That includes a stream built before
-  the pipeline over another restriction that has the identity of a step inside it. Use one restriction per pipeline, or
-  build separate pipelines.
+  source's identity, so a pipeline holds one restriction (or none) per source: building a
+  pipeline in which one table is read with two different restrictions (or with and without
+  one) raises `ValueError` instead of silently reading one of them, whatever streams lead to
+  the table: different column selections or operator chains, streams built before the
+  pipeline, a `CachedSource` or a `SourceProxy` bound to it. Use one restriction per
+  pipeline, or build separate pipelines.
 - **With `limit=`.** A source built with `limit=n` reads the first `n` rows that match, in
   key order: the conditions are applied first.
 - **Conditions as values.** Two conditions are equal when they require the same columns to
@@ -314,10 +318,12 @@ print(Condition.of(day=day, started=started, recorded=recorded))
   `1.0`); floats compare as Orcapod matches them (`0.0` equals `-0.0`, NaN equals NaN); an
   aware `datetime` is its instant, so one instant written in two zones is one value, and the
   two 01:30 of a daylight-saving overlap (`fold`) are two. This equality decides whether two
-  restrictions are one restriction (for the one-restriction rule below); it does not decide
+  restrictions are one restriction (for the one-restriction rule above); it does not decide
   which rows a source returns.
   `str(condition)` (or `condition.text()`) reads `unit_id=106, session_index=2`, and
-  `condition.equalities` maps each column to its value. A `Condition` is in no hash.
+  `condition.equalities` maps each column to its value. A `Condition` has a Python hash,
+  consistent with that equality, so it can be a dictionary key or a set member; it never
+  enters an Orcapod source or pipeline hash.
 - **Recorded.** `RunSummary.restrictions` maps the slot of each source read under a condition
   to its `Condition`, `RunSummary.limits` the slot of each source read with a `limit=` to the
   limit, and `RunSummary.restricted_source_ids` every such slot to its source id; the

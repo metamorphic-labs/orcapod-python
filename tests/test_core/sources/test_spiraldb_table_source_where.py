@@ -1429,7 +1429,7 @@ class TestOperatorCacheOverARestriction:
             if run == "job.run":
                 job.run()
             elif run == "job.run_async":
-                asyncio.run(job.run_async())
+                asyncio.run(asyncio.wait_for(job.run_async(), timeout=120))
             else:
                 job.nodes["rename"].run()
 
@@ -1477,11 +1477,15 @@ class TestOperatorCacheOverARestriction:
         store = DeltaTableDatabase(tmp_path / "store")
         job = self._job(store, self._events(), chain=True)
         self._cache(job, "rename", CacheMode.LOG, store)
-        job.run() if path == "sync" else asyncio.run(job.run_async())
+        job.run() if path == "sync" else asyncio.run(
+            asyncio.wait_for(job.run_async(), timeout=120)
+        )
         logged = job.nodes["rename"].as_table().column("timestamp").to_pylist()
 
         self._cache(job, "rename", mode, store)
-        job.run() if path == "sync" else asyncio.run(job.run_async())
+        job.run() if path == "sync" else asyncio.run(
+            asyncio.wait_for(job.run_async(), timeout=120)
+        )
 
         assert sorted(logged) == [1, 2, 3, 4, 5]
         rows = job.nodes["rename"].as_table().column("timestamp").to_pylist()
@@ -1498,7 +1502,9 @@ class TestOperatorCacheOverARestriction:
         job = self._job(store, source, chain=True)
         self._cache(job, "rename", CacheMode.OFF, store)
 
-        job.run() if path == "sync" else asyncio.run(job.run_async())
+        job.run() if path == "sync" else asyncio.run(
+            asyncio.wait_for(job.run_async(), timeout=120)
+        )
 
         expected = _timestamps(source)
         rows = job.nodes["rename"].as_table().column("timestamp").to_pylist()
@@ -1599,8 +1605,11 @@ class TestOperatorCacheEntryPoints:
         async def run() -> list[Any]:
             await inputs.writer.close()
             with pytest.raises(ValueError, match="cannot cache a restricted read"):
-                await node.async_execute([inputs.reader], output.writer)
-            return await output.reader.collect()
+                await asyncio.wait_for(
+                    node.async_execute([inputs.reader], output.writer), timeout=30
+                )
+            # Bounded: a regression that leaves the output open fails, not hangs.
+            return await asyncio.wait_for(output.reader.collect(), timeout=30)
 
         assert asyncio.run(run()) == []
         assert self._stored_files(folder) == []
@@ -1613,3 +1622,289 @@ class TestOperatorCacheEntryPoints:
         events = _source(source_id="events", tag_only_columns=True)
         rows = node.execute(events)
         assert sorted(tag["timestamp"] for tag, _ in rows) == [1, 2, 3, 4, 5]
+
+
+def _proxy_for(source: SpiralDBTableSource) -> Any:
+    """A ``SourceProxy`` standing in for ``source``'s identity, unbound."""
+    from orcapod.core.sources.source_proxy import SourceProxy
+
+    # With the system-tag columns, as a slot needs them (a loaded job's proxy has its
+    # node's schema).
+    tag_schema, data_schema = source.output_schema(columns={"system_tags": True})
+    return SourceProxy(
+        source_id=source.source_id,
+        content_hash_str=source.content_hash().to_string(),
+        pipeline_hash_str=source.pipeline_hash().to_string(),
+        tag_schema=tag_schema,
+        data_schema=data_schema,
+        expected_class_name="SpiralDBTableSource",
+    )
+
+
+def _events() -> SpiralDBTableSource:
+    return _source(source_id="events", tag_only_columns=True)
+
+
+class TestRestrictionThroughWrappers:
+    """A restriction is seen through a bound ``SourceProxy`` and a ``CachedSource``.
+
+    CodeRabbit (PR 435): a proxy bound to a restricted source has no condition of its
+    own and binds by identity, which a restriction leaves unchanged, so the walks must
+    look through it. Wrappers checked: ``SourceJobNode`` (bound source),
+    ``SourceProxy`` (delegate), ``CachedSource`` (cached source); a ``DerivedSource``
+    is a root (it reads stored rows, not its origin's sources).
+    """
+
+    @staticmethod
+    def _bound_proxy(restriction: str) -> Any:
+        restricted = _RESTRICTIONS[restriction](_events())
+        proxy = _proxy_for(_events())
+        proxy.bind(restricted)
+        return proxy
+
+    @staticmethod
+    def _cached_job(store: DeltaTableDatabase, mode: CacheMode) -> PipelineJob:
+        job = PipelineJob(name="events", database=store)
+        with job:
+            _events().map_data({"amplitude": "a"}, label="rename")
+        job.nodes["rename"].attach_databases(
+            pipeline_database=store.at("events"), cache_mode=mode
+        )
+        return job
+
+    @pytest.mark.parametrize("mode", _CACHING, ids=lambda m: m.name)
+    @pytest.mark.parametrize("restriction", list(_RESTRICTIONS))
+    @pytest.mark.parametrize("entry", ["upstreams", "execute"])
+    def test_a_proxy_bound_to_a_restricted_source_is_refused_under_a_cache(
+        self, project, tmp_path, mode, restriction, entry
+    ):
+        """The entries a proxy can reach: a slot refuses a proxy itself (it carries
+        no system-tag columns), so a proxy never feeds a job through a slot."""
+        store = DeltaTableDatabase(tmp_path / "s")
+        proxy = self._bound_proxy(restriction)
+        node = self._cached_job(store, mode).nodes["rename"]
+        with pytest.raises(ValueError, match="cannot cache a restricted read"):
+            if entry == "upstreams":
+                node.upstreams = (proxy,)
+            else:
+                node.execute(proxy)
+
+    def test_a_proxy_does_not_fit_a_slot(self, project, tmp_path):
+        from orcapod.errors import SourceSpecMismatchError
+
+        job = self._cached_job(DeltaTableDatabase(tmp_path / "s"), CacheMode.OFF)
+        with pytest.raises(SourceSpecMismatchError, match="system-tag"):
+            job.bind(sources={"events": self._bound_proxy("a condition")})
+
+    def test_the_summary_and_the_walk_see_through_a_proxy(self, project):
+        proxy = self._bound_proxy("several conditions")
+        found = restrictions_in_force([proxy.select_data_columns(["amplitude"])])
+        assert list(found.values()) == [
+            ("events", Condition.of(subject_id="m1", flag=True), None)
+        ]
+
+    @pytest.mark.parametrize("order", ["proxy first", "source first"])
+    def test_a_proxy_and_a_source_restricted_two_ways_are_refused_at_capture(
+        self, project, tmp_path, order
+    ):
+        proxy = self._bound_proxy("a condition")  # subject_id='m1'
+        other = _events().where(subject_id="m2")
+        first, second = (proxy, other) if order == "proxy first" else (other, proxy)
+        job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
+        with pytest.raises(ValueError, match="different rows in one pipeline"):
+            with job:
+                first.select_data_columns(["amplitude"], label="a")
+                second.select_data_columns(["channel"], label="b")
+
+    def test_a_cache_over_a_proxy_bound_later_refuses_to_read(self, project, tmp_path):
+        proxy = _proxy_for(_events())
+        cached = proxy.cached(cache_database=DeltaTableDatabase(tmp_path / "c"))
+        proxy.bind(_events().where(subject_id="m1"))
+        scans = len(fake_pyspiral.scan_log)
+
+        with pytest.raises(ValueError, match="cannot hold a restricted read"):
+            cached.as_table()
+
+        assert len(fake_pyspiral.scan_log) == scans
+        assert not (tmp_path / "c").exists() or not any(
+            (tmp_path / "c").rglob("*.parquet")
+        )
+
+    def test_a_cache_over_a_proxy_bound_to_a_restricted_source_is_refused(
+        self, project, tmp_path
+    ):
+        proxy = self._bound_proxy("a limit")
+        with pytest.raises(ValueError, match="cannot hold a restricted read"):
+            proxy.cached(cache_database=DeltaTableDatabase(tmp_path / "c"))
+
+
+class TestCachedSourceFromConfig:
+    """A saved restricted source never produces a cache (CodeRabbit, PR 435)."""
+
+    @staticmethod
+    def _cached_config(tmp_path: Path, inner: dict[str, Any]) -> dict[str, Any]:
+        config = (
+            _events()
+            .cached(cache_database=DeltaTableDatabase(tmp_path / "c"))
+            .to_config()
+        )
+        return {**config, "inner_source": inner}
+
+    @pytest.mark.parametrize("restriction", list(_RESTRICTIONS))
+    @pytest.mark.parametrize("table", ["available", "unavailable"])
+    def test_a_restricted_inner_config_is_refused(
+        self, project, tmp_path, restriction, table
+    ):
+        inner = _RESTRICTIONS[restriction](_events()).to_config()
+        if table == "unavailable":
+            # The source cannot be rebuilt, so a SourceProxy would stand in for it.
+            inner = {**inner, "table_name": "no_such_table"}
+        config = self._cached_config(tmp_path, inner)
+
+        with pytest.raises(ValueError, match="cannot hold a restricted read"):
+            CachedSource.from_config(config)
+
+    def test_an_unrestricted_inner_config_still_loads(self, project, tmp_path):
+        config = self._cached_config(tmp_path, _events().to_config())
+        loaded = CachedSource.from_config(config)
+        assert sorted(_timestamps(loaded)) == [1, 2, 3, 4, 5]
+
+
+class TestBindOfADatabaseOverARestrictedSlot:
+    """``bind(database=...)`` refuses before it changes anything (CodeRabbit, PR 435)."""
+
+    @pytest.mark.parametrize("mode", _CACHING, ids=lambda m: m.name)
+    def test_nothing_changes_and_a_second_bind_behaves_alike(
+        self, project, tmp_path, mode
+    ):
+        store = DeltaTableDatabase(tmp_path / "s")
+        job = TestRestrictionThroughWrappers._cached_job(store, mode)
+        node = job.nodes["rename"]
+        job.nodes["events"].bound_source = _events().where(subject_id="m1")
+        before = (job.database, node._pipeline_database)  # pyright: ignore[reportPrivateUsage]
+
+        other = DeltaTableDatabase(tmp_path / "other")
+        for _ in range(2):
+            with pytest.raises(ValueError, match="cannot cache a restricted read"):
+                job.bind(database=other)
+            after = (job.database, node._pipeline_database)  # pyright: ignore[reportPrivateUsage]
+            assert after[0] is before[0] and after[1] is before[1]
+
+
+class TestOneRestrictionPerSource:
+    """The one-restriction rule is per source identity, not per stream hash.
+
+    CodeRabbit (PR 435): two different projections (or operator chains) over two
+    restrictions of one source have different stream hashes.
+    """
+
+    @staticmethod
+    def _chains() -> dict[str, Callable[[Any], Any]]:
+        return {
+            "select": lambda s: s.select_data_columns(["amplitude"]),
+            "drop": lambda s: s.drop_data_columns(["note"]),
+            "map then select": lambda s: s.map_data(
+                {"channel": "lane"}
+            ).select_data_columns(["lane"]),
+        }
+
+    @pytest.mark.parametrize("second_chain", ["select", "drop", "map then select"])
+    @pytest.mark.parametrize("first_chain", ["select", "drop", "map then select"])
+    @pytest.mark.parametrize(
+        "second",
+        [
+            lambda: _events().where(subject_id="m2"),
+            lambda: _events(),
+            lambda: SpiralDBTableSource(
+                _PROJECT, "event", source_id="events", tag_only_columns=True, limit=2
+            ).where(subject_id="m1"),
+        ],
+        ids=["another condition", "no restriction", "the condition and a limit"],
+    )
+    def test_two_restrictions_of_one_source_are_refused_whatever_the_chains(
+        self, project, tmp_path, first_chain, second_chain, second
+    ):
+        chains = self._chains()
+
+        @function_pod(output_keys="x")
+        def keep(amplitude: float | None) -> float | None:
+            """Return ``amplitude``."""
+            return amplitude
+
+        job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
+        with pytest.raises(ValueError, match="different rows in one pipeline"):
+            with job:
+                chains[first_chain](_events().where(subject_id="m1"))
+                chains[second_chain](second())
+
+    @pytest.mark.parametrize("order", ["m1 first", "m2 first"])
+    @pytest.mark.parametrize(
+        "chains",
+        [
+            ("select", "drop"),
+            ("map then select", "select"),
+            ("drop", "map then select"),
+        ],
+        ids=["select and drop", "map-select and select", "drop and map-select"],
+    )
+    def test_chains_built_before_the_job_over_two_restrictions_are_refused(
+        self, project, tmp_path, chains, order
+    ):
+        """Streams built outside the job: their steps are never recorded, so only the
+        sources they read can show the conflict."""
+        built = self._chains()
+        m1 = built[chains[0]](_events().where(subject_id="m1"))
+        m2 = built[chains[1]](_events().where(subject_id="m2"))
+        first, second = (m1, m2) if order == "m1 first" else (m2, m1)
+        job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
+        with pytest.raises(ValueError, match="different rows in one pipeline"):
+            with job:
+                first.semi_join(second, label="both")
+
+    @pytest.mark.parametrize("order", ["select first", "drop first"])
+    def test_one_restriction_through_two_chains_is_accepted(
+        self, project, tmp_path, order
+    ):
+        chains = self._chains()
+        names = ["select", "drop"] if order == "select first" else ["drop", "select"]
+        job = PipelineJob(name="one", database=DeltaTableDatabase(tmp_path / "s"))
+        with job:
+            for name in names:
+                chains[name](_events().where(flag=True, subject_id="m1"))
+        summary = job.run()
+        assert summary.restrictions == {
+            "events": Condition.of(subject_id="m1", flag=True)
+        }
+
+
+class TestSummaryKeys:
+    """A slot keeps its name; a direct source is numbered only when its label collides."""
+
+    @pytest.mark.parametrize("order", ["slot first", "direct first"])
+    def test_a_slot_keeps_its_name_whatever_the_visit_order(
+        self, project, tmp_path, order
+    ):
+        from orcapod.core.nodes.source_node import SourceJobNode
+
+        bound = _events().where(subject_id="m1")
+        slot = SourceJobNode.from_stream(bound)
+        direct = _source(label=slot.name).where(subject_id="m2")
+        streams = [slot, direct] if order == "slot first" else [direct, slot]
+
+        found = restrictions_in_force(streams)
+
+        assert found[slot.name] == (
+            bound.source_id,
+            Condition.of(subject_id="m1"),
+            None,
+        )
+        assert found[f"{slot.name} (2)"] == (
+            direct.source_id,
+            Condition.of(subject_id="m2"),
+            None,
+        )
+
+    def test_a_direct_label_with_no_collision_is_not_numbered(self, project):
+        first = _source(label="a").where(subject_id="m1")
+        second = _source(label="b").where(subject_id="m2")
+        assert set(restrictions_in_force([second, first])) == {"a", "b"}

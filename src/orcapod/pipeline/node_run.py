@@ -274,16 +274,43 @@ def restriction_of(stream: object) -> _Restriction | None:
     return (condition or None, limit)
 
 
-def _restrictions_beneath(
+def _streams_beneath(
+    current: Any, bound_sources: Mapping[str, Any] | None = None
+) -> tuple[Any, ...]:
+    """Return what ``current`` reads: the streams a restriction walk goes on to.
+
+    A ``SourceJobNode`` reads its bound source (or the one a bind is about to bind,
+    ``bound_sources``), a bound ``SourceProxy`` its delegate, a ``CachedSource`` the
+    source it caches; any other stream its ``upstreams``. A ``DerivedSource`` is a
+    root: it reads the rows stored for its origin, never its origin's sources, so
+    the walk ends there, as at every other root source.
+    """
+    from orcapod.core.nodes.source_node import SourceJobNode
+    from orcapod.core.sources.cached_source import CachedSource
+    from orcapod.core.sources.source_proxy import SourceProxy
+
+    if isinstance(current, SourceJobNode):
+        bound = current.bound_source
+        if bound_sources is not None and current.name in bound_sources:
+            bound = bound_sources[current.name]
+        return () if bound is None else (bound,)
+    if isinstance(current, SourceProxy):
+        return () if current.delegate is None else (current.delegate,)
+    if isinstance(current, CachedSource):
+        return (current.cached_source,)
+    return tuple(getattr(current, "upstreams", ()))
+
+
+def restrictions_beneath(
     streams: Iterable[Any],
     bound_sources: Mapping[str, Any] | None = None,
 ) -> frozenset[tuple[str, _Restriction]]:
     """Return the restrictions of every source the streams read, order-free.
 
-    Walks ``upstreams`` and a ``SourceJobNode``'s bound source down to the root
-    sources; each restricted root gives ``(source name, (condition, limit))``. Two
-    results are equal when the same sources are restricted equally (``Condition``
-    equality: by value, in any order of the columns; and the same limit).
+    Walks down to the root sources (``_streams_beneath``: through a slot's bound
+    source, a proxy's delegate and a cache's source); each restricted root gives
+    ``(source name, (condition, limit))``. Two results are equal when the same
+    sources are restricted equally (``Condition`` equality, and the same limit).
 
     Args:
         streams: Where the walk starts.
@@ -291,8 +318,6 @@ def _restrictions_beneath(
             in place of the slot's current source (``PipelineJob.bind`` checks
             before it binds).
     """
-    from orcapod.core.nodes.source_node import SourceJobNode
-
     found: set[tuple[str, _Restriction]] = set()
     visited: list[Any] = []
     pending = list(streams)
@@ -304,18 +329,11 @@ def _restrictions_beneath(
         restriction = restriction_of(current)
         if restriction is not None:
             found.add((_source_name(current), restriction))
-        if isinstance(current, SourceJobNode):
-            bound = current.bound_source
-            if bound_sources is not None and current.name in bound_sources:
-                bound = bound_sources[current.name]
-            if bound is not None:
-                pending.append(bound)
-        else:
-            pending.extend(getattr(current, "upstreams", ()))
+        pending.extend(_streams_beneath(current, bound_sources))
     return frozenset(found)
 
 
-def _restrictions_text(found: frozenset[tuple[str, _Restriction]]) -> str:
+def restrictions_text(found: frozenset[tuple[str, _Restriction]]) -> str:
     """The restrictions found beneath streams, as words for a message."""
     if not found:
         return "no restriction"
@@ -326,36 +344,83 @@ def _restrictions_text(found: frozenset[tuple[str, _Restriction]]) -> str:
     )
 
 
-def require_one_restriction(known: Sequence[Any], other: Sequence[Any]) -> None:
-    """Refuse two streams of one identity that read differently restricted sources.
+def sources_read(streams: Iterable[Any]) -> list[tuple[str, str, _Restriction | None]]:
+    """Return every root source the streams read, with its restriction.
+
+    ``(content hash, source name, restriction or None)`` for each root source met by
+    ``_streams_beneath``, once per object. The content hash is the source's identity,
+    which a restriction leaves unchanged, so it is the key of the one-restriction
+    rule.
+    """
+    from orcapod.core.sources.base import RootSource
+    from orcapod.core.sources.cached_source import CachedSource
+    from orcapod.core.sources.source_proxy import SourceProxy
+
+    found: list[tuple[str, str, _Restriction | None]] = []
+    visited: list[Any] = []
+    pending = list(streams)
+    while pending:
+        current = pending.pop()
+        if any(current is seen for seen in visited):
+            continue
+        visited.append(current)
+        beneath = _streams_beneath(current)
+        if (
+            isinstance(current, RootSource)
+            and not isinstance(current, (CachedSource, SourceProxy))
+            and not beneath
+        ):
+            found.append(
+                (
+                    current.content_hash().to_string(),
+                    _source_name(current),
+                    restriction_of(current),
+                )
+            )
+        pending.extend(beneath)
+    return found
+
+
+def require_one_restriction(
+    known: Mapping[str, tuple[str, _Restriction | None]], streams: Iterable[Any]
+) -> dict[str, tuple[str, _Restriction | None]]:
+    """Refuse a source read under two different restrictions in one pipeline.
 
     A restriction (ITL-1218) does not change a source's identity, so a pipeline
-    records one stream per content hash and every node over that hash reads it.
-    Two streams of one content hash over differently restricted sources (two
-    sources of one table, or streams built on them before the capture, or a
-    stream with the hash of a recorded step's output) would be one stream of the
-    graph and one restriction would be lost: refused instead.
+    holds one restriction (or none) per source identity, whatever streams lead to
+    it (projections, operator chains, caches, proxies). ``known`` maps each source
+    identity the pipeline already reads to its name and restriction; ``streams`` are
+    what is being recorded.
 
     Args:
-        known: What the graph already holds for the content hash: the stream, or
-            the input streams of the recorded step that produces it.
-        other: What is being recorded with the same content hash, in the same form.
+        known: Source content hash to ``(name, restriction or None)``.
+        streams: The streams of the invocation being recorded.
+
+    Returns:
+        The entries to add to ``known`` once the invocation is recorded (nothing is
+        changed here).
 
     Raises:
-        ValueError: If the sources beneath the two restrict their rows differently.
+        ValueError: If a source is read under a restriction other than the one
+            ``known`` or another of ``streams`` reads it under.
     """
-    known_found = _restrictions_beneath(known)
-    other_found = _restrictions_beneath(other)
-    if known_found != other_found:
-        raise ValueError(
-            "Two streams of one identity read different rows in one pipeline: "
-            "their sources are restricted differently "
-            f"({_restrictions_text(known_found)} and "
-            f"{_restrictions_text(other_found)}). "
-            "A restriction does not change a source's identity, so a pipeline "
-            "holds one of them: use one restriction for the table in this pipeline, "
-            "or build a separate pipeline."
-        )
+    added: dict[str, tuple[str, _Restriction | None]] = {}
+    for key, name, restriction in sources_read(streams):
+        seen = known.get(key) or added.get(key)
+        if seen is None:
+            added[key] = (name, restriction)
+            continue
+        if seen[1] != restriction:
+            first = restriction_text(*seen[1]) if seen[1] else "no restriction"
+            second = restriction_text(*restriction) if restriction else "no restriction"
+            raise ValueError(
+                "Two streams read different rows in one pipeline: the source "
+                f"{name!r} is read with two different restrictions ({first} and "
+                f"{second}). A restriction does not change a source's identity, so a "
+                "pipeline holds one restriction per source: use one restriction for "
+                "the table in this pipeline, or build a separate pipeline."
+            )
+    return added
 
 
 # TODO(ITL-1219): a restriction kept apart from the node's identity (or a cache keyed by
@@ -390,13 +455,13 @@ def refuse_restricted_operator_cache(
     if cache_mode == CacheMode.OFF:
         return
     inputs = streams if streams is not None else getattr(node, "upstreams", ())
-    found = _restrictions_beneath(inputs, bound_sources)
+    found = restrictions_beneath(inputs, bound_sources)
     if not found:
         return
     raise ValueError(
         f"An operator cache keeps its rows under the node's identity; operator node "
         f"{node.label!r} (CacheMode.{cache_mode.name}) cannot cache a restricted read "
-        f"({_restrictions_text(found)}): a log written from it would be replayed for "
+        f"({restrictions_text(found)}): a log written from it would be replayed for "
         "another restriction or none. Set the node's cache mode to CacheMode.OFF, or "
         "read the unrestricted source."
     )
@@ -448,10 +513,11 @@ def restrictions_in_force(
     A restriction belongs to the source object bound to a slot, so the key is the
     slot's name (the ``SourceJobNode``'s, the name ``bind`` takes); a source read
     directly by the node whose ``run()`` it is has no slot and is keyed by its label.
-    A slot bound to a stream over a source (a pod's or an operator's stream) reports
-    that source under the slot's name. Two slots bound to one table with different
-    conditions are both reported; two sources without a slot that share a label are
-    numbered (``"<label> (2)"``).
+    A slot bound to a stream over a source (a pod's or an operator's stream, a proxy,
+    a cache) reports that source under the slot's name. Two slots bound to one table
+    with different conditions are both reported. A slot keeps its name; a direct
+    source is numbered (``"<label> (2)"``) only when its label is a slot's name or
+    another direct source's, whatever the order the walk meets them.
 
     Only a ``SpiralDBTableSource`` can be restricted today (``restriction_of``;
     every source kind when restrictions are generalized, ITL-1219).
@@ -461,14 +527,14 @@ def restrictions_in_force(
 
     Returns:
         Slot name to the source's id, its ``Condition`` and its limit (each ``None``
-        when unset), for the sources that restrict their rows, in the order first
-        met. ``RunSummary`` keeps the three apart (``restricted_source_ids``,
-        ``restrictions``, ``limits``).
+        when unset), for the sources that restrict their rows: slots in the order
+        first met, then direct sources. ``RunSummary`` keeps the three apart
+        (``restricted_source_ids``, ``restrictions``, ``limits``).
     """
     from orcapod.core.nodes.source_node import SourceJobNode
-    from orcapod.core.sources.base import RootSource
 
-    found: dict[str, tuple[str, Condition | None, int | None]] = {}
+    slots: dict[str, tuple[str, Condition | None, int | None]] = {}
+    direct: list[tuple[str, tuple[str, Condition | None, int | None]]] = []
     visited: list[tuple[Any, str | None]] = []
     pending: list[tuple[Any, str | None]] = [(stream, None) for stream in streams]
     while pending:
@@ -477,23 +543,26 @@ def restrictions_in_force(
         if any(stream is seen and slot == seen_slot for seen, seen_slot in visited):
             continue
         visited.append((stream, slot))
+        restriction = restriction_of(stream)
+        if restriction is not None:
+            entry = (_source_name(stream), *restriction)
+            if slot is not None:
+                slots.setdefault(slot, entry)
+            elif (str(stream.label), entry) not in direct:
+                direct.append((str(stream.label), entry))
         if isinstance(stream, SourceJobNode):
-            if stream.bound_source is not None:
-                pending.append((stream.bound_source, stream.name))
-        elif isinstance(stream, RootSource):
-            restriction = restriction_of(stream)
-            if restriction is not None:
-                entry = (_source_name(stream), *restriction)
-                name = slot if slot is not None else str(stream.label)
-                # A slot holds one source (bind refuses a stream of several), so
-                # only two unbound sources of one label can meet here: number them.
-                key, n = name, 2
-                while key in found and found[key] != entry:
-                    key, n = f"{name} ({n})", n + 1
-                found[key] = entry
+            pending.extend((inner, stream.name) for inner in _streams_beneath(stream))
         else:
             # A slot bound to a stream over a source keeps its name down to it.
-            pending.extend((up, slot) for up in getattr(stream, "upstreams", ()))
+            pending.extend((inner, slot) for inner in _streams_beneath(stream))
+    found = dict(slots)
+    for label, entry in direct:
+        if found.get(label) == entry:
+            continue  # the slot's own source, also read directly: reported once
+        key, n = label, 2
+        while key in found:
+            key, n = f"{label} ({n})", n + 1
+        found[key] = entry
     return found
 
 

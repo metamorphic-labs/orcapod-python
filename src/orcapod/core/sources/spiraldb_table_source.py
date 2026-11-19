@@ -51,6 +51,7 @@ from orcapod.core.sources.base import RootSource, saved_tag_only_columns
 from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
 from orcapod.core.sources.source_ids import joined_location, location_source_id
 from orcapod.core.sources.derived_source import validate_tags_as_data
+from orcapod.utils.datetime_utils import instant_microseconds, is_aware
 from orcapod.core.sources.stream_builder import (
     SourceStreamBuilder,
     key_column_type_allowed,
@@ -202,7 +203,7 @@ def _checked_conditions(
             )
         if isinstance(value, datetime.datetime):
             zoned = getattr(arrow_type, "tz", None) is not None
-            if zoned != (value.tzinfo is not None):
+            if zoned != is_aware(value):
                 raise TypeError(
                     f"where: column {column!r} holds {arrow_type}, so the value must "
                     f"be {'an aware' if zoned else 'a naive'} datetime; got {value!r}"
@@ -242,11 +243,10 @@ def _same_stored_value(stored: object, value: object) -> bool:
     equals two zones' values in a daylight-saving overlap.
     """
     if isinstance(stored, datetime.datetime) and isinstance(value, datetime.datetime):
-        stored_offset, value_offset = stored.utcoffset(), value.utcoffset()
-        if stored_offset is not None and value_offset is not None:
-            return stored.replace(tzinfo=None) - stored_offset == (
-                value.replace(tzinfo=None) - value_offset
-            )
+        stored_instant = instant_microseconds(stored)
+        value_instant = instant_microseconds(value)
+        if stored_instant is not None and value_instant is not None:
+            return stored_instant == value_instant
     return stored == value
 
 

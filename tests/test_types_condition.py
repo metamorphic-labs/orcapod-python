@@ -412,3 +412,52 @@ class TestNonFiniteFloats:
     def test_different_values_conflict(self, first, second):
         with pytest.raises(ValueError, match="cannot also equal"):
             Condition.of(x=first).combined(Condition.of(x=second))
+
+
+class TestRangeEndsAndAwareness:
+    """Instants at the ends of the datetime range; awareness by ``utcoffset``."""
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            dt.datetime(1, 1, 1, tzinfo=dt.timezone(dt.timedelta(hours=1))),
+            dt.datetime(
+                9999,
+                12,
+                31,
+                23,
+                59,
+                59,
+                999999,
+                tzinfo=dt.timezone(dt.timedelta(hours=-1)),
+            ),
+        ],
+        ids=["year 1, +01:00", "year 9999, -01:00"],
+    )
+    def test_a_time_whose_utc_instant_leaves_the_range_compares_and_hashes(self, value):
+        condition = Condition.of(at=value, unit=106)
+        assert condition == Condition.of(unit=106, at=value)
+        assert hash(condition) == hash(Condition.of(at=value, unit=106))
+        assert condition.combined(Condition.of(at=value)) == condition
+        shifted = value.replace(tzinfo=dt.timezone(dt.timedelta(0)))
+        assert Condition.of(at=value) != Condition.of(at=shifted)
+
+    def test_a_tzinfo_with_no_offset_is_naive(self):
+        class NoOffset(dt.tzinfo):
+            def utcoffset(self, _dt):
+                return None
+
+            def dst(self, _dt):
+                return None
+
+        naive_ish = _START.replace(tzinfo=NoOffset())
+        assert Condition.of(at=naive_ish) == Condition.of(at=_START)
+        assert Condition.of(at=naive_ish) != Condition.of(at=_AWARE)
+
+
+class TestImmutable:
+    def test_init_runs_once(self):
+        condition = Condition.of(unit=106, session=2)
+        with pytest.raises(TypeError, match="immutable"):
+            condition.__init__()
+        assert dict(condition.equalities) == {"unit": 106, "session": 2}

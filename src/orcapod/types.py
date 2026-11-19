@@ -17,10 +17,12 @@ import os
 import uuid
 from collections.abc import Collection, Iterator, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from enum import Enum
 from types import MappingProxyType, UnionType
 from typing import TYPE_CHECKING, Any, Generic, NamedTuple, Self, TypeAlias, TypeVar
+
+from orcapod.utils.datetime_utils import instant_microseconds
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -809,18 +811,6 @@ _CONDITION_VALUE_TYPES: tuple[type, ...] = (
 """The exact Python types a condition value may have (no subclass, no NumPy scalar)."""
 
 
-def _instant(value: datetime) -> datetime | None:
-    """Return an aware datetime as its instant in UTC, ``None`` for a naive one.
-
-    The offset is the one the value's own fold selects, so the two 01:30 of a
-    daylight-saving overlap are two instants.
-    """
-    offset = value.utcoffset()
-    if offset is None:
-        return None
-    return (value.replace(tzinfo=None) - offset).replace(tzinfo=timezone.utc)
-
-
 def _same_condition_value(a: object, b: object) -> bool:
     """Return whether two condition values are one value.
 
@@ -838,7 +828,7 @@ def _same_condition_value(a: object, b: object) -> bool:
     if isinstance(a, float) and isinstance(b, float) and a != a and b != b:
         return True
     if isinstance(a, datetime) and isinstance(b, datetime):
-        a_instant, b_instant = _instant(a), _instant(b)
+        a_instant, b_instant = instant_microseconds(a), instant_microseconds(b)
         if (a_instant is None) != (b_instant is None):
             return False
         if a_instant is not None:
@@ -851,9 +841,9 @@ def _condition_hash_key(value: object) -> tuple[type, object]:
     if isinstance(value, float) and value != value:
         return (float, "nan")
     if isinstance(value, datetime):
-        instant = _instant(value)
+        instant = instant_microseconds(value)
         if instant is not None:
-            return (datetime, ("instant", instant.replace(tzinfo=None)))
+            return (datetime, ("instant", instant))
         return (datetime, ("wall", value))
     return (type(value), value)
 
@@ -978,6 +968,10 @@ class Condition:
         A source starts from it; ``Condition.of`` builds a condition that names
         columns.
         """
+        if hasattr(self, "_terms"):
+            raise TypeError(
+                "a Condition is immutable: __init__ runs once, on a new one"
+            )
         object.__setattr__(self, "_terms", ())
 
     @classmethod

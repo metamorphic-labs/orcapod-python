@@ -91,6 +91,9 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         self._invocation_lut: dict[str, PodInvocation] = {}
         # Maps content-hash-string → raw stream for each unregistered upstream.
         self._source_streams: dict[str, Any] = {}
+        # Source identity to (name, restriction or None), built when first needed
+        # (``_restrictions_by_source``, ITL-1218).
+        self._restriction_index: dict[str, Any] | None = None
         # Topology graph — vertices and edges are content-hash strings.
         # Additive: persists and grows across multiple with-blocks.
         self._hash_graph: "nx.DiGraph" = nx.DiGraph()
@@ -295,10 +298,10 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
             invocation: The pod invocation to record.
 
         Raises:
-            ValueError: If a stream of the invocation (an input, or its output) has
-                the content hash of a stream the graph already holds, of a recorded
-                invocation's output, or of another input of the invocation, but reads
-                differently restricted sources (ITL-1218). Nothing is recorded then.
+            ValueError: If the invocation reads a source under another restriction
+                than the pipeline already reads it under, or two of its inputs read
+                one source under two restrictions (ITL-1218), whatever streams lead
+                there. Nothing is recorded then.
         """
         from orcapod.pipeline.node_run import require_one_restriction
 
@@ -308,31 +311,44 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
             (upstream, upstream.content_hash().to_string()) for upstream in inputs
         ]
         # Checked before anything is recorded, so a refused invocation leaves the
-        # graph as it was. Compilation resolves a hash to one stream: a held one, or
-        # the output of the invocation recorded under it. So each input is checked
-        # against the stream held for its hash, against the inputs of an invocation
-        # recorded under its hash, and against this invocation's other inputs; and
-        # this invocation's output against a stream held, or an invocation recorded,
-        # under its hash.
-        held = dict(self._source_streams)
-        for upstream, upstream_hash in upstreams:
-            known = held.setdefault(upstream_hash, upstream)
-            if known is not upstream:
-                require_one_restriction((known,), (upstream,))
-            producer = self._invocation_lut.get(upstream_hash)
-            if producer is not None:
-                require_one_restriction(tuple(producer.input_streams), (upstream,))
-        if key in self._source_streams:
-            require_one_restriction((self._source_streams[key],), inputs)
-        recorded = self._invocation_lut.get(key)
-        if recorded is not None:
-            require_one_restriction(tuple(recorded.input_streams), inputs)
+        # graph as it was. A restriction does not change a source's identity, so the
+        # pipeline keeps one restriction (or none) per source identity, whatever
+        # streams lead to it: every source this invocation reads is checked against
+        # the sources the pipeline already reads and against each other.
+        index = self._restrictions_by_source()
+        added = require_one_restriction(index, inputs)
         self._invocation_lut[key] = invocation
         self._hash_graph.add_node(key)
         for upstream, upstream_hash in upstreams:
             self._hash_graph.add_edge(upstream_hash, key)
             if upstream_hash not in self._source_streams:
                 self._source_streams[upstream_hash] = upstream
+        index.update(added)
+
+    def _restrictions_by_source(self) -> dict[str, Any]:
+        """The restriction each source the pipeline reads is read under (ITL-1218).
+
+        Source content hash to ``(name, restriction or None)``, kept as invocations
+        are recorded; built once from what the pipeline holds when it is first
+        needed (a pipeline rebuilt from invocations, or a clone, starts without it).
+        """
+        from orcapod.pipeline.node_run import sources_read
+
+        index = getattr(self, "_restriction_index", None)
+        if index is None:
+            index = {}
+            streams = [
+                *self._source_streams.values(),
+                *(
+                    stream
+                    for invocation in self._invocation_lut.values()
+                    for stream in invocation.input_streams
+                ),
+            ]
+            for source_key, name, restriction in sources_read(streams):
+                index.setdefault(source_key, (name, restriction))
+            self._restriction_index = index
+        return index
 
     # ------------------------------------------------------------------
     # Diagram (ITL-1197)

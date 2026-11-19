@@ -416,7 +416,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         Raises:
             SourceSpecMismatchError: If any source's columns differ from its slot's
                 declared names, roles or types.
-            ValueError: If a source key has no matching ``SourceJobNode`` slot.
+            ValueError: If a source key has no matching ``SourceJobNode`` slot, or an
+                operator node that caches (``LOG`` or ``REPLAY``) would read a
+                restricted source, one this bind binds or one already bound
+                (ITL-1218); the job is left as it was.
             UnstorableColumnError: If *database* cannot store a table of a node
                 (ITL-1162); the job is left as it was.
         """
@@ -440,14 +443,14 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             for node in (self._persistent_node_map or {}).values():
                 if isinstance(node, SourceNodeBase) and node.name in sources:
                     node.validate(sources[node.name])
-            # A caching operator over a source this bind restricts is refused before
-            # anything is bound (ITL-1218).
-            refuse_restricted_operator_caches(
-                (self._persistent_node_map or {}).values(), bound_sources=sources
-            )
 
         # A database that cannot store a node's tables is refused before anything
-        # changes too (ITL-1162).
+        # changes too (ITL-1162), and so is a caching operator over a restricted
+        # source, one this bind binds or one already bound (ITL-1218): a bind of a
+        # database alone would otherwise set it and fail while distributing it.
+        refuse_restricted_operator_caches(
+            (self._persistent_node_map or {}).values(), bound_sources=sources
+        )
         if database_changed and database is not None:
             self._require_storable_tables(database)
 

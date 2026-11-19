@@ -1260,9 +1260,13 @@ data. The rules:
   `limits` (slot to limit), `restricted_source_ids` (every such slot), filled by one walk;
   the saved job keeps `where` and `limit` in the source config, bind never compares them, and a job run over a restricted
   source feeding `GroupBy`, `Batch` or `MergeJoin` issues one `RestrictedAggregationWarning`.
-  A graph holds one source per content hash, so one table restricted two ways (or with and
-  without a restriction) in one pipeline is refused at capture (`node_run.require_one_restriction`),
-  also when a stream built before the capture has the hash of a captured step. A `CachedSource`
+  A pipeline keeps one restriction (or none) per source identity (a restriction leaves the
+  identity unchanged), so one table restricted two ways (or with and without a restriction) in
+  one pipeline is refused at capture (`node_run.require_one_restriction`, over the sources each
+  invocation reads, `sources_read`), whatever streams lead there: projections, operator chains,
+  streams built before the capture. Every restriction walk goes through a slot's bound source,
+  a `SourceProxy`'s delegate and a `CachedSource`'s source (`_streams_beneath`); a
+  `DerivedSource` is a root. A `CachedSource`
   over a restricted source is refused at construction (a cache is kept under the table's
   identity; developer, November 18, 2026), and so is an operator job node that caches (`LOG` or
   `REPLAY`) over a restricted source (developer, November 19, 2026: its cache is kept under the
