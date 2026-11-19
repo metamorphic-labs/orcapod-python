@@ -244,13 +244,13 @@
                 "digest": "ba5b3f91710cfa607d16df622635b944b47ecd4b027573ab42a0b2b9a97d9357"
             },
             {
-                "date": "2026-11-17",
+                "date": "2026-11-18",
                 "release": null,
                 "added": {
-                    "pipeline-02.json": "6d01f7186e09e8383c62f97e4063d1030a19e465248d85c401b966e62b587f0a"
+                    "pipeline-02.json": "1ec3cbbe09bbb353366d1c8f2573881467d1c8e1ae53a20f8df4e7f43bbfa74e"
                 },
                 "previous": "ba5b3f91710cfa607d16df622635b944b47ecd4b027573ab42a0b2b9a97d9357",
-                "digest": "0f0402e163be720312fc5cd255f2570d709e517558c45055886f7d74e27bbf53"
+                "digest": "b125d745d8a800c0a6c08e6e4626fe4b6b73984c82e0dc877659d1e635c4ecbf"
             }
         ],
         "provisional": {
