@@ -35,6 +35,11 @@ warnings.simplefilter("ignore")
 
 import orcapod as op  # noqa: E402
 from orcapod.contexts import get_default_context  # noqa: E402
+from orcapod.utils.arrow_utils import (  # noqa: E402
+    _same_as_previous,  # pyright: ignore[reportPrivateUsage]  # the rule under measurement
+    canonical_identity_row_order,
+    canonically_sortable,
+)
 
 CTX = get_default_context()
 CONVERTER = CTX.type_converter
@@ -252,16 +257,20 @@ def tied_rows() -> None:
     )
     for name, table in cases.items():
         assert table is not None
-        sortable = []
-        for col in sorted(table.column_names):
-            ok, _ = try_sort(col, table.column(col))
-            if ok == "ok":
-                sortable.append(col)
+        # The sort keys of the spec: the closed type list, not what pyarrow can sort.
+        sortable = [
+            col
+            for col in sorted(table.column_names)
+            if canonically_sortable(table.schema.field(col).type)
+        ]
         idx = pc.sort_indices(table, sort_keys=[(c, "ascending") for c in sortable])
         st = table.take(idx)
-        keys = st.select(sortable)
-        rows = [tuple(map(repr, r.values())) for r in keys.to_pylist()]
-        tied = len(rows) - len(set(rows))
+        # Ties under the sort's own comparison (nulls equal, every NaN equal, -0.0 equal
+        # to 0.0), the rule canonical_identity_row_order applies to adjacent rows.
+        same = pa.array([True] * (st.num_rows - 1), pa.bool_())
+        for col in sortable:
+            same = pc.and_(same, _same_as_previous(st.column(col)))
+        tied = sum(bool(v) for v in same.to_pylist())
         try:
             digests = {
                 HASHER.hash_table(table.slice(i, 1)).to_hex()
@@ -324,23 +333,10 @@ def costs(n: int = 20000) -> None:
         )
 
     def hybrid(t: pa.Table) -> pa.Table:
-        s = value_sort(t)
-        # Ties: rows equal in every column the sort used.
-        keys = sorted(
-            c
-            for c in s.column_names
-            if not pa.types.is_map(s.schema.field(c).type)
-            and not pa.types.is_large_list(s.schema.field(c).type)
-        )
-        frame = pl.from_arrow(s.select(keys))
-        assert isinstance(frame, pl.DataFrame)
-        dup = frame.is_duplicated().to_numpy()
-        if not dup.any():
-            return s
-        # Hash only the rows of tie groups, and order each group by its digests.
-        ids = frame.with_row_index("i").filter(pl.Series(dup))["i"].to_list()
-        _ = [HASHER.hash_table(s.slice(i, 1)).to_prefixed_digest() for i in ids]
-        return s
+        # The implementation itself: value sort, tie detection with the sort's own
+        # comparison, and each tie group ordered by its rows' one-row hashes.
+        tags = [c for c in ("j", "k") if c in t.column_names]
+        return canonical_identity_row_order(t, tags, HASHER)
 
     def timed(fn: Callable[[pa.Table], pa.Table], t: pa.Table) -> float:
         best = float("inf")
