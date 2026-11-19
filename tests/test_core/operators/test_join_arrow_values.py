@@ -584,7 +584,7 @@ def test_a_data_column_of_a_type_with_no_rule_passes_through(
 # ── the preparation itself ───────────────────────────────────────────────────
 
 PREPARED_TYPES: dict[str, Column] = {
-    **{name: build([0, 1, None, 2]) for name, build in TYPES.items()},
+    **{name: build([0, 1, None, 0]) for name, build in TYPES.items()},
     "dictionary<int32, string>": pa.array(["a", "b", None, "a"]).dictionary_encode(),
     "string_view": pa.array(["a", "b", None, "a"], pa.string_view()),
     "binary_view": pa.array([b"a", b"b", None, b"a"], pa.binary_view()),
@@ -597,17 +597,37 @@ PREPARED_TYPES: dict[str, Column] = {
 
 @pytest.mark.parametrize("type_name", list(PREPARED_TYPES))
 def test_a_prepared_key_matches_as_its_values_do(type_name: str) -> None:
-    """Rows 0 and 3 of each column are distinct values except where equal by value;
-    a sliced column is prepared as its slice. The rule and the preparation agree."""
+    """Rows 0 and 3 of each column hold one value, row 1 another, row 2 a null.
+    Polars, given the prepared column, matches exactly the rows whose values are
+    equal (compared here independently, as exact values), so a preparation that
+    merged or split values would fail. A sliced column is prepared as its slice,
+    and the rule and the preparation agree."""
     column = PREPARED_TYPES[type_name]
     assert part_without_rule(column.type, structs=True) is None
     prepared = polars_ready(column)
     assert len(prepared) == len(column)
     sliced = polars_ready(column.slice(1, 3))
-    assert sliced.to_pylist() == prepared.slice(1, 3).to_pylist()
+    assert _exact(sliced) == _exact(prepared.slice(1, 3))
     frame = polars_key_frame(pa.table({"k": column}), ["k"], "row")
     assert frame.get_column("row").to_list() == [0, 1, 2, 3]
-    assert frame.height == 4
+    values = _exact(column)
+    # A null key never matches in the operators (``Join`` keys on a constant column
+    # too, ``SemiJoin`` drops null right keys); here only non-null rows are compared.
+    present = [i for i, value in enumerate(values) if value is not None]
+    pairs = frame.join(frame, on="k", how="inner", suffix="_other")
+    matched = {
+        (int(left), int(right))
+        for left, right in zip(
+            pairs.get_column("row").to_list(), pairs.get_column("row_other").to_list()
+        )
+        if left in present and right in present
+    }
+    assert matched == {
+        (i, j) for i in present for j in present if repr(values[i]) == repr(values[j])
+    }
+    if present:
+        assert matched >= {(0, 3), (3, 0)}
+        assert (0, 1) not in matched
 
 
 @pytest.mark.parametrize("type_name", list(NO_RULE))
