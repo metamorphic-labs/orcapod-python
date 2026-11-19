@@ -332,5 +332,5 @@ class TestFunctionPodGolden:
             "golden_pod_fn",
             "7f73f4eca0b57ef29a6acbea0664eb60e3a7e5886b75be06b3463ed1f56b981a",
             "v0",
-            "python.function.v0",
+            "python.function.v1",
         )

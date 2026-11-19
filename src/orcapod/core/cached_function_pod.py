@@ -68,6 +68,7 @@ class CachedFunctionPod(WrappedFunctionPod):
         self._cache = ResultCache(
             result_database=result_database,
             record_path=self.uri,  # no prefix; db is pre-scoped
+            revision=function_pod.data_function.declaration.revision_component,
             auto_flush=auto_flush,
             # A pod that takes the invocation context performs an external action.
             delivers_side_effects=function_pod.ctx_arg_name is not None,

@@ -17,7 +17,7 @@ class TestPythonDataFunctionConfig:
             version="v1.0",
         )
         config = pf.to_config()
-        assert config["data_function_type_id"] == "python.function.v0"
+        assert config["data_function_type_id"] == "python.function.v1"
 
     def test_to_config_includes_module_and_name(self):
         pf = PythonDataFunction(
@@ -60,7 +60,7 @@ class TestPythonDataFunctionConfig:
 
     def test_from_config_with_missing_module_raises(self):
         config = {
-            "data_function_type_id": "python.function.v0",
+            "data_function_type_id": "python.function.v1",
             "config": {
                 "module_path": "nonexistent.module",
                 "callable_name": "func",

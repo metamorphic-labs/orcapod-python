@@ -319,7 +319,7 @@ def test_narrower_then_nullable_runs_append_to_one_path(
     assert second.ok
     assert set(database.list_table_paths(())) == paths
     assert sorted(job.nodes["inc"].as_table().column("z").to_pylist()) == [0, 4]
-    stored = [database.get_all_records(path) for path in paths if path[-1] == "pdb_v2"]
+    stored = [database.get_all_records(path) for path in paths if path[-1] == "pdb_v1"]
     assert [None if table is None else table.num_rows for table in stored] == [4]
 
 

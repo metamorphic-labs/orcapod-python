@@ -10,16 +10,15 @@ Rows written under the current data context are the current entries: every read 
 lookup keeps those rows only. Rows of another data context stay in the table,
 unchanged, until they are migrated.
 
-Tables written before v0.3 have no ``__data_context`` column and live at an older
-table layout (another last path component). They are the generation
-``std:v0.1:default``; Orcapod counts and reports them and does not read them as
-results.
+A table at another layout (another last path component than ``CURRENT_LAYOUTS``) was
+written by another build of Orcapod; Orcapod reports it and does not read it as results.
 
-The path of a table holds hashes, and those can differ between versions of Orcapod, so
-a table written before v0.3 is not looked for at a computed path only. The beginning of
-the path, up to the name of the function or pod, holds no hash: the tables under it
-are listed (``list_table_paths``), and a table whose last path component is not one of
-the current layouts (``CURRENT_LAYOUTS``) was written before v0.3 (ITL-954).
+The path of a table holds hashes, and those can differ between builds, so such a table is
+not looked for at a computed path. The beginning of the path, up to the name of the
+function or pod, holds no hash: the tables under it are listed (``list_table_paths``), and
+a table whose last path component is not one of the current layouts is of another layout
+(ITL-954). Tables of the versions before 0.4 are not looked for otherwise: nobody has such
+a store, and their layouts had the names the first release uses (ITL-1259).
 
 Example:
     To list the data contexts a stored table holds, call
@@ -42,9 +41,6 @@ from orcapod.errors import (
     TableListingNotSupportedError,
 )
 from orcapod.system_constants import (
-    OLD_PIPELINE_DB_SCHEMA_VERSIONS,
-    OLD_RESULT_DB_SCHEMA_VERSIONS,
-    OLD_TRACKING_DB_SCHEMA_VERSIONS,
     OPERATOR_DB_SCHEMA_VERSION,
     PIPELINE_DB_SCHEMA_VERSION,
     PRE_V1_DATA_CONTEXT_KEY,
@@ -73,23 +69,6 @@ CURRENT_LAYOUTS: frozenset[str] = frozenset(
         OPERATOR_DB_SCHEMA_VERSION,
         SOURCE_DB_SCHEMA_VERSION,
     }
-)
-
-# Last path components that mark a table as written before v0.3 wherever it is found:
-# the older layout names, and the beginnings of the hash components that ended a path
-# when a table had no layout component (also as a connector database spells them).
-_OLD_LAYOUTS: frozenset[str] = frozenset(
-    OLD_PIPELINE_DB_SCHEMA_VERSIONS
-    + OLD_RESULT_DB_SCHEMA_VERSIONS
-    + OLD_TRACKING_DB_SCHEMA_VERSIONS
-)
-_BARE_PATH_ENDINGS: tuple[str, ...] = (
-    "schema:",
-    "instance:",
-    "node:",
-    "schema_",
-    "instance_",
-    "node_",
 )
 
 # How many table paths a report spells out before it only counts the rest.
@@ -294,26 +273,6 @@ def report_tables_under_name(
     )
 
 
-def report_unclaimed_tables(
-    database_path: tuple[str, ...], record_paths: Collection[tuple[str, ...]]
-) -> None:
-    """Warn, once for a job, about the pre-v0.3 tables none of its nodes reports.
-
-    Args:
-        database_path: Path of the job's tables from the root of the database.
-        record_paths: Paths of the tables found, from the root of the database.
-    """
-    logger.warning(
-        "Database %r holds %d more %s written by an earlier version of Orcapod "
-        "(operator caches, cached sources, or nodes not in this job): %s. They are "
-        "not used and are left unchanged; they can be migrated later.",
-        "/".join(database_path),
-        len(record_paths),
-        "table" if len(record_paths) == 1 else "tables",
-        _spelled_out(record_paths),
-    )
-
-
 def report_unlisted_side_effect_tables(
     name_paths: Collection[tuple[str, ...]], reason: str
 ) -> None:
@@ -439,23 +398,29 @@ class StaleTables:
         self.unlisted.extend(other.unlisted)
 
 
-def tables_written_before_v03(
-    database: object, name_path: tuple[str, ...]
+def tables_of_another_layout(
+    database: object,
+    name_path: tuple[str, ...],
+    result_revision: str | None = None,
 ) -> list[tuple[str, ...]]:
-    """List the tables under ``name_path`` that were written before Orcapod v0.3.
+    """List the tables under ``name_path`` that are at another layout than this build's.
 
-    Old and current are told apart by the layout, the last path component, never
-    by a hash: every table this version writes ends in one of ``CURRENT_LAYOUTS``.
-    ``name_path`` is expected to end with the name of one function or pod, so that
-    every table under it belongs to a node of that name.
+    Another layout and the current ones are told apart by path components, never by a
+    hash: every table this version writes ends in one of ``CURRENT_LAYOUTS``, and a
+    function result table has its data function type's revision just before its layout
+    (``.../rev1/rdb_v1``, ITL-1259). ``name_path`` is expected to end with the name of one
+    function or pod, so that every table under it belongs to a node of that name.
 
     Args:
         database: The database to list.
         name_path: Leading path components, relative to the database's ``base_path``.
+        result_revision: The revision component of the result tables the caller reads
+            (``rev1``). A result table under ``name_path`` with another revision is then
+            of another layout too. ``None`` checks the last component only.
 
     Returns:
         The paths, relative to the database's ``base_path``, of the tables under
-        ``name_path`` whose last component is not a current layout, sorted.
+        ``name_path`` that are not at a current layout, sorted.
 
     Raises:
         TableListingNotSupportedError: If the database cannot list its tables.
@@ -464,59 +429,11 @@ def tables_written_before_v03(
         path
         for path in _list_table_paths(database, name_path)
         if path[-1] not in CURRENT_LAYOUTS
-    ]
-
-
-def marked_tables_written_before_v03(database: object) -> list[tuple[str, ...]]:
-    """List the tables of a whole database view that carry a mark of an older version.
-
-    Unlike under the name of one function, a database holds other tables beside node
-    tables (observer logs, tables of the user), so here a table counts only when its
-    last path component is an older layout (``pdb_v1``, ``rdb_v1``, ``tdb_v1``) or
-    the hash component that ended a path before tables had a layout component
-    (``schema:...``, ``instance:...``, ``node:...``).
-
-    Args:
-        database: The database to list, positioned at the tables of one job.
-
-    Returns:
-        The paths of those tables, relative to the database's ``base_path``, sorted.
-
-    Raises:
-        TableListingNotSupportedError: If the database cannot list its tables.
-    """
-    return [
-        path
-        for path in _list_table_paths(database, ())
-        if path[-1] in _OLD_LAYOUTS or path[-1].startswith(_BARE_PATH_ENDINGS)
-    ]
-
-
-def unclaimed_tables_written_before_v03(
-    database: object, claimed: Collection[tuple[str, ...]]
-) -> list[tuple[str, ...]]:
-    """List the marked pre-v0.3 tables of a job that none of its nodes accounts for.
-
-    A function or side-effect node accounts for every table under its own name.
-    What is left are operator caches and cached sources, whose paths hold no name
-    that survives a change of hashes, and tables of nodes the job no longer has.
-
-    Args:
-        database: The database, positioned at the tables of one job.
-        claimed: The name paths, relative to ``database``, that nodes of the job
-            account for themselves.
-
-    Returns:
-        The paths, relative to the database's ``base_path``, of the tables that
-        ``marked_tables_written_before_v03`` finds outside every claimed name path.
-
-    Raises:
-        TableListingNotSupportedError: If the database cannot list its tables.
-    """
-    return [
-        path
-        for path in marked_tables_written_before_v03(database)
-        if not any(path[: len(name_path)] == name_path for name_path in claimed)
+        or (
+            result_revision is not None
+            and path[-1] == RESULT_DB_SCHEMA_VERSION
+            and (len(path) < 2 or path[-2] != result_revision)
+        )
     ]
 
 
@@ -539,47 +456,39 @@ def _list_table_paths(
 
 def find_stale_tables(
     database: _RecordStore,
-    old_paths: tuple[tuple[str, ...], ...],
     current: tuple[tuple[str, ...], str] | None = None,
     name_path: tuple[str, ...] | None = None,
+    result_revision: str | None = None,
 ) -> StaleTables:
     """Find the stored rows of other generations that belong to one table of a node.
 
-    Three searches, none of which writes anything:
+    Two searches, neither of which writes anything:
 
-    - at ``old_paths``, where an earlier version stored the table if no hash in the
-      path changed since (the rows are counted, which reads the table);
-    - under ``name_path``, by listing the database, for tables of an earlier version
+    - under ``name_path``, by listing the database, for tables of another layout
       wherever their hashes put them (ITL-954; not read, so not counted);
     - in the current table, for rows of another data context.
 
     Args:
         database: The database the paths belong to.
-        old_paths: Paths at which an earlier version of Orcapod stored this table.
         current: The table's current path and the current data context key, to also
             look for rows of another data context in the current table (this reads
             the whole table). ``None`` skips that search.
         name_path: The beginning of the table's path up to the name of its function
             or pod, the part that holds no hash. ``None`` skips the listing.
+        result_revision: For a result cache, the revision of its data function type's
+            record: a result table under ``name_path`` at another revision is listed too
+            (``tables_of_another_layout``).
 
     Returns:
-        The old-layout tables found (those at ``old_paths`` first), then one entry
-        per other data context found in the current table (in key order); and
-        ``name_path`` under ``unlisted`` if the database could not list its tables.
+        The tables of another layout found, then one entry per other data context
+        found in the current table (in key order); and ``name_path`` under
+        ``unlisted`` if the database could not list its tables.
     """
     found = StaleTables()
-    for path in old_paths:
-        if not database.table_exists(path):
-            continue
-        records = database.get_all_records(path)
-        rows = 0 if records is None else records.num_rows
-        found.tables.append(
-            StaleTable(database.base_path + path, PRE_V1_DATA_CONTEXT_KEY, rows, True)
-        )
     if name_path is not None:
         under = database.base_path + name_path
         try:
-            listed = tables_written_before_v03(database, name_path)
+            listed = tables_of_another_layout(database, name_path, result_revision)
         except TableListingNotSupportedError as exc:
             found.unlisted.append(UnlistedTables(under, str(exc)))
         else:
