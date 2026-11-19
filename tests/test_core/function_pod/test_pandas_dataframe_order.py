@@ -288,7 +288,7 @@ def test_v02_table_with_a_pandas_column_is_reported_not_read_and_left_alone(
     """A table v0.2 wrote with a ``pandas.dataframe`` column is counted and untouched.
 
     Before v0.3 a frame column was stored under the extension name ``pandas.dataframe``
-    with no metadata, in a table at an older layout (``rdb_v1``). That name is no longer
+    with no metadata, in a table at an older layout (``rdb_v2``). That name is no longer
     registered. The table is found by the function's name and reported; it is never
     read (reading the column would be refused), and its files stay byte-identical.
     """
@@ -300,7 +300,7 @@ def test_v02_table_with_a_pandas_column_is_reported_not_read_and_left_alone(
         "0" * 64,
         "v0",
         "python.function.v0",
-        "rdb_v1",
+        "rdb_v2",
     )
     old_dir = root.joinpath(*old)
     old_dir.mkdir(parents=True)

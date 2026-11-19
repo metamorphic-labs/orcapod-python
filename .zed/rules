@@ -841,19 +841,45 @@ Every row Orcapod stores carries __data_context (constants.DATA_CONTEXT_COL, lar
 the key of the data context that wrote it (std:v1:default since v0.3). The key names one
 generation of hashing; rows of the current data context are the current entries.
 
-  Function pipeline — pdb_v2 (PIPELINE_DB_SCHEMA_VERSION)
-  Function result   — rdb_v2 (RESULT_DB_SCHEMA_VERSION)
-  Side-effect log   — tdb_v2 (TRACKING_DB_SCHEMA_VERSION)
+  Function pipeline — pdb_v1 (PIPELINE_DB_SCHEMA_VERSION)
+  Function result   — rdb_v1, after the type's revision rev1 (RESULT_DB_SCHEMA_VERSION)
+  Side-effect log   — tdb_v1 (TRACKING_DB_SCHEMA_VERSION)
   Operator cache    — odb_v1 (OPERATOR_DB_SCHEMA_VERSION)
   Cached source     — sdb_v1 (SOURCE_DB_SCHEMA_VERSION)
 
-- The layout version is the last component of a table path. A change to the bookkeeping
-  columns of a table kind moves its layout version, so the table gets a new path. Never add,
-  rename or retype a stored column without it.
-- The v0.3 layouts (pdb_v2, rdb_v2, tdb_v2, odb_v1, sdb_v1) were redefined before
-  their first release (ITL-1154): the record-id system tag became text (large_string) without a
-  layout bump, since no release shipped them. A store written by a development build of v0.3 is
-  discarded, not migrated (its side-effect logs would deliver again).
+- The layout version is the last component of a table path. Every layout marker starts at v1
+  for the first release, 0.4.0 (developer, November 18, 2026, ITL-1259; 0.3.0 was withdrawn,
+  so nothing released uses v2). A change to the common bookkeeping columns of a table kind
+  moves its layout version, so the table gets a new path. Never add, rename or retype a stored
+  column without it.
+- A function result table is at
+  <function>/<output schema hash>/v<function major>/python.function.v1/rev1/rdb_v1, three
+  components with three owners (docs/reference/data-function-types.md):
+  - python.function.v1, the data function type and its MAJOR (what a function means and how it
+    is run): the last part of the uri, so in every pod and node hash. A new major moves hashes.
+  - rev1, the REVISION of the type's own record (the pf_var_* / pf_exec_* columns), declared by
+    the type: path only. It never enters a uri, content or pipeline hash, source-info token or
+    record id; a new revision is a new result table and moves no hash.
+  - rdb_v1, the common result columns (input data hash, outputs, their source-info tokens,
+    __pod_ts, __data_context, record id; result_cache.COMMON_RESULT_COLUMNS), global: path only.
+  - The test between a new major and the other two: is a row stored before the change still a
+    correct result for the same input? No: a new major. Yes: a new revision (the type's
+    columns) or a new rdb version (the common columns). Components are delimited, never parsed
+    out of one string; the major is not repeated.
+  - Pipeline tables carry no revision (.../python.function.v1/schema:<pipeline hash>/pdb_v1). A
+    saved job names the type and major only (data_function_type_id); the revision comes from
+    the installed library's declaration (declaration_for(type id)).
+- A data function type's declaration (PYTHON_FUNCTION, beside its class in core/data_function.py;
+  the classes in core/data_function_types.py, a leaf module) is the
+  source of truth: type name, major, revision, identity recipe, run rules, and its record
+  (every column with name, Python and Arrow type, nullability, meaning, and for a hash its
+  label CONSTANT and what it covers). The data function builds its stored columns from it;
+  never a second list. Each declaration is written out as a snapshot
+  (src/orcapod/data_function_types/<type>/v<major>-rev<revision>.json, pinned in
+  released.json; scripts/data_function_types.py --check, --write, and --release, run by
+  generate_golden_hashes.py --release). An open snapshot must equal the code; a released one
+  never changes: a change to what a type stores is a new revision, to what its functions mean
+  a new major.
 - Every new stored table kind writes __data_context (contexts/stored.with_data_context), and
   every read or lookup keeps rows of the current data context only
   (keep_rows_of_data_context, or a lookup constraint on the column).
@@ -863,17 +889,18 @@ generation of hashing; rows of the current data context are the current entries.
   side effects (a SideEffectPod node, or a function node whose pod takes the invocation
   context, ctx_arg), raise SideEffectLogDataContextError before any delivery. A new kind of
   node goes through that function; never decide it locally.
-- A table written before v0.3 is found by NAME, never by a computed hash (ITL-954): the
-  hashes in a path differ between versions. find_stale_tables(..., name_path=...) lists the
+- A table of another layout is found by NAME, never by a computed hash (ITL-954): the
+  hashes in a path differ between builds. find_stale_tables(..., name_path=...) lists the
   store under the hash-free beginning of the node's path (ArrowDatabaseProtocol.list_table_paths;
   <function>, side_effect_function/<function>, side_effects/<pod>, relative to the node's
-  database) and every table there whose last component is not in
-  contexts/stored.CURRENT_LAYOUTS is pre-v0.3. A new layout constant must be added to
-  CURRENT_LAYOUTS, and a superseded one to the OLD_*_SCHEMA_VERSIONS tuples. A store that
-  cannot list raises TableListingNotSupportedError: side-effecting nodes then warn and
-  proceed (developer, November 11, 2026). Operator caches and cached sources have no stable
-  name; PipelineJob.run() reports one total for them. Every database class implements
-  list_table_paths.
+  database; <prefix>/source for a cached source) and every table there whose last component
+  is not in contexts/stored.CURRENT_LAYOUTS is of another layout (tables_of_another_layout).
+  A new layout constant must be added to CURRENT_LAYOUTS. A store that cannot list raises
+  TableListingNotSupportedError: side-effecting nodes then warn and proceed (developer,
+  November 11, 2026). Every database class implements list_table_paths. Stores of the
+  versions before 0.4 are not looked for otherwise (no old-layout names, no layout-less
+  paths, no job-wide total): nobody has one, and their layouts had the names the first
+  release uses (ITL-1259).
 - A released data context manifest (contexts/data/<version>.json) is frozen: the digest of
   its canonical JSON without golden is pinned in contexts/released_manifests.json
   (manifest), with one releases line per library release (ITL-946). Only its golden

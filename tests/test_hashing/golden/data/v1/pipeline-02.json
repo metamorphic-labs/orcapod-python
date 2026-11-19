@@ -37,6 +37,21 @@
   ],
   "add_tags.operator[every_type].content_hash": "semantic_v1:6facb9a731655e8e6a695bbb96bb7902f6b212562f7df2b5207508ff3ab9e03e",
   "add_tags.operator[every_type].pipeline_hash": "semantic_v1:6facb9a731655e8e6a695bbb96bb7902f6b212562f7df2b5207508ff3ab9e03e",
+  "default_source_ids.as_source[function_node].source_id": "derived:semantic_v1:6ada754d8fc4292450d3fb8813f05878b8aabbd52da3615519c80c7418bc0b4e",
+  "drop_nulls_job.node[ratio].content_hash": "semantic_v1:09afbbcc0d89147e8bcc05227431ac2a674febbcea331f584bee55927c85e447",
+  "drop_nulls_job.node[ratio].pipeline_hash": "semantic_v1:cf4f9b8dff56193f509a551e7f201a165dd011ec388f9e5c827bb14d82d58376",
+  "drop_nulls_job.table[golden_drop_null_job/_result/golden_ratio/21e6485805726eb7ceed63ef6b677f0b6b11d2eaf48bd9fc44c1dccdf718aa1d/v0/python.function.v1/rev1/rdb_v1].input_data_hashes": [
+    "arrow_v1:0000026c8d10d614b78d874ef224a78d613befa1a0c773932aaa368237211673d18380",
+    "arrow_v1:000002c619a23da2daa78b89cb32837af1561a1e6613d3ef0af83cf95506abeeedab1f"
+  ],
+  "drop_nulls_job.table[golden_drop_null_job/golden_ratio/21e6485805726eb7ceed63ef6b677f0b6b11d2eaf48bd9fc44c1dccdf718aa1d/v0/python.function.v1/schema:cf4f9b8dff56193f509a551e7f201a165dd011ec388f9e5c827bb14d82d58376/pdb_v1].record_ids": [
+    "arrow_v1:0000025e66eb58363aca967d1e9fa33dc979d6b78d90c1420ef3031defc7b74df5eafc",
+    "arrow_v1:000002fc063fe04b01f009f373104bcc0156b4763c503a27468253e3278f81914b1272"
+  ],
+  "drop_nulls_job.table_paths": [
+    "golden_drop_null_job/_result/golden_ratio/21e6485805726eb7ceed63ef6b677f0b6b11d2eaf48bd9fc44c1dccdf718aa1d/v0/python.function.v1/rev1/rdb_v1",
+    "golden_drop_null_job/golden_ratio/21e6485805726eb7ceed63ef6b677f0b6b11d2eaf48bd9fc44c1dccdf718aa1d/v0/python.function.v1/schema:cf4f9b8dff56193f509a551e7f201a165dd011ec388f9e5c827bb14d82d58376/pdb_v1"
+  ],
   "group_by_arrangement.default.interleaved.content_hash": "semantic_v1:33994dc5eb4e5fdc0797c5d090fd91b3b8bfa7dd138763d944bbb390acb848d0",
   "group_by_arrangement.default.interleaved.pipeline_hash": "semantic_v1:049a1fb3744027bea2a31ca70c960364adf513667b3c09f30441646c43b157f8",
   "group_by_arrangement.default.interleaved.row[{\"g\":\"a\",\"k\":1}]._tag_record_id::009b87c48e0540870894b8e1434a47f6e9150c21d7a401ecd9b791bdec215ee8::009b87c48e0540870894b8e1434a47f6e9150c21d7a401ecd9b791bdec215ee8": "group_v1:8c07899443ee6fcd1c5063e7b3b539372e18ac38101ddbb53cbb8c35a55bf877",
@@ -180,5 +195,47 @@
   "group_by_nan_keys.system_tag_columns": [
     "_tag_source_id::b9b2a71e04d7acbbbcb6d4e9ed74068893840cbed90077e3567c6851b533a656::b9b2a71e04d7acbbbcb6d4e9ed74068893840cbed90077e3567c6851b533a656",
     "_tag_record_id::b9b2a71e04d7acbbbcb6d4e9ed74068893840cbed90077e3567c6851b533a656::b9b2a71e04d7acbbbcb6d4e9ed74068893840cbed90077e3567c6851b533a656"
+  ],
+  "job.node[adjust].content_hash": "semantic_v1:6ada754d8fc4292450d3fb8813f05878b8aabbd52da3615519c80c7418bc0b4e",
+  "job.node[adjust].pipeline_hash": "semantic_v1:f8f3638bf17df15345b70be956e0779e01c9905db088daa02dfec441d7de441d",
+  "job.table[golden_job/_result/golden_adjust/a2fa1ad227c2c0b24315bf0bfca5b3f5473e1f044a6d48cfcf3b78977510a560/v0/python.function.v1/rev1/rdb_v1].input_data_hashes": [
+    "arrow_v1:0000026b8369e60be10e43dd72a0be4e8d93a992f827cd6baab33909331dcdaeea8b64",
+    "arrow_v1:000002c945ad08138f51298940c60333852ef5191eb16077d96105386d44840c0ccfdf"
+  ],
+  "job.table[golden_job/golden_adjust/a2fa1ad227c2c0b24315bf0bfca5b3f5473e1f044a6d48cfcf3b78977510a560/v0/python.function.v1/schema:f8f3638bf17df15345b70be956e0779e01c9905db088daa02dfec441d7de441d/pdb_v1].record_ids": [
+    "arrow_v1:000002a1828b9c9ba03f8de117585fbb8cf4b25d79efab407b026c1ce4927319495aed",
+    "arrow_v1:000002e92267293f5992f541919b8b2bbeb6a72bb458645315316cd8ab427b6849ec0c"
+  ],
+  "job.table_paths": [
+    "golden_job/_result/golden_adjust/a2fa1ad227c2c0b24315bf0bfca5b3f5473e1f044a6d48cfcf3b78977510a560/v0/python.function.v1/rev1/rdb_v1",
+    "golden_job/golden_adjust/a2fa1ad227c2c0b24315bf0bfca5b3f5473e1f044a6d48cfcf3b78977510a560/v0/python.function.v1/schema:f8f3638bf17df15345b70be956e0779e01c9905db088daa02dfec441d7de441d/pdb_v1"
+  ],
+  "join_pod.pod.content_hash": "semantic_v1:6ada754d8fc4292450d3fb8813f05878b8aabbd52da3615519c80c7418bc0b4e",
+  "join_pod.pod.pipeline_hash": "semantic_v1:f8f3638bf17df15345b70be956e0779e01c9905db088daa02dfec441d7de441d",
+  "pod.content_hash": "semantic_v1:9b6de7be825efc4495abaa60baf14e0bc5dbd034f68751b95546308e1266a93a",
+  "pod.pipeline_hash": "semantic_v1:a7f19352f4abe281d50ffdd8d5574b04ea494f5e9da8daef30e189c3fc0ac693",
+  "pod_default_version.decorator.uri": [
+    "golden_ratio",
+    "21e6485805726eb7ceed63ef6b677f0b6b11d2eaf48bd9fc44c1dccdf718aa1d",
+    "v0",
+    "python.function.v1"
+  ],
+  "pod_default_version.from_fn.uri": [
+    "golden_ratio",
+    "21e6485805726eb7ceed63ef6b677f0b6b11d2eaf48bd9fc44c1dccdf718aa1d",
+    "v0",
+    "python.function.v1"
+  ],
+  "polars_filter_expr_job.node[adjust].content_hash": "semantic_v1:7b1f153f7490f52aace74402e0bb6fb3a5e4a4ea8deb0834ec3a17c5ee8b8431",
+  "polars_filter_expr_job.node[adjust].pipeline_hash": "semantic_v1:322673821cfe060b65a7aa3fe74888209ff88c463d834d5daf5f876a90a8fb03",
+  "polars_filter_expr_job.table[golden_filter_job/_result/golden_adjust/a2fa1ad227c2c0b24315bf0bfca5b3f5473e1f044a6d48cfcf3b78977510a560/v0/python.function.v1/rev1/rdb_v1].input_data_hashes": [
+    "arrow_v1:0000026b8369e60be10e43dd72a0be4e8d93a992f827cd6baab33909331dcdaeea8b64"
+  ],
+  "polars_filter_expr_job.table[golden_filter_job/golden_adjust/a2fa1ad227c2c0b24315bf0bfca5b3f5473e1f044a6d48cfcf3b78977510a560/v0/python.function.v1/schema:322673821cfe060b65a7aa3fe74888209ff88c463d834d5daf5f876a90a8fb03/pdb_v1].record_ids": [
+    "arrow_v1:000002805f559cb2ee882683918a4bb57099b86c725fb9c48a42490461633f8833bf5f"
+  ],
+  "polars_filter_expr_job.table_paths": [
+    "golden_filter_job/_result/golden_adjust/a2fa1ad227c2c0b24315bf0bfca5b3f5473e1f044a6d48cfcf3b78977510a560/v0/python.function.v1/rev1/rdb_v1",
+    "golden_filter_job/golden_adjust/a2fa1ad227c2c0b24315bf0bfca5b3f5473e1f044a6d48cfcf3b78977510a560/v0/python.function.v1/schema:322673821cfe060b65a7aa3fe74888209ff88c463d834d5daf5f876a90a8fb03/pdb_v1"
   ]
 }
