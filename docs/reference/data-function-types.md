@@ -101,7 +101,7 @@ Each result row holds these columns about the function (`__pf_var_` prefix):
 | `function_version` | `str` | `large_string` | yes | the full version string the function was declared with (`v3.7`) |
 | `function_module` | `str \| None` | `large_string` | yes | the function's module (`__module__`) |
 | `function_signature_hash` | `bytes` | `large_binary` | yes | the hash of the function's declared interface |
-| `function_content_hash` | `bytes \| None` | `large_binary` | yes | the hash of the function as written; absent when its source cannot be read (a plain REPL, `python -c`, `exec`) |
+| `function_content_hash` | `bytes \| None` | `large_binary` | yes | the hash of the function as written; absent when its source cannot be read (a plain REPL, `python -c`, `exec`) or does not start at a `def` statement |
 | `git_hash` | `str` | `large_string` | yes | the git commit of the function's file or working directory, with `-dirty`, `-untracked` and `-<source>` suffixes; `unknown` outside git |
 
 and these about how it was computed (`__pf_exec_` prefix):
@@ -118,7 +118,7 @@ The two hashes, each stored as `<label>:` followed by its digest:
 | Column | Label | What it covers |
 |---|---|---|
 | `function_signature_hash` | `function_signature_v1` | `{"inputs": {<name>: {"type": <type hash>, "default": <value hash>}}, "outputs": [{"key": <output key>, "type": <type hash>}]}`: the effective types (`input_schema=` / `output_schema=`, else the annotations); inputs keyed by name in no order, a `default` only for a parameter that has one; outputs in declared order (one key is a one-element list, none an empty one). Not in it: the function's name and module (their own columns), the parameters' kind and order, the version, the body |
-| `function_content_hash` | `function_content_v1` | `{"source": <text>}`: the source text from the `def` line on, as written (docstring, comments and whitespace included; decorator lines excluded); for a lambda, the enclosing line. Absent (null) when the source cannot be read |
+| `function_content_hash` | `function_content_v1` | `{"source": <text>}`: the source text from the `def` line on, as written (docstring, comments and whitespace included; decorator lines excluded); for a lambda, the enclosing line. The `def` line is found by tokenizing the text as written, so nothing in the body moves the cut. Absent (null) when the source cannot be read or does not start at a `def` statement: never a text with a decorator line |
 
 Results are reused by the function's identity (its uri) and the input data hash alone;
 these columns record what produced each row and are not compared on a cache hit.

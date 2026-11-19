@@ -83,7 +83,7 @@
       "arrow_type": "large_binary",
       "covers": "{\"source\": <the source text from the def line on, as written: docstring, comments and whitespace included, decorator lines excluded; for a lambda the enclosing line>}",
       "hash_label": "function_content_v1",
-      "meaning": "the hash of the function as written; absent when its source cannot be read (a plain REPL, python -c, exec)",
+      "meaning": "the hash of the function as written; absent when its source cannot be read (a plain REPL, python -c, exec) or does not start at a def statement",
       "name": "function_content_hash",
       "nullable": true,
       "python_type": "bytes | None"

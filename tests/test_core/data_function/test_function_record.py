@@ -9,7 +9,7 @@ Every result row records, beside the function's name and version:
   name, module, parameter kind or order, version or body;
 * ``function_content_hash`` (``function_content_v1``): the source text from the ``def``
   line on, as written (no decorator lines; a lambda's enclosing line), absent (null)
-  when the source cannot be read.
+  when the source cannot be read or does not start at a ``def`` statement.
 
 Reuse is unchanged: on the function's identity only (ITL-1253 will make comparing an
 aspect opt-in).
@@ -17,6 +17,7 @@ aspect opt-in).
 
 from __future__ import annotations
 
+import importlib.util
 import itertools
 import os
 import subprocess
@@ -263,6 +264,130 @@ def test_a_lambda_counts_its_enclosing_line() -> None:
         )
     )
     assert record["function_content_hash"] is not None
+
+
+# Where the ``def`` line is (the CodeRabbit finding on PR 449): every case is written as a
+# module file, because a column-zero comment or bracket line, tabs and Windows line endings
+# cannot live in this formatted file, and ``inspect`` reads a function's source from its file.
+
+_PREAMBLE = (
+    "from orcapod import function_pod\n\n\n"
+    "def note(*args, **kwargs):\n"
+    "    return lambda f: f\n\n\n"
+)
+
+# Each decorator variant is a list of lines, placed at the function's indentation.
+DECORATORS = (
+    [],
+    ["@function_pod(output_keys='v')"],
+    ["@function_pod(output_keys='w', version='v2.0')", "@note(k=1)"],
+    ["@function_pod(", "    output_keys='v',", "    version='v1.0',", ")"],
+    [
+        '@note("""',
+        "def g():",
+        "    pass",
+        '""")',
+        "# a comment between",
+        "@note \\",
+        "(k=2)",
+    ],
+)
+
+# name: (module text with {dec} where the decorators go and {n} in the body, indentation,
+# line ending). Every module defines ``f(x: int) -> int``.
+CUT_CASES: dict[str, tuple[str, str, str]] = {
+    "top_level": ("{dec}def f(x: int) -> int:\n    return x + {n}\n", "", "\n"),
+    "one_line_def": ("{dec}def f(x: int) -> int: return x + {n}\n", "", "\n"),
+    "async_def": ("{dec}async def f(x: int) -> int:\n    return x + {n}\n", "", "\n"),
+    "nested_with_a_column_zero_string": (
+        "def outer():\n{dec}    def f(x: int) -> int:\n        text = '''\nzero\n'''\n"
+        "        return x + {n} + len(text)\n    return f\n\n\nf = outer()\n",
+        "    ",
+        "\n",
+    ),
+    "nested_with_a_column_zero_comment": (
+        "def outer():\n{dec}    def f(x: int) -> int:\n# column zero\n"
+        "        return x + {n}\n    return f\n\n\nf = outer()\n",
+        "    ",
+        "\n",
+    ),
+    "nested_with_a_column_zero_bracket_line": (
+        "def outer():\n{dec}    def f(x: int) -> int:\n        return (x +\n{n})\n"
+        "    return f\n\n\nf = outer()\n",
+        "    ",
+        "\n",
+    ),
+    "nested_async_with_a_column_zero_string": (
+        "def outer():\n{dec}    async def f(x: int) -> int:\n        text = '''\nzero\n'''\n"
+        "        return x + {n} + len(text)\n    return f\n\n\nf = outer()\n",
+        "    ",
+        "\n",
+    ),
+    "class_body_with_a_column_zero_string": (
+        "class C:\n{dec}    def f(x: int) -> int:\n        text = '''\nzero\n'''\n"
+        "        return x + {n} + len(text)\n\n\nf = C.f\n",
+        "    ",
+        "\n",
+    ),
+    "tab_indented_with_a_column_zero_string": (
+        "def outer():\n{dec}\tdef f(x: int) -> int:\n\t\ttext = '''\nzero\n'''\n"
+        "\t\treturn x + {n} + len(text)\n\treturn f\n\n\nf = outer()\n",
+        "\t",
+        "\n",
+    ),
+    "windows_line_endings": (
+        "{dec}def f(x: int) -> int:\n    return x + {n}\n",
+        "",
+        "\r\n",
+    ),
+}
+
+_module_numbers = itertools.count()
+
+
+def _load_f(directory: Path, case: str, decorator: list[str], n: int) -> Any:
+    """``f`` of the case's module, written with ``decorator`` and ``n`` in the body."""
+    text, indent, newline = CUT_CASES[case]
+    decorators = "".join(f"{indent}{line}\n" for line in decorator)
+    source = _PREAMBLE + text.format(dec=decorators, n=n)
+    path = directory / f"cut_case_{next(_module_numbers)}.py"
+    path.write_bytes(source.replace("\n", newline).encode())
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.f
+
+
+def _content_hash(f: Any) -> Any:
+    return _record(PythonDataFunction(f, output_keys="v"))["function_content_hash"]
+
+
+@pytest.mark.parametrize("case", list(CUT_CASES))
+def test_no_decorator_line_ever_enters_the_content_hash(
+    case: str, tmp_path: Path
+) -> None:
+    """Every decorator variant gives one content hash; a body change gives another."""
+    hashes = set()
+    for decorator in DECORATORS:
+        f = _load_f(tmp_path, case, decorator, 1)
+        source = function_source(f)
+        assert source is not None
+        assert source.lstrip().startswith(("def f(", "async def f("))
+        hashes.add(_content_hash(f))
+    assert len(hashes) == 1 and None not in hashes
+    assert _content_hash(_load_f(tmp_path, case, DECORATORS[1], 2)) not in hashes
+
+
+def test_a_source_that_does_not_start_at_a_def_has_no_content_hash(
+    tmp_path: Path,
+) -> None:
+    """A source whose first statement after the decorators is no ``def`` cannot be cut."""
+    f = _load_f(tmp_path, "top_level", [], 1)
+    # The code object now names line 1 of the preamble, an import, as its first line.
+    f.__code__ = f.__code__.replace(co_firstlineno=1)
+    assert function_source(f) is None
+    assert _content_hash(f) is None
 
 
 def _repl_function() -> Any:

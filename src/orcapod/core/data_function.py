@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import ast
 import inspect
+import io
 import logging
 import re
 import sys
-import textwrap
+import tokenize
+import types
 import uuid
 from abc import abstractmethod
 from collections.abc import Callable, Iterable, Sequence
@@ -473,28 +474,88 @@ def function_source(function: Callable[..., Any]) -> str | None:
     """A function's source text from its ``def`` line on, as written.
 
     Docstring, comments and whitespace are kept; decorator lines are not. For a lambda
-    the enclosing source line (or lines) count as its source.
+    the enclosing source line (or lines) count as its source, as ``inspect`` gives them.
+
+    The ``def`` line is found by tokenizing the text as written (``_def_line_index``),
+    never by dedenting or parsing it, so what the body holds cannot move the cut.
 
     Args:
         function: The function.
 
     Returns:
         The text, or ``None`` when the source cannot be read (a function defined in a
-        plain REPL, with ``python -c`` or through ``exec``).
+        plain REPL, with ``python -c`` or through ``exec``) or its ``def`` line cannot
+        be found: never a text that holds a decorator line.
     """
     try:
         source = inspect.getsource(function)
     except (OSError, TypeError):
         return None
-    try:
-        tree = ast.parse(textwrap.dedent(source))
-    except SyntaxError:
+    if _is_lambda(function):
         return source
-    first = tree.body[0] if tree.body else None
-    if isinstance(first, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        # The node's line is its ``def`` line; its decorators are above it.
-        return "".join(source.splitlines(keepends=True)[first.lineno - 1 :])
-    return source
+    lines = io.StringIO(source).readlines()
+    index = _def_line_index(lines)
+    if index is None:
+        return None
+    return "".join(lines[index:])
+
+
+def _is_lambda(function: Callable[..., Any]) -> bool:
+    """Whether the function ``inspect.getsource`` reads is a lambda."""
+    code: object = getattr(inspect.unwrap(function), "__code__", None)
+    return isinstance(code, types.CodeType) and code.co_name == "<lambda>"
+
+
+_LINE_LAYOUT_TOKENS = frozenset(
+    {tokenize.NL, tokenize.COMMENT, tokenize.INDENT, tokenize.DEDENT}
+)
+_OPENING_BRACKETS = frozenset("([{")
+_CLOSING_BRACKETS = frozenset(")]}")
+
+
+def _def_line_index(lines: list[str]) -> int | None:
+    """The index in ``lines`` of the line where the function's ``def`` statement starts.
+
+    ``lines`` is the source of one function as ``inspect.getsource`` gives it: decorator
+    statements, then the ``def`` (or ``async def``) statement. The ``def`` statement is
+    the first logical line that is not a decorator, found by tokenizing the text as
+    written: a string, comment or bracket that spans lines stays inside its decorator.
+    Tokens are read lazily, up to the ``def`` line only.
+
+    Returns:
+        The index, or ``None`` when the first logical line that is not a decorator is no
+        ``def`` statement or the text cannot be tokenized.
+    """
+    remaining = iter(lines)
+    depth = 0
+    at_logical_line_start = True
+    async_row: int | None = None
+    try:
+        for token in tokenize.generate_tokens(lambda: next(remaining, "")):
+            if token.type in _LINE_LAYOUT_TOKENS:
+                continue
+            if token.type == tokenize.NEWLINE:
+                at_logical_line_start = True
+                continue
+            if async_row is not None:
+                return async_row - 1 if token.string == "def" else None
+            if at_logical_line_start and depth == 0:
+                at_logical_line_start = False
+                if token.string == "def":
+                    return token.start[0] - 1
+                if token.string == "async":
+                    async_row = token.start[0]
+                    continue
+                if token.string != "@":
+                    return None
+            if token.type == tokenize.OP:
+                if token.string in _OPENING_BRACKETS:
+                    depth += 1
+                elif token.string in _CLOSING_BRACKETS:
+                    depth -= 1
+    except (tokenize.TokenError, SyntaxError):
+        return None
+    return None
 
 
 def function_content_hash(
@@ -507,9 +568,10 @@ def function_content_hash(
         hasher: The semantic hasher.
 
     Returns:
-        The hash, labelled ``FUNCTION_CONTENT_HASH_LABEL``, or ``None`` when the source
-        cannot be read: the record then holds no content hash rather than one that
-        would claim a match it cannot support.
+        The hash, labelled ``FUNCTION_CONTENT_HASH_LABEL``, or ``None`` when
+        ``function_source`` gives no text (the source cannot be read, or does not start
+        at a ``def`` statement): the record then holds no content hash rather than one
+        that would claim a match it cannot support.
     """
     source = function_source(function)
     if source is None:
@@ -585,7 +647,7 @@ PYTHON_FUNCTION = DataFunctionTypeDeclaration(
             _BINARY,
             True,
             "the hash of the function as written; absent when its source cannot be "
-            + "read (a plain REPL, python -c, exec)",
+            + "read (a plain REPL, python -c, exec) or does not start at a def statement",
             hash_label=FUNCTION_CONTENT_HASH_LABEL,
             covers='{"source": <the source text from the def line on, as written: '
             + "docstring, comments and whitespace included, decorator lines excluded; "
