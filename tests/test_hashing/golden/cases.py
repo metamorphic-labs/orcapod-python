@@ -2565,3 +2565,89 @@ def semantic_annotated_functions() -> dict[str, Any]:
         out[f"{name}.info"] = hasher.hash_object(info).to_string()
         out[f"{name}.object"] = hasher.hash_object(fn).to_string()
     return out
+
+
+# ---------------------------------------------------------------------------
+# GroupBy over several tags and several data columns (ITL-1226)
+# ---------------------------------------------------------------------------
+
+# Two non-key tags, ``x`` and ``y``, whose orders disagree; ``y`` and ``b`` hold nulls;
+# the rows 1 and 2 share every tag, so only the record id orders them.
+GROUP_MEMBER_ORDER_FIELDS = {
+    "g": (pa.large_string(), False, ["a", "a", "a", "a", "a", "a"]),
+    "k": (pa.int64(), False, [1, 1, 1, 2, 2, 2]),
+    "x": (pa.int64(), False, [2, 1, 1, 1, 2, 1]),
+    "y": (pa.large_string(), True, ["p", "q", "q", None, "p", "r"]),
+    "w": (pa.float64(), False, [0.5, 1.5, 2.5, 3.5, 4.5, 5.5]),
+    "n": (pa.int32(), True, [10, 20, 30, 40, None, 60]),
+    "s": (pa.large_string(), False, ["u", "v", "w", "x", "y", "z"]),
+}
+
+
+def _group_member_order_source(tag_columns: list[str], layout: list[str]) -> Any:  # pyright: ignore[reportExplicitAny]  # a source
+    """One set of rows, with the tags declared and the table laid out as given."""
+    from orcapod.sources import ArrowTableSource
+
+    fields = GROUP_MEMBER_ORDER_FIELDS
+    table = pa.table(
+        {name: pa.array(fields[name][2], fields[name][0]) for name in layout},
+        schema=pa.schema(
+            [
+                pa.field(name, fields[name][0], nullable=fields[name][1])
+                for name in layout
+            ]
+        ),
+    )
+    return ArrowTableSource(
+        table,
+        tag_columns=tag_columns,
+        tag_only_columns=True,
+        source_id="golden_group_member_order",
+    )
+
+
+GROUP_MEMBER_ORDER_ARRANGEMENTS: dict[str, tuple[list[str], list[str], list[str]]] = {
+    # name: (tag_columns, table layout, by)
+    "tags_first": (
+        ["g", "k", "x", "y"],
+        ["g", "k", "x", "y", "w", "n", "s"],
+        ["g", "k"],
+    ),
+    "reversed": (["y", "x", "k", "g"], ["s", "n", "w", "y", "x", "k", "g"], ["k", "g"]),
+    "interleaved": (
+        ["k", "y", "g", "x"],
+        ["w", "k", "s", "y", "n", "g", "x"],
+        ["g", "k"],
+    ),
+}
+"""Arrangements of one input whose ``GroupBy`` entries must be equal (ITL-1226):
+``tests/test_hashing/golden/test_group_by_arrangements.py`` asserts it."""
+
+
+@case("pipeline", "group_by_arrangement")
+def pipeline_group_by_arrangement() -> dict[str, Any]:
+    """Pin ``GroupBy`` over several tags and data columns, in several arrangements.
+
+    The default member order (the non-key tags in name order, then the record id),
+    an explicit ``member_order``, and a grouped stream grouped again. Every
+    arrangement of the input's columns and of ``by`` pins the same values.
+    """
+    from orcapod.operators import GroupBy
+
+    out: dict[str, Any] = {}
+    for name, (tags, layout, by) in GROUP_MEMBER_ORDER_ARRANGEMENTS.items():
+        source = _group_member_order_source(tags, layout)
+        out.update(_prefixed(f"default.{name}", stream_summary(GroupBy(by=by)(source))))
+        out.update(
+            _prefixed(
+                f"member_order_y.{name}",
+                stream_summary(GroupBy(by=by, member_order=["y"])(source)),
+            )
+        )
+        out.update(
+            _prefixed(
+                f"grouped_again.{name}",
+                stream_summary(GroupBy(by=["g"])(GroupBy(by=by)(source))),
+            )
+        )
+    return out

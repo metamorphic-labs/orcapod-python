@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence, Set
+from collections.abc import Iterable
 from typing import Any, ClassVar
 
 from typing_extensions import override
@@ -18,25 +18,22 @@ from orcapod.utils import schema_utils
 from orcapod.utils.schema_utils import column_names
 
 
-def _tag_by_names(columns: str | Sequence[str]) -> tuple[str, ...]:
-    """Return the names ``TagBy`` marks, in the order given.
+def _tag_by_names(columns: str | Iterable[str]) -> tuple[str, ...]:
+    """Return the names ``TagBy`` marks, in name order.
+
+    The order the names are given in is not kept (ITL-1226): it is part of neither
+    the identity nor the output.
 
     Args:
-        columns: One name, or a sequence of names.
+        columns: One name, or any iterable of names (a list, a tuple, a set).
 
     Returns:
-        The names, in the order given.
+        The names, sorted.
 
     Raises:
-        TypeError: If ``columns`` is a set (unordered: the order of the names is the
-            order of the new tags) or holds a name that is not a string.
+        TypeError: If a name is not a string.
         ValueError: If no name is given, or a name is repeated.
     """
-    if isinstance(columns, Set):
-        raise TypeError(
-            "TagBy: give the column names as a list or a tuple, not a set: their "
-            + "order is the order of the new tags"
-        )
     try:
         names = column_names(columns)
     except TypeError as exc:
@@ -45,7 +42,7 @@ def _tag_by_names(columns: str | Sequence[str]) -> tuple[str, ...]:
         raise ValueError("TagBy: expected at least one column name")
     if repeated := sorted({name for name in names if names.count(name) > 1}):
         raise ValueError(f"TagBy: columns {repeated} are named more than once")
-    return names
+    return tuple(sorted(names))
 
 
 class TagBy(UnaryOperator):
@@ -56,7 +53,8 @@ class TagBy(UnaryOperator):
     the data columns keep their names, order, types, values and source info,
     the system tags keep their names and values (rule 1, name-preserving), and
     no row is added, removed or reordered. The new tags follow the input's user
-    tags, in the order given, and the column is stored once, where it was.
+    tags, in name order whatever the order they are given in (ITL-1226), and the
+    column is stored once, where it was.
 
     The operator creates no value and moves none: every output data column is the
     input data column of that name, and no tag becomes data. A data column that a
@@ -64,11 +62,12 @@ class TagBy(UnaryOperator):
     key a join or a group.
 
     Args:
-        columns: One data column name, or a sequence of them. Their order is the
-            order of the new tags, and part of the operator's identity.
+        columns: One data column name, or any iterable of them (a list, a tuple,
+            a set). Their order is not kept: the new tags are in name order, and
+            the identity is the sorted names.
 
     Raises:
-        TypeError: If ``columns`` is a set or holds a name that is not a string.
+        TypeError: If ``columns`` holds a name that is not a string.
         ValueError: If no name is given, or a name is repeated.
         InputValidationError: If a name is reserved: the meta prefix, a system
             column name, or one holding ``::``.
@@ -77,7 +76,7 @@ class TagBy(UnaryOperator):
     # Data-tags (ITL-1023): handled; this operator makes them.
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
-    def __init__(self, columns: str | Sequence[str], **kwargs: Any) -> None:
+    def __init__(self, columns: str | Iterable[str], **kwargs: Any) -> None:
         names = _tag_by_names(columns)
         schema_utils.require_names_not_meta(names)
         schema_utils.require_names_not_system(names)
@@ -87,10 +86,10 @@ class TagBy(UnaryOperator):
 
     @override
     def identity_structure(self) -> Any:
-        """Return the operator's identity: its class name and the names, in order.
+        """Return the operator's identity: its class name and the sorted names.
 
         Returns:
-            ``("TagBy", [names in the order given])``.
+            ``("TagBy", [names in name order])``.
         """
         return (self.__class__.__name__, list(self.columns))
 
@@ -100,7 +99,7 @@ class TagBy(UnaryOperator):
 
         Returns:
             A dict with ``class_name``, ``module_path`` and ``config`` keys, where
-            ``config`` holds ``columns``, the names in order.
+            ``config`` holds ``columns``, the names in name order.
         """
         config = super().to_config()
         config["config"] = {"columns": list(self.columns)}

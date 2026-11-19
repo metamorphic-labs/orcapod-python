@@ -107,9 +107,9 @@ class TestGroupByBareString:
     @pytest.mark.parametrize(
         "by", [["session", "subject"], ("session", "subject"), ["subject", "session"]]
     )
-    def test_collections_keep_their_identity(self, by):
-        """A list or tuple keeps its order in the identity, as before."""
-        assert GroupBy(by).identity_structure() == ("GroupBy", tuple(by))
+    def test_collections_enter_the_identity_in_name_order(self, by):
+        """A list or tuple gives its keys; their order is not identity (ITL-1226)."""
+        assert GroupBy(by).identity_structure() == ("GroupBy", tuple(sorted(by)))
 
     def test_bytes_are_not_a_name(self):
         """``bytes`` is neither a name nor a collection of names, empty or not."""
