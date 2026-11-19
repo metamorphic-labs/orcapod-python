@@ -53,10 +53,14 @@ class TestValues:
         assert table.column("cohort").to_pylist() == ["A", "A", "A"]
         assert table.column("run").to_pylist() == [3, 3, 3]
 
-    def test_new_tags_follow_the_input_tags_in_the_order_given(self) -> None:
-        out = _readings().add_tags(run=3, cohort="A")
-        assert out.keys() == (("subject", "run", "cohort"), ("x", "name"))
-        assert out.as_table().column_names[:3] == ["subject", "run", "cohort"]
+    def test_new_tags_follow_the_input_tags_in_name_order(self) -> None:
+        """The order the keywords are given in is not kept (ITL-1269)."""
+        for out in (
+            _readings().add_tags(run=3, cohort="A"),
+            _readings().add_tags(cohort="A", run=3),
+        ):
+            assert out.keys() == (("subject", "cohort", "run"), ("x", "name"))
+            assert out.as_table().column_names[:3] == ["subject", "cohort", "run"]
 
     def test_arrow_type_of_each_accepted_value_type(self) -> None:
         out = _readings().add_tags(b=True, i=3, f=1.5, s="A", raw=b"\x01")
@@ -135,10 +139,15 @@ class TestIdentity:
         }
         assert len(hashes) == 6
 
-    def test_order_is_part_of_the_identity(self) -> None:
+    def test_order_is_not_part_of_the_identity(self) -> None:
+        """The tags are a set of items: their order never forms identity (ITL-1269)."""
         assert (
             AddTags({"a": 1, "b": 2}).content_hash()
-            != AddTags({"b": 2, "a": 1}).content_hash()
+            == AddTags({"b": 2, "a": 1}).content_hash()
+        )
+        assert (
+            AddTags({"a": 1, "b": 2}).pipeline_hash()
+            == AddTags({"b": 2, "a": 1}).pipeline_hash()
         )
 
     def test_names_are_part_of_the_identity(self) -> None:
@@ -227,7 +236,8 @@ class TestConfig:
         op = AddTags({"b": True, "i": 3, "f": 1.5, "s": "A", "raw": b"\x01"})
         config = op.to_config()
         assert config["class_name"] == "AddTags"
-        assert config["config"]["tags"][4] == {
+        # Saved in name order: b, f, i, raw, s.
+        assert config["config"]["tags"][3] == {
             "name": "raw",
             "type": "bytes",
             "value": "01",
@@ -236,10 +246,10 @@ class TestConfig:
         assert restored.tags == op.tags
         assert [type(v) for v in restored.tags.values()] == [
             bool,
-            int,
             float,
-            str,
+            int,
             bytes,
+            str,
         ]
         assert restored.content_hash() == op.content_hash()
 
