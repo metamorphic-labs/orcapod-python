@@ -327,11 +327,15 @@ cache keys:
   NaN has smaller bits than the canonical quiet NaN, so when a member holds one, it is the
   key emitted. The emitted key is always a value a member holds, bit for bit, and neither
   the order of the rows nor `member_order` decides it.
-- **No arrangement of the input changes the result.** The order of its tags, the order of
-  its data columns and the layout of its table leave every value, record id and hash of the
-  output unchanged. A reordered input produces a byte-identical output table. The output
-  lists its columns as the input does (the keys in the input's tag order); that order is
-  presentation, and no hash depends on it.
+- **No arrangement of the input's columns changes the result.** The order of its tags, the
+  order of its data columns and the layout of its table leave every value, record id and
+  hash of the output unchanged. The output lists its columns as the input does (the keys in
+  the input's tag order); that order is presentation, and no hash depends on it.
+- **The order of the input's rows** changes nothing when the source has key columns
+  (`record_id_columns`): its record ids follow the rows' content, so a reordered input gives
+  a byte-identical output table. Without key columns a record id is the row's position, so
+  reordering the rows is a change: the folded record ids differ, and members that share
+  every tag (ordered by record id) can swap places in the lists.
 
 ```python
 units = DictSource(

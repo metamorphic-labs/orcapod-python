@@ -1239,7 +1239,9 @@ data. The rules:
   non-key tags in name order (or as `member_order` gives), with the system `record_id` and
   then the source id as tiebreakers (a record id names a row within its source only), so the
   hashed lists are stable across runs. Groups themselves are emitted sorted by their keys in
-  name order, so a reordered input yields a byte-identical table.
+  name order, so reordered rows yield a byte-identical table when the source has key columns
+  (`record_id_columns`). Without them a record id is the row's position: reordering the rows
+  changes the folded record ids, and members sharing every tag can swap places.
 - `GroupBy`'s output tag columns are its `by` columns, scalar, in the input's tag order; every
   other tag is dropped (ITL-1070; ITL-955 had kept them as `list[T]` tags, never released). The
   dropped tags still order the members, so the data lists are as before. Their values are not
