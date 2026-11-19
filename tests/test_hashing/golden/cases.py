@@ -2728,3 +2728,92 @@ def pipeline_group_by_arrangement() -> dict[str, Any]:
             )
         )
     return out
+
+
+# GroupBy over a float key with NaN and -0.0 (ITL-1234)
+# ---------------------------------------------------------------------------
+
+
+@case("pipeline", "group_by_nan_keys")
+def pipeline_group_by_nan_keys() -> dict[str, Any]:
+    """Pin ``GroupBy`` over a float key whose NaN and zero values differ in bits.
+
+    The three NaN keys (the canonical quiet NaN, one with the sign bit set, one with
+    a payload) form one group, which emits the canonical NaN; ``0.0`` and ``-0.0``
+    form one group, which emits ``0.0``; the null keys form one group.
+    """
+    from orcapod.operators import GroupBy
+    from orcapod.sources import ArrowTableSource
+
+    key_bits = [
+        0xFFF8000000000000,
+        0x8000000000000000,
+        0x7FF8000000000001,
+        None,
+        0x0,
+        0x7FF8000000000000,
+        None,
+    ]
+    table = pa.table(
+        {
+            "k": pa.array(key_bits, pa.uint64()).view(pa.float64()),
+            "t": pa.array([1, 2, 3, 4, 5, 6, 7], pa.int64()),
+            "v": pa.array([10, 20, 30, 40, 50, 60, 70], pa.int64()),
+        }
+    )
+    source = ArrowTableSource(
+        table,
+        tag_columns=["k", "t"],
+        tag_only_columns=True,
+        source_id="golden_group_by_nan_keys",
+    )
+    grouped = GroupBy(by=["k"])(source)
+    out = stream_summary(grouped)
+    out.update(_group_key_identity(grouped, pa.uint64()))
+
+    # A data-tag key of float32 (the key is data too): a signaling NaN, whose bits are
+    # the smallest of the NaN group, is emitted bit for bit; the key's data hash and
+    # its folded source-info token are pinned with the rest.
+    data_tag_bits = [0x7FC00000, 0x80000000, 0x7F800001, None, 0x0, 0xFFC00000]
+    data_tag_table = pa.table(
+        {
+            "k": pa.array(data_tag_bits, pa.uint32()).view(pa.float32()),
+            "t": pa.array([1, 2, 3, 4, 5, 6], pa.int64()),
+            "v": pa.array([10, 20, 30, 40, 50, 60], pa.int64()),
+        }
+    )
+    data_tag_source = ArrowTableSource(
+        data_tag_table,
+        tag_columns=["k", "t"],
+        tag_only_columns=["t"],
+        source_id="golden_group_by_nan_keys_data_tag",
+    )
+    data_tag_grouped = GroupBy(by=["k"])(data_tag_source)
+    out.update(
+        _prefixed(
+            "data_tag_key",
+            {
+                **stream_summary(data_tag_grouped),
+                **_group_key_identity(data_tag_grouped, pa.uint32()),
+            },
+        )
+    )
+    return out
+
+
+def _group_key_identity(stream: Any, unsigned: Any) -> dict[str, Any]:  # pyright: ignore[reportExplicitAny]  # a stream and an Arrow type
+    """Per row of a grouping on ``k``: the tag hash, the key's bits and its source info.
+
+    ``stream_summary`` keys a row by its tag values, where every NaN reads ``NaN``;
+    the bits and the tag hash pin which NaN (or which zero) the group emits.
+    """
+    out: dict[str, Any] = {}
+    bits = stream.as_table().column("k").combine_chunks().view(unsigned).to_pylist()
+    for (tag, data), key_bits in zip(stream.iter_data(), bits, strict=True):
+        row = _row_key(tag.as_dict())
+        out[f"row[{row}].tag_hash"] = tag.content_hash().to_string()
+        out[f"row[{row}].key_bits"] = None if key_bits is None else f"{key_bits:x}"
+        source_info = data.as_dict(all_info=True).get("_source_k")
+        if source_info is not None:
+            out[f"row[{row}]._source_k"] = _jsonable(source_info)
+    return out
