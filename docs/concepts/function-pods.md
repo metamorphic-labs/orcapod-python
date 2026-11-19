@@ -1005,12 +1005,13 @@ from that database, and no rows under that key is an empty result, not an error.
   `DataFrameSource`) keep their data only in memory, so they are not saved; loading logs
   this at INFO level. This does not affect reading the other nodes. To read such a source
   node itself, bind a source to it: `loaded.bind(sources={"mice": source})`. The source must
-  have the slot's tag and data columns with the same Python types, except that a column the
-  slot declares `T | None` may be `T` (the slot then reads it as `T | None`); `bind` refuses
-  any other (`SourceSpecMismatchError`, an `InputValidationError`). The pipeline determines
-  every node's schema: binding a source never changes a node's stored path or the schema of
-  any node's or stored table, only the values. The check compares Python types, so a
-  difference in Arrow width only (`int32` against `int64`) is not yet refused (ITL-949). A
+  have the slot's tag and data columns with the same Arrow types (the slot keeps the Arrow
+  types of the source it was saved from), except that a column the slot declares nullable
+  may be non-null (the slot then reads it as nullable); `bind` refuses any other
+  (`SourceSpecMismatchError`, an `InputValidationError`), also a difference in Arrow width
+  only (`int32` against `int64`). The pipeline determines every node's schema: binding a
+  source never changes a node's stored path or the schema of any node's or stored table,
+  only the values. A
   joined or merged stream (one pair of system-tag columns per input), or one with no
   system-tag columns, is refused too: make the join part of the pipeline, or store the joined
   stream and bind the stored source. A pipeline built directly over a raw `ArrowTableStream`

@@ -827,7 +827,7 @@ Every pipeline element has two parallel hashes:
    identity. For a source it is a stable *address*, not a digest of its rows (developer,
    November 11, 2026: "sources content hash is meant to be a stable address and is not
    necessarily going to reflect the very data content"). A root source hashes
-   `(class name, output schema, source_id, key columns)`; given a `source_id`, changed, added or
+   `(class name, Arrow schema identity, source_id, key columns)`; given a `source_id`, changed, added or
    reordered rows leave it unchanged. The key columns are the resolved `record_id_columns` in key
    order (`()` for the position; a database or SpiralDB table's primary key by default): two
    sources that differ only in how they name their rows are two sources, with one pipeline
@@ -840,9 +840,10 @@ Every pipeline element has two parallel hashes:
    memoized by. The node's content hash tells apart, inside a shared table, the rows of
    pipelines bound to different sources (`__node_content_hash`).
 2. **`pipeline_hash()`** — schema + topology only. Ignores data content. Used for DB path
-   scoping so that different sources with identical schemas share database tables.
+   scoping so that different sources with identical Arrow schemas share database tables.
 
-Base case: `RootSource.pipeline_identity_structure()` returns `(tag_schema, data_schema)`.
+Base case: `RootSource.pipeline_identity_structure()` returns the Arrow schema identity of
+its tag and data schemas (below, "Schemas are hashed as Arrow schemas").
 Each downstream node's pipeline hash commits to its own identity plus the pipeline hashes of
 its upstreams, forming a Merkle chain.
 
@@ -963,6 +964,38 @@ and `as_table()` methods. `all_info=True` sets everything to True.
   with timestamp-based staleness detection and automatic recomputation.
 - **Source delegation** — CSVSource, DictSource, etc. all create an internal
   `ArrowTableSource` and delegate every method to it.
+
+### Schemas are hashed as Arrow schemas
+
+Developer, November 18, 2026 (ITL-640; option B): a schema enters every identity as its Arrow
+schema, large-normalized, hashed by the one function `StarfixArrowHasher.hash_schema`
+(label `arrow_schema_v1`, `ARROW_SCHEMA_HASH_LABEL`), never as Python types. The places: a
+source's pipeline and content identity and an input slot's
+(`schema_utils.arrow_schema_identity`: the tag and data schemas hashed apart, as nested
+`ContentHash` objects), the system-tag column names (`compute_schema_hash`, the semantic hash
+of that pair, bare hex) and the output schema in a function's `uri` (the converter's Arrow
+schema of the declared outputs, fed as a one-schema tuple, bare hex). `output_schema()` still
+reports Python types; a function's INPUT check stays at the Python level; a function's input
+types are in no schema hash.
+
+- Which Arrow schema: a source's or node's typed zero-row table (never computed from rows),
+  cached per source (`RootSource.arrow_schemas`); a `DerivedSource` takes its origin's and
+  refuses a stored read of another type (top-level nullability aside); a `CachedSource` its
+  source's; a slot made from a stream, that stream's (`SourceNodeBase.arrow_schemas`); a
+  saved job writes each slot's own Arrow types and a load rebuilds them; an unbound slot with
+  known Arrow types types its zero-row table from them; a loaded function node types its
+  zero-row output from its saved Arrow text.
+- Declared Python types mean one Arrow type each, the converter's (`int` is `int64`,
+  `datetime` is `timestamp[us, tz=UTC]`): a hand-declared slot, an unbound `SourceProxy`, a
+  `PollingSource` whose `impl.schema()` returns a Python `Schema`. A source, slot or batch of
+  another Arrow type is refused (bind: `SourceSpecMismatchError`; a polled batch:
+  `SchemaInconsistencyError` before commit), never converted. The remedy is declaring in
+  Arrow: `SourceNode(name, tag_schema=pa.schema(...), data_schema=pa.schema(...))`,
+  `impl.schema()` returning a `pa.Schema`. Never loosen this.
+- `hash_schema` ignores column order, large/non-large, list item field names, dictionary
+  encoding and field metadata other than `ARROW:extension:*`; it tells apart width, sign,
+  nullability at every depth, timestamp unit and zone, decimal precision, date types,
+  fixed-size against plain lists, struct fields, and a logical type's whole identifier.
 
 ### Arrow types
 
@@ -1094,14 +1127,18 @@ data. The rules:
   columns without a reason. `SourceNodeBase.validate` is the one check, used by
   `PipelineJob.bind`, the `bound_source` setter (and `SourceJobNode.__init__`) and
   `PipelineJob.load`: per column the declared Python type (structural classes of one identity
-  are one type, `equivalent_hints`), or `T` where the slot declares `T | None`; and exactly
+  are one type, `equivalent_hints`), or `T` where the slot declares `T | None`, AND the slot's
+  Arrow type, compared by `hash_schema`, with only a top-level non-null column accepted where
+  the slot's is nullable (nested nullability exact; ITL-640); and exactly
   one source-id (`str`) and one record-id (`str`) system-tag column, no other. Anything
   else raises `SourceSpecMismatchError` before anything is bound. The
   source's rows are given as the declared schema at one place, `_DeclaredForm` (nullable
   fields over the same arrays; the system-tag column NAMES of the declared schema hash,
   taken from the source's own pair by prefix, the VALUES the source's own; as a stable
-  convenience, not a guarantee, the declared column order, source id before record id). Limits: the check compares Python types, so a difference in Arrow width only
-  (`int32` against `int64`) is not yet refused (ITL-949). A source whose system-tag columns
+  convenience, not a guarantee, the declared column order, source id before record id). A
+  difference in Arrow width only (`int32` against `int64`) is refused (ITL-949, resolved by
+  ITL-640); never loosen this for timestamps or widths: a declared Python type means one
+  Arrow type, and the remedy is declaring the slot from the source or in Arrow. A source whose system-tag columns
   are not exactly one source-id and one record-id column (a joined or merged stream, a raw
   stream with none) is refused by the same check (developer, November 14, 2026, ITL-1126);
   binding one properly is ITL-1127. That includes a pipeline's input: `Pipeline.compile`
