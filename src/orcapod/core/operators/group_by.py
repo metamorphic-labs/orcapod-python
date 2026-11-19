@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection
-from typing import Any, ClassVar, TYPE_CHECKING, get_origin
+import math
+from collections.abc import Collection, Sequence, Set
+from typing import Any, ClassVar, TYPE_CHECKING, cast, get_origin
 
 from orcapod.core.operators.base import UnaryOperator
 from orcapod.core.data_tags import stream_data_tags
@@ -23,24 +24,125 @@ else:
 
 
 def _null_last_key(value: Any) -> tuple[Any, ...]:
-    """Build an order key that sorts nulls last, at any list depth.
+    """Build an order key that sorts NaN after every number and nulls last, at any depth.
 
-    The leading integer keeps a null comparable against a real value of any
-    type.  A list is keyed element by element, so a list-valued non-key tag
-    that holds a null (a list-typed tag column of a source) still compares.
+    The leading integer keeps a NaN and a null comparable against a real value of
+    any type.  A NaN never compares with ``<``, so without its own place a sort that
+    meets one keeps the input's row order; here every NaN ties every other NaN and
+    the next sort column (the record id) breaks the tie (ITL-1226), as Arrow and
+    Polars order a NaN.  A list is keyed element by element, so a list-valued tag
+    that holds a NaN or a null (a list-typed tag column of a source) still compares.
 
     Args:
         value: A tag or system-tag value: a scalar, ``None``, or a list of
             these nested to any depth.
 
     Returns:
-        A tuple that orders values ascending, with nulls after every value.
+        A tuple that orders values ascending, NaN after every number and nulls
+        after everything.
     """
     if value is None:
+        return (2,)
+    if isinstance(value, float) and math.isnan(value):
         return (1,)
     if isinstance(value, list):
         return (0, tuple(_null_last_key(v) for v in value))
     return (0, value)
+
+
+# The grouping form of a NaN key value: one shared object, so every row whose key
+# is NaN falls into one group (ITL-1234), as the joins match a NaN key
+# (``match_keys``).  ``0.0`` and ``-0.0`` already fall into one group: they are equal.
+_NAN_KEY = object()
+
+
+def _grouping_key(key: tuple[Any, ...]) -> tuple[Any, ...]:
+    """Return a group key in the form that groups rows: every NaN as one value.
+
+    Args:
+        key: The values of the ``by`` columns of one row, in the order of ``by``.
+
+    Returns:
+        The key with each NaN replaced by one shared object.
+    """
+    return tuple(
+        _NAN_KEY if isinstance(value, float) and math.isnan(value) else value
+        for value in key
+    )
+
+
+def _float_storage(arrow_type: "pa.DataType") -> "pa.DataType | None":
+    """Return the float type a column is stored as, or ``None`` when it is not a float.
+
+    A logical (extension) type over float storage, such as a temperature stored as
+    ``float64``, is stored as that float, and a dictionary-encoded column as the
+    float type of its values.
+
+    Args:
+        arrow_type: The Arrow type of a key column.
+
+    Returns:
+        The ``float16``, ``float32`` or ``float64`` type of the column's storage, or
+        ``None``.
+    """
+    storage = (
+        arrow_type.storage_type
+        if isinstance(arrow_type, pa.ExtensionType)
+        else arrow_type
+    )
+    if pa.types.is_dictionary(storage):
+        storage = storage.value_type
+    return storage if pa.types.is_floating(storage) else None
+
+
+def _emitted_key_row(column: "pa.ChunkedArray[Any]", indices: Sequence[int]) -> int:
+    """Return the input row whose value of one key column a group emits.
+
+    The members of a group hold equal key values, but equal floats may differ in
+    their bits: ``0.0`` and ``-0.0``, and NaN with another sign or payload (equal
+    floats of any other value have the same bits).  The hashes of the emitted row
+    read the bits, so for a zero or NaN key the group emits the member value with
+    the smallest bit pattern at the column's own width (ITL-1234), chosen per key
+    column.  That is ``0.0`` over ``-0.0``, a positive NaN over a negative one, and
+    the NaN with the smallest payload; a signaling NaN has smaller bits than the
+    canonical quiet NaN, so it is the one emitted when a member holds it.  A group
+    whose members agree emits their value.  Neither the row order nor
+    ``member_order`` decides it, and the caller takes the value from the Arrow
+    column, so its bits are kept exactly.
+
+    Args:
+        column: A key column of the input table.
+        indices: The rows of one group, at least one, all with equal keys.
+
+    Returns:
+        The row, one of ``indices``, whose value the group emits for this column.
+    """
+    first = indices[0]
+    storage_type = _float_storage(column.type)
+    if len(indices) == 1 or storage_type is None:
+        return first
+    # Only a zero or NaN key can differ in bits among equal values, so the first
+    # member's value decides whether the group is gathered at all.
+    scalar = column[first]
+    if isinstance(scalar, pa.ExtensionScalar):
+        # A null extension scalar has no storage scalar.
+        storage = scalar.value
+        value = None if storage is None else cast(float | None, storage.as_py())
+    else:
+        value = cast(float | None, scalar.as_py())
+    if value is None or (value != 0.0 and not math.isnan(value)):
+        return first
+    members = column.take(pa.array(indices, pa.int64())).combine_chunks()
+    if isinstance(members, pa.ExtensionArray):
+        members = members.storage
+    if isinstance(members, pa.DictionaryArray):
+        # The values each member's index points at, bits as stored.
+        members = members.dictionary_decode()
+    # The unsigned integer of the float's width, to read its bits; no value of the
+    # group is null, since a null key equals no float.
+    unsigned = {16: pa.uint16, 32: pa.uint32, 64: pa.uint64}[storage_type.bit_width]()
+    bits = cast(list[int], members.view(unsigned).to_pylist())
+    return indices[min(range(len(indices)), key=bits.__getitem__)]
 
 
 GROUP_BY_FOLD_LABEL = "group_v1"
@@ -50,6 +152,71 @@ group key (ITL-1017). It names the operation; the procedure is
 ``arrow_utils.fold_system_tag_values``. Change it only when this operation's fold
 would give an existing member list a different value.
 """
+
+
+MEMBER_ORDER_NAME = "name"
+"""The keyword for the default member order: the non-key tags in name order."""
+
+
+def _member_order_names(
+    member_order: str | Sequence[str] | None, by: tuple[str, ...]
+) -> tuple[str, ...] | None:
+    """Return the tags ``member_order`` names, or ``None`` for the default order.
+
+    Args:
+        member_order: ``None`` or ``"name"`` (the default order), or a sequence of tag
+            names.
+        by: The group keys.
+
+    Returns:
+        The names in the order given, or ``None`` for the default order.
+
+    Raises:
+        NotImplementedError: For a function: an ordering function is planned, not
+            available yet.
+        TypeError: For a set (unordered), or a name that is not a string.
+        ValueError: For an unknown keyword, an empty sequence, a repeated name, or
+            a group key.
+    """
+    if member_order is None:
+        return None
+    if isinstance(member_order, str):
+        if member_order == MEMBER_ORDER_NAME:
+            return None
+        raise ValueError(
+            f"GroupBy: member_order {member_order!r} is not a known order; the "
+            + f"keyword is {MEMBER_ORDER_NAME!r} (the default: the non-key tags in "
+            + "name order); to order by a tag, give a list of tag names: "
+            + f"member_order=[{member_order!r}]"
+        )
+    if callable(member_order):
+        raise NotImplementedError(
+            "GroupBy: an ordering function for member_order is planned but not "
+            + "available yet (ITL-1226); give a list of tag names"
+        )
+    if isinstance(member_order, Set):
+        raise TypeError(
+            "GroupBy: give member_order as a list or a tuple, not a set: its order "
+            + "is the order the members are sorted by"
+        )
+    names = tuple(member_order)
+    if not names:
+        raise ValueError(
+            "GroupBy: member_order needs at least one tag name; leave it out for "
+            + "the default order"
+        )
+    if not_strings := [name for name in names if not isinstance(name, str)]:
+        raise TypeError(
+            f"GroupBy: member_order names must be strings, got {not_strings!r}"
+        )
+    if repeated := sorted({name for name in names if names.count(name) > 1}):
+        raise ValueError(f"GroupBy: member_order names {repeated} more than once")
+    if keys := [name for name in names if name in by]:
+        raise ValueError(
+            f"GroupBy: member_order names {keys}, a group key: a key has one value "
+            + "in a group, so it cannot order the members"
+        )
+    return names
 
 
 class GroupBy(UnaryOperator):
@@ -85,14 +252,35 @@ class GroupBy(UnaryOperator):
     a data-tag at the source (the default), declare it as data, or use
     ``DerivedSource(origin, tags_as_data={...})``.
 
-    Members are sorted by the input's non-group-key tag values, with ``record_id``
-    appended as a final tiebreaker, so the emitted lists are stable across
-    runs.  The list of a data-tag non-key is therefore in its own value
-    order, and every other data list is aligned with it.  This matters because orcapod hashes those lists to build the cache
-    key -- an unsorted list would make an identical member set hash differently
-    and trigger a spurious recompute.  Groups themselves are emitted in
-    group-key order for the same reason: a reordered input must produce an
-    identical output.
+    Members are sorted by the input's non-group-key tags in name order, each
+    ascending with nulls last, then by the ``record_id`` columns and then the
+    source-id columns as tiebreakers, so the emitted lists are stable across
+    runs (ITL-1226).  ``member_order`` names the tags to sort by first, in its
+    order; the other non-key tags follow in name order, then the same
+    tiebreakers.  A member is never ordered by a data value.  The order does
+    not depend on how the input's columns are arranged: the order of its tags,
+    the order of its data columns and the layout of its table change no value,
+    id or hash of the output (developer, November 17, 2026).  The output lists
+    its columns as the input does: the keys in the input's tag order, the data
+    in the input's order; that is presentation, and no hash depends on it.
+
+    The list of a data-tag non-key is in member order, and every other data
+    list is aligned with it.  This matters because orcapod hashes those lists
+    to build the cache key -- an unsorted list would make an identical member
+    set hash differently and trigger a spurious recompute.  Groups themselves
+    are emitted sorted by their keys, in name order, for the same reason: a
+    reordered input or a reordered ``by`` must
+    produce an identical output.
+
+    Rows with equal keys form one group, as the joins match keys, except that all
+    rows with a null key form one group too.  So do all rows with a NaN key, and
+    ``0.0`` equals ``-0.0`` (ITL-1234).  A NaN key sorts after every number and
+    before null.  A float key that the members hold with different bits is
+    emitted, per key column, as the one with the smallest bit pattern at the
+    column's own width (``0.0`` over ``-0.0``, a positive NaN over a negative
+    one, a signaling NaN over the canonical quiet NaN), taken from the input's
+    Arrow column, so the emitted key is a value a member holds, bit for bit, and
+    never depends on the row order or on ``member_order``.
 
     Tag tuples are expected to be unique within a stream, but nothing enforces
     that.  If the input does contain duplicate tag tuples, the members sharing
@@ -103,8 +291,9 @@ class GroupBy(UnaryOperator):
     A grouped stream can be grouped again on a coarser key: its data lists nest
     one level deeper (``list[list[T]]``), as source info does.  The members of
     the second grouping are ordered by the first grouping's keys that are not
-    in the coarser key (scalar tags of the grouped stream), then by
-    ``record_id``; a tag the first grouping dropped no longer takes part.  A
+    in the coarser key (scalar tags of the grouped stream, in name order or as
+    ``member_order`` gives), then by ``record_id``; a tag the first grouping
+    dropped no longer takes part.  A
     list-valued tag of the input can order members but cannot be a grouping
     key.
 
@@ -113,16 +302,37 @@ class GroupBy(UnaryOperator):
     what tells a batch's members apart.
 
     Args:
-        by: Tag column names to group on, or one name as a string (a bare
-            string is one name, never its characters).  Must be non-empty, free
-            of duplicates, and must all be scalar tag columns of the input
-            stream.
+        by: Tag column names to group on, in any order (a set too), or one
+            name as a string (a bare string is one name, never its characters).
+            Must be non-empty, free of duplicates, and must all be scalar tag
+            columns of the input stream.  Their order is not kept: it is not part
+            of the identity, and the groups are emitted sorted by the keys in name
+            order (developer, November 17, 2026, ITL-1226).
+        member_order: The order of the members of a group.  ``None`` (or
+            ``"name"``): by the non-key tags in name order.  A list or tuple of
+            non-key tag names (plain tags or data-tags): by those tags in the
+            order given, then by the other non-key tags in name order.  Part of
+            the operator's identity only when given.  An ordering function is
+            planned (ITL-1226) and refused for now.
+
+    Raises:
+        ValueError: If ``by`` is empty or repeats a name, or ``member_order`` is
+            an unknown keyword, empty, repeats a name or names a group key.
+        TypeError: If ``by`` is not a string or an iterable of strings, or
+            ``member_order`` is a set or holds a name that is not a string.
+        NotImplementedError: If ``member_order`` is a function.
     """
 
     # Data-tags (ITL-1023): handled.
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
-    def __init__(self, by: str | Collection[str], **kwargs: Any) -> None:
+    def __init__(
+        self,
+        by: str | Collection[str],
+        *,
+        member_order: str | Sequence[str] | None = None,
+        **kwargs: Any,
+    ) -> None:
         by_tuple = column_names(by)
         if not by_tuple:
             raise ValueError("GroupBy requires at least one column in `by`.")
@@ -132,11 +342,19 @@ class GroupBy(UnaryOperator):
                 f"GroupBy `by` contains duplicate column names: {duplicates}. "
                 f"Got {list(by_tuple)}."
             )
-        self.by = by_tuple
+        # The order of the keys only orders the groups (rows), never a value
+        # within a row: it is not identity (developer, November 17, 2026).
+        self.by = tuple(sorted(by_tuple))
+        self.member_order = _member_order_names(member_order, by_tuple)
         super().__init__(**kwargs)
 
     def identity_structure(self) -> Any:
-        return (self.__class__.__name__, self.by)
+        # ``member_order`` enters only when given, so a GroupBy without it keeps the
+        # identity it had before the option existed (ITL-1226).
+        identity: tuple[Any, ...] = (self.__class__.__name__, self.by)
+        if self.member_order is not None:
+            identity += (("member_order", self.member_order),)
+        return identity
 
     def to_config(self) -> dict[str, Any]:
         """Serialize this GroupBy operator to a config dict.
@@ -146,10 +364,12 @@ class GroupBy(UnaryOperator):
 
         Returns:
             A dict with ``class_name``, ``module_path``, and ``config`` keys,
-            where ``config`` contains ``by``.
+            where ``config`` contains ``by``, and ``member_order`` when given.
         """
         config = super().to_config()
         config["config"] = {"by": list(self.by)}
+        if self.member_order is not None:
+            config["config"]["member_order"] = list(self.member_order)
         return config
 
     # ------------------------------------------------------------------
@@ -164,7 +384,8 @@ class GroupBy(UnaryOperator):
 
         Raises:
             InputValidationError: If any name in ``by`` is not a tag column, or
-                names a list-valued tag column.
+                names a list-valued tag column; or a name in ``member_order`` is
+                not a tag column.
         """
         tag_columns, data_columns = stream.keys()
         missing = [c for c in self.by if c not in tag_columns]
@@ -189,6 +410,21 @@ class GroupBy(UnaryOperator):
                 f"cannot be grouping keys. Column types: {non_scalar}. "
                 "A list-valued tag usually means the stream came from `Batch`; "
                 "group before batching rather than after."
+            )
+
+        # The members are ordered by tags only, never by a data value.
+        for name in self.member_order or ():
+            if name in tag_columns:
+                continue
+            if name in data_columns:
+                raise InputValidationError(
+                    f"GroupBy: member_order names {name!r}, which is a data column "
+                    + "of the input, not a tag: members are ordered by tags only. "
+                    + f"Make it a tag first: stream.tag_by({name!r})"
+                )
+            raise InputValidationError(
+                f"GroupBy: member_order names {name!r}, which is not a tag column "
+                + f"of the input; its tags are {list(tag_columns)}"
             )
 
     # ------------------------------------------------------------------
@@ -234,7 +470,9 @@ class GroupBy(UnaryOperator):
             and c not in key_source_columns
             and c not in dropped_columns
         )
-        # Non-key user tags order the members of a group.  The `record_id`
+        # Non-key user tags order the members of a group: those `member_order`
+        # names, in its order, then the others in name order, so the order never
+        # depends on the input's tag order (ITL-1226).  The `record_id`
         # columns are appended as a final tiebreaker: tag tuples are supposed
         # to be unique within a stream, but nothing enforces that, and without
         # the tiebreaker duplicate tuples would fall back to emission order --
@@ -251,7 +489,8 @@ class GroupBy(UnaryOperator):
         # names a row within its source only (ITL-1154), so the source-id columns
         # come last: two members with equal record ids from different sources still
         # have one order.
-        sort_columns = non_key_tags
+        named = self.member_order or ()
+        sort_columns = named + tuple(sorted(c for c in non_key_tags if c not in named))
         for prefix in (
             constants.SYSTEM_TAG_RECORD_ID_PREFIX,
             constants.SYSTEM_TAG_SOURCE_ID_PREFIX,
@@ -260,16 +499,36 @@ class GroupBy(UnaryOperator):
                 sorted(c for c in system_tag_columns if c.startswith(prefix))
             )
 
-        groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
-        for row in table.to_pylist():
-            groups.setdefault(tuple(row[c] for c in self.by), []).append(row)
+        # Every NaN key is one value here (ITL-1234), so the rows whose key is NaN
+        # form one group, as the joins match them.
+        rows = table.to_pylist()
+        groups: dict[tuple[Any, ...], list[int]] = {}
+        for index, row in enumerate(rows):
+            key = _grouping_key(tuple(row[c] for c in self.by))
+            groups.setdefault(key, []).append(index)
+        # For each group, the row whose value each key column emits.
+        keyed_groups: list[tuple[tuple[int, ...], list[dict[str, Any]]]] = [
+            (
+                tuple(_emitted_key_row(table.column(c), indices) for c in self.by),
+                [rows[i] for i in indices],
+            )
+            for indices in groups.values()
+        ]
 
         grouped_rows: list[dict[str, Any]] = []
         # Emit groups in key order rather than first-appearance order, so a
-        # reordered input produces a byte-identical output table.
-        for key, members in sorted(
-            groups.items(), key=lambda kv: tuple(_null_last_key(v) for v in kv[0])
+        # reordered input produces a byte-identical output table.  The keys are in
+        # name order (``by`` is sorted); a NaN key sorts after every number and
+        # before null, as a member's tag does.
+        key_rows: list[tuple[int, ...]] = []
+        for group_key_rows, members in sorted(
+            keyed_groups,
+            key=lambda km: tuple(
+                _null_last_key(rows[r][c]) for r, c in zip(km[0], self.by)
+            ),
         ):
+            key_rows.append(group_key_rows)
+            key = tuple(rows[r][c] for r, c in zip(group_key_rows, self.by))
             if sort_columns:
                 members.sort(
                     key=lambda r: tuple(_null_last_key(r[c]) for c in sort_columns)
@@ -302,6 +561,34 @@ class GroupBy(UnaryOperator):
             member_columns,
             stream.data_context.type_converter,
         )
+
+        # A float key column (a float, a logical type stored as one, or a dictionary
+        # over floats) holds the chosen member's value as the input's Arrow column
+        # has it, never through Python: a conversion can change a float's bits (a
+        # float32 signaling NaN comes back quiet).  Every other key keeps the value rebuilt from Python,
+        # as before: its members may differ in Arrow although equal in Python (two
+        # time64[ns] values within one microsecond read as one ``datetime.time``),
+        # and taking one member's would make the key depend on the row order.
+        # Grouping such keys by their exact value is ITL-1250.
+        for position, c in enumerate(self.by):
+            if _float_storage(table.column(c).type) is None:
+                continue
+            # A null key is taken through a null index, so it is a null at the top
+            # level whichever member came first: a dictionary column can hold a null
+            # as a null index or as an index to a null entry, and only the first is
+            # a null to a reader of validity (``DropNulls``).
+            chosen = pa.array(
+                [
+                    None if rows[r[position]][c] is None else r[position]
+                    for r in key_rows
+                ],
+                pa.int64(),
+            )
+            grouped_table = grouped_table.set_column(
+                grouped_table.schema.get_field_index(c),
+                grouped_table.schema.field(c),
+                table.column(c).take(chosen),
+            )
 
         n_char = self.orcapod_config.hashing.system_tag_n_char
         grouped_table = arrow_utils.append_to_system_tags(

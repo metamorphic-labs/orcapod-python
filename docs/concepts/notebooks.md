@@ -168,8 +168,8 @@ means = job.nodes["session_means"]
 view = means.run()  # the node holds a current run: this computes nothing
 print(view.header())
 # FunctionJobNode[session_means] — all 8 rows
-print(view.tail(3))
-# FunctionJobNode[session_means] — last 3 of 8 rows
+print(view.sort_by_tags().tail(3))
+# FunctionJobNode[session_means] — last 3 of 8 rows, sorted by tags
 # * = tag
 # shape: (3, 3)
 # ┌─────────────┬──────────┬──────────────┐
