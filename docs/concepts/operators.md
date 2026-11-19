@@ -316,9 +316,12 @@ cache keys:
 - **Groups** are emitted sorted by their keys, taken in name order. The order of the names
   in `by` is not part of the operator: `GroupBy(by=["a", "b"])` and `GroupBy(by=["b", "a"])`
   are one operator.
-- **Keys** group as the joins match them, except for null: rows with equal keys form one
-  group, all rows with a null key form one group, and so do all rows with a NaN key (NaN
-  equals NaN here; `0.0` equals `-0.0`). A NaN key sorts after every number and before null.
+- **Keys** group by their Arrow value, as the joins match them, except for null: rows with
+  equal keys form one group, all rows with a null key form one group, and so do all rows
+  with a NaN key (NaN equals NaN here; `0.0` equals `-0.0`). A NaN key sorts after every
+  number and before null. `GroupBy` compares and orders values with Polars, never as Python
+  values, so keys that differ only below what Python keeps are two groups: `time64[ns]`
+  values of 1 ns and 2 ns, or two `date64` values on one day.
   When the members of a group hold a float key with different bits (`0.0` and `-0.0`, or NaN
   with another sign or payload), the group emits the one with the smallest bit pattern at
   the column's own width (`float16`, `float32` or `float64`; a logical type stored as a
@@ -327,6 +330,10 @@ cache keys:
   NaN has smaller bits than the canonical quiet NaN, so when a member holds one, it is the
   key emitted. The emitted key is always a value a member holds, bit for bit, and neither
   the order of the rows nor `member_order` decides it.
+- **Values are kept exactly.** Every emitted key and every element of a data list is taken
+  from the input's Arrow columns, so a list holds its members' values bit for bit: a
+  `time64[ns]` value keeps its nanoseconds, a `date64` value its time of day, a float its
+  bits (a signaling NaN stays signaling).
 - **No arrangement of the input's columns changes the result.** The order of its tags, the
   order of its data columns and the layout of its table leave every value, record id and
   hash of the output unchanged. The output lists its columns as the input does (the keys in
@@ -368,6 +375,14 @@ Every name in `by` must be a **scalar tag column** of the input. `GroupBy` raise
 `InputValidationError` for an unknown column, a data column, or a list-valued tag column --
 the last usually means the stream came from `Batch`, so group *before* batching rather than
 after.
+
+A tag whose type has no order can be neither a key nor a non-key tag of the input, because
+every non-key tag orders the members: a struct or a map (a user class, a `dict[K, V]`), an
+interval, a union. `GroupBy` raises `InputValidationError` for it, from the schema alone. A
+key that is a list of any kind, a fixed-size list included, is refused as list-valued. Since
+`GroupBy` drops a non-key tag anyway, drop it before grouping, with `select_tag_columns`
+naming the tags to keep. A list-valued non-key tag orders the members element by element,
+nulls last at every depth.
 
 Streams also expose this as a fluent method. A single column may be given as a string, as
 for every operator that takes column names (a string is one name, never its characters):
