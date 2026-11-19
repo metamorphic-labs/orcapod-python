@@ -653,6 +653,39 @@ class TestTableAddress:
         with pytest.raises(ValueError, match="source_id"):
             postgresql_table_address("localhost", 5432, database, schema, table)
 
+    @pytest.mark.parametrize(
+        "host",
+        ["/tmp/pg::sock", "/a::b/c", "@pg::sock", "/tmp/pg:", "/tmp/a:b:"],
+        ids=[
+            "socket directory holding ::",
+            ":: in the middle",
+            "abstract socket holding ::",
+            "socket directory ending with ':'",
+            "':' inside and at the end",
+        ],
+    )
+    def test_a_host_that_would_put_double_colon_in_the_address_has_none(
+        self, host: str
+    ) -> None:
+        """``::`` separates a source-info token: refused, asking for a source_id."""
+        from orcapod.core.sources.postgresql_table_source import (
+            postgresql_table_address,
+        )
+
+        with pytest.raises(
+            ValueError, match="contains '::'.*give the source a source_id"
+        ):
+            postgresql_table_address(host, 5432, "orcapod", "public", "t")
+
+    def test_a_single_colon_in_a_socket_directory_is_kept(self) -> None:
+        from orcapod.core.sources.postgresql_table_source import (
+            postgresql_table_address,
+        )
+
+        assert postgresql_table_address("/tmp/a:b", 5432, "d", "s", "t") == (
+            "/tmp/a:b:5432/d.s.t"
+        )
+
     def test_empty_host_has_no_address(self) -> None:
         from orcapod.core.sources.postgresql_table_source import (
             postgresql_table_address,
@@ -754,6 +787,57 @@ class TestDefaultSourceIdNamesServer:
         ):
             self._source(connector)
         connector.current_location.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("host", "hostaddr"),
+        [
+            ("0:0:0:0:0:0:0:1", "::1"),
+            ("::1", "0:0:0:0:0:0:0:1"),
+            ("2001:DB8::1", "2001:db8:0:0:0:0:0:1"),
+            ("2001:db8:0:0:0:0:0:1", "2001:DB8::1"),
+            ("fe80::1%eth0", "fe80:0:0:0:0:0:0:1%eth0"),
+        ],
+        ids=[
+            "exploded host, short address",
+            "short host, exploded address",
+            "upper case host",
+            "upper case address",
+            "one zone",
+        ],
+    )
+    def test_two_spellings_of_one_ip_address_name_it(
+        self, host: str, hostaddr: str
+    ) -> None:
+        connector = _server_connector(host, 5432, given=(host, hostaddr))
+        source_id = self._source(connector).source_id
+        assert source_id.startswith("postgresql_table:[")
+        assert source_id.endswith("]:5432/orcapod.public.measurements")
+
+    @pytest.mark.parametrize(
+        ("host", "hostaddr"),
+        [
+            ("fe80::1%eth0", "fe80::1"),
+            ("fe80::1", "fe80::1%eth0"),
+            ("fe80::1%eth0", "fe80::1%eth1"),
+            ("::ffff:127.0.0.1", "127.0.0.1"),
+            ("::1", "::2"),
+            ("localhost", "::1"),
+        ],
+        ids=[
+            "zone only on the host",
+            "zone only on the address",
+            "two zones",
+            "IPv4-mapped against IPv4",
+            "two IPv6 addresses",
+            "a name beside an IPv6 address",
+        ],
+    )
+    def test_different_addresses_or_a_name_still_have_no_default(
+        self, host: str, hostaddr: str
+    ) -> None:
+        connector = _server_connector(host, 5432, given=(host, hostaddr))
+        with pytest.raises(ValueError, match="host name alone does not identify"):
+            self._source(connector)
 
     def test_hostaddr_alone_or_equal_to_the_host_names_the_address(self) -> None:
         # libpq reports the address as the host when no host is given; a host that

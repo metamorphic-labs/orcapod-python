@@ -16,6 +16,7 @@ Each test gets an isolated schema created fresh and dropped on teardown.
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import uuid
 from collections.abc import Iterator, Mapping
@@ -325,6 +326,21 @@ def _expected(host: str, schema: str, port: str | None = None) -> str:
     )
 
 
+def _id_host(host: str) -> str:
+    """How the default id writes the test server's host: an IPv6 address bracketed
+    and exploded, an IPv4 address as given, a name in lower case."""
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return host.lower()
+    return f"[{ip.exploded}]" if ip.version == 6 else host
+
+
+def _uri_host(host: str) -> str:
+    """The test server's host in a URI: an IPv6 address in brackets."""
+    return f"[{host}]" if ":" in host else host
+
+
 def _requires_localhost() -> None:
     if _SERVER["host"] != "localhost":
         pytest.skip("needs the test server at PGHOST=localhost, as in CI")
@@ -340,12 +356,12 @@ class TestDefaultSourceIdOnTheServer:
 
     def test_uri_and_keyword_dsn_give_one_id(self, server_table: str) -> None:
         uri = (
-            f"postgresql://{_SERVER['user']}:{_SERVER['password']}@{_SERVER['host']}:"
+            f"postgresql://{_SERVER['user']}:{_SERVER['password']}@{_uri_host(_SERVER['host'])}:"
             f"{_SERVER['port']}/{_SERVER['dbname']}"
             f"?options=-csearch_path%3D{server_table}"
         )
         ids = [_source_id(uri), _source_id(_keyword_dsn(server_table))]
-        assert ids == [_expected(_SERVER["host"].lower(), server_table)] * 2
+        assert ids == [_expected(_id_host(_SERVER["host"]), server_table)] * 2
 
     def test_id_never_holds_user_or_password(self, server_table: str) -> None:
         # Both DSNs carry the user and the password; the id is exactly the host, the
@@ -353,12 +369,12 @@ class TestDefaultSourceIdOnTheServer:
         # check would fail a correct id whenever the user's name is also the
         # database's, as with PGUSER=postgres PGDATABASE=postgres.)
         uri = (
-            f"postgresql://{_SERVER['user']}:{_SERVER['password']}@{_SERVER['host']}:"
+            f"postgresql://{_SERVER['user']}:{_SERVER['password']}@{_uri_host(_SERVER['host'])}:"
             f"{_SERVER['port']}/{_SERVER['dbname']}"
             f"?options=-csearch_path%3D{server_table}"
         )
         for dsn in (uri, _keyword_dsn(server_table)):
-            assert _source_id(dsn) == _expected(_SERVER["host"].lower(), server_table)
+            assert _source_id(dsn) == _expected(_id_host(_SERVER["host"]), server_table)
 
     def test_upper_case_host_name_gives_the_lower_case_id(
         self, server_table: str

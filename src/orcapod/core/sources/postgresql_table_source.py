@@ -57,6 +57,21 @@ def _server_name(host: str) -> str:
     return host.lower()
 
 
+def _one_address(host: str, hostaddr: str) -> bool:
+    """Return whether a ``host`` and a ``hostaddr`` name one address.
+
+    Equal text, or two IP literals of one parsed value (``0:0:0:0:0:0:0:1`` and
+    ``::1``; an IPv6 zone such as ``%eth0`` is part of the value). A host name beside
+    an address is never one address: what the name resolves to is not seen.
+    """
+    if host == hostaddr:
+        return True
+    try:
+        return ipaddress.ip_address(host) == ipaddress.ip_address(hostaddr)
+    except ValueError:
+        return False
+
+
 def postgresql_table_address(
     host: str, port: int, database: str, schema: str, table: str
 ) -> str:
@@ -80,8 +95,10 @@ def postgresql_table_address(
         The table's address.
 
     Raises:
-        ValueError: If the host is empty, or the database, schema or table name is
-            empty or holds ``.`` or ``/``; give the source a ``source_id``.
+        ValueError: If the host is empty, the database, schema or table name is
+            empty or holds ``.`` or ``/``, or the address would contain ``::`` (a
+            socket directory holding it, or a host ending with ``:``); give the
+            source a ``source_id``.
     """
     if not host:
         raise ValueError(
@@ -90,7 +107,15 @@ def postgresql_table_address(
         )
     joined_location("/", database, schema, table)
     name = joined_location(".", database, schema, table)
-    return f"{_server_name(host)}:{port}/{name}"
+    address = f"{_server_name(host)}:{port}/{name}"
+    if "::" in address:
+        raise ValueError(
+            f"the address {address!r} of the PostgreSQL table contains '::' (in the "
+            "host, such as a socket directory, or in a name), which separates the "
+            "parts of a source-info token, so the table has no default source id; "
+            "give the source a source_id"
+        )
+    return address
 
 
 class PostgreSQLTableSource(DBTableSource):
@@ -211,7 +236,7 @@ class PostgreSQLTableSource(DBTableSource):
                 "connection to the next, so the table has no default source id; give "
                 "the source a source_id"
             )
-        if host and hostaddr and host != hostaddr:
+        if host and hostaddr and not _one_address(host, hostaddr):
             raise ValueError(
                 f"the connection parameters of the PostgreSQL source over table "
                 f"{table_name!r} (its DSN, PGHOST or PGHOSTADDR, or a service file) "

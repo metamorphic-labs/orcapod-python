@@ -186,7 +186,8 @@ when they read the same data. The generic `DBTableSource` knows no database, so 
 default and refuses to be built without a `source_id`. A location whose parts cannot be
 told apart has no default (`joined_location`): a SQLite table name holding `:`, a PostgreSQL or
 SpiralDB name holding `.`, a PostgreSQL name holding `/`, a SpiralDB address or table id
-holding `@`. Such a source needs a `source_id`.
+holding `@`, a PostgreSQL address holding `::` (a socket directory holding it or ending with
+`:`; `::` separates the parts of a source-info token). Such a source needs a `source_id`.
 
 A PostgreSQL default names the server the connection reached (developer, November 18, 2026,
 ITL-1267), as libpq reports it, so one database, schema and table name on two servers gives
@@ -202,7 +203,8 @@ ids (`localhost` and `127.0.0.1`), as two spellings of one CSV path are. A DSN, 
 or `PGHOSTADDR` setting or a service file that names several servers (`host=a,b`) gives no
 default: the server reached can change from one connection to the next. Neither do
 parameters that give a host beside a different `hostaddr` (`host=db.example.org
-hostaddr=192.0.2.1`; `host=127.0.0.1 hostaddr=127.0.0.1` keeps a default), wherever each
+hostaddr=192.0.2.1`; `host=127.0.0.1 hostaddr=127.0.0.1` keeps a default, as do two spellings of
+one IP address, compared by value, an IPv6 zone included: `host=0:0:0:0:0:0:0:1 hostaddr=::1`), wherever each
 comes from. libpq takes each parameter from the DSN, else a service file, else the
 environment; psycopg (3.1.17 or later, the version `orcapod[postgresql]` requires for this)
 resolves a single host name of the DSN or `PGHOST` itself, when neither
