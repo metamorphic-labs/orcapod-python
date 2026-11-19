@@ -477,8 +477,9 @@ class TestGroupByIdentity:
     def test_to_config_round_trip(self):
         op = GroupBy(by=["subject", "date"])
         config = op.to_config()
-        # A list, not a tuple, so the config stays JSON-serializable.
-        assert config["config"]["by"] == ["subject", "date"]
+        # A list, not a tuple, so the config stays JSON-serializable; the keys in
+        # name order, since their order is not identity (ITL-1226).
+        assert config["config"]["by"] == ["date", "subject"]
         rebuilt = GroupBy.from_config(config)
         assert rebuilt.identity_structure() == op.identity_structure()
 

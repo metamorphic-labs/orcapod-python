@@ -305,14 +305,64 @@ plain tag. A data-tag group key stays a data column too (scalar, in both roles),
 following function can read its value (see [Data-tags](data-tags.md)).
 
 Ordering is deterministic by construction, because orcapod hashes the emitted lists to build
-cache keys: members are sorted by the input's non-key tag values (with the internal record id
-as a final tiebreaker), even though those tags are dropped, and groups are emitted in group-key
-order. A reordered input therefore produces a byte-identical output table.
+cache keys:
+
+- **Members** are sorted by the input's non-key tags, even though those tags are dropped.
+  The tags are taken in name order, each ascending with NaN after every number and nulls
+  last, and the internal record id breaks ties. `member_order` names tags to sort by first, in its order; the other
+  non-key tags follow in name order. A member is never ordered by a data value: a name in
+  `member_order` must be a tag of the input (a data-tag counts), and a data column is
+  refused (make it a tag first with `tag_by`).
+- **Groups** are emitted sorted by their keys, taken in name order. The order of the names
+  in `by` is not part of the operator: `GroupBy(by=["a", "b"])` and `GroupBy(by=["b", "a"])`
+  are one operator.
+- **Keys** group as the joins match them, except for null: rows with equal keys form one
+  group, all rows with a null key form one group, and so do all rows with a NaN key (NaN
+  equals NaN here; `0.0` equals `-0.0`). A NaN key sorts after every number and before null.
+  When the members of a group hold a float key with different bits (`0.0` and `-0.0`, or NaN
+  with another sign or payload), the group emits the one with the smallest bit pattern at
+  the column's own width (`float16`, `float32` or `float64`; a logical type stored as a
+  float is read through its storage, a dictionary-encoded float through its values), for
+  each key column: `0.0` over `-0.0`, and a positive NaN over a negative one. A signaling
+  NaN has smaller bits than the canonical quiet NaN, so when a member holds one, it is the
+  key emitted. The emitted key is always a value a member holds, bit for bit, and neither
+  the order of the rows nor `member_order` decides it.
+- **No arrangement of the input's columns changes the result.** The order of its tags, the
+  order of its data columns and the layout of its table leave every value, record id and
+  hash of the output unchanged. The output lists its columns as the input does (the keys in
+  the input's tag order); that order is presentation, and no hash depends on it.
+- **The order of the input's rows** changes nothing when the source has key columns
+  (`record_id_columns`): its record ids follow the rows' content, so a reordered input gives
+  a byte-identical output table. Without key columns a record id is the row's position, so
+  reordering the rows is a change: the folded record ids differ, and members that share
+  every tag (ordered by record id) can swap places in the lists.
+
+```python
+units = DictSource(
+    data=[
+        {"subject_id": "mouse_01", "unit": 0, "probe": "imec1", "spike_count": 980},
+        {"subject_id": "mouse_01", "unit": 1, "probe": "imec0", "spike_count": 1200},
+        {"subject_id": "mouse_01", "unit": 0, "probe": "imec0", "spike_count": 1100},
+    ],
+    tag_columns=["subject_id", "unit", "probe"], tag_only_columns=True,
+)
+for _, data in units.group_by(["subject_id"]).iter_data():
+    print(data.as_dict())
+    # {'spike_count': [1100, 1200, 980]}
+for _, data in units.group_by(["subject_id"], member_order=["unit"]).iter_data():
+    print(data.as_dict())
+    # {'spike_count': [1100, 980, 1200]}
+```
+
+By default the members are ordered by `probe`, then `unit` (name order), whatever the order
+of `tag_columns`. With `member_order=["unit"]`, they are ordered by `unit`, then `probe`. The
+option is part of the operator's identity only when it is given, so a `GroupBy` without it
+keeps its hash.
 
 A grouped stream can be grouped again on a coarser key; its data lists then nest one level
 deeper (`list[list[T]]`). The members of the second grouping are ordered by the first
-grouping's keys that are not in the coarser key, then by record id; a tag the first grouping
-dropped no longer takes part.
+grouping's keys that are not in the coarser key (in name order, or as `member_order` gives),
+then by record id; a tag the first grouping dropped no longer takes part.
 
 Every name in `by` must be a **scalar tag column** of the input. `GroupBy` raises
 `InputValidationError` for an unknown column, a data column, or a list-valued tag column --

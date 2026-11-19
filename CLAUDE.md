@@ -1272,10 +1272,13 @@ data. The rules:
   unchanged path; any other type difference, and every data column, behaves as before.
 - `GroupBy` requires every column in `by` to be a scalar tag column; it raises
   `InputValidationError` for unknown, data, or list-valued columns (the last usually means the
-  stream came from `Batch` — group before batching, not after). Members are sorted by non-key
-  tag values with the system `record_id` and then the source id as tiebreakers (a record id
-  names a row within its source only), so the hashed lists are stable across runs. Groups themselves are emitted in key order, so a reordered input yields a
-  byte-identical table.
+  stream came from `Batch` — group before batching, not after). Members are sorted by the
+  non-key tags in name order (or as `member_order` gives), with the system `record_id` and
+  then the source id as tiebreakers (a record id names a row within its source only), so the
+  hashed lists are stable across runs. Groups themselves are emitted sorted by their keys in
+  name order, so reordered rows yield a byte-identical table when the source has key columns
+  (`record_id_columns`). Without them a record id is the row's position: reordering the rows
+  changes the folded record ids, and members sharing every tag can swap places.
 - `GroupBy`'s output tag columns are its `by` columns, scalar, in the input's tag order; every
   other tag is dropped (ITL-1070; ITL-955 had kept them as `list[T]` tags, never released). The
   dropped tags still order the members, so the data lists are as before. Their values are not
@@ -1284,6 +1287,35 @@ data. The rules:
   can still order members, so the member sort key (`_null_last_key`) is
   recursive and sorts nulls last at every depth. A grouped stream grouped again on a coarser key
   orders its members by the first grouping's keys outside the coarser key, then by record id. An opt-in mode that keeps non-key tags is ITL-1071.
+- GroupBy never depends on how its input's columns are arranged (developer, November 17,
+  2026, ITL-1226). Members are ordered by the non-key tags in name order (each ascending,
+  NaN after every number, nulls last), then the record-id and source-id columns; `member_order` (non-key TAG names
+  only: a data column, a key, a repeat, a set or an empty list is refused; `"name"` is the
+  default; an ordering function is reserved, refused for now) names tags to order by first,
+  the rest follow in name order. A member is never ordered by a data value. The keys in `by`
+  are kept in name order: their order is not identity, and groups are emitted sorted by them.
+  `member_order` enters the identity and config only when given. Every arrangement of the
+  input (tag order, data order, table layout, the order of `by`) gives identical values,
+  record ids, folds, source-info tokens and hashes; only the output's column order follows
+  the input, as presentation. `TagBy`'s identity is its sorted names, and its new tags are
+  placed in name order.
+- `GroupBy` groups keys as the joins match them, except null (developer, November 17, 2026,
+  ITL-1234): all rows with a null key form one group, and so do all rows with a NaN key (the
+  grouping key holds every NaN as one object, `_grouping_key`); `0.0` equals `-0.0`. A NaN key
+  sorts after every number and before null, as in the member order (`_null_last_key`, which
+  also sorts a NaN tag after every number). The hashes read a float's bits, so a group emits,
+  for each float key column, its members' value with the smallest bit pattern at the column's
+  own width, float16, float32 or float64 (`_emitted_key_row`: `0.0` over `-0.0`, a positive NaN
+  over a negative one; a signaling NaN has smaller bits than the canonical quiet NaN, so it
+  wins), taken from the input's Arrow column, never through Python (a float32 signaling NaN
+  comes back quiet from Python): always a value a member holds, never the first row's, never
+  chosen by `member_order`. Bits are read only for a group whose key is zero or NaN. A logical
+  type stored as a float, or a dictionary-encoded float, is a float key, read through its
+  storage or its values (`_float_storage`). Every
+  other key is rebuilt from its Python value, as before: equal Python values that differ in
+  Arrow (`time64[ns]` within a microsecond) are one group with one rebuilt key; grouping by
+  the exact value is ITL-1250. The stance on `0.0`/`-0.0` and NaN for the whole library
+  (match by value, as Polars does; show the smallest bit pattern; rewrite nothing) is ITL-1251.
 - `Data` source-info values may be `str`, `None`, or `list[...]`, nested to any depth; the
   Arrow and Python types are derived from the value, with `None` mapping to `large_string`.
   That rule has one definition, `arrow_utils.source_info_arrow_type`, and applies only to
