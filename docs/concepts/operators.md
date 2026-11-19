@@ -73,12 +73,20 @@ Takes one or more streams. Used for `Join`, which performs an N-ary inner join.
 N-ary inner join on shared tag columns. Requires that input streams have non-overlapping
 data columns (raises `InputValidationError` on collision). Join is **commutative** -- the
 order of input streams does not affect the result. Like every operator, Join drops its
-inputs' meta (`__`-prefixed) columns, so they never collide. Rows match on equality of every shared tag column, whatever
-its type (lists and structs compare element by element). A row with a null in any shared tag
+inputs' meta (`__`-prefixed) columns, so they never collide. Rows match on equality of every shared tag column
+(lists and structs compare element by element). A row with a null in any shared tag
 column matches nothing, a null list or struct included, and rows with null on both sides do
 not match each other (the SQL convention for nulls; `MergeJoin` and `SemiJoin` follow it too, on the sync and the async path, while `GroupBy` is the exception by design and puts null keys in one group); a null *inside* a list or struct is an ordinary element that equals
 another null, an empty list is not a null, and NaN equals NaN. The async path gives the same
 rows.
+
+`Join` and `SemiJoin` keep every value exactly: each output column is taken from the inputs
+as it is, bit for bit (a `time64[ns]` keeps its nanoseconds, a `date64` its time of day, a
+`decimal256` its 76 digits), and a data column of any Arrow type passes through. A shared tag
+column must be a type they can compare: an integer, float, decimal, boolean, string, binary,
+date, time, timestamp or duration, a logical type stored as one, or a list or struct of
+those. A key that holds a map, an interval or a union is refused with `InputValidationError`
+naming the column; drop it from one input (`drop_tag_columns`) to join on the other tags.
 
 Because a null key matches nothing, a shared tag column may differ between the inputs in
 nullability alone: `T` in one input and `T | None` in another is accepted by `Join`, `MergeJoin`
