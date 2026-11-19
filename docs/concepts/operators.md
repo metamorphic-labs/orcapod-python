@@ -723,8 +723,17 @@ for tag, data in labelled:
 # {'subject_id': 'mouse_02', 'session': 2, 'cohort': 'A', 'run': 3} -> {'age': 8, 'weight': 22.1}
 ```
 
-The new tags follow the input's tags, in the order given. Data columns, their source info and
-the system tags are unchanged. A value's type is the tag's type, with no inference: a `bool`
+The new tags follow the input's tags, in name order: they are a set, and the order they are
+given in is not kept. `add_tags(run=3, cohort="A")` is the same operator, with the same hashes
+and the same columns:
+
+```python
+reordered = sessions.add_tags(run=3, cohort="A")
+print(reordered.keys())  # (('subject_id', 'session', 'cohort', 'run'), ('age', 'weight'))
+print(reordered.content_hash() == labelled.content_hash())  # True
+```
+
+Data columns, their source info and the system tags are unchanged. A value's type is the tag's type, with no inference: a `bool`
 becomes Arrow `bool`, an `int` `int64`, a `float` `double`, a `str` `large_string` and a `bytes`
 `large_binary`, and every new tag is non-nullable:
 
@@ -745,8 +754,9 @@ except InputValidationError as error:
 # add_tags: cannot add a tag with an existing column's name: 'age' is a data column
 ```
 
-The names and values, in order, are the operator's identity, so two different values are two
-operators, with different hashes and stored tables.
+The names and values, in name order, are the operator's identity, so two different values are
+two operators, with different hashes and stored tables, while two orders of the same tags are
+one operator.
 
 On a stream with [data-tags](data-tags.md), the data-tags stay data-tags and the new tags are
 plain: a constant tag is never a data value.
