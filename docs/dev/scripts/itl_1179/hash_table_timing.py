@@ -7,7 +7,9 @@ Run under each starfix version, one process at a time::
 
 Prints the best of three wall-clock times for starfix's ``ArrowDigester.hash_table`` and for
 Orcapod's ``StarfixArrowHasher.hash_table`` (which adds the semantic preprocessing; a flat
-table skips it, a nested column goes through the Python visitor).
+table skips it, a nested column goes through the Python visitor), with every run's time.
+The numbers are indicative: one machine, the two versions measured in separate processes
+run one after the other, no counterbalancing of their order.
 
 The numbers in ``README.md`` were taken at commit 937a68f7 (before Orcapod passed starfix's
 float options). On a later checkout the 0.5.0 run works through ``_starfix_compat``, which
@@ -33,13 +35,14 @@ from docs.dev.scripts.itl_1179._starfix_compat import use_installed_starfix  # n
 N = 1_000_000
 
 
-def _best(fn, repeat: int = 3) -> float:
+def _samples(fn, repeat: int = 3) -> list[float]:
+    """Wall-clock seconds of ``repeat`` runs of ``fn``, in run order."""
     times = []
     for _ in range(repeat):
         start = time.perf_counter()
         fn()
         times.append(time.perf_counter() - start)
-    return min(times)
+    return times
 
 
 def main() -> None:
@@ -60,20 +63,21 @@ def main() -> None:
     timings = [
         (
             "starfix hash_table, flat (int64, float64, large_string)",
-            _best(lambda: ArrowDigester.hash_table(flat)),
+            _samples(lambda: ArrowDigester.hash_table(flat)),
         ),
         (
             "starfix hash_table, large_list<int64>",
-            _best(lambda: ArrowDigester.hash_table(lists)),
+            _samples(lambda: ArrowDigester.hash_table(lists)),
         ),
-        ("orcapod hash_table, flat", _best(lambda: hasher.hash_table(flat))),
+        ("orcapod hash_table, flat", _samples(lambda: hasher.hash_table(flat))),
         (
             "orcapod hash_table, large_list<int64> (visitor)",
-            _best(lambda: hasher.hash_table(lists), 1),
+            _samples(lambda: hasher.hash_table(lists), 1),
         ),
     ]
-    for label, seconds in timings:
-        print(f"  {label + ':':<56} {seconds:.3f} s")
+    for label, samples in timings:
+        raw = ", ".join(f"{t:.3f}" for t in samples)
+        print(f"  {label + ':':<56} best {min(samples):.3f} s  (runs: {raw})")
 
 
 if __name__ == "__main__":

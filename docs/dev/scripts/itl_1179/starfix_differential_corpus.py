@@ -649,39 +649,30 @@ def orcapod_tables() -> dict[str, pa.Table]:
         "list_path": ([[Path("/a"), Path("/b")], []], list[Path]),
         "float_list": ([[1.0, math.nan], [math.inf]], list[float]),
     }
+    rows_types["file"] = (
+        [orcapod.File(rel / "a.txt"), orcapod.File(rel / "b.txt")],
+        orcapod.File,
+    )
+    rows_types["directory"] = ([orcapod.Directory(rel / "dir")], orcapod.Directory)
     try:
         import torch
-
+    except ImportError:  # torch is optional: its cases are a recorded skip
+        SKIPPED.extend(["orcapod.torch_f32", "orcapod.torch_bf16"])
+    else:
         rows_types["torch_f32"] = ([torch.tensor([1.0, 2.0, math.nan])], torch.Tensor)
         rows_types["torch_bf16"] = (
             [torch.tensor([1.0, -2.0], dtype=torch.bfloat16)],
             torch.Tensor,
         )
-    except ImportError:  # pragma: no cover - torch is optional
-        pass
-    try:
-        from orcapod import File as FileT
-
-        rows_types["file"] = ([FileT(rel / "a.txt"), FileT(rel / "b.txt")], FileT)
-    except Exception:  # noqa: BLE001 - a missing File type is reported by the absence
-        pass
-    try:
-        from orcapod import Directory as DirT
-
-        rows_types["directory"] = ([DirT(rel / "dir")], DirT)
-    except Exception:  # noqa: BLE001
-        pass
 
     out: dict[str, pa.Table] = {}
     for name, (values, py_type) in rows_types.items():
-        try:
-            table = tc.python_dicts_to_arrow_table(
-                [{"c": v, "k": i} for i, v in enumerate(values)],
-                python_schema=Schema({"c": py_type, "k": int}),
-            )
-        except Exception as exc:  # noqa: BLE001 - recorded, compared across runs
-            print(f"orcapod table {name}: {type(exc).__name__}: {exc}", file=sys.stderr)
-            continue
+        # A case that cannot be built fails the run: a dropped case would leave a silent
+        # hole in the comparison.
+        table = tc.python_dicts_to_arrow_table(
+            [{"c": v, "k": i} for i, v in enumerate(values)],
+            python_schema=Schema({"c": py_type, "k": int}),
+        )
         out[f"orcapod.{name}"] = table
         out[f"orcapod.{name}.zero_rows"] = table.slice(0, 0)
     return out
@@ -733,16 +724,21 @@ def library_values() -> dict[str, Any]:
     }
     try:
         import torch
-
+    except ImportError:  # torch is optional: its cases are a recorded skip
+        SKIPPED.extend(["value.torch.f64", "value.torch.f16_strided"])
+    else:
         values["torch.f64"] = torch.tensor(
             [1.0, math.nan, math.inf], dtype=torch.float64
         )
         values["torch.f16_strided"] = (
             torch.arange(6, dtype=torch.float16).reshape(2, 3).t()
         )
-    except ImportError:  # pragma: no cover
-        pass
     return values
+
+
+SKIPPED: list[str] = []
+"""Cases left out because an optional dependency (torch) is missing; written to the output
+and listed by ``compare_corpus_runs.py``. Every other case must be built, or the run fails."""
 
 
 # --- running ---------------------------------------------------------------------------------
@@ -826,10 +822,12 @@ def run() -> dict[str, str]:
 def main() -> None:
     target = Path(sys.argv[1])
     version = use_installed_starfix()
+    entries = run()  # fills SKIPPED
     result = {
         "starfix_version": version,
+        "skipped": sorted(SKIPPED),
         "pyarrow_version": pa.__version__,
-        "entries": run(),
+        "entries": entries,
     }
     target.write_text(json.dumps(result, indent=1, sort_keys=True) + "\n")
     print(

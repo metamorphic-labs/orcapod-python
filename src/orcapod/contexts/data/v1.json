@@ -274,7 +274,7 @@
         },
         {
             "definition": "arrow_hasher",
-            "change": "starfix 0.6 (the Rust implementation, byte-identical to 0.5.0 for every other input) with the float rule for the Arrow tables Orcapod builds: -0.0 hashes as 0.0 and every NaN as the ordinary NaN; a pyarrow table given as a value is hashed strictly under its own label; library values unchanged (ITL-1179, ITL-1251)"
+            "change": "starfix 0.6 (the Rust implementation; with the float options off byte-identical to 0.5.0, except two dictionary inputs 0.5.0 got wrong: a dictionary over a sliced nested fixed-size list, ITL-1223, and a dictionary whose empty dictionary has no offsets buffer) with the float rule for the Arrow tables Orcapod builds: -0.0 hashes as 0.0 and every NaN as the ordinary NaN; a pyarrow table given as a value is hashed strictly under its own label, arrow_strict_v1; library values unchanged (ITL-1179, ITL-1251)"
         },
         {
             "definition": "semantic_hasher",

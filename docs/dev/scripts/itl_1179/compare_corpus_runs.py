@@ -10,6 +10,10 @@ Prints every entry whose outcome differs and classifies it:
 * ``message``: both runs raise the same exception class and only the message differs;
 * ``UNEXPECTED``: anything else, including any other outcome of a known-defect case.
 
+Each run lists the cases it skipped because an optional dependency (torch) is missing; the
+two lists are printed and must be equal. Every other case is built in both runs, or the
+corpus script fails.
+
 Exits non-zero when an unexpected difference is found.
 
 Usage::
@@ -85,6 +89,11 @@ def main() -> int:
         f"old: starfix {old_run['starfix_version']}, new: starfix {new_run['starfix_version']}, "
         f"pyarrow {old_run['pyarrow_version']} / {new_run['pyarrow_version']}"
     )
+    skipped = (old_run.get("skipped", []), new_run.get("skipped", []))
+    print(f"skipped (optional dependency missing): old {skipped[0]}, new {skipped[1]}")
+    if skipped[0] != skipped[1]:
+        print("UNEXPECTED: the runs skipped different cases")
+        return 1
     if set(old) != set(new):
         print(f"UNEXPECTED: entry sets differ: {sorted(set(old) ^ set(new))}")
         return 1
