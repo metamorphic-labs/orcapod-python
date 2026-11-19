@@ -14,6 +14,7 @@ struct, a logical type (``Path``), and nullable and non-nullable columns.
 from __future__ import annotations
 
 import asyncio
+import decimal
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -239,6 +240,40 @@ def source_shared_data() -> ArrowTableSource:
     )
 
 
+def source_exact(
+    source_id: str, offset: int, with_data_tags: bool = False
+) -> ArrowTableSource:
+    """Tags ``k: date64`` (off midnight) and ``kd: decimal256``; data of both, in a
+    list and in a struct (ITL-1284): the sync ``Join`` and ``SemiJoin`` used to
+    move a ``date64`` to midnight and panic on ``decimal256``."""
+    dates = pa.array([1, 86_400_001, 2], pa.int64()).cast(pa.date64())
+    decimals = pa.array(
+        [decimal.Decimal(f"{n}.{offset + n:040d}") for n in range(3)],
+        pa.decimal256(76, 40),
+    )
+    lists = pa.LargeListArray.from_arrays(pa.array([0, 1, 2, 3], pa.int64()), decimals)
+    return _source(
+        {
+            "k": dates,
+            "kd": pa.array(
+                [decimal.Decimal(f"0.{n:040d}") for n in (1, 2, 3)],
+                pa.decimal256(76, 40),
+            ),
+            f"date_{source_id}": pa.array(
+                [1 + offset, 86_400_001 + offset, 3], pa.int64()
+            ).cast(pa.date64()),
+            f"dec_{source_id}": decimals,
+            f"list_{source_id}": lists,
+            f"struct_{source_id}": pa.StructArray.from_arrays(
+                [dates, decimals], names=["a", "b"]
+            ),
+        },
+        tags=("k", "kd"),
+        source_id=source_id,
+        with_data_tags=with_data_tags,
+    )
+
+
 def merge_source(
     source_id: str, offset: int, with_data_tags: bool = False
 ) -> ArrowTableSource:
@@ -407,6 +442,26 @@ CASES = [
         "semijoin_shared_data_column",
         SemiJoin,
         lambda: (source_b(nested=False), source_shared_data()),
+    ),
+    # Values Polars changed or could not read on the sync path (ITL-1284).
+    Case(
+        "join_exact_values",
+        Join,
+        lambda: (source_exact("e", 0), source_exact("f", 5)),
+    ),
+    Case(
+        "join_3_exact_values_data_tags",
+        Join,
+        lambda: (
+            source_exact("e", 0, with_data_tags=True),
+            source_exact("f", 5, with_data_tags=True),
+            source_exact("g", 9, with_data_tags=True),
+        ),
+    ),
+    Case(
+        "semijoin_exact_values",
+        SemiJoin,
+        lambda: (source_exact("e", 0, with_data_tags=True), source_exact("f", 5)),
     ),
     Case("batch_2", lambda: Batch(batch_size=2), lambda: (source_a(),)),
     Case("batch_all", Batch, lambda: (source_a(),)),
@@ -964,6 +1019,11 @@ def _zero_row_cases() -> list[Any]:
     """Every case with all inputs empty, and each multi-input case with one input empty."""
     params: list[Any] = []
     for case in CASES:
+        if "exact_values" in case.label:
+            # ``no_rows`` filters with ``PolarsFilter``, which carries every column
+            # through Polars and panics on ``decimal256``; these cases' zero-row
+            # inputs are tested in ``test_join_arrow_values.py``.
+            continue
         n_inputs = len(case.make_sources())
         empty_sets = [tuple(range(n_inputs))]
         if n_inputs > 1:

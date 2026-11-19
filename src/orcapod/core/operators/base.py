@@ -11,6 +11,7 @@ from orcapod.core.operators.meta_columns import (
 )
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.data_tags import data_tags_first
+from orcapod.core.operators.arrow_keys import part_without_rule
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import (
@@ -61,6 +62,38 @@ def require_shared_arrow_type(
             + "have the same Arrow type."
         )
     return shared
+
+
+def require_matchable_key(operator: str, name: str, arrow_type: pa.DataType) -> None:
+    """Raise if a join key's type has no rule for matching rows in Polars.
+
+    The rule is ``arrow_keys.part_without_rule`` (structs allowed: a struct
+    matches field by field); this adds the error an operator raises for a key
+    column it cannot match. Called with the input tables (the sync path, also
+    on zero-row tables) or the first rows (an async path) before rows are
+    matched, so no such column reaches Polars. Not at validation: that would
+    derive every input's zero-row table each time a graph is built
+    (``tests/test_pipeline/test_graph_walk_cost.py``).
+
+    Args:
+        operator: The operator's name, for the error message.
+        name: The key column's name, for the error message.
+        arrow_type: The key column's Arrow type.
+
+    Raises:
+        InputValidationError: If a part of the type (at the top level, or inside
+            a list or a struct) has no rule, such as a map, an interval or a
+            union. The message names the operator, the column and the type.
+    """
+    part = part_without_rule(arrow_type, structs=True)
+    if part is not None:
+        raise InputValidationError(
+            f"{operator} cannot match rows on the tag {name!r}: its type "
+            + f"{arrow_type} holds {part}, which has no rule for comparing values "
+            + "(a map, an interval, a union or a list view has none). Match on "
+            + "other tags: drop this one from one input "
+            + f"(stream.drop_tag_columns([{name!r}]))."
+        )
 
 
 def require_tag_data_roles_agree(
