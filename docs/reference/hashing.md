@@ -4,7 +4,11 @@ This document is a developer-facing reference for every hash computation site in
 orcapod-python framework. For conceptual background on the two identity chains
 (`content_hash` and `pipeline_hash`), see [Identity & Hashing](../concepts/identity.md).
 Every hash listed here that Orcapod stores or embeds in a name is pinned as a golden value;
-how released values are protected is described in [Golden Hashes](golden-hashes.md).
+how released values are protected is described in [Golden Hashes](golden-hashes.md). A
+release freezes every golden value except those of the provisional operators
+(`orcapod.operators.PROVISIONAL_OPERATORS`, today `PolarsFilter`) and of every step downstream
+of one: their identity may still change in a later release (see
+[Provisional operators](../concepts/operators.md#provisional-operators)).
 
 ---
 
@@ -577,6 +581,10 @@ The pipeline hash uses the same `SemanticAwarePythonHasher` with the **`pipeline
 
 ### 1c. Polars expression predicates
 
+**Provisional.** `PolarsFilter` is a provisional operator (ITL-1266): its identity, and the
+`polars_expr_v1` hashes that only it feeds, are not frozen with data context v1. Their golden
+values are in the provisional golden files ([Golden Hashes](golden-hashes.md#provisional-files)).
+
 `PolarsFilter.identity_structure()` is `("PolarsFilter", predicates, constraints)`, with
 `predicates` always a tuple. Keyword constraints hash as plain values. A `pl.Expr` predicate
 hashes through `PolarsExprHandler` to the leaf `polars_expr_v1:<hex>`.
@@ -631,8 +639,8 @@ definition. Consequences:
   change to the encoding of a supported construct needs a new label (`polars_expr_v2`).
 
 The canonical trees of a corpus of expressions are pinned in
-`tests/test_hashing/test_polars_expr_hashing.py`, and their hashes in the golden suite
-([Golden Hashes](golden-hashes.md)).
+`tests/test_hashing/test_polars_expr_hashing.py`, and their hashes in the provisional golden
+files ([Golden Hashes](golden-hashes.md#provisional-files)).
 
 ### 1d. Function values and parameter defaults
 
@@ -1526,11 +1534,15 @@ a null. A source whose table has such a column fails when it is constructed.
 A label names the algorithm that produced one hash. It does not say which generation of
 Orcapod's hashing a stored row belongs to. That is the **data context**: one key that changes
 whenever any existing hash value can change (the hashers, the identity definitions, the
-record-id recipes, the libraries behind them). Orcapod v0.3 writes `std:v1:default`;
-everything stored before v0.3 is the earlier generation, `std:v0.1:default`. The manifest of
+record-id recipes, the libraries behind them). This does not cover a provisional operator:
+its identity, and every hash downstream of one, can change in a later release under the same
+key ([Provisional operators](../concepts/operators.md#provisional-operators)). Orcapod v0.3
+writes `std:v1:default`; everything stored before v0.3 is the earlier generation,
+`std:v0.1:default`. The manifest of
 the current data context is `orcapod/contexts/data/v1.json`. It is frozen at the release of
-the library version that contains it and never edited afterwards, except that its `golden`
-history gains revisions as golden values are added and released
+the library version that contains it and never edited afterwards, except in its `golden`
+section: the history gains revisions as golden values are added and released, and the
+digests of the provisional files, which no release freezes, follow those files
 ([Golden Hashes](golden-hashes.md)). It names the hashers, the
 definitions that live in code, the libraries the hashes depend on and what changed from the
 previous data context. Logical types are not part of it: they are registered in
