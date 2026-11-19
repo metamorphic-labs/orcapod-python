@@ -16,7 +16,7 @@ from __future__ import annotations
 import itertools
 import json
 import struct
-from typing import Any, cast
+from typing import Any
 
 import pyarrow as pa
 import pytest
@@ -413,13 +413,13 @@ def test_a_float_backed_logical_key_groups_the_same_sync_and_async() -> None:
             assert fingerprint == seen[0], orchestrator.__name__
 
 
-def test_a_time64_ns_key_is_rebuilt_from_its_python_value() -> None:
-    """Pins today's grouping of a key that is not a float, whatever the row order.
+def test_a_time64_ns_key_groups_by_its_exact_value() -> None:
+    """1 ns and 2 ns are two groups, each emitting its own key, whatever the row order.
 
-    ``GroupBy`` compares keys as Python values, and a ``time64[ns]`` value reads as a
-    ``datetime.time`` of microseconds: 1 ns and 2 ns form one group, which emits
-    the Python value rebuilt (0 ns), as on ``main``. Grouping by the exact value is
-    ITL-1250. Only a float key is taken from the Arrow column.
+    ``GroupBy`` compared keys as Python values, and a ``time64[ns]`` value reads as a
+    ``datetime.time`` of microseconds: 1 ns and 2 ns were one group, which emitted the
+    Python value rebuilt (0 ns). It now groups by the Arrow value (ITL-1250), and every
+    key is taken from the input's Arrow column, not only a float key.
     """
     for values in ([1, 2], [2, 1]):
         table = pa.table(
@@ -429,9 +429,8 @@ def test_a_time64_ns_key_is_rebuilt_from_its_python_value() -> None:
             table, tag_columns=["k"], tag_only_columns=True, source_id="s"
         )
         out = source.group_by("k").as_table()
-        assert out.column("k").cast(pa.int64()).to_pylist() == [0]
-        members = cast(list[list[int]], out.column("v").to_pylist())
-        assert sorted(members[0]) == sorted(values)
+        assert out.column("k").cast(pa.int64()).to_pylist() == [1, 2]
+        assert out.column("v").to_pylist() == [[1], [2]]
 
 
 # ── a dictionary-encoded key is refused (ITL-1264) ──────────────────────────

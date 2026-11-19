@@ -85,6 +85,8 @@ The labels of v0.3:
 | `polars_expr_v1` | the Polars expression hash (§1c) | `POLARS_EXPR_HASH_LABEL`, `hashing/semantic_hashing/polars_expr.py` |
 | `polars_dataframe_v1` | the Polars DataFrame value hash (§1e) | `PolarsDataFrameHandler.HASH_LABEL`, `hashing/semantic_hashing/builtin_handlers.py` |
 | `polars_series_v1` | the Polars Series value hash (§1e) | `PolarsSeriesHandler.HASH_LABEL`, `hashing/semantic_hashing/builtin_handlers.py` |
+| `function_signature_v1` | the stored function signature hash: a function's declared interface ([Data function types](data-function-types.md)) | `FUNCTION_SIGNATURE_HASH_LABEL`, `core/data_function.py` |
+| `function_content_v1` | the stored function content hash: its source text from the `def` line on ([Data function types](data-function-types.md)) | `FUNCTION_CONTENT_HASH_LABEL`, `core/data_function.py` |
 | `batch_v1` | the folded source id and record id of `Batch` (site 6b) | `BATCH_FOLD_LABEL`, `core/operators/batch.py` |
 | `group_v1` | the folded source id and record id of `GroupBy` (site 6b), and the merged source-info token of a data-tag group key | `GROUP_BY_FOLD_LABEL`, `core/operators/group_by.py` |
 | `join_v1` | the merged source-info token of a key that is a data-tag on several inputs of a `Join` (site 6b) | `JOIN_FOLD_LABEL`, `core/operators/join.py` |
@@ -174,7 +176,7 @@ category, but we should make it totally overridable"; November 16, 2026, ITL-115
 | `CSVSource` | `csv` | `csv:<file path as passed>` |
 | `DeltaTableSource` | `delta_table` | `delta_table:<path or URI of the table folder as passed>` |
 | `SQLiteTableSource` | `sqlite_table` | `sqlite_table:<db path as passed>:main.<table>` (SQLite names a table `<schema>.<table>`; the main database's schema is `main`) |
-| `PostgreSQLTableSource` | `postgresql_table` | `postgresql_table:<database>.<schema>.<table>` (the three-part name, from `current_database()` and `current_schema()`) |
+| `PostgreSQLTableSource` | `postgresql_table` | `postgresql_table:<host>:<port>/<database>.<schema>.<table>` (the server the connection reached, then the three-part name, from `current_database()` and `current_schema()`; see below) |
 | `DBTableSource` (any other connector) | `db_table` | none: `source_id` is required. The connector protocol exposes no database address, and the table name alone does not say which database the table is in (developer decision, November 16, 2026) |
 | `SpiralDBTableSource` | `spiraldb_table` | `spiraldb_table:<project>.<dataset>.<table>@<table id>` (Spiral's own table identifier, then SpiralDB's table id; `SPIRALDB_SOURCE_ID_HAS_TABLE_ID`) |
 | `PollingSource` | `polling_source` | `polling_source:semantic_v1:<hex>` of `impl.identity()` (never its `repr`) |
@@ -185,8 +187,44 @@ A location default names the data where it lives, so two sources of one kind sha
 when they read the same data. The generic `DBTableSource` knows no database, so it has no
 default and refuses to be built without a `source_id`. A location whose parts cannot be
 told apart has no default (`joined_location`): a SQLite table name holding `:`, a PostgreSQL or
-SpiralDB name holding `.`, a SpiralDB address or table id holding `@`. Such a source needs a
-`source_id`.
+SpiralDB name holding `.`, a PostgreSQL name holding `/`, a SpiralDB address or table id
+holding `@`, a PostgreSQL address holding `::` (a socket directory holding it or ending with
+`:`; `::` separates the parts of a source-info token). Such a source needs a `source_id`.
+
+A PostgreSQL default names the server the connection reached (developer, November 18, 2026,
+ITL-1267), as libpq reports it, so one database, schema and table name on two servers gives
+two ids. The host is the name or address as given, or the directory of a Unix-domain socket;
+never the address a name resolved to. A `hostaddr` given alone is the host.
+A host name is written in lower case (`DB.Example.ORG` and `db.example.org` are one id); an
+IPv6 address in brackets and in its exploded form, which holds no `::`
+(`[0000:0000:0000:0000:0000:0000:0000:0001]` for `::1`); an IPv4 address and a socket
+directory as given (a Windows one with its drive, `C:/PgSockets`, keeps its case too). The port is always the number used: a DSN without one uses the port of
+a service file, else `PGPORT`, else libpq's compiled default (normally `5432`), so a DSN that
+gives the port the connection would use anyway and one without it give one id. Two spellings of one server are two
+ids (`localhost` and `127.0.0.1`), as two spellings of one CSV path are. A DSN, a `PGHOST`
+or `PGHOSTADDR` setting or a service file that names several servers (`host=a,b`) gives no
+default: the server reached can change from one connection to the next. Neither do
+parameters that give a host beside a different `hostaddr` (`host=db.example.org
+hostaddr=192.0.2.1`; `host=127.0.0.1 hostaddr=127.0.0.1` keeps a default, as do two spellings of
+one IP address, compared by value, an IPv6 zone included: `host=0:0:0:0:0:0:0:1 hostaddr=::1`), wherever each
+comes from. libpq takes each parameter from the DSN, else a service file, else the
+environment; psycopg (3.1.17 or later, the version `orcapod[postgresql]` requires for this)
+resolves a single host name of the DSN or `PGHOST` itself, when neither
+gives a `hostaddr`, and passes the address it reached as `hostaddr`, which overrides a service
+file's. So a service file's `hostaddr` beside a host name of the DSN or `PGHOST` changes
+nothing (the connection goes to the named host, and the default stays), while beside a
+Unix-socket directory, which psycopg does not resolve, it is the address used and there is no
+default; and a service file's host beside a `PGHOST` that psycopg resolved has no default
+(libpq reports the service file's host, the connection went to the `PGHOST` address). libpq
+sends the connection to the address, so
+the host name does not name the server, and two such DSNs with one host and two addresses
+would share an id. A name that DNS, a hosts file or a tunnel sends to another server is not
+seen in the parameters: two servers reached under one name that way share a default id and
+need a `source_id`. The same holds for a name that means this machine: a socket directory
+(`/var/run/postgresql`), `localhost` or a loopback address (`127.0.0.1`, `::1`). Two
+machines that each read their own server that way get one default id for one table name
+(`postgresql_table:/var/run/postgresql:5432/d.public.t` on both), so when their rows or
+provenance are combined, give each source a distinct `source_id`. No user name, password or other connection parameter enters the id.
 
 A row's record id is its row identifier (site 5), chosen by `record_id_columns` (a column name
 or several, in key order; every source accepts it):
@@ -278,7 +316,7 @@ test session with `-p tests.test_hashing.hash_site_trace`.
 | `_record_hash` of operator-cache and cached-source tables | `core/nodes/operator_node.py:OperatorJobNode._store_output_stream`, `core/sources/cached_source.py:CachedSource._live_records` |
 | side-effect log `record_id`, `record_id_hash` | `side_effects.py:_execute_side_effect_row` |
 | the `_content_hash` column | `core/streams/arrow_table_stream.py:ArrowTableStream._assemble_table.<locals>.hashes`, `core/function_pod.py:FunctionPodStream.as_table.<locals>.all_content_hashes`, `core/function_pod.py:FunctionPodStream.head.<locals>.shown_content_hashes`, `core/function_pod.py:FunctionPodStream.head.<locals>.<lambda>`, `core/nodes/function_node.py:FunctionNodeBase.as_table.<locals>.all_content_hashes`, `core/nodes/function_node.py:FunctionNodeBase._head_of_pairs.<locals>.<lambda>`, `side_effects.py:_table_of_rows` |
-| `__pf_var_function_signature_hash`, `__pf_var_function_content_hash` | `core/data_function.py:PythonDataFunction.__init__` |
+| `__pf_var_function_signature_hash`, `__pf_var_function_content_hash` | `core/data_function.py:function_signature_hash`, `core/data_function.py:function_content_hash`, `core/data_function.py:PythonDataFunction.__init__` |
 | saved pipeline and job files | `pipeline/graph.py:Pipeline.save`, `pipeline/job.py:PipelineJob.save`, `pipeline/job.py:PipelineJob.as_pipeline`, `core/sources/base.py:RootSource._identity_config` |
 | cached file hashes | `hashing/hash_cachers.py:SqliteHashCacher.put` |
 | `InvocationContext.invocation_hash` (`<label>:<hex>::<label>:<hex>`; its redesign is a side-effect follow-up) | `invocation.py:_serialize_component` |
@@ -526,7 +564,7 @@ The table below shows what each class returns from `identity_structure()`.
 | `DerivedSource` | Origin node's `content_hash` | Inherits its generating node's identity |
 | `DerivedSource` with `tags_as_data` | `(class_name, output_schema, source_id, key_columns, ("tags_as_data", sorted items))`; the default `source_id` is `tags_as_data:<label>:<hex>` of the hash of `(("DerivedSource", sorted tags_as_data items), (origin,))`, the origin entering through its `content_hash`; `record_id_columns`, when given, is appended to the parameters as `("record_id_columns", (names...))` | The rule of every root source plus the mapping, which enters the `content_hash` directly (two mappings can give one schema) and so also with an explicit `source_id`; the origin enters through the default `source_id` only, which is the content hash an operator node doing the derivation would have |
 | `ListSource` | `(class_name, name, elements, tag function hash, key_columns)` | The elements are the source's identity; `key_columns` as for every root source |
-| `PollingSource` | `(impl.identity(), tag_columns, key_columns)` | The implementer's identity; `key_columns` (always given for a polling source) as for every root source |
+| `PollingSource` | `(impl.identity(), sorted tag_columns, key_columns)` | The implementer's identity; the tag columns in name order, so their declared order changes nothing; `key_columns` (always given for a polling source, in key order) as for every root source |
 | `SpiralDBTableSource` | `(class_name, output_schema, source_id, key_columns)`, then the sorted `tags_as_data` items when given | A restriction (`where`, `limit`, `asof`) chooses rows of the same table and adds nothing |
 | `CachedSource` | the wrapped source's identity | |
 | Operators (unary) | `(operator_class_name, upstream_stream)` | Stream reference resolved via `content_resolver` |
@@ -690,10 +728,13 @@ registry. Raising is the v0.3 behaviour (developer decision, November 11, 2026);
 pod parameter's default as the column value it would be, which would cover `Path`,
 `datetime`, `date` and numpy scalars, is the follow-up ITL-971.
 
-**Where the hash is used.** As the hash of a function that appears as a value, and as the
-`function_signature_hash` stored with every result row (the
-`__pf_var_function_signature_hash` column), which is this same hash of the pod's function. A
-function pod's identity does **not** use it: the pod's `uri`, its `pipeline_hash()`, its
+**Where the hash is used.** As the hash of a function that appears as a value. The
+`function_signature_hash` stored with every result row is another hash
+(`function_signature_v1`, ITL-1256): the function's declared interface, each input with its
+effective type and default by name and the outputs in declared order, without the function's
+name, module or parameter kinds (see [Data function types](data-function-types.md)). Its
+defaults are hashed the same way, so a default the hasher cannot hash fails a pod at
+construction. A function pod's identity uses neither: the pod's `uri`, its `pipeline_hash()`, its
 `content_hash()` and its table paths depend on the function's name, version and output
 schema (see [Data Function URI Hash](#5-data-function-uri-hash)), so changing a default
 moves no path.

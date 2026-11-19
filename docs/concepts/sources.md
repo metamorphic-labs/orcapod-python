@@ -36,9 +36,17 @@ hashing) and produces the final immutable stream.
 `orcapod.sources` also provides database-backed sources (`SQLiteTableSource`,
 `PostgreSQLTableSource`, `SpiralDBTableSource`) and `PollingSource` for data that arrives over
 time; see the [API reference](../api/sources.md). Their default `source_id` names the table
-where it lives (`sqlite_table:<db path>:main.<table>`). `DBTableSource`, the base they share,
-can also be used directly over any connector; a connector gives no address of its database,
-so it then has no default and needs a `source_id`.
+where it lives (`sqlite_table:<db path>:main.<table>`,
+`postgresql_table:<host>:<port>/<database>.<schema>.<table>`, with the server the connection
+reached; the
+[hashing reference](../reference/hashing.md#default-source-ids-and-row-identifiers) has
+every form). A PostgreSQL DSN that names several servers (`host=a,b`), or gives a host
+beside a different `hostaddr` (`host=db.example.org hostaddr=192.0.2.1`; with
+`host=127.0.0.1 hostaddr=127.0.0.1` the default stays), has no default; the same holds when
+`PGHOST`, `PGHOSTADDR` or a service file gives either value. Give such a source a
+`source_id`. `DBTableSource`, the base they share, can also be used directly
+over any connector; a connector gives no address of its database, so it then has no default
+and needs a `source_id`.
 
 Two construction rules apply to every source and are the most common first errors:
 
@@ -515,6 +523,9 @@ before. Things to know:
 - The mapping is `{tag column: new data column}`. The new name must not already be a column
   and must not start with `_`; a wrong name raises `InputValidationError` when the source is
   built.
+- The copies follow the origin's data columns, in the order of their new names. The mapping
+  names a set of copies: the order you give it in changes neither the columns, their order,
+  nor any hash.
 - The copy has exactly the tag's type, including whether it may be null. If the tag may be
   null, annotate the function parameter as optional (`datetime | None`).
 - The copy equals the tag when the source is read. After that it is ordinary data: a function

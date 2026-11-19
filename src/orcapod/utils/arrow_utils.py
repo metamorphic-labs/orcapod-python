@@ -1644,6 +1644,43 @@ def build_aggregated_table(
     return table
 
 
+def aggregated_list_array(
+    values: "pa.Array[Any] | pa.ChunkedArray[Any]",
+    offsets: "pa.Int64Array",
+    list_type: pa.DataType,
+) -> pa.Array[Any]:
+    """Build a list column of exactly ``list_type`` from member values and offsets.
+
+    The array-based sibling of ``build_aggregated_table``: the members of row ``i``
+    are ``values[offsets[i]:offsets[i + 1]]``, so the values are never read as Python
+    values and keep every bit (a ``time64[ns]`` value its nanoseconds, a ``date64``
+    its time of day, a float32 signaling NaN its bits; ITL-1250, ITL-1248). The
+    caller puts the values in member order (``take``) and gives ``list_type`` from
+    ``aggregated_list_type``; for a logical element the list is built over the
+    element's storage and wrapped, as ``build_aggregated_table`` does.
+
+    Args:
+        values: Every member's value, group after group, in the input column's type.
+        offsets: ``int64`` offsets, one more than the number of rows, from 0 to
+            ``len(values)``.
+        list_type: The column's type, from ``aggregated_list_type``.
+
+    Returns:
+        The list array, one row per group, never null at the top level.
+    """
+    if isinstance(values, pa.ChunkedArray):
+        values = values.combine_chunks()
+    if isinstance(list_type, pa.BaseExtensionType):
+        storage_values = (
+            values.storage if isinstance(values, pa.ExtensionArray) else values
+        )
+        storage = pa.LargeListArray.from_arrays(
+            offsets, storage_values, type=list_type.storage_type
+        )
+        return pa.ExtensionArray.from_storage(list_type, storage)
+    return pa.LargeListArray.from_arrays(offsets, values, type=list_type)
+
+
 def _parse_system_tag_column(
     col_name: str,
 ) -> tuple[str, str, str] | None:

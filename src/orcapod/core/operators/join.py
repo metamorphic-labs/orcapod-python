@@ -13,8 +13,10 @@ from orcapod.core.operators.meta_columns import (
 )
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.match_keys import frozen_scalar
+from orcapod.core.operators.arrow_keys import polars_key_frame
 from orcapod.core.operators.base import (
     NonZeroInputOperator,
+    require_matchable_key,
     require_shared_arrow_type,
     require_tag_data_roles_agree,
 )
@@ -50,6 +52,11 @@ else:
     pl = LazyModule("polars")
 
 
+# The row-number columns of the frames Polars joins (``_inner_join``); a tag, so a
+# key, never starts with the meta prefix ``__``.
+_LEFT_ROW = "__join_left_row"
+_RIGHT_ROW = "__join_right_row"
+
 # Temporary name of the right input's source info of a merged data-tag column
 # during the join (``static_process``); never in an output.
 _MERGED_SOURCE_PREFIX = "__join_merged_source__"
@@ -61,6 +68,45 @@ _MERGED_SOURCE_PREFIX = "__join_merged_source__"
 # the members met so far, as this marker followed by their JSON array; the join folds
 # them when it emits a row (``_fold_pending``). Never in an output.
 _PENDING_MEMBERS = "\x00join-pending-members\x00"
+
+
+def _inner_join(left: "pa.Table", right: "pa.Table", keys: list[str]) -> "pa.Table":
+    """Inner-join two tables on their key columns, every value taken from the tables.
+
+    Polars decides which rows match, from the prepared keys and the row numbers
+    only (``arrow_keys``, ITL-1284); every output column is taken from ``left`` or
+    ``right`` by those row numbers, so each value is the input's, bit for bit. The
+    layout is the one Polars' join gives: the left columns (one of each key, the
+    left row's value), then the right columns that are not keys, a name the left
+    table also has taking the suffix ``_right``. The rows are in the order of
+    Polars' join.
+
+    Args:
+        left: The left table.
+        right: The right table.
+        keys: The key columns, in both tables, each checked by
+            ``require_matchable_key``.
+
+    Returns:
+        The joined table. Its fields carry no flags of the inputs (every field
+        nullable); the caller restores them.
+    """
+    pairs = polars_key_frame(left, keys, _LEFT_ROW).join(
+        polars_key_frame(right, keys, _RIGHT_ROW), on=keys, how="inner"
+    )
+    left_rows = pairs.get_column(_LEFT_ROW).to_arrow()
+    right_rows = pairs.get_column(_RIGHT_ROW).to_arrow()
+    names: list[str] = []
+    arrays: list[Any] = []
+    for name in left.column_names:
+        names.append(name)
+        arrays.append(left.column(name).take(left_rows))
+    for name in right.column_names:
+        if name in keys:
+            continue
+        names.append(f"{name}_right" if name in left.column_names else name)
+        arrays.append(right.column(name).take(right_rows))
+    return pa.Table.from_arrays(arrays, names=names)
 
 
 def _members(token: str | None) -> list[str | None]:
@@ -429,27 +475,24 @@ class Join(NonZeroInputOperator):
                 next_table = next_table.rename_columns(
                     [right_source.get(c, c) for c in next_table.column_names]
                 )
-            # Polars sets every field nullable; capture the schema before the join.
+            # The joined table is built from arrays, with no field flags; capture
+            # the schemas before the join.
             next_ref_schema = next_table.schema
             # A shared tag key must have one Arrow type in both inputs (up to
-            # layout); otherwise Polars would join and keep one side's type.
+            # layout); otherwise Polars would join and keep one side's type. And
+            # it must be a type Polars can be given (``arrow_keys``).
             for key in sorted(common_tag_keys):
-                _ = require_shared_arrow_type(
+                key_type = require_shared_arrow_type(
                     "Join",
                     key,
                     arrow_utils.column_arrow_type(table.schema, key),
                     arrow_utils.column_arrow_type(next_table.schema, key),
                 )
+                require_matchable_key("Join", key, key_type)
             common_tag_keys.add(COMMON_JOIN_KEY)
 
-            # Capture the left-side schema before the Polars join, which sets all
-            # fields to nullable=True regardless of the original schema.
             table_ref_schema = table.schema
-            table = (
-                pl.DataFrame(table)
-                .join(pl.DataFrame(next_table), on=list(common_tag_keys), how="inner")
-                .to_arrow()
-            )
+            table = _inner_join(table, next_table, list(common_tag_keys))
             table = arrow_utils.restore_schema_nullability(
                 table, table_ref_schema, next_ref_schema
             )
@@ -953,8 +996,9 @@ class Join(NonZeroInputOperator):
     ) -> None:
         """Raise if a shared tag key has disagreeing Arrow types in two inputs.
 
-        The async counterpart of the check ``static_process`` runs on the input
-        tables before its join, applied to the first row of each side.
+        The async counterpart of the checks ``static_process`` runs on the input
+        tables before its join, applied to the first row of each side: one Arrow
+        type in both, and one the sync join can match on.
 
         Args:
             first: A tag from one input.
@@ -963,16 +1007,18 @@ class Join(NonZeroInputOperator):
 
         Raises:
             InputValidationError: If a key's large-normalized Arrow types differ
-                (``require_shared_arrow_type``).
+                (``require_shared_arrow_type``), or its type has no rule for
+                matching (``require_matchable_key``).
         """
         first_schema, second_schema = first.arrow_schema(), second.arrow_schema()
         for key in keys:
-            _ = require_shared_arrow_type(
+            key_type = require_shared_arrow_type(
                 "Join",
                 key,
                 arrow_utils.column_arrow_type(first_schema, key),
                 arrow_utils.column_arrow_type(second_schema, key),
             )
+            require_matchable_key("Join", key, key_type)
 
     @staticmethod
     async def _rename_sys_tags(
