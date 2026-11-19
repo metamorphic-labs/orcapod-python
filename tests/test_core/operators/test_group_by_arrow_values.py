@@ -16,14 +16,22 @@ from __future__ import annotations
 import decimal
 import itertools
 import json
+from pathlib import Path
 from typing import Any, TypeAlias, cast
 
+import polars as pl
 import pyarrow as pa
 import pytest
 
 import orcapod as op
 from orcapod.core.operators import GroupBy
-from orcapod.core.operators.group_by import GROUP_BY_FOLD_LABEL
+from orcapod.core.operators.group_by import (
+    GROUP_BY_FOLD_LABEL,
+    _polars_ready,  # pyright: ignore[reportPrivateUsage]  # the test is about these
+    _sort_key,  # pyright: ignore[reportPrivateUsage]
+    _unorderable_part,  # pyright: ignore[reportPrivateUsage]
+)
+from orcapod.contexts import get_default_context
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import InputValidationError
@@ -623,3 +631,122 @@ def test_every_list_and_fold_follows_one_member_order(roles: str) -> None:
                     [json.dumps({"rid": r}, separators=(",", ":")) for r in rows],
                     label=GROUP_BY_FOLD_LABEL,
                 )
+
+
+# ── validation and preparation agree on every type ──────────────────────────
+#
+# CodeRabbit, PR 458: a dictionary over a logical type passed validation but its
+# preparation unwrapped the logical type before decoding the dictionary, then met it
+# again and raised. Both now read a type through logical storage and dictionary values
+# alternately, until neither applies.
+
+PATH_TYPE = cast(
+    pa.BaseExtensionType,
+    get_default_context().type_converter.python_type_to_arrow_type(Path),
+)
+
+
+def _paths(values: list[str | None]) -> Column:
+    return pa.ExtensionArray.from_storage(
+        PATH_TYPE, pa.array(values, PATH_TYPE.storage_type)
+    )
+
+
+def _dictionary(values: Column, indices: list[int | None]) -> Column:
+    return pa.DictionaryArray.from_arrays(pa.array(indices, pa.int32()), values)
+
+
+def test_a_dictionary_over_a_logical_type_orders_and_keys() -> None:
+    """A dictionary-encoded Path tag orders the members and keys the groups."""
+    columns: dict[str, Column] = {
+        "g": pa.array([1, 1, 1, 2], pa.int64()),
+        "t1": _dictionary(_paths(["/b", "/a"]), [0, 1, None, 1]),
+        "t2": pa.array([0, 0, 0, 1], pa.int64()),
+        "rid": pa.array([f"r{i}" for i in range(4)], pa.large_string()),
+        "v": pa.array(range(4), pa.int64()),
+    }
+    table = _table(columns)
+    stream = ArrowTableStream(table, tag_columns=["g", "t1", "t2"])
+    # "/a" before "/b", null last; for every key path, sync and async.
+    for rows in (
+        list(GroupBy("g")(stream).iter_data()),
+        async_rows(GroupBy("g"), stream),
+    ):
+        lists = sorted(
+            cast(list[int], data.as_table().column("v").to_pylist()[0])
+            for _, data in rows
+        )
+        assert lists == [[1, 0, 2], [3]]
+    for rows in (
+        list(GroupBy(["t1", "t2"])(stream).iter_data()),
+        async_rows(GroupBy(["t2", "t1"]), stream),
+    ):
+        assert len(rows) == 4
+
+
+AGREEMENT_TYPES: dict[str, Column] = {
+    "int8": pa.array([1, None, -1], pa.int8()),
+    "uint64": pa.array([0, None, 2**64 - 1], pa.uint64()),
+    "float16": _floats([0x3C00, None, 0x7C01], 16),
+    "float64": pa.array([1.0, None, float("nan")], pa.float64()),
+    "bool": pa.array([True, None, False]),
+    "decimal128": pa.array([D(1), None, D(-1)], pa.decimal128(10, 2)),
+    "decimal256": pa.array([_dec(1, 1), None, _dec(-1)], DEC),
+    "large_string": pa.array(["b", None, "a"], pa.large_string()),
+    "string_view": pa.array(["b", None, "a"], pa.string_view()),
+    "binary_view": pa.array([b"b", None, b"a"], pa.binary_view()),
+    "fixed_size_binary": pa.array([b"ab", None, b"ba"], pa.binary(2)),
+    "date64": _ints([1, None, 86_400_001], pa.date64()),
+    "time32[s]": pa.array([1, None, 2], pa.int32()).cast(pa.time32("s")),
+    "time64[ns]": _ints([1, None, 2], NS),
+    "timestamp[ns, tz]": _ints([1, None, 2], pa.timestamp("ns", "UTC")),
+    "duration[s]": _ints([1, None, 2], pa.duration("s")),
+    "null": pa.array([None, None, None], pa.null()),
+    "logical Path": _paths(["/b", None, "/a"]),
+    "dictionary<string>": _dictionary(
+        pa.array(["b", "a"], pa.large_string()), [0, None, 1]
+    ),
+    "dictionary<Path>": _dictionary(_paths(["/b", "/a"]), [0, None, 1]),
+    "large_list<dictionary<Path>>": pa.LargeListArray.from_arrays(
+        pa.array([0, 1, 1, 2], pa.int64()),
+        _dictionary(_paths(["/b", "/a"]), [0, 1]),
+    ),
+    "fixed_size_list<decimal256>": _fixed([[_dec(1)], None, [_dec(2)]], DEC, 1),
+    "large_list<fixed_size_list<float16>>": pa.LargeListArray.from_arrays(
+        pa.array([0, 1, 1, 2], pa.int64()),
+        pa.FixedSizeListArray.from_arrays(_floats([0x3C00, 0x4000], 16), 1),
+    ),
+    # Without an order:
+    "struct": pa.StructArray.from_arrays(
+        [pa.array([1, 2, 3], pa.int64())], names=["x"]
+    ),
+    "map": pa.array([[("a", 1)], None, []], pa.map_(pa.large_string(), pa.int64())),
+    "interval": pa.array([(1, 0, 0), None, (0, 31, 0)], pa.month_day_nano_interval()),
+    "dense_union": UNORDERABLE_TAGS["dense_union"],
+    "large_list_view": pa.array([[1], None, [2]], pa.large_list_view(pa.int64())),
+    "large_list<struct>": pa.array(
+        [[{"x": 1}], None, []], pa.large_list(pa.struct([("x", pa.int64())]))
+    ),
+    "dictionary<struct>": _dictionary(
+        pa.StructArray.from_arrays([pa.array([1, 2], pa.int64())], names=["x"]),
+        [0, None, 1],
+    ),
+}
+ORDERABLE = 23
+
+
+@pytest.mark.parametrize("name", list(AGREEMENT_TYPES))
+def test_validation_and_preparation_agree_on_every_type(name: str) -> None:
+    """A type validation accepts is prepared and read by Polars; any other is refused
+    by both, never passed through."""
+    array = AGREEMENT_TYPES[name]
+    accepted = _unorderable_part(array.type) is None
+    assert accepted == (list(AGREEMENT_TYPES).index(name) < ORDERABLE)
+    if accepted:
+        prepared = _polars_ready(array)
+        frame = pl.from_arrow(pa.Table.from_arrays([prepared], names=["x"]))
+        assert isinstance(frame, pl.DataFrame)
+        _ = frame.sort(_sort_key("x", frame.schema["x"]), nulls_last=True)
+    else:
+        with pytest.raises(TypeError, match="no order"):
+            _ = _polars_ready(array)

@@ -138,10 +138,29 @@ def _storage(column: "pa.ChunkedArray[Any]") -> "pa.Array[Any]":
     Returns:
         The column's values as stored.
     """
-    array = column.combine_chunks()
-    if isinstance(array, pa.ExtensionArray):
-        array = array.storage
-    return _without_dictionary(array)
+    return _values_of(column.combine_chunks())
+
+
+def _values_of(array: "pa.Array[Any]") -> "pa.Array[Any]":
+    """Return an array as its values are read: through logical types and dictionaries.
+
+    The array twin of ``_value_type``: a logical type's storage and a dictionary's
+    values, alternately, until neither applies, so a dictionary over a logical type
+    (or a logical type over a dictionary) is read as validation reads its type.
+
+    Args:
+        array: A column of the input table, or the values of one.
+
+    Returns:
+        The array of plain values.
+    """
+    while True:
+        if isinstance(array, pa.ExtensionArray):
+            array = array.storage
+        elif isinstance(array, pa.DictionaryArray):
+            array = _without_dictionary(array)
+        else:
+            return array
 
 
 def _decimal256_limbs(array: "pa.Array[Any]") -> "pa.Array[Any]":
@@ -186,7 +205,8 @@ def _polars_ready(array: "pa.Array[Any]") -> "pa.Array[Any]":
     type ``_unorderable_part`` accepts is prepared here, and no other type reaches
     it (the caller refuses it first):
 
-    * a logical type is its storage and a dictionary its values;
+    * a logical type is its storage and a dictionary its values, alternately until
+      neither applies (``_values_of``, as ``_value_type`` reads the type);
     * a date, time, timestamp or duration is its integer (the column's unit and zone
       are its type, so the integers order and compare as the values do), so no
       conversion of Polars' own can change it;
@@ -206,9 +226,7 @@ def _polars_ready(array: "pa.Array[Any]") -> "pa.Array[Any]":
         TypeError: For a type ``_unorderable_part`` refuses; never reached through
             ``GroupBy``, which refuses the column first.
     """
-    if isinstance(array, pa.ExtensionArray):
-        array = array.storage
-    array = _without_dictionary(array)
+    array = _values_of(array)
     arrow_type = array.type
     types = pa.types
     if types.is_large_list(arrow_type) or types.is_list(arrow_type):
@@ -232,7 +250,13 @@ def _polars_ready(array: "pa.Array[Any]") -> "pa.Array[Any]":
         return _decimal256_limbs(array)
     if types.is_float16(arrow_type):
         return array.cast(pa.float32())
-    if types.is_temporal(arrow_type):
+    if (
+        types.is_date(arrow_type)
+        or types.is_time(arrow_type)
+        or types.is_timestamp(arrow_type)
+        or types.is_duration(arrow_type)
+    ):
+        # Not ``is_temporal``, which also takes an interval: that has no order.
         width = cast(int, arrow_type.bit_width)
         return array.view(pa.int32() if width == 32 else pa.int64())
     if types.is_string_view(arrow_type):
