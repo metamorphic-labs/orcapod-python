@@ -21,7 +21,11 @@ from orcapod.contexts.stored import require_same_data_context
 from orcapod.core.base import TraceableBase
 from orcapod.core.data_function_types import DataFunctionTypeDeclaration, StoredColumn
 from orcapod.core.datagrams import Datagram, Data
-from orcapod.hashing.semantic_hashing.builtin_handlers import hash_default_value
+from orcapod.hashing.semantic_hashing.builtin_handlers import (
+    DEFAULT_VALUE_REFUSALS,
+    default_value_refused,
+    hash_default_value,
+)
 from orcapod.core.result_cache import ResultCache
 from orcapod.errors import NoOutputsDeclaredError, OutputTypeError
 from orcapod.protocols.core_protocols import DataFunctionProtocol, DataProtocol
@@ -440,8 +444,10 @@ def function_signature_hash(
         The hash, labelled ``FUNCTION_SIGNATURE_HASH_LABEL``.
 
     Raises:
-        TypeError: If a parameter's default cannot be hashed; the message names the
-            parameter and the function.
+        TypeError: If the hasher refuses a parameter's default (any of
+            ``DEFAULT_VALUE_REFUSALS``: a ``TypeError`` or a ``ValueError`` such as
+            ``UnsupportedValueError``); the message names the parameter and the
+            function, and the hasher's error is its cause.
     """
     parameters = inspect.signature(function).parameters
     inputs: dict[str, dict[str, ContentHash]] = {}
@@ -451,16 +457,8 @@ def function_signature_hash(
         if parameter is not None and parameter.default is not inspect.Parameter.empty:
             try:
                 entry["default"] = hash_default_value(parameter.default, hasher)
-            except TypeError as exc:
-                module = getattr(function, "__module__", None)
-                qualname = getattr(function, "__qualname__", None) or repr(function)
-                function_name = f"{module}.{qualname}" if module else qualname
-                raise TypeError(
-                    f"Cannot hash the default value of parameter {name!r} of function "
-                    f"{function_name}: {exc} A default value is part of the "
-                    "function's signature hash: use a default the hasher can hash, or "
-                    "remove the default and supply the value as an input."
-                ) from exc
+            except DEFAULT_VALUE_REFUSALS as exc:
+                raise default_value_refused(name, function, exc) from exc
         inputs[name] = entry
     outputs = [
         {"key": key, "type": hasher.hash_object(python_type)}

@@ -270,6 +270,74 @@ class TestUnhashableDefaultRaises:
         assert "default" in message
 
 
+def _object_array() -> Any:
+    """A value of a type the hasher knows but refuses: an object-dtype NumPy array."""
+    import numpy as np
+
+    return np.array([object(), 1], dtype=object)
+
+
+def _two_refused(first: str) -> Callable[..., Any]:
+    """``f(x: int, <two parameters whose defaults the hasher refuses>) -> int``.
+
+    ``first`` names which refused default comes first in the signature: ``"array"``
+    (an object-dtype NumPy array, refused with a ``ValueError``) or ``"unregistered"``
+    (an instance of a class with no handler, refused with a ``TypeError``).
+    """
+    if first == "array":
+
+        def f(
+            x: int, array: Any = _object_array(), unregistered: Any = _Unregistered()
+        ) -> int:
+            return x
+
+    else:
+
+        def f(
+            x: int, unregistered: Any = _Unregistered(), array: Any = _object_array()
+        ) -> int:
+            return x
+
+    return f
+
+
+class TestEveryRefusalOfADefaultNamesTheParameter:
+    """Every refusal of the hasher, ``TypeError`` or ``ValueError``, is wrapped.
+
+    The hasher refuses an object-dtype NumPy array with ``UnsupportedValueError`` (a
+    ``ValueError``) and a value of an unregistered class with a ``TypeError``. Both
+    become the documented ``TypeError`` naming the parameter and the function, with
+    the hasher's error as its cause, at both hash sites.
+    """
+
+    @HASH_SITES
+    @pytest.mark.parametrize("first", ["array", "unregistered"])
+    def test_the_first_refused_default_is_named(
+        self, site: Callable[..., Any], first: str
+    ) -> None:
+        from orcapod.errors import UnsupportedValueError
+
+        fn = _two_refused(first)
+        with pytest.raises(TypeError) as excinfo:
+            site(fn)
+        message = str(excinfo.value)
+        other = "unregistered" if first == "array" else "array"
+        assert f"'{first}'" in message
+        assert f"'{other}'" not in message
+        assert fn.__qualname__ in message
+        expected_cause = UnsupportedValueError if first == "array" else TypeError
+        assert isinstance(excinfo.value.__cause__, expected_cause)
+
+    @HASH_SITES
+    def test_a_refused_numpy_default_alone(self, site: Callable[..., Any]) -> None:
+        """The case that escaped: a ``ValueError`` refusal, now wrapped and chained."""
+        fn = _with_default(_object_array())
+        with pytest.raises(TypeError, match="'option'") as excinfo:
+            site(fn)
+        assert fn.__qualname__ in str(excinfo.value)
+        assert isinstance(excinfo.value.__cause__, ValueError)
+
+
 # ---------------------------------------------------------------------------
 # Defaults of common non-primitive types (decision D3: raise, or a value handler)
 # ---------------------------------------------------------------------------
