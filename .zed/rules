@@ -479,7 +479,8 @@ A class a user defines is one of two kinds (developer, November 12, 2026, ITL-97
 
 ## Golden hash values
 
-Hash values must stay identical across releases (developer, November 10, 2026). Every hash
+Hash values must stay identical across releases (developer, November 10, 2026). Not covered:
+a provisional operator's identity and every hash downstream of it (ITL-1266, below). Every hash
 Orcapod stores or embeds in a name is pinned in the golden folder of the current data context,
 `tests/test_hashing/golden/data/<folder>/<group>-NN.json`, and checked by
 `tests/test_hashing/golden/test_golden_hashes.py`. The mechanism is
@@ -496,6 +497,20 @@ Orcapod stores or embeds in a name is pinned in the golden folder of the current
   generator writes the new value. `--release 0.4.0` freezes v1. Any version published
   before it, a pre-release included, would freeze v1 there: the Release workflow requires
   the release step for every version. A withdrawn version is never released again.
+- Provisional operators are outside the freeze (developer, November 18, 2026, ITL-1266):
+  `orcapod.operators.PROVISIONAL_OPERATORS` (`core/operators/provisional.py`) is the one
+  list (name to the issue deciding its identity; today `PolarsFilter`), and each listed class
+  sets `PROVISIONAL = True` (a test checks they agree). Building one issues
+  `ProvisionalHashWarning` once per operator per process. A golden case that depends on one
+  declares it (`@case(..., provisional=("PolarsFilter",))`; `compute_group_kinds` refuses a
+  case that builds an undeclared one); its entries live in
+  `data/<folder>/provisional/<group>.json`, listed in `golden.provisional` of the manifest,
+  outside the history, so no release freezes them. They are checked like every other value
+  and change only with the developer's approval of the exact list, without a new data
+  context. `generate_golden_hashes.py --relocate` moves entries, values unchanged, between
+  frozen and provisional files; an operator leaving the group has its entries relocated into
+  a frozen file before the release step. Never put a value that depends on a provisional
+  operator in a frozen file.
 - The unit of immutability is the golden file. The manifest's `golden.history`
   (`src/orcapod/contexts/data/<version>.json`) lists every file with the sha256 of its bytes;
   a release appends a revision with `added: {}`, pinned in
@@ -904,9 +919,11 @@ generation of hashing; rows of the current data context are the current entries.
 - A released data context manifest (contexts/data/<version>.json) is frozen: the digest of
   its canonical JSON without golden is pinned in contexts/released_manifests.json
   (manifest), with one releases line per library release (ITL-946). Only its golden
-  history grows, by appending. A change that moves a released golden hash value, for any
-  reason (a logical type's own change included), needs a new data context version with its
-  own manifest file, never an edit of a released one. A withdrawn release freezes nothing:
+  section changes: the history grows, by appending, and the provisional listing follows the
+  provisional files, which no release freezes (ITL-1266). A change that moves a released
+  golden hash value, for any reason (a logical type's own change included), needs a new data
+  context version with its own manifest file, never an edit of a released one. A withdrawn
+  release freezes nothing:
   its pins move to a withdrawn record (0.3.0, ITL-1255: v1 is open until 0.4.0).
 - In memory the data context column is still _context_key (ColumnConfig context).
 - A writer refuses an input of another data context than its own
