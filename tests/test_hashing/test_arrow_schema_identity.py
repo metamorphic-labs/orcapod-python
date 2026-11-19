@@ -37,7 +37,7 @@ DATES = [dt.date(2026, 1, 1), dt.date(2026, 1, 2)]
 
 
 def _table(
-    x: pa.Array, x_field: pa.Field | None = None, order: str = "kgxw"
+    x: pa.Array[Any], x_field: pa.Field[Any] | None = None, order: str = "kgxw"
 ) -> pa.Table:
     """Two tags ``k``, ``g`` and two data columns ``x`` (under test), ``w``."""
     columns = {

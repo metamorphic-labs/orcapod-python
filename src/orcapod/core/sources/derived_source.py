@@ -125,7 +125,7 @@ def validate_tags_as_data(
         seen.add(name)
 
 
-def _field_text(field: "pa.Field") -> str:
+def _field_text(field: "pa.Field[Any]") -> str:
     """The Arrow type of ``field`` with its top-level nullability, for a message."""
     return f"{field.type}{'' if field.nullable else ' not null'}"
 

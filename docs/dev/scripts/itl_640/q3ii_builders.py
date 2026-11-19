@@ -17,6 +17,7 @@ import sys
 import tempfile
 import warnings
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import polars as pl
@@ -64,9 +65,13 @@ ROWS = [
 CSV_COLUMNS = ["k", "i", "f", "s", "b", "n"]
 
 
-def build(root: Path) -> dict[str, object]:
-    kw = {"tag_columns": ["k"], "tag_only_columns": True, "source_id": "s"}
-    out: dict[str, object] = {}
+def build(root: Path) -> dict[str, Any]:
+    kw: dict[str, Any] = {
+        "tag_columns": ["k"],
+        "tag_only_columns": True,
+        "source_id": "s",
+    }
+    out: dict[str, Any] = {}
     for label, make in (
         ("DictSource", lambda: DictSource(ROWS, **kw)),
         ("DataFrameSource(pandas)", lambda: DataFrameSource(pd.DataFrame(ROWS), **kw)),
@@ -95,7 +100,7 @@ def build(root: Path) -> dict[str, object]:
     return out
 
 
-def field_text(f: pa.Field) -> str:
+def field_text(f: "pa.Field[Any]") -> str:
     return f"{f.type}{'' if f.nullable else ' nn'}"
 
 

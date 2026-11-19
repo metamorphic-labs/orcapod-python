@@ -47,7 +47,6 @@ def sub(title: str) -> None:
 
 def main() -> None:
     ctx = resolve_context()
-    semantic_hasher = ctx.semantic_hasher
     schema_n_char = DEFAULT_CONFIG.hashing.schema_n_char
 
     # ------------------------------------------------------------------
@@ -115,8 +114,10 @@ def main() -> None:
 
     sub("Site 3 — Schema hash embedded in system-tag column names")
     tag_schema, data_schema = scores.output_schema()
+    # The schema hash is built from the Arrow schemas of the source's rows (ITL-640).
+    arrow_tag, arrow_data = scores.arrow_schemas
     schema_hash = compute_schema_hash(
-        tag_schema, data_schema, semantic_hasher, schema_n_char
+        arrow_tag, arrow_data, scores.data_context, schema_n_char
     )
     print(f"    (tag_schema, data_schema)   = ({tag_schema!r}, {data_schema!r})")
     print(f"    schema_hash (char_count={schema_n_char!r}) = {schema_hash!r}")

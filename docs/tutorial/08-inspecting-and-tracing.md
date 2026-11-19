@@ -127,7 +127,7 @@ source_columns = [c for c in table.columns if c.startswith("_tag_source_id")]
 print(len(source_columns))
 # 2
 print(table.select(source_columns).unique().rows())
-# [('units', 'sessions')]
+# [('sessions', 'units')]
 ```
 
 Two system-tag columns, because two sources feed `rates`; every row depends on one row of

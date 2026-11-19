@@ -22,6 +22,7 @@ import tempfile
 import uuid
 import warnings
 from pathlib import Path
+from typing import Any
 
 import pyarrow as pa
 
@@ -43,14 +44,6 @@ dates = [dt.date(2026, 1, 1), dt.date(2026, 1, 2)]
 
 def col(values, arrow_type, nullable=True):
     return pa.field("x", arrow_type, nullable=nullable), pa.array(values, arrow_type)
-
-
-def logical(py_type, values):
-    ctx.semantic_hasher.hash_object(py_type)
-    arrow_type = conv.python_type_to_arrow_type(py_type)
-    return pa.field("x", arrow_type), conv.python_values_to_arrow_array(
-        values, py_type
-    ) if hasattr(conv, "python_values_to_arrow_array") else None
 
 
 def logical_column(py_type, values):
@@ -126,7 +119,7 @@ def databases(root: Path):
     }
 
 
-def describe(field: pa.Field) -> str:
+def describe(field: "pa.Field[Any]") -> str:
     return f"{field.type}{'' if field.nullable else ' not null'}"
 
 

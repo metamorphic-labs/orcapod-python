@@ -15,6 +15,7 @@ this script shows it, so that nothing identity-bearing may be carried only that 
 from __future__ import annotations
 
 import dataclasses
+from typing import Any
 import uuid
 import warnings
 from pathlib import Path
@@ -52,7 +53,7 @@ class StructuralOtherFields:
     b: float
 
 
-TYPES: dict[str, object] = {
+TYPES: dict[str, Any] = {
     "Path": Path,
     "uuid.UUID": uuid.UUID,
     "File": op.File if hasattr(op, "File") else None,
@@ -70,13 +71,17 @@ def h(schema: pa.Schema) -> str:
     return hasher.hash_schema(schema).to_hex()[:16]
 
 
-def ipc_field(field: pa.Field) -> pa.Field:
+def ipc_field(field: "pa.Field[Any]") -> "pa.Field[Any]":
     """The field in IPC form: storage type plus ``ARROW:extension:*`` metadata."""
     return normalize_extension_columns(pa.schema([field]).empty_table()).schema.field(0)
 
 
-def with_ext(field: pa.Field, *, name: bytes | None = None, meta: bytes | None = None):
-    md = dict(field.metadata or {})
+def with_ext(
+    field: "pa.Field[Any]", *, name: bytes | None = None, meta: bytes | None = None
+) -> "pa.Field[Any]":
+    md: dict[bytes | str, bytes | str] = {
+        key: value for key, value in (field.metadata or {}).items()
+    }
     if name is not None:
         md[b"ARROW:extension:name"] = name
     if meta is not None:

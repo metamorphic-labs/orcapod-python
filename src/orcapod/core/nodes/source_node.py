@@ -800,12 +800,12 @@ class SourceNodeBase(TraceableBase, ABC):
         # The Arrow types of the slot's and the source's columns, read once (ITL-640);
         # a slot with a column it cannot restore has no Arrow schema to compare.
         compare_arrow = not unrestored
-        source_arrow = (
+        source_arrow: dict[str, pa.Schema] = (
             dict(zip(("tag", "data"), typed_arrow_schemas(source)))
             if compare_arrow
             else {}
         )
-        slot_arrow = (
+        slot_arrow: dict[str, pa.Schema] = (
             dict(zip(("tag", "data"), self.arrow_schemas)) if compare_arrow else {}
         )
         for role, declared, given in (
