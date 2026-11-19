@@ -689,6 +689,114 @@ class TestColumnTypes:
             assert _checked_conditions(conditions, schema) == conditions
 
 
+# Two layouts of one table: three key columns (two timestamps and an integer), three
+# data columns (two timestamps and a float), in different column and key orders.
+_LAYOUTS: dict[str, tuple[list[str], list[str]]] = {
+    "keys first": (["at", "wall", "k", "seen", "noted", "x"], ["at", "wall", "k"]),
+    "keys last, reordered": (
+        ["x", "noted", "seen", "k", "wall", "at"],
+        ["k", "wall", "at"],
+    ),
+}
+
+
+def _role_rows() -> dict[str, Any]:
+    import zoneinfo
+
+    later = _WALL.replace(hour=3)
+    zoned_later = later.replace(tzinfo=zoneinfo.ZoneInfo(_ZONE))
+    return {
+        "at": pa.array(
+            [_local(0), _local(1), zoned_later], pa.timestamp("ns", tz=_ZONE)
+        ),
+        "wall": pa.array([_WALL, _WALL, later], pa.timestamp("ms")),
+        "k": pa.array([0, 1, 2], pa.int64()),
+        "seen": pa.array(
+            [_local(0), _local(1), zoned_later], pa.timestamp("s", tz=_ZONE)
+        ),
+        "noted": pa.array([_WALL, _WALL, later], pa.timestamp("us")),
+        "x": pa.array([0.5, 1.5, 2.5]),
+    }
+
+
+@pytest.fixture(params=list(_LAYOUTS))
+def roles(request, tmp_path: Path):
+    """Provide a ``roles`` table (one layout per parameter) in a fake keeping zones."""
+    columns, keys = _LAYOUTS[request.param]
+    rows = _role_rows()
+    table = pa.table({name: rows[name] for name in columns})
+    root = tmp_path / "roles"
+    fake_pyspiral.write_behaviour(
+        root, fake_pyspiral.StorageBehaviour(drop_timezone=False)
+    )
+    with fake_pyspiral.install(root):
+        fake_pyspiral.FakeSpiral().project(_PROJECT).create_table(
+            "default.roles", key_schema=pa.schema([table.schema.field(k) for k in keys])
+        ).write(table)
+        yield
+
+
+def _sync_and_async_keys(source: SpiralDBTableSource) -> tuple[list[int], list[int]]:
+    """The ``k`` of every row read, sync and async (sorted), after checking that the
+    two paths yield the same rows."""
+
+    def merged(tag: Any, data: Any) -> dict[str, Any]:
+        return {**tag.as_dict(all_info=True), **data.as_dict(all_info=True)}
+
+    async def collect() -> list[dict[str, Any]]:
+        return [merged(t, d) async for t, d in source.async_iter_data()]
+
+    sync = [merged(t, d) for t, d in source.iter_data()]
+    async_rows = asyncio.run(asyncio.wait_for(collect(), timeout=60))
+    assert async_rows == sync
+    return (
+        sorted(cast("list[int]", source.as_table().column("k").to_pylist())),
+        sorted(row["k"] for row in async_rows),
+    )
+
+
+class TestTimestampColumnsInEveryRole:
+    """Timestamp columns as tags, as data-tags and as data, restricted together, in
+    two table layouts, read sync and async (several-items rule, CodeRabbit PR 435)."""
+
+    @pytest.mark.parametrize(
+        "tag_only", [True, False], ids=["key columns tags", "key columns data-tags"]
+    )
+    @pytest.mark.parametrize(
+        "restrict, expected",
+        [
+            (lambda s: s.where(at=_local(1), seen=_local(1)), [1]),
+            (lambda s: s.where(seen=_local(1), at=_local(1)), [1]),
+            (lambda s: s.where({"wall": _WALL}, noted=_WALL), [0, 1]),
+            (lambda s: s.where(noted=_WALL).where(wall=_WALL, k=0), [0]),
+            (
+                lambda s: s.where(
+                    Condition.of({"seen": _local(0), "wall": _WALL, "at": _local(0)})
+                ),
+                [0],
+            ),
+            (lambda s: s.where(at=_local(0), seen=_local(1)), []),
+            (lambda s: s.where(wall=_WALL, x=1.5, noted=_WALL), [1]),
+        ],
+        ids=[
+            "zoned tag and zoned data",
+            "zoned data and zoned tag",
+            "naive tag (mapping) and naive data",
+            "chained, with the integer tag",
+            "Condition over three columns",
+            "the two folds disagree",
+            "naive tag, float data, naive data",
+        ],
+    )
+    def test_matching_keys_on_both_paths(self, roles, tag_only, restrict, expected):
+        source = SpiralDBTableSource(_PROJECT, "roles", tag_only_columns=tag_only)
+        tags, data = source.output_schema()
+        assert {"at", "wall", "k"} <= set(tags)
+        assert ({"at", "wall", "k"} <= set(data)) is not tag_only
+
+        assert _sync_and_async_keys(restrict(source)) == (expected, expected)
+
+
 class TestIdentity:
     """A restricted source has the unrestricted source's identity and rows."""
 
@@ -2265,6 +2373,117 @@ class TestASlotOverTwoTables:
             assert "events: where subject_id='m1'" in str(info.value)
         if restricted in ("others", "both"):
             assert "others: where subject_id='m2'" in str(info.value)
+
+
+class TestBindingTwoSlotsOverOneSource:
+    """One bind call over two slots that read one source (CodeRabbit, PR 435).
+
+    Slot ``events`` reads the table; slot ``pick`` reads a column selection of it.
+    Equivalent restrictions in one bind are accepted in either mapping order; a
+    conflicting one, or one slot changed away from the other's, is refused and both
+    slots keep their bindings.
+    """
+
+    @staticmethod
+    def _pick(source: Any) -> Any:
+        return source.select_data_columns(["amplitude", "flag"])
+
+    def _job(self, tmp_path: Path) -> PipelineJob:
+        from orcapod.core.nodes.source_node import SourceJobNode
+
+        m1 = _events().where(subject_id="m1")
+        pick = SourceJobNode.from_stream(self._pick(m1), name="pick")
+        job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
+        with job:
+            m1.map_data({"amplitude": "a"}, label="rename")
+            MapData({"amplitude": "b"})(pick)
+        return job
+
+    @staticmethod
+    def _bound(job: PipelineJob) -> tuple[Any, Any]:
+        return job.nodes["events"].bound_source, job.nodes["pick"].bound_source
+
+    @pytest.mark.parametrize("order", ["events first", "pick first"])
+    def test_equivalent_restrictions_for_both_slots_are_accepted(
+        self, project, tmp_path, order
+    ):
+        job = self._job(tmp_path)
+        events = _events().where(subject_id="m2", flag=True)
+        pick = self._pick(_events().where(flag=True).where(subject_id="m2"))
+        sources: dict[str, Any] = {"events": events, "pick": pick}
+        if order == "pick first":
+            sources = dict(reversed(sources.items()))
+
+        job.bind(sources=sources)
+
+        assert self._bound(job) == (events, pick)
+        summary = job.run()
+        assert summary.restrictions == {
+            "events": Condition.of(subject_id="m2", flag=True),
+            "pick": Condition.of(subject_id="m2", flag=True),
+        }
+        assert sorted(
+            job.nodes["rename"].as_table().column("timestamp").to_pylist()
+        ) == [4, 5]
+
+    @pytest.mark.parametrize("order", ["events first", "pick first"])
+    @pytest.mark.parametrize(
+        "pick_read",
+        [
+            lambda: _events().where(subject_id="m1"),
+            lambda: _events(),
+            lambda: _events().where(subject_id="m2", flag=False),
+        ],
+        ids=["the old condition", "no restriction", "another condition"],
+    )
+    def test_conflicting_restrictions_are_refused_and_nothing_changes(
+        self, project, tmp_path, order, pick_read
+    ):
+        job = self._job(tmp_path)
+        before = (job.database, *self._bound(job))
+        sources: dict[str, Any] = {
+            "events": _events().where(subject_id="m2"),
+            "pick": self._pick(pick_read()),
+        }
+        if order == "pick first":
+            sources = dict(reversed(sources.items()))
+        other = DeltaTableDatabase(tmp_path / "other")
+
+        for _ in range(2):
+            with pytest.raises(ValueError, match="different rows in one pipeline"):
+                job.bind(sources=sources, database=other)
+            after = (job.database, *self._bound(job))
+            assert all(a is b for a, b in zip(after, before, strict=True))
+
+    @pytest.mark.parametrize("slot", ["events", "pick"])
+    def test_one_slot_changed_away_from_the_other_is_refused(
+        self, project, tmp_path, slot
+    ):
+        job = self._job(tmp_path)
+        before = self._bound(job)
+        m2 = _events().where(subject_id="m2")
+        new = m2 if slot == "events" else self._pick(m2)
+
+        with pytest.raises(ValueError, match="different rows in one pipeline"):
+            job.bind(sources={slot: new})
+        after = self._bound(job)
+        assert after[0] is before[0] and after[1] is before[1]
+
+    @pytest.mark.parametrize("slot", ["events", "pick"])
+    def test_one_slot_changed_to_an_equal_restriction_is_accepted(
+        self, project, tmp_path, slot
+    ):
+        job = self._job(tmp_path)
+        m1 = _events().where(subject_id="m1")
+        new = m1 if slot == "events" else self._pick(m1)
+
+        job.bind(sources={slot: new})
+
+        assert job.nodes[slot].bound_source is new
+        assert job.run().restrictions == {
+            "events": Condition.of(subject_id="m1"),
+            "pick": Condition.of(subject_id="m1"),
+        }
 
 
 class TestSummaryKeys:
