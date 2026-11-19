@@ -1149,8 +1149,9 @@ data. The rules:
   `delta_table:<path or URI as passed>`, `sqlite_table:<db path as passed>:main.<table>`,
   `postgresql_table:<host>:<port>/<database>.<schema>.<table>` (the server the connection
   reached, as libpq reports it: a host name lower-cased, an IPv6 address bracketed and
-  exploded, a socket directory as given, the port always a number; a DSN naming several
-  servers has no default; developer, November 18, 2026, ITL-1267),
+  exploded, a socket directory as given, the port always a number; parameters naming several
+  servers, or a host beside a `hostaddr` that is not that address, give no default;
+  developer, November 18, 2026, ITL-1267),
   `spiraldb_table:<project>.<dataset>.<table>@<table id>` (developer, November 16, 2026); a
   location whose parts hold their separator has no default (`source_ids.joined_location`). A
   `DBTableSource` used directly (a generic connector, no database address) has no default:

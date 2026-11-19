@@ -410,9 +410,9 @@ class PostgreSQLConnector:
         ``(host, port, current_database(), current_schema())``: where the connector
         finds its tables. The host and port are what libpq reports for the live
         connection (``PQhost``, ``PQport``): the host name or IP address as given
-        (with ``host`` and ``hostaddr`` both given, the host), or the directory of a
-        Unix-domain socket; the port is the one used, the compiled default when none
-        was given. Never the resolved address, the user, the password or any other
+        (with ``host`` and ``hostaddr`` both given, the host; ``given_server`` tells
+        that case apart), or the directory of a Unix-domain socket; the port is the
+        one used, the compiled default when none was given. Never the resolved address, the user, the password or any other
         connection parameter (ITL-1267).
 
         Returns:
@@ -431,30 +431,36 @@ class PostgreSQLConnector:
             raise ValueError("the PostgreSQL connection has no current schema")
         return str(host), int(port), str(row[0]), str(row[1])
 
-    def names_several_servers(self) -> bool:
-        """Return whether the connection parameters name more than one server.
+    def given_server(self) -> tuple[str, str]:
+        """Return the ``host`` and ``hostaddr`` the user gave the connection.
 
-        libpq accepts a comma-separated list of hosts (``host=a,b``, or
-        ``postgresql://a:5432,b:5433/db``) and connects to the first that answers.
-        The list may come from the DSN, from ``PGHOST`` / ``PGHOSTADDR`` when the DSN
-        names no host, or from a service file; the first two are read from the DSN
-        and the environment, a service file from the parameters the connection
-        reports (psycopg tries the hosts of the DSN and the environment one by one,
-        so its connection reports only the one it reached).
+        Each is read from the DSN, else from ``PGHOST`` / ``PGHOSTADDR``; when
+        neither names a host, libpq takes the host (and a ``hostaddr`` the DSN and
+        the environment do not give) from a service file, which only the parameters
+        the connection reports show. Never the parameters psycopg adds: psycopg
+        resolves a host of the DSN or the environment itself and passes the address
+        it reached as ``hostaddr``, so a reported ``hostaddr`` is the user's only when
+        no host came from the DSN or the environment. A value may be a
+        comma-separated list (``host=a,b``, ``postgresql://a:5432,b:5433/db``): libpq
+        then connects to the first server that answers.
 
         Returns:
-            ``True`` when ``host`` or ``hostaddr`` holds more than one entry.
+            The host and the host address as given, each ``""`` when none is.
         """
         from psycopg.conninfo import conninfo_to_dict
 
         given = conninfo_to_dict(self._dsn)
-        with self._lock:
-            reported = self._require_open().info.get_parameters()
-        for key, envvar in (("host", "PGHOST"), ("hostaddr", "PGHOSTADDR")):
-            value = given[key] if key in given else os.environ.get(envvar)
-            if "," in str(value or "") or "," in reported.get(key, ""):
-                return True
-        return False
+
+        def supplied(key: str, envvar: str) -> str:
+            return str((given[key] if key in given else os.environ.get(envvar)) or "")
+
+        host, hostaddr = supplied("host", "PGHOST"), supplied("hostaddr", "PGHOSTADDR")
+        if not host:
+            with self._lock:
+                reported = self._require_open().info.get_parameters()
+            host = reported.get("host", "")
+            hostaddr = hostaddr or reported.get("hostaddr", "")
+        return host, hostaddr
 
     def get_pk_columns(self, table_name: str) -> list[str]:
         """Return primary-key column names in key-sequence order."""

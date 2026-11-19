@@ -186,8 +186,8 @@ holding `@`. Such a source needs a `source_id`.
 
 A PostgreSQL default names the server the connection reached (developer, November 18, 2026,
 ITL-1267), as libpq reports it, so one database, schema and table name on two servers gives
-two ids. The host is the name or address as given (with `host` and `hostaddr` both given,
-the host), or the directory of a Unix-domain socket; never the address a name resolved to.
+two ids. The host is the name or address as given, or the directory of a Unix-domain socket;
+never the address a name resolved to. A `hostaddr` given alone is the host.
 A host name is written in lower case (`DB.Example.ORG` and `db.example.org` are one id); an
 IPv6 address in brackets and in its exploded form, which holds no `::`
 (`[0000:0000:0000:0000:0000:0000:0000:0001]` for `::1`); an IPv4 address and a socket
@@ -195,8 +195,13 @@ directory as given. The port is always the number used, the default `5432` inclu
 DSN with `port=5432` and one without it give one id. Two spellings of one server are two
 ids (`localhost` and `127.0.0.1`), as two spellings of one CSV path are. A DSN, a `PGHOST`
 or `PGHOSTADDR` setting or a service file that names several servers (`host=a,b`) gives no
-default: the server reached can change from one connection to the next. No user name,
-password or other connection parameter enters the id.
+default: the server reached can change from one connection to the next. Neither do
+parameters that give a host beside a `hostaddr` that is not that address
+(`host=db.example.org hostaddr=192.0.2.1`): libpq sends the connection to the address, so
+the host name does not name the server, and two such DSNs with one host and two addresses
+would share an id. A name that DNS, a hosts file or a tunnel sends to another server is not
+seen in the parameters: two servers reached under one name that way share a default id and
+need a `source_id`. No user name, password or other connection parameter enters the id.
 
 A row's record id is its row identifier (site 5), chosen by `record_id_columns` (a column name
 or several, in key order; every source accepts it):

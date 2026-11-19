@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import os
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
+from types import MappingProxyType
 
 import pytest
 
@@ -267,20 +268,28 @@ class TestPipelineIntegration:
 # ---------------------------------------------------------------------------
 
 
-def _server() -> dict[str, str]:
-    """The test server's connection parameters, from the PG* environment."""
-    return {
+# The test server's connection parameters, read from the PG* environment once, when
+# the module is imported: before any fixture (``no_server_env``) or test changes it.
+_SERVER: Mapping[str, str] = MappingProxyType(
+    {
         "host": os.environ.get("PGHOST", "localhost"),
         "port": os.environ.get("PGPORT", "5432"),
         "dbname": os.environ.get("PGDATABASE", "testdb"),
         "user": os.environ.get("PGUSER", "postgres"),
         "password": os.environ.get("PGPASSWORD", "postgres"),
     }
+)
 
 
 def _keyword_dsn(schema: str, **params: str | None) -> str:
-    """A keyword DSN for the test server; a parameter given as None is left out."""
-    merged: dict[str, str | None] = {**_server(), **params}
+    """A keyword DSN for the test server; a parameter given as None is left out.
+
+    The parameters given come after the server's others, in the order given.
+    """
+    merged: dict[str, str | None] = {
+        **{key: value for key, value in _SERVER.items() if key not in params},
+        **params,
+    }
     parts = [f"{key}={value}" for key, value in merged.items() if value is not None]
     return " ".join([*parts, f"options=-csearch_path={schema}"])
 
@@ -310,15 +319,14 @@ def _source_id(dsn: str) -> str:
 
 
 def _expected(host: str, schema: str, port: str | None = None) -> str:
-    server = _server()
     return (
-        f"postgresql_table:{host}:{port or server['port']}/"
-        f"{server['dbname']}.{schema}.t"
+        f"postgresql_table:{host}:{port or _SERVER['port']}/"
+        f"{_SERVER['dbname']}.{schema}.t"
     )
 
 
 def _requires_localhost() -> None:
-    if _server()["host"] != "localhost":
+    if _SERVER["host"] != "localhost":
         pytest.skip("needs the test server at PGHOST=localhost, as in CI")
 
 
@@ -331,26 +339,26 @@ class TestDefaultSourceIdOnTheServer:
     """
 
     def test_uri_and_keyword_dsn_give_one_id(self, server_table: str) -> None:
-        server = _server()
         uri = (
-            f"postgresql://{server['user']}:{server['password']}@{server['host']}:"
-            f"{server['port']}/{server['dbname']}"
+            f"postgresql://{_SERVER['user']}:{_SERVER['password']}@{_SERVER['host']}:"
+            f"{_SERVER['port']}/{_SERVER['dbname']}"
             f"?options=-csearch_path%3D{server_table}"
         )
         ids = [_source_id(uri), _source_id(_keyword_dsn(server_table))]
-        assert ids == [_expected(server["host"].lower(), server_table)] * 2
+        assert ids == [_expected(_SERVER["host"].lower(), server_table)] * 2
 
     def test_id_never_holds_user_or_password(self, server_table: str) -> None:
-        server = _server()
+        # Both DSNs carry the user and the password; the id is exactly the host, the
+        # port and the three-part name, with room for nothing else. (A substring
+        # check would fail a correct id whenever the user's name is also the
+        # database's, as with PGUSER=postgres PGDATABASE=postgres.)
         uri = (
-            f"postgresql://{server['user']}:{server['password']}@{server['host']}:"
-            f"{server['port']}/{server['dbname']}"
+            f"postgresql://{_SERVER['user']}:{_SERVER['password']}@{_SERVER['host']}:"
+            f"{_SERVER['port']}/{_SERVER['dbname']}"
             f"?options=-csearch_path%3D{server_table}"
         )
         for dsn in (uri, _keyword_dsn(server_table)):
-            location = _source_id(dsn).removeprefix("postgresql_table:")
-            assert server["user"] not in location
-            assert server["password"] not in location
+            assert _source_id(dsn) == _expected(_SERVER["host"].lower(), server_table)
 
     def test_upper_case_host_name_gives_the_lower_case_id(
         self, server_table: str
@@ -365,7 +373,7 @@ class TestDefaultSourceIdOnTheServer:
     def test_omitted_port_is_written_as_the_port_used(
         self, server_table: str, no_server_env: None
     ) -> None:
-        if _server()["port"] != "5432":
+        if _SERVER["port"] != "5432":
             pytest.skip("needs the test server on the default port 5432")
         omitted = _source_id(_keyword_dsn(server_table, host="localhost", port=None))
         given = _source_id(_keyword_dsn(server_table, host="localhost", port="5432"))
@@ -389,11 +397,111 @@ class TestDefaultSourceIdOnTheServer:
         dsn = _keyword_dsn(server_table, host=None, hostaddr="127.0.0.1")
         assert _source_id(dsn) == _expected("127.0.0.1", server_table)
 
-    def test_host_with_hostaddr_names_the_host(
+    def test_host_equal_to_hostaddr_names_the_address(
         self, server_table: str, no_server_env: None
     ) -> None:
         _requires_localhost()
-        dsn = _keyword_dsn(server_table, host="LocalHost", hostaddr="127.0.0.1")
+        dsn = _keyword_dsn(server_table, host="127.0.0.1", hostaddr="127.0.0.1")
+        assert _source_id(dsn) == _expected("127.0.0.1", server_table)
+
+    @pytest.mark.parametrize(
+        "order",
+        [("host", "hostaddr"), ("hostaddr", "host")],
+        ids=["host-first", "hostaddr-first"],
+    )
+    @pytest.mark.parametrize("form", ["keyword", "uri"])
+    def test_host_beside_hostaddr_in_the_dsn_has_no_default(
+        self,
+        server_table: str,
+        no_server_env: None,
+        form: str,
+        order: tuple[str, str],
+    ) -> None:
+        _requires_localhost()
+        from orcapod.core.sources import PostgreSQLTableSource
+
+        server = {"host": "LocalHost", "hostaddr": "127.0.0.1"}
+        if form == "keyword":
+            dsn = _keyword_dsn(server_table, **{key: server[key] for key in order})
+        else:
+            query = "&".join(f"{key}={server[key]}" for key in order)
+            dsn = (
+                f"postgresql://{_SERVER['user']}:{_SERVER['password']}@:"
+                f"{_SERVER['port']}/{_SERVER['dbname']}?{query}"
+                f"&options=-csearch_path%3D{server_table}"
+            )
+        with pytest.raises(ValueError, match="host name alone does not identify"):
+            _source_id(dsn)
+        given = PostgreSQLTableSource(
+            dsn, "t", source_id="t_by_address", tag_only_columns=True
+        )
+        assert given.source_id == "t_by_address"
+
+    @pytest.mark.parametrize(
+        ("dsn_params", "env"),
+        [
+            ({"host": "localhost"}, {"PGHOSTADDR": "127.0.0.1"}),
+            ({"hostaddr": "127.0.0.1"}, {"PGHOST": "localhost"}),
+            ({}, {"PGHOST": "localhost", "PGHOSTADDR": "127.0.0.1"}),
+            ({}, {"PGHOSTADDR": "127.0.0.1", "PGHOST": "localhost"}),
+        ],
+        ids=["dsn-host-env-addr", "env-host-dsn-addr", "env-both", "env-both-reversed"],
+    )
+    def test_host_beside_hostaddr_from_the_environment_has_no_default(
+        self,
+        server_table: str,
+        no_server_env: None,
+        monkeypatch: pytest.MonkeyPatch,
+        dsn_params: dict[str, str],
+        env: dict[str, str],
+    ) -> None:
+        _requires_localhost()
+        for envvar, value in env.items():
+            monkeypatch.setenv(envvar, value)
+        dsn = _keyword_dsn(server_table, **{"host": None, **dsn_params})
+        with pytest.raises(ValueError, match="host name alone does not identify"):
+            _source_id(dsn)
+
+    @pytest.mark.parametrize(
+        ("service", "dsn_params"),
+        [
+            ("host=localhost\nhostaddr=127.0.0.1", {}),
+            ("hostaddr=127.0.0.1\nhost=localhost", {}),
+            ("host=localhost", {"hostaddr": "127.0.0.1"}),
+        ],
+        ids=["service-both", "service-both-reversed", "service-host-dsn-addr"],
+    )
+    def test_host_beside_hostaddr_from_a_service_file_has_no_default(
+        self,
+        server_table: str,
+        no_server_env: None,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+        service: str,
+        dsn_params: dict[str, str],
+    ) -> None:
+        _requires_localhost()
+        service_file = tmp_path / "pg_service.conf"
+        service_file.write_text(f"[one]\n{service}\nport={_SERVER['port']}\n")
+        monkeypatch.setenv("PGSERVICEFILE", str(service_file))
+        dsn = _keyword_dsn(
+            server_table, **{"host": None, "port": None, "service": "one", **dsn_params}
+        )
+        with pytest.raises(ValueError, match="host name alone does not identify"):
+            _source_id(dsn)
+
+    def test_host_from_a_service_file_names_the_host(
+        self,
+        server_table: str,
+        no_server_env: None,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ) -> None:
+        _requires_localhost()
+        service_file = tmp_path / "pg_service.conf"
+        service_file.write_text(f"[one]\nhost=LocalHost\nport={_SERVER['port']}\n")
+        monkeypatch.setenv("PGSERVICEFILE", str(service_file))
+        dsn = _keyword_dsn(server_table, host=None, port=None, service="one")
         assert _source_id(dsn) == _expected("localhost", server_table)
 
     def test_ipv6_host_is_bracketed_and_exploded(self, server_table: str) -> None:
@@ -438,10 +546,9 @@ class TestDefaultSourceIdOnTheServer:
         tmp_path,
     ) -> None:
         _requires_localhost()
-        server = _server()
         service_file = tmp_path / "pg_service.conf"
         service_file.write_text(
-            f"[pool]\nhost=localhost,127.0.0.1\nport={server['port']}\n"
+            f"[pool]\nhost=localhost,127.0.0.1\nport={_SERVER['port']}\n"
         )
         monkeypatch.setenv("PGSERVICEFILE", str(service_file))
         dsn = _keyword_dsn(server_table, host=None, port=None, service="pool")

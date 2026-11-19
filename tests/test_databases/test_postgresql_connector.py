@@ -312,7 +312,7 @@ class TestSchemaIntrospectionUnit:
 
 
 class TestServerLocationUnit:
-    """``current_location`` and ``names_several_servers`` (ITL-1267), mocked connection.
+    """``current_location`` and ``given_server`` (ITL-1267), mocked connection.
 
     The values a live server reports are asserted by the postgres-marked tests in
     ``tests/test_core/sources/test_postgresql_table_source_integration.py``.
@@ -352,79 +352,203 @@ class TestServerLocationUnit:
         assert connector.current_location() == (host, port, "testdb", "public")
         connector._conn = None
 
-    @pytest.mark.parametrize(
-        "dsn",
-        [
-            "host=a.example.org,b.example.org port=5432 dbname=x",
-            "host=a.example.org,b.example.org port=5432,5433 dbname=x",
-            "postgresql://u:p@a.example.org:5432,b.example.org:5433/x",
-            "postgresql://u@b.example.org,a.example.org/x",
-            "hostaddr=192.0.2.1,192.0.2.2 dbname=x",
-        ],
-    )
-    def test_several_hosts_in_the_dsn(
-        self, dsn: str, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.delenv("PGHOST", raising=False)
-        monkeypatch.delenv("PGHOSTADDR", raising=False)
-        connector = self._connector(dsn)
-        assert connector.names_several_servers()
-        connector._conn = None
+    @pytest.fixture
+    def no_server_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for envvar in ("PGHOST", "PGHOSTADDR"):
+            monkeypatch.delenv(envvar, raising=False)
+
+    # What psycopg's connection reports for a host of the DSN or the environment:
+    # psycopg resolves the host itself and passes the address it reached as
+    # ``hostaddr``, which is never the user's.
+    RESOLVED = {"host": "db.example.org", "hostaddr": "203.0.113.9"}
 
     @pytest.mark.parametrize(
-        ("envvar", "value"),
+        ("dsn", "expected"),
         [
-            ("PGHOST", "a.example.org,b.example.org"),
-            ("PGHOSTADDR", "192.0.2.1,192.0.2.2"),
+            ("host=db.example.org port=5432 dbname=x", ("db.example.org", "")),
+            ("postgresql://u:p@db.example.org:5432/x", ("db.example.org", "")),
+            ("host=/var/run/postgresql dbname=x", ("/var/run/postgresql", "")),
+            # A host beside a hostaddr, in both orders, in both DSN forms.
+            (
+                "host=db.example.org hostaddr=192.0.2.1 dbname=x",
+                ("db.example.org", "192.0.2.1"),
+            ),
+            (
+                "hostaddr=192.0.2.1 dbname=x host=db.example.org",
+                ("db.example.org", "192.0.2.1"),
+            ),
+            (
+                "postgresql://u@db.example.org/x?hostaddr=192.0.2.1",
+                ("db.example.org", "192.0.2.1"),
+            ),
+            (
+                "postgresql:///x?hostaddr=192.0.2.1&host=db.example.org",
+                ("db.example.org", "192.0.2.1"),
+            ),
+            # Several servers, in both DSN forms and both orders.
+            (
+                "host=a.example.org,b.example.org port=5432 dbname=x",
+                ("a.example.org,b.example.org", ""),
+            ),
+            (
+                "postgresql://u:p@b.example.org:5433,a.example.org:5432/x",
+                ("b.example.org,a.example.org", ""),
+            ),
+            (
+                "hostaddr=192.0.2.1,192.0.2.2 dbname=x",
+                ("", "192.0.2.1,192.0.2.2"),
+            ),
         ],
     )
-    def test_several_hosts_from_the_environment(
-        self, envvar: str, value: str, monkeypatch: pytest.MonkeyPatch
+    def test_given_in_the_dsn(
+        self, dsn: str, expected: tuple[str, str], no_server_env: None
     ) -> None:
-        monkeypatch.delenv("PGHOST", raising=False)
-        monkeypatch.delenv("PGHOSTADDR", raising=False)
-        monkeypatch.setenv(envvar, value)
-        connector = self._connector("dbname=x user=u")
-        assert connector.names_several_servers()
+        reported = dict(self.RESOLVED) if expected[0] else {}
+        connector = self._connector(dsn, parameters=reported)
+        assert connector.given_server() == expected
         connector._conn = None
 
-    def test_the_dsn_host_overrides_the_environment(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("PGHOST", "a.example.org,b.example.org")
-        monkeypatch.delenv("PGHOSTADDR", raising=False)
-        connector = self._connector("host=db.example.org dbname=x")
-        assert not connector.names_several_servers()
-        connector._conn = None
+    def test_hostaddr_alone(self, no_server_env: None) -> None:
+        # libpq then reports no host; the address is the server.
+        for dsn in (
+            "hostaddr=192.0.2.1 dbname=x",
+            "postgresql:///x?hostaddr=192.0.2.1",
+        ):
+            connector = self._connector(dsn, parameters={"hostaddr": "192.0.2.1"})
+            assert connector.given_server() == ("", "192.0.2.1")
+            connector._conn = None
 
-    @pytest.mark.parametrize("key", ["host", "hostaddr"])
-    def test_several_hosts_the_connection_reports(
-        self, key: str, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        ("dsn", "env", "expected"),
+        [
+            ("dbname=x", {"PGHOST": "db.example.org"}, ("db.example.org", "")),
+            ("dbname=x", {"PGHOSTADDR": "192.0.2.1"}, ("", "192.0.2.1")),
+            (
+                "dbname=x",
+                {"PGHOST": "db.example.org", "PGHOSTADDR": "192.0.2.1"},
+                ("db.example.org", "192.0.2.1"),
+            ),
+            (
+                "dbname=x",
+                {"PGHOSTADDR": "192.0.2.1", "PGHOST": "db.example.org"},
+                ("db.example.org", "192.0.2.1"),
+            ),
+            # A host of the DSN beside a PGHOSTADDR, and the other way round.
+            (
+                "host=db.example.org dbname=x",
+                {"PGHOSTADDR": "192.0.2.1"},
+                ("db.example.org", "192.0.2.1"),
+            ),
+            (
+                "hostaddr=192.0.2.1 dbname=x",
+                {"PGHOST": "db.example.org"},
+                ("db.example.org", "192.0.2.1"),
+            ),
+            # The DSN overrides the environment, key by key.
+            (
+                "host=db.example.org dbname=x",
+                {"PGHOST": "a.example.org,b.example.org"},
+                ("db.example.org", ""),
+            ),
+            (
+                "host=db.example.org hostaddr=192.0.2.1 dbname=x",
+                {"PGHOSTADDR": "192.0.2.7,192.0.2.8"},
+                ("db.example.org", "192.0.2.1"),
+            ),
+            (
+                "dbname=x",
+                {"PGHOST": "a.example.org,b.example.org"},
+                ("a.example.org,b.example.org", ""),
+            ),
+            (
+                "dbname=x",
+                {"PGHOSTADDR": "192.0.2.1,192.0.2.2"},
+                ("", "192.0.2.1,192.0.2.2"),
+            ),
+        ],
+    )
+    def test_given_in_the_environment(
+        self,
+        dsn: str,
+        env: dict[str, str],
+        expected: tuple[str, str],
+        no_server_env: None,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # A service file can name several hosts; the DSN then names none, and only
-        # the connection's own parameters show them.
-        monkeypatch.delenv("PGHOST", raising=False)
-        monkeypatch.delenv("PGHOSTADDR", raising=False)
-        connector = self._connector(
-            "service=pool dbname=x",
-            parameters={key: "a.example.org,b.example.org"},
-        )
-        assert connector.names_several_servers()
+        for envvar, value in env.items():
+            monkeypatch.setenv(envvar, value)
+        reported = dict(self.RESOLVED) if expected[0] else {"hostaddr": expected[1]}
+        connector = self._connector(dsn, parameters=reported)
+        assert connector.given_server() == expected
         connector._conn = None
 
     @pytest.mark.parametrize(
-        "dsn",
+        ("dsn", "env", "reported", "expected"),
         [
-            "postgresql://u:p@db.example.org:5432/x",
-            "host=db.example.org port=5432 dbname=x",
-            "host=db.example.org hostaddr=192.0.2.1 dbname=x",
-            "host=/var/run/postgresql dbname=x",
-            "dbname=x",
+            # A service file gives the host: only the connection reports it.
+            (
+                "service=pool dbname=x",
+                {},
+                {"host": "db.example.org"},
+                ("db.example.org", ""),
+            ),
+            (
+                "service=pool dbname=x",
+                {},
+                {"host": "db.example.org", "hostaddr": "192.0.2.1"},
+                ("db.example.org", "192.0.2.1"),
+            ),
+            (
+                "service=pool dbname=x",
+                {},
+                {"hostaddr": "192.0.2.1", "host": "db.example.org"},
+                ("db.example.org", "192.0.2.1"),
+            ),
+            (
+                "service=pool dbname=x",
+                {},
+                {"host": "a.example.org,b.example.org"},
+                ("a.example.org,b.example.org", ""),
+            ),
+            (
+                "service=pool dbname=x",
+                {},
+                {"hostaddr": "192.0.2.1,192.0.2.2"},
+                ("", "192.0.2.1,192.0.2.2"),
+            ),
+            # The service file's host beside a hostaddr of the DSN or the environment.
+            (
+                "service=pool hostaddr=192.0.2.1 dbname=x",
+                {},
+                {"host": "db.example.org", "hostaddr": "192.0.2.1"},
+                ("db.example.org", "192.0.2.1"),
+            ),
+            (
+                "service=pool dbname=x",
+                {"PGHOSTADDR": "192.0.2.1"},
+                {"host": "db.example.org", "hostaddr": "192.0.2.1"},
+                ("db.example.org", "192.0.2.1"),
+            ),
+            # A host of the DSN: the reported hostaddr is psycopg's, not the user's.
+            (
+                "service=pool host=db.example.org dbname=x",
+                {},
+                {"host": "db.example.org", "hostaddr": "203.0.113.9"},
+                ("db.example.org", ""),
+            ),
         ],
     )
-    def test_one_server(self, dsn: str, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("PGHOST", raising=False)
-        monkeypatch.delenv("PGHOSTADDR", raising=False)
-        connector = self._connector(dsn, parameters={"host": "db.example.org"})
-        assert not connector.names_several_servers()
+    def test_given_in_a_service_file(
+        self,
+        dsn: str,
+        env: dict[str, str],
+        reported: dict[str, str],
+        expected: tuple[str, str],
+        no_server_env: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        for envvar, value in env.items():
+            monkeypatch.setenv(envvar, value)
+        connector = self._connector(dsn, parameters=reported)
+        assert connector.given_server() == expected
         connector._conn = None

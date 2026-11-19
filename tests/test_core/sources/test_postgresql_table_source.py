@@ -1,6 +1,7 @@
 """Unit tests for PostgreSQLTableSource."""
 
 from __future__ import annotations
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 import pyarrow as pa
 import pytest
@@ -74,7 +75,7 @@ def _make_mock_connector(
     mock.get_table_names.return_value = table_names
     mock.get_pk_columns.return_value = pk_columns
     mock.current_location.return_value = ("localhost", 5432, "orcapod", "public")
-    mock.names_several_servers.return_value = False
+    mock.given_server.return_value = ("localhost", "")
     mock.get_column_info.return_value = []
     mock.iter_batches.return_value = iter(batches)
     return mock
@@ -553,12 +554,16 @@ def _server_connector(
     database: str = "orcapod",
     schema: str = "public",
     *,
-    several_servers: bool = False,
+    given: tuple[str, str] | None = None,
 ) -> MagicMock:
-    """A mocked connector whose connection reports ``host``, ``port`` and location."""
+    """A mocked connector whose connection reports ``host``, ``port`` and location.
+
+    ``given`` is the ``host`` and ``hostaddr`` the user gave (``given_server``);
+    by default the host alone.
+    """
     mock = _make_mock_connector()
     mock.current_location.return_value = (host, port, database, schema)
-    mock.names_several_servers.return_value = several_servers
+    mock.given_server.return_value = (host, "") if given is None else given
     return mock
 
 
@@ -718,16 +723,53 @@ class TestDefaultSourceIdNamesServer:
         assert "alice" not in source_id
         assert "s3cret" not in source_id
 
-    def test_several_servers_have_no_default(self) -> None:
-        connector = _server_connector("db.example.org", 5432, several_servers=True)
+    SEVERAL_SERVERS: ClassVar[list[tuple[str, str]]] = [
+        ("a.example.org,b.example.org", ""),
+        ("b.example.org,a.example.org", ""),
+        ("", "192.0.2.1,192.0.2.2"),
+        ("a.example.org,b.example.org", "192.0.2.1,192.0.2.2"),
+    ]
+    # A host beside a hostaddr that is not that address: the connection is sent to
+    # the address, so the host does not name the server.
+    HOST_BESIDE_HOSTADDR: ClassVar[list[tuple[str, str]]] = [
+        ("db.example.org", "192.0.2.1"),
+        ("db.example.org", "192.0.2.2"),
+        ("localhost", "127.0.0.1"),
+        ("/var/run/postgresql", "192.0.2.1"),
+        ("192.0.2.1", "192.0.2.2"),
+    ]
+
+    @pytest.mark.parametrize("given", SEVERAL_SERVERS)
+    def test_several_servers_have_no_default(self, given: tuple[str, str]) -> None:
+        connector = _server_connector("db.example.org", 5432, given=given)
         with pytest.raises(ValueError, match="several servers.*source_id"):
             self._source(connector)
+        connector.current_location.assert_not_called()
 
-    def test_given_source_id_is_used_as_given(self) -> None:
-        for connector in (
-            _server_connector("db.example.org", 5432),
-            _server_connector("db.example.org", 5432, several_servers=True),
+    @pytest.mark.parametrize("given", HOST_BESIDE_HOSTADDR)
+    def test_host_beside_hostaddr_has_no_default(self, given: tuple[str, str]) -> None:
+        connector = _server_connector(given[0], 5432, given=given)
+        with pytest.raises(
+            ValueError, match="host name alone does not identify.*source_id"
         ):
-            src = self._source(connector, source_id="measurements_v1")
-            assert src.source_id == "measurements_v1"
-            connector.current_location.assert_not_called()
+            self._source(connector)
+        connector.current_location.assert_not_called()
+
+    def test_hostaddr_alone_or_equal_to_the_host_names_the_address(self) -> None:
+        # libpq reports the address as the host when no host is given; a host that
+        # is the address itself names it too.
+        for given in [("", "192.0.2.1"), ("192.0.2.1", "192.0.2.1")]:
+            connector = _server_connector("192.0.2.1", 5432, given=given)
+            assert self._source(connector).source_id == (
+                "postgresql_table:192.0.2.1:5432/orcapod.public.measurements"
+            )
+
+    @pytest.mark.parametrize(
+        "given", [("db.example.org", ""), *SEVERAL_SERVERS, *HOST_BESIDE_HOSTADDR]
+    )
+    def test_given_source_id_is_used_as_given(self, given: tuple[str, str]) -> None:
+        connector = _server_connector("db.example.org", 5432, given=given)
+        src = self._source(connector, source_id="measurements_v1")
+        assert src.source_id == "measurements_v1"
+        connector.current_location.assert_not_called()
+        connector.given_server.assert_not_called()

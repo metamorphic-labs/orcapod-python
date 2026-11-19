@@ -40,8 +40,9 @@ where it lives (`sqlite_table:<db path>:main.<table>`,
 `postgresql_table:<host>:<port>/<database>.<schema>.<table>`, with the server the connection
 reached; the
 [hashing reference](../reference/hashing.md#default-source-ids-and-row-identifiers) has
-every form). A PostgreSQL DSN that names several servers (`host=a,b`) has no default: give
-such a source a `source_id`. `DBTableSource`, the base they share, can also be used directly
+every form). A PostgreSQL DSN that names several servers (`host=a,b`), or gives a host
+beside a `hostaddr` (`host=db.example.org hostaddr=192.0.2.1`), has no default: give such a
+source a `source_id`. `DBTableSource`, the base they share, can also be used directly
 over any connector; a connector gives no address of its database, so it then has no default
 and needs a `source_id`.
 

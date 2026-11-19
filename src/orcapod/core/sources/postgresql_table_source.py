@@ -123,8 +123,8 @@ class PostgreSQLTableSource(DBTableSource):
             primary key (a table without one is refused); ``()``: the position.
         source_id: Canonical source name. Defaults to
             ``postgresql_table:<host>:<port>/<database>.<schema>.<table>``
-            (``postgresql_table_address``); a DSN that names several servers has
-            no default.
+            (``postgresql_table_address``); connection parameters that name
+            several servers, or a host beside a ``hostaddr``, give no default.
         label: Human-readable label for this source node.
         data_context: Data context governing type conversion and hashing.
         config: OrcaPod configuration.
@@ -196,18 +196,29 @@ class PostgreSQLTableSource(DBTableSource):
             The table's address.
 
         Raises:
-            ValueError: If the connection parameters name several servers: the one
-                reached can change from one connection to the next, so it is no
-                name for the table.
+            ValueError: If the connection parameters name several servers (the one
+                reached can change from one connection to the next), or give a
+                ``hostaddr`` beside a host that is not that address (the connection
+                is sent to the address, so the host does not name the server).
         """
         pg = cast("PostgreSQLConnector", connector)
-        if pg.names_several_servers():
+        host, hostaddr = pg.given_server()
+        if "," in host or "," in hostaddr:
             raise ValueError(
                 f"the connection parameters of the PostgreSQL source over table "
                 f"{table_name!r} (its DSN, PGHOST or PGHOSTADDR, or a service file) "
                 "name several servers, and the one reached can change from one "
                 "connection to the next, so the table has no default source id; give "
                 "the source a source_id"
+            )
+        if host and hostaddr and host != hostaddr:
+            raise ValueError(
+                f"the connection parameters of the PostgreSQL source over table "
+                f"{table_name!r} (its DSN, PGHOST or PGHOSTADDR, or a service file) "
+                f"give the host {host!r} and the address {hostaddr!r}: the connection "
+                "is sent to the address, so the host name alone does not identify "
+                "the server, and the table has no default source id; give the source "
+                "a source_id"
             )
         host, port, database, schema = pg.current_location()
         return postgresql_table_address(host, port, database, schema, table_name)
