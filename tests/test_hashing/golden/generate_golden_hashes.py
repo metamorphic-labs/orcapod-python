@@ -6,6 +6,7 @@ Usage::
     uv run python tests/test_hashing/golden/generate_golden_hashes.py --check    # report
     uv run python tests/test_hashing/golden/generate_golden_hashes.py --release 0.4.0
     uv run python tests/test_hashing/golden/generate_golden_hashes.py --remove <entry>
+    uv run python tests/test_hashing/golden/generate_golden_hashes.py --relocate
 
 The golden values of the current data context live in
 ``tests/test_hashing/golden/data/<folder>/<group>-NN.json``, and the manifest of the data
@@ -44,6 +45,16 @@ The rules (developer, November 15, 2026, ITL-946; reopened November 17, 2026, IT
    and a written migration assessment: ``--remove <entry>`` takes the entry out of its
    unreleased file and records that file again in the open revision (it refuses an entry a
    release lists), then ``--add`` writes the new value.
+
+5. Provisional operators (``orcapod.operators.PROVISIONAL_OPERATORS``, ITL-1266) are outside
+   the freeze. A case that depends on one declares it (``@case(..., provisional=(...))``);
+   its entries go to ``<folder>/provisional/<group>.json``, which the manifest lists in
+   ``golden.provisional``, outside the history, so no release freezes them. Their values
+   are checked like every other and change only with the developer's approval of the exact
+   list (``--remove`` then ``--add``), without a new data context. ``--relocate`` moves
+   pinned entries, values unchanged, to the kind of file their case declares: out of an
+   unreleased frozen file into the provisional file, or, when an operator leaves the group
+   before a release, into the open frozen file of its group.
 
 Never edit a golden file to make a failing test pass. If a test fails and you did not mean to
 change a hash, the code change is the bug.
@@ -125,8 +136,93 @@ def _require_sound(root: pathlib.Path, version: str) -> None:
         )
 
 
+def _provisional_listing(manifest: dict[str, Any]) -> dict[str, str]:
+    """A copy of the manifest's ``golden.provisional`` listing."""
+    return dict(manifest["golden"][store.PROVISIONAL])
+
+
+def _set_provisional_listing(manifest: dict[str, Any], listing: dict[str, str]) -> None:
+    manifest["golden"][store.PROVISIONAL] = dict(sorted(listing.items()))
+
+
+def _open_frozen_file(
+    folder: pathlib.Path,
+    files: dict[str, list[pathlib.Path]],
+    released: set[str],
+    group: str,
+) -> pathlib.Path:
+    """The frozen file new entries of ``group`` go to.
+
+    The newest file of the group when no release lists it, otherwise a new
+    ``<group>-NN.json`` with the next counter.
+    """
+    existing = files.get(group, [])
+    latest = existing[-1] if existing else None
+    if latest is not None and latest.name not in released:
+        return latest
+    number = 1
+    if latest is not None:
+        match = store.FILE_NAME.match(latest.name)
+        assert match is not None
+        number = int(match["number"]) + 1
+    if number > 99:
+        raise SystemExit(f"{group} has no free file counter")
+    return folder / f"{group}-{number:02d}.json"
+
+
+class _Plan:
+    """Files to write and the history and listing that record them; nothing written yet."""
+
+    def __init__(self, folder: pathlib.Path, manifest: dict[str, Any]) -> None:
+        self.folder = folder
+        self.history: list[dict[str, Any]] = manifest["golden"]["history"]
+        self.listing = _provisional_listing(manifest)
+        self.contents: dict[pathlib.Path, dict[str, Any]] = {}
+
+    def values(self, path: pathlib.Path) -> dict[str, Any]:
+        """The planned entries of a file, read from disk on first use."""
+        if path not in self.contents:
+            self.contents[path] = dict(store.read_json(path)) if path.exists() else {}
+        return self.contents[path]
+
+    def write(self, manifest: dict[str, Any], manifest_path: pathlib.Path) -> None:
+        """Write the planned files, record them, and write the manifest."""
+        provisional = store.provisional_folder(self.folder)
+        writes: list[tuple[pathlib.Path, bytes | None]] = []
+        for path, values in self.contents.items():
+            if path.parent == provisional:
+                if values:
+                    data = dump(values).encode("utf-8")
+                    self.listing[path.name] = hashlib.sha256(data).hexdigest()
+                    writes.append((path, data))
+                else:
+                    # An emptied provisional file is removed, with its listing.
+                    self.listing.pop(path.name, None)
+                    writes.append((path, None))
+            else:
+                data = dump(values).encode("utf-8")
+                self.history = store.with_file(
+                    self.history, path.name, hashlib.sha256(data).hexdigest(), _today()
+                )
+                writes.append((path, data))
+        for path, data in writes:
+            if data is None:
+                path.unlink(missing_ok=True)
+                print(f"removed {path}")
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                _ = path.write_bytes(data)
+                print(f"wrote {path}")
+        manifest["golden"]["history"] = self.history
+        _set_provisional_listing(manifest, self.listing)
+        store.write_json(manifest_path, manifest)
+
+
 def add(root: pathlib.Path, version: str, groups: list[str]) -> list[str]:
     """Write the computed entries that no golden file pins yet.
+
+    An entry of a case that declares a provisional feature goes to the provisional file of
+    its group; any other to the group's open frozen file.
 
     Args:
         root: Project root.
@@ -134,7 +230,7 @@ def add(root: pathlib.Path, version: str, groups: list[str]) -> list[str]:
         groups: Groups to compute.
 
     Returns:
-        Names of the files written.
+        Names of the files written, relative to the golden folder.
     """
     _require_sound(root, version)
     path = store.manifest_path(root, version)
@@ -143,13 +239,13 @@ def add(root: pathlib.Path, version: str, groups: list[str]) -> list[str]:
     pinned = store.load_folder(folder)
     owner = {entry: group for group, values in pinned.items() for entry in values}
     files = store.group_files(folder)
-    history = manifest["golden"]["history"]
-    released = store.released_files(history)
+    released = store.released_files(manifest["golden"]["history"])
+    plan = _Plan(folder, manifest)
     # Compute and plan every group before writing anything, so a failure leaves the files
     # and their history as they were.
-    planned: list[tuple[pathlib.Path, bytes, int]] = []
+    counts: dict[pathlib.Path, int] = {}
     for group in groups:
-        live = cases.compute_group(group)
+        live, provisional = cases.compute_group_kinds(group)
         clash = sorted(e for e in live if owner.get(e, group) != group)
         if clash:
             raise SystemExit(f"{group} entries pinned under another group: {clash}")
@@ -158,35 +254,32 @@ def add(root: pathlib.Path, version: str, groups: list[str]) -> list[str]:
             continue
         # An entry name appears once in a folder: claim it before the next group plans.
         owner.update(dict.fromkeys(new, group))
-        existing = files.get(group, [])
-        latest = existing[-1] if existing else None
-        if latest is not None and latest.name not in released:
-            target = latest
-            values = {**store.read_json(latest), **new}
-        else:
-            number = 1
-            if latest is not None:
-                match = store.FILE_NAME.match(latest.name)
-                assert match is not None
-                number = int(match["number"]) + 1
-            if number > 99:
-                raise SystemExit(f"{group} has no free file counter")
-            target = folder / f"{group}-{number:02d}.json"
-            values = new
-        data = dump(values).encode("utf-8")
-        history = store.with_file(
-            history, target.name, hashlib.sha256(data).hexdigest(), _today()
-        )
-        planned.append((target, data, len(new)))
-    if not planned:
+        frozen_target = _open_frozen_file(folder, files, released, group)
+        provisional_target = store.provisional_folder(folder) / f"{group}.json"
+        for entry, value in new.items():
+            target = provisional_target if entry in provisional else frozen_target
+            plan.values(target)[entry] = value
+            counts[target] = counts.get(target, 0) + 1
+    if not plan.contents:
         print("nothing to add: every computed entry is pinned")
         return []
-    for target, data, count in planned:
-        _ = target.write_bytes(data)
-        print(f"added {count} entries to {target}")
-    manifest["golden"]["history"] = history
-    store.write_json(path, manifest)
-    return [target.name for target, _, _ in planned]
+    for target, count in counts.items():
+        print(f"adding {count} entries to {target}")
+    plan.write(manifest, path)
+    return [target.relative_to(folder).as_posix() for target in plan.contents]
+
+
+def _misplaced(
+    pinned_provisional: set[str], live: dict[str, Any], provisional: frozenset[str]
+) -> tuple[list[str], list[str]]:
+    """Entries pinned in the wrong kind of file: (to make provisional, to freeze)."""
+    to_provisional = sorted(
+        e for e in live if e in provisional and e not in pinned_provisional
+    )
+    to_frozen = sorted(
+        e for e in pinned_provisional if e in live and e not in provisional
+    )
+    return to_provisional, to_frozen
 
 
 def check(root: pathlib.Path, version: str, groups: list[str]) -> list[str]:
@@ -198,16 +291,19 @@ def check(root: pathlib.Path, version: str, groups: list[str]) -> list[str]:
         groups: Groups to compute.
 
     Returns:
-        One sentence per difference or rule problem.
+        One sentence per difference or rule problem, including an entry pinned in a
+        frozen file whose case is provisional, or the other way round.
     """
     problems = store.tree_problems(root, version)
     manifest = store.read_json(store.manifest_path(root, version))
+    folder = store.golden_folder(root, manifest)
     try:
-        pinned = store.load_folder(store.golden_folder(root, manifest))
+        pinned = store.load_folder(folder)
+        pinned_provisional = store.load_provisional(folder)
     except store.GoldenLayoutError as exc:
         return [*problems, str(exc)]
     for group in groups:
-        live = cases.compute_group(group)
+        live, provisional = cases.compute_group_kinds(group)
         pins = pinned.get(group, {})
         skipped = cases.unavailable_entries(group)
         for entry in sorted(set(live) | set(pins)):
@@ -221,6 +317,19 @@ def check(root: pathlib.Path, version: str, groups: list[str]) -> list[str]:
                 problems.append(
                     f"{group}:{entry} moved: pinned {pins[entry]!r}, live {live[entry]!r}"
                 )
+        here = set(pinned_provisional.get(group, {}))
+        to_provisional, to_frozen = _misplaced(here, live, provisional)
+        problems.extend(
+            f"{group}:{e} is pinned in a frozen file, but its case is provisional: "
+            "run generate_golden_hashes.py --relocate"
+            for e in to_provisional
+            if e in pins
+        )
+        problems.extend(
+            f"{group}:{e} is pinned in the provisional file, but its case is not "
+            "provisional: run generate_golden_hashes.py --relocate"
+            for e in to_frozen
+        )
     return problems
 
 
@@ -229,7 +338,8 @@ def remove(root: pathlib.Path, version: str, entries: list[str]) -> list[str]:
 
     The first step of an approved change to an unreleased value: remove the entry, then
     ``--add`` writes its new value. An entry in a file a release lists is refused, and
-    nothing is written unless every entry can be removed.
+    nothing is written unless every entry can be removed. A provisional file is never
+    listed by a release; one left without entries is removed.
 
     Args:
         root: Project root.
@@ -237,47 +347,99 @@ def remove(root: pathlib.Path, version: str, entries: list[str]) -> list[str]:
         entries: Entry names to remove.
 
     Returns:
-        Names of the files rewritten.
+        Names of the files rewritten, relative to the golden folder.
     """
     _require_sound(root, version)
     path = store.manifest_path(root, version)
     manifest = store.read_json(path)
     folder = store.golden_folder(root, manifest)
-    history = manifest["golden"]["history"]
-    released = store.released_files(history)
-    where = {
-        entry: file
-        for files in store.group_files(folder).values()
-        for file in files
-        for entry in store.read_json(file)
-    }
+    released = store.released_files(manifest["golden"]["history"])
+    files = [
+        *(file for paths in store.group_files(folder).values() for file in paths),
+        *store.provisional_files(folder).values(),
+    ]
+    where = {entry: file for file in files for entry in store.read_json(file)}
     unknown = sorted(e for e in entries if e not in where)
     if unknown:
         raise SystemExit(f"no golden file pins {unknown}; nothing written")
-    frozen = sorted(e for e in entries if where[e].name in released)
+    frozen = sorted(
+        e for e in entries if where[e].parent == folder and where[e].name in released
+    )
     if frozen:
         raise SystemExit(
             f"{frozen} are in files a release lists; a released value never changes "
             "(a change needs a new data context version); nothing written"
         )
-    planned: dict[pathlib.Path, dict[str, Any]] = {}
+    plan = _Plan(folder, manifest)
     for entry in dict.fromkeys(entries):
-        file = where[entry]
-        values = planned.setdefault(file, store.read_json(file))
-        _ = values.pop(entry)
-    writes: list[tuple[pathlib.Path, bytes]] = []
-    for file, values in planned.items():
-        data = dump(values).encode("utf-8")
-        history = store.with_file(
-            history, file.name, hashlib.sha256(data).hexdigest(), _today()
+        _ = plan.values(where[entry]).pop(entry)
+    plan.write(manifest, path)
+    return [file.relative_to(folder).as_posix() for file in plan.contents]
+
+
+def relocate(root: pathlib.Path, version: str, groups: list[str]) -> list[str]:
+    """Move pinned entries to the kind of file their case declares; values unchanged.
+
+    An entry of a provisional case pinned in a frozen file moves to the provisional file
+    of its group: refused, with nothing written, for a file a release lists, since a
+    frozen value never leaves. An entry pinned in a provisional file whose case no longer
+    declares a provisional feature (its operator left the group) moves to the open frozen
+    file of its group, to be frozen by the next release. Every value is copied as it is
+    pinned; nothing is computed into a file.
+
+    Args:
+        root: Project root.
+        version: Data context version.
+        groups: Groups whose cases are computed to learn their kinds.
+
+    Returns:
+        Names of the files rewritten, relative to the golden folder.
+    """
+    _require_sound(root, version)
+    path = store.manifest_path(root, version)
+    manifest = store.read_json(path)
+    folder = store.golden_folder(root, manifest)
+    files = store.group_files(folder)
+    released = store.released_files(manifest["golden"]["history"])
+    pinned_provisional = store.load_provisional(folder)
+    where = {
+        entry: file
+        for paths in files.values()
+        for file in paths
+        for entry in store.read_json(file)
+    }
+    plan = _Plan(folder, manifest)
+    for group in groups:
+        live, provisional = cases.compute_group_kinds(group)
+        here = pinned_provisional.get(group, {})
+        to_provisional, to_frozen = _misplaced(set(here), live, provisional)
+        to_provisional = [e for e in to_provisional if e in where]
+        stuck = sorted(e for e in to_provisional if where[e].name in released)
+        if stuck:
+            raise SystemExit(
+                f"{stuck} are provisional but pinned in files a release lists; a "
+                "released value never leaves its file; nothing written"
+            )
+        provisional_file = store.provisional_folder(folder) / f"{group}.json"
+        for entry in to_provisional:
+            value = plan.values(where[entry]).pop(entry)
+            plan.values(provisional_file)[entry] = value
+        if to_frozen:
+            target = _open_frozen_file(folder, files, released, group)
+            for entry in to_frozen:
+                plan.values(target)[entry] = plan.values(provisional_file).pop(entry)
+        if to_provisional or to_frozen:
+            print(
+                f"{group}: {len(to_provisional)} entries to the provisional file, "
+                f"{len(to_frozen)} to a frozen file"
+            )
+    if not plan.contents:
+        print(
+            "nothing to relocate: every entry is in the kind of file its case declares"
         )
-        writes.append((file, data))
-    for file, data in writes:
-        _ = file.write_bytes(data)
-        print(f"removed entries from {file}")
-    manifest["golden"]["history"] = history
-    store.write_json(path, manifest)
-    return [file.name for file, _ in writes]
+        return []
+    plan.write(manifest, path)
+    return [file.relative_to(folder).as_posix() for file in plan.contents]
 
 
 def release(root: pathlib.Path, version: str, release_text: str) -> str:
@@ -467,6 +629,14 @@ def main(argv: list[str] | None = None) -> None:
         ),
     )
     _ = mode.add_argument(
+        "--relocate",
+        action="store_true",
+        help=(
+            "move pinned entries, values unchanged, between the frozen files and the "
+            "provisional files, as their cases declare (ITL-1266)"
+        ),
+    )
+    _ = mode.add_argument(
         "--stdout",
         action="store_true",
         help="print all computed groups as one JSON object; write nothing",
@@ -525,6 +695,9 @@ def main(argv: list[str] | None = None) -> None:
             g: cases.compute_group(g, allow_errors=args.allow_errors) for g in groups
         }
         _ = sys.stdout.write(dump(computed))
+        return
+    if args.relocate:
+        _ = relocate(args.root, version, groups)
         return
     if args.check:
         problems = check(args.root, version, groups)

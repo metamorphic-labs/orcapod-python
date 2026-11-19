@@ -212,8 +212,7 @@
   ],
   "join_pod.pod.content_hash": "semantic_v1:6ada754d8fc4292450d3fb8813f05878b8aabbd52da3615519c80c7418bc0b4e",
   "join_pod.pod.pipeline_hash": "semantic_v1:f8f3638bf17df15345b70be956e0779e01c9905db088daa02dfec441d7de441d",
-  "list_tag_producerless_stream.as_given": "semantic_v1:da5675a8c04bdd9fc0b141862357540d73d790afa4edf4370c37e7a54ebd8d25",
-  "list_tag_producerless_stream.reversed": "semantic_v1:da5675a8c04bdd9fc0b141862357540d73d790afa4edf4370c37e7a54ebd8d25",
+  "list_tag_producerless_stream.as_given": "semantic_v1:ad76e4cf890d6cf18777dfc3e1998d322a2e7079a9f5824abe1f34f42f3265da",
   "pod.content_hash": "semantic_v1:9b6de7be825efc4495abaa60baf14e0bc5dbd034f68751b95546308e1266a93a",
   "pod.pipeline_hash": "semantic_v1:a7f19352f4abe281d50ffdd8d5574b04ea494f5e9da8daef30e189c3fc0ac693",
   "pod_default_version.decorator.uri": [
@@ -227,19 +226,5 @@
     "21e6485805726eb7ceed63ef6b677f0b6b11d2eaf48bd9fc44c1dccdf718aa1d",
     "v0",
     "python.function.v1"
-  ],
-  "polars_filter_expr_job.node[adjust].content_hash": "semantic_v1:7b1f153f7490f52aace74402e0bb6fb3a5e4a4ea8deb0834ec3a17c5ee8b8431",
-  "polars_filter_expr_job.node[adjust].pipeline_hash": "semantic_v1:322673821cfe060b65a7aa3fe74888209ff88c463d834d5daf5f876a90a8fb03",
-  "polars_filter_expr_job.table[golden_filter_job/_result/golden_adjust/a2fa1ad227c2c0b24315bf0bfca5b3f5473e1f044a6d48cfcf3b78977510a560/v0/python.function.v1/rev1/rdb_v1].input_data_hashes": [
-    "arrow_v1:0000026b8369e60be10e43dd72a0be4e8d93a992f827cd6baab33909331dcdaeea8b64"
-  ],
-  "polars_filter_expr_job.table[golden_filter_job/golden_adjust/a2fa1ad227c2c0b24315bf0bfca5b3f5473e1f044a6d48cfcf3b78977510a560/v0/python.function.v1/schema:322673821cfe060b65a7aa3fe74888209ff88c463d834d5daf5f876a90a8fb03/pdb_v1].record_ids": [
-    "arrow_v1:000002805f559cb2ee882683918a4bb57099b86c725fb9c48a42490461633f8833bf5f"
-  ],
-  "polars_filter_expr_job.table_paths": [
-    "golden_filter_job/_result/golden_adjust/a2fa1ad227c2c0b24315bf0bfca5b3f5473e1f044a6d48cfcf3b78977510a560/v0/python.function.v1/rev1/rdb_v1",
-    "golden_filter_job/golden_adjust/a2fa1ad227c2c0b24315bf0bfca5b3f5473e1f044a6d48cfcf3b78977510a560/v0/python.function.v1/schema:322673821cfe060b65a7aa3fe74888209ff88c463d834d5daf5f876a90a8fb03/pdb_v1"
-  ],
-  "tagless_producerless_stream.as_given": "semantic_v1:0793ec47689115dade94c6e432df74a187f9ca632e733892b867414bee02d1db",
-  "tagless_producerless_stream.reordered": "semantic_v1:0793ec47689115dade94c6e432df74a187f9ca632e733892b867414bee02d1db"
+  ]
 }
