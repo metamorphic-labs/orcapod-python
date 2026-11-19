@@ -218,21 +218,35 @@ def make_source(
     )
 
 
-def row_fingerprint(tag: TagProtocol, data: DataProtocol) -> tuple[str, ...]:
-    """What identifies one row regardless of column order: values, system tags, hashes."""
+def row_fingerprint(
+    tag: TagProtocol, data: DataProtocol, *, source_info: bool = True
+) -> tuple[str, ...]:
+    """What identifies one row regardless of column order: values, system tags, hashes.
+
+    Args:
+        tag: The row's tag.
+        data: The row's data.
+        source_info: Include the data's source info. A function's in-memory output
+            names a fresh random record per computation, so a comparison of two
+            computations leaves it out.
+    """
     return (
         repr(sorted(tag.as_dict().items())),
         repr(sorted(data.as_dict().items())),
         repr(sorted(tag.system_tags().items())),
         tag.content_hash().to_string(),
         data.content_hash().to_string(),
-        repr(sorted(data.source_info().items())),
+        repr(sorted(data.source_info().items())) if source_info else "",
     )
 
 
-def rows_fingerprint(rows: Sequence[Row]) -> list[tuple[str, ...]]:
+def rows_fingerprint(
+    rows: Sequence[Row], *, source_info: bool = True
+) -> list[tuple[str, ...]]:
     """The rows' fingerprints, sorted: row order is not part of it."""
-    return sorted(row_fingerprint(tag, data) for tag, data in rows)
+    return sorted(
+        row_fingerprint(tag, data, source_info=source_info) for tag, data in rows
+    )
 
 
 def ordered_rows_fingerprint(rows: Sequence[Row]) -> list[tuple[str, ...]]:
@@ -256,11 +270,12 @@ def ordered_rows_fingerprint(rows: Sequence[Row]) -> list[tuple[str, ...]]:
     )
 
 
-def fingerprint(stream: StreamProtocol) -> dict[str, Any]:
+def fingerprint(stream: StreamProtocol, *, source_info: bool = True) -> dict[str, Any]:
     """What must not depend on the input's arrangement or a set argument's order.
 
     Args:
         stream: An operator's result.
+        source_info: Include each row's source info (see ``row_fingerprint``).
 
     Returns:
         The rows (``rows_fingerprint``), the content and pipeline hashes, and the
@@ -268,7 +283,7 @@ def fingerprint(stream: StreamProtocol) -> dict[str, Any]:
     """
     tag_keys, data_keys = stream.keys(columns={"system_tags": True})
     return {
-        "rows": rows_fingerprint(list(stream.iter_data())),
+        "rows": rows_fingerprint(list(stream.iter_data()), source_info=source_info),
         "content_hash": stream.content_hash().to_string(),
         "pipeline_hash": stream.pipeline_hash().to_string(),
         "tag_names": sorted(tag_keys),
