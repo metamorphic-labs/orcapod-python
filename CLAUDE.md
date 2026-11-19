@@ -853,10 +853,16 @@ The pipeline hash uses a **resolver pattern** — `PipelineElementProtocol` obje
 shouldn't depend on tag order -- generally nothing should depend on tag order". A list of tag
 or data-tag names enters an identity as a set of sorted names (`FallThroughPod`'s
 `fall_through_tags`, also in its config and a saved job; a raw stream's tag columns and
-data-tags). A raw `ArrowTableStream` (no producer) holds its rows as a multiset of row hashes
-(`ArrowTableStream._row_hashes`: each row's `arrow_v1` hash over every column group but
-`_content_hash`, as `to_prefixed_digest()`, sorted bytewise into one `large_binary` column
-`row_hash`), with no special case for no tags, tied tags or list tags. Outputs still list the
+data-tags). A raw `ArrowTableStream` (no producer) hashes its whole identity
+table once (every column group but `_content_hash`; `hash_table` covers the schema, so a stream
+with no rows still commits to its columns) with its rows in the canonical row order of an
+identity table (`arrow_utils.canonical_identity_row_order`, developer, November 19, 2026,
+"option 2"; the specification is in `docs/reference/hashing.md`): a pyarrow value sort, ascending
+and nulls last, over the user tags in name order then every other column in name order, each
+only when its type is on the closed list `arrow_utils.canonically_sortable` (decided from the
+type, never by trying a sort; no extension, list, struct, `float16` or `decimal256`), and rows
+still tied ordered by their own one-row `hash_table` digest (prefixed bytes), computed for tie
+groups only. Outputs still list the
 data-tags first in the input's tag order: column order is presentation. An operation whose
 result could depend on a column order takes that order as an explicit argument that is part
 of its identity (GroupBy's `member_order`), never the input's column order.

@@ -407,8 +407,8 @@ def test_the_presentation_sort_orders_a_list_tag_and_identity_has_no_row_order()
 ):
     """``as_table(sort_by_tags)`` orders list tags (Polars); the identity has no order.
 
-    The identity of a raw stream holds its rows as a multiset of row hashes
-    (``ArrowTableStream._row_hashes``, ITL-1227), so the same rows in another order are
+    The identity of a raw stream hashes its table in the canonical row order
+    (``arrow_utils.canonical_identity_row_order``, ITL-1227), so the same rows in another order are
     the same stream; only presentations sort.
     """
     from orcapod.core.streams import ArrowTableStream

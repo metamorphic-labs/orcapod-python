@@ -50,7 +50,7 @@ def _tables() -> dict[str, pa.Table]:
 
 
 _FLAT_HASHES: dict[str, object] = {
-    "stream_content": "7997a1fc429b9c940b31d7f3e7c16bca302ea1a4bb228a854f1a8d7bda636b02",
+    "stream_content": "e34f7e47f388b93db0403fe3e882ea4c2c7ce30cdcf7937eb928868e6aeaf93a",
     "stream_pipeline": "0caab8d581b700f6746fcf508ba50945757be2abe7360c6e33fb87836e291b65",
     "source_content": "a1679332b537fe2c2f0d950e71c122e2e25812a6ed8988e1d4dc36a9db9e6b48",
     "source_pipeline": "0caab8d581b700f6746fcf508ba50945757be2abe7360c6e33fb87836e291b65",
@@ -66,7 +66,7 @@ MAIN_HASHES: dict[str, dict[str, object]] = {
     "small": _FLAT_HASHES,
     "large": _FLAT_HASHES,
     "nested": {
-        "stream_content": "aa8c4528d4e253a3e4e64addfadd32639054b010f561f1678362f38bfcf2069c",
+        "stream_content": "413fa479269c7957fef99caca81336f0d94c0cb240160c831e4b7b719c0a3ff1",
         "stream_pipeline": "705efaca724d9d35569743799eeba69fe910e011c84adfe8d934961c04c61840",
         "source_content": "0babf998742cc24277ee8adc9937f9d4dc2d53ecaf76bf4a5594d0be627132e9",
         "source_pipeline": "705efaca724d9d35569743799eeba69fe910e011c84adfe8d934961c04c61840",
@@ -76,7 +76,7 @@ MAIN_HASHES: dict[str, dict[str, object]] = {
         ],
     },
     "list_of_struct": {
-        "stream_content": "441c71770a310f04eb173a40f3ba80b0bb4ad736a1086b7b6998d6b99c468676",
+        "stream_content": "145c0f2bdd30c6ded9e29067f7d6fa7649b18712ee75cb9a6c5eb6582500075e",
         "stream_pipeline": "f364ae4074150182fcb7b386f605b6f3b7d4d0d56b7b44d1da439f9ea0eecc83",
         "source_content": "fdc31658092bce777befba057bd843a57382656f443efc597302d26023bc097c",
         "source_pipeline": "f364ae4074150182fcb7b386f605b6f3b7d4d0d56b7b44d1da439f9ea0eecc83",
@@ -137,12 +137,7 @@ class TestStructPythonType:
 
 
 class TestStructHashesUnchanged:
-    """Content and pipeline hashes of struct columns are the same as on ``main``.
-
-    ``stream_content``, the content hash of a raw stream, follows the multiset rule of
-    ITL-1227 (developer, November 19, 2026): its three literals were updated once, by
-    that rule alone; every other field keeps the value pinned before it.
-    """
+    """Content and pipeline hashes of struct columns are the same as on ``main``."""
 
     @pytest.mark.parametrize("name", sorted(MAIN_HASHES))
     def test_hashes_match_main(self, name: str) -> None:

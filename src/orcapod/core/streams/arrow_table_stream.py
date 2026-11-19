@@ -201,13 +201,13 @@ class ArrowTableStream(StreamBase):
     def identity_structure(self) -> Any:
         if self._producer is not None:
             return super().identity_structure()
-        # A raw stream (no producer) is its rows, its tag columns and its data-tags.
-        # None of them depends on an order (developer, November 18, 2026, ITL-1227):
-        # the rows are a multiset of row hashes (``_row_hashes``), and the tag columns
-        # and data-tags are sets of names, sorted.
+        # A raw stream (no producer) is its table, its tag columns and its data-tags,
+        # none of them in an order the input chose (developer, November 18 and 19,
+        # 2026, ITL-1227): the table in its canonical row order (``_identity_table``),
+        # hashed whole by the Arrow table handler, and the names as sorted tuples.
         return (
             self.__class__.__name__,
-            self._row_hashes(),
+            self._identity_table(),
             tuple(sorted(self._tag_columns)),
         ) + (
             # Only when there is one: a plain stream keeps its identity, and a stream
@@ -220,38 +220,34 @@ class ArrowTableStream(StreamBase):
         """The data-tags: tag columns that are also data columns (tag order)."""
         return self._data_tags
 
-    def _row_hashes(self) -> "pa.Table":
-        """Return the rows of this stream as a multiset: the table ``identity_structure`` hashes.
+    def _identity_table(self) -> "pa.Table":
+        """Return the table ``identity_structure`` hashes, its rows in canonical order.
 
-        Developer decision, November 18, 2026 (ITL-1227): a raw stream's identity does
-        not depend on the order of its rows or of its columns. Each row is hashed on its
-        own by the data context's Arrow hasher (``hash_table`` of the one-row table,
-        which ignores column order), over every column group but the per-row content
-        hash: user tags, system tags, data, source info, data context and meta columns.
-        This is how an operator node hashes the rows it stores (``_record_hash``). The
-        digests, each with its label (``to_prefixed_digest``: ``b"arrow_v1:" + digest``),
-        are sorted bytewise into the one column ``row_hash`` (``large_binary``), and that
-        table is the identity. A row that occurs twice is there twice. There is no
-        special case: a stream with no tag column, rows tied on every tag, a list tag or
-        any type Arrow cannot order hash the same way, and a stream with no row is an
-        empty column.
+        Developer decisions, November 18 and 19, 2026 (ITL-1227): a raw stream's identity
+        depends on neither the order of its rows nor that of its columns: "take the
+        data, order it as we had agreed and then hash the entirety of the arrow table".
+        The table holds every column group but the per-row content hash: user tags,
+        system tags, data, source info, data context and meta columns. Its rows are put
+        in the canonical row order of an identity table
+        (``arrow_utils.canonical_identity_row_order``: a value sort over a closed list
+        of column types, ties settled by each tied row's own hash), and the table is
+        hashed whole, once, by the Arrow table handler (``hash_table``, ``arrow_v1``),
+        which covers its schema and ignores column order: a stream with no rows still
+        commits to its columns. A row that occurs twice is there twice. There is no
+        special case for no rows, no tag column, tied tags, list tags or library values.
 
         THIS RULE IS A HASH INPUT AND MUST NOT CHANGE.
 
         Returns:
-            The sorted row hashes, one row each, in the column ``row_hash``.
+            The identity table in canonical row order.
         """
         table = self._assemble_table(
             ColumnConfig(meta=True, context=True, source=True, system_tags=True),
             limit=None,
         )
-        hasher = self.data_context.arrow_hasher
-        row_hashes = sorted(
-            hasher.hash_table(batch.slice(i, 1)).to_prefixed_digest()
-            for batch in table.to_batches()
-            for i in range(batch.num_rows)
+        return arrow_utils.canonical_identity_row_order(
+            table, self._tag_columns, self.data_context.arrow_hasher
         )
-        return pa.table({"row_hash": pa.array(row_hashes, pa.large_binary())})
 
     def pipeline_identity_structure(self) -> Any:
         if self._producer is None or not isinstance(
@@ -390,7 +386,7 @@ class ArrowTableStream(StreamBase):
                 self._tag_columns or columns_config.system_tags
             ):
                 # The presentation sort (the identity has no row order, see
-                # ``_row_hashes``). A stream with no tag column is sorted only when
+                # ``_identity_table``). A stream with no tag column is sorted only when
                 # the system tags are asked for. The system tags stay in the table
                 # through the sort: they break ties between equal tags.
                 table = arrow_utils.sort_by_tag_columns(table, tuple(self._tag_columns))

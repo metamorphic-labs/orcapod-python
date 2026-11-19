@@ -6,8 +6,10 @@ the tags in tag order: two raw streams over one table that differed only in the 
 ``tag_columns`` had different content hashes, rows tied on every tag or with a list tag
 hashed in their given order, and a stream with no tag and no system tag could not be
 hashed at all. Developer, November 18, 2026: "nothing should depend on tag order", and "I
-agree with multiset of rows as the definitive way to sort". The identity now holds the rows
-as a multiset of row hashes and the names as sorted tuples.
+agree with multiset of rows as the definitive way to sort"; November 19, 2026, "option 2").
+The identity now hashes the whole table with its rows in the canonical row order of an
+identity table (a value sort over a closed list of types, ties by row hash), and holds the
+names as sorted tuples.
 """
 
 from __future__ import annotations
@@ -146,7 +148,7 @@ def _two_column_stream(
 
 
 def test_a_stream_with_no_tag_and_no_system_tag_has_a_content_hash() -> None:
-    """Main raised (nothing to sort by); a multiset needs no key."""
+    """Main raised (nothing to sort by); the canonical order needs no tag."""
 
     def stream(xs: list[int], ys: list[str]) -> ArrowTableStream:
         return _two_column_stream(
@@ -182,7 +184,7 @@ def test_rows_tied_on_every_tag_hash_the_same_in_any_order() -> None:
 
 
 def test_a_duplicate_row_is_kept_twice() -> None:
-    """A multiset: two equal rows are not one row."""
+    """Two equal rows are not one row."""
 
     def stream(ks: list[int]) -> ArrowTableStream:
         return _two_column_stream(
@@ -199,7 +201,7 @@ def test_a_duplicate_row_is_kept_twice() -> None:
 
 
 def test_rows_with_a_list_tag_hash_the_same_in_any_order() -> None:
-    """Arrow cannot order a list tag; a multiset does not need to."""
+    """A list tag is no sort key: the row hash settles its rows' order."""
 
     def stream(ks: list[list[int]], xs: list[int], tags: list[str]) -> ArrowTableStream:
         return _two_column_stream(
@@ -226,3 +228,55 @@ def test_a_stream_with_no_rows_has_one_content_hash_for_every_tag_order() -> Non
     }
     assert len(hashes) == 1
     assert hashes != {_stream(TAGS, SYSTEM, "tags_first", ("m", "j")).content_hash()}
+
+
+# ── a stream with no rows still commits to its columns (CodeRabbit on PR 453) ─
+
+
+def _empty(fields: list[pa.Field[Any]], **kwargs: Any) -> ArrowTableStream:
+    schema = pa.schema(fields)
+    return ArrowTableStream(schema.empty_table(), tag_columns=["k"], **kwargs)
+
+
+K = pa.field("k", pa.int64())
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "kwargs"),
+    [
+        ([K, pa.field("x", pa.int64())], [K, pa.field("y", pa.int64())], {}),
+        ([K, pa.field("x", pa.int64())], [K, pa.field("x", pa.large_string())], {}),
+        (
+            [K, pa.field("x", pa.int64(), nullable=True)],
+            [K, pa.field("x", pa.int64(), nullable=False)],
+            {},
+        ),
+        (
+            [K, pa.field("x", pa.int64())],
+            [K, pa.field("x", pa.int64()), pa.field("z", pa.float64())],
+            {},
+        ),
+        (
+            [K, pa.field("x", pa.int64())],
+            [K, pa.field("x", pa.int64()), pa.field("s1", pa.large_string())],
+            {"system_tag_columns": ["s1"]},
+        ),
+    ],
+    ids=["data-name", "data-type", "nullability", "extra-data-column", "system-tag"],
+)
+def test_streams_with_no_rows_and_different_columns_differ(
+    left: list[pa.Field[Any]], right: list[pa.Field[Any]], kwargs: dict[str, Any]
+) -> None:
+    """The identity table is hashed whole, so its schema counts even with no rows."""
+    other = (
+        ArrowTableStream(pa.schema(right).empty_table(), tag_columns=["k"], **kwargs)
+        if kwargs
+        else _empty(right)
+    )
+    assert _empty(left).content_hash() != other.content_hash()
+
+
+def test_streams_with_no_rows_and_the_same_columns_are_one_stream() -> None:
+    fields = [K, pa.field("x", pa.int64()), pa.field("w", pa.large_string())]
+    reordered = [fields[2], K, fields[1]]
+    assert _empty(fields).content_hash() == _empty(reordered).content_hash()
