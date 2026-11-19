@@ -1,6 +1,6 @@
 {
-  "add_tags.every_type.content_hash": "semantic_v1:1d29df8a1a36187ca0239f5d747acb924c73a8487c9263d094286113abc82e7d",
-  "add_tags.every_type.pipeline_hash": "semantic_v1:4bf3958b20db82ad7fb1a3ef1b32937565799f69f0d95b3c86b1dca78dc3a3e3",
+  "add_tags.every_type.content_hash": "semantic_v1:3ad41cfd204171984d104e117092ffecbb0e758b673f4c9aa329c93ec38763b4",
+  "add_tags.every_type.pipeline_hash": "semantic_v1:b10ad59c44d364fe81c6f70ba974281be6e12c5dc9e4d58d08292feb319a6b72",
   "add_tags.every_type.row[{\"cohort\":\"A\",\"k\":\"r1\",\"ok\":true,\"raw\":\"01\",\"run\":3,\"site\":\"a\",\"w\":1.5}]._tag_record_id::a4a91ac74561d231cff4ab05fdb7e199d259e8765f3af954e23d2c152b564b4f": "row_0",
   "add_tags.every_type.row[{\"cohort\":\"A\",\"k\":\"r1\",\"ok\":true,\"raw\":\"01\",\"run\":3,\"site\":\"a\",\"w\":1.5}]._tag_source_id::a4a91ac74561d231cff4ab05fdb7e199d259e8765f3af954e23d2c152b564b4f": "golden_nullable",
   "add_tags.every_type.row[{\"cohort\":\"A\",\"k\":\"r1\",\"ok\":true,\"raw\":\"01\",\"run\":3,\"site\":\"a\",\"w\":1.5}].data_hash": "arrow_v1:0000025c8400b7856fb3a703d4468712ba835fc942a04e99380e7c7285477bf385c1aa",
@@ -35,8 +35,8 @@
     "_tag_source_id::a4a91ac74561d231cff4ab05fdb7e199d259e8765f3af954e23d2c152b564b4f",
     "_tag_record_id::a4a91ac74561d231cff4ab05fdb7e199d259e8765f3af954e23d2c152b564b4f"
   ],
-  "add_tags.operator[every_type].content_hash": "semantic_v1:6facb9a731655e8e6a695bbb96bb7902f6b212562f7df2b5207508ff3ab9e03e",
-  "add_tags.operator[every_type].pipeline_hash": "semantic_v1:6facb9a731655e8e6a695bbb96bb7902f6b212562f7df2b5207508ff3ab9e03e",
+  "add_tags.operator[every_type].content_hash": "semantic_v1:91fce7b9bb879c3d92cd6423e4368f42ebf667cf89af73af107ac1a88a814c30",
+  "add_tags.operator[every_type].pipeline_hash": "semantic_v1:91fce7b9bb879c3d92cd6423e4368f42ebf667cf89af73af107ac1a88a814c30",
   "default_source_ids.as_source[function_node].source_id": "derived:semantic_v1:6ada754d8fc4292450d3fb8813f05878b8aabbd52da3615519c80c7418bc0b4e",
   "drop_nulls_job.node[ratio].content_hash": "semantic_v1:09afbbcc0d89147e8bcc05227431ac2a674febbcea331f584bee55927c85e447",
   "drop_nulls_job.node[ratio].pipeline_hash": "semantic_v1:cf4f9b8dff56193f509a551e7f201a165dd011ec388f9e5c827bb14d82d58376",
