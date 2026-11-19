@@ -86,6 +86,51 @@ logical types are kept, and the two variants hash identically, so no hash depend
 one you gave. The Arrow `list_view` and `large_list_view` types are not supported: a source
 refuses a column of either type.
 
+Dictionary-encoded tags are not currently supported in Orcapod. A tag column whose Arrow type
+is a `dictionary`, or holds one inside it (a list of dictionary values, a struct with a
+dictionary field), is refused with `InputValidationError` when the source or stream is built.
+The message names every such tag column, its type and the type it decodes to. A data-tag is a
+tag, so it is refused too. Such columns come from an Arrow table of your own, a pandas
+`Categorical` of strings, or a polars `Categorical` or `Enum`; CSV files, Delta tables,
+database tables and Python values never give one. Decode the column before building the
+source:
+
+```python
+import pyarrow as pa
+
+from orcapod.errors import InputValidationError
+from orcapod.sources import ArrowTableSource
+
+coded = pa.table(
+    {
+        "session": pa.array(["s1", "s2", "s1"]).dictionary_encode(),
+        "trial": [1, 1, 2],
+        "response": [0.4, 0.7, 0.5],
+    }
+)
+try:
+    ArrowTableSource(coded, tag_columns=["session", "trial"], tag_only_columns=True)
+except InputValidationError as exc:
+    print(str(exc).split(": tag column")[0])
+# dictionary-encoded tags are not currently supported in Orcapod
+
+session = coded["session"]
+decoded = coded.set_column(0, "session", session.cast(session.type.value_type))
+source = ArrowTableSource(decoded, tag_columns=["session", "trial"], tag_only_columns=True)
+print(source.as_table().schema.field("session").type)
+# large_string
+```
+
+With polars, `df.with_columns(pl.col("session").cast(pl.String))` decodes a `Categorical` or
+`Enum` column. With pandas, `df["session"].astype(df["session"].cat.categories.dtype)` decodes
+a `Categorical` of strings; a `Categorical` of integers that holds a missing value cannot be
+cast to an integer dtype this way (fill or drop the missing values first). A pandas
+`Categorical` of integers reaches the source as plain integers, so it needs no decoding.
+
+A dictionary-encoded data column is accepted as before. Its Python type is `Any`, so a
+function pod with a typed parameter refuses it, and a filter or a join on a stream that holds
+a dictionary of integers or floats fails; decode it the same way.
+
 ### SpiralDB tables
 
 `SpiralDBTableSource` exposes a table in a [SpiralDB](https://spiraldb.com) project as a

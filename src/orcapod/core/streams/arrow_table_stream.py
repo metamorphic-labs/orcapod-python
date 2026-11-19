@@ -80,6 +80,9 @@ class ArrowTableStream(StreamBase):
         Raises:
             ValueError: If a tag column or a data-tag is not a tag column of
                 the table, or the stream has no data column.
+            InputValidationError: If a tag column's type is, or contains, a
+                dictionary: dictionary-encoded tags are not currently supported
+                (ITL-1264).
         """
         super().__init__(**kwargs)
 
@@ -143,6 +146,9 @@ class ArrowTableStream(StreamBase):
             raise ValueError(
                 f"Data-tags {sorted(unknown)} are not tag columns of the stream."
             )
+        # Dictionary-encoded tags are not currently supported (ITL-1264): every
+        # source and operator result becomes a stream here, so this refuses them all.
+        schema_utils.require_tags_not_dictionary(table.schema, self._tag_columns)
         # A data-tag is one column in both roles: a tag, and a data column of
         # the same name (tag order).
         self._data_tags = tuple(c for c in self._tag_columns if c in set(data_tags))

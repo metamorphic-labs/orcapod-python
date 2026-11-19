@@ -32,6 +32,19 @@ it an explicit schema (for example `data_schema=` on `DictSource`).
 
 **Fix.** Leave at least one column out of `tag_columns`. A stream needs something to carry.
 
+### `InputValidationError: dictionary-encoded tags are not currently supported in Orcapod: tag column '...' has type dictionary<...> (decoded: ...)`
+
+**Cause.** A tag column is dictionary-encoded, or holds a dictionary inside it (for example
+a list of dictionary values). This comes from an Arrow table built with `dictionary_encode()`,
+a pandas `Categorical` of strings, or a polars `Categorical` or `Enum`. Orcapod does not
+support such tags yet; the message names every one, with the type it decodes to.
+
+**Fix.** Decode the column before building the source: with pyarrow,
+`table.set_column(i, name, table[name].cast(table[name].type.value_type))` (for a nested
+dictionary, cast to the decoded type the message gives); with polars,
+`df.with_columns(pl.col(name).cast(pl.String))`. See
+[Arrow types of a source](concepts/sources.md#arrow-types-of-a-source).
+
 ### `TypeError: 'PosixPath' object is not iterable` from `CSVSource`
 
 **Cause.** `CSVSource` was given a `pathlib.Path` and no `source_id`. The file path is

@@ -9,6 +9,7 @@ from orcapod.utils.arrow_utils import (
     apply_column_config,
     column_arrow_type,
     concat_tables_by_name,
+    decode_dictionaries,
     infer_schema_nullable,
     make_schema_non_nullable,
     normalize_extension_columns,
@@ -1069,3 +1070,82 @@ class TestSourceInfoArrowType:
         data = Data({"x": 1}, source_info={"x": [[], [["a"]]]})
         schema = data.schema(columns={"source": True})
         assert schema["_source_x"] == list[list[list[str]]]
+
+
+class _TestDictExt(pa.ExtensionType):
+    """Extension type over dictionary storage, used in decode_dictionaries tests."""
+
+    def __init__(self):
+        super().__init__(
+            pa.dictionary(pa.int32(), pa.string()), "orcapod.test.dict_ext"
+        )
+
+    def __arrow_ext_serialize__(self):
+        return b"{}"
+
+    @classmethod
+    def __arrow_ext_deserialize__(cls, storage_type, serialized):
+        return cls()
+
+
+_DICT = pa.dictionary(pa.int32(), pa.string())
+
+
+class TestDecodeDictionaries:
+    """``decode_dictionaries`` (ITL-1264): every dictionary becomes its value type."""
+
+    @pytest.mark.parametrize(
+        "arrow_type",
+        [
+            pa.int64(),
+            pa.large_string(),
+            pa.large_list(pa.field("item", pa.float32(), nullable=False)),
+            pa.struct([pa.field("a", pa.int8()), pa.field("b", pa.string())]),
+            pa.map_(pa.string(), pa.int64()),
+            _TestIntExt(),
+        ],
+    )
+    def test_a_type_without_a_dictionary_is_returned_as_it_is(self, arrow_type):
+        assert decode_dictionaries(arrow_type) == arrow_type
+
+    @pytest.mark.parametrize(
+        ("arrow_type", "decoded"),
+        [
+            (_DICT, pa.string()),
+            (pa.dictionary(pa.uint8(), pa.float64(), ordered=True), pa.float64()),
+            (pa.dictionary(pa.int16(), pa.int32()), pa.int32()),
+            (pa.list_(_DICT), pa.list_(pa.string())),
+            (pa.large_list(_DICT), pa.large_list(pa.string())),
+            (pa.list_(_DICT, 2), pa.list_(pa.string(), 2)),
+            (
+                pa.struct([pa.field("k", _DICT), pa.field("n", pa.int64())]),
+                pa.struct([pa.field("k", pa.string()), pa.field("n", pa.int64())]),
+            ),
+            (pa.map_(_DICT, _DICT), pa.map_(pa.string(), pa.string())),
+            (
+                pa.dense_union([pa.field("s", _DICT), pa.field("i", pa.int8())]),
+                pa.dense_union([pa.field("s", pa.string()), pa.field("i", pa.int8())]),
+            ),
+            (
+                pa.large_list(pa.large_list(_DICT)),
+                pa.large_list(pa.large_list(pa.string())),
+            ),
+            (_TestDictExt(), pa.string()),
+        ],
+    )
+    def test_every_dictionary_is_decoded(self, arrow_type, decoded):
+        assert decode_dictionaries(arrow_type) == decoded
+
+    def test_nested_fields_keep_their_names_nullability_and_metadata(self):
+        child = pa.field("k", _DICT, nullable=False, metadata={"m": "1"})
+        decoded = decode_dictionaries(pa.struct([child, pa.field("n", pa.int8())]))
+        assert isinstance(decoded, pa.StructType)
+        assert decoded.field("k").equals(
+            pa.field("k", pa.string(), nullable=False, metadata={"m": "1"}),
+            check_metadata=True,
+        )
+        item = pa.field("element", _DICT, nullable=False)
+        decoded_list = decode_dictionaries(pa.large_list(item))
+        assert isinstance(decoded_list, pa.LargeListType)
+        assert decoded_list.value_field.name == "element"
+        assert not decoded_list.value_field.nullable
