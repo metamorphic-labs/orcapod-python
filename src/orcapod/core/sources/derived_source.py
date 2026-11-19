@@ -524,7 +524,7 @@ class DerivedSource(RootSource):
         tag_keys, data_keys = self._origin.keys()
         names = list(dict.fromkeys([*tag_keys, *data_keys]))
         typed = typed_zero_row_table(self._origin)
-        if typed is not None:
+        if isinstance(typed, pa.Table):
             return typed.select(names)
         # Build empty table preserving declared field nullability.
         tag_schema, data_schema = self._origin.output_schema()
