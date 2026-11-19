@@ -8,22 +8,25 @@ content-addressable, and reproducible by design.
 ## Installation
 
 Orcapod supports Python 3.11, 3.12 and 3.13 and is published on PyPI as `orcapod`, under the
-MIT License:
+MIT License.
+No release after `0.1.4` is available there yet: `0.2.0` was never published, and `0.3.0` was
+withdrawn on 2026-11-17. Until `0.4.0` is released, install the development version from the
+repository.
 
 The recommended way to install it is [uv](https://docs.astral.sh/uv/): `uv add` adds
 Orcapod to a uv project (start one with `uv init` in a new directory), and `uv run` runs
 your code in that project's environment:
 
 ```bash
-uv add orcapod
+uv add git+https://github.com/metamorphic-labs/orcapod-python
 ```
 
-In an environment not managed by uv, use `pip install orcapod` instead. A plain
-`uv add orcapod` installs the latest stable release; to try a release candidate, name it,
-for example `uv add "orcapod==0.4.0rc1"`.
+In an environment not managed by uv, use
+`pip install git+https://github.com/metamorphic-labs/orcapod-python` instead. Once `0.4.0` is
+out, `uv add orcapod` (or `pip install orcapod`) installs the latest stable release; to try a
+release candidate, name it, for example `uv add "orcapod==0.4.0rc1"`.
 
-`0.3.0` is the first release on PyPI since `0.1.4`; `0.2.0` was never published to PyPI.
-Tables written by `0.2.0` or earlier are not read by `0.3.0`: see
+Tables written by `0.2.0` or earlier are not read by this version: see
 `CHANGELOG.md` in the repository, *Upgrading from 0.2.0*
 (it also covers `0.1.4`).
 

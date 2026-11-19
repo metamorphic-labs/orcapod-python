@@ -2,7 +2,7 @@
 
 A named data column becomes a data-tag: one column, a tag and the data column it
 was, with its values and source info unchanged. The new tags follow the input's tags in
-the order given. Every operator is driven through its public call and read through the
+name order, whatever order they are named in (ITL-1226). Every operator is driven through its public call and read through the
 stream's public methods; a schema prediction is checked against ``static_process``.
 """
 
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime
 import decimal
+import json
 import warnings
 from pathlib import Path
 from typing import Any
@@ -65,6 +66,15 @@ def session_of(trial: int) -> str:
     return f"s{trial // 20}"
 
 
+def json_rows(table: pa.Table) -> str:
+    """The rows of ``table`` as one text, independent of row and column order."""
+    return json.dumps(
+        sorted(
+            json.dumps(row, sort_keys=True, default=str) for row in table.to_pylist()
+        )
+    )
+
+
 def _sorted_rows(table: pa.Table) -> list[dict[str, Any]]:
     return sorted(table.to_pylist(), key=lambda row: repr(sorted(row.items())))
 
@@ -72,8 +82,8 @@ def _sorted_rows(table: pa.Table) -> list[dict[str, Any]]:
 # ── what the output is ──────────────────────────────────────────────────────
 
 
-def test_named_data_columns_become_data_tags_in_the_order_given() -> None:
-    tagged = _plain().tag_by("label", "trial")
+def test_named_data_columns_become_data_tags_in_name_order() -> None:
+    tagged = _plain().tag_by("trial", "label")
     assert tagged.keys() == (
         ("unit", "label", "trial"),
         ("label", "trial", "amp"),
@@ -114,29 +124,34 @@ def test_an_existing_data_tag_is_kept() -> None:
     assert tagged.keys() == (("unit", "trial"), ("unit", "trial", "amp", "label"))
 
 
-def test_names_as_strings_or_one_sequence_are_one_operator() -> None:
+def test_names_as_strings_a_sequence_or_a_set_in_any_order_are_one_operator() -> None:
+    """The order of the names is neither identity nor output (ITL-1226)."""
     source = _plain()
-    by_strings = source.tag_by("trial", "label")
-    by_list = source.tag_by(["trial", "label"])
-    by_tuple = source.tag_by(("trial", "label"))
-    assert (
-        by_strings.content_hash() == by_list.content_hash() == by_tuple.content_hash()
-    )
-    assert by_strings.pipeline_hash() == by_list.pipeline_hash()
-
-
-def test_the_order_of_the_names_is_part_of_the_identity() -> None:
-    source = _plain()
-    forward = source.tag_by("trial", "label")
-    backward = source.tag_by("label", "trial")
-    assert forward.keys()[0] == ("unit", "trial", "label")
-    assert backward.keys()[0] == ("unit", "label", "trial")
-    assert forward.content_hash() != backward.content_hash()
-    assert forward.pipeline_hash() != backward.pipeline_hash()
+    forms = [
+        source.tag_by("trial", "label"),
+        source.tag_by("label", "trial"),
+        source.tag_by(["trial", "label"]),
+        source.tag_by(("label", "trial")),
+        source.tag_by({"trial", "label"}),
+        source.tag_by(frozenset({"label", "trial"})),
+    ]
+    assert len({s.content_hash() for s in forms}) == 1
+    assert len({s.pipeline_hash() for s in forms}) == 1
+    for stream in forms:
+        assert stream.keys() == (
+            ("unit", "label", "trial"),
+            ("label", "trial", "amp"),
+        )
+        assert stream_data_tags(stream) == ("label", "trial")
+    rows = {json_rows(s.as_table(all_info=True)) for s in forms}
+    assert len(rows) == 1
     assert TagBy(["trial", "label"]).identity_structure() == (
         "TagBy",
-        ["trial", "label"],
+        ["label", "trial"],
     )
+    assert TagBy({"trial", "label"}).to_config()["config"] == {
+        "columns": ["label", "trial"]
+    }
 
 
 @pytest.mark.parametrize("all_info", [False, True])
@@ -269,8 +284,6 @@ def test_a_nullable_column_is_tagged_after_drop_nulls() -> None:
 @pytest.mark.parametrize(
     ("columns", "error"),
     [
-        ({"trial", "label"}, TypeError),
-        (frozenset({"trial"}), TypeError),
         ([], ValueError),
         (["trial", "trial"], ValueError),
         ([1], TypeError),
@@ -280,8 +293,6 @@ def test_a_nullable_column_is_tagged_after_drop_nulls() -> None:
         (["a::b"], InputValidationError),
     ],
     ids=[
-        "set",
-        "frozenset",
         "empty",
         "repeated",
         "not_a_string",
@@ -296,9 +307,7 @@ def test_bad_names_are_refused_at_construction(columns: Any, error: type) -> Non
         _ = TagBy(columns)
 
 
-def test_the_stream_method_refuses_no_name_and_a_set() -> None:
-    with pytest.raises(TypeError):
-        _ = _plain().tag_by({"trial"})  # pyright: ignore[reportArgumentType]  # the refusal is the test
+def test_the_stream_method_refuses_no_name() -> None:
     with pytest.raises(ValueError, match="at least one"):
         _ = _plain().tag_by([])
 

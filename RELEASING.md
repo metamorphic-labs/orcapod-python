@@ -26,7 +26,8 @@ setting, secret or environment.
 `nauticalab/orcapod-python`: `main` was pushed there by fast-forward at a release point, the
 Release workflow ran there, and the tag was fetched back into `metamorphic-labs`
 (ITL-1007). Every release tag up to `v0.3.0` is also here, on the same commit; `v0.2.0` (a
-tag only, never published) exists only here and stays as it is.
+tag only, never published) exists only here and stays as it is. `0.3.0` was withdrawn on
+2026-11-17 (see *Withdrawn releases*); the next release is `0.4.0`.
 
 ## Branching Model
 
@@ -120,13 +121,38 @@ against are in `docs/reference/golden-hashes.md`.
   (before 1.0) or a major one, never in a patch.
 - When a new data context starts, the old context's golden files and code move to
   `orcapod-sanctuary`; this repository carries only the current context's golden folder.
+- Data context v1 is open until `0.4.0` (developer, November 17, 2026, ITL-1255): `0.3.0` is
+  withdrawn, so no v1 golden file is released. Until `0.4.0`, a change to a v1 value needs the
+  developer's approval of the exact list of entries that move, each explained. The release
+  step of `0.4.0` freezes v1. Every published version needs the release step, a pre-release
+  included (the gate below refuses to tag one without it), so **publishing `0.4.0rc1` would
+  freeze v1 at the release candidate**: plan the release around it.
 - Release tags are protected on `metamorphic-labs/orcapod-python` (and on
   `nauticalab/orcapod-python`, the release repository up to `0.3.0`): the repository ruleset
   `protect-release-tags` (target `refs/tags/v*`; rules deletion, update and non-fast-forward;
   no bypass actors) is in place since 2026-11-15. A `v*` tag can be created, as the Release workflow does, but never moved
   or deleted. This is a precondition of the CI tag check (`scripts/check_golden_tags.py`),
   which compares HEAD with every release tag of the current data context. Agents never change
-  repository settings.
+  repository settings. The one exception is the tag `v0.3.0` of the withdrawn release, which
+  the developer deletes (see *Withdrawn releases*).
+
+### Withdrawn releases
+
+`0.3.0` (2026-11-17) was withdrawn by the developer on 2026-11-17, before anyone used it, so
+that data context v1 is frozen at `0.4.0` instead, after every open question that can move a
+golden value is settled (ITL-1255). The developer's acts, never an agent's: withdrawing the
+version from PyPI (yanked or deleted), lifting `protect-release-tags` to delete the tag
+`v0.3.0` (here and on `nauticalab`), and deleting its GitHub Release. In the repository the
+release revision left the v1 golden history and its pins moved to the `withdrawn` record in
+`src/orcapod/contexts/released_manifests.json`, with the date and the reason
+(`docs/reference/golden-hashes.md`, *Withdrawing a release*). The tag check compares the tag,
+while it exists, with that record, so CI passes before and after the tag is deleted.
+
+- The version `0.3.0` is never used again: PyPI never takes a version twice, and
+  `generate_golden_hashes.py --release` and the release gate refuse a withdrawn version.
+- The version of a build comes from the git tags (`hatch-vcs`). After `v0.3.0` is deleted, a
+  build from `main` reports a `0.2.x` development version until the next tag exists, so a
+  project that requires `orcapod>=0.3.1.dev0` no longer resolves to a build of `main`.
 
 ## Cutting a Release
 
@@ -219,10 +245,9 @@ secrets or environments:
 5. The `LINEAR_ACCESS_KEY` repository secret, for the Linear jobs (see *Linear Release
    System*). Codecov needs no secret (see *Coverage uploads*).
 6. Before the first release cut here: the latest GitHub Release in this repository is
-   `v0.1.2` (the GitHub Release of `v0.3.0` is on `nauticalab`), and the generated
-   release notes start at the latest earlier Release. Create a GitHub Release for `v0.3.0`
-   here (its notes copied from `nauticalab`) so that the next notes start at `v0.3.0`, or edit
-   the next Release's notes after the run.
+   `v0.1.2` (`0.3.0` is withdrawn and has none), and the generated release notes start at the
+   latest earlier Release. Edit the notes of `0.4.0` after the run, or create a GitHub Release
+   for `v0.2.0` here first so that the next notes start there.
 
 ### Coverage uploads
 
@@ -333,7 +358,8 @@ failure in a later job leaves the tag behind.
 | `linear-sync` | Unknown: it needs only `build` and runs in parallel with publishing, so it can fail before anything is published | Check `publish-testpypi` and `publish-pypi` first and recover them by their rows above. Then re-run `linear-sync`; it does not affect publishing |
 | `linear-complete` | Release is published (it runs only after `publish-pypi` and `linear-sync` succeed) | Re-run the failed job; it does not affect publishing |
 
-Never delete a tag whose version has been published to any package index.
+Never delete a tag whose version has been published to any package index. The one
+exception is `v0.3.0`, whose release the developer withdrew (see *Withdrawn releases*).
 
 ## Release Lineage
 
