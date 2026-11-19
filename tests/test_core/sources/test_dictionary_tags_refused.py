@@ -335,17 +335,27 @@ def _nested(kind: str) -> pa.Array[Any]:
         return pa.StructArray.from_arrays(
             [encoded, pa.array([1, 2, 3])], names=["k", "n"]
         )
+    if kind == "list_view":
+        return pa.ListViewArray.from_arrays(  # pyright: ignore[reportCallIssue, reportUnknownVariableType]  # the pyarrow stubs omit from_arrays' sizes argument
+            pa.array([0, 1, 2], pa.int32()), pa.array([1, 1, 1], pa.int32()), encoded
+        )
+    if kind == "large_list_view":
+        return pa.LargeListViewArray.from_arrays(  # pyright: ignore[reportCallIssue, reportUnknownVariableType]  # the pyarrow stubs omit from_arrays' sizes argument
+            pa.array([0, 1, 2], pa.int64()), pa.array([1, 1, 1], pa.int64()), encoded
+        )
     raise ValueError(kind)
 
 
 DECODED = {
     "list": "large_list<item: string>",
     "struct": "struct<k: string, n: int64>",
+    "list_view": "list_view<item: string>",
+    "large_list_view": "large_list_view<item: string>",
 }
 
 
 @pytest.mark.parametrize("build", ["source", "stream"])
-@pytest.mark.parametrize("kind", ["list", "struct"])
+@pytest.mark.parametrize("kind", ["list", "struct", "list_view", "large_list_view"])
 def test_a_tag_containing_a_dictionary_is_refused(kind: str, build: str) -> None:
     table = pa.table({"b": [1, 2, 3], "a": _nested(kind), "v": [1.0, 2.0, 3.0]})
     with pytest.raises(InputValidationError) as info:
@@ -359,6 +369,29 @@ def test_a_tag_containing_a_dictionary_is_refused(kind: str, build: str) -> None
     if build == "source":
         assert f"(decoded: {DECODED[kind]})" in message
     assert "tag column 'b'" not in message
+
+
+@pytest.mark.parametrize("kind", ["list_view", "large_list_view"])
+def test_a_list_view_tag_without_a_dictionary_is_handled_as_before(kind: str) -> None:
+    """Only a dictionary inside a list view is refused here (CodeRabbit on PR 455).
+
+    A list view of plain values keeps what it had: a raw stream holds it as given,
+    and a source refuses it because the Arrow hasher cannot hash it (ITL-1129).
+    """
+    plain = pa.array(["x", "y", "x"])
+    offsets, sizes = (
+        (pa.array([0, 1, 2], pa.int32()), pa.array([1, 1, 1], pa.int32()))
+        if kind == "list_view"
+        else (pa.array([0, 1, 2], pa.int64()), pa.array([1, 1, 1], pa.int64()))
+    )
+    column = (
+        pa.ListViewArray if kind == "list_view" else pa.LargeListViewArray
+    ).from_arrays(offsets, sizes, plain)  # pyright: ignore[reportCallIssue, reportUnknownVariableType]  # the pyarrow stubs omit from_arrays' sizes argument
+    table = pa.table({"b": [1, 2, 3], "a": column, "v": [1.0, 2.0, 3.0]})
+    ArrowTableStream(table, tag_columns=["a", "b"])
+    with pytest.raises(ValueError, match="the Arrow hasher refused") as info:
+        ArrowTableSource(table, tag_columns=["a", "b"], tag_only_columns=True)
+    assert NOT_SUPPORTED not in str(info.value)
 
 
 # ── the decoding the message suggests works ─────────────────────────────────

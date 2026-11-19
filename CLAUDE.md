@@ -989,7 +989,7 @@ holds them as given (ITL-1129).
 
 Dictionary-encoded tags are refused (developer, November 18, 2026, ITL-1264): "Say it is not
 currently supported in orcapod. We MAY support but not immediately in the plan." A tag column
-(a data-tag too) whose Arrow type is, or contains, a dictionary (list item, struct child, map
+(a data-tag too) whose Arrow type is, or contains, a dictionary (list or list-view item, struct child, map
 key or item, extension storage) raises `InputValidationError` naming each such column, its type
 and its decoded type (`arrow_utils.decode_dictionaries`). One rule,
 `schema_utils.require_tags_not_dictionary`, called by `ArrowTableStream.__init__` (every source

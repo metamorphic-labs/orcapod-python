@@ -698,7 +698,8 @@ def require_tags_not_dictionary(
 
     Developer decision, November 18, 2026: dictionary-encoded tags are not currently
     supported in Orcapod. A dictionary at the top level of a tag's type, or inside it
-    (a list item, a struct child, a map key or item, an extension type's storage),
+    (a list or list-view item, a struct child, a map key or item, an extension type's
+    storage),
     is refused here, where a stream gets its tags, and not far from the cause (a
     sort by tags, a nullability restore, ``Batch``, ``GroupBy``). This is the one
     rule: ``ArrowTableStream`` calls it for every source and operator result, and
