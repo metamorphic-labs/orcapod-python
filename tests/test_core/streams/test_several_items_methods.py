@@ -184,13 +184,12 @@ CASES = [
         lambda s, i: s.polars_filter(constraint_map=dict(i), t2=1),
         lambda s, i: PolarsFilter(constraints={**dict(i), "t2": 1})(s),
     ),
-    # An added tag's identity is its names and values in order (AddTags).
+    # The new tags are a set (ITL-1269): identity and placement in name order.
     MethodCase(
         "add_tags",
         (("x", 1), ("y", "z")),
         lambda s, i: s.add_tags(**dict(i)),
         lambda s, i: AddTags(dict(i))(s),
-        order=ORDER_IS_IDENTITY,
     ),
     # TagBy takes data columns only; a data-tag is refused (already a tag).
     MethodCase(

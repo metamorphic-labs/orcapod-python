@@ -417,17 +417,17 @@ def test_polars_filter_predicate_order_is_not_identity(role: str) -> None:
 
 
 @pytest.mark.parametrize("role", ROLES)
-def test_add_tags_order_is_the_order_of_the_new_tags_and_its_identity(
+def test_add_tags_order_is_neither_the_order_of_the_new_tags_nor_identity(
     role: str,
 ) -> None:
+    """The new tags are a set, placed in name order (ITL-1269)."""
     source = make_source(MAIN, Arrangement(MAIN.tags, TAGS_FIRST, role))
     xy = AddTags({"x": 1, "y": "z"})(source)
     yx = AddTags({"y": "z", "x": 1})(source)
     assert xy.keys()[0] == ("t1", "t2", "t3", "x", "y")
-    assert yx.keys()[0] == ("t1", "t2", "t3", "y", "x")
-    assert xy.content_hash() != yx.content_hash()
-    assert xy.pipeline_hash() != yx.pipeline_hash()
-    # Same rows: the values of each row do not depend on the order.
+    assert yx.keys()[0] == ("t1", "t2", "t3", "x", "y")
+    assert xy.content_hash() == yx.content_hash()
+    assert xy.pipeline_hash() == yx.pipeline_hash()
     assert rows_fingerprint(list(xy.iter_data())) == rows_fingerprint(
         list(yx.iter_data())
     )
