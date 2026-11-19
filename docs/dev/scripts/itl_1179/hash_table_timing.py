@@ -46,29 +46,25 @@ def main() -> None:
         {"l": pa.array([[i, i + 1] for i in range(N)], pa.large_list(pa.int64()))}
     )
     hasher = get_default_context().arrow_hasher
-    print(
-        f"starfix {importlib.metadata.version('starfix')}, pyarrow {pa.__version__}, {N} rows"
-    )
-    print(
-        f"  starfix hash_table, flat (int64, float64, large_string): {_best(lambda: (
-                ArrowDigester.hash_table(flat)
-            )):.3f} s"
-    )
-    print(
-        f"  starfix hash_table, large_list<int64>:                  {_best(lambda: (
-                ArrowDigester.hash_table(lists)
-            )):.3f} s"
-    )
-    print(
-        f"  orcapod hash_table, flat:                               {_best(lambda: (
-                hasher.hash_table(flat)
-            )):.3f} s"
-    )
-    print(
-        f"  orcapod hash_table, large_list<int64> (visitor):        {_best(lambda: (
-                hasher.hash_table(lists)
-            ), 1):.3f} s"
-    )
+    version = importlib.metadata.version("starfix")
+    print(f"starfix {version}, pyarrow {pa.__version__}, {N} rows")
+    timings = [
+        (
+            "starfix hash_table, flat (int64, float64, large_string)",
+            _best(lambda: ArrowDigester.hash_table(flat)),
+        ),
+        (
+            "starfix hash_table, large_list<int64>",
+            _best(lambda: ArrowDigester.hash_table(lists)),
+        ),
+        ("orcapod hash_table, flat", _best(lambda: hasher.hash_table(flat))),
+        (
+            "orcapod hash_table, large_list<int64> (visitor)",
+            _best(lambda: hasher.hash_table(lists), 1),
+        ),
+    ]
+    for label, seconds in timings:
+        print(f"  {label + ':':<56} {seconds:.3f} s")
 
 
 if __name__ == "__main__":
