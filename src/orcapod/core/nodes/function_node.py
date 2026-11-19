@@ -1244,6 +1244,100 @@ class _JoinedRecords(NamedTuple):
     data_tags: tuple[str, ...]
 
 
+# ``_fetch_joined_records`` decides which stored rows belong together with Polars,
+# and takes every column of its result from the stored Arrow tables (ITL-1295):
+# Polars changed some types on the way through (a ``date64`` value came back at
+# midnight) and panicked on others (``decimal256``). Polars sees only the
+# bookkeeping columns below and a row number per table; the row-number columns are
+# meta-prefixed, so no stored column has their names.
+_TAGINFO_ROW = "__fetch_taginfo_row"
+_RESULT_ROW = "__fetch_result_row"
+_EPHEMERAL_RESULT_ROW = "__fetch_ephemeral_result_row"
+
+# The pipeline-table columns the fetch filters, joins and reads entries by.
+_TAGINFO_MATCH_COLUMNS = (
+    constants.NODE_CONTENT_HASH_COL,
+    constants.IS_EPHEMERAL_COL,
+    constants.DATA_RECORD_ID,
+    _PIPELINE_BASE_ENTRY_ID_COL,
+    _PIPELINE_RECOMPUTATION_INDEX_COL,
+)
+
+
+def _row_frame(table: "pa.Table", columns: Sequence[str], row: str) -> "pl.DataFrame":
+    """Return a Polars frame of some of a table's columns and its row numbers.
+
+    Args:
+        table: A stored table.
+        columns: The columns to include; those the table lacks are left out.
+        row: The name of the row-number column (``int64``).
+
+    Returns:
+        The frame: the present ``columns``, in their order, then ``row``.
+    """
+    names = [name for name in columns if name in table.column_names]
+    arrays = [table.column(name) for name in names]
+    arrays.append(pa.chunked_array([pa.array(range(table.num_rows), pa.int64())]))
+    return cast(
+        "pl.DataFrame", pl.from_arrow(pa.Table.from_arrays(arrays, names=[*names, row]))
+    )
+
+
+def _joined_from_stored(
+    matched: "pl.DataFrame",
+    taginfo: "pa.Table",
+    parts: Sequence[tuple[str, "pa.Table"]],
+) -> "pa.Table":
+    """Build the joined records from the stored tables, by the rows Polars matched.
+
+    The layout is the one Polars' join and diagonal concatenation gave: every
+    pipeline-table column, then each result column other than the record id (a name
+    the pipeline table also has takes the suffix ``_right``), in order of first
+    appearance across ``parts``; a column a part lacks is null in that part's rows.
+
+    Args:
+        matched: The matched rows, in output order: a ``_TAGINFO_ROW`` column and,
+            per part, its row-number column (null in the other parts' rows). The
+            rows of each part are contiguous, in the order of ``parts``.
+        taginfo: The stored pipeline table.
+        parts: Per result table, in concatenation order: its row-number column in
+            ``matched`` and the table.
+
+    Returns:
+        The joined table, every value taken from the stored tables.
+    """
+    taginfo_rows = matched.get_column(_TAGINFO_ROW).to_arrow()
+    names = list(taginfo.column_names)
+    columns: list[Any] = [taginfo.column(name).take(taginfo_rows) for name in names]
+    # Output name -> stored column name, per part.
+    result_names: dict[str, str] = {}
+    for _, results in parts:
+        for name in results.column_names:
+            if name == constants.DATA_RECORD_ID:
+                continue
+            out = f"{name}_right" if name in taginfo.column_names else name
+            result_names.setdefault(out, name)
+    part_rows = []
+    for row_column, _ in parts:
+        rows = matched.get_column(row_column)
+        part_rows.append(rows.drop_nulls().to_arrow())
+    for out, name in result_names.items():
+        chunks: list[Any] = []
+        arrow_type = next(
+            results.schema.field(name).type
+            for _, results in parts
+            if name in results.column_names
+        )
+        for (_, results), rows in zip(parts, part_rows):
+            if name in results.column_names:
+                chunks.extend(results.column(name).take(rows).chunks)
+            else:
+                chunks.append(pa.nulls(len(rows), arrow_type))
+        names.append(out)
+        columns.append(pa.chunked_array(chunks, type=arrow_type))
+    return pa.Table.from_arrays(columns, names=names)
+
+
 class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
     """DB-backed execution node for function pod invocations.
 
@@ -3278,7 +3372,8 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         data_tags = self._stored_data_tags(taginfo_schema)
 
         is_ephemeral_col = constants.IS_EPHEMERAL_COL
-        taginfo_df = pl.DataFrame(taginfo)
+        # Polars sees only the bookkeeping columns and row numbers (ITL-1295).
+        taginfo_df = _row_frame(taginfo, _TAGINFO_MATCH_COLUMNS, _TAGINFO_ROW)
 
         # Per-node isolation: when sharing a pipeline table in pipeline_hash scope,
         # filter to rows written by this node to prevent cross-node contamination.
@@ -3304,6 +3399,8 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         # Persistent join
         # ------------------------------------------------------------------
         results_schema = None
+        results: pa.Table | None = None
+        eph_results: pa.Table | None = None
         persistent_df = pl.DataFrame()
         if persistent_taginfo_df.height > 0:
             results = self._cached_function_pod.result_database.get_all_records(
@@ -3328,7 +3425,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             else:
                 results_schema = results.schema
                 full_persistent_df = persistent_taginfo_df.join(
-                    pl.DataFrame(results),
+                    _row_frame(results, (constants.DATA_RECORD_ID,), _RESULT_ROW),
                     on=constants.DATA_RECORD_ID,
                     how="inner",
                 )
@@ -3351,7 +3448,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         empty_taginfo_rows: dict[bytes, dict] = {}
 
         if ephemeral_taginfo_df.height > 0:
-            eph_results = None
+            eph_frame: pl.DataFrame | None = None
             if self._ephemeral_cached_pod is not None:
                 eph_results = (
                     self._ephemeral_cached_pod.result_database.get_all_records(
@@ -3365,24 +3462,29 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 )
                 if results_schema is None:
                     results_schema = eph_results.schema
+                eph_frame = _row_frame(
+                    eph_results, (constants.DATA_RECORD_ID,), _EPHEMERAL_RESULT_ROW
+                )
                 ephemeral_df = ephemeral_taginfo_df.join(
-                    pl.DataFrame(eph_results),
+                    eph_frame,
                     on=constants.DATA_RECORD_ID,
                     how="inner",
                 )
 
             # Emit EmptyData tokens for unmatched ephemeral rows
             # (cross-session miss: ephemeral data is gone).
-            if eph_results is not None:
+            if eph_frame is not None:
                 unmatched_df = ephemeral_taginfo_df.join(
-                    pl.DataFrame(eph_results),
-                    on=constants.DATA_RECORD_ID,
-                    how="anti",
+                    eph_frame, on=constants.DATA_RECORD_ID, how="anti"
                 )
             else:
                 # No ephemeral database or empty database — all ephemeral rows are misses.
                 unmatched_df = ephemeral_taginfo_df
-            for row in unmatched_df.iter_rows(named=True):
+            # The rows themselves are read from the pipeline table, not from Polars.
+            unmatched_rows = taginfo.take(
+                unmatched_df.get_column(_TAGINFO_ROW).to_arrow()
+            ).to_pylist()
+            for row in unmatched_rows:
                 base_eid = row[_PIPELINE_BASE_ENTRY_ID_COL]
                 previous = empty_taginfo_rows.get(base_eid)
                 if (
@@ -3443,10 +3545,17 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 pl.col(_PIPELINE_BASE_ENTRY_ID_COL).is_in(base_entry_ids)
             )
 
-        joined = merged_df.to_arrow()
-        # Polars drops field metadata and nullable flags: restore them from the
-        # pipeline table in every case (its data-tag marker included), and from
-        # the result table when one was read.
+        # Every column comes from the stored tables, by the rows Polars matched; the
+        # ephemeral rows come first, as concatenated above.
+        parts: list[tuple[str, pa.Table]] = []
+        if ephemeral_df.height > 0:
+            parts.append((_EPHEMERAL_RESULT_ROW, cast("pa.Table", eph_results)))
+        if persistent_df.height > 0:
+            parts.append((_RESULT_ROW, cast("pa.Table", results)))
+        joined = _joined_from_stored(merged_df, taginfo, parts)
+        # The table is built from arrays, with no field flags: restore them from the
+        # pipeline table in every case (its data-tag marker included), and from the
+        # result table when one was read.
         joined = arrow_utils.restore_schema_nullability(
             joined,
             *(
