@@ -182,10 +182,13 @@ The output schema is a set of named, typed outputs: each output key with its typ
 order, like every other schema. `output_keys` also says which position of the returned
 tuple each name takes, and that mapping belongs with the body. So reordering the output keys
 changes the identity only when a key's type changes. Swapping two keys of the same type
-keeps the identity, as a body edit does, and it changes what the function computes: bump
-the major version. Until stored results are checked against the current function on a cache
-hit (ITL-1253), a run serves the earlier results without a warning. The function's input
-parameters (their names and their order) are not part of the identity either.
+keeps the identity, as a body edit does. When a name now receives another value (the keys
+swapped without the returned values, or the reverse), what the function computes changed:
+bump the major version. Until stored results are checked against the current function on a
+cache hit (ITL-1253), a run serves the earlier results without a warning. Swapping the keys
+and the returned values together changes nothing: each name receives the value it had. The
+function's input parameters (their names and their order) are not part of the identity
+either.
 
 ```python
 @function_pod(output_keys=["total", "doubled"])

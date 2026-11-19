@@ -6,9 +6,11 @@ type, in no order (the schema hash sorts field names, as for every schema). So:
 * swapping two output keys of different types changes the schema: another uri, content
   hash, pipeline hash and stored tables;
 * swapping two output keys of the same type leaves the schema as it is: the same uri.
-  Like an edit of the body, it changes what the function computes, so it needs a
-  major version bump (the uri holds only the major); a check of the stored function
-  variation data on a cache hit is ITL-1253 (strict xfail below);
+  When a name then receives another value (the keys swapped without the returned
+  values, or the reverse), it is like an edit of the body: it changes what the
+  function computes, so it needs a major version bump (the uri holds only the
+  major); a check of the stored function variation data on a cache hit is ITL-1253
+  (strict xfail below). Swapping the keys with the returned values changes nothing;
 * the input parameters are in no part of the uri (names and order);
 * a function with one output key has the identity the golden values pin.
 
@@ -170,11 +172,12 @@ def test_a_swap_changes_the_identity_exactly_when_it_changes_a_keys_type() -> No
     assert len(set().union(*by_str_key.values())) == 3
 
 
-def test_only_a_major_version_bump_tells_a_same_typed_swap_apart() -> None:
+def test_only_a_major_version_bump_tells_apart_keys_swapped_without_values() -> None:
     """The uri holds the major version only: a minor bump keeps the swapped order's uri.
 
-    So, while a cache hit is not checked (ITL-1253), only a major bump makes the
-    swapped order compute its own values.
+    ``same2`` returns its values in one order, so swapping its keys gives each name
+    the other value. While a cache hit is not checked (ITL-1253), only a major bump
+    makes the swapped order compute its own values.
     """
     original = FunctionPod.from_fn(same2, output_keys=["first", "second"])
     minor = FunctionPod.from_fn(same2, output_keys=["second", "first"], version="v0.1")
@@ -182,6 +185,51 @@ def test_only_a_major_version_bump_tells_a_same_typed_swap_apart() -> None:
     assert minor.uri == original.uri
     assert major.uri != original.uri
     assert major.uri[2] == "v1"
+
+
+# ``partly``'s outputs by name: two of one type and one of another.
+PARTLY_TYPES = {"first": int, "second": int, "third": str}
+
+
+def _partly_by_name(d1: int, d3: str) -> dict[str, Any]:
+    return {"first": d1 + len(d3), "second": d1 * 2, "third": d3 * 2}
+
+
+def _partly_returning(keys: tuple[str, ...]) -> Any:
+    """``partly`` declaring ``keys`` and returning its values in the same order.
+
+    Every order has the same name, so only the keys and the returned tuple differ.
+    """
+
+    def partly_in_order(d1: int, d3: str) -> Any:
+        values = _partly_by_name(d1, d3)
+        return tuple(values[key] for key in keys)
+
+    return_type: Any = tuple[tuple(PARTLY_TYPES[key] for key in keys)]
+    partly_in_order.__annotations__ = {"d1": int, "d3": str, "return": return_type}
+    return partly_in_order
+
+
+def _partly_pod(keys: tuple[str, ...]) -> Any:
+    return FunctionPod.from_fn(_partly_returning(keys), output_keys=list(keys))
+
+
+def _partly_expected() -> list[tuple[Any, ...]]:
+    """Each row's values by name, in sorted name order."""
+    return sorted(
+        tuple(_partly_by_name(d1, d3)[key] for key in THREE_KEYS)
+        for d1, d3 in _main_values()
+    )
+
+
+def test_swapping_the_keys_with_the_returned_values_is_one_function() -> None:
+    """Every order of the keys, each with the returned values in that order: one uri.
+
+    Each name receives the value it had, so nothing a stored result means has changed
+    and no version bump is needed; the outputs of two types change no identity either.
+    """
+    identities = {_identity(_partly_pod(keys)) for keys in _orders(3)}
+    assert len(identities) == 1
 
 
 def test_renaming_an_output_key_is_another_function() -> None:
@@ -278,6 +326,20 @@ def test_in_memory_each_order_names_its_own_values(
                 tuple(data[k] for k in keys) for _, data in stream.iter_data()
             )
             assert rows == expected, (keys, shape)
+
+
+@pytest.mark.parametrize("role", [PLAIN, DATA_TAGS, MIXED])
+def test_in_memory_keys_swapped_with_their_values_give_each_name_its_value(
+    role: str,
+) -> None:
+    """Every order of keys and returned values, in every arrangement: the same values."""
+    for keys in _orders(3):
+        for shape in SHAPES:
+            stream = _partly_pod(keys)(_source(role, shape))
+            rows = sorted(
+                tuple(data[key] for key in THREE_KEYS) for _, data in stream.iter_data()
+            )
+            assert rows == _partly_expected(), (keys, shape)
 
 
 FALL_THROUGH_ORDER_ISSUE = "ITL-1246"
@@ -402,6 +464,37 @@ def test_jobs_with_differently_typed_orders_on_one_database_store_their_own_rows
     assert len(paths) == len(orders)
 
 
+@pytest.mark.parametrize(
+    "orchestrator",
+    [SyncPipelineOrchestrator, AsyncPipelineOrchestrator],
+    ids=["sync", "async"],
+)
+@pytest.mark.parametrize("shape", list(SHAPES))
+@pytest.mark.parametrize("role", [PLAIN, DATA_TAGS])
+def test_jobs_with_keys_swapped_with_their_values_share_correct_rows(
+    role: str, shape: str, orchestrator: type
+) -> None:
+    """The first order computes; every other order is served its rows, which are right.
+
+    One uri and one stored table for every order of keys and returned values, and each
+    name holds its own value in every order: serving the stored rows is correct.
+    """
+    database = InMemoryArrowDatabase()
+    paths = set()
+    for index, keys in enumerate(_orders(3)):
+        job = PipelineJob(name="outputs", database=database)
+        with job:
+            _partly_pod(keys)(_source(role, shape), label="outputs")
+        summary = job.run(orchestrator=orchestrator())
+        counts = summary.nodes["outputs"]
+        expected_counts = (6, 0) if index == 0 else (0, 6)
+        assert (counts.computed, counts.reused) == expected_counts, keys
+        node = job.nodes["outputs"]
+        paths.add(node.node_identity_path)
+        assert _values(node, THREE_KEYS) == _partly_expected(), keys
+    assert len(paths) == 1
+
+
 @pytest.mark.parametrize("shape", list(SHAPES))
 def test_a_saved_and_loaded_job_keeps_the_declared_order(
     shape: str, tmp_path: Path
@@ -441,7 +534,8 @@ def test_a_saved_and_loaded_job_keeps_the_declared_order(
 def test_a_same_typed_swap_is_never_served_the_other_orders_rows_silently(
     n: int, shape: str
 ) -> None:
-    """Same-typed swapped keys share a uri, so the second job finds the first's rows.
+    """Same-typed keys swapped without the returned values share a uri: the second job
+    finds the first's rows, which give each name the other value.
 
     What the safety net must do: either compute the second order's own values, or
     say so (a warning or an error); never serve the first order's values under the
