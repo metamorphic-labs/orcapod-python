@@ -434,7 +434,9 @@ def _page_rows(heading: str, columns: int) -> list[list[str]]:
     section = text.split(heading, 1)[1].split("\n## ", 1)[0]
     rows = []
     for line in section.splitlines():
-        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        # An escaped pipe (``str \\| None``) belongs to its cell.
+        escaped = line.strip().strip("|").replace("\\|", "\x00")
+        cells = [cell.strip().replace("\x00", "|") for cell in escaped.split("|")]
         if line.startswith("| `") and len(cells) == columns:
             rows.append([cell.strip("`") for cell in cells])
     return rows

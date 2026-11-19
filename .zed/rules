@@ -547,7 +547,8 @@ algorithm produced it.**
 - A label names the algorithm that produced a digest (the whole procedure: canonical form,
   preparation, encoding, digest function) and nothing else. Format `<algorithm>_v<N>`,
   integer `N`: `semantic_v1`, `arrow_v1`, `arrow_ordered_v1`, `directory_v1`, `ndarray_v1`,
-  `polars_expr_v1`, `batch_v1`, `group_v1`. The file content hash keeps `sha256`, the only
+  `polars_expr_v1`, `batch_v1`, `group_v1`, `function_signature_v1`, `function_content_v1`.
+  The file content hash keeps `sha256`, the only
   exception. A logical type's implementer picks its label.
 - Change a label only when its algorithm would give an existing input a different digest.
 - Define each label in exactly one place, as a constant beside its algorithm. Never write a
@@ -619,6 +620,25 @@ and the async path. A test whose streams have one tag and one data column does n
 operator. The shared family of such inputs is `tests/test_core/operators/several_items.py`;
 the inventory is `docs/dev/specs/itl-1236-several-item-test-audit.md`. The docs show the
 several-item form of such an argument, not only the one-item form.
+
+**Order never counts, except where you give it** (developer, November 18, 2026, ITL-1271):
+no operator result and no stream depends on the order of the tags or columns fed into it
+(declared `tag_columns`, table layout, which tags are data-tags), on the order of the items
+of an argument that names a set (names, mapping entries, keywords, predicates), or on the
+order of the inputs of a commutative operator or a function pod. "If any operations COULD
+vary output by tag order, then explicit ordering of tags to be used should be an explicit
+input into the function/operator." Nothing that enters a hash, an identity, a stored path or
+a stored value may follow such an order: hold a set of names sorted (or as a dict), and
+place columns by an explicit argument or by name. The places where order is meant to count
+are listed once, `ORDER_EXCEPTIONS` in `tests/test_core/order_rules.py`, each with its
+reason, and rendered in `docs/concepts/identity.md` ("Order never counts, except where you
+give it"); add one only with the developer's decision. Column placement following the
+declared order is presentation only. `tests/test_core/test_order_invariance.py` checks every
+exported operator, source and stream kind, the function pod forms and a job: a new operator
+or stream kind fails there until it has a case; a case owned by an open issue is
+`xfail(strict=True, raises=AssertionError)` naming it (`KNOWN_VIOLATIONS`, exactly the
+issues the marks name), on the comparison only, removed when the issue lands. The
+audit is `docs/dev/specs/itl-1271-order-invariance-audit.md`.
 
 ---
 
@@ -1255,8 +1275,7 @@ data. The rules:
   dropped tags still order the members, so the data lists are as before. Their values are not
   carried: a step that needs them makes the column data before grouping (at the source, or
   DerivedSource(tags_as_data=...)). A list-valued tag of the input (a list-typed source tag)
-  can still order members, so the member sort key (_null_last_key) is
-  recursive and sorts nulls last at every depth. A grouped stream grouped again on a coarser
+  can still order members, element by element, nulls last at every depth. A grouped stream grouped again on a coarser
   key orders its members by the first grouping's keys outside the coarser key, then by record id. An opt-in mode that keeps non-key tags is ITL-1071.
 - GroupBy never depends on how its input's columns are arranged (developer, November 17,
   2026, ITL-1226). Members are ordered by the non-key tags in name order (each ascending,
@@ -1270,23 +1289,42 @@ data. The rules:
   record ids, folds, source-info tokens and hashes; only the output's column order follows
   the input, as presentation. `TagBy`'s identity is its sorted names, and its new tags are
   placed in name order.
-- `GroupBy` groups keys as the joins match them, except null (developer, November 17, 2026,
-  ITL-1234): all rows with a null key form one group, and so do all rows with a NaN key (the
-  grouping key holds every NaN as one object, `_grouping_key`); `0.0` equals `-0.0`. A NaN key
-  sorts after every number and before null, as in the member order (`_null_last_key`, which
-  also sorts a NaN tag after every number). The hashes read a float's bits, so a group emits,
-  for each float key column, its members' value with the smallest bit pattern at the column's
-  own width, float16, float32 or float64 (`_emitted_key_row`: `0.0` over `-0.0`, a positive NaN
-  over a negative one; a signaling NaN has smaller bits than the canonical quiet NaN, so it
-  wins), taken from the input's Arrow column, never through Python (a float32 signaling NaN
-  comes back quiet from Python): always a value a member holds, never the first row's, never
-  chosen by `member_order`. Bits are read only for a group whose key is zero or NaN. A logical
-  type stored as a float, or a dictionary-encoded float, is a float key, read through its
-  storage or its values (`_float_storage`). Every
-  other key is rebuilt from its Python value, as before: equal Python values that differ in
-  Arrow (`time64[ns]` within a microsecond) are one group with one rebuilt key; grouping by
-  the exact value is ITL-1250. The stance on `0.0`/`-0.0` and NaN for the whole library
-  (match by value, as Polars does; show the smallest bit pattern; rewrite nothing) is ITL-1251.
+- `GroupBy` groups keys by their Arrow value, as the joins match them, except null (developer,
+  November 17, 2026, ITL-1234; November 19, 2026, ITL-1250): all rows with a null key form one
+  group, and so do all rows with a NaN key; `0.0` equals `-0.0`. It decides which rows group
+  and in what order with Polars, never through Python values: one stable sort of a frame of
+  the keys (name order), the member-order tags, the record-id and source-id columns
+  (`nulls_last`; Polars ties `0.0` with `-0.0` and every NaN, and puts NaN after every number
+  and before null), group boundaries by Polars' equality (`rle_id`). Keys that differ below
+  Python's precision (`time64[ns]` within a microsecond, `date64` on one day) are separate
+  groups. A list-valued tag sorts through `(is_null, value)` pairs at every depth (`_sort_key`:
+  Polars puts a null inside a list first). The sort frame only sees prepared columns
+  (`_polars_ready`: a logical type as its storage, a dictionary decoded in one place,
+  `_without_dictionary`, a temporal value as its integer, `float16` as `float32`, a view as
+  its large variant, `decimal256` as four 64-bit limbs, which Polars cannot read (it panics,
+  which no caller can catch), every list kind, fixed-size lists included, as a large list
+  over its prepared values). What may reach it is one rule, `_unorderable_part` (an integer,
+  float, decimal, boolean, string, binary, date, time, timestamp, duration or null, through
+  logical storage, dictionary values and lists of every kind at every depth), checked from
+  the schema at validation and from the table when grouping (the async path skips
+  validation); anything else is refused, never passed through. The output is built from the input's Arrow table: `take()` in the
+  sorted order and list arrays from group offsets (`arrow_utils.aggregated_list_array`, the
+  array-based sibling of `build_aggregated_table`), so every key and list element is a value
+  a member holds, bit for bit (`time64[ns]` keeps its nanoseconds, a float32 signaling NaN
+  its bits; ITL-1248 for `GroupBy`). The hashes read a float's bits, so a group emits, for
+  each float key column (a logical type stored as a float, or a dictionary over floats,
+  included), its members' value with the smallest bit pattern at the column's own width
+  (`0.0` over `-0.0`, a positive NaN over a negative one; a signaling NaN has smaller bits
+  than the canonical quiet NaN, so it wins): never the first row's, never chosen by
+  `member_order`. Every other key is the group's first member's (equal values are identical).
+  Only the system-tag and key source-info folds read Python values, which are text. A user tag
+  whose type has no order (a struct or a map, such as a user class or a `dict[K, V]`, an
+  interval, a union, a list view) is refused (`InputValidationError`,
+  `_refuse_unorderable_tags`), as a key and as a non-key tag (which orders the members): a
+  struct has no decided order (developer, November 19, 2026), so drop it before grouping. A
+  key that is a list of any kind (a fixed-size list included) is refused as list-valued. `Batch` and `MergeJoin` still rebuild their lists from Python
+  (ITL-1281). The stance on `0.0`/`-0.0` and NaN for the whole library (match by value, as
+  Polars does; show the smallest bit pattern; rewrite nothing) is ITL-1251.
 - Data source-info values may be str, None, or list[...], nested to any depth; Arrow/Python
   types are derived from the value, with None mapping to large_string. That rule has one
   definition, arrow_utils.source_info_arrow_type, and applies only to tokens supplied as

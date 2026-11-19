@@ -85,6 +85,8 @@ The labels of v0.3:
 | `polars_expr_v1` | the Polars expression hash (§1c) | `POLARS_EXPR_HASH_LABEL`, `hashing/semantic_hashing/polars_expr.py` |
 | `polars_dataframe_v1` | the Polars DataFrame value hash (§1e) | `PolarsDataFrameHandler.HASH_LABEL`, `hashing/semantic_hashing/builtin_handlers.py` |
 | `polars_series_v1` | the Polars Series value hash (§1e) | `PolarsSeriesHandler.HASH_LABEL`, `hashing/semantic_hashing/builtin_handlers.py` |
+| `function_signature_v1` | the stored function signature hash: a function's declared interface ([Data function types](data-function-types.md)) | `FUNCTION_SIGNATURE_HASH_LABEL`, `core/data_function.py` |
+| `function_content_v1` | the stored function content hash: its source text from the `def` line on ([Data function types](data-function-types.md)) | `FUNCTION_CONTENT_HASH_LABEL`, `core/data_function.py` |
 | `batch_v1` | the folded source id and record id of `Batch` (site 6b) | `BATCH_FOLD_LABEL`, `core/operators/batch.py` |
 | `group_v1` | the folded source id and record id of `GroupBy` (site 6b), and the merged source-info token of a data-tag group key | `GROUP_BY_FOLD_LABEL`, `core/operators/group_by.py` |
 | `join_v1` | the merged source-info token of a key that is a data-tag on several inputs of a `Join` (site 6b) | `JOIN_FOLD_LABEL`, `core/operators/join.py` |
@@ -278,7 +280,7 @@ test session with `-p tests.test_hashing.hash_site_trace`.
 | `_record_hash` of operator-cache and cached-source tables | `core/nodes/operator_node.py:OperatorJobNode._store_output_stream`, `core/sources/cached_source.py:CachedSource._live_records` |
 | side-effect log `record_id`, `record_id_hash` | `side_effects.py:_execute_side_effect_row` |
 | the `_content_hash` column | `core/streams/arrow_table_stream.py:ArrowTableStream._assemble_table.<locals>.hashes`, `core/function_pod.py:FunctionPodStream.as_table.<locals>.all_content_hashes`, `core/function_pod.py:FunctionPodStream.head.<locals>.shown_content_hashes`, `core/function_pod.py:FunctionPodStream.head.<locals>.<lambda>`, `core/nodes/function_node.py:FunctionNodeBase.as_table.<locals>.all_content_hashes`, `core/nodes/function_node.py:FunctionNodeBase._head_of_pairs.<locals>.<lambda>`, `side_effects.py:_table_of_rows` |
-| `__pf_var_function_signature_hash`, `__pf_var_function_content_hash` | `core/data_function.py:PythonDataFunction.__init__` |
+| `__pf_var_function_signature_hash`, `__pf_var_function_content_hash` | `core/data_function.py:function_signature_hash`, `core/data_function.py:function_content_hash`, `core/data_function.py:PythonDataFunction.__init__` |
 | saved pipeline and job files | `pipeline/graph.py:Pipeline.save`, `pipeline/job.py:PipelineJob.save`, `pipeline/job.py:PipelineJob.as_pipeline`, `core/sources/base.py:RootSource._identity_config` |
 | cached file hashes | `hashing/hash_cachers.py:SqliteHashCacher.put` |
 | `InvocationContext.invocation_hash` (`<label>:<hex>::<label>:<hex>`; its redesign is a side-effect follow-up) | `invocation.py:_serialize_component` |
@@ -526,7 +528,7 @@ The table below shows what each class returns from `identity_structure()`.
 | `DerivedSource` | Origin node's `content_hash` | Inherits its generating node's identity |
 | `DerivedSource` with `tags_as_data` | `(class_name, output_schema, source_id, key_columns, ("tags_as_data", sorted items))`; the default `source_id` is `tags_as_data:<label>:<hex>` of the hash of `(("DerivedSource", sorted tags_as_data items), (origin,))`, the origin entering through its `content_hash`; `record_id_columns`, when given, is appended to the parameters as `("record_id_columns", (names...))` | The rule of every root source plus the mapping, which enters the `content_hash` directly (two mappings can give one schema) and so also with an explicit `source_id`; the origin enters through the default `source_id` only, which is the content hash an operator node doing the derivation would have |
 | `ListSource` | `(class_name, name, elements, tag function hash, key_columns)` | The elements are the source's identity; `key_columns` as for every root source |
-| `PollingSource` | `(impl.identity(), tag_columns, key_columns)` | The implementer's identity; `key_columns` (always given for a polling source) as for every root source |
+| `PollingSource` | `(impl.identity(), sorted tag_columns, key_columns)` | The implementer's identity; the tag columns in name order, so their declared order changes nothing; `key_columns` (always given for a polling source, in key order) as for every root source |
 | `SpiralDBTableSource` | `(class_name, output_schema, source_id, key_columns)`, then the sorted `tags_as_data` items when given | A restriction (`where`, `limit`, `asof`) chooses rows of the same table and adds nothing |
 | `CachedSource` | the wrapped source's identity | |
 | Operators (unary) | `(operator_class_name, upstream_stream)` | Stream reference resolved via `content_resolver` |
@@ -690,10 +692,13 @@ registry. Raising is the v0.3 behaviour (developer decision, November 11, 2026);
 pod parameter's default as the column value it would be, which would cover `Path`,
 `datetime`, `date` and numpy scalars, is the follow-up ITL-971.
 
-**Where the hash is used.** As the hash of a function that appears as a value, and as the
-`function_signature_hash` stored with every result row (the
-`__pf_var_function_signature_hash` column), which is this same hash of the pod's function. A
-function pod's identity does **not** use it: the pod's `uri`, its `pipeline_hash()`, its
+**Where the hash is used.** As the hash of a function that appears as a value. The
+`function_signature_hash` stored with every result row is another hash
+(`function_signature_v1`, ITL-1256): the function's declared interface, each input with its
+effective type and default by name and the outputs in declared order, without the function's
+name, module or parameter kinds (see [Data function types](data-function-types.md)). Its
+defaults are hashed the same way, so a default the hasher cannot hash fails a pod at
+construction. A function pod's identity uses neither: the pod's `uri`, its `pipeline_hash()`, its
 `content_hash()` and its table paths depend on the function's name, version and output
 schema (see [Data Function URI Hash](#5-data-function-uri-hash)), so changing a default
 moves no path.
