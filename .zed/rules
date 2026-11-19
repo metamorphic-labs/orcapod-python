@@ -1070,7 +1070,7 @@ data. The rules:
   to large_list, recursively). Width, nullability and logical (extension) types are never
   changed; int8 stays int8, and null stays null (operators and the type converter pass
   keep_null=True; only Data maps null to large_string, the function's default). An
-  operator that round-trips through Polars casts its columns back
+  operator that round-trips its columns through Polars casts them back
   to the normalized input types (arrow_utils.restore_column_types, or
   restore_schema_nullability when nullability is restored too).
   This holds for every operator, also one that passes its rows through unchanged (select,
@@ -1220,6 +1220,19 @@ data. The rules:
 - DerivedSource over a job node with nothing stored → presents zero rows with the origin's columns
   (no computed records; no error), in the plain form and with tags_as_data.
 - Join requires non-overlapping data columns; raises InputValidationError on collision.
+- `Join` and `SemiJoin` give Polars only their key columns and row numbers (ITL-1284): Polars
+  decides which rows match, and every output column is taken from the input tables by row
+  number (`take`), so every value is the input's, bit for bit (they used to carry every column
+  through Polars: a `date64` off midnight came back at midnight, a `decimal256` made Polars
+  panic). Keys are prepared in one place, `core/operators/arrow_keys.py` (`polars_ready`: a
+  logical type as its storage, a dictionary decoded, a temporal value as its integer, `float16`
+  as `float32`, a view as its large variant, `decimal256` as four 64-bit limbs, through lists,
+  fixed-size lists and structs; `part_without_rule` says what may reach Polars). A key whose
+  type has no rule (a map, an interval, a union, a list view) is refused with
+  `InputValidationError` naming the column (`base.require_matchable_key`) on both paths,
+  before rows are matched (never at validation, which would derive every input's zero-row
+  table on each graph build). `GroupBy` keeps its own copy of the preparation until ITL-1281, which also
+  moves `MergeJoin` off its round trip.
 - MergeJoin requires colliding data columns to have identical Python types; merges into sorted
   large_list<T> with source columns reordered to match, where T is the large-normalized input
   Arrow type; inputs whose Arrow types still differ after normalization raise
