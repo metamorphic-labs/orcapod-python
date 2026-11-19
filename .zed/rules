@@ -621,6 +621,25 @@ operator. The shared family of such inputs is `tests/test_core/operators/several
 the inventory is `docs/dev/specs/itl-1236-several-item-test-audit.md`. The docs show the
 several-item form of such an argument, not only the one-item form.
 
+**Order never counts, except where you give it** (developer, November 18, 2026, ITL-1271):
+no operator result and no stream depends on the order of the tags or columns fed into it
+(declared `tag_columns`, table layout, which tags are data-tags), on the order of the items
+of an argument that names a set (names, mapping entries, keywords, predicates), or on the
+order of the inputs of a commutative operator or a function pod. "If any operations COULD
+vary output by tag order, then explicit ordering of tags to be used should be an explicit
+input into the function/operator." Nothing that enters a hash, an identity, a stored path or
+a stored value may follow such an order: hold a set of names sorted (or as a dict), and
+place columns by an explicit argument or by name. The places where order is meant to count
+are listed once, `ORDER_EXCEPTIONS` in `tests/test_core/order_rules.py`, each with its
+reason, and rendered in `docs/concepts/identity.md` ("Order never counts, except where you
+give it"); add one only with the developer's decision. Column placement following the
+declared order is presentation only. `tests/test_core/test_order_invariance.py` checks every
+exported operator, source and stream kind, the function pod forms and a job: a new operator
+or stream kind fails there until it has a case; a case owned by an open issue is
+`xfail(strict=True, raises=AssertionError)` naming it (`KNOWN_VIOLATIONS`, exactly the
+issues the marks name), on the comparison only, removed when the issue lands. The
+audit is `docs/dev/specs/itl-1271-order-invariance-audit.md`.
+
 ---
 
 ## Project layout

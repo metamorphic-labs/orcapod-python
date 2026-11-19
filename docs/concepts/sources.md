@@ -437,6 +437,9 @@ before. Things to know:
 - The mapping is `{tag column: new data column}`. The new name must not already be a column
   and must not start with `_`; a wrong name raises `InputValidationError` when the source is
   built.
+- The copies follow the origin's data columns, in the order of their new names. The mapping
+  names a set of copies: the order you give it in changes neither the columns, their order,
+  nor any hash.
 - The copy has exactly the tag's type, including whether it may be null. If the tag may be
   null, annotate the function parameter as optional (`datetime | None`).
 - The copy equals the tag when the source is read. After that it is ordinary data: a function

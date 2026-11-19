@@ -171,17 +171,22 @@ def test_record_id_columns_as_a_set_is_refused() -> None:
 
 
 @pytest.mark.parametrize("role", ROLES)
-def test_tags_as_data_order_is_the_order_of_the_new_columns_only(role: str) -> None:
+def test_tags_as_data_columns_are_placed_in_the_order_of_their_new_names(
+    role: str,
+) -> None:
+    # The mapping names a set: the new columns follow in the order of their new names,
+    # whatever the order of the mapping or of the tags (ITL-1271). "c1" names t3's copy,
+    # so name order differs from tag order.
     source = make_source(MAIN, Arrangement(MAIN.tags, TAGS_FIRST, role))
-    forward = DerivedSource(source, tags_as_data={"t1": "c1", "t3": "c3"})
-    backward = DerivedSource(source, tags_as_data={"t3": "c3", "t1": "c1"})
+    forward = DerivedSource(source, tags_as_data={"t1": "c3", "t3": "c1"})
+    backward = DerivedSource(source, tags_as_data={"t3": "c1", "t1": "c3"})
     assert presentation(forward)[1][-2:] == ("c1", "c3")
-    assert presentation(backward)[1][-2:] == ("c3", "c1")
+    assert presentation(backward) == presentation(forward)
     assert forward.source_id == backward.source_id
     assert fingerprint(forward) == fingerprint(backward)
     # Each new column holds its own tag's values.
     for tag, data in forward.iter_data():
-        assert (data["c1"], data["c3"]) == (tag["t1"], tag["t3"])
+        assert (data["c3"], data["c1"]) == (tag["t1"], tag["t3"])
 
 
 @pytest.mark.parametrize("role", ROLES)
