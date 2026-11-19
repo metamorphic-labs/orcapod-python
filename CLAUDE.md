@@ -1276,8 +1276,7 @@ data. The rules:
   dropped tags still order the members, so the data lists are as before. Their values are not
   carried: a step that needs them makes the column data before grouping (at the source, or
   `DerivedSource(tags_as_data=...)`). A list-valued tag of the input (a list-typed source tag)
-  can still order members, so the member sort key (`_null_last_key`) is
-  recursive and sorts nulls last at every depth. A grouped stream grouped again on a coarser key
+  can still order members, element by element, nulls last at every depth. A grouped stream grouped again on a coarser key
   orders its members by the first grouping's keys outside the coarser key, then by record id. An opt-in mode that keeps non-key tags is ITL-1071.
 - GroupBy never depends on how its input's columns are arranged (developer, November 17,
   2026, ITL-1226). Members are ordered by the non-key tags in name order (each ascending,
@@ -1291,23 +1290,35 @@ data. The rules:
   record ids, folds, source-info tokens and hashes; only the output's column order follows
   the input, as presentation. `TagBy`'s identity is its sorted names, and its new tags are
   placed in name order.
-- `GroupBy` groups keys as the joins match them, except null (developer, November 17, 2026,
-  ITL-1234): all rows with a null key form one group, and so do all rows with a NaN key (the
-  grouping key holds every NaN as one object, `_grouping_key`); `0.0` equals `-0.0`. A NaN key
-  sorts after every number and before null, as in the member order (`_null_last_key`, which
-  also sorts a NaN tag after every number). The hashes read a float's bits, so a group emits,
-  for each float key column, its members' value with the smallest bit pattern at the column's
-  own width, float16, float32 or float64 (`_emitted_key_row`: `0.0` over `-0.0`, a positive NaN
-  over a negative one; a signaling NaN has smaller bits than the canonical quiet NaN, so it
-  wins), taken from the input's Arrow column, never through Python (a float32 signaling NaN
-  comes back quiet from Python): always a value a member holds, never the first row's, never
-  chosen by `member_order`. Bits are read only for a group whose key is zero or NaN. A logical
-  type stored as a float, or a dictionary-encoded float, is a float key, read through its
-  storage or its values (`_float_storage`). Every
-  other key is rebuilt from its Python value, as before: equal Python values that differ in
-  Arrow (`time64[ns]` within a microsecond) are one group with one rebuilt key; grouping by
-  the exact value is ITL-1250. The stance on `0.0`/`-0.0` and NaN for the whole library
-  (match by value, as Polars does; show the smallest bit pattern; rewrite nothing) is ITL-1251.
+- `GroupBy` groups keys by their Arrow value, as the joins match them, except null (developer,
+  November 17, 2026, ITL-1234; November 19, 2026, ITL-1250): all rows with a null key form one
+  group, and so do all rows with a NaN key; `0.0` equals `-0.0`. It decides which rows group
+  and in what order with Polars, never through Python values: one stable sort of a frame of
+  the keys (name order), the member-order tags, the record-id and source-id columns
+  (`nulls_last`; Polars ties `0.0` with `-0.0` and every NaN, and puts NaN after every number
+  and before null), group boundaries by Polars' equality (`rle_id`). Keys that differ below
+  Python's precision (`time64[ns]` within a microsecond, `date64` on one day) are separate
+  groups. A list-valued tag sorts through `(is_null, value)` pairs at every depth (`_sort_key`:
+  Polars puts a null inside a list first). The sort frame only sees prepared columns
+  (`_polars_ready`: a logical type as its storage, a dictionary decoded in one place,
+  `_without_dictionary`, `float16` as `float32`, `decimal256` as four 64-bit limbs, which
+  Polars cannot read). The output is built from the input's Arrow table: `take()` in the
+  sorted order and list arrays from group offsets (`arrow_utils.aggregated_list_array`, the
+  array-based sibling of `build_aggregated_table`), so every key and list element is a value
+  a member holds, bit for bit (`time64[ns]` keeps its nanoseconds, a float32 signaling NaN
+  its bits; ITL-1248 for `GroupBy`). The hashes read a float's bits, so a group emits, for
+  each float key column (a logical type stored as a float, or a dictionary over floats,
+  included), its members' value with the smallest bit pattern at the column's own width
+  (`0.0` over `-0.0`, a positive NaN over a negative one; a signaling NaN has smaller bits
+  than the canonical quiet NaN, so it wins): never the first row's, never chosen by
+  `member_order`. Every other key is the group's first member's (equal values are identical).
+  Only the system-tag and key source-info folds read Python values, which are text. A user tag
+  whose type holds a struct or a map (a user class, a `dict[K, V]`) is refused
+  (`InputValidationError`, `_refuse_struct_or_map_tags`), as a key and as a non-key tag
+  (which orders the members): a struct has no decided order (developer, November 19, 2026),
+  so drop it before grouping. `Batch` and `MergeJoin` still rebuild their lists from Python
+  (ITL-1281). The stance on `0.0`/`-0.0` and NaN for the whole library (match by value, as
+  Polars does; show the smallest bit pattern; rewrite nothing) is ITL-1251.
 - `Data` source-info values may be `str`, `None`, or `list[...]`, nested to any depth; the
   Arrow and Python types are derived from the value, with `None` mapping to `large_string`.
   That rule has one definition, `arrow_utils.source_info_arrow_type`, and applies only to
