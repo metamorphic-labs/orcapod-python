@@ -30,13 +30,27 @@ GROUPS = ["semantic", "schema", "arrow", "datagram", "pipeline", "torch"]
 HEX = re.compile(r"[0-9a-f]{64,70}")
 
 
+FOLDER = ROOT / "tests" / "test_hashing" / "golden" / "data" / "v1"
+
+
 def pinned_entries() -> dict[str, dict[str, object]]:
-    folder = ROOT / "tests" / "test_hashing" / "golden" / "data" / "v1"
+    """Every pinned entry by group: the frozen files and the provisional files (ITL-1266)."""
     out: dict[str, dict[str, object]] = collections.defaultdict(dict)
-    for path in sorted(folder.glob("*.json")):
+    for path in sorted(FOLDER.glob("*.json")):
         group = path.name.split("-")[0]
         out[group].update(json.loads(path.read_text()))
+    for path in sorted((FOLDER / "provisional").glob("*.json")):
+        out[path.stem].update(json.loads(path.read_text()))
     return out
+
+
+def provisional_pins() -> set[tuple[str, str]]:
+    """``(group, entry)`` of every entry pinned in a provisional file."""
+    return {
+        (path.stem, entry)
+        for path in sorted((FOLDER / "provisional").glob("*.json"))
+        for entry in json.loads(path.read_text())
+    }
 
 
 def blank(name: str) -> str:
@@ -68,6 +82,8 @@ def label_only(old: object, new: object) -> bool:
 
 def main(show: bool) -> None:
     pinned = pinned_entries()
+    in_provisional = provisional_pins()
+    kind_count: collections.Counter[tuple[str, str]] = collections.Counter()
     moved: list[tuple[str, str, str, object, object]] = []
     renamed: list[tuple[str, str, str, bool]] = []
     relabelled: list[tuple[str, str]] = []
@@ -87,20 +103,26 @@ def main(show: bool) -> None:
             total += 1
             if e in skipped:
                 continue
+            where = "provisional" if (group, e) in in_provisional else "frozen"
             if live[e] != pins[e]:
                 if label_only(pins[e], live[e]):
                     relabelled.append((group, case_of(e)))
+                    kind_count[("A label only", where)] += 1
                 else:
                     moved.append((group, case_of(e), kind_of(e), pins[e], live[e]))
+                    kind_count[("B moved", where)] += 1
             else:
                 stayed[(group, kind_of(e))] += 1
         for e in sorted(gone):
             total += 1
             partners = by_blank_new.get(blank(e), [])
             if len(partners) == 1:
-                renamed.append(
-                    (group, case_of(e), kind_of(e), live[partners[0]] != pins[e])
-                )
+                value_moved = live[partners[0]] != pins[e]
+                renamed.append((group, case_of(e), kind_of(e), value_moved))
+                where = "provisional" if (group, e) in in_provisional else "frozen"
+                kind_count[("C renamed", where)] += 1
+                if value_moved:
+                    kind_count[("C renamed, value moved", where)] += 1
             else:
                 unmatched.append(f"{group}:{e} (partners {len(partners)})")
     print(f"pinned entries examined: {total}")
@@ -113,6 +135,12 @@ def main(show: bool) -> None:
     print(f"unmatched (pinned, not produced, no renamed partner): {len(unmatched)}")
     for u in unmatched:
         print("   ", u)
+    print()
+    print("BY FILE KIND (frozen v1 files / provisional files):")
+    for category in ("A label only", "B moved", "C renamed", "C renamed, value moved"):
+        frozen = kind_count[(category, "frozen")]
+        provisional = kind_count[(category, "provisional")]
+        print(f"  {category:24} frozen {frozen:4}  provisional {provisional:4}")
 
     print()
     print("MOVED by group / kind:")
