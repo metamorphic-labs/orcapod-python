@@ -8,18 +8,27 @@ Run under each starfix version, one process at a time::
 Prints the best of three wall-clock times for starfix's ``ArrowDigester.hash_table`` and for
 Orcapod's ``StarfixArrowHasher.hash_table`` (which adds the semantic preprocessing; a flat
 table skips it, a nested column goes through the Python visitor).
+
+The numbers in ``README.md`` were taken at commit 937a68f7 (before Orcapod passed starfix's
+float options). On a later checkout the 0.5.0 run works through ``_starfix_compat``, which
+drops the two options starfix 0.5.0 does not have; the tables here hold no ``-0.0`` and no
+NaN, so the options change no digest.
 """
 
 from __future__ import annotations
 
-import importlib.metadata
+import sys
 import time
+from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
 from starfix import ArrowDigester
 
 from orcapod.contexts import get_default_context
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
+from docs.dev.scripts.itl_1179._starfix_compat import use_installed_starfix  # noqa: E402  # the repository root goes on the path first
 
 N = 1_000_000
 
@@ -46,7 +55,7 @@ def main() -> None:
         {"l": pa.array([[i, i + 1] for i in range(N)], pa.large_list(pa.int64()))}
     )
     hasher = get_default_context().arrow_hasher
-    version = importlib.metadata.version("starfix")
+    version = use_installed_starfix()
     print(f"starfix {version}, pyarrow {pa.__version__}, {N} rows")
     timings = [
         (

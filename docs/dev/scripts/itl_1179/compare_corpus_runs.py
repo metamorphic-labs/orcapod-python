@@ -2,10 +2,13 @@
 
 Prints every entry whose outcome differs and classifies it:
 
-* ``documented``: a ``known_defect.*`` case, which starfix 0.6.0 documents as hashing
-  differently from 0.5.0;
+* ``documented``: a call of a ``known_defect.*`` case that makes exactly the transition
+  starfix 0.6.0 documents against 0.5.0 (``EXPECTED_TRANSITIONS``): for ITL-1223, 0.5.0
+  gives another digest and 0.6.0 gives the digest of the same values built fresh (the
+  case's twin); for the bufferless dictionary, 0.5.0 raises ``TypeError`` and 0.6.0 gives
+  the digest of the same dictionary with its buffer allocated (the twin);
 * ``message``: both runs raise the same exception class and only the message differs;
-* ``UNEXPECTED``: anything else (a digest moved, or a raise turned into a digest or back).
+* ``UNEXPECTED``: anything else, including any other outcome of a known-defect case.
 
 Exits non-zero when an unexpected difference is found.
 
@@ -18,14 +21,58 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 
-def _classify(name: str, old: str, new: str) -> str:
-    if name.startswith("known_defect."):
+@dataclass(frozen=True)
+class Transition:
+    """What a known-defect case does between 0.5.0 (old) and 0.6.0 (new).
+
+    Attributes:
+        old_raises: The exception class the old run raises, or ``None`` when it gives a
+            digest (which must then differ from the new one).
+        twin: The case holding the same values built fresh: the new digest must equal
+            the twin's new digest for the same call.
+    """
+
+    old_raises: str | None
+    twin: str
+
+
+EXPECTED_TRANSITIONS = {
+    "known_defect.itl1223_sliced_nested_fsl_dictionary": Transition(
+        old_raises=None, twin="twin.itl1223_fresh_values"
+    ),
+    "known_defect.bufferless_empty_dictionary": Transition(
+        old_raises="TypeError", twin="twin.allocated_empty_dictionary"
+    ),
+}
+
+
+def _is_raise(outcome: str) -> bool:
+    return outcome.startswith("raise:")
+
+
+def _documented(name: str, old: dict[str, str], new: dict[str, str]) -> bool:
+    """Whether ``name`` (``<case>|<call>``) makes its case's expected transition."""
+    case, call = name.split("|", 1)
+    transition = EXPECTED_TRANSITIONS.get(case)
+    if transition is None:
+        return False
+    twin = new.get(f"{transition.twin}|{call}")
+    if twin is None or _is_raise(new[name]) or new[name] != twin:
+        return False
+    if transition.old_raises is None:
+        return not _is_raise(old[name]) and old[name] != new[name]
+    return old[name].split(":", 2)[:2] == ["raise", transition.old_raises]
+
+
+def _classify(name: str, old: dict[str, str], new: dict[str, str]) -> str:
+    if _documented(name, old, new):
         return "documented"
-    if old.startswith("raise:") and new.startswith("raise:"):
-        if old.split(":", 2)[1] == new.split(":", 2)[1]:
+    if _is_raise(old[name]) and _is_raise(new[name]):
+        if old[name].split(":", 2)[1] == new[name].split(":", 2)[1]:
             return "message"
     return "UNEXPECTED"
 
@@ -46,7 +93,7 @@ def main() -> int:
         if old[name] == new[name]:
             counts["same"] += 1
             continue
-        kind = _classify(name.split("|")[0], old[name], new[name])
+        kind = _classify(name, old, new)
         counts[kind] += 1
         print(f"[{kind}] {name}\n    old: {old[name]}\n    new: {new[name]}")
     print(f"{len(old)} entries: {counts}")

@@ -1483,8 +1483,21 @@ datagram and stream hashes) comes from `StarfixArrowHasher.hash_table`, which re
 `ContentHash(method="arrow_v1", digest=D)` (a pyarrow table given as a value takes
 `hash_table_strict` instead, below). `D` is 35 bytes: the starfix hash format number
 `00 00 02` followed by a SHA-256 digest (hash format 2), computed by `starfix` 0.6.0 or
-newer, the Rust implementation; for every input without `-0.0` or a non-ordinary NaN it is
-byte-identical to the pure-Python starfix-python 0.5.0 that Orcapod used before (ITL-1179).
+newer, the Rust implementation. With the float options off it is byte-identical to the
+pure-Python starfix-python 0.5.0 that Orcapod used before (ITL-1179), except for two
+dictionary inputs starfix-python 0.5.0 got wrong, which starfix 0.6.0 documents: a
+dictionary over a sliced nested fixed-size list (0.5.0 hashed values corrupted by
+pyarrow's `take`, ITL-1223) and a dictionary whose empty dictionary has no offsets buffer
+(0.5.0 raised `TypeError`). So what changed with the move is exactly:
+
+- the hash of a table Orcapod builds that holds `-0.0` or a NaN other than the ordinary
+  one (the float rule, below), and every hash built on it;
+- the hash of a pyarrow `Table` or `RecordBatch` given as a value, and of every structure
+  that contains one: it carries the label `arrow_strict_v1` instead of `arrow_v1` (the same
+  digest bytes; the enclosing structure hash embeds the label);
+- the two dictionary inputs above.
+
+Every other hash is unchanged.
 The byte layout is specified in starfix's `docs/byte-layout-spec.md`. Every starfix call
 goes through one module, `hashing/starfix_digest.py`, which states which use gets which
 float options.

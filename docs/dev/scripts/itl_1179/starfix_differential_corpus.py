@@ -22,6 +22,10 @@ Each entry is ``<case>|<call>`` mapped to the hex digest, or to
 Usage (one process at a time)::
 
     uv run python docs/dev/scripts/itl_1179/starfix_differential_corpus.py OUT.json
+    uv run --with "starfix==0.5.0" python docs/dev/scripts/itl_1179/starfix_differential_corpus.py OUT.json
+
+Under 0.5.0, ``_starfix_compat`` lets Orcapod's calls drop the float options 0.5.0 does not
+have; the corpus holds no ``-0.0`` and only the ordinary NaN, so they change no digest.
 """
 
 from __future__ import annotations
@@ -29,7 +33,6 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import decimal
-import importlib.metadata
 import json
 import math
 import struct
@@ -45,6 +48,9 @@ import pyarrow as pa
 from starfix import ArrowDigester
 
 import orcapod
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
+from docs.dev.scripts.itl_1179._starfix_compat import use_installed_starfix  # noqa: E402  # the repository root goes on the path first
 
 HERE = Path(__file__).resolve().parent
 FILES = HERE / "corpus_files"
@@ -542,6 +548,30 @@ def known_defect_tables() -> dict[str, Callable[[], pa.Table]]:
     }
 
 
+def twin_tables() -> dict[str, Callable[[], pa.Table]]:
+    """The values of each known-defect case, built fresh by pyarrow: what a correct
+    digest of the defect case must equal (``compare_corpus_runs.EXPECTED_TRANSITIONS``)."""
+
+    def fresh_nested_fsl_dictionary() -> pa.Table:
+        nested = pa.list_(pa.list_(pa.int64(), 1), 2)
+        values = pa.array([[[3], [4]], [[5], [6]]], nested)
+        return _tbl(
+            {"d": pa.DictionaryArray.from_arrays(pa.array([0], pa.int8()), values)}
+        )
+
+    def allocated_empty_dictionary() -> pa.Table:
+        dictionary = pa.array([], pa.string())
+        column = pa.DictionaryArray.from_arrays(
+            pa.array([None, None], pa.int32()), dictionary
+        )
+        return _tbl({"d": column})
+
+    return {
+        "twin.itl1223_fresh_values": fresh_nested_fsl_dictionary,
+        "twin.allocated_empty_dictionary": allocated_empty_dictionary,
+    }
+
+
 # --- Orcapod logical-type tables (extension types) -----------------------------------------
 
 
@@ -781,6 +811,9 @@ def run() -> dict[str, str]:
     for name, table_fn in known_defect_tables().items():
         starfix_calls(name, table_fn)
         orcapod_calls(name, table_fn)
+    for name, table_fn in twin_tables().items():
+        starfix_calls(name, table_fn)
+        orcapod_calls(name, table_fn)
     for name, table in orcapod_tables().items():
         orcapod_calls(name, lambda t=table: t)
     for name, value in library_values().items():
@@ -792,8 +825,9 @@ def run() -> dict[str, str]:
 
 def main() -> None:
     target = Path(sys.argv[1])
+    version = use_installed_starfix()
     result = {
-        "starfix_version": importlib.metadata.version("starfix"),
+        "starfix_version": version,
         "pyarrow_version": pa.__version__,
         "entries": run(),
     }

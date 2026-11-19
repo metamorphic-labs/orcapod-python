@@ -30,8 +30,13 @@ combinations, `hash_schema` with and without metadata, and Orcapod's `StarfixArr
 (`hash_table`, `hash_table_ordered` with and without struct field order, `hash_schema`); library
 values go through the semantic hasher.
 
-Run once per version (`uv run --with "starfix==0.5.0" ...` for the old one) and compared with
-`compare_corpus_runs.py`: 4,367 equal, 0 unexpected, and
+Run once per version (`uv run --with "starfix==0.5.0" ...` for the old one; on a checkout
+after stage 1, `_starfix_compat.py` drops the float options 0.5.0 does not have, which change
+nothing for these inputs) and compared with `compare_corpus_runs.py`. A known-defect call
+counts as documented only when it makes its exact transition: 0.5.0 raises `TypeError` or
+gives another digest, and 0.6.0 gives the digest of the same values built fresh (the
+`twin.*` cases); anything else is unexpected. Result (4,428 calls with the twins): 4,395
+equal, 0 unexpected, and
 
 - 22 documented differences, the two inputs starfix 0.6.0 lists against 0.5.0
   (`python/tests/_harness.py` `EXPECTED_DIFFERENCES` in the 0.6.0 sdist; `README.md`, "known
@@ -56,7 +61,8 @@ Run once per version (`uv run --with "starfix==0.5.0" ...` for the old one) and 
   `logical_types/polars_type.py` matches), "Hashing data of type null (node 'c') is not
   supported", "Unsupported Arrow type for hashing: list_view<item: int64>", map, interval,
   view, union and run-end-encoded types.
-- `hash_table_timing.py`, 1e6 rows, best of three:
+- `hash_table_timing.py`, 1e6 rows, best of three (taken at commit 937a68f7; on a later
+  checkout the 0.5.0 run goes through `_starfix_compat.py`):
 
   | | 0.5.0 | 0.6.0 |
   |---|---|---|
