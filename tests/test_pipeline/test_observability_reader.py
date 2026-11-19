@@ -42,7 +42,7 @@ def _write_status_table(
         / node_name
         / "hash_a"
         / "v0"
-        / "python.function.v0"
+        / "python.function.v1"
         / "node:hash_b"
     )
     table_dir.mkdir(parents=True, exist_ok=True)
@@ -68,7 +68,7 @@ def _write_log_table(
         / node_name
         / "hash_a"
         / "v0"
-        / "python.function.v0"
+        / "python.function.v1"
         / "node:hash_b"
     )
     table_dir.mkdir(parents=True, exist_ok=True)

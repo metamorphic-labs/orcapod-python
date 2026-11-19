@@ -53,7 +53,6 @@ from orcapod.invocation import (
     InvocationHashConfig,
 )
 from orcapod.system_constants import (
-    OLD_TRACKING_DB_SCHEMA_VERSIONS,
     TRACKING_DB_SCHEMA_VERSION,
     constants,
 )
@@ -1148,10 +1147,6 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
         current = self._pod.data_context_key
         found = find_stale_tables(
             self._pipeline_database,
-            tuple(
-                self._table_path[:-1] + (layout,)
-                for layout in OLD_TRACKING_DB_SCHEMA_VERSIONS
-            ),
             current=None if self._current_log_checked else (self._table_path, current),
             # ("side_effects", <pod name>): the part of the path that holds no hash.
             name_path=self.node_uri,
