@@ -427,3 +427,101 @@ def test_the_async_run_stores_where_and_as_the_sync_run_does(
     (first_path, first_type), (second_path, second_type) = results["sync"]
     assert first_path != second_path
     assert (first_type, second_type) == tuple(x.type for x in DIFFERENT[pair])
+
+
+# ITL-1280: ``node.as_source()`` rebuilt its Arrow schema from Python types before a run,
+# widening narrow ints and floats, giving a timestamp UTC microseconds and raising on a
+# decimal. Its types now are its origin's, before and after rows are stored.
+AS_SOURCE_TYPES: dict[str, pa.Array[Any]] = {
+    "int8": pa.array([1, 2], pa.int8()),
+    "int32": pa.array([1, 2], pa.int32()),
+    "uint16": pa.array([1, 2], pa.uint16()),
+    "float16": pa.array([1.5, 2.5], pa.float32()).cast(pa.float16()),
+    "float32": pa.array([1.5, 2.5], pa.float32()),
+    "ts[s] naive": pa.array(TS, pa.timestamp("s")),
+    "ts[us] naive": pa.array(TS, pa.timestamp("us")),
+    "ts[ms, Europe/Berlin]": pa.array(TS, pa.timestamp("ms", tz="Europe/Berlin")),
+    "decimal128(10,2)": pa.array([D("1.25"), D("2.50")], pa.decimal128(10, 2)),
+}
+
+
+@function_pod(output_keys="y")
+def _plus_one(w: float) -> float:
+    return w + 1
+
+
+def _as_source_cases() -> list[Any]:
+    cases = []
+    for type_name in AS_SOURCE_TYPES:
+        for role, node_kind in (
+            ("tag", "operator"),
+            ("tag", "function"),
+            ("data", "operator"),
+        ):
+            for kind in ("memory", "delta"):
+                for path in ("sync", "async"):
+                    if type_name == "float16" and kind == "delta":
+                        # Delta Lake has no float16: the write is refused loudly.
+                        continue
+                    cases.append(
+                        pytest.param(
+                            type_name,
+                            role,
+                            node_kind,
+                            kind,
+                            path,
+                            id=f"{type_name}-{role}-{node_kind}-{kind}-{path}",
+                        )
+                    )
+    return cases
+
+
+@pytest.mark.parametrize(
+    ("type_name", "role", "node_kind", "kind", "path"), _as_source_cases()
+)
+def test_as_source_has_its_origins_types_before_and_after_a_run(
+    type_name: str, role: str, node_kind: str, kind: str, path: str, tmp_path: Path
+) -> None:
+    """Tag ``g`` or data ``x`` of the type, beside a second tag and data column."""
+    import asyncio
+
+    column = AS_SOURCE_TYPES[type_name]
+    g = column if role == "tag" else pa.array([1, 2], pa.int64())
+    x = column if role == "data" else pa.array([1, 2], pa.int64())
+    table = pa.Table.from_arrays(
+        [pa.array(["r1", "r2"], pa.large_string()), g, x, pa.array([0.5, 1.5])],
+        schema=pa.schema(
+            [
+                pa.field("k", pa.large_string(), nullable=False),
+                pa.field("g", g.type),
+                pa.field("x", x.type),
+                pa.field("w", pa.float64(), nullable=False),
+            ]
+        ),
+    )
+    database = _databases(tmp_path)[kind]
+    job = PipelineJob(name="j", database=database)
+    with job:
+        if node_kind == "operator":
+            _source(table).map_data({"x": "z"}, label="node")
+        else:
+            _plus_one.pod(_source(table), label="node")
+    node = job.nodes["node"]
+    if node_kind == "operator":
+        node.attach_databases(
+            pipeline_database=database.at("j"), cache_mode=CacheMode.LOG
+        )
+    name = "g" if role == "tag" else "z"
+    before = node.as_source()
+    before_type = before.as_table().schema.field(name).type
+    if path == "sync":
+        job.run()
+    else:
+        asyncio.run(job.run_async())
+    after = node.as_source()
+    after_table = after.as_table()
+    assert after_table.num_rows == 2
+    assert before_type == after_table.schema.field(name).type == column.type
+    assert node.as_table().schema.field(name).type == column.type
+    assert before.pipeline_hash() == after.pipeline_hash()
+    assert before.content_hash() == after.content_hash()
