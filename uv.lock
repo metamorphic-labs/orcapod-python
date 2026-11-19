@@ -2143,7 +2143,7 @@ requires-dist = [
     { name = "redis", marker = "extra == 'all'", specifier = ">=6.2.0" },
     { name = "redis", marker = "extra == 'redis'", specifier = ">=6.2.0" },
     { name = "s3fs", specifier = ">=2025.12.0" },
-    { name = "starfix", specifier = ">=0.5.0,<0.6" },
+    { name = "starfix", specifier = ">=0.6.0,<0.7" },
     { name = "torch", marker = "sys_platform == 'linux' and extra == 'all'", specifier = ">=2.6", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torch", marker = "sys_platform == 'linux' and extra == 'torch'", specifier = ">=2.6", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torch", marker = "sys_platform != 'linux' and extra == 'all'", specifier = ">=2.6" },
@@ -3620,14 +3620,19 @@ wheels = [
 
 [[package]]
 name = "starfix"
-version = "0.5.0"
+version = "0.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pyarrow" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/cb/15/f431d84042cab83680b3e857455c133bc0493c629b93fc23f28cd85b07ee/starfix-0.5.0.tar.gz", hash = "sha256:677f001fae5f0173c52ffaaf761fb96becf856ff679ab5d201208f453396a9fb", size = 225505, upload-time = "2026-11-11T23:21:04.713Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/eb/6b/e7f80aa84ace07ee1af07fd922c990ab24b96f3b5eadb1f780da36648027/starfix-0.6.0.tar.gz", hash = "sha256:848f240f4eb71ddd14d53690f07306933f89b8de43af1762daeb62c3936cfd72", size = 11207380, upload-time = "2026-11-19T01:55:50.057Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/4e/f6/8b9042044b9bf520c5bac38d0630c411e66ccc47635e8c0293bd9a7d5038/starfix-0.5.0-py3-none-any.whl", hash = "sha256:6982fa4598f99e20428b76041378e3203f2894e6542f6e3ba75746bdbfea0ad2", size = 28736, upload-time = "2026-11-11T23:21:03.711Z" },
+    { url = "https://files.pythonhosted.org/packages/e3/0c/d79560eca92e5ca9e1781edb6e96d1bd3702e92abf3afb3aa9c3193cdbeb/starfix-0.6.0-cp310-abi3-macosx_10_12_universal2.macosx_10_12_x86_64.macosx_11_0_arm64.whl", hash = "sha256:7ad9fc20aa18c53cdcc3d330a605be0dfac6caef7b321209ab8f2ac4f8cb2017", size = 4925506, upload-time = "2026-11-19T01:55:42.091Z" },
+    { url = "https://files.pythonhosted.org/packages/b5/d7/5a06b9c04386b482c089eeaae2ba8e8b05d4113db4c6f9ccf43e3370bbf4/starfix-0.6.0-cp310-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:9a4520d5aab9d1e09178650216e4d3a19eca0f2799d7f2d01382b0d03e351a64", size = 2325545, upload-time = "2026-11-19T01:55:43.558Z" },
+    { url = "https://files.pythonhosted.org/packages/05/f0/4b30821e4137ad23de16690f299bdf82395cd1ced0fc3b24e11d470d0bb0/starfix-0.6.0-cp310-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:f620c5c5584cc33568ec001a241e456a2ca8791d14931293610b3582097bd3b6", size = 2526236, upload-time = "2026-11-19T01:55:44.707Z" },
+    { url = "https://files.pythonhosted.org/packages/ad/d5/e363e768b937712baa46a3aabcf2ac181f15c3495e3a028279d24291ce7a/starfix-0.6.0-cp310-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:39437d7d572f81590ea4f3c7144bd7933d7c560529f4d2af5f7cac638500fc29", size = 2307992, upload-time = "2026-11-19T01:55:45.953Z" },
+    { url = "https://files.pythonhosted.org/packages/94/96/8929b2d4c447f38fcf406f6820301ebc49513a8002e4ed2bc1012a18d3e8/starfix-0.6.0-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:4ba80a6f7b1b8a1c231ade6fa1de787cadd674e88cad9189827471e00e40f860", size = 2508419, upload-time = "2026-11-19T01:55:47.306Z" },
+    { url = "https://files.pythonhosted.org/packages/8c/06/a22f76eac1a656865b05060b3bf5dc4a51044f05fea5bebd59ea25b2e744/starfix-0.6.0-cp310-abi3-win_amd64.whl", hash = "sha256:2e47a0fbc0dab6482ed7029467254f9549fcaa25b54b5bbaa87a73be0bf3ea08", size = 2452769, upload-time = "2026-11-19T01:55:48.642Z" },
 ]
 
 [[package]]

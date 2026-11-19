@@ -23,8 +23,8 @@ ARROW_HASH_LABEL = "arrow_v1"
 """``ContentHash.method`` of an Arrow table or schema hash: the single definition.
 
 It names the whole procedure of ``StarfixArrowHasher``: the replacement of
-extension-typed cells by their value digests, then the starfix digest (hash format 2,
-starfix 0.5). A change that gives an existing table a different digest takes a new
+extension-typed cells by their value digests, then the starfix digest (hash format 2:
+starfix 0.5 and later; Orcapod uses starfix 0.6, the Rust implementation, ITL-1179). A change that gives an existing table a different digest takes a new
 label (``arrow_v2``). The number is not kept equal to the starfix hash format number.
 The data context file names the hasher class and does not repeat the label.
 """
@@ -40,7 +40,7 @@ value hashes built on it (pandas ``DataFrame`` and ``Series``).
 
 
 class StarfixArrowHasher:
-    """Arrow table hasher backed by the starfix-python ``ArrowDigester``.
+    """Arrow table hasher backed by starfix's ``ArrowDigester`` (the Rust implementation).
 
     Pipeline
     --------
@@ -52,8 +52,8 @@ class StarfixArrowHasher:
        their full extension metadata intact.
     2. **Starfix hashing** — ``ArrowDigester.hash_table`` produces a 35-byte
        digest: the starfix hash format number ``00 00 02`` (hash format 2,
-       starfix 0.5) followed by a SHA-256 digest, byte-for-byte identical to
-       the Rust ``starfix`` crate output. In ``hash_table`` the order of columns
+       starfix 0.5 and later) followed by a SHA-256 digest. starfix 0.6 computes
+       it in Rust, byte-for-byte as the pure-Python starfix-python 0.5.0 did. In ``hash_table`` the order of columns
        and of struct fields is not part of the hash (starfix's order options stay
        off); ``hash_table_ordered`` turns both options on. Row order and list
        element order are always part of it. Extension identity

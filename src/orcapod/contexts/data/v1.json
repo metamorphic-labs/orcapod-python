@@ -222,7 +222,7 @@
         "type_conversion": "type_conversion_v1"
     },
     "libraries": {
-        "starfix": "0.5.0 (hash format 2, digest prefix 000002): Arrow table and schema hashes",
+        "starfix": "0.6.0, the Rust implementation (hash format 2, digest prefix 000002; byte-identical to starfix-python 0.5.0 here): Arrow table and schema hashes",
         "pyarrow": "23.0.1: conversion of Python values to Arrow types, which are hashed",
         "polars": "1.41.2: serialisation of filter expressions, which is hashed"
     },
