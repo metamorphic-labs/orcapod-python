@@ -13,7 +13,6 @@ the record ids, the folds and every hash must be the same for all of them.
 
 from __future__ import annotations
 
-import asyncio
 import itertools
 import json
 import struct
@@ -23,10 +22,10 @@ import pyarrow as pa
 import pytest
 
 import orcapod as op
-from orcapod.channels import Channel
-from orcapod.core.operators import GroupBy
+from orcapod.core.streams import ArrowTableStream
 from orcapod.core.streams.base import StreamBase
 from orcapod.databases import InMemoryArrowDatabase
+from orcapod.errors import InputValidationError
 from orcapod.logical_types import make_arrow_extension_type
 from orcapod.pipeline import (
     AsyncPipelineOrchestrator,
@@ -435,171 +434,89 @@ def test_a_time64_ns_key_is_rebuilt_from_its_python_value() -> None:
         assert sorted(members[0]) == sorted(values)
 
 
-# ── a dictionary-encoded float key ──────────────────────────────────────────
+# ── a dictionary-encoded key is refused (ITL-1264) ──────────────────────────
+#
+# Developer decision, November 18, 2026: dictionary-encoded tags are not currently
+# supported. Every stream refuses one when it is built (``ArrowTableStream`` and the
+# source builder, ``schema_utils.require_tags_not_dictionary``), so a dictionary-encoded
+# key never reaches ``GroupBy``: before ITL-1264, ITL-1234 chose such a float key by
+# the bits of its values. A hand-built channel fed to ``async_execute`` is not a
+# supported way to make a stream and is not covered.
 
-DICTIONARY_ROWS: list[dict[str, Any]] = [
-    {"k": "nan", "rid": "r1", "v": 1},
-    {"k": "-nan", "rid": "r2", "v": 2},
-    {"k": "payload_nan", "rid": "r3", "v": 3},
-    {"k": "-0", "rid": "r4", "v": 4},
-    {"k": "0", "rid": "r5", "v": 5},
-    {"k": None, "rid": "r6", "v": 6},
-]
+DICTIONARY_KEYS: dict[str, "pa.Array[Any]"] = {
+    "string": pa.array(["b", "a", "b", "a"], pa.large_string()),
+    "integer": pa.array([2, 1, 2, 1], pa.int64()),
+    "float": pa.array([0.0, -0.0, float("nan"), 0.0], pa.float64()),
+}
 
 
-def _dictionary_source(rows: list[dict[str, Any]], width: int) -> StreamBase:
-    values = pa.array(
-        [None if r["k"] is None else BITS[r["k"]][width] for r in rows],
-        UNSIGNED[width],
-    ).view(FLOAT[width])
-    table = pa.table(
-        {
-            "k": values.dictionary_encode(),
-            "rid": [r["rid"] for r in rows],
-            "v": [r["v"] for r in rows],
-        }
+def _dictionary_table(kind: str, encoded: tuple[str, ...]) -> pa.Table:
+    """Key ``k`` and tag ``t`` (each dictionary-encoded when named), ``rid`` and ``v``."""
+    columns: dict[str, "pa.Array[Any]"] = {
+        "k": DICTIONARY_KEYS[kind],
+        "t": pa.array([1, 1, 2, 2], pa.int64()),
+    }
+    columns = {
+        name: column.dictionary_encode() if name in encoded else column
+        for name, column in columns.items()
+    }
+    columns["rid"] = pa.array(["r1", "r2", "r3", "r4"], pa.large_string())
+    columns["v"] = pa.array([1, 2, 3, 4], pa.int64())
+    return pa.table(list(columns.values()), names=list(columns))
+
+
+@pytest.mark.parametrize("encoded", [("k",), ("k", "t")], ids=["key", "key_and_tag"])
+@pytest.mark.parametrize("tag_order", [("k", "t"), ("t", "k")], ids=["k_t", "t_k"])
+@pytest.mark.parametrize("tag_only", [True, False], ids=["plain", "data_tags"])
+@pytest.mark.parametrize("kind", list(DICTIONARY_KEYS))
+def test_a_dictionary_encoded_key_is_refused_before_grouping(
+    kind: str, tag_order: tuple[str, str], tag_only: bool, encoded: tuple[str, ...]
+) -> None:
+    """A source or stream with a dictionary key is refused; nothing reaches GroupBy."""
+    table = _dictionary_table(kind, encoded)
+    for build in (
+        lambda: op.sources.ArrowTableSource(
+            table,
+            tag_columns=list(tag_order),
+            tag_only_columns=tag_only,
+            source_id="s",
+            record_id_columns="rid",
+        ),
+        lambda: ArrowTableStream(
+            table, tag_columns=list(tag_order), data_tags=() if tag_only else tag_order
+        ),
+    ):
+        with pytest.raises(InputValidationError) as raised:
+            build().group_by("k")
+        message = str(raised.value)
+        assert "dictionary-encoded tags are not currently supported" in message
+        # Every encoded tag is named, in tag order.
+        named = [name for name in tag_order if f"tag column {name!r}" in message]
+        assert named == [name for name in tag_order if name in encoded]
+
+
+@pytest.mark.parametrize("tag_order", [("k", "t"), ("t", "k")], ids=["k_t", "t_k"])
+@pytest.mark.parametrize("kind", list(DICTIONARY_KEYS))
+def test_the_decoded_key_groups(kind: str, tag_order: tuple[str, str]) -> None:
+    """The decoding the error names gives a key GroupBy takes, in either tag order."""
+    table = _dictionary_table(kind, ("k", "t"))
+    decoded = pa.table(
+        [
+            column.cast(column.type.value_type)
+            if pa.types.is_dictionary(column.type)
+            else column
+            for column in table.columns
+        ],
+        names=table.column_names,
     )
-    return op.sources.ArrowTableSource(
-        table,
-        tag_columns=["k"],
+    grouped = op.sources.ArrowTableSource(
+        decoded,
+        tag_columns=list(tag_order),
         tag_only_columns=True,
         source_id="s",
         record_id_columns="rid",
+    ).group_by("k")
+    members = cast(list[list[int]], grouped.as_table().column("v").to_pylist())
+    assert sorted(len(group) for group in members) == (
+        [1, 3] if kind == "float" else [2, 2]
     )
-
-
-def _dictionary_key_bits(table: pa.Table, width: int) -> list[int | None]:
-    column = table.column("k").combine_chunks()
-    assert pa.types.is_dictionary(column.type)  # the output keeps the encoding
-    assert column.type.value_type == FLOAT[width]
-    return column.cast(FLOAT[width]).view(UNSIGNED[width]).to_pylist()
-
-
-@pytest.mark.parametrize("width", [32, 64])
-def test_a_dictionary_encoded_float_key_emits_the_smallest_bits(width: int) -> None:
-    """A dictionary over floats is chosen by its values' bits, in every row order."""
-    seen: dict[str, Any] = {}
-    for rows in itertools.permutations(DICTIONARY_ROWS):
-        grouped = _dictionary_source(list(rows), width).group_by("k")
-        table = grouped.as_table()
-        assert table.column("v").to_pylist() == [[4, 5], [1, 2, 3], [6]]
-        assert _dictionary_key_bits(table, width) == [
-            BITS["0"][width],
-            BITS["nan"][width],
-            None,
-        ]
-        # ``all_info`` sorts by the tags, which a dictionary tag cannot be yet
-        # (ITL-1264): the rows come in key order already, with every system tag and
-        # source token.
-        fingerprint = {
-            "rows": [
-                json.dumps(_with_bits(row), sort_keys=True, default=str)
-                for row in grouped.as_table(
-                    columns={"system_tags": True, "source": True}
-                ).to_pylist()
-            ],
-            "row_hashes": _row_identity(grouped.iter_data()),
-            "content_hash": grouped.content_hash().to_string(),
-        }
-        if not seen:
-            seen = fingerprint
-        assert fingerprint == seen
-
-
-async def _async_grouped_rows(source: StreamBase) -> list[Any]:
-    """The rows of ``GroupBy("k")``'s async path, over a channel.
-
-    A pipeline job cannot carry a dictionary-typed tag yet (its stored-table sort and
-    nullability restore refuse a dictionary; ITL-1264), so the operator's async path
-    is driven directly, as ``test_async_sync_equivalence.py`` does.
-    """
-    channel: Channel[Any] = Channel(buffer_size=64)
-    output: Channel[Any] = Channel(buffer_size=64)
-    for row in source.iter_data():
-        await channel.writer.send(row)
-    await channel.writer.close()
-    await GroupBy("k").async_execute(
-        [channel.reader],
-        output.writer,
-        input_pipeline_hashes=[source.pipeline_hash()],
-    )
-    return await output.reader.collect()
-
-
-def _row_identity(rows: Any) -> list[tuple[str, str, Any]]:
-    """Each row's tag hash, data hash and key bits (as hex), in row order."""
-    out: list[tuple[str, str, Any]] = []
-    for tag, data in rows:
-        key = tag.as_table().column("k").combine_chunks()
-        key = key.cast(key.type.value_type)
-        unsigned = UNSIGNED[key.type.bit_width]
-        out.append(
-            (
-                tag.content_hash().to_string(),
-                data.content_hash().to_string(),
-                key.view(unsigned).to_pylist(),
-            )
-        )
-    return out
-
-
-@pytest.mark.parametrize("width", [32, 64])
-def test_a_dictionary_encoded_float_key_groups_the_same_sync_and_async(
-    width: int,
-) -> None:
-    seen: list[Any] = []
-    for rows in (DICTIONARY_ROWS, DICTIONARY_ROWS[::-1]):
-        source = _dictionary_source(list(rows), width)
-        sync = _row_identity(source.group_by("k").iter_data())
-        asynchronous = _row_identity(asyncio.run(_async_grouped_rows(source)))
-        assert sorted(asynchronous, key=repr) == sorted(sync, key=repr)
-        assert [bits for _, _, bits in sync] == [
-            [BITS["0"][width]],
-            [BITS["nan"][width]],
-            [None],
-        ]
-        if not seen:
-            seen = sync
-        assert sync == seen
-
-
-def _null_dictionary_source(indices: list[int | None], rids: list[str]) -> StreamBase:
-    """A dictionary key whose null is a null index in one row and an index to a null
-    entry in the other: both read as null."""
-    key = pa.DictionaryArray.from_arrays(
-        pa.array(indices, pa.int32()), pa.array([1.0, None], pa.float64())
-    )
-    table = pa.table({"k": key, "rid": rids, "v": [int(r[1:]) for r in rids]})
-    return op.sources.ArrowTableSource(
-        table,
-        tag_columns=["k"],
-        tag_only_columns=True,
-        source_id="s",
-        record_id_columns="rid",
-    )
-
-
-@pytest.mark.parametrize(
-    ("indices", "rids"),
-    [([None, 1], ["r1", "r2"]), ([1, None], ["r2", "r1"])],
-    ids=["null_index_first", "null_entry_first"],
-)
-def test_a_null_dictionary_key_is_emitted_as_a_null(
-    indices: list[int | None], rids: list[str]
-) -> None:
-    """Whichever null comes first, the group's key is a null index.
-
-    ``DropNulls`` reads the top-level validity, which an index to a null entry does
-    not carry: without this, the row order decided whether the group was dropped.
-    """
-    source = _null_dictionary_source(indices, rids)
-    grouped = source.group_by("k")
-    key = grouped.as_table().column("k").combine_chunks()
-    assert isinstance(key, pa.DictionaryArray)
-    assert key.indices.to_pylist() == [None]
-    assert grouped.drop_nulls(["k"]).as_table().num_rows == 0
-    for rows in (list(grouped.iter_data()), asyncio.run(_async_grouped_rows(source))):
-        [(tag, _)] = rows
-        tag_key = tag.as_table().column("k").combine_chunks()
-        assert isinstance(tag_key, pa.DictionaryArray)
-        assert tag_key.indices.to_pylist() == [None]
