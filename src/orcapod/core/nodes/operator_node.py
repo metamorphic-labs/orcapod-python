@@ -334,6 +334,16 @@ class OperatorNodeBase(StreamBase):
 
     @upstreams.setter
     def upstreams(self, value: tuple[StreamProtocol, ...]) -> None:
+        """Replace the node's inputs.
+
+        Raises:
+            ValueError: If the node caches (``LOG`` or ``REPLAY``) and a source
+                feeding ``value`` is restricted (ITL-1218); nothing changes.
+        """
+        from orcapod.pipeline.node_run import refuse_restricted_operator_cache
+
+        mode = getattr(self, "_cache_mode", None) or CacheMode.OFF
+        refuse_restricted_operator_cache(self, mode, streams=value)
         self._input_streams = value
         self._forget_output_schema()
 
@@ -1616,12 +1626,19 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
 
         Returns:
             Materialized list of (tag, data) pairs.
+
+        Raises:
+            ValueError: If the node caches (``LOG`` or ``REPLAY``) and a source
+                feeding ``input_streams`` is restricted (ITL-1218); nothing is
+                read, computed or written.
         """
+        from orcapod.pipeline.node_run import refuse_restricted_operator_cache
         from orcapod.pipeline.observer import NoOpObserver
 
         # A loaded node runs only in a load-only run, with its rebuilt operator.
         if self._loaded and (not load_only or self._operator is None):
             raise self._cannot_compute_error()
+        refuse_restricted_operator_cache(self, self._cache_mode, streams=input_streams)
 
         node_label = self.label
         node_hash = self.content_hash().to_string()
@@ -2108,13 +2125,24 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             output: Writable channel for output (tag, data) pairs.
             observer: Optional execution observer for hooks.
             load_only: As for ``execute``: a ``LOG`` node stores nothing (ITL-1095).
+
+        Raises:
+            ValueError: If the node caches (``LOG`` or ``REPLAY``) and a source
+                feeding its ``upstreams`` (which the channels carry) is restricted
+                (ITL-1218); the output is closed, nothing read or written.
         """
+        from orcapod.pipeline.node_run import refuse_restricted_operator_cache
         from orcapod.pipeline.observer import NoOpObserver
 
         # A loaded node runs only in a load-only run, with its rebuilt operator.
         if self._loaded and (not load_only or self._operator is None):
             await output.close()
             raise self._cannot_compute_error()
+        try:
+            refuse_restricted_operator_cache(self, self._cache_mode)
+        except ValueError:
+            await output.close()
+            raise
 
         obs = observer if observer is not None else NoOpObserver()
         node_label = self.label

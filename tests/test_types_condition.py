@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import math
+import zoneinfo
 
 import numpy as np
 import pytest
@@ -18,6 +19,11 @@ from orcapod.types import Condition
 _DAY = dt.date(2026, 11, 20)
 _START = dt.datetime(2026, 11, 20, 9, 30)
 _AWARE = _START.replace(tzinfo=dt.timezone.utc)
+_NEW_YORK = zoneinfo.ZoneInfo("America/New_York")
+# The two 01:30 of the daylight-saving overlap in New York, November 1, 2026: Python's
+# ``==`` calls them equal (one tzinfo, wall time); they are two instants an hour apart.
+_FIRST_0130 = dt.datetime(2026, 11, 1, 1, 30, tzinfo=_NEW_YORK)
+_SECOND_0130 = _FIRST_0130.replace(fold=1)
 
 
 class TestFactory:
@@ -166,8 +172,27 @@ class TestEquality:
             ),
             (Condition.of(day=_DAY), Condition.of(day=dt.date(2026, 11, 20))),
             (Condition(), Condition()),
+            (Condition.of(at=_AWARE), Condition.of(at=_AWARE.astimezone(_NEW_YORK))),
+            (
+                Condition.of(at=_SECOND_0130, unit=106),
+                Condition.of(unit=106, at=_SECOND_0130.astimezone(dt.timezone.utc)),
+            ),
+            (
+                Condition.of(at=_SECOND_0130),
+                Condition.of(at=dt.datetime.fromisoformat(_SECOND_0130.isoformat())),
+            ),
         ],
-        ids=["order", "0.0 and -0.0", "NaN", "NaN and order", "date", "empty"],
+        ids=[
+            "order",
+            "0.0 and -0.0",
+            "NaN",
+            "NaN and order",
+            "date",
+            "empty",
+            "one instant in two zones",
+            "an overlap instant in UTC, in another order",
+            "an overlap instant reloaded with a fixed offset",
+        ],
     )
     def test_equal_conditions_and_their_hashes(self, first, second):
         """Equal conditions have equal hashes."""
@@ -282,3 +307,108 @@ class TestSavedForm:
     def test_an_empty_mapping_reads_as_the_empty_condition(self):
         """A source saved without ``where`` reads as no condition."""
         assert Condition.from_config({}) == Condition()
+
+
+class TestInstants:
+    """An aware datetime is its instant (CodeRabbit, PR 435): fold counts, zones do not."""
+
+    def test_the_two_times_of_an_overlap_are_two_values(self):
+        assert _FIRST_0130 == _SECOND_0130  # Python's wall-time comparison
+        first, second = Condition.of(at=_FIRST_0130), Condition.of(at=_SECOND_0130)
+        assert first != second
+        assert len({first, second}) == 2
+
+    @pytest.mark.parametrize(
+        "first, second",
+        [(_FIRST_0130, _SECOND_0130), (_SECOND_0130, _FIRST_0130)],
+        ids=["first then second", "second then first"],
+    )
+    def test_combining_the_two_times_of_an_overlap_is_refused(self, first, second):
+        with pytest.raises(ValueError, match="cannot also equal"):
+            Condition.of(at=first, unit=106).combined(Condition.of(unit=106, at=second))
+        with pytest.raises(ValueError, match="as a keyword"):
+            Condition.of({"at": first}, at=second)
+
+    @pytest.mark.parametrize(
+        "other",
+        [
+            _SECOND_0130.astimezone(dt.timezone.utc),
+            dt.datetime.fromisoformat(_SECOND_0130.isoformat()),
+        ],
+        ids=["UTC", "fixed offset"],
+    )
+    def test_one_instant_in_another_zone_is_kept_once(self, other):
+        combined = Condition.of(at=_SECOND_0130, unit=106).combined(
+            Condition.of(unit=106, at=other)
+        )
+        assert dict(combined.equalities) == {"at": _SECOND_0130, "unit": 106}
+        assert Condition.of({"at": _SECOND_0130}, at=other) == Condition.of(
+            at=_SECOND_0130
+        )
+
+    def test_the_saved_form_reads_back_as_the_same_instant(self):
+        condition = Condition.of(at=_SECOND_0130, unit=106)
+        loaded = Condition.from_config(json.loads(json.dumps(condition.to_config())))
+        assert loaded == condition
+        assert hash(loaded) == hash(condition)
+
+    def test_a_naive_time_is_not_an_instant(self):
+        assert Condition.of(at=_START) != Condition.of(at=_AWARE)
+        assert Condition.of(at=_START) == Condition.of(at=_START.replace(fold=1))
+
+
+_NON_FINITE = [math.nan, math.inf, -math.inf]
+
+
+class TestNonFiniteFloats:
+    """A NaN or infinite value is accepted and saved as strict JSON (developer, 2026-11-19).
+
+    Which rows it selects is the table system's equality, not Orcapod's (documented);
+    Condition equality, which decides whether two restrictions are one, keeps NaN equal
+    to NaN and 0.0 equal to -0.0.
+    """
+
+    @pytest.mark.parametrize("value", _NON_FINITE, ids=["NaN", "inf", "-inf"])
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda v: Condition.of(x=v, unit=106, label="a"),
+            lambda v: Condition.of(unit=106, label="a", x=v),
+            lambda v: Condition.of({"unit": 106, "x": v}),
+            lambda v: Condition.of({"x": v}, unit=106),
+            lambda v: Condition.of(unit=106).combined(Condition.of(x=v)),
+        ],
+        ids=["first keyword", "last keyword", "mapping", "mapping first", "combined"],
+    )
+    def test_round_trips_through_strict_json(self, build, value):
+        condition = build(value)
+        text = json.dumps(condition.to_config(), allow_nan=False)
+        loaded = Condition.from_config(json.loads(text))
+        assert loaded == condition
+        assert hash(loaded) == hash(condition)
+        assert condition.to_config()["x"] == {
+            "float": "nan" if value != value else ("inf" if value > 0 else "-inf")
+        }
+
+    def test_a_file_python_wrote_with_bare_nan_still_reads(self):
+        """``json.dumps`` without ``allow_nan=False`` writes ``NaN`` / ``Infinity``."""
+        saved = json.loads('{"x": NaN, "y": Infinity, "z": -Infinity, "unit": 106}')
+        assert Condition.from_config(saved) == Condition.of(
+            x=math.nan, y=math.inf, z=-math.inf, unit=106
+        )
+
+    def test_finite_values_keep_their_saved_form(self):
+        condition = Condition.of(x=1.5, y=-0.0, z=1e300)
+        assert condition.to_config() == {"x": 1.5, "y": -0.0, "z": 1e300}
+        assert json.loads(json.dumps(condition.to_config(), allow_nan=False)) == (
+            condition.to_config()
+        )
+
+    @pytest.mark.parametrize(
+        "first, second",
+        [(math.inf, -math.inf), (math.nan, math.inf), (math.nan, 0.0)],
+        ids=["inf and -inf", "NaN and inf", "NaN and 0.0"],
+    )
+    def test_different_values_conflict(self, first, second):
+        with pytest.raises(ValueError, match="cannot also equal"):
+            Condition.of(x=first).combined(Condition.of(x=second))

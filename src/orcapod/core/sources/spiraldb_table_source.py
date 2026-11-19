@@ -218,7 +218,9 @@ def _checked_conditions(
                 )
         else:
             try:
-                exact = pa.scalar(value, type=arrow_type).as_py() == value
+                exact = _same_stored_value(
+                    pa.scalar(value, type=arrow_type).as_py(), value
+                )
             except (pa.ArrowInvalid, OverflowError) as exc:
                 raise TypeError(
                     f"where: column {column!r} holds {arrow_type}, which cannot hold "
@@ -230,6 +232,22 @@ def _checked_conditions(
                     f"{value!r} exactly"
                 )
     return dict(conditions)
+
+
+def _same_stored_value(stored: object, value: object) -> bool:
+    """Return whether the column's form of a condition value is the value itself.
+
+    An aware datetime is compared by instant (its own offset, ``fold`` included):
+    the column hands it back in its own zone object, and Python's ``==`` never
+    equals two zones' values in a daylight-saving overlap.
+    """
+    if isinstance(stored, datetime.datetime) and isinstance(value, datetime.datetime):
+        stored_offset, value_offset = stored.utcoffset(), value.utcoffset()
+        if stored_offset is not None and value_offset is not None:
+            return stored.replace(tzinfo=None) - stored_offset == (
+                value.replace(tzinfo=None) - value_offset
+            )
+    return stored == value
 
 
 SPIRALDB_SOURCE_ID_HAS_TABLE_ID = True
@@ -594,6 +612,13 @@ class SpiralDBTableSource(RootSource):
         over (the pinned table version, ``limit``, ``max_rows``, tags, data-tags,
         ``tags_as_data``, key columns, source id, label, data context). With a
         ``limit``, the new source reads the first ``limit`` rows that match.
+
+        Each condition is sent to SpiralDB as ``column == value``, and which rows it
+        selects is SpiralDB's own equality, not Orcapod's. For a float column that
+        means: whether a NaN value selects the NaN rows, and whether ``0.0`` selects
+        the ``-0.0`` rows, is decided by SpiralDB; under the usual floating-point rule
+        a NaN equals nothing, so such a condition may select no row. To select rows by
+        such values as Orcapod matches them, filter inside the pipeline.
 
         A convenience: the arguments are given to ``Condition.of``, which builds the
         ``Condition`` (``orcapod.types``); the source checks it against its table and

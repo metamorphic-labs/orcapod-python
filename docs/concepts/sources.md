@@ -264,6 +264,22 @@ print(summary.restricted_source_ids)
 (This sample needs a SpiralDB project, so it is not run with the documentation; `job` is a
 job built over `events`, whose slot is named by the source id.)
 
+A date or a time written as text is converted explicitly, with the function of its column's
+type: `date.fromisoformat` for a date column, `datetime.fromisoformat` for a timestamp
+column, with an offset (an aware value) for a column with a time zone.
+
+```python
+import datetime as dt
+
+from orcapod.types import Condition
+
+day = dt.date.fromisoformat("2026-11-20")  # a date column
+started = dt.datetime.fromisoformat("2026-11-20T09:30:00")  # a timestamp, no zone
+recorded = dt.datetime.fromisoformat("2026-11-20T09:30:00+00:00")  # a zoned timestamp
+print(Condition.of(day=day, started=started, recorded=recorded))
+# day=datetime.date(2026, 11, 20), started=datetime.datetime(2026, 11, 20, 9, 30), recorded=datetime.datetime(2026, 11, 20, 9, 30, tzinfo=datetime.timezone.utc)
+```
+
 - **One mechanism.** `where()` adds to the conditions given with `where=` (a mapping or a
   `Condition`) when the source was built (`Condition.combined`), and SpiralDB applies them
   in the scan. A column already restricted to another value
@@ -273,10 +289,18 @@ job built over `events`, whose slot is named by the source id.)
   columns, the source id and the label. The original source is not changed.
 - **No conversion.** A value must be exactly of its column's Python type: an `int` for an
   integer column (not `True`, not `1.0`, not a NumPy scalar: use `.item()`), a `float` for a
-  float column, a `datetime.date` or `datetime.datetime` for a date or timestamp column (not
-  a string: use `date.fromisoformat`), and it must fit the column's Arrow type. Anything else
-  raises `TypeError`, naming the column and both types. Columns of other types (lists,
-  structs) take no condition.
+  float column, a `datetime.date` for a date column and a `datetime.datetime` for a timestamp
+  column (not a string; see below), and it must fit the column's Arrow type. A timestamp
+  column with a time zone takes an aware `datetime`, one without a zone a naive `datetime`.
+  Anything else raises `TypeError`, naming the column and both types. Columns of other types
+  (lists, structs) take no condition.
+- **The table system's equality.** Each condition is sent to SpiralDB as `column == value`,
+  and which rows it selects is SpiralDB's own equality, not Orcapod's. For a float column,
+  whether a NaN value selects the NaN rows and whether `0.0` selects the `-0.0` rows is
+  decided by SpiralDB; under the usual floating-point rule a NaN equals nothing, so such a
+  condition may select no row. To select rows by such values as Orcapod matches them, filter
+  inside the pipeline (`PolarsFilter`). A NaN or infinite value is saved as
+  `{"float": "nan"}`, `{"float": "inf"}` or `{"float": "-inf"}`, since JSON has no such number.
 - **One restriction per table in a pipeline.** A restricted source has the unrestricted
   source's identity, so a pipeline holds one source for the table: building a pipeline in
   which one table is read with two different restrictions (or with and without one) raises
@@ -287,7 +311,11 @@ job built over `events`, whose slot is named by the source id.)
   key order: the conditions are applied first.
 - **Conditions as values.** Two conditions are equal when they require the same columns to
   equal the same values, in any order. Values of different types differ (`1`, `True` and
-  `1.0`); floats compare as Polars matches them (`0.0` equals `-0.0`, NaN equals NaN).
+  `1.0`); floats compare as Orcapod matches them (`0.0` equals `-0.0`, NaN equals NaN); an
+  aware `datetime` is its instant, so one instant written in two zones is one value, and the
+  two 01:30 of a daylight-saving overlap (`fold`) are two. This equality decides whether two
+  restrictions are one restriction (for the one-restriction rule below); it does not decide
+  which rows a source returns.
   `str(condition)` (or `condition.text()`) reads `unit_id=106, session_index=2`, and
   `condition.equalities` maps each column to its value. A `Condition` is in no hash.
 - **Recorded.** `RunSummary.restrictions` maps the slot of each source read under a condition

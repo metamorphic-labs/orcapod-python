@@ -409,6 +409,70 @@ class TestRefusals:
         with pytest.raises(TypeError, match="aware"):
             _checked_conditions({"at": _START}, schema)
 
+    @pytest.mark.parametrize("fold", [0, 1])
+    @pytest.mark.parametrize("zone", ["America/New_York", "UTC"])
+    def test_a_time_in_a_daylight_saving_overlap_is_accepted(self, fold, zone):
+        """Either 01:30 of an overlap is a time a zoned column holds (compared by
+        instant: the column hands it back in its own zone), beside another column."""
+        import zoneinfo
+
+        schema = pa.schema(
+            [
+                pa.field("at", pa.timestamp("us", tz=zone)),
+                pa.field("unit", pa.int64()),
+            ]
+        )
+        local = dt.datetime(
+            2026, 11, 1, 1, 30, fold=fold, tzinfo=zoneinfo.ZoneInfo("America/New_York")
+        )
+
+        # About the condition check itself: the pyspiral fake keeps no time zone.
+        for conditions in ({"at": local, "unit": 1}, {"unit": 1, "at": local}):
+            assert _checked_conditions(conditions, schema) == conditions
+
+    @pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf, -0.0])
+    @pytest.mark.parametrize(
+        "restrict",
+        [
+            lambda v: _source(where={"amplitude": v, "subject_id": "m1"}),
+            lambda v: _source(where={"subject_id": "m1", "amplitude": v}),
+            lambda v: _source().where(subject_id="m1", amplitude=v),
+            lambda v: _source().where(amplitude=v, subject_id="m1"),
+            lambda v: _source().where(subject_id="m1").where(amplitude=v),
+            lambda v: _source().where(
+                Condition.of({"subject_id": "m1", "amplitude": v})
+            ),
+        ],
+        ids=[
+            "where= first",
+            "where= last",
+            "where() last",
+            "where() first",
+            "where() chained",
+            "Condition.of mapping",
+        ],
+    )
+    def test_a_non_finite_or_signed_zero_float_is_pushed_down_as_given(
+        self, project, restrict, value
+    ):
+        """Accepted, and sent to the table system as ``column == value``: which rows
+        it selects is that system's equality (developer decision, 2026-11-19)."""
+        source = restrict(value)
+        source.as_table()
+
+        pushed = dict(fake_pyspiral.scan_log[-1].kwargs["where"].equalities)
+        assert set(pushed) == {"amplitude", "subject_id"}
+        sent = pushed["amplitude"]
+        assert (
+            sent != sent
+            if value != value
+            else (sent == value and math.copysign(1, sent) == math.copysign(1, value))
+        )
+        saved = json.dumps(source.to_config(), allow_nan=False)
+        assert SpiralDBTableSource.from_config(json.loads(saved)).to_config() == (
+            source.to_config()
+        )
+
     def test_a_time_finer_than_the_column_is_refused(self):
         """A value the column would truncate is refused, not cut."""
         schema = pa.schema([pa.field("at", pa.timestamp("s"))])
@@ -1458,3 +1522,94 @@ class TestOperatorCacheOverARestriction:
 
         rows = job.nodes["double"].as_table().column("timestamp").to_pylist()
         assert sorted(rows) == [1, 2, 3]
+
+
+class TestOperatorCacheEntryPoints:
+    """Every entry point that runs a caching operator node refuses a restricted read.
+
+    CodeRabbit (PR 435): a LOG node attached over an unrestricted source could still
+    log restricted rows through ``node.upstreams = ...`` and ``node.execute(...)`` /
+    ``node.async_execute(...)``, which pass neither ``attach_databases`` nor ``run()``.
+    """
+
+    @staticmethod
+    def _logged_node(store: DeltaTableDatabase, mode: CacheMode) -> Any:
+        events = _source(source_id="events", tag_only_columns=True)
+        job = PipelineJob(name="events", database=store)
+        with job:
+            events.map_data({"amplitude": "a"}, label="rename")
+        node = job.nodes["rename"]
+        node.attach_databases(pipeline_database=store.at("events"), cache_mode=mode)
+        return node
+
+    @staticmethod
+    def _stored_files(folder: Path) -> list[Path]:
+        return sorted(folder.rglob("*.parquet")) if folder.exists() else []
+
+    @pytest.mark.parametrize("mode", _CACHING, ids=lambda m: m.name)
+    @pytest.mark.parametrize("restriction", list(_RESTRICTIONS))
+    def test_assigning_restricted_upstreams_is_refused(
+        self, project, tmp_path, mode, restriction
+    ):
+        node = self._logged_node(DeltaTableDatabase(tmp_path / "s"), mode)
+        before = node.upstreams
+        restricted = _RESTRICTIONS[restriction](
+            _source(source_id="events", tag_only_columns=True)
+        )
+
+        with pytest.raises(ValueError, match="cannot cache a restricted read"):
+            node.upstreams = (restricted,)
+
+        assert node.upstreams is before
+
+    @pytest.mark.parametrize("mode", _CACHING, ids=lambda m: m.name)
+    @pytest.mark.parametrize("restriction", list(_RESTRICTIONS))
+    def test_execute_over_restricted_streams_is_refused(
+        self, project, tmp_path, mode, restriction
+    ):
+        folder = tmp_path / "s"
+        node = self._logged_node(DeltaTableDatabase(folder), mode)
+        restricted = _RESTRICTIONS[restriction](
+            _source(source_id="events", tag_only_columns=True)
+        )
+        scans = len(fake_pyspiral.scan_log)
+
+        with pytest.raises(ValueError, match="cannot cache a restricted read"):
+            node.execute(restricted.select_data_columns(["amplitude", "channel"]))
+
+        assert len(fake_pyspiral.scan_log) == scans
+        assert self._stored_files(folder) == []
+
+    @pytest.mark.parametrize("mode", _CACHING, ids=lambda m: m.name)
+    def test_async_execute_over_a_restricted_slot_is_refused(
+        self, project, tmp_path, mode
+    ):
+        """The slot's source set directly (no job check); async_execute itself refuses
+        and closes its output."""
+        from orcapod.channels import Channel
+
+        folder = tmp_path / "s"
+        node = self._logged_node(DeltaTableDatabase(folder), mode)
+        (slot,) = node.upstreams
+        slot.bound_source = _source(source_id="events", tag_only_columns=True).where(
+            subject_id="m1"
+        )
+        inputs, output = Channel(buffer_size=8), Channel(buffer_size=8)
+
+        async def run() -> list[Any]:
+            await inputs.writer.close()
+            with pytest.raises(ValueError, match="cannot cache a restricted read"):
+                await node.async_execute([inputs.reader], output.writer)
+            return await output.reader.collect()
+
+        assert asyncio.run(run()) == []
+        assert self._stored_files(folder) == []
+
+    @pytest.mark.parametrize("mode", _CACHING, ids=lambda m: m.name)
+    def test_execute_over_unrestricted_streams_still_caches(
+        self, project, tmp_path, mode
+    ):
+        node = self._logged_node(DeltaTableDatabase(tmp_path / "s"), CacheMode.LOG)
+        events = _source(source_id="events", tag_only_columns=True)
+        rows = node.execute(events)
+        assert sorted(tag["timestamp"] for tag, _ in rows) == [1, 2, 3, 4, 5]

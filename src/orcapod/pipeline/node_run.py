@@ -364,6 +364,8 @@ def refuse_restricted_operator_cache(
     node: Any,
     cache_mode: CacheMode,
     bound_sources: Mapping[str, Any] | None = None,
+    *,
+    streams: Iterable[Any] | None = None,
 ) -> None:
     """Refuse an operator node that caches (LOG or REPLAY) over a restricted source.
 
@@ -377,6 +379,8 @@ def refuse_restricted_operator_cache(
         node: The operator job node.
         cache_mode: The cache mode the node has or is about to get.
         bound_sources: Slot name to the source a bind is about to bind there.
+        streams: The inputs the node is about to read, when they are not (yet) its
+            ``upstreams``: streams handed to ``execute``, or a new ``upstreams``.
 
     Raises:
         ValueError: If ``cache_mode`` caches and a source feeding the node is
@@ -385,7 +389,8 @@ def refuse_restricted_operator_cache(
     """
     if cache_mode == CacheMode.OFF:
         return
-    found = _restrictions_beneath(getattr(node, "upstreams", ()), bound_sources)
+    inputs = streams if streams is not None else getattr(node, "upstreams", ())
+    found = _restrictions_beneath(inputs, bound_sources)
     if not found:
         return
     raise ValueError(

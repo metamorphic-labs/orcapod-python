@@ -1193,8 +1193,14 @@ data. The rules:
   Its factory Condition.of(mapping=None, /, **columns) takes where()'s arguments and does
   every check that needs no table (None, a value not exactly bool/int/float/str/
   bytes/datetime/date, mapping against keyword); combined adds two and refuses a
-  contradiction; equality is by value, order-free, exact types, floats as Polars matches them
-  (0.0 equals -0.0, NaN equals NaN), with a consistent hash; text()/str, and
+  contradiction; equality is by value, order-free, exact types, floats as Orcapod matches them
+  (0.0 equals -0.0, NaN equals NaN), an aware datetime by its instant (fold counts, zones do
+  not; never Python's ==, which ignores fold within one tzinfo), with a consistent hash.
+  That equality decides whether two restrictions are one, never which rows a source returns:
+  a condition is pushed down as column == value and the table system's equality decides
+  (developer, November 19, 2026: a NaN, an infinity or a signed zero is accepted, pushed down
+  and documented, never filtered on the client or refused; a NaN or infinite value is saved
+  as {"float": "nan" | "inf" | "-inf"}); text()/str, and
   to_config/from_config (the saved where mapping). Internally terms (column, operator,
   value), equality only today; the public surface names no operator. Never add a second
   restriction class: a limit stays the source's own (limit=). Today only
@@ -1214,9 +1220,11 @@ data. The rules:
   identity; developer, November 18, 2026), and so is an operator job node that caches (LOG or
   REPLAY) over a restricted source (developer, November 19, 2026: its cache is kept under the
   node's identity): node_run.refuse_restricted_operator_cache(s), called where the cache mode
-  is attached, by bind before it binds, before a job distributes its databases and at the
-  start of job.run(), run_async() and a job node's run(), before any source is checked;
-  CacheMode.OFF and function nodes are not concerned (TODO(ITL-1219)).
+  is attached, by bind before it binds, before a job distributes its databases, by the
+  upstreams setter, by execute (on the streams it is handed) and async_execute, and at
+  the start of job.run(), run_async() and a job node's run(), before any source is
+  checked or anything computed or written; a new way to run or rewire a caching operator node
+  calls it too. CacheMode.OFF and function nodes are not concerned (TODO(ITL-1219)).
 - Empty data → ArrowTableSource raises ValueError("Table is empty").
 - A side-effect job node delivers only when it runs (developer, November 13, 2026, ITL-1091):
   job.run(), node.run() (state-driven, ITL-1095: a node holding a current run delivers

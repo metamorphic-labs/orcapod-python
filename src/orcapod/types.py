@@ -12,11 +12,12 @@ throughout the OrcaPod framework, including:
 from __future__ import annotations
 
 import logging
+import math
 import os
 import uuid
 from collections.abc import Collection, Iterator, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from enum import Enum
 from types import MappingProxyType, UnionType
 from typing import TYPE_CHECKING, Any, Generic, NamedTuple, Self, TypeAlias, TypeVar
@@ -789,7 +790,9 @@ class PollingConfig:
             )
 
 
-# How a datetime, date or bytes value of a condition is written in a saved config.
+# How a datetime, date or bytes value of a condition is written in a saved config, and a
+# NaN or infinite float, which JSON has no number for (a finite float is written as is).
+_FLOAT_KEY = "float"
 _DATETIME_KEY = "datetime"
 _DATE_KEY = "date"
 _BYTES_KEY = "bytes"
@@ -806,16 +809,40 @@ _CONDITION_VALUE_TYPES: tuple[type, ...] = (
 """The exact Python types a condition value may have (no subclass, no NumPy scalar)."""
 
 
+def _instant(value: datetime) -> datetime | None:
+    """Return an aware datetime as its instant in UTC, ``None`` for a naive one.
+
+    The offset is the one the value's own fold selects, so the two 01:30 of a
+    daylight-saving overlap are two instants.
+    """
+    offset = value.utcoffset()
+    if offset is None:
+        return None
+    return (value.replace(tzinfo=None) - offset).replace(tzinfo=timezone.utc)
+
+
 def _same_condition_value(a: object, b: object) -> bool:
     """Return whether two condition values are one value.
 
     Values of different types differ (``1``, ``True`` and ``1.0`` are three values).
-    Floats compare as Polars matches them: ``0.0`` equals ``-0.0`` and NaN equals NaN.
+    Floats compare as Orcapod matches them everywhere (Polars' rule): ``0.0`` equals
+    ``-0.0`` and NaN equals NaN. This decides whether two restrictions are one
+    restriction, not which rows a source returns (the table system's own equality
+    decides that). An aware datetime is its instant: two values of one instant are one value,
+    whatever their zones, and the two 01:30 of a daylight-saving overlap (``fold``)
+    are two (Python's ``==`` compares two values of one ``tzinfo`` by wall time and
+    ignores ``fold``). A naive datetime is never equal to an aware one.
     """
     if type(a) is not type(b):
         return False
     if isinstance(a, float) and isinstance(b, float) and a != a and b != b:
         return True
+    if isinstance(a, datetime) and isinstance(b, datetime):
+        a_instant, b_instant = _instant(a), _instant(b)
+        if (a_instant is None) != (b_instant is None):
+            return False
+        if a_instant is not None:
+            return a_instant == b_instant
     return a == b
 
 
@@ -823,11 +850,21 @@ def _condition_hash_key(value: object) -> tuple[type, object]:
     """Return the key ``Condition.__hash__`` uses for a value, consistent with equality."""
     if isinstance(value, float) and value != value:
         return (float, "nan")
+    if isinstance(value, datetime):
+        instant = _instant(value)
+        if instant is not None:
+            return (datetime, ("instant", instant.replace(tzinfo=None)))
+        return (datetime, ("wall", value))
     return (type(value), value)
 
 
 def _condition_value_to_config(value: object) -> object:
-    """Return a condition value in its JSON form (date, datetime and bytes tagged)."""
+    """Return a condition value in its JSON form (date, datetime, bytes and a NaN or
+    infinite float tagged: ``{"float": "nan" | "inf" | "-inf"}``)."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return {
+            _FLOAT_KEY: "nan" if value != value else ("inf" if value > 0 else "-inf")
+        }
     if isinstance(value, datetime):
         return {_DATETIME_KEY: value.isoformat()}
     if isinstance(value, date):
@@ -847,7 +884,37 @@ def _condition_value_from_config(saved: object) -> object:
             return date.fromisoformat(text)
         if key == _BYTES_KEY:
             return bytes.fromhex(text)
+        if key == _FLOAT_KEY and text in ("nan", "inf", "-inf"):
+            return float(text)
     return saved
+
+
+def _require_condition_value(column: object, value: object) -> None:
+    """Refuse a column name or value no condition holds.
+
+    Raises:
+        TypeError: If ``column`` is not a string, or ``value`` is not exactly of a
+            supported type.
+        ValueError: If ``value`` is ``None``.
+    """
+    if not isinstance(column, str):
+        raise TypeError(
+            f"where: a column name is a string, got {column!r} "
+            f"({type(column).__name__})"
+        )
+    if value is None:
+        raise ValueError(
+            f"where: column {column!r}: None is refused: a null equals "
+            "nothing, so the condition would match no row"
+        )
+    if type(value) not in _CONDITION_VALUE_TYPES:
+        raise TypeError(
+            f"where: column {column!r}: the value {value!r} is a "
+            f"{type(value).__name__}, and a condition value is exactly a bool, "
+            "int, float, str, bytes, datetime.datetime or datetime.date; "
+            "convert it explicitly (a NumPy scalar with .item()): Orcapod "
+            "converts no value"
+        )
 
 
 class _Term(NamedTuple):
@@ -881,8 +948,14 @@ class Condition:
 
     Two conditions are equal when they require the same columns to equal the same
     values, in any order. Values of different types differ (``1``, ``True``,
-    ``1.0``); floats compare as Polars matches them (``0.0`` equals ``-0.0``, NaN
-    equals NaN). A condition is immutable and hashable, consistently with that
+    ``1.0``); floats compare as Orcapod matches them (``0.0`` equals ``-0.0``, NaN
+    equals NaN); an aware datetime is its instant (two zones of one instant are one
+    value, the two 01:30 of a daylight-saving overlap two). That equality decides
+    whether two restrictions are one; it does not decide which rows a source
+    returns: a source applies a condition with its table system's own equality (for
+    a float column, whether a NaN selects NaN rows and whether ``0.0`` selects
+    ``-0.0`` rows is the table system's; under the usual floating-point rule a NaN
+    equals nothing). To select rows by such values inside the pipeline, filter there. A condition is immutable and hashable, consistently with that
     equality; the hash is Python's own and in-process only, never an Orcapod hash.
 
     Example::
@@ -947,6 +1020,8 @@ class Condition:
             condition = mapping.combined(cls._equal_to(columns)) if columns else mapping
         else:
             merged = dict(mapping or {})
+            for column, value in [*merged.items(), *columns.items()]:
+                _require_condition_value(column, value)
             for column, value in columns.items():
                 if column in merged and not _same_condition_value(
                     merged[column], value
@@ -974,24 +1049,7 @@ class Condition:
             ValueError: If a value is ``None``.
         """
         for column, value in values.items():
-            if not isinstance(column, str):
-                raise TypeError(
-                    f"where: a column name is a string, got {column!r} "
-                    f"({type(column).__name__})"
-                )
-            if value is None:
-                raise ValueError(
-                    f"where: column {column!r}: None is refused: a null equals "
-                    "nothing, so the condition would match no row"
-                )
-            if type(value) not in _CONDITION_VALUE_TYPES:
-                raise TypeError(
-                    f"where: column {column!r}: the value {value!r} is a "
-                    f"{type(value).__name__}, and a condition value is exactly a bool, "
-                    "int, float, str, bytes, datetime.datetime or datetime.date; "
-                    "convert it explicitly (a NumPy scalar with .item()): Orcapod "
-                    "converts no value"
-                )
+            _require_condition_value(column, value)
         return cls._of_terms(
             tuple(_Term(column, _EQUALS, value) for column, value in values.items())
         )
@@ -1053,8 +1111,9 @@ class Condition:
 
         Returns:
             Column name to value: a date, datetime or bytes value is written as
-            ``{"date": iso}``, ``{"datetime": iso}`` or ``{"bytes": hex}``, any other
-            value as it is.
+            ``{"date": iso}``, ``{"datetime": iso}`` or ``{"bytes": hex}``, a NaN or
+            infinite float as ``{"float": "nan"}``, ``{"float": "inf"}`` or
+            ``{"float": "-inf"}`` (JSON has no such number), any other value as it is.
         """
         return {
             column: _condition_value_to_config(value)
