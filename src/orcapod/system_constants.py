@@ -21,18 +21,16 @@ BLOCK_SEPARATOR = "::"
 ENV_INFO = "env_info"
 IS_EPHEMERAL_COL = "is_ephemeral"
 # Table layout versions: the last component of every stored table's path. A layout
-# version moves whenever the bookkeeping columns of that table kind change. v0.3 moved
-# all of them, because every table gained the ``__data_context`` column (ITL-944).
-PIPELINE_DB_SCHEMA_VERSION = "pdb_v2"
-RESULT_DB_SCHEMA_VERSION = "rdb_v2"
-TRACKING_DB_SCHEMA_VERSION = "tdb_v2"
+# version moves whenever the common bookkeeping columns of that table kind change. All
+# start at v1 for the first release, 0.4.0 (developer, November 18, 2026, ITL-1259; 0.3.0
+# was withdrawn, so nothing released used v2). A function result table has one more
+# component before its layout: the revision of its data function type's own record
+# (``rev1``, declared by the type, ``core/data_function_types.py``).
+PIPELINE_DB_SCHEMA_VERSION = "pdb_v1"
+RESULT_DB_SCHEMA_VERSION = "rdb_v1"
+TRACKING_DB_SCHEMA_VERSION = "tdb_v1"
 OPERATOR_DB_SCHEMA_VERSION = "odb_v1"
 SOURCE_DB_SCHEMA_VERSION = "sdb_v1"
-# Layout components earlier versions of Orcapod wrote, newest first. A table found at
-# one of them (or at the path without a layout component) is an old-layout table.
-OLD_PIPELINE_DB_SCHEMA_VERSIONS = ("pdb_v1",)
-OLD_RESULT_DB_SCHEMA_VERSIONS = ("rdb_v1",)
-OLD_TRACKING_DB_SCHEMA_VERSIONS = ("tdb_v1",)
 STORED_DATA_CONTEXT = "data_context"
 # The data context of everything Orcapod wrote before v0.3. Its manifest is not shipped:
 # stored rows that carry this key, and tables without a data context column, belong to it.

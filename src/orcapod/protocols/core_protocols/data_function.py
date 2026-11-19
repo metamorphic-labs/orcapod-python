@@ -12,6 +12,7 @@ from orcapod.protocols.hashing_protocols import (
 from orcapod.types import Schema
 
 if TYPE_CHECKING:
+    from orcapod.core.data_function_types import DataFunctionTypeDeclaration
     from orcapod.protocols.observability_protocols import DataExecutionLoggerProtocol
 
 
@@ -27,7 +28,16 @@ class DataFunctionProtocol(
     # ==================== Identity & Metadata ====================
     @property
     def data_function_type_id(self) -> str:
-        """How functions are defined and executed (e.g., python.function.v2)"""
+        """The data function type and its major (e.g. ``python.function.v1``)."""
+        ...
+
+    @property
+    def declaration(self) -> "DataFunctionTypeDeclaration":
+        """The declaration of the data function type (ITL-1259).
+
+        It gives the revision of the type's record, a component of the result table
+        path, and the columns the type stores with every result row.
+        """
         ...
 
     @property

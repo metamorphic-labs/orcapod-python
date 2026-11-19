@@ -46,7 +46,7 @@ def _make_cache(
 ) -> tuple[ResultCache, InMemoryArrowDatabase]:
     if db is None:
         db = InMemoryArrowDatabase()
-    cache = ResultCache(result_database=db, record_path=record_path)
+    cache = ResultCache(result_database=db, record_path=record_path, revision="rev1")
     return cache, db
 
 
@@ -115,8 +115,12 @@ class TestLookupHit:
 
     def test_same_data_different_record_path_is_miss(self):
         db = InMemoryArrowDatabase()
-        cache_a = ResultCache(result_database=db, record_path=("path_a",))
-        cache_b = ResultCache(result_database=db, record_path=("path_b",))
+        cache_a = ResultCache(
+            result_database=db, record_path=("path_a",), revision="rev1"
+        )
+        cache_b = ResultCache(
+            result_database=db, record_path=("path_b",), revision="rev1"
+        )
         pf = _make_pf()
         input_pkt = Data({"x": 10})
 
@@ -314,7 +318,9 @@ class TestAutoFlush:
 
     def test_auto_flush_false_in_constructor(self):
         db = InMemoryArrowDatabase()
-        cache = ResultCache(result_database=db, record_path=("t",), auto_flush=False)
+        cache = ResultCache(
+            result_database=db, record_path=("t",), revision="rev1", auto_flush=False
+        )
         assert cache._auto_flush is False
 
 

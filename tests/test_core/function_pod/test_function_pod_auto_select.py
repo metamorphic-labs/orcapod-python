@@ -261,12 +261,14 @@ def test_stream_passed_for_its_tags_restricts_the_rows() -> None:
 # ---------------------------------------------------------------------------
 
 
-# The hashes ``add.pod(_xs(), _ys())`` had on main before ITL-807 (commit 25650c42).
+# The hashes ``add.pod(_xs(), _ys())`` had on main before ITL-807 (commit 25650c42),
+# moved once since: the function type became ``python.function.v1`` (ITL-1259), the
+# last part of the uri every function pod hashes.
 _JOINED_PIPELINE_HASH = (
-    "8c0e0a4e746fee990b4921bb3efc2e4b023732046a08ee858ee7cac4e1c552ab"
+    "258a798139dc3e0707a99d691c5eefb054a3ae063cd4982186325dfcf0ed1a60"
 )
 _JOINED_CONTENT_HASH = (
-    "f182005e82da6b62fb9bc718b844c07fe64d5d279ff590dd3842a9e8746597be"
+    "8a2ea497fe9899b35994dfa562d6d797ab5e5f0378c1fba071e7a144880e4ac9"
 )
 
 

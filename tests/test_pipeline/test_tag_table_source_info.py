@@ -1,6 +1,6 @@
 """Function-node tag tables store each input row's own source info (ITL-845).
 
-A ``FunctionJobNode`` writes one tag-table (pipeline DB, ``pdb_v1``) row per input,
+A ``FunctionJobNode`` writes one tag-table (pipeline DB, ``pdb_v2``) row per input,
 carrying that input's source-info tokens. A source-info token is the provenance
 value a row holds for one data column: the value of its ``_source_<column>``
 column, as ``Data.source_info()`` returns it (for example ``S::row_0::x``).
@@ -237,7 +237,7 @@ class TestStoreWrittenBeforeFix:
 class TestDropOnlyTagTables:
     """Dropping the tag tables but keeping the result tables refills them correctly.
 
-    The result tables (``_result/.../rdb_v1``) serve every output by input data
+    The result tables (``_result/.../rdb_v2``) serve every output by input data
     hash, so no function runs again; only ``__computed`` flips to ``False``.
     """
 
@@ -259,7 +259,7 @@ class TestDropOnlyTagTables:
         return store, before
 
     def _drop_tag_table(self, tmp_path: Path, label: str) -> None:
-        """Delete the node's ``pdb_v1`` tag table on disk."""
+        """Delete the node's ``pdb_v2`` tag table on disk."""
         node = _function_node(_job(InMemoryArrowDatabase()), label)
         path = tmp_path.joinpath(
             _JOB, *node.node_identity_path, PIPELINE_DB_SCHEMA_VERSION

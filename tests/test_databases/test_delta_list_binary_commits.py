@@ -56,7 +56,7 @@ def _build(store: Path, pod: Any, n: int) -> PipelineJob:
 
 def _result_table(store: Path) -> pa.Table:
     """The stored function-result table, read with Delta directly, sorted by record id."""
-    (path,) = [p for p in store.rglob("rdb_v2") if (p / "_delta_log").is_dir()]
+    (path,) = [p for p in store.rglob("rdb_v1") if (p / "_delta_log").is_dir()]
     table = deltalake.DeltaTable(str(path)).to_pyarrow_table()
     return table.sort_by("__record_id")
 

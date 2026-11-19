@@ -123,7 +123,7 @@ class TestStoredPathsAndKeys:
         _ = _operator_job(store).run()
 
         paths = sorted(store.list_sources())
-        assert sorted(path[-1] for path in paths) == ["odb_v1", "pdb_v2", "rdb_v2"]
+        assert sorted(path[-1] for path in paths) == ["odb_v1", "pdb_v1", "rdb_v1"]
         for path in paths:
             for component in path:
                 assert "semantic_v" not in component, path
@@ -222,7 +222,13 @@ class TestSideEffectNodeChecksEveryRun:
     """A sink looks for completions it cannot match before every run (CodeRabbit, PR #315)."""
 
     def test_a_table_written_before_v03_that_appears_between_runs_is_refused(self):
-        """A sink's second run raises on an old log added after its first run."""
+        """A sink's second run raises on an old log added after its first run.
+
+        The old log is at a layout of the withdrawn 0.3.0 (``tdb_v2``). A log a version
+        before 0.4 wrote at ``tdb_v1`` under another hash looks current and does not stop
+        the sink: the approved removal of the pre-0.4 store detection (nobody has such
+        a store; ITL-1259).
+        """
         store = InMemoryArrowDatabase()
         job = _sink_job(store)
         _ = job.run()
@@ -230,7 +236,7 @@ class TestSideEffectNodeChecksEveryRun:
         delivered.clear()
 
         # A log of the same pod at the layout Orcapod v0.2 wrote, under another hash.
-        old_path = _add_table_written_before_v03(store, "tdb_v2", "tdb_v1")
+        old_path = _add_table_written_before_v03(store, "tdb_v1", "tdb_v2")
 
         # The same job object runs the sink again (a node holding a current run is not
         # run, ITL-1095, so it is cleared first): the check is not remembered from the
@@ -252,7 +258,7 @@ class TestSideEffectNodeChecksEveryRun:
         _ = job.run()  # nothing new in the database: runs, and delivers nothing again
         assert delivered == []
 
-        old_path = _add_table_written_before_v03(store, "pdb_v2", "pdb_v1")
+        old_path = _add_table_written_before_v03(store, "pdb_v1", "pdb_v2")
 
         job.nodes["notify"].clear_cache()
         with pytest.raises(SideEffectLogDataContextError) as info:
@@ -263,7 +269,7 @@ class TestSideEffectNodeChecksEveryRun:
     def test_the_error_does_not_offer_a_fresh_store_as_a_safe_retry(self):
         """The error message warns that a fresh database repeats every side effect."""
         error = SideEffectLogDataContextError(
-            (("j", "side_effects", "notify", "schema:abc", "tdb_v1"),),
+            (("j", "side_effects", "notify", "schema:abc", "tdb_v2"),),
             "std:v0.1:default",
             CURRENT,
             node_label="notify",
@@ -274,43 +280,3 @@ class TestSideEffectNodeChecksEveryRun:
             "A fresh database holds no completions, so on it the node performs every "
             "side effect again" in message
         )
-
-
-class TestTablesOfNodesTheRunLeavesOut:
-    """A node the run excludes does not hide its pre-v0.3 tables (CodeRabbit, PR #324)."""
-
-    def test_job_total_counts_the_tables_of_an_excluded_node(
-        self, caplog: pytest.LogCaptureFixture
-    ):
-        """A function node behind an unbound source reports nothing itself; the job does."""
-        import logging
-
-        from orcapod.core.nodes.source_node import SourceNode
-
-        store = InMemoryArrowDatabase()
-        tag_schema, data_schema = DictSource(
-            data=ROWS, tag_columns=["k"], tag_only_columns=True, source_id="src"
-        ).output_schema()
-        job = PipelineJob(name=JOB_NAME, database=store)
-        with job:
-            unbound = SourceNode(
-                name="src", tag_schema=tag_schema, data_schema=data_schema
-            )
-            double.pod(unbound, label="dbl")
-        key = pa.array([b"arrow_v0.1:00"], pa.large_binary())
-        old_path = (JOB_NAME, "double", "0" * 64, "v0", "python.function.v0", "pdb_v1")
-        store.add_records(
-            old_path, pa.table({"__record_id": key}), record_id_column="__record_id"
-        )
-        store.flush()
-
-        with caplog.at_level(logging.WARNING):
-            _ = job.run()
-
-        totals = [
-            record.getMessage()
-            for record in caplog.records
-            if "more table" in record.getMessage()
-        ]
-        assert len(totals) == 1, [r.getMessage() for r in caplog.records]
-        assert "/".join(old_path) in totals[0]
