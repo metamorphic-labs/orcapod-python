@@ -1039,7 +1039,7 @@ the plan"; November 19, 2026, ITL-1277: "safe default, though could be inconveni
 reject working with it"). Every column of a stream (tag, data-tag, data, and Orcapod's own
 system-tag, source-info, context and meta columns, which only a hand-built table could encode)
 whose Arrow type is, or contains, a dictionary (list, list-view or fixed-size list item, struct
-child, map key or item, extension storage) raises `InputValidationError` naming each such
+child, map key or item, run-end-encoded values, extension storage) raises `InputValidationError` naming each such
 column with its role, its type and its decoded type (`arrow_utils.decode_dictionaries`), then
 the pyarrow and polars ways to decode. One rule, `schema_utils.dictionary_columns` with
 `schema_utils.dictionary_columns_error`, applied by `ArrowTableStream.__init__` (every source

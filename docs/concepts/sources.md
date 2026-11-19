@@ -118,9 +118,13 @@ except InputValidationError as exc:
 
 decoded = coded
 for name in ("session", "response"):
-    column = decoded[name]
+    field = decoded.schema.field(name)
+    value_type = field.type.value_type
+    # The field keeps its name, nullability and metadata; set_column returns a new table.
     decoded = decoded.set_column(
-        decoded.schema.get_field_index(name), name, column.cast(column.type.value_type)
+        decoded.schema.get_field_index(name),
+        field.with_type(value_type),
+        decoded[name].cast(value_type),
     )
 source = ArrowTableSource(decoded, tag_columns=["session", "trial"], tag_only_columns=True)
 print(source.as_table().schema.field("session").type)

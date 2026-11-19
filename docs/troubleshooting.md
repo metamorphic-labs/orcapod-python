@@ -40,10 +40,20 @@ example a list of dictionary values). This comes from an Arrow table built with
 Orcapod does not support such columns yet; the message names every one, with its role and the
 type it decodes to.
 
-**Fix.** Decode the column before building the source: with pyarrow,
-`table.set_column(i, name, table[name].cast(table[name].type.value_type))` (for a nested
-dictionary, cast to the decoded type the message gives); with polars,
-`df.with_columns(pl.col(name).cast(pl.String))`. Or keep the data frame as a value in a cell:
+**Fix.** Decode the column before building the source.
+
+With pyarrow, keep the field's name, nullability and metadata, and keep the table that
+`set_column` returns:
+
+- Take the field: `field = table.schema.field(name)`.
+- Take the decoded type: `decoded = field.type.value_type`. For a column that holds a
+  dictionary inside it (a struct with a dictionary field, a list of dictionary values), use
+  the decoded type the message gives instead, for example
+  `pa.struct([("k", pa.string()), ("n", pa.int64())])`.
+- Replace the column:
+  `table = table.set_column(table.schema.get_field_index(name), field.with_type(decoded), table[name].cast(decoded))`.
+
+With polars, `df.with_columns(pl.col(name).cast(pl.String))`. Or keep the data frame as a value in a cell:
 a pandas or polars `DataFrame` stored whole in one column is a library value, not a dictionary
 column. See [Arrow types of a source](concepts/sources.md#arrow-types-of-a-source).
 

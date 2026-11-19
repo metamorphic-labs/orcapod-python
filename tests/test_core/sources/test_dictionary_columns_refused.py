@@ -430,6 +430,10 @@ def _nested(kind: str) -> pa.Array[Any]:
         return pa.ListViewArray.from_arrays(  # pyright: ignore[reportCallIssue, reportUnknownVariableType]  # the pyarrow stubs omit from_arrays' sizes argument
             pa.array([0, 1, 2], pa.int32()), pa.array([1, 1, 1], pa.int32()), encoded
         )
+    if kind == "run_end_encoded":
+        return pa.RunEndEncodedArray.from_arrays(
+            pa.array([1, 2, 3], pa.int32()), encoded
+        )
     if kind == "large_list_view":
         return pa.LargeListViewArray.from_arrays(  # pyright: ignore[reportCallIssue, reportUnknownVariableType]  # the pyarrow stubs omit from_arrays' sizes argument
             pa.array([0, 1, 2], pa.int64()), pa.array([1, 1, 1], pa.int64()), encoded
@@ -442,6 +446,7 @@ DECODED = {
     "struct": "struct<k: string, n: int64>",
     "list_view": "list_view<item: string>",
     "large_list_view": "large_list_view<item: string>",
+    "run_end_encoded": "run_end_encoded<run_ends: int32, values: string>",
 }
 NESTED_KINDS = pytest.mark.parametrize("kind", sorted(DECODED))
 

@@ -197,8 +197,8 @@ def decode_dictionaries(arrow_type: "pa.DataType") -> "pa.DataType":
     """Return ``arrow_type`` with every dictionary in it replaced by its value type.
 
     The type a dictionary-encoded column decodes to: a dictionary at the top level or
-    inside a list (a list view included), a struct, a map or a union becomes its value
-    type, and nested fields
+    inside a list (a list view included), a struct, a map, a union or the values of a
+    run-end-encoded type becomes its value type, and nested fields
     keep their names, nullability and metadata. An extension type is replaced by its
     decoded storage type when that storage holds a dictionary. A type that holds no
     dictionary is returned as it is, so ``decode_dictionaries(t) == t`` tells whether
@@ -235,6 +235,11 @@ def decode_dictionaries(arrow_type: "pa.DataType") -> "pa.DataType":
         if pa.types.is_large_list_view(arrow_type):
             return pa.large_list_view(decoded)
         return pa.list_(decoded, arrow_type.list_size)
+    if pa.types.is_run_end_encoded(arrow_type):
+        values = decode_dictionaries(arrow_type.value_type)
+        if values == arrow_type.value_type:
+            return arrow_type
+        return pa.run_end_encoded(arrow_type.run_end_type, values)
     if pa.types.is_struct(arrow_type):
         fields = [f.with_type(decode_dictionaries(f.type)) for f in arrow_type]
         return pa.struct(fields)

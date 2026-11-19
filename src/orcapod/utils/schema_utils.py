@@ -699,9 +699,10 @@ def dictionary_columns(
     Developer decisions, November 18 and 19, 2026 (ITL-1264, ITL-1277): dictionary-encoded
     columns are not currently supported in Orcapod, tags and data alike. A dictionary at
     the top level of a column's type or inside it (a list, list-view or fixed-size list
-    item, a struct child, a map key or item, an extension type's storage) counts. A
-    library value in a cell (a pandas or polars data frame holding a categorical column)
-    is an extension column stored as bytes, not a dictionary, and does not count.
+    item, a struct child, a map key or item, the values of a run-end-encoded type, an
+    extension type's storage) counts. A library value in a cell (a pandas or polars data
+    frame holding a categorical column) is an extension column stored as bytes, not a
+    dictionary, and does not count.
 
     ``ArrowTableStream.__init__`` (every source and operator result becomes a stream
     there) and the source builder (first, before its key columns and its hash) refuse

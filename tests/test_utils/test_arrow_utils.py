@@ -1101,6 +1101,7 @@ class TestDecodeDictionaries:
             pa.large_string(),
             pa.large_list(pa.field("item", pa.float32(), nullable=False)),
             pa.list_view(pa.string()),
+            pa.run_end_encoded(pa.int16(), pa.large_string()),
             pa.large_list_view(pa.field("item", pa.int8(), nullable=False)),
             pa.struct([pa.field("a", pa.int8()), pa.field("b", pa.string())]),
             pa.map_(pa.string(), pa.int64()),
@@ -1120,6 +1121,10 @@ class TestDecodeDictionaries:
             (pa.large_list(_DICT), pa.large_list(pa.string())),
             (pa.list_(_DICT, 2), pa.list_(pa.string(), 2)),
             (pa.list_view(_DICT), pa.list_view(pa.string())),
+            (
+                pa.run_end_encoded(pa.int32(), _DICT),
+                pa.run_end_encoded(pa.int32(), pa.string()),
+            ),
             (pa.large_list_view(_DICT), pa.large_list_view(pa.string())),
             (
                 pa.struct([pa.field("k", _DICT), pa.field("n", pa.int64())]),
