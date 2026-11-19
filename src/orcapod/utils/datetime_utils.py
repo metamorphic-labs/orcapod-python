@@ -24,19 +24,22 @@ def is_aware(value: datetime) -> bool:
 def instant_microseconds(value: datetime) -> int | None:
     """Return the instant an aware ``value`` names, in microseconds since 0001-01-01 UTC.
 
-    Computed from the wall time and the offset the value's own ``fold`` selects,
-    without building a UTC ``datetime`` (which leaves the supported range near year 1
-    and year 9999), so the two times of a daylight-saving overlap are two instants.
+    Computed from the calendar fields of the wall time (day ordinal, hour, minute,
+    second, microsecond) and the offset the value's own ``fold`` selects. No
+    ``datetime`` arithmetic is done, so neither the supported range near year 1 and
+    year 9999 nor a ``datetime`` subclass of narrower range (Arrow hands back a
+    nanosecond timestamp as a ``pandas.Timestamp``, which cannot reach year 1) can
+    make it fail, and the two times of a daylight-saving overlap are two instants.
     ``None`` for a naive value.
     """
     offset = value.utcoffset()
     if offset is None:
         return None
-    wall = value.replace(tzinfo=None) - datetime.min
-    shift = offset.days * _MICROSECONDS_PER_DAY + offset.seconds * 1_000_000
-    return (
-        wall.days * _MICROSECONDS_PER_DAY
-        + wall.seconds * 1_000_000
-        + wall.microseconds
-        - (shift + offset.microseconds)
+    wall_seconds = (
+        (value.toordinal() - 1) * 86_400
+        + value.hour * 3_600
+        + value.minute * 60
+        + value.second
     )
+    shift = offset.days * _MICROSECONDS_PER_DAY + offset.seconds * 1_000_000
+    return wall_seconds * 1_000_000 + value.microsecond - (shift + offset.microseconds)

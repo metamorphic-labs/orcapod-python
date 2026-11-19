@@ -1262,9 +1262,12 @@ data. The rules:
   source feeding `GroupBy`, `Batch` or `MergeJoin` issues one `RestrictedAggregationWarning`.
   A pipeline keeps one restriction (or none) per source identity (a restriction leaves the
   identity unchanged), so one table restricted two ways (or with and without a restriction) in
-  one pipeline is refused at capture (`node_run.require_one_restriction`, over the sources each
-  invocation reads, `sources_read`), whatever streams lead there: projections, operator chains,
-  streams built before the capture. Every restriction walk goes through a slot's bound source,
+  one pipeline is refused (`node_run.require_one_restriction`, over the sources the streams
+  read now, `sources_read`; nothing is remembered between checks, since a rebound slot changes
+  what they read) at capture, at compile, by `bind` before it binds and at the start of every
+  run (`refuse_restriction_conflicts`), whatever streams lead there: projections, operator
+  chains, streams built before the capture. A bind's walk matches the job's own slots by object
+  (`Rebinding`), never by name. `RunSummary` keeps one restriction per slot (ITL-1293). Every restriction walk goes through a slot's bound source,
   a `SourceProxy`'s delegate and a `CachedSource`'s source (`_streams_beneath`); a
   `DerivedSource` is a root. A `CachedSource`
   over a restricted source is refused at construction (a cache is kept under the table's

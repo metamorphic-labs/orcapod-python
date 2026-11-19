@@ -14,7 +14,7 @@ the commit ``job.run()`` makes.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeAlias
 
@@ -274,16 +274,23 @@ def restriction_of(stream: object) -> _Restriction | None:
     return (condition or None, limit)
 
 
+Rebinding: TypeAlias = Sequence[tuple[Any, Any]]
+"""The sources a bind is about to bind: ``(slot, source)`` pairs, one per slot of the
+job that the bind changes. A slot is matched by object identity, never by name: a
+source being bound can itself be a slot of another job, of the same name."""
+
+
 def _streams_beneath(
-    current: Any, bound_sources: Mapping[str, Any] | None = None
+    current: Any, rebinding: Rebinding | None = None
 ) -> tuple[Any, ...]:
     """Return what ``current`` reads: the streams a restriction walk goes on to.
 
-    A ``SourceJobNode`` reads its bound source (or the one a bind is about to bind,
-    ``bound_sources``), a bound ``SourceProxy`` its delegate, a ``CachedSource`` the
-    source it caches; any other stream its ``upstreams``. A ``DerivedSource`` is a
-    root: it reads the rows stored for its origin, never its origin's sources, so
-    the walk ends there, as at every other root source.
+    A ``SourceJobNode`` reads its bound source (or, when it is one of the slots of
+    ``rebinding``, the source a bind is about to bind there), a bound
+    ``SourceProxy`` its delegate, a ``CachedSource`` the source it caches; any other
+    stream its ``upstreams``. A ``DerivedSource`` is a root: it reads the rows stored
+    for its origin, never its origin's sources, so the walk ends there, as at every
+    other root source.
     """
     from orcapod.core.nodes.source_node import SourceJobNode
     from orcapod.core.sources.cached_source import CachedSource
@@ -291,8 +298,9 @@ def _streams_beneath(
 
     if isinstance(current, SourceJobNode):
         bound = current.bound_source
-        if bound_sources is not None and current.name in bound_sources:
-            bound = bound_sources[current.name]
+        for slot, source in rebinding or ():
+            if slot is current:
+                bound = source
         return () if bound is None else (bound,)
     if isinstance(current, SourceProxy):
         return () if current.delegate is None else (current.delegate,)
@@ -303,7 +311,7 @@ def _streams_beneath(
 
 def restrictions_beneath(
     streams: Iterable[Any],
-    bound_sources: Mapping[str, Any] | None = None,
+    rebinding: Rebinding | None = None,
 ) -> frozenset[tuple[str, _Restriction]]:
     """Return the restrictions of every source the streams read, order-free.
 
@@ -314,8 +322,8 @@ def restrictions_beneath(
 
     Args:
         streams: Where the walk starts.
-        bound_sources: Slot name to the source a bind is about to bind there, read
-            in place of the slot's current source (``PipelineJob.bind`` checks
+        rebinding: The job's slots a bind is about to bind, each with its source,
+            read in place of the slot's current source (``PipelineJob.bind`` checks
             before it binds).
     """
     found: set[tuple[str, _Restriction]] = set()
@@ -329,7 +337,7 @@ def restrictions_beneath(
         restriction = restriction_of(current)
         if restriction is not None:
             found.add((_source_name(current), restriction))
-        pending.extend(_streams_beneath(current, bound_sources))
+        pending.extend(_streams_beneath(current, rebinding))
     return frozenset(found)
 
 
@@ -344,13 +352,15 @@ def restrictions_text(found: frozenset[tuple[str, _Restriction]]) -> str:
     )
 
 
-def sources_read(streams: Iterable[Any]) -> list[tuple[str, str, _Restriction | None]]:
+def sources_read(
+    streams: Iterable[Any], rebinding: Rebinding | None = None
+) -> list[tuple[str, str, _Restriction | None]]:
     """Return every root source the streams read, with its restriction.
 
     ``(content hash, source name, restriction or None)`` for each root source met by
     ``_streams_beneath``, once per object. The content hash is the source's identity,
     which a restriction leaves unchanged, so it is the key of the one-restriction
-    rule.
+    rule. ``rebinding``: the job's slots a bind is about to bind, with their sources.
     """
     from orcapod.core.sources.base import RootSource
     from orcapod.core.sources.cached_source import CachedSource
@@ -364,7 +374,7 @@ def sources_read(streams: Iterable[Any]) -> list[tuple[str, str, _Restriction | 
         if any(current is seen for seen in visited):
             continue
         visited.append(current)
-        beneath = _streams_beneath(current)
+        beneath = _streams_beneath(current, rebinding)
         if (
             isinstance(current, RootSource)
             and not isinstance(current, (CachedSource, SourceProxy))
@@ -382,36 +392,37 @@ def sources_read(streams: Iterable[Any]) -> list[tuple[str, str, _Restriction | 
 
 
 def require_one_restriction(
-    known: Mapping[str, tuple[str, _Restriction | None]], streams: Iterable[Any]
-) -> dict[str, tuple[str, _Restriction | None]]:
+    streams: Iterable[Any], rebinding: Rebinding | None = None
+) -> None:
     """Refuse a source read under two different restrictions in one pipeline.
 
     A restriction (ITL-1218) does not change a source's identity, so a pipeline
     holds one restriction (or none) per source identity, whatever streams lead to
-    it (projections, operator chains, caches, proxies). ``known`` maps each source
-    identity the pipeline already reads to its name and restriction; ``streams`` are
-    what is being recorded.
+    it (projections, operator chains, caches, proxies). The check reads what each
+    stream reads now (``sources_read``) and keeps nothing between calls: a slot
+    rebound since an earlier check changes what the streams over it read, so a
+    remembered answer could be wrong. Checked at capture, at compile, by a bind
+    before it binds and at the start of every run (``refuse_restriction_conflicts``),
+    since a slot bound to a stream over a source can read a source another slot
+    reads.
 
     Args:
-        known: Source content hash to ``(name, restriction or None)``.
-        streams: The streams of the invocation being recorded.
-
-    Returns:
-        The entries to add to ``known`` once the invocation is recorded (nothing is
-        changed here).
+        streams: Every stream the pipeline holds, with the inputs of the invocation
+            being recorded; or the nodes of a job or a run.
+        rebinding: The job's slots a bind is about to bind, with their sources.
 
     Raises:
-        ValueError: If a source is read under a restriction other than the one
-            ``known`` or another of ``streams`` reads it under.
+        ValueError: If one source is read under two different restrictions (or
+            with and without one).
     """
-    added: dict[str, tuple[str, _Restriction | None]] = {}
-    for key, name, restriction in sources_read(streams):
-        seen = known.get(key) or added.get(key)
-        if seen is None:
-            added[key] = (name, restriction)
+    seen: dict[str, _Restriction | None] = {}
+    for key, name, restriction in sources_read(streams, rebinding):
+        if key not in seen:
+            seen[key] = restriction
             continue
-        if seen[1] != restriction:
-            first = restriction_text(*seen[1]) if seen[1] else "no restriction"
+        if seen[key] != restriction:
+            earlier = seen[key]
+            first = restriction_text(*earlier) if earlier else "no restriction"
             second = restriction_text(*restriction) if restriction else "no restriction"
             raise ValueError(
                 "Two streams read different rows in one pipeline: the source "
@@ -420,7 +431,6 @@ def require_one_restriction(
                 "pipeline holds one restriction per source: use one restriction for "
                 "the table in this pipeline, or build a separate pipeline."
             )
-    return added
 
 
 # TODO(ITL-1219): a restriction kept apart from the node's identity (or a cache keyed by
@@ -428,7 +438,7 @@ def require_one_restriction(
 def refuse_restricted_operator_cache(
     node: Any,
     cache_mode: CacheMode,
-    bound_sources: Mapping[str, Any] | None = None,
+    rebinding: Rebinding | None = None,
     *,
     streams: Iterable[Any] | None = None,
 ) -> None:
@@ -443,7 +453,7 @@ def refuse_restricted_operator_cache(
     Args:
         node: The operator job node.
         cache_mode: The cache mode the node has or is about to get.
-        bound_sources: Slot name to the source a bind is about to bind there.
+        rebinding: The job's slots a bind is about to bind, with their sources.
         streams: The inputs the node is about to read, when they are not (yet) its
             ``upstreams``: streams handed to ``execute``, or a new ``upstreams``.
 
@@ -455,7 +465,7 @@ def refuse_restricted_operator_cache(
     if cache_mode == CacheMode.OFF:
         return
     inputs = streams if streams is not None else getattr(node, "upstreams", ())
-    found = restrictions_beneath(inputs, bound_sources)
+    found = restrictions_beneath(inputs, rebinding)
     if not found:
         return
     raise ValueError(
@@ -469,20 +479,20 @@ def refuse_restricted_operator_cache(
 
 def refuse_restricted_operator_caches(
     streams: Iterable[Any],
-    bound_sources: Mapping[str, Any] | None = None,
+    rebinding: Rebinding | None = None,
 ) -> None:
     """Refuse every caching operator job node at or above ``streams`` over a restriction.
 
     Walks ``upstreams`` (not into a slot's bound source, whose own nodes are not
     the job's) and checks each ``OperatorJobNode`` found with
-    ``refuse_restricted_operator_cache``. Called by ``PipelineJob.bind`` before it
-    binds, before a job distributes its databases, and at the start of
-    ``job.run()``, ``run_async()`` and a job node's ``run()``, before any source is
-    checked or anything computed or written.
+    ``refuse_restricted_operator_cache``. Called before a job distributes its
+    databases, and through ``refuse_restriction_conflicts`` by ``PipelineJob.bind``
+    before it binds and at the start of ``job.run()``, ``run_async()`` and a job
+    node's ``run()``, before any source is checked or anything computed or written.
 
     Args:
         streams: The nodes of a run or a job, or the node whose ``run()`` it is.
-        bound_sources: Slot name to the source a bind is about to bind there.
+        rebinding: The job's slots a bind is about to bind, with their sources.
 
     Raises:
         ValueError: For the first caching operator node over a restricted source.
@@ -500,9 +510,32 @@ def refuse_restricted_operator_caches(
         if isinstance(current, OperatorJobNode):
             # As PipelineJob reads it: the mode has no public accessor.
             mode = getattr(current, "_cache_mode", None) or CacheMode.OFF
-            refuse_restricted_operator_cache(current, mode, bound_sources)
+            refuse_restricted_operator_cache(current, mode, rebinding)
         if not isinstance(current, SourceJobNode):
             pending.extend(getattr(current, "upstreams", ()))
+
+
+def refuse_restriction_conflicts(
+    streams: Iterable[Any], rebinding: Rebinding | None = None
+) -> None:
+    """Refuse what a bind or a run cannot do over restricted sources (ITL-1218).
+
+    One source read under two restrictions (``require_one_restriction``) and a
+    caching operator node over a restricted source
+    (``refuse_restricted_operator_caches``). Called by ``PipelineJob.bind`` before it
+    binds, and at the start of ``job.run()``, ``run_async()`` and a job node's
+    ``run()``, before any source is checked or anything computed or written.
+
+    Args:
+        streams: The nodes of a job or a run, or the node whose ``run()`` it is.
+        rebinding: The job's slots a bind is about to bind, with their sources.
+
+    Raises:
+        ValueError: For the first conflict found.
+    """
+    streams = list(streams)
+    require_one_restriction(streams, rebinding)
+    refuse_restricted_operator_caches(streams, rebinding)
 
 
 def restrictions_in_force(
@@ -518,6 +551,11 @@ def restrictions_in_force(
     with different conditions are both reported. A slot keeps its name; a direct
     source is numbered (``"<label> (2)"``) only when its label is a slot's name or
     another direct source's, whatever the order the walk meets them.
+
+    Known limit (ITL-1293): a slot keeps one entry. A slot bound to a stream that
+    reads two restricted tables (a ``semi_join`` of two restricted sources) reports
+    the first one the walk meets. Every check (the operator-cache refusal, the
+    one-restriction rule) still reads both.
 
     Only a ``SpiralDBTableSource`` can be restricted today (``restriction_of``;
     every source kind when restrictions are generalized, ITL-1219).

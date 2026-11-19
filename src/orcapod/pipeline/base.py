@@ -91,9 +91,6 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         self._invocation_lut: dict[str, PodInvocation] = {}
         # Maps content-hash-string → raw stream for each unregistered upstream.
         self._source_streams: dict[str, Any] = {}
-        # Source identity to (name, restriction or None), built when first needed
-        # (``_restrictions_by_source``, ITL-1218).
-        self._restriction_index: dict[str, Any] | None = None
         # Topology graph — vertices and edges are content-hash strings.
         # Additive: persists and grows across multiple with-blocks.
         self._hash_graph: "nx.DiGraph" = nx.DiGraph()
@@ -299,9 +296,9 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
 
         Raises:
             ValueError: If the invocation reads a source under another restriction
-                than the pipeline already reads it under, or two of its inputs read
-                one source under two restrictions (ITL-1218), whatever streams lead
-                there. Nothing is recorded then.
+                than the pipeline's streams read it under now, or two of its inputs
+                read one source under two restrictions (ITL-1218), whatever streams
+                lead there. Nothing is recorded then.
         """
         from orcapod.pipeline.node_run import require_one_restriction
 
@@ -313,42 +310,27 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         # Checked before anything is recorded, so a refused invocation leaves the
         # graph as it was. A restriction does not change a source's identity, so the
         # pipeline keeps one restriction (or none) per source identity, whatever
-        # streams lead to it: every source this invocation reads is checked against
-        # the sources the pipeline already reads and against each other.
-        index = self._restrictions_by_source()
-        added = require_one_restriction(index, inputs)
+        # streams lead to it: every source this invocation reads is checked with
+        # every source the pipeline's streams read now (nothing is remembered: a
+        # slot rebound since the last invocation changes what they read).
+        require_one_restriction([*self._held_streams(), *inputs])
         self._invocation_lut[key] = invocation
         self._hash_graph.add_node(key)
         for upstream, upstream_hash in upstreams:
             self._hash_graph.add_edge(upstream_hash, key)
             if upstream_hash not in self._source_streams:
                 self._source_streams[upstream_hash] = upstream
-        index.update(added)
 
-    def _restrictions_by_source(self) -> dict[str, Any]:
-        """The restriction each source the pipeline reads is read under (ITL-1218).
-
-        Source content hash to ``(name, restriction or None)``, kept as invocations
-        are recorded; built once from what the pipeline holds when it is first
-        needed (a pipeline rebuilt from invocations, or a clone, starts without it).
-        """
-        from orcapod.pipeline.node_run import sources_read
-
-        index = getattr(self, "_restriction_index", None)
-        if index is None:
-            index = {}
-            streams = [
-                *self._source_streams.values(),
-                *(
-                    stream
-                    for invocation in self._invocation_lut.values()
-                    for stream in invocation.input_streams
-                ),
-            ]
-            for source_key, name, restriction in sources_read(streams):
-                index.setdefault(source_key, (name, restriction))
-            self._restriction_index = index
-        return index
+    def _held_streams(self) -> list[Any]:
+        """Every stream the pipeline holds: its leaves and every recorded input."""
+        return [
+            *self._source_streams.values(),
+            *(
+                stream
+                for invocation in self._invocation_lut.values()
+                for stream in invocation.input_streams
+            ),
+        ]
 
     # ------------------------------------------------------------------
     # Diagram (ITL-1197)
@@ -461,8 +443,19 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
 
         This method always rebuilds from scratch; it does NOT perform
         incremental compilation.
+
+        Raises:
+            ValueError: If one source is read under two different restrictions
+                (ITL-1218), judged from what the recorded streams read now.
         """
         import networkx as _nx
+
+        from orcapod.pipeline.node_run import require_one_restriction
+
+        # Checked again here, from what the streams read now: a slot rebound after
+        # the last invocation would otherwise connect a branch recorded over one
+        # restriction to another (ITL-1218).
+        require_one_restriction(self._held_streams())
 
         source_node_cls = self.source_node_class
 

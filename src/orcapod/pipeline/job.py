@@ -28,6 +28,7 @@ from orcapod.pipeline.node_run import (
     RunPlan,
     check_sources,
     refuse_restricted_operator_caches,
+    refuse_restriction_conflicts,
     restrictions_in_force,
     warn_restricted_aggregation,
     clear_run_rows,
@@ -448,8 +449,16 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # changes too (ITL-1162), and so is a caching operator over a restricted
         # source, one this bind binds or one already bound (ITL-1218): a bind of a
         # database alone would otherwise set it and fail while distributing it.
-        refuse_restricted_operator_caches(
-            (self._persistent_node_map or {}).values(), bound_sources=sources
+        # The slots this bind changes are the job's own, matched by object: a source
+        # being bound may itself be a slot of another job with the same name.
+        to_bind = sources or {}
+        rebinding = [
+            (node, to_bind[node.name])
+            for node in (self._persistent_node_map or {}).values()
+            if isinstance(node, SourceJobNode) and node.name in to_bind
+        ]
+        refuse_restriction_conflicts(
+            (self._persistent_node_map or {}).values(), rebinding=rebinding
         )
         if database_changed and database is not None:
             self._require_storable_tables(database)
@@ -1253,9 +1262,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         pipeline_db = self._database.at(*self._name)
         result_db = pipeline_db.at("_result")
 
-        # A caching operator over a restricted source is refused before any source is
-        # checked and before anything is computed or written (ITL-1218).
-        refuse_restricted_operator_caches(exec_dag.nodes())
+        # A source read under two restrictions, or a caching operator over a restricted
+        # source, is refused before any source is checked and before anything is
+        # computed or written (ITL-1218).
+        refuse_restriction_conflicts(exec_dag.nodes())
         # Every source first takes in any new data, moving its modified time, before
         # the state rule judges any node (ITL-1102).
         unchecked = check_sources(exec_dag.nodes())

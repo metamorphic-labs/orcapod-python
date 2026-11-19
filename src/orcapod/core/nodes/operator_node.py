@@ -1778,7 +1778,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         from orcapod.pipeline.node_run import (
             check_sources,
             depends_on_job_nodes,
-            refuse_restricted_operator_caches,
+            refuse_restriction_conflicts,
             refuse_unloadable_inputs,
             run_with_dependencies,
         )
@@ -1786,9 +1786,10 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
 
         if self._loaded and not load_only:
             raise self._cannot_compute_error()
-        # A caching operator over a restricted source is refused before any source is
-        # checked and before anything is computed or written (ITL-1218).
-        refuse_restricted_operator_caches([self])
+        # A source read under two restrictions, or a caching operator over a restricted
+        # source, is refused before any source is checked and before anything is
+        # computed or written (ITL-1218).
+        refuse_restriction_conflicts([self])
         # Every source feeding the run first takes in any new data (ITL-1102).
         unchecked = check_sources([self])
         if self.holds_current_run(load_only=load_only):

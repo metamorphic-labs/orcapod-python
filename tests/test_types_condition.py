@@ -352,6 +352,46 @@ class TestInstants:
         assert loaded == condition
         assert hash(loaded) == hash(condition)
 
+    @pytest.mark.parametrize("unit", ["s", "ms", "us", "ns"])
+    @pytest.mark.parametrize(
+        "value", [_FIRST_0130, _SECOND_0130], ids=["fold 0", "fold 1"]
+    )
+    def test_a_value_handed_back_by_arrow_has_the_same_instant(self, unit, value):
+        """Arrow hands back a nanosecond timestamp as a ``pandas.Timestamp``, which
+        cannot reach year 1: the instant is computed from calendar fields."""
+        import pyarrow as pa
+
+        from orcapod.utils.datetime_utils import instant_microseconds
+
+        stored = pa.scalar(
+            value, type=pa.timestamp(unit, tz="America/New_York")
+        ).as_py()
+        assert isinstance(stored, dt.datetime)
+        assert instant_microseconds(stored) == instant_microseconds(value)
+        assert instant_microseconds(value) == (
+            instant_microseconds(value.astimezone(dt.timezone.utc))
+        )
+
+    @pytest.mark.parametrize(
+        "value, expected",
+        [
+            (dt.datetime(1, 1, 1, tzinfo=dt.timezone.utc), 0),
+            (
+                dt.datetime(1, 1, 1, 1, tzinfo=dt.timezone(dt.timedelta(hours=1))),
+                0,
+            ),
+            (
+                dt.datetime(9999, 12, 31, 23, 59, 59, 999_999, tzinfo=dt.timezone.utc),
+                (dt.date(9999, 12, 31).toordinal() * 86_400) * 1_000_000 - 1,
+            ),
+        ],
+        ids=["year 1", "year 1 at +01:00", "year 9999"],
+    )
+    def test_the_ends_of_the_range(self, value, expected):
+        from orcapod.utils.datetime_utils import instant_microseconds
+
+        assert instant_microseconds(value) == expected
+
     def test_a_naive_time_is_not_an_instant(self):
         assert Condition.of(at=_START) != Condition.of(at=_AWARE)
         assert Condition.of(at=_START) == Condition.of(at=_START.replace(fold=1))

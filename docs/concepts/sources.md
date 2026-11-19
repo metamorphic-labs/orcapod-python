@@ -309,8 +309,10 @@ print(Condition.of(day=day, started=started, recorded=recorded))
   pipeline in which one table is read with two different restrictions (or with and without
   one) raises `ValueError` instead of silently reading one of them, whatever streams lead to
   the table: different column selections or operator chains, streams built before the
-  pipeline, a `CachedSource` or a `SourceProxy` bound to it. Use one restriction per
-  pipeline, or build separate pipelines.
+  pipeline, a `CachedSource` or a `SourceProxy` bound to it. It is checked from what each
+  stream reads at that moment: when the pipeline is built, when it is compiled, by `bind`
+  before it binds (a slot bound to a stream over a table another slot reads) and when a run
+  starts. Use one restriction per pipeline, or build separate pipelines.
 - **With `limit=`.** A source built with `limit=n` reads the first `n` rows that match, in
   key order: the conditions are applied first.
 - **Conditions as values.** Two conditions are equal when they require the same columns to
@@ -329,7 +331,10 @@ print(Condition.of(day=day, started=started, recorded=recorded))
   limit, and `RunSummary.restricted_source_ids` every such slot to its source id; the
   summary shows them (`spikes (spikes): where unit_id=106, limit 3`). A saved job records them in
   the source's config, and a loaded job reads with them. Binding does not compare
-  restrictions: a restricted source fits the slot of the unrestricted one.
+  restrictions: a restricted source fits the slot of the unrestricted one. A slot keeps one
+  entry: a slot bound to a stream over two restricted tables (a `semi_join` of two restricted
+  sources) records the first one found (a known limit, ITL-1293), although every check reads
+  both.
 - **No cache over a restriction.** `CachedSource` (and `source.cached(...)`) refuses a
   restricted source with `ValueError`, naming the restriction: a cache keeps the table's rows
   under the table's identity, which a restriction is not part of, so a restricted read would

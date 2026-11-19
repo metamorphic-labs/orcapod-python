@@ -12,6 +12,7 @@ import copy
 import datetime as dt
 import json
 import math
+from decimal import Decimal
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
@@ -29,6 +30,7 @@ from orcapod.core.sources.spiraldb_table_source import _checked_conditions
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.cached_source import CachedSource
 from orcapod.sources import SpiralDBTableSource
+from orcapod.core.operators import MapData
 from orcapod.types import CacheMode, Condition
 from tests.test_databases import fake_pyspiral
 
@@ -503,6 +505,188 @@ class TestRefusals:
             _source().where(channel="0")
 
         assert fake_pyspiral.scan_log == []
+
+
+_UNITS: list[Any] = ["s", "ms", "us", "ns"]  # pyarrow types the unit as a literal
+_ZONE = "America/New_York"
+# 01:30 on 2026-11-01 happens twice in New York: fold 0 (EDT, 05:30 UTC) and fold 1
+# (EST, 06:30 UTC). A naive column holds one 01:30 for both.
+_WALL = dt.datetime(2026, 11, 1, 1, 30)
+
+
+def _local(fold: int) -> dt.datetime:
+    import zoneinfo
+
+    return _WALL.replace(fold=fold, tzinfo=zoneinfo.ZoneInfo(_ZONE))
+
+
+def _typed_rows() -> pa.Table:
+    """Key ``k`` 0, 1, 2: every timestamp unit zoned and zone-free, and the other
+    column types a condition can match."""
+    import zoneinfo
+
+    zone = zoneinfo.ZoneInfo(_ZONE)
+    later = _WALL.replace(hour=3)
+    columns: dict[str, Any] = {"k": pa.array([0, 1, 2], pa.int64())}
+    for unit in _UNITS:
+        columns[f"naive_{unit}"] = pa.array([_WALL, _WALL, later], pa.timestamp(unit))
+        columns[f"zoned_{unit}"] = pa.array(
+            [_local(0), _local(1), later.replace(tzinfo=zone)],
+            pa.timestamp(unit, tz=_ZONE),
+        )
+    one, two = dt.date(2026, 1, 1), dt.date(2026, 1, 2)
+    columns.update(
+        {
+            "d64": pa.array([one, two, one], pa.date64()),
+            "bin": pa.array([b"a", b"b", b"a"], pa.binary()),
+            "fbin": pa.array([b"aa", b"bb", b"aa"], pa.binary(2)),
+            "i8": pa.array([-1, 2, -1], pa.int8()),
+            "u8": pa.array([255, 2, 255], pa.uint8()),
+            "i32": pa.array([1, 2, 1], pa.int32()),
+            "u32": pa.array([1, 2, 1], pa.uint32()),
+            "i64": pa.array([1, 2, 1], pa.int64()),
+            "f64": pa.array([1.5, 2.5, 1.5], pa.float64()),
+            "t32": pa.array([dt.time(1), dt.time(2), dt.time(1)], pa.time32("s")),
+            "t64": pa.array([dt.time(1), dt.time(2), dt.time(1)], pa.time64("us")),
+            "dec": pa.array([Decimal("1.50")] * 3, pa.decimal128(5, 2)),
+            "dur": pa.array([dt.timedelta(1)] * 3, pa.duration("us")),
+        }
+    )
+    return pa.table(columns)
+
+
+@pytest.fixture()
+def typed(tmp_path: Path):
+    """Provide a ``typed`` table in a fake that keeps time zones."""
+    root = tmp_path / "typed"
+    fake_pyspiral.write_behaviour(
+        root, fake_pyspiral.StorageBehaviour(drop_timezone=False)
+    )
+    with fake_pyspiral.install(root):
+        project = fake_pyspiral.FakeSpiral().project(_PROJECT)
+        project.create_table(
+            "default.typed", key_schema=pa.schema([pa.field("k", pa.int64())])
+        ).write(_typed_rows())
+        yield SpiralDBTableSource(_PROJECT, "typed", tag_only_columns=True)
+
+
+def _keys(source: SpiralDBTableSource) -> list[int]:
+    return cast("list[int]", source.as_table().column("k").to_pylist())
+
+
+@pytest.mark.filterwarnings("ignore:arrow_type_to_python_type")
+class TestColumnTypes:
+    """``where`` on every timestamp unit, zoned and zone-free, and the other column
+    types (CodeRabbit, PR 435: Arrow hands back a nanosecond timestamp as a
+    ``pandas.Timestamp``, which no instant computation may need to reach year 1)."""
+
+    @pytest.mark.parametrize("unit", _UNITS)
+    @pytest.mark.parametrize("fold", [0, 1])
+    def test_a_zoned_column_matches_the_instant_of_either_fold(self, typed, unit, fold):
+        assert _keys(typed.where({f"zoned_{unit}": _local(fold)})) == [fold]
+
+    @pytest.mark.parametrize("unit", _UNITS)
+    @pytest.mark.parametrize("fold", [0, 1])
+    def test_an_aware_value_in_another_zone_matches_by_instant(self, typed, unit, fold):
+        in_utc = _local(fold).astimezone(dt.timezone.utc)
+        assert _keys(typed.where({f"zoned_{unit}": in_utc})) == [fold]
+
+    @pytest.mark.parametrize("unit", _UNITS)
+    @pytest.mark.parametrize("fold", [0, 1])
+    def test_a_naive_column_holds_one_wall_time_for_both_folds(self, typed, unit, fold):
+        assert _keys(typed.where({f"naive_{unit}": _WALL.replace(fold=fold)})) == [
+            0,
+            1,
+        ]
+
+    @pytest.mark.parametrize("unit", _UNITS)
+    def test_the_wrong_kind_of_time_is_refused_for_every_unit(self, typed, unit):
+        with pytest.raises(TypeError, match="aware"):
+            typed.where({f"zoned_{unit}": _WALL})
+        with pytest.raises(TypeError, match="naive"):
+            typed.where({f"naive_{unit}": _local(0)})
+
+    @pytest.mark.parametrize(
+        "restrict",
+        [
+            lambda s, z, n: s.where(**{z: _local(1), n: _WALL}),
+            lambda s, z, n: s.where(**{n: _WALL, z: _local(1)}),
+            lambda s, z, n: s.where({n: _WALL}, **{z: _local(1)}),
+            lambda s, z, n: s.where({z: _local(1)}).where({n: _WALL}),
+            lambda s, z, n: s.where(Condition.of({n: _WALL, z: _local(1)})),
+        ],
+        ids=[
+            "zoned first",
+            "naive first",
+            "mapping and keyword",
+            "chained",
+            "Condition",
+        ],
+    )
+    @pytest.mark.parametrize(
+        "zoned, naive", [("zoned_ns", "naive_s"), ("zoned_s", "naive_ns")]
+    )
+    def test_several_time_columns_in_every_order(self, typed, restrict, zoned, naive):
+        assert _keys(restrict(typed, zoned, naive)) == [1]
+
+    def test_two_zoned_units_and_a_key_together(self, typed):
+        both = {"zoned_ms": _local(0), "zoned_ns": _local(0), "k": 0}
+        assert _keys(typed.where(both)) == [0]
+        assert _keys(typed.where(dict(reversed(both.items())))) == [0]
+        assert _keys(typed.where(zoned_ms=_local(0), zoned_ns=_local(1))) == []
+
+    @pytest.mark.parametrize(
+        "column, value, expected",
+        [
+            ("d64", dt.date(2026, 1, 1), [0, 2]),
+            ("bin", b"a", [0, 2]),
+            ("fbin", b"aa", [0, 2]),
+            ("i8", -1, [0, 2]),
+            ("u8", 255, [0, 2]),
+            ("i32", 2, [1]),
+            ("u32", 1, [0, 2]),
+            ("i64", 2, [1]),
+            ("f64", 1.5, [0, 2]),
+        ],
+    )
+    def test_each_other_type_can_be_matched(self, typed, column, value, expected):
+        assert _keys(typed.where({column: value})) == expected
+        assert _keys(typed.where({column: value, "k": expected[-1]})) == [expected[-1]]
+
+    @pytest.mark.parametrize(
+        "column, value, match",
+        [
+            ("fbin", b"a", "cannot hold"),
+            ("i8", 128, "cannot hold"),
+            ("u8", -1, "cannot hold"),
+            ("u32", 2**32, "cannot hold"),
+            ("t32", 1, "does not support"),
+            ("t64", 1, "does not support"),
+            ("dec", 1.5, "does not support"),
+            ("dur", 1, "does not support"),
+        ],
+    )
+    def test_a_value_the_column_cannot_take_is_refused(
+        self, typed, column, value, match
+    ):
+        """Time of day, decimal and duration columns take no condition: a condition
+        holds only a bool, int, float, str, bytes, datetime or date."""
+        with pytest.raises(TypeError, match=match):
+            typed.where({column: value})
+
+    @pytest.mark.parametrize(
+        "value", [dt.time(1), Decimal("1.50"), dt.timedelta(1)], ids=repr
+    )
+    def test_no_condition_holds_a_time_of_day_decimal_or_duration(self, value):
+        with pytest.raises(TypeError, match="exactly a bool"):
+            Condition.of(x=value)
+
+    def test_a_float16_column_takes_a_float(self):
+        """The check accepts it; which rows match is the table system's equality.
+        (About the check itself: pyarrow, and so the fake, has no float16 equality.)"""
+        schema = pa.schema([pa.field("h", pa.float16()), pa.field("k", pa.int64())])
+        for conditions in ({"h": 1.5, "k": 1}, {"k": 1, "h": 1.5}):
+            assert _checked_conditions(conditions, schema) == conditions
 
 
 class TestIdentity:
@@ -1790,6 +1974,34 @@ class TestBindOfADatabaseOverARestrictedSlot:
             after = (job.database, node._pipeline_database)  # pyright: ignore[reportPrivateUsage]
             assert after[0] is before[0] and after[1] is before[1]
 
+    @pytest.mark.parametrize("mode", _CACHING, ids=lambda m: m.name)
+    @pytest.mark.parametrize("inner_name", ["events", "inner"])
+    @pytest.mark.parametrize("with_database", [True, False], ids=["db", "no-db"])
+    def test_a_slot_over_a_restricted_slot_is_refused_before_anything_changes(
+        self, project, tmp_path, mode, inner_name, with_database
+    ):
+        """A source to bind that is itself a slot (of another job) bound to a
+        restricted source: its restriction is read, whatever its name. Only the
+        job's own slots take the source being bound (CodeRabbit, PR 435)."""
+        from orcapod.core.nodes.source_node import SourceJobNode
+
+        store = DeltaTableDatabase(tmp_path / "s")
+        job = TestRestrictionThroughWrappers._cached_job(store, mode)
+        node, slot = job.nodes["rename"], job.nodes["events"]
+        inner = SourceJobNode.from_stream(_events(), name=inner_name)
+        inner.bound_source = _events().where(subject_id="m1")
+        before = (job.database, node._pipeline_database, slot.bound_source)  # pyright: ignore[reportPrivateUsage]
+        other = DeltaTableDatabase(tmp_path / "other")
+
+        for _ in range(2):
+            with pytest.raises(ValueError, match="cannot cache a restricted read"):
+                if with_database:
+                    job.bind(sources={"events": inner}, database=other)
+                else:
+                    job.bind(sources={"events": inner})
+            after = (job.database, node._pipeline_database, slot.bound_source)  # pyright: ignore[reportPrivateUsage]
+            assert all(a is b for a, b in zip(after, before, strict=True))
+
 
 class TestOneRestrictionPerSource:
     """The one-restriction rule is per source identity, not per stream hash.
@@ -1875,6 +2087,184 @@ class TestOneRestrictionPerSource:
         assert summary.restrictions == {
             "events": Condition.of(subject_id="m1", flag=True)
         }
+
+
+class TestRestrictionsCheckedLive:
+    """The one-restriction rule reads what each stream reads now (CodeRabbit, PR 435).
+
+    A slot rebound during the capture changes what the streams recorded from it read,
+    so nothing is kept from an earlier check: every invocation checks every stream
+    the pipeline holds with its own inputs, and compilation checks them again.
+    """
+
+    @staticmethod
+    def _slot(source: Any) -> Any:
+        from orcapod.core.nodes.source_node import SourceJobNode
+
+        return SourceJobNode.from_stream(source)
+
+    @pytest.mark.parametrize("step", ["select", "drop"])
+    def test_a_slot_rebound_between_invocations_is_refused_at_the_next(
+        self, project, tmp_path, step
+    ):
+        """A projection from a slot bound to m1, the slot rebound to m2, then a
+        projection from the m1 source: compiled, both would read m2's rows."""
+        m1 = _events().where(subject_id="m1")
+        slot = self._slot(m1)
+        later = {
+            "select": lambda s: s.select_data_columns(["amplitude"]),
+            "drop": lambda s: s.drop_data_columns(["note"]),
+        }[step]
+        job = PipelineJob(name="live", database=DeltaTableDatabase(tmp_path / "s"))
+        with pytest.raises(ValueError, match="different rows in one pipeline"):
+            with job:
+                MapData({"channel": "lane"})(slot)
+                slot.bound_source = _events().where(subject_id="m2")
+                later(m1)
+
+    def test_a_slot_rebound_after_the_last_invocation_is_refused_at_compile(
+        self, project, tmp_path
+    ):
+        m1 = _events().where(subject_id="m1")
+        slot = self._slot(m1)
+        job = PipelineJob(name="live", database=DeltaTableDatabase(tmp_path / "s"))
+        with pytest.raises(ValueError, match="different rows in one pipeline"):
+            with job:
+                MapData({"channel": "lane"})(slot)
+                m1.select_data_columns(["amplitude"])
+                slot.bound_source = _events().where(subject_id="m2")
+
+    def test_a_slot_rebound_to_an_equal_restriction_is_accepted(
+        self, project, tmp_path
+    ):
+        m1 = _events().where(subject_id="m1")
+        slot = self._slot(m1)
+        job = PipelineJob(name="live", database=DeltaTableDatabase(tmp_path / "s"))
+        with job:
+            MapData({"channel": "lane"})(slot)
+            slot.bound_source = _events().where(subject_id="m1")
+            m1.select_data_columns(["amplitude"])
+        assert job.run().restrictions == {"events": Condition.of(subject_id="m1")}
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.SemiJoinIgnoredColumnWarning")
+class TestASlotOverTwoTables:
+    """A slot bound to a stream over two restricted tables (CodeRabbit, PR 435).
+
+    A ``semi_join`` keeps its left input's system tags, so it fits a slot; every
+    check then reads both tables. One source read under two restrictions across
+    slots is refused by a bind before it binds, and by a run before anything is
+    read, as at capture. A job node's ``run()`` checks what that run reads.
+    """
+
+    @staticmethod
+    def _others() -> SpiralDBTableSource:
+        return SpiralDBTableSource(
+            _PROJECT, "other", source_id="others", tag_only_columns=True
+        )
+
+    @pytest.fixture()
+    def other_table(self, project):
+        project.create_table("default.other", key_schema=_KEYS).write(
+            _rows(["m1", "m2", "m1", "m2", "m2"], [1, 2, 3, 4, 5])
+        )
+        fake_pyspiral.scan_log.clear()
+
+    def _job(self, tmp_path: Path, others: SpiralDBTableSource) -> PipelineJob:
+        """Slot ``events`` (unrestricted) and slot ``others`` bound to ``others``;
+        node ``both`` reads the two slots."""
+        job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
+        with job:
+            events = _events()
+            events.map_data({"amplitude": "a"}, label="rename")
+            others.map_data({"amplitude": "b"}, label="other")
+            events.semi_join(others, label="both")
+        return job
+
+    @pytest.mark.parametrize("form", ["semi_join", "nested"])
+    @pytest.mark.parametrize(
+        "bound_other",
+        [lambda s: s.where(subject_id="m2"), lambda s: s],
+        ids=["another condition", "no restriction"],
+    )
+    def test_a_bind_reading_a_source_two_ways_is_refused_before_anything_changes(
+        self, project, other_table, tmp_path, form, bound_other
+    ):
+        job = self._job(tmp_path, self._others().where(subject_id="m1"))
+        slot = job.nodes["events"]
+        before = (job.database, slot.bound_source)
+        other_read = bound_other(self._others())
+        events = _events().where(subject_id="m1")
+        stream = (
+            events.semi_join(other_read)
+            if form == "semi_join"
+            else events.semi_join(other_read.semi_join(events))
+        )
+        other_db = DeltaTableDatabase(tmp_path / "other")
+
+        for _ in range(2):
+            with pytest.raises(ValueError, match="different rows in one pipeline"):
+                job.bind(sources={"events": stream}, database=other_db)
+            assert job.database is before[0]
+            assert slot.bound_source is before[1]
+
+    @pytest.mark.parametrize("run", ["job.run", "job.run_async", "node.run"])
+    def test_a_slot_rebound_directly_is_refused_when_the_run_starts(
+        self, project, other_table, tmp_path, run
+    ):
+        job = self._job(tmp_path, self._others().where(subject_id="m1"))
+        job.nodes["events"].bound_source = _events().semi_join(
+            self._others().where(subject_id="m2")
+        )
+        scans = len(fake_pyspiral.scan_log)
+
+        with pytest.raises(ValueError, match="different rows in one pipeline"):
+            if run == "job.run":
+                job.run()
+            elif run == "job.run_async":
+                asyncio.run(asyncio.wait_for(job.run_async(), timeout=120))
+            else:
+                job.nodes["both"].run()
+        assert len(fake_pyspiral.scan_log) == scans
+
+    @pytest.mark.parametrize("order", ["events first", "others first"])
+    def test_two_tables_restricted_once_each_are_accepted(
+        self, project, other_table, tmp_path, order
+    ):
+        """Two sources, one restriction each: no conflict; the run reads only the
+        rows both restrictions keep."""
+        job = self._job(tmp_path, self._others().where(subject_id="m2"))
+        events = _events().where(subject_id="m2")
+        others = self._others().where(subject_id="m2")
+        stream = (
+            events.semi_join(others)
+            if order == "events first"
+            else events.semi_join(others.semi_join(events))
+        )
+        job.bind(sources={"events": stream})
+        job.run()
+        rows = job.nodes["rename"].as_table()
+        assert sorted(rows.column("timestamp").to_pylist()) == [4, 5]
+
+    @pytest.mark.parametrize("mode", _CACHING, ids=lambda m: m.name)
+    @pytest.mark.parametrize("restricted", ["events", "others", "both"])
+    def test_a_cache_over_the_slot_is_refused_naming_each_restriction(
+        self, project, other_table, tmp_path, mode, restricted
+    ):
+        store = DeltaTableDatabase(tmp_path / "s")
+        job = TestRestrictionThroughWrappers._cached_job(store, mode)
+        events, others = _events(), self._others()
+        if restricted in ("events", "both"):
+            events = events.where(subject_id="m1")
+        if restricted in ("others", "both"):
+            others = others.where(subject_id="m2")
+
+        with pytest.raises(ValueError, match="cannot cache a restricted read") as info:
+            job.bind(sources={"events": events.semi_join(others)})
+        if restricted in ("events", "both"):
+            assert "events: where subject_id='m1'" in str(info.value)
+        if restricted in ("others", "both"):
+            assert "others: where subject_id='m2'" in str(info.value)
 
 
 class TestSummaryKeys:
