@@ -860,3 +860,27 @@ def test_the_order_of_the_mapping_changes_nothing_not_even_the_column_order(
             )
         )
     assert len(results) == 1
+
+
+@pytest.mark.parametrize("roles", ["plain", "data_tags", "mixed"])
+def test_the_exported_config_is_a_copy_in_new_name_order(roles: str) -> None:
+    """``to_config()`` gives a copy of the mapping, in the order of the new names.
+
+    Editing the exported mapping (reordering or dropping its entries) changes neither
+    the source's config nor its columns, in every mapping order.
+    """
+    origin = make_source(MAIN, Arrangement(MAIN.tags, TAGS_FIRST, roles))
+    items = (("t1", "z1"), ("t2", "y2"), ("t3", "x3"))
+    for order in itertools.permutations(items):
+        source = DerivedSource(origin, tags_as_data=dict(order))
+        before = source.keys()
+        exported = source.to_config()["tags_as_data"]
+        assert list(exported.items()) == [("t3", "x3"), ("t2", "y2"), ("t1", "z1")]
+        exported.pop("t3")
+        exported["t3"] = "x3"  # now last: another order, same entries
+        exported.pop("t2")
+        assert source.to_config()["tags_as_data"] == dict(
+            [("t3", "x3"), ("t2", "y2"), ("t1", "z1")]
+        )
+        assert list(source.to_config()["tags_as_data"]) == ["t3", "t2", "t1"]
+        assert source.keys() == before

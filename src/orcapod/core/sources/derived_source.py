@@ -141,7 +141,9 @@ class DerivedSource(RootSource):
     content into the data group; a source defines its own tag and data columns, so
     this is where a key (for example a session start time) can also become an
     input to computation. The tags are the origin's tags. The data columns are the
-    origin's data columns followed by the copies, in mapping order. Each copy has
+    origin's data columns followed by the copies, in the order of their new names
+    (``{"t1": "z1", "t3": "x3"}`` appends ``x3`` before ``z1``), whatever the
+    mapping's order (ITL-1271). Each copy has
     the tag column's exact Arrow type, nullability and field metadata. The copy
     equals the tag when the source is read; downstream it is plain data.
 
@@ -343,7 +345,10 @@ class DerivedSource(RootSource):
         """
         config: dict[str, Any] = {
             "source_type": self.SOURCE_KIND,
-            "tags_as_data": self._tags_as_data,
+            # A copy: a caller that edits the exported config never edits this source.
+            "tags_as_data": None
+            if self._tags_as_data is None
+            else dict(self._tags_as_data),
             "record_id_columns": None
             if self._record_id_columns is None
             else list(self._record_id_columns),

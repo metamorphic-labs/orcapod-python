@@ -4,7 +4,11 @@ This document is a developer-facing reference for every hash computation site in
 orcapod-python framework. For conceptual background on the two identity chains
 (`content_hash` and `pipeline_hash`), see [Identity & Hashing](../concepts/identity.md).
 Every hash listed here that Orcapod stores or embeds in a name is pinned as a golden value;
-how released values are protected is described in [Golden Hashes](golden-hashes.md).
+how released values are protected is described in [Golden Hashes](golden-hashes.md). A
+release freezes every golden value except those of the provisional operators
+(`orcapod.operators.PROVISIONAL_OPERATORS`, today `PolarsFilter`) and of every step downstream
+of one: their identity may still change in a later release (see
+[Provisional operators](../concepts/operators.md#provisional-operators)).
 
 ---
 
@@ -121,21 +125,21 @@ rule_job.run()
 # A hash kept as a value carries its label.
 rule_node = rule_job.nodes["double"]
 print(rule_node.pipeline_hash())
-# semantic_v1:c4294cdcdc37c18c76b88f83a50a21e71293c77dc25a9104c7b8d710b0041235
+# semantic_v1:d6a114849775f6c2b3ddffadea22542268abb320e09a6fa5d4b0caa2e6a374d6
 
 # A hash inside a name is the bare digest: the function uri and the table path.
 print(double.pod.uri)
-# ('double', '32567b339b2e50ee4f435e6234441a0415db766db953431439e81cf471c94945', 'v0', 'python.function.v0')
+# ('double', '32567b339b2e50ee4f435e6234441a0415db766db953431439e81cf471c94945', 'v0', 'python.function.v1')
 pipeline_table = next(p for p in rule_store.list_sources() if "_result" not in p)
 print("/".join(pipeline_table))
-# my_pipeline/double/32567b339b2e50ee4f435e6234441a0415db766db953431439e81cf471c94945/v0/python.function.v0/schema:c4294cdcdc37c18c76b88f83a50a21e71293c77dc25a9104c7b8d710b0041235/pdb_v2
+# my_pipeline/double/32567b339b2e50ee4f435e6234441a0415db766db953431439e81cf471c94945/v0/python.function.v1/schema:d6a114849775f6c2b3ddffadea22542268abb320e09a6fa5d4b0caa2e6a374d6/pdb_v1
 
 # Stored columns hold labelled hashes; the system-tag column name holds a bare digest.
 stored = rule_store.get_all_records(pipeline_table)
 print(ContentHash.from_prefixed_digest(stored["__input_data_hash"][0].as_py()))
 # arrow_v1:000002fcbe7eec1821a57679d34084a583d8282798563aa706ecb9c0c24382580de4df
 print(ContentHash.from_prefixed_digest(stored["__node_content_hash"][0].as_py()))
-# semantic_v1:43529fee65d63d64303db070024f9dbae24ba6f9c3e9ec0ebc12c79f5dde6ddb
+# semantic_v1:9f558e2253c200686d3f0a8c01b7d6e9ae6fd93885d396e697f9b9b79a06a197
 print([name for name in stored.column_names if name.startswith("_tag_source_id")])
 # ['_tag_source_id::3bd6e739b7e15bd3402717af3bafd487d480f3b382028cb22c2250fcb6a90e64']
 ```
@@ -439,7 +443,7 @@ each suffix is the stream's `pipeline_hash()` (sites 1b and 6).
 
 | Site | Item | Value |
 |------|------|-------|
-| 11 | `data_function.uri` | `('grade', '6dfe7b63d41fec2df9e9fe6e7581428678c88866f4927b45dd48a44df73dfe3d', 'v0', 'python.function.v0')` |
+| 11 | `data_function.uri` | `('grade', '6dfe7b63d41fec2df9e9fe6e7581428678c88866f4927b45dd48a44df73dfe3d', 'v0', 'python.function.v1')` |
 | 11 | `output_schema_hash` (uri[1]) | `6dfe7b63d41fec2df9e9fe6e7581428678c88866f4927b45dd48a44df73dfe3d` (bare digest: it is part of a name) |
 
 #### §6 — Pipeline Run Identity
@@ -529,6 +533,7 @@ The table below shows what each class returns from `identity_structure()`.
 | Operators (binary/N-ary) | `(operator_class_name, argument_symmetry(streams))` | `frozenset` for commutative (Join, MergeJoin); `tuple` for ordered (SemiJoin) |
 | `SelectTagColumns`, `SelectDataColumns`, `DropTagColumns`, `DropDataColumns`, `SelectColumns`, `DropColumns` | `(operator_class_name, sorted unique column names as a list, strict)` | The operators act on a set of names: a list, a tuple, a set, a single string, a repeated or a reordered name list give one hash (ITL-942) |
 | `MapTags`, `MapData`, `MapColumns` | `(operator_class_name, name_map, drop_unmapped, strict)` | An operator's identity is its full configuration, `strict` included, as for the column selection operators (ITL-1160) |
+| `AddTags` | `(operator_class_name, ((name, value), ...) in name order)` | The new tags are a set: the order they are given in never enters the identity, and the tags are placed in name order (ITL-1269) |
 
 **Inputs of a commutative operator are a set (kept by decision, ITL-942).** A pipeline hash
 covers the structure of the pipeline, not only its schemas. `MergeJoin()(m1, m1)`, a stream
@@ -574,6 +579,10 @@ The pipeline hash uses the same `SemanticAwarePythonHasher` with the **`pipeline
 ---
 
 ### 1c. Polars expression predicates
+
+**Provisional.** `PolarsFilter` is a provisional operator (ITL-1266): its identity, and the
+`polars_expr_v1` hashes that only it feeds, are not frozen with data context v1. Their golden
+values are in the provisional golden files ([Golden Hashes](golden-hashes.md#provisional-files)).
 
 `PolarsFilter.identity_structure()` is `("PolarsFilter", predicates, constraints)`, with
 `predicates` always a tuple. Keyword constraints hash as plain values. A `pl.Expr` predicate
@@ -629,8 +638,8 @@ definition. Consequences:
   change to the encoding of a supported construct needs a new label (`polars_expr_v2`).
 
 The canonical trees of a corpus of expressions are pinned in
-`tests/test_hashing/test_polars_expr_hashing.py`, and their hashes in the golden suite
-([Golden Hashes](golden-hashes.md)).
+`tests/test_hashing/test_polars_expr_hashing.py`, and their hashes in the provisional golden
+files ([Golden Hashes](golden-hashes.md#provisional-files)).
 
 ### 1d. Function values and parameter defaults
 
@@ -1521,11 +1530,15 @@ a null. A source whose table has such a column fails when it is constructed.
 A label names the algorithm that produced one hash. It does not say which generation of
 Orcapod's hashing a stored row belongs to. That is the **data context**: one key that changes
 whenever any existing hash value can change (the hashers, the identity definitions, the
-record-id recipes, the libraries behind them). Orcapod v0.3 writes `std:v1:default`;
-everything stored before v0.3 is the earlier generation, `std:v0.1:default`. The manifest of
+record-id recipes, the libraries behind them). This does not cover a provisional operator:
+its identity, and every hash downstream of one, can change in a later release under the same
+key ([Provisional operators](../concepts/operators.md#provisional-operators)). Orcapod v0.3
+writes `std:v1:default`; everything stored before v0.3 is the earlier generation,
+`std:v0.1:default`. The manifest of
 the current data context is `orcapod/contexts/data/v1.json`. It is frozen at the release of
-the library version that contains it and never edited afterwards, except that its `golden`
-history gains revisions as golden values are added and released
+the library version that contains it and never edited afterwards, except in its `golden`
+section: the history gains revisions as golden values are added and released, and the
+digests of the provisional files, which no release freezes, follow those files
 ([Golden Hashes](golden-hashes.md)). It names the hashers, the
 definitions that live in code, the libraries the hashes depend on and what changed from the
 previous data context. Logical types are not part of it: they are registered in
@@ -1535,11 +1548,11 @@ Every row Orcapod stores names its data context in the column `__data_context`:
 
 | Table | Layout (last path component) |
 |---|---|
-| Function-node pipeline table | `pdb_v2` |
-| Function result table | `rdb_v2` |
+| Function-node pipeline table | `pdb_v1` |
+| Function result table | `rdb_v1`, after the revision of the data function type's record (`.../python.function.v1/rev1/rdb_v1`; see [Data function types](data-function-types.md)) |
 | Operator-node cache table | `odb_v1` |
 | Cached-source table | `sdb_v1` |
-| Side-effect invocation log | `tdb_v2` |
+| Side-effect invocation log | `tdb_v1` |
 
 The layout component is always the last component of a table's path, also when a
 `CachedSource` is given an explicit `cache_path`.
@@ -1551,50 +1564,30 @@ current data context only, and every read of a whole table (a node's `as_table()
 data context out. Those rows are never changed or deleted, and a read that leaves rows out
 logs one warning per table with their number (logger `orcapod.contexts.stored`).
 
-**Tables written before v0.3** have no `__data_context` column and sit at an older layout
-(`pdb_v1`, `rdb_v1`, `tdb_v1`; operator-node and cached-source tables, and the function
-tables of Orcapod v0.1, had no layout component). Orcapod does not read them as results and never modifies them. When it finds
-one it logs one warning with the number of rows:
-
-```text
-Found 3 rows in stored table '...' written by an earlier version of Orcapod (older table
-layout, data context std:v0.1:default). They are not used and are left unchanged; they can
-be migrated later.
-```
-
-**How they are found.** The path of a table holds hashes (of the function's output schema,
-of the pipeline), and a later version of Orcapod can compute other hashes, so an older table
-is not only looked for at the path the current version computes. The beginning of a path
-holds no hash: the job, then the name of the function (`<job>/<function>/...` and
-`<job>/_result/<function>/...`; `side_effect_function/<function>` for a function pod that
-takes the invocation context; `side_effects/<pod>` for a side-effect pod). A node lists the
-tables stored under that beginning (`list_table_paths` of the database) and tells old from
-current by the last path component, the layout: `pdb_v2`, `rdb_v2`, `tdb_v2`, `odb_v1` and
-`sdb_v1` are current, every other table under the name was written before v0.3. Tables
-found this way are not read, so they are reported without a number of rows, once per node:
+**Tables of another layout.** A table whose last path component is not one of the current
+layouts above was written by another build of Orcapod. Orcapod does not read it as results
+and never modifies it. The path of a table holds hashes (of the function's output schema, of
+the pipeline), and another build can compute other hashes, so such a table is not looked for
+at a computed path. The beginning of a path holds no hash: the job, then the name of the
+function (`<job>/<function>/...` and `<job>/_result/<function>/...`;
+`side_effect_function/<function>` for a function pod that takes the invocation context;
+`side_effects/<pod>` for a side-effect pod; `<prefix>/source` for a cached source without
+an explicit `cache_path`). A node lists the tables stored under that beginning
+(`list_table_paths` of the database) and reports, once, those whose last component is not a
+current layout. They are not read, so they are reported without a number of rows:
 
 ```text
 Found 2 tables written by an earlier version of Orcapod under 'my_job/double' (older table
-layout, data context std:v0.1:default): 'my_job/double/.../pdb_v1', ... They are not used
+layout, data context std:v0.1:default): 'my_job/double/.../pdb_v2', ... They are not used
 and are left unchanged; they can be migrated later. Tables of another function or node with
 the same name are included.
 ```
 
-Operator caches and cached sources have no name in their path that survives a change of
-hashes. A job run lists the tables under the job's name once and reports one total of the
-older tables that no function or side-effect node of the job reports itself: operator
-caches, cached sources stored under the job, and tables of nodes the job no longer has.
-
-```text
-Store 'my_job' holds 2 more tables written by an earlier version of Orcapod (operator
-caches, cached sources, or nodes not in this job): '...'. They are not used and are left
-unchanged; they can be migrated later.
-```
-
-Two consequences of finding tables by name: a table of another function or pod with the
-same name in the same job, and a table of another node of the same function, count as well.
-A store that cannot list its tables (`TableListingNotSupportedError`) is not searched this
-way; tables at the path the current version computes are still found.
+A table of another function or pod with the same name in the same job, and a table of
+another node of the same function, count as well. A store that cannot list its tables
+(`TableListingNotSupportedError`) is not searched. Stores of the versions before 0.4 are not
+looked for otherwise: nobody has one, and their layouts had the names the first release uses
+again (ITL-1259).
 
 Nodes that perform side effects are the exception. A completion is looked up by its key, so
 completions stored under another data context would not be found and every side effect would
@@ -1602,8 +1595,8 @@ be performed again. There are two kinds: a side-effect pod (`@side_effect_pod`, 
 `@tap_pod`), whose completions are in its invocation log, and a function pod that takes the
 invocation context (`@function_pod(ctx_arg=...)`), whose completions are in its pipeline and
 result tables. Either raises `SideEffectLogDataContextError`, naming the tables, before
-doing anything when it finds a table at an older layout anywhere under its name, or
-completions of another data context in its current tables. Because every older table under
+doing anything when it finds a table of another layout anywhere under its name, or
+completions of another data context in its current tables. Because every such table under
 the name counts, an unrelated pod of the same name in the same job raises the error too;
 the error names every table so that you can tell. When the database cannot list its tables,
 the node logs one warning saying that it could not look for older completions, and
@@ -1643,8 +1636,8 @@ context_job.run()
 
 for path in sorted(context_store.list_sources()):
     print(path[-1], stored_data_contexts(context_store, path))
-# rdb_v2 {'std:v1:default': 2}
-# pdb_v2 {'std:v1:default': 2}
+# rdb_v1 {'std:v1:default': 2}
+# pdb_v1 {'std:v1:default': 2}
 ```
 
 ```python

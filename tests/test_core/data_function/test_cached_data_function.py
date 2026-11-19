@@ -89,10 +89,13 @@ class TestConstruction:
         assert cached_pf.record_path[-1] == RESULT_DB_SCHEMA_VERSION
 
     def test_record_path_contains_inner_uri(self, cached_pf, inner_pf):
-        """record_path is inner_pf.uri + (RESULT_DB_SCHEMA_VERSION,)."""
+        """record_path is inner_pf.uri + ("rev1", RESULT_DB_SCHEMA_VERSION)."""
         from orcapod.system_constants import RESULT_DB_SCHEMA_VERSION
 
-        assert cached_pf.record_path == inner_pf.uri + (RESULT_DB_SCHEMA_VERSION,)
+        assert cached_pf.record_path == inner_pf.uri + (
+            "rev1",
+            RESULT_DB_SCHEMA_VERSION,
+        )
 
     def test_record_path_prefix_prepended(self, inner_pf, db):
         from orcapod.system_constants import RESULT_DB_SCHEMA_VERSION
@@ -101,6 +104,7 @@ class TestConstruction:
             inner_pf, result_database=db, record_path_prefix=("org", "project")
         )
         assert cpf.record_path == ("org", "project") + inner_pf.uri + (
+            "rev1",
             RESULT_DB_SCHEMA_VERSION,
         )
 

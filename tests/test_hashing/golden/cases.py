@@ -75,55 +75,130 @@ def available_groups() -> tuple[str, ...]:
     return tuple(g for g in GROUPS if group_available(g))
 
 
-_CASES: dict[str, list[tuple[str, CaseFn]]] = {group: [] for group in GROUPS}
+_CASES: dict[str, list[tuple[str, CaseFn, tuple[str, ...]]]] = {
+    group: [] for group in GROUPS
+}
 
 
-def case(group: str, name: str) -> Callable[[CaseFn], CaseFn]:
+def case(
+    group: str, name: str, *, provisional: tuple[str, ...] = ()
+) -> Callable[[CaseFn], CaseFn]:
     """Register a golden case under ``group``.
 
     Args:
         group: One of ``GROUPS``; selects the golden files (``<group>-NN.json``) that
             pin the entries.
         name: Case name, used as the prefix of every entry the case returns.
+        provisional: The provisional features the case depends on
+            (``declarable_provisional_names``; ITL-1266). A case that declares one is
+            pinned in the provisional file of its group, which no release freezes. A case
+            that uses a provisional feature must declare it (``compute_group_kinds``).
 
     Returns:
         A decorator that registers the case function and returns it unchanged.
     """
 
     def register(fn: CaseFn) -> CaseFn:
-        _CASES[group].append((name, fn))
+        _CASES[group].append((name, fn, tuple(provisional)))
         return fn
 
     return register
 
 
-def compute_group(group: str, *, allow_errors: bool = False) -> dict[str, Any]:
-    """Compute every entry of one golden group.
+def declarable_provisional_names() -> frozenset[str]:
+    """The names a case may declare provisional: the provisional operators (ITL-1266)."""
+    from orcapod.core.operators.provisional import PROVISIONAL_OPERATORS
+
+    return frozenset(PROVISIONAL_OPERATORS)
+
+
+def _recording() -> Any:
+    """``recording_provisional_uses`` of the library, or an empty record for an older one.
+
+    The generator is also run against an older checkout's library (``--stdout``), which
+    has no record of provisional uses.
+    """
+    try:
+        from orcapod.utils.provisional import recording_provisional_uses
+    except ImportError:
+        return contextlib.nullcontext(set())
+    return recording_provisional_uses()
+
+
+def compute_group_kinds(
+    group: str, *, allow_errors: bool = False
+) -> tuple[dict[str, Any], frozenset[str]]:
+    """Compute every entry of one golden group, and say which entries are provisional.
+
+    Each case runs while the library records the provisional features it uses
+    (``orcapod.utils.provisional.recording_provisional_uses``). A case that uses one it
+    does not declare, or declares a name ``declarable_provisional_names`` does not hold,
+    is refused, so a value that depends on a provisional operator can never be pinned in
+    a frozen file.
 
     Args:
         group: One of ``GROUPS``.
         allow_errors: When true, a case that raises records a single
-            ``"ERROR: <type>: <message>"`` entry instead of propagating. Used only when
-            running the generator against an older release.
+            ``"ERROR: <type>: <message>"`` entry instead of propagating, and the
+            declarations are not checked. Used only when running the generator against an
+            older release.
 
     Returns:
-        A dict of ``<case>.<entry>`` names to JSON-compatible values, sorted by name.
+        A dict of ``<case>.<entry>`` names to JSON-compatible values, sorted by name, and
+        the names of the entries of cases that declare a provisional feature.
+
+    Raises:
+        ValueError: A case declares an unknown provisional name, uses a provisional
+            feature it does not declare, or two cases produce one entry name.
     """
     out: dict[str, Any] = {}
-    for name, fn in _CASES[group]:
+    provisional_entries: set[str] = set()
+    for name, fn, declared in _CASES[group]:
+        if not allow_errors:
+            unknown = sorted(set(declared) - declarable_provisional_names())
+            if unknown:
+                raise ValueError(
+                    f"golden case {group}:{name} declares {unknown} provisional, but "
+                    "they are not provisional (orcapod.operators.PROVISIONAL_OPERATORS)"
+                )
         try:
-            values = fn()
+            with _recording() as used:
+                values = fn()
         except Exception as exc:
             if not allow_errors:
                 raise
             out[name] = f"ERROR: {type(exc).__name__}: {str(exc).splitlines()[0][:200]}"
             continue
+        undeclared = sorted(set(used) - set(declared))
+        if undeclared and not allow_errors:
+            raise ValueError(
+                f"golden case {group}:{name} uses the provisional {undeclared} without "
+                f"declaring it: register it with @case({group!r}, {name!r}, "
+                f"provisional={tuple(sorted(used))!r}), so that its values go to the "
+                "provisional file, never to a frozen one"
+            )
         for key, value in values.items():
             full = f"{name}.{key}" if key else name
             if full in out:
                 raise ValueError(f"duplicate golden entry {full!r}")
             out[full] = value
-    return dict(sorted(out.items()))
+            if declared:
+                provisional_entries.add(full)
+    return dict(sorted(out.items())), frozenset(provisional_entries)
+
+
+def compute_group(group: str, *, allow_errors: bool = False) -> dict[str, Any]:
+    """Compute every entry of one golden group (``compute_group_kinds``, values only).
+
+    Args:
+        group: One of ``GROUPS``.
+        allow_errors: Passed to ``compute_group_kinds``.
+
+    Returns:
+        A dict of ``<case>.<entry>`` names to JSON-compatible values, sorted by name.
+    """
+    values, _ = compute_group_kinds(group, allow_errors=allow_errors)
+    return values
 
 
 def compute_all(*, allow_errors: bool = False) -> dict[str, dict[str, Any]]:
@@ -1673,7 +1748,7 @@ def pipeline_map_columns() -> dict[str, Any]:
     return out
 
 
-@case("pipeline", "polars_filter")
+@case("pipeline", "polars_filter", provisional=("PolarsFilter",))
 def pipeline_polars_filter() -> dict[str, Any]:
     from orcapod.operators import PolarsFilter
 
@@ -1918,14 +1993,16 @@ def _polars_exprs() -> dict[str, Any]:
     }
 
 
-@case("semantic", "polars_expr")
+# In the library only PolarsFilter feeds polars_expr_v1 (its predicates), so these hashes are
+# as provisional as PolarsFilter is (ITL-1266), although the case builds no operator.
+@case("semantic", "polars_expr", provisional=("PolarsFilter",))
 def semantic_polars_exprs() -> dict[str, Any]:
     """Record the ``polars_expr_v1`` semantic hash of each representative expression."""
     hasher = _ctx().semantic_hasher
     return {k: hasher.hash_object(e).to_string() for k, e in _polars_exprs().items()}
 
 
-@case("pipeline", "polars_filter_expr")
+@case("pipeline", "polars_filter_expr", provisional=("PolarsFilter",))
 def pipeline_polars_filter_expr() -> dict[str, Any]:
     """Record expression-only and expression-plus-keyword filter streams."""
     import polars as pl
@@ -1949,7 +2026,7 @@ def pipeline_polars_filter_expr() -> dict[str, Any]:
     return out
 
 
-@case("pipeline", "polars_filter_expr_job")
+@case("pipeline", "polars_filter_expr_job", provisional=("PolarsFilter",))
 def pipeline_polars_filter_expr_job() -> dict[str, Any]:
     """Record a job with an expression filter upstream of a join and a function pod."""
     import polars as pl
@@ -2650,4 +2727,93 @@ def pipeline_group_by_arrangement() -> dict[str, Any]:
                 stream_summary(GroupBy(by=["g"])(GroupBy(by=by)(source))),
             )
         )
+    return out
+
+
+# GroupBy over a float key with NaN and -0.0 (ITL-1234)
+# ---------------------------------------------------------------------------
+
+
+@case("pipeline", "group_by_nan_keys")
+def pipeline_group_by_nan_keys() -> dict[str, Any]:
+    """Pin ``GroupBy`` over a float key whose NaN and zero values differ in bits.
+
+    The three NaN keys (the canonical quiet NaN, one with the sign bit set, one with
+    a payload) form one group, which emits the canonical NaN; ``0.0`` and ``-0.0``
+    form one group, which emits ``0.0``; the null keys form one group.
+    """
+    from orcapod.operators import GroupBy
+    from orcapod.sources import ArrowTableSource
+
+    key_bits = [
+        0xFFF8000000000000,
+        0x8000000000000000,
+        0x7FF8000000000001,
+        None,
+        0x0,
+        0x7FF8000000000000,
+        None,
+    ]
+    table = pa.table(
+        {
+            "k": pa.array(key_bits, pa.uint64()).view(pa.float64()),
+            "t": pa.array([1, 2, 3, 4, 5, 6, 7], pa.int64()),
+            "v": pa.array([10, 20, 30, 40, 50, 60, 70], pa.int64()),
+        }
+    )
+    source = ArrowTableSource(
+        table,
+        tag_columns=["k", "t"],
+        tag_only_columns=True,
+        source_id="golden_group_by_nan_keys",
+    )
+    grouped = GroupBy(by=["k"])(source)
+    out = stream_summary(grouped)
+    out.update(_group_key_identity(grouped, pa.uint64()))
+
+    # A data-tag key of float32 (the key is data too): a signaling NaN, whose bits are
+    # the smallest of the NaN group, is emitted bit for bit; the key's data hash and
+    # its folded source-info token are pinned with the rest.
+    data_tag_bits = [0x7FC00000, 0x80000000, 0x7F800001, None, 0x0, 0xFFC00000]
+    data_tag_table = pa.table(
+        {
+            "k": pa.array(data_tag_bits, pa.uint32()).view(pa.float32()),
+            "t": pa.array([1, 2, 3, 4, 5, 6], pa.int64()),
+            "v": pa.array([10, 20, 30, 40, 50, 60], pa.int64()),
+        }
+    )
+    data_tag_source = ArrowTableSource(
+        data_tag_table,
+        tag_columns=["k", "t"],
+        tag_only_columns=["t"],
+        source_id="golden_group_by_nan_keys_data_tag",
+    )
+    data_tag_grouped = GroupBy(by=["k"])(data_tag_source)
+    out.update(
+        _prefixed(
+            "data_tag_key",
+            {
+                **stream_summary(data_tag_grouped),
+                **_group_key_identity(data_tag_grouped, pa.uint32()),
+            },
+        )
+    )
+    return out
+
+
+def _group_key_identity(stream: Any, unsigned: Any) -> dict[str, Any]:  # pyright: ignore[reportExplicitAny]  # a stream and an Arrow type
+    """Per row of a grouping on ``k``: the tag hash, the key's bits and its source info.
+
+    ``stream_summary`` keys a row by its tag values, where every NaN reads ``NaN``;
+    the bits and the tag hash pin which NaN (or which zero) the group emits.
+    """
+    out: dict[str, Any] = {}
+    bits = stream.as_table().column("k").combine_chunks().view(unsigned).to_pylist()
+    for (tag, data), key_bits in zip(stream.iter_data(), bits, strict=True):
+        row = _row_key(tag.as_dict())
+        out[f"row[{row}].tag_hash"] = tag.content_hash().to_string()
+        out[f"row[{row}].key_bits"] = None if key_bits is None else f"{key_bits:x}"
+        source_info = data.as_dict(all_info=True).get("_source_k")
+        if source_info is not None:
+            out[f"row[{row}]._source_k"] = _jsonable(source_info)
     return out

@@ -180,10 +180,14 @@ stale results are not reused.
 
 ## Order never counts, except where you give it
 
-No hash, identity, stored value or row depends on the order in which you give Orcapod a set
-of things. If an order matters, it is an explicit argument. In particular, none of these
-changes a content hash, a pipeline hash, a system-tag column name, a stored table path, a
-stored row, a record id or a row's hashes:
+The rule: no hash, identity, stored value or row depends on the order in which you give
+Orcapod a set of things. If an order matters, it is an explicit argument. The rule does not
+hold everywhere yet: a few cases still break it, each owned by an open issue, and they are
+listed under [What does not hold yet](#what-does-not-hold-yet) below. They are defects to be
+fixed, not exceptions. The places where an order is meant to count are the table of
+exceptions further down. By the rule, none of these changes a content hash, a pipeline
+hash, a system-tag column name, a stored table path, a stored row, a record id or a row's
+hashes:
 
 - the order of a source's `tag_columns` (plain tags and data-tags alike) and the order of
   the columns in its table;
@@ -257,13 +261,21 @@ print(keyed.content_hash() == rekeyed.content_hash())
 # False
 ```
 
+### What does not hold yet
+
 `tests/test_core/test_order_invariance.py` checks the rule for every exported operator,
-source and stream kind, the function pod forms and a job. The cases that still break it are
-being fixed before data context v1 is frozen: `add_tags` holds its keywords in order
-(ITL-1269); the order of `polars_filter`'s predicates is in its identity (ITL-1247,
-undecided); a function pod over data-tags and a stream built directly from a table depend
-on the input's tag order (ITL-1246, ITL-1227); which rows `head()` shows follows the tag
-order (ITL-1270).
+source and stream kind, the function pod forms and a job. Today these cases still break it
+(the test marks each as an expected failure naming its issue); they are being fixed before
+data context v1 is frozen:
+
+- the order of `polars_filter`'s predicates is in its identity (ITL-1247, undecided);
+- a function pod over data-tags: its content and pipeline hash and its node's stored paths
+  depend on the input's tag order and table layout (ITL-1246);
+- a stream built directly from a table (`ArrowTableStream`): its content hash depends on
+  the order of its tags (ITL-1227);
+- which rows `head()` shows, sorted by tags, follows the tag order (ITL-1270);
+- where the columns are placed is not always the declared order: an operator places its
+  output tags in its input table's column order (ITL-1249, presentation only).
 
 ## Your own classes in the identity
 

@@ -120,8 +120,12 @@ Orcapod is before version 1.0. In the development version (0.4.0 is next):
 - **Hash values of data context v1 freeze at 0.4.0.** Hashes name stored tables and find
   stored results again, so a hash value released in 0.4.0 will not change in a later release
   of the same data context; CI checks this. Until 0.4.0 a v1 hash may still change, only by
-  an approved and explained change (0.3.0, which first shipped v1, was withdrawn). See
-  [Golden hashes](https://github.com/metamorphic-labs/orcapod-python/blob/main/docs/reference/golden-hashes.md).
+  an approved and explained change (0.3.0, which first shipped v1, was withdrawn). This
+  does not cover a provisional operator (today `PolarsFilter`): its identity, and every hash
+  downstream of it, may still change in a later release of v1. See
+  [Golden hashes](https://github.com/metamorphic-labs/orcapod-python/blob/main/docs/reference/golden-hashes.md)
+  and
+  [Provisional operators](https://github.com/metamorphic-labs/orcapod-python/blob/main/docs/concepts/operators.md#provisional-operators).
 - **Library value types are provisional.** The hashes of `numpy.ndarray`, `torch.Tensor`, and
   pandas and polars `DataFrame` and `Series` values are provisional until the library value
   type audit (after 0.4.0rc1) and may change then; results computed from them may then be

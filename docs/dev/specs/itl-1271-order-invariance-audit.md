@@ -58,11 +58,11 @@ computation; the script masks it, as it is not an order effect.
 | `GroupBy("t1")` (two non-key tags) | tag order | member lists: values, folded system tags, row hashes, source info; sync and async | ITL-1226 (PR #434) |
 | `GroupBy(["t1", "t2"])` | `by` order | operator identity, content and pipeline hash | ITL-1226 (PR #434: `by` order is not identity) |
 | `TagBy(["d3", "d1"])` | names order | operator identity, content and pipeline hash | ITL-1226 (PR #434: sorted) |
-| `AddTags({"x": 1, "y": "z"})` | keyword order | operator identity, content and pipeline hash | ITL-1269 (approved) |
+| `AddTags({"x": 1, "y": "z"})` | keyword order | operator identity, content and pipeline hash | ITL-1269 (landed in PR 457, 2026-11-19: order free) |
 | `PolarsFilter(predicates=[...])` | predicate order | operator identity, content and pipeline hash | ITL-1247 (rule undecided) |
 | `pod(source)` over data-tags (data-tags, mixed) | tag order | content and pipeline hash | ITL-1246 |
 | `pod(a, b)` over data-tags (automatic join) | tag order **and layout** | content and pipeline hash | ITL-1246 (the fall-through tuple takes the joined stream's tag order, which follows the layout) |
-| `PipelineJob`: function node over data-tags | tag order | node content and pipeline hash, stored table paths, `pdb_v2` stored rows, loaded node hashes, `node.as_source()` content hash and `source_id`; sync and async | ITL-1246 |
+| `PipelineJob`: function node over data-tags | tag order | node content and pipeline hash, stored table paths, `pdb_v1` stored rows, loaded node hashes, `node.as_source()` content hash and `source_id`; sync and async | ITL-1246 |
 | raw `ArrowTableStream` (every role) | tag order | content hash | ITL-1227 |
 | `PollingSource` (found by the permanent test) | tag order | content hash (identity held `tag_columns` in declared order) | **fixed here** (sorted; 0 pinned entries move) |
 | `ArrowTableSource(record_id_columns=...)` | key order | content hash, record ids, source info | intended: the key order is the explicit argument |
@@ -94,10 +94,10 @@ argument order and input order:
 |---|---|---|
 | `keys()` and `as_table()` column order of every source and operator | tag order (the declared `tag_columns`) | intended: placement follows the declared order (ITL-1205 rule) |
 | the same | layout | ITL-1249 |
-| `AddTags` column placement | keyword order | ITL-1269 (new tags placed in name order) |
+| `AddTags` column placement | keyword order | ITL-1269 (landed in PR 457: new tags placed in name order) |
 | `DerivedSource(tags_as_data=...)` column placement of the new data columns | mapping order | **fixed here**: copies in the order of their new names (no hash moves) |
 | rows `head(n)` / `as_table(sort_by_tags=True)` / preview show | tag order; for joins and pods also layout | ITL-1270 (and ITL-1249 for layout) |
-| stored column order of `pdb_v2` and `odb_v1` | tag order and layout | presentation: a Delta store written by two tag orders reads back by name (checked: two runs, one path, all rows) |
+| stored column order of `pdb_v1` and `odb_v1` | tag order and layout | presentation: a Delta store written by two tag orders reads back by name (checked: two runs, one path, all rows) |
 | saved job file: a bound source's `tag_columns`, a `Join` node's input order | as declared | presentation: the file records the declaration; a load rebuilds the same hashes |
 
 ## Not measured
@@ -137,7 +137,7 @@ order-free statement of the arguments and the semantics have no open question.
 | `DropColumns` | `("DropColumns", sorted names: list, strict)` | 2026-11-13 | ITL-1084 (done) | 36 (`tag_and_data_columns`) | FROZEN (borderline, as `SelectColumns`) |
 | `PolarsFilter` | `("PolarsFilter", predicates: tuple in the order given, constraints: dict)` | 2025-09 | ITL-1247 (predicate order), ITL-1266 / PR 450, ITL-1265 | 76 (moved to provisional by PR 450) | PROVISIONAL (already, PR 450) |
 | `DropNulls` | `("DropNulls", sorted unique names: tuple)`, or `("DropNulls", None)` for all | 2026-11-12 | ITL-976 (async drops `__` meta in a tag), ITL-1014 (data-tags) | 109 (`drop_nulls`, `drop_nulls_all`, `drop_nulls_job`) | FROZEN (borderline: 6 days old): reads validity only, plain sorted identity, heavily pinned |
-| `AddTags` | `("AddTags", ((name, value), ...) in keyword order)` | 2026-11-17 | ITL-1269 (approved: identity sorted, tags placed in name order; not started), function form future | 32 (`add_tags`; ITL-1269 moves them) | PROVISIONAL: one day old, identity about to change |
+| `AddTags` | `("AddTags", ((name, value), ...) in keyword order)` | 2026-11-17 | ITL-1269 (landed in PR 457, 2026-11-19: identity sorted, tags placed in name order), function form future | 32 (`add_tags`; ITL-1269 moves them) | PROVISIONAL: one day old, identity about to change |
 | `Pick` | `("Pick", column, key, out)` (`fail_on_miss` not in identity) | 2026-06 | ITL-439 (miss policy open: changes the output for a miss), ITL-850, ITL-1165, ITL-985, ITL-1014, ITL-440/441 | 18 (`index_pick`) | PROVISIONAL: the miss policy is an open question on output |
 | `Index` | `("Index", column, i, out)` (`fail_on_miss` not in identity) | 2026-06 | ITL-439, ITL-866 (list-valued source-info token stringified: a stored value), ITL-850, ITL-1165, ITL-985 | 18 (`index_pick`) | PROVISIONAL: as `Pick`, plus a stored token known wrong |
 | `TagBy` | `("TagBy", names: list in the order given)` | 2026-11-17 | ITL-1226 / PR 434 (names sorted) | **0** | PROVISIONAL: one day old, identity changing, nothing pinned |

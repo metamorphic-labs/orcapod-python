@@ -22,7 +22,12 @@ import json
 import pyarrow as pa
 import pytest
 
-from orcapod.core.sources import ArrowTableSource, CachedSource, DerivedSource
+from orcapod.core.sources import (
+    ArrowTableSource,
+    CachedSource,
+    DerivedSource,
+    DictSource,
+)
 from orcapod.databases import InMemoryArrowDatabase
 
 from ..operators.several_items import (
@@ -207,3 +212,39 @@ def test_a_cached_source_reads_back_every_role_and_arrangement(
             again = CachedSource(unavailable, cache_database=database)
             assert presentation(again) == presentation(make_source(MAIN, arrangement))
             assert fingerprint(again) == fingerprint(cached)
+
+
+@pytest.mark.parametrize(
+    "data_schema",
+    [
+        {"t1": str, "t2": int, "d1": int, "d3": str},
+        {"d3": str, "t2": int, "d1": int, "t1": str},
+    ],
+    ids=["table_order", "another_order"],
+)
+@pytest.mark.parametrize("role", ROLES)
+def test_a_schema_in_another_field_order_gives_the_same_source(
+    data_schema: dict[str, type], role: str
+) -> None:
+    """A ``DictSource`` schema with several fields, in the rows' order or another."""
+    rows = [
+        {"t1": "a", "t2": 1, "d1": 10, "d3": "x"},
+        {"t1": "b", "t2": 2, "d1": 20, "d3": "y"},
+    ]
+    tag_only = {PLAIN: True, DATA_TAGS: [], MIXED: ["t2"]}[role]
+    source = DictSource(
+        rows,
+        tag_columns=["t1", "t2"],
+        source_id="d",
+        data_schema=data_schema,
+        tag_only_columns=tag_only,
+    )
+    reference = DictSource(
+        rows,
+        tag_columns=["t1", "t2"],
+        source_id="d",
+        data_schema={"t1": str, "t2": int, "d1": int, "d3": str},
+        tag_only_columns=tag_only,
+    )
+    assert fingerprint(source) == fingerprint(reference)
+    assert presentation(source)[0] == ("t1", "t2")

@@ -53,6 +53,7 @@ import pytest
 import orcapod
 from orcapod import PipelineJob, function_pod, operators, sources, streams
 from orcapod.channels import Channel
+from orcapod.core.nodes import SourceJobNode
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
@@ -132,8 +133,16 @@ LAYOUTS = (TAGS_FIRST, DATA_FIRST_REVERSED, INTERLEAVED)
 
 
 def xfail(issue: str) -> pytest.MarkDecorator:
-    """The strict expected-failure mark of a case owned by ``issue``."""
-    return pytest.mark.xfail(strict=True, reason=f"{issue}: {KNOWN_VIOLATIONS[issue]}")
+    """The strict expected-failure mark of a case owned by ``issue``.
+
+    Only a failed comparison is the expected failure (``raises=AssertionError``): an
+    error while building, running or loading fails the test as usual.
+    """
+    return pytest.mark.xfail(
+        strict=True,
+        raises=AssertionError,
+        reason=f"{issue}: {KNOWN_VIOLATIONS[issue]}",
+    )
 
 
 # ── inputs ──────────────────────────────────────────────────────────────────
@@ -408,7 +417,6 @@ OPERATOR_CASES: dict[str, tuple[OperatorCase, ...]] = {
             "add_tags",
             _mapping(AddTags),
             (("x", 1), ("y", "z")),
-            argument_issue="ITL-1269",
         ),
     ),
     "Pick": (
@@ -946,14 +954,44 @@ def test_the_docs_list_every_exception() -> None:
     assert listed == [f"| {e.what} | {e.reason} |" for e in ORDER_EXCEPTIONS]
 
 
+def _issues_on_marks() -> set[str]:
+    """The issue of every expected-failure mark on a test of this module."""
+    issues = set()
+    for name, test in list(globals().items()):
+        if not (name.startswith("test_") and callable(test)):
+            continue
+        for mark in getattr(test, "pytestmark", []):
+            marks = [mark]
+            if mark.name == "parametrize":
+                # A ``pytest.param`` carries its own marks.
+                marks = [
+                    m for param in mark.args[1] for m in getattr(param, "marks", ())
+                ]
+            issues |= {
+                m.kwargs["reason"].split(":", 1)[0] for m in marks if m.name == "xfail"
+            }
+    return issues
+
+
 def test_every_known_violation_is_used() -> None:
-    """An issue left in ``KNOWN_VIOLATIONS`` after its marks are gone is stale."""
-    source_text = Path(__file__).read_text()
-    for issue in KNOWN_VIOLATIONS:
-        assert f'"{issue}"' in source_text, f"{issue} marks no case: remove it"
+    """``KNOWN_VIOLATIONS`` is exactly the issues the generated marks name.
+
+    An issue left in it after its last mark is gone is stale, even if this file still
+    mentions it; a mark naming an issue missing from it cannot be built.
+    """
+    assert _issues_on_marks() == set(KNOWN_VIOLATIONS)
 
 
 # ── a job: stored tables, saved and loaded ─────────────────────────────────
+
+
+class PrerequisiteFailed(Exception):
+    """A failed check that comes before a comparison across arrangements.
+
+    Async against sync, loaded against saved. It is not an ``AssertionError``, so an
+    expected-failure mark, which takes ``AssertionError`` only, never hides it.
+    """
+
 
 _VOLATILE = {"__pod_ts", "__data_id", "executed_at", "pipeline_run_id"}
 JOB_OPERATORS: dict[str, Callable[[Any, Any, Any], Any]] = {
@@ -961,27 +999,52 @@ JOB_OPERATORS: dict[str, Callable[[Any, Any, Any], Any]] = {
     "group_by": lambda s, p, q: GroupBy(["t1", "t2"])(s, label="group_by"),
     "batch": lambda s, p, q: Batch(batch_size=4)(s, label="batch"),
 }
+# The job comparisons: the declared tag order with the tags first, the reversed tag order
+# with the tags first, and the declared order with the data first and reversed.
+JOB_ARRANGEMENTS = ((0, TAGS_FIRST), (1, TAGS_FIRST), (0, DATA_FIRST_REVERSED))
 
 
 def _job(
-    role: str, order: int, layout: str, run_async: bool, tmp: Path
+    role: str, order: int, layout: str, run_async: bool, tmp: Path, *, pod: bool
 ) -> dict[str, Any]:
+    """A job in one arrangement: what must not depend on it.
+
+    Args:
+        role: The tag role of the sources.
+        order: The tag order index.
+        layout: The table layout.
+        run_async: Run with ``run_async`` rather than ``run``.
+        tmp: Where the job is saved.
+        pod: Build only the function pod node (``True``), or only the operators and
+            the side effect (``False``).
+
+    Returns:
+        Each node's hashes and rows, ``as_source`` of a node, every stored table's rows
+        (volatile columns left out) and the loaded job's node hashes. A loaded node
+        whose hashes differ from the saved job's fails here, in every role (a source
+        slot's content hash excepted: a loaded slot over an in-memory table is unbound).
+    """
     database = InMemoryArrowDatabase()
     job = PipelineJob(name="order", database=database)
     with job:
         main = source(MAIN, role, order, layout)
-        other_p, other_q = (
-            source(P, role, order, layout),
-            source(Q, role, order, layout),
-        )
-        combine.pod(main, label="pod")
-        for build in JOB_OPERATORS.values():
-            build(main, other_p, other_q)
-        SideEffectPod(notify)(main.select_data_columns(["d1", "d3"]), label="effect")
-    for label in JOB_OPERATORS:
-        job.nodes[label].attach_databases(
-            pipeline_database=database.at("ops"), cache_mode=CacheMode.LOG
-        )
+        if pod:
+            combine.pod(main, label="pod")
+        else:
+            other_p, other_q = (
+                source(P, role, order, layout),
+                source(Q, role, order, layout),
+            )
+            for build in JOB_OPERATORS.values():
+                build(main, other_p, other_q)
+            SideEffectPod(notify)(
+                main.select_data_columns(["d1", "d3"]), label="effect"
+            )
+    if not pod:
+        for label in JOB_OPERATORS:
+            job.nodes[label].attach_databases(
+                pipeline_database=database.at("ops"), cache_mode=CacheMode.LOG
+            )
     if run_async:
         asyncio.run(job.run_async())
     else:
@@ -994,13 +1057,12 @@ def _job(
             node.pipeline_hash().to_string(),
         )
         out[f"{label}.rows"] = row_identity(list(node.iter_data()))
-    for label in ("pod", "join"):
-        derived = job.nodes[label].as_source()
-        out[f"{label}.as_source"] = (
-            derived.content_hash().to_string(),
-            derived.pipeline_hash().to_string(),
-            derived.source_id,
-        )
+    derived = job.nodes["pod" if pod else "join"].as_source()
+    out["as_source"] = (
+        derived.content_hash().to_string(),
+        derived.pipeline_hash().to_string(),
+        derived.source_id,
+    )
     for path in database.list_table_paths():
         stored = database.get_all_records(path)
         if stored is None:
@@ -1009,36 +1071,69 @@ def _job(
         out[f"stored[{'/'.join(path)}]"] = sorted(
             _masked(sorted(row.items())) for row in stored.select(keep).to_pylist()
         )
-    saved = tmp / f"job_{role}_{order}_{layout}_{run_async}.json"
+    saved = tmp / f"job_{role}_{order}_{layout}_{run_async}_{pod}.json"
     job.save(saved)
     loaded = PipelineJob.load(saved, database=database)
     out["loaded"] = {
         label: (node.content_hash().to_string(), node.pipeline_hash().to_string())
         for label, node in sorted(loaded.nodes.items())
     }
+    # The loaded job is the job that was saved, not only equal across arrangements:
+    # every node's pipeline hash, and the content hash of every node but the source
+    # slots (an in-memory table is not saved, so a loaded source slot is unbound).
+    for label, node in job.nodes.items():
+        content, pipeline = out["loaded"][label]
+        if pipeline != out[f"{label}.hashes"][1] or (
+            not isinstance(node, SourceJobNode) and content != out[f"{label}.hashes"][0]
+        ):
+            raise PrerequisiteFailed(
+                f"loaded {label}: hashes differ from the saved job"
+            )
     return out
+
+
+def _jobs_by_arrangement(role: str, tmp: Path, *, pod: bool) -> dict[str, Any]:
+    """``_job`` in every ``JOB_ARRANGEMENTS``; the async run must equal the sync run."""
+    results = {}
+    for order, layout in JOB_ARRANGEMENTS:
+        sync = _job(role, order, layout, False, tmp, pod=pod)
+        if _job(role, order, layout, True, tmp, pod=pod) != sync:
+            raise PrerequisiteFailed(f"async differs from sync in {order}/{layout}")
+        results[f"{order}/{layout}"] = sync
+    return results
+
+
+@pytest.mark.parametrize("role", ROLES)
+def test_a_jobs_operators_and_side_effect_do_not_depend_on_the_arrangement(
+    role: str, tmp_path: Path
+) -> None:
+    """Node hashes, stored paths and rows, as_source and a loaded job; sync and async."""
+    assert_all_equal(_jobs_by_arrangement(role, tmp_path, pod=False))
 
 
 @pytest.mark.parametrize(
     "role",
     [pytest.param(r, marks=[xfail("ITL-1246")] if r != PLAIN else []) for r in ROLES],
 )
-def test_a_job_does_not_depend_on_the_arrangement_of_its_sources(
+def test_a_jobs_function_pod_does_not_depend_on_the_arrangement(
     role: str, tmp_path: Path
 ) -> None:
-    """Node hashes, stored paths and rows, as_source and a loaded job; sync and async."""
-    results = {}
-    for order, layout in ARRANGEMENTS[:2]:
-        sync = _job(role, order, layout, False, tmp_path)
-        assert _job(role, order, layout, True, tmp_path) == sync, "async differs"
-        results[f"{order}/{layout}"] = sync
+    """The function pod node, alone in its job: the same elements as above.
+
+    Building, running, the async run and loading are checked before the comparison and
+    fail as usual; only the comparison across arrangements is ITL-1246's.
+    """
+    results = _jobs_by_arrangement(role, tmp_path, pod=True)
     assert_all_equal(results)
 
 
 def test_a_saved_job_records_the_declared_order_and_loads_the_same_hashes(
     tmp_path: Path,
 ) -> None:
-    """The saved file keeps each source's declared ``tag_columns``: placement only."""
+    """The saved file keeps each source's declared ``tag_columns``: placement only.
+
+    Each loaded job has the saved job's hashes, and the two orders have the same.
+    """
     database = InMemoryArrowDatabase()
     hashes = []
     for order in (0, 1):
@@ -1046,6 +1141,7 @@ def test_a_saved_job_records_the_declared_order_and_loads_the_same_hashes(
         with job:
             combine.pod(source(MAIN, PLAIN, order, TAGS_FIRST), label="pod")
         job.run()
+        original = job.nodes["pod"].content_hash()
         path = tmp_path / f"job_{order}.json"
         job.save(path)
         saved = json.loads(path.read_text())
@@ -1053,5 +1149,6 @@ def test_a_saved_job_records_the_declared_order_and_loads_the_same_hashes(
             MAIN.tag_orders()[order]
         )
         loaded = PipelineJob.load(path, database=database)
-        hashes.append(loaded.nodes["pod"].content_hash())
+        assert loaded.nodes["pod"].content_hash() == original
+        hashes.append(original)
     assert hashes[0] == hashes[1]

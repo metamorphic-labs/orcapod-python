@@ -71,10 +71,13 @@ class TestConstruction:
         assert cached_pod.record_path[-1] == RESULT_DB_SCHEMA_VERSION
 
     def test_record_path_contains_inner_uri(self, cached_pod, double_pod):
-        """record_path is inner_pod.uri + (RESULT_DB_SCHEMA_VERSION,)."""
+        """record_path is inner_pod.uri + ("rev1", RESULT_DB_SCHEMA_VERSION)."""
         from orcapod.system_constants import RESULT_DB_SCHEMA_VERSION
 
-        assert cached_pod.record_path == double_pod.uri + (RESULT_DB_SCHEMA_VERSION,)
+        assert cached_pod.record_path == double_pod.uri + (
+            "rev1",
+            RESULT_DB_SCHEMA_VERSION,
+        )
 
     def test_record_path_prefix_param_removed(self, double_pod, cache_db):
         """record_path_prefix was removed — passing it must raise TypeError."""

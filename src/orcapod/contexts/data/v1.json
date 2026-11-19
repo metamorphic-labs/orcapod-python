@@ -230,29 +230,33 @@
         "folder": "v1",
         "history": [
             {
-                "date": "2026-11-16",
+                "date": "2026-11-18",
                 "release": null,
                 "added": {
                     "arrow-01.json": "c66fa55619178f2631d04232555cd58059813e97e9ecd2b9de9e63699e60c964",
                     "datagram-01.json": "598d4a2851819d76ba674e189222e61733ca1861ca82a59e990a8ee5e1b0a7b3",
-                    "pipeline-01.json": "ec0049a39e85645d59d9a276a17528bfa64a91f349aa0094052a6d55bc930be5",
+                    "pipeline-01.json": "538958d92057f903d72d5c9e9b35fad23f40078638f4f2291865a536fb643035",
                     "schema-01.json": "79aa2a068e0724891cf43ee528ce8f569e65f08864faa5e34773bfc69ac9576e",
-                    "semantic-01.json": "8e5d9dfff461f9f1d6bdd49a3019e7bf6122e75d799d725b17531d31b080003c",
+                    "semantic-01.json": "45840a7406d232a7686e55805aabe5953594409b447ed175fdff791c49a3f947",
                     "torch-01.json": "af2e8b68d66dffaa37e1d0ad75acd42f595d65b9fae00ddcde81bf9e13a265c8"
                 },
                 "previous": null,
-                "digest": "0a789cf9e8d1df9fb762d6dc2fabffcd3383cd6a21ef147e8c6583f963280c2e"
+                "digest": "28731f440e29a6004d4cfc9318909a10013abcf9488975e15d4864e9544e73c9"
             },
             {
                 "date": "2026-11-18",
                 "release": null,
                 "added": {
-                    "pipeline-02.json": "1ec3cbbe09bbb353366d1c8f2573881467d1c8e1ae53a20f8df4e7f43bbfa74e"
+                    "pipeline-02.json": "7584d28939fb31907e9b078f91e0d6605222c31b170eb70bd6e4e4254342358f"
                 },
-                "previous": "0a789cf9e8d1df9fb762d6dc2fabffcd3383cd6a21ef147e8c6583f963280c2e",
-                "digest": "71b1edf7a9091477d5a39f5882f2da72e1324b3c353bbfaf755d444469c84b28"
+                "previous": "28731f440e29a6004d4cfc9318909a10013abcf9488975e15d4864e9544e73c9",
+                "digest": "6096da93e09dbe7276d5f171f43f893297d0afc840f8dcd244729d9505c8d122"
             }
-        ]
+        ],
+        "provisional": {
+            "pipeline.json": "42d588512ad1ba11acf6725f8424e28bd85c7a75c0dda5ac129d79e4c07a3322",
+            "semantic.json": "0adfab60f8ced647d841d0a74a0603096b00fab310a8f4686246309d5fb39d3d"
+        }
     },
     "changes": [
         {
