@@ -1161,6 +1161,15 @@ class TestDecodeDictionaries:
             ),
             (pa.map_(_DICT, pa.int64()), pa.map_(pa.string(), pa.int64())),
             (_StorageExt(pa.large_list(_DICT)), pa.large_list(pa.string())),
+            (pa.opaque(_DICT, "label", "vendor"), pa.string()),
+            (
+                pa.opaque(pa.large_list(_DICT), "label", "vendor"),
+                pa.large_list(pa.string()),
+            ),
+            (
+                pa.struct([pa.field("o", pa.opaque(_DICT, "label", "vendor"))]),
+                pa.struct([pa.field("o", pa.string())]),
+            ),
             (_StorageExt(pa.large_list_view(_DICT)), pa.large_list_view(pa.string())),
             (
                 _StorageExt(pa.run_end_encoded(pa.int32(), _DICT)),  # pyright: ignore[reportArgumentType]  # the stubs accept only basic value types; Arrow takes a dictionary

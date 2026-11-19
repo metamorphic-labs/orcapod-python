@@ -378,6 +378,16 @@ class SourceStreamBuilder:
         # so say so here rather than report the tag as missing (ITL-1080).
         schema_utils.require_names_not_meta(tag_columns_tuple)
 
+        # Dictionary-encoded columns are not currently supported (ITL-1264,
+        # ITL-1277). The stream refuses them too; checking first reports the
+        # dictionary, not a key column error, and before anything is hashed. It runs
+        # before the system columns are dropped: a hand-built meta, source-info or
+        # system-tag column holding a dictionary is refused, not dropped silently.
+        if found := schema_utils.dictionary_columns(table.schema):
+            raise schema_utils.dictionary_columns_error(
+                found, tag_columns_tuple, data_tags_tuple, system_tag_columns_tuple
+            )
+
         # 1. Drop system columns from raw input.
         table = arrow_utils.drop_system_columns(table)
 
@@ -395,14 +405,6 @@ class SourceStreamBuilder:
             raise ValueError(
                 f"tag_columns not found in table: {missing_tags}. "
                 f"Available columns: {list(table.column_names)}"
-            )
-
-        # Dictionary-encoded columns are not currently supported (ITL-1264,
-        # ITL-1277). The stream refuses them too; checking first reports the
-        # dictionary, not a key column error, and before anything is hashed.
-        if found := schema_utils.dictionary_columns(table.schema):
-            raise schema_utils.dictionary_columns_error(
-                found, tag_columns_tuple, data_tags_tuple, system_tag_columns_tuple
             )
 
         # 3. The row identifiers (validates the key columns).

@@ -131,11 +131,33 @@ print(source.as_table().schema.field("session").type)
 # large_string
 ```
 
-With polars, `df.with_columns(pl.col("session").cast(pl.String))` decodes a `Categorical` or
-`Enum` column. With pandas, `df["session"].astype(df["session"].cat.categories.dtype)` decodes
-a `Categorical` of strings; a `Categorical` of integers that holds a missing value cannot be
-cast to an integer dtype this way (fill or drop the missing values first). A pandas
-`Categorical` of integers reaches the source as plain integers, so it needs no decoding.
+With polars, `pl.col("session").cast(pl.String)` decodes a `Categorical` or `Enum` column.
+With pandas, `astype` with the categories' dtype decodes a `Categorical` of strings. Both
+return a new frame or column: keep it before building the source.
+
+```python
+import pandas as pd
+import polars as pl
+
+from orcapod.sources import DataFrameSource
+
+frame = pl.DataFrame({"session": ["s1", "s2", "s1"], "trial": [1, 1, 2]}).with_columns(
+    pl.col("session").cast(pl.Categorical())
+)
+frame = frame.with_columns(pl.col("session").cast(pl.String))
+print(DataFrameSource(frame, tag_columns=["session"], tag_only_columns=True).keys())
+# (('session',), ('trial',))
+
+table = pd.DataFrame({"session": ["s1", "s2", "s1"], "trial": [1, 1, 2]})
+table["session"] = table["session"].astype("category")
+table["session"] = table["session"].astype(table["session"].cat.categories.dtype)
+print(DataFrameSource(table, tag_columns=["session"], tag_only_columns=True).keys())
+# (('session',), ('trial',))
+```
+
+A pandas `Categorical` of integers that holds a missing value cannot be cast to an integer
+dtype this way (fill or drop the missing values first). A pandas `Categorical` of integers
+reaches the source as plain integers, so it needs no decoding.
 
 A data frame kept whole as a value in a cell (a pandas or polars `DataFrame` holding a
 categorical column) is not a dictionary column: it is a library value, stored and hashed as one

@@ -782,12 +782,16 @@ def dictionary_columns_error(
         f"{DICTIONARY_COLUMNS_NOT_SUPPORTED}:\n"
         + "\n".join(lines)
         + "\nIf keeping the dictionary encoding is not important, decode each such "
-        "column before building the source or stream. With pyarrow, cast it to its "
-        "decoded type (column.cast(column.type.value_type) for a dictionary column, "
-        "the decoded type shown for a column holding a dictionary inside it) and "
-        "replace it keeping its field: table.set_column(i, field.with_type(decoded), "
-        "column.cast(decoded)). With polars, pl.col(name).cast(pl.String) decodes a "
-        "Categorical or Enum column."
+        "column before building the source or stream. With pyarrow, cast it to the "
+        "decoded type shown and replace it keeping its field: "
+        "table.set_column(i, field.with_type(decoded), column.cast(decoded)). Three "
+        "kinds need a step first: a dictionary whose values hold a dictionary "
+        "(chunk.dictionary_decode() on each chunk, then the cast), a list view (cast "
+        "it to a large list of the decoded items) and a run-end-encoded column (cast "
+        "its values, then expand its runs with pyarrow.compute.run_end_decode); the "
+        "troubleshooting page gives each call. With polars, "
+        "df = df.with_columns(pl.col(name).cast(pl.String)) decodes a Categorical or "
+        "Enum column."
     )
 
 

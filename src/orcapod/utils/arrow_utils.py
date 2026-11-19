@@ -210,7 +210,9 @@ def decode_dictionaries(arrow_type: "pa.DataType") -> "pa.DataType":
     Returns:
         The decoded type.
     """
-    if isinstance(arrow_type, pa.ExtensionType):
+    # The base class: a Python extension type and a built-in one (pa.opaque, the
+    # canonical JSON, UUID, tensor and boolean8 types) alike.
+    if isinstance(arrow_type, pa.BaseExtensionType):
         storage = decode_dictionaries(arrow_type.storage_type)
         return arrow_type if storage == arrow_type.storage_type else storage
     if pa.types.is_dictionary(arrow_type):

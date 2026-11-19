@@ -46,6 +46,8 @@ from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.job import PipelineJob
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 from orcapod.types import Cursor, PollingConfig, Schema
+from orcapod.contexts import get_default_context
+from orcapod.utils import schema_utils
 from orcapod.utils.arrow_utils import decode_dictionaries
 
 NOT_SUPPORTED = "dictionary-encoded columns are not currently supported in Orcapod"
@@ -125,11 +127,12 @@ def _assert_refused(
     for name in all_names:
         if name not in named:
             assert f"column {name!r}" not in message
-    assert "column.cast(column.type.value_type)" in message
     assert (
         "table.set_column(i, field.with_type(decoded), column.cast(decoded))" in message
     )
-    assert "pl.col(name).cast(pl.String)" in message
+    assert "chunk.dictionary_decode()" in message
+    assert "pyarrow.compute.run_end_decode" in message
+    assert "df = df.with_columns(pl.col(name).cast(pl.String))" in message
 
 
 # ── a raw ArrowTableStream ──────────────────────────────────────────────────
@@ -211,6 +214,8 @@ def test_a_dictionary_column_is_refused_before_anything_is_hashed(
         raise AssertionError("the source hashed before checking its columns")
 
     monkeypatch.setattr(stream_builder, "row_identifiers", _never)
+    # No table or column hash either (the default source id, a key column check).
+    monkeypatch.setattr(get_default_context().arrow_hasher, "hash_table", _never)
     with pytest.raises(InputValidationError, match=NOT_SUPPORTED):
         ArrowTableSource(
             _table("string", encoded), tag_columns=["a", "b"], tag_only_columns=True
@@ -274,6 +279,65 @@ def test_a_raw_stream_refuses_a_dictionary_in_orcapods_own_columns(
     with pytest.raises(InputValidationError) as info:
         ArrowTableStream(table, tag_columns=["a", "b"], **kwargs)
     assert f"- {role} column {column!r} has type dictionary<" in str(info.value)
+
+
+OWN_COLUMNS = {
+    "__note": "meta",
+    "_source_v": "source-info",
+    "_tag_source_id::abc": "system-tag",
+}
+
+
+@pytest.mark.parametrize(
+    "own", [("__note",), ("_source_v",), ("_tag_source_id::abc",), tuple(OWN_COLUMNS)]
+)
+@pytest.mark.parametrize("with_user_column", [False, True], ids=["alone", "beside-v"])
+@pytest.mark.parametrize("own_first", [False, True], ids=["user-first", "own-first"])
+def test_a_source_refuses_a_dictionary_in_hand_built_system_columns(
+    own: tuple[str, ...], with_user_column: bool, own_first: bool
+) -> None:
+    """The builder checks before it drops system columns (CodeRabbit on PR 455): a
+    dictionary-free system column is still stripped, a dictionary one is refused."""
+    user: dict[str, pa.Array[Any]] = {
+        "a": pa.array(["x", "y"]),
+        "b": pa.array(["p", "q"]),
+        "v": pa.array(["r", "s"]).dictionary_encode()
+        if with_user_column
+        else pa.array(["r", "s"]),
+        "w": pa.array([3, 4]),
+    }
+    system = {name: pa.array(["c1", "c2"]).dictionary_encode() for name in own}
+    columns = {**system, **user} if own_first else {**user, **system}
+    table = pa.table(list(columns.values()), names=list(columns))
+    with pytest.raises(InputValidationError) as info:
+        ArrowTableSource(table, tag_columns=["a", "b"], tag_only_columns=True)
+    message = str(info.value)
+    for name in own:
+        assert f"- {OWN_COLUMNS[name]} column {name!r} has type dictionary<" in message
+    assert ("- data column 'v'" in message) == with_user_column
+
+
+def test_a_dictionary_free_system_column_is_still_stripped() -> None:
+    table = pa.table(
+        {
+            "a": ["x", "y"],
+            "__note": ["n1", "n2"],
+            "_source_v": ["s1", "s2"],
+            "v": [1, 2],
+        }
+    )
+    source = ArrowTableSource(table, tag_columns=["a"], tag_only_columns=True)
+    assert source.keys() == (("a",), ("v",))
+
+
+def test_an_opaque_type_over_a_dictionary_is_refused() -> None:
+    """``pa.opaque`` is a built-in extension type, not a Python ``pa.ExtensionType``."""
+    opaque = pa.opaque(pa.dictionary(pa.int32(), pa.string()), "label", "vendor")
+    storage = pa.array(["x", "y"]).dictionary_encode()
+    column = pa.ExtensionArray.from_storage(opaque, storage)
+    table = pa.table({"a": ["p", "q"], "o": column, "v": [1, 2]})
+    with pytest.raises(InputValidationError, match="- data column 'o' has type"):
+        ArrowTableStream(table, tag_columns=["a"])
 
 
 # ── data frames ─────────────────────────────────────────────────────────────
@@ -615,6 +679,81 @@ def test_a_nested_dictionary_decoded_as_the_message_says_builds(kind: str) -> No
     kept = stream.as_table().schema.field("w")
     assert not kept.nullable
     assert (kept.metadata or {}).get(b"note") == b"kept"
+
+
+def _replace(table: pa.Table, name: str, column: Any) -> pa.Table:
+    """Replace a column keeping its field: name, nullability and metadata."""
+    field = table.schema.field(name)
+    return table.set_column(
+        table.schema.get_field_index(name), field.with_type(column.type), column
+    )
+
+
+def _recover(kind: str, column: Any) -> Any:
+    """The recipe the message and the troubleshooting page give, per kind of column."""
+    import pyarrow.compute as pc
+
+    if kind == "dictionary of a dictionary":
+        # The values hold a dictionary: decode the top level first, then cast.
+        return pa.chunked_array(
+            [chunk.dictionary_decode() for chunk in column.chunks]
+        ).cast(decode_dictionaries(column.type))
+    if kind == "list_view":
+        # A source refuses list views; a large list of the decoded items it accepts.
+        return column.cast(pa.large_list(decode_dictionaries(column.type.value_type)))
+    if kind == "run_end_encoded":
+        # Decode the values, then expand the runs.
+        return pa.chunked_array(
+            [
+                pc.run_end_decode(  # pyright: ignore[reportAttributeAccessIssue]  # a generated compute function the stubs omit
+                    pa.RunEndEncodedArray.from_arrays(
+                        chunk.run_ends,
+                        chunk.values.cast(decode_dictionaries(chunk.values.type)),
+                    )
+                )
+                for chunk in column.chunks
+            ]
+        )
+    return column.cast(decode_dictionaries(column.type))
+
+
+def _special(kind: str) -> pa.Array[Any]:
+    encoded = pa.array(["x", "y"]).dictionary_encode()
+    if kind == "dictionary of a dictionary":
+        values = pa.StructArray.from_arrays([encoded], names=["k"])
+        return pa.DictionaryArray.from_arrays(pa.array([0, 1, 0], pa.int32()), values)
+    if kind == "list_view":
+        return pa.ListViewArray.from_arrays(  # pyright: ignore[reportCallIssue, reportUnknownVariableType]  # the pyarrow stubs omit from_arrays' sizes argument
+            pa.array([0, 1, 0], pa.int32()), pa.array([1, 1, 2], pa.int32()), encoded
+        )
+    if kind == "run_end_encoded":
+        return pa.RunEndEncodedArray.from_arrays(pa.array([1, 3], pa.int32()), encoded)
+    raise ValueError(kind)
+
+
+@pytest.mark.parametrize(
+    "kind", ["dictionary of a dictionary", "list_view", "run_end_encoded"]
+)
+def test_the_columns_a_plain_cast_cannot_decode_have_a_recipe_that_works(
+    kind: str,
+) -> None:
+    """pyarrow cannot cast these to their decoded type; the stated steps decode them."""
+    table = pa.table(
+        {
+            "a": ["p", "q", "r"],
+            "b": [1, 2, 3],
+            "c": _special(kind),
+            "w": [0.5, 1.5, 2.5],
+        }
+    )
+    with pytest.raises(InputValidationError):
+        ArrowTableSource(table, tag_columns=["a", "b"], tag_only_columns=True)
+    with pytest.raises(pa.ArrowNotImplementedError):
+        table["c"].cast(decode_dictionaries(table.schema.field("c").type))
+    decoded = _replace(table, "c", _recover(kind, table["c"]))
+    assert not schema_utils.dictionary_columns(decoded.schema)
+    source = ArrowTableSource(decoded, tag_columns=["a", "b"], tag_only_columns=True)
+    assert source.as_table().num_rows == 3
 
 
 @pytest.mark.parametrize("dtype", ["Categorical", "Enum"])
