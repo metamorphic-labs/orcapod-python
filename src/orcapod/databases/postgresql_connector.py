@@ -344,6 +344,23 @@ def _field_has_metadata(field: pa.Field) -> bool:
     return False
 
 
+def _psycopg_server(dsn: str) -> tuple[str, str]:
+    """Return the ``host`` and ``hostaddr`` psycopg reads for ``dsn``, now.
+
+    Each from the DSN, else from ``PGHOST`` / ``PGHOSTADDR`` (a service file is
+    libpq's, and psycopg does not read it), ``""`` when neither gives one. psycopg
+    decides from these whether it resolves the host itself.
+    """
+    from psycopg.conninfo import conninfo_to_dict
+
+    given = conninfo_to_dict(dsn)
+
+    def supplied(key: str, envvar: str) -> str:
+        return str((given[key] if key in given else os.environ.get(envvar)) or "")
+
+    return supplied("host", "PGHOST"), supplied("hostaddr", "PGHOSTADDR")
+
+
 # ---------------------------------------------------------------------------
 # PostgreSQLConnector
 # ---------------------------------------------------------------------------
@@ -366,6 +383,10 @@ class PostgreSQLConnector:
 
     def __init__(self, dsn: str) -> None:
         self._dsn = dsn
+        # The host and hostaddr psycopg reads for this connection (the DSN, else
+        # PGHOST / PGHOSTADDR), taken when it connects: ``given_server`` must not
+        # read an environment changed since (ITL-1267).
+        self._psycopg_server = _psycopg_server(dsn)
         self._conn: Any = psycopg.connect(dsn, autocommit=False)
         self._lock = threading.RLock()  # RLock required: iter_batches → _resolve_column_type_lookup → get_column_info re-enters the lock
         self._cursor_seq = itertools.count()
@@ -450,17 +471,21 @@ class PostgreSQLConnector:
         that answers. psycopg splits such a list of the DSN or the environment into
         one attempt per server, so that list is returned as given.
 
+        This relies on one psycopg behaviour, that of ``Connection.connect`` in
+        psycopg 3.1.17 and later (earlier releases passed the DSN to libpq
+        unchanged): a single host name of the DSN or ``PGHOST``, with no
+        ``hostaddr`` there, is resolved by psycopg and passed to libpq as
+        ``hostaddr`` (``TestPsycopgResolvesTheHost`` pins it).
+
+        What psycopg read from the DSN and the environment is taken when the
+        connector connected, so a later change of ``PGHOST`` or ``PGHOSTADDR``
+        changes nothing here; the host and the address are what the connection
+        reports.
+
         Returns:
             The host and the host address, each ``""`` when there is none.
         """
-        from psycopg.conninfo import conninfo_to_dict
-
-        given = conninfo_to_dict(self._dsn)
-
-        def supplied(key: str, envvar: str) -> str:
-            return str((given[key] if key in given else os.environ.get(envvar)) or "")
-
-        host, hostaddr = supplied("host", "PGHOST"), supplied("hostaddr", "PGHOSTADDR")
+        host, hostaddr = self._psycopg_server
         if "," in host or "," in hostaddr:
             return host, hostaddr
         with self._lock:

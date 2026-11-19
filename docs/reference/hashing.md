@@ -203,10 +203,15 @@ or `PGHOSTADDR` setting or a service file that names several servers (`host=a,b`
 default: the server reached can change from one connection to the next. Neither do
 parameters that give a host beside a different `hostaddr` (`host=db.example.org
 hostaddr=192.0.2.1`; `host=127.0.0.1 hostaddr=127.0.0.1` keeps a default), wherever each
-comes from: libpq takes each parameter from the DSN, else a service file, else the
-environment, so a service file's `hostaddr` counts beside a host of the DSN or `PGHOST`, and a
-service file's host beside a `PGHOST` that psycopg resolved. libpq sends the connection to the
-address, so
+comes from. libpq takes each parameter from the DSN, else a service file, else the
+environment; psycopg resolves a single host name of the DSN or `PGHOST` itself, when neither
+gives a `hostaddr`, and passes the address it reached as `hostaddr`, which overrides a service
+file's. So a service file's `hostaddr` beside a host name of the DSN or `PGHOST` changes
+nothing (the connection goes to the named host, and the default stays), while beside a
+Unix-socket directory, which psycopg does not resolve, it is the address used and there is no
+default; and a service file's host beside a `PGHOST` that psycopg resolved has no default
+(libpq reports the service file's host, the connection went to the `PGHOST` address). libpq
+sends the connection to the address, so
 the host name does not name the server, and two such DSNs with one host and two addresses
 would share an id. A name that DNS, a hosts file or a tunnel sends to another server is not
 seen in the parameters: two servers reached under one name that way share a default id and

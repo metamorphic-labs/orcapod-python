@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import pathlib
 import socket
+from typing import Any
 from unittest.mock import MagicMock, patch
 
+import psycopg
 import pyarrow as pa
 import pytest
 
@@ -645,3 +647,128 @@ class TestServerLocationUnit:
     ) -> None:
         given = self._given(isolated_env, monkeypatch, dsn, env, service, reverse)
         assert given == expected
+
+    @pytest.mark.parametrize(
+        ("at_connect", "later", "expected"),
+        [
+            # psycopg resolved PGHOST: a PGHOSTADDR set later does not make its
+            # address the user's.
+            (
+                {"PGHOST": "db.example.org"},
+                {"PGHOSTADDR": "192.0.2.7"},
+                ("db.example.org", ""),
+            ),
+            # Another host later, in place of the one connected to.
+            (
+                {"PGHOST": "db.example.org"},
+                {"PGHOST": "other.example.org"},
+                ("db.example.org", ""),
+            ),
+            # Several servers at connect time stay several when PGHOST is unset.
+            (
+                {"PGHOST": "a.example.org,b.example.org"},
+                {"PGHOST": None},
+                ("a.example.org,b.example.org", ""),
+            ),
+            # One server at connect time stays one when PGHOST becomes a list.
+            (
+                {"PGHOST": "db.example.org"},
+                {"PGHOST": "a.example.org,b.example.org"},
+                ("db.example.org", ""),
+            ),
+        ],
+    )
+    def test_the_environment_is_read_when_the_connector_connects(
+        self,
+        isolated_env: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+        at_connect: dict[str, str],
+        later: dict[str, str | None],
+        expected: tuple[str, str],
+    ) -> None:
+        for envvar, value in at_connect.items():
+            monkeypatch.setenv(envvar, value)
+        connector = self._as_libpq_takes("dbname=x")
+        for envvar, value in later.items():
+            if value is None:
+                monkeypatch.delenv(envvar)
+            else:
+                monkeypatch.setenv(envvar, value)
+        try:
+            assert connector.given_server() == expected
+        finally:
+            connector._conn = None
+
+
+class TestPsycopgResolvesTheHost:
+    """The psycopg behaviour ``given_server`` relies on, pinned (ITL-1267).
+
+    psycopg's ``Connection.connect`` resolves a single host name of the DSN or
+    ``PGHOST`` itself, when neither gives a ``hostaddr``, and passes the address to
+    libpq as ``hostaddr`` (psycopg 3.1.17 and later; earlier releases passed the DSN
+    unchanged). Real name resolution of ``localhost`` and psycopg's own connect
+    loop: only the step that would open the connection is replaced, to record the
+    connection string psycopg hands to libpq. If a future psycopg stops doing this
+    (or renames that step), these tests fail.
+    """
+
+    @staticmethod
+    def _passed_to_libpq(dsn: str) -> list[dict[str, Any]]:
+        from psycopg.conninfo import conninfo_to_dict
+
+        passed: list[str] = []
+
+        def refuse(conninfo: str, **_: Any) -> Any:
+            passed.append(conninfo)
+            raise psycopg.OperationalError("not connecting in a unit test")
+
+        with patch.object(psycopg.Connection, "_connect_gen", side_effect=refuse):
+            with pytest.raises(psycopg.OperationalError):
+                psycopg.connect(dsn)
+        assert passed, "psycopg did not reach the step that opens the connection"
+        return [conninfo_to_dict(conninfo) for conninfo in passed]
+
+    @staticmethod
+    def _addresses(name: str) -> set[str]:
+        return {
+            str(info[4][0])
+            for info in socket.getaddrinfo(
+                name, 5432, proto=socket.IPPROTO_TCP, type=socket.SOCK_STREAM
+            )
+        }
+
+    @pytest.fixture(autouse=True)
+    def _no_server_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for envvar in ("PGHOST", "PGHOSTADDR", "PGSERVICE"):
+            monkeypatch.delenv(envvar, raising=False)
+
+    @pytest.mark.parametrize("via", ["dsn", "PGHOST"])
+    def test_a_host_name_is_passed_with_the_address_psycopg_resolved(
+        self, monkeypatch: pytest.MonkeyPatch, via: str
+    ) -> None:
+        if via == "PGHOST":
+            monkeypatch.setenv("PGHOST", "localhost")
+        dsn = "host=localhost dbname=x" if via == "dsn" else "dbname=x"
+        attempts = self._passed_to_libpq(dsn)
+        addresses = self._addresses("localhost")
+        assert {attempt["hostaddr"] for attempt in attempts} <= addresses
+        assert all(
+            attempt.get("host", "localhost") == "localhost" for attempt in attempts
+        )
+
+    @pytest.mark.parametrize(
+        ("dsn", "hostaddr"),
+        [
+            ("host=127.0.0.1 dbname=x", "127.0.0.1"),
+            ("host=localhost hostaddr=192.0.2.1 dbname=x", "192.0.2.1"),
+            ("hostaddr=192.0.2.1 host=localhost dbname=x", "192.0.2.1"),
+        ],
+    )
+    def test_an_address_is_passed_as_given(self, dsn: str, hostaddr: str) -> None:
+        assert [attempt["hostaddr"] for attempt in self._passed_to_libpq(dsn)] == [
+            hostaddr
+        ]
+
+    def test_a_socket_directory_is_not_resolved(self) -> None:
+        attempts = self._passed_to_libpq("host=/var/run/postgresql dbname=x")
+        assert [attempt.get("hostaddr") for attempt in attempts] == [None]
