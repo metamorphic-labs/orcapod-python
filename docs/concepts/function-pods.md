@@ -409,7 +409,8 @@ print("function calls:", len(calls))
     version, e.g. `@function_pod(output_keys="bmi", version="v1.0")` (the default is
     `"v0.0"`; a minor bump such as `"v0.1"` is not enough), or rename the function.
     The same holds when you reorder `output_keys` among outputs of the same type: the
-    output schema is a set of named, typed outputs, so its identity does not change (see
+    output schema is a set of named, typed outputs, so its identity does not change, and
+    only a major version bump makes the function compute the new order's values (see
     *Change detection* in [Identity & Hashing](identity.md#change-detection)).
 
 !!! note "When the database cannot be read"

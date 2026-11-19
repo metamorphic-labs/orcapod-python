@@ -7,8 +7,8 @@ type, in no order (the schema hash sorts field names, as for every schema). So:
   hash, pipeline hash and stored tables;
 * swapping two output keys of the same type leaves the schema as it is: the same uri.
   Like an edit of the body, it changes what the function computes, so it needs a
-  version bump; a check of the stored function variation data on a cache hit is
-  ITL-1253 (strict xfail below);
+  major version bump (the uri holds only the major); a check of the stored function
+  variation data on a cache hit is ITL-1253 (strict xfail below);
 * the input parameters are in no part of the uri (names and order);
 * a function with one output key has the identity the golden values pin.
 
@@ -168,6 +168,20 @@ def test_a_swap_changes_the_identity_exactly_when_it_changes_a_keys_type() -> No
         by_str_key.setdefault(keys[2], set()).add(_identity(pod))
     assert all(len(identities) == 1 for identities in by_str_key.values())
     assert len(set().union(*by_str_key.values())) == 3
+
+
+def test_only_a_major_version_bump_tells_a_same_typed_swap_apart() -> None:
+    """The uri holds the major version only: a minor bump keeps the swapped order's uri.
+
+    So, while a cache hit is not checked (ITL-1253), only a major bump makes the
+    swapped order compute its own values.
+    """
+    original = FunctionPod.from_fn(same2, output_keys=["first", "second"])
+    minor = FunctionPod.from_fn(same2, output_keys=["second", "first"], version="v0.1")
+    major = FunctionPod.from_fn(same2, output_keys=["second", "first"], version="v1.0")
+    assert minor.uri == original.uri
+    assert major.uri != original.uri
+    assert major.uri[2] == "v1"
 
 
 def test_renaming_an_output_key_is_another_function() -> None:
