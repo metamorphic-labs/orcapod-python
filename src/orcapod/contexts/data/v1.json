@@ -247,10 +247,10 @@
                 "date": "2026-11-18",
                 "release": null,
                 "added": {
-                    "pipeline-02.json": "e5fbe9dd43df61554209ec5261a9c1bdd8059ec6d0d0959f882d1c42170bbb6b"
+                    "pipeline-02.json": "7584d28939fb31907e9b078f91e0d6605222c31b170eb70bd6e4e4254342358f"
                 },
                 "previous": "9f6e545f710e6c8c36ff546477ddedd251871f1a154588e823145aafa6802442",
-                "digest": "c8acaca15da89e312c59aa238d290706bd597dbc70abe7e56588e76d7516f7c7"
+                "digest": "7be3c4e8659a3bca78bd54a04a444323db181a9ca2a3285cd7ba5ad4a76a305c"
             }
         ],
         "provisional": {

@@ -793,10 +793,13 @@ no input tag name may appear among the data columns.
 **An operator may add a tag, never data** (developer, November 16, 2026, ITL-1196): "synthesizing
 a tag is fine — that's not a value. Operator may never add data." `AddTags`
 (`stream.add_tags(cohort="A", run=3)`) adds tags holding one constant value on every row, after
-the input's tags; data columns, source info and system tags pass through unchanged. A value is
-exactly a `bool`, `int`, `float`, `str` or `bytes` (Arrow `bool`, `int64`, `double`,
-`large_string`, `large_binary`, non-nullable); anything else (`None`, `Decimal`, `datetime`,
-`date`, a subclass) is refused. Its identity is the names and values in order. A function form
+the input's tags, in name order; data columns, source info and system tags pass through
+unchanged. A value is exactly a `bool`, `int`, `float`, `str` or `bytes` (Arrow `bool`, `int64`,
+`double`, `large_string`, `large_binary`, non-nullable); anything else (`None`, `Decimal`,
+`datetime`, `date`, a subclass) is refused. The new tags are a set (developer, November 18,
+2026, ITL-1269: "I absolutely agree to make it entry order independent"): the operator holds
+them in name order, and its identity is the names and values in name order, so the order of the
+keywords never changes a hash, a stored path or a column name. A function form
 (new tags computed from a row's tags and data) is future work, not designed yet.
 
 Two operators reduce row count many→one. `Batch` groups consecutive rows by count; `GroupBy`
