@@ -29,7 +29,7 @@ from orcapod.core.sources.spiraldb_table_source import _checked_conditions
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.cached_source import CachedSource
 from orcapod.sources import SpiralDBTableSource
-from orcapod.types import Condition
+from orcapod.types import CacheMode, Condition
 from tests.test_databases import fake_pyspiral
 
 _PROJECT = "workshop-sample"
@@ -1253,3 +1253,208 @@ class TestCachedSourceOverARestriction:
 
         rows = job.nodes["first"].as_table().column("timestamp").to_pylist()
         assert sorted(rows) == [1, 2, 3, 4, 5]
+
+
+# The restrictions of one source under which a caching operator is refused: a condition,
+# several conditions, a limit, both.
+_RESTRICTIONS: dict[str, _Restrict] = {
+    "a condition": lambda s: s.where(subject_id="m1"),
+    "several conditions": lambda s: s.where(subject_id="m1", flag=True),
+    "a limit": lambda s: SpiralDBTableSource(
+        _PROJECT, "event", source_id="events", tag_only_columns=True, limit=3
+    ),
+    "a condition and a limit": lambda s: SpiralDBTableSource(
+        _PROJECT, "event", source_id="events", tag_only_columns=True, limit=3
+    ).where(subject_id="m1"),
+}
+_CACHING = [CacheMode.LOG, CacheMode.REPLAY]
+
+
+class TestOperatorCacheOverARestriction:
+    """An operator node that caches (LOG or REPLAY) is refused over a restricted source.
+
+    Developer, November 19, 2026 ("B is the proper behavior for now"): the cache is
+    kept under the node's identity, which a restriction is not part of, so a log
+    written from a restricted read would be replayed for another restriction or none.
+    Refused at the earliest point both are known: setting the cache mode over a
+    restricted source, binding a restricted source under a caching node, and, for
+    any other order, the start of every run, before anything is read or written.
+    """
+
+    @staticmethod
+    def _events() -> SpiralDBTableSource:
+        return _source(source_id="events", tag_only_columns=True)
+
+    @staticmethod
+    def _job(
+        store: DeltaTableDatabase, source: Any, *, chain: bool = False
+    ) -> PipelineJob:
+        """A job renaming ``amplitude`` (op ``rename``), optionally after a select."""
+        job = PipelineJob(name="events", database=store)
+        with job:
+            upstream = source
+            if chain:
+                upstream = upstream.select_data_columns(
+                    ["amplitude", "channel"], label="select"
+                ).map_data({"channel": "lane"}, label="lane")
+            upstream.map_data({"amplitude": "a"}, label="rename")
+        return job
+
+    @staticmethod
+    def _cache(
+        job: PipelineJob, node: str, mode: CacheMode, store: DeltaTableDatabase
+    ) -> None:
+        """Give ``node`` the cache mode, over the job's own database."""
+        job.nodes[node].attach_databases(
+            pipeline_database=store.at("events"), cache_mode=mode
+        )
+
+    @pytest.mark.parametrize("mode", _CACHING, ids=lambda m: m.name)
+    @pytest.mark.parametrize("restriction", list(_RESTRICTIONS))
+    @pytest.mark.parametrize(
+        "chain", [False, True], ids=["direct", "through-operators"]
+    )
+    def test_setting_the_cache_mode_over_a_restricted_source_is_refused(
+        self, project, tmp_path, mode, restriction, chain
+    ):
+        """Restriction first, cache mode second: refused when the mode is set."""
+        source = _RESTRICTIONS[restriction](self._events())
+        store = DeltaTableDatabase(tmp_path / "store")
+        job = self._job(store, source, chain=chain)
+
+        with pytest.raises(ValueError, match="cannot cache a restricted read") as info:
+            self._cache(job, "rename", mode, store)
+
+        assert f"CacheMode.{mode.name}" in str(info.value)
+        assert "'rename'" in str(info.value)
+        assert "events: " in str(info.value)
+
+    @pytest.mark.parametrize("mode", _CACHING, ids=lambda m: m.name)
+    @pytest.mark.parametrize("restriction", list(_RESTRICTIONS))
+    def test_binding_a_restricted_source_under_a_cache_is_refused(
+        self, project, tmp_path, mode, restriction
+    ):
+        """Cache mode first, restriction second: refused at the bind, nothing bound."""
+        events = self._events()
+        store = DeltaTableDatabase(tmp_path / "store")
+        job = self._job(store, events, chain=True)
+        self._cache(job, "rename", mode, store)
+        slot = job.nodes["events"]
+
+        with pytest.raises(ValueError, match="cannot cache a restricted read"):
+            job.bind(sources={"events": _RESTRICTIONS[restriction](events)})
+
+        assert slot.bound_source is events
+
+    @pytest.mark.parametrize("mode", _CACHING, ids=lambda m: m.name)
+    @pytest.mark.parametrize("run", ["job.run", "job.run_async", "node.run"])
+    def test_a_slot_rebound_directly_is_refused_when_the_run_starts(
+        self, project, tmp_path, mode, run
+    ):
+        """A source set on the slot itself (no job to check it) is refused by the
+        run, sync or async, before any source is read or anything written."""
+        events = self._events()
+        folder = tmp_path / "store"
+        store = DeltaTableDatabase(folder)
+        job = self._job(store, events)
+        self._cache(job, "rename", mode, store)
+        job.nodes["events"].bound_source = events.where(subject_id="m1")
+        scans = len(fake_pyspiral.scan_log)
+
+        with pytest.raises(ValueError, match="cannot cache a restricted read"):
+            if run == "job.run":
+                job.run()
+            elif run == "job.run_async":
+                asyncio.run(job.run_async())
+            else:
+                job.nodes["rename"].run()
+
+        assert len(fake_pyspiral.scan_log) == scans
+        assert not folder.exists() or not any(folder.rglob("*.parquet"))
+
+    @pytest.mark.parametrize("mode", _CACHING, ids=lambda m: m.name)
+    @pytest.mark.parametrize(
+        "restricted", [("events",), ("units",), ("events", "units")]
+    )
+    def test_two_sources_feeding_one_operator(
+        self, project, tmp_path, mode, restricted
+    ):
+        """A join of two tables caches only when neither source is restricted."""
+        project.create_table("default.unit", key_schema=_KEYS).write(
+            pa.table(
+                {
+                    "subject_id": ["m1", "m1", "m2"],
+                    "timestamp": pa.array([1, 2, 4], pa.uint64()),
+                    "depth": pa.array([10.0, 20.0, 40.0]),
+                }
+            )
+        )
+        events = self._events()
+        units = SpiralDBTableSource(
+            _PROJECT, "unit", source_id="units", tag_only_columns=True
+        )
+        sources = {"events": events, "units": units}
+        for name in restricted:
+            sources[name] = sources[name].where(subject_id="m1")
+        store = DeltaTableDatabase(tmp_path / "s")
+        job = PipelineJob(name="events", database=store)
+        with job:
+            sources["events"].join(sources["units"], label="joined")
+
+        with pytest.raises(ValueError, match="cannot cache a restricted read") as info:
+            self._cache(job, "joined", mode, store)
+        for name in restricted:
+            assert f"{name}: where subject_id='m1'" in str(info.value)
+
+    @pytest.mark.parametrize("mode", _CACHING, ids=lambda m: m.name)
+    @pytest.mark.parametrize("path", ["sync", "async"])
+    def test_an_unrestricted_pipeline_still_caches(self, project, tmp_path, mode, path):
+        """Without a restriction, a LOG run stores and a REPLAY run replays."""
+        store = DeltaTableDatabase(tmp_path / "store")
+        job = self._job(store, self._events(), chain=True)
+        self._cache(job, "rename", CacheMode.LOG, store)
+        job.run() if path == "sync" else asyncio.run(job.run_async())
+        logged = job.nodes["rename"].as_table().column("timestamp").to_pylist()
+
+        self._cache(job, "rename", mode, store)
+        job.run() if path == "sync" else asyncio.run(job.run_async())
+
+        assert sorted(logged) == [1, 2, 3, 4, 5]
+        rows = job.nodes["rename"].as_table().column("timestamp").to_pylist()
+        assert sorted(rows) == [1, 2, 3, 4, 5]
+
+    @pytest.mark.parametrize("restriction", list(_RESTRICTIONS))
+    @pytest.mark.parametrize("path", ["sync", "async"])
+    def test_cache_mode_off_over_a_restriction_still_runs(
+        self, project, tmp_path, restriction, path
+    ):
+        """``CacheMode.OFF`` caches nothing, so a restricted source is accepted."""
+        store = DeltaTableDatabase(tmp_path / "store")
+        source = _RESTRICTIONS[restriction](self._events())
+        job = self._job(store, source, chain=True)
+        self._cache(job, "rename", CacheMode.OFF, store)
+
+        job.run() if path == "sync" else asyncio.run(job.run_async())
+
+        expected = _timestamps(source)
+        rows = job.nodes["rename"].as_table().column("timestamp").to_pylist()
+        assert sorted(rows) == sorted(expected)
+        assert len(expected) < 5
+
+    def test_a_function_node_over_a_restriction_is_not_concerned(
+        self, project, tmp_path
+    ):
+        """A function node stores per row, so it runs over a restricted source."""
+
+        @function_pod(output_keys="doubled")
+        def double(amplitude: float | None) -> float | None:
+            """Return twice ``amplitude``."""
+            return None if amplitude is None else 2 * amplitude
+
+        job = PipelineJob(name="events", database=DeltaTableDatabase(tmp_path / "s"))
+        with job:
+            double.pod(self._events().where(subject_id="m1"), label="double")
+        job.run()
+
+        rows = job.nodes["double"].as_table().column("timestamp").to_pylist()
+        assert sorted(rows) == [1, 2, 3]

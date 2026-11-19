@@ -874,7 +874,14 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
                 mode stores or replays them (``LOG`` or ``REPLAY``), and the database
                 cannot keep the marker that states them (ITL-1019). Nothing is
                 attached or written.
+            ValueError: If the cache mode is ``LOG`` or ``REPLAY`` and a source
+                feeding the node is restricted (a condition or a limit, ITL-1218):
+                the cache is kept under the node's identity, which a restriction is
+                not part of. Nothing is attached.
         """
+        from orcapod.pipeline.node_run import refuse_restricted_operator_cache
+
+        refuse_restricted_operator_cache(self, cache_mode)
         if cache_mode != CacheMode.OFF:
             # A stored table states its data-tags; refuse a database that
             # cannot, before anything runs or is written (ITL-1019).
@@ -1748,10 +1755,13 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         Raises:
             RuntimeError: If the node was loaded by ``PipelineJob.load`` and
                 ``load_only`` is false.
+            ValueError: If this node or one it depends on caches (``LOG`` or
+                ``REPLAY``) over a restricted source (ITL-1218); nothing has run.
         """
         from orcapod.pipeline.node_run import (
             check_sources,
             depends_on_job_nodes,
+            refuse_restricted_operator_caches,
             refuse_unloadable_inputs,
             run_with_dependencies,
         )
@@ -1759,6 +1769,9 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
 
         if self._loaded and not load_only:
             raise self._cannot_compute_error()
+        # A caching operator over a restricted source is refused before any source is
+        # checked and before anything is computed or written (ITL-1218).
+        refuse_restricted_operator_caches([self])
         # Every source feeding the run first takes in any new data (ITL-1102).
         unchecked = check_sources([self])
         if self.holds_current_run(load_only=load_only):

@@ -347,11 +347,15 @@ def run_job_node(
     from orcapod.pipeline.node_run import (
         check_sources,
         depends_on_job_nodes,
+        refuse_restricted_operator_caches,
         refuse_unloadable_inputs,
         run_with_dependencies,
     )
     from orcapod.pipeline.run_summary import warn_row_failures
 
+    # A caching operator over a restricted source is refused before any source is
+    # checked and before anything is computed or written (ITL-1218).
+    refuse_restricted_operator_caches([node])
     # Every source feeding the run first takes in any new data (ITL-1102).
     unchecked = check_sources([node])
     if node.holds_current_run(load_only=load_only):

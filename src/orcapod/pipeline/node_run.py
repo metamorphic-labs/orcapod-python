@@ -14,12 +14,12 @@ the commit ``job.run()`` makes.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeAlias
 
 from orcapod.errors import OrcapodDatabaseError, OrcapodDatabaseWriteError
-from orcapod.types import Condition
+from orcapod.types import CacheMode, Condition
 from orcapod.pipeline.run_summary import (
     restriction_text,
     RunCountingObserver,
@@ -276,6 +276,7 @@ def restriction_of(stream: object) -> _Restriction | None:
 
 def _restrictions_beneath(
     streams: Iterable[Any],
+    bound_sources: Mapping[str, Any] | None = None,
 ) -> frozenset[tuple[str, _Restriction]]:
     """Return the restrictions of every source the streams read, order-free.
 
@@ -283,6 +284,12 @@ def _restrictions_beneath(
     sources; each restricted root gives ``(source name, (condition, limit))``. Two
     results are equal when the same sources are restricted equally (``Condition``
     equality: by value, in any order of the columns; and the same limit).
+
+    Args:
+        streams: Where the walk starts.
+        bound_sources: Slot name to the source a bind is about to bind there, read
+            in place of the slot's current source (``PipelineJob.bind`` checks
+            before it binds).
     """
     from orcapod.core.nodes.source_node import SourceJobNode
 
@@ -298,8 +305,11 @@ def _restrictions_beneath(
         if restriction is not None:
             found.add((_source_name(current), restriction))
         if isinstance(current, SourceJobNode):
-            if current.bound_source is not None:
-                pending.append(current.bound_source)
+            bound = current.bound_source
+            if bound_sources is not None and current.name in bound_sources:
+                bound = bound_sources[current.name]
+            if bound is not None:
+                pending.append(bound)
         else:
             pending.extend(getattr(current, "upstreams", ()))
     return frozenset(found)
@@ -346,6 +356,83 @@ def require_one_restriction(known: Sequence[Any], other: Sequence[Any]) -> None:
             "holds one of them: use one restriction for the table in this pipeline, "
             "or build a separate pipeline."
         )
+
+
+# TODO(ITL-1219): a restriction kept apart from the node's identity (or a cache keyed by
+# it) would let an operator cache a restricted read; until then it is refused.
+def refuse_restricted_operator_cache(
+    node: Any,
+    cache_mode: CacheMode,
+    bound_sources: Mapping[str, Any] | None = None,
+) -> None:
+    """Refuse an operator node that caches (LOG or REPLAY) over a restricted source.
+
+    An operator node keeps its cache under its own identity, which a restriction
+    (ITL-1218) is not part of, so a log written from a restricted read would be
+    replayed for another restriction or for none (developer, November 19, 2026).
+    ``CacheMode.OFF`` caches nothing and is never refused; function nodes store
+    per row and are not concerned.
+
+    Args:
+        node: The operator job node.
+        cache_mode: The cache mode the node has or is about to get.
+        bound_sources: Slot name to the source a bind is about to bind there.
+
+    Raises:
+        ValueError: If ``cache_mode`` caches and a source feeding the node is
+            restricted (a condition or a limit), naming the node and each
+            restriction.
+    """
+    if cache_mode == CacheMode.OFF:
+        return
+    found = _restrictions_beneath(getattr(node, "upstreams", ()), bound_sources)
+    if not found:
+        return
+    raise ValueError(
+        f"An operator cache keeps its rows under the node's identity; operator node "
+        f"{node.label!r} (CacheMode.{cache_mode.name}) cannot cache a restricted read "
+        f"({_restrictions_text(found)}): a log written from it would be replayed for "
+        "another restriction or none. Set the node's cache mode to CacheMode.OFF, or "
+        "read the unrestricted source."
+    )
+
+
+def refuse_restricted_operator_caches(
+    streams: Iterable[Any],
+    bound_sources: Mapping[str, Any] | None = None,
+) -> None:
+    """Refuse every caching operator job node at or above ``streams`` over a restriction.
+
+    Walks ``upstreams`` (not into a slot's bound source, whose own nodes are not
+    the job's) and checks each ``OperatorJobNode`` found with
+    ``refuse_restricted_operator_cache``. Called by ``PipelineJob.bind`` before it
+    binds, before a job distributes its databases, and at the start of
+    ``job.run()``, ``run_async()`` and a job node's ``run()``, before any source is
+    checked or anything computed or written.
+
+    Args:
+        streams: The nodes of a run or a job, or the node whose ``run()`` it is.
+        bound_sources: Slot name to the source a bind is about to bind there.
+
+    Raises:
+        ValueError: For the first caching operator node over a restricted source.
+    """
+    from orcapod.core.nodes.operator_node import OperatorJobNode
+    from orcapod.core.nodes.source_node import SourceJobNode
+
+    visited: list[Any] = []
+    pending = list(streams)
+    while pending:
+        current = pending.pop(0)
+        if any(current is seen for seen in visited):
+            continue
+        visited.append(current)
+        if isinstance(current, OperatorJobNode):
+            # As PipelineJob reads it: the mode has no public accessor.
+            mode = getattr(current, "_cache_mode", None) or CacheMode.OFF
+            refuse_restricted_operator_cache(current, mode, bound_sources)
+        if not isinstance(current, SourceJobNode):
+            pending.extend(getattr(current, "upstreams", ()))
 
 
 def restrictions_in_force(

@@ -300,9 +300,14 @@ job built over `events`, whose slot is named by the source id.)
   restricted source with `ValueError`, naming the restriction: a cache keeps the table's rows
   under the table's identity, which a restriction is not part of, so a restricted read would
   be read back as the whole table by every cache of it. Cache the unrestricted source, or read
-  without a cache. An operator node in `CacheMode.REPLAY` flows the rows its `LOG` runs stored
-  whatever the current input is, so a log written from a restricted read replays only those
-  rows.
+  without a cache. For the same reason an operator node that caches (`CacheMode.LOG` or
+  `CacheMode.REPLAY`) is refused when a source feeding it is restricted: its cache is kept
+  under the node's identity, so a log written from a restricted read would be replayed for
+  another restriction or none. The `ValueError` names the node and each restriction, and is
+  raised when both are known, before anything is read or written: when the cache mode is set
+  over a restricted source, when `bind` binds a restricted source under a caching node, or
+  else when a run starts. Use `CacheMode.OFF` there, or read the unrestricted source. A
+  function node stores its results row by row and is not concerned.
 - **Under an aggregation.** A `GroupBy`, `Batch` or `MergeJoin` below a restricted source
   builds its groups from the rows the restriction lets through. That is allowed (each
   aggregated row lists its members), and a job run issues one

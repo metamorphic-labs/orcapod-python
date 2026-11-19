@@ -27,6 +27,7 @@ from orcapod.pipeline.dag import OrcaDAG
 from orcapod.pipeline.node_run import (
     RunPlan,
     check_sources,
+    refuse_restricted_operator_caches,
     restrictions_in_force,
     warn_restricted_aggregation,
     clear_run_rows,
@@ -439,6 +440,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             for node in (self._persistent_node_map or {}).values():
                 if isinstance(node, SourceNodeBase) and node.name in sources:
                     node.validate(sources[node.name])
+            # A caching operator over a source this bind restricts is refused before
+            # anything is bound (ITL-1218).
+            refuse_restricted_operator_caches(
+                (self._persistent_node_map or {}).values(), bound_sources=sources
+            )
 
         # A database that cannot store a node's tables is refused before anything
         # changes too (ITL-1162).
@@ -520,7 +526,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             )
 
         # Every node is checked before any is attached, so a refused database
-        # leaves every node as it was (ITL-1162).
+        # leaves every node as it was (ITL-1162), and so is a caching operator over
+        # a restricted source (ITL-1218).
+        refuse_restricted_operator_caches((self._persistent_node_map or {}).values())
         self._require_storable_tables(self._database)
         pipeline_db = self._database.at(*self._name)
         result_db = pipeline_db.at("_result")
@@ -1242,6 +1250,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         pipeline_db = self._database.at(*self._name)
         result_db = pipeline_db.at("_result")
 
+        # A caching operator over a restricted source is refused before any source is
+        # checked and before anything is computed or written (ITL-1218).
+        refuse_restricted_operator_caches(exec_dag.nodes())
         # Every source first takes in any new data, moving its modified time, before
         # the state rule judges any node (ITL-1102).
         unchecked = check_sources(exec_dag.nodes())

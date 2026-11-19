@@ -1255,8 +1255,12 @@ data. The rules:
   without a restriction) in one pipeline is refused at capture (`node_run.require_one_restriction`),
   also when a stream built before the capture has the hash of a captured step. A `CachedSource`
   over a restricted source is refused at construction (a cache is kept under the table's
-  identity; developer, November 18, 2026); an operator's `REPLAY` replays what its `LOG` runs
-  stored, restricted or not.
+  identity; developer, November 18, 2026), and so is an operator job node that caches (`LOG` or
+  `REPLAY`) over a restricted source (developer, November 19, 2026: its cache is kept under the
+  node's identity): `node_run.refuse_restricted_operator_cache(s)`, called where the cache mode
+  is attached, by `bind` before it binds, before a job distributes its databases and at the
+  start of `job.run()`, `run_async()` and a job node's `run()`, before any source is checked;
+  `CacheMode.OFF` and function nodes are not concerned (`TODO(ITL-1219)`).
 - Empty data → `ArrowTableSource` raises `ValueError("Table is empty")`.
 - A side-effect job node delivers only when it runs (developer, November 13, 2026, ITL-1091):
   `job.run()`, `node.run()` (state-driven, ITL-1095: a node holding a current run delivers
