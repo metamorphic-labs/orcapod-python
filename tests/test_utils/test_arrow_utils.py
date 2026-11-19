@@ -1122,7 +1122,7 @@ class TestDecodeDictionaries:
             (pa.list_(_DICT, 2), pa.list_(pa.string(), 2)),
             (pa.list_view(_DICT), pa.list_view(pa.string())),
             (
-                pa.run_end_encoded(pa.int32(), _DICT),
+                pa.run_end_encoded(pa.int32(), _DICT),  # pyright: ignore[reportArgumentType]  # the stubs accept only basic value types; Arrow takes a dictionary
                 pa.run_end_encoded(pa.int32(), pa.string()),
             ),
             (pa.large_list_view(_DICT), pa.large_list_view(pa.string())),

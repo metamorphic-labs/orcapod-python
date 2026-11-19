@@ -239,7 +239,7 @@ def decode_dictionaries(arrow_type: "pa.DataType") -> "pa.DataType":
         values = decode_dictionaries(arrow_type.value_type)
         if values == arrow_type.value_type:
             return arrow_type
-        return pa.run_end_encoded(arrow_type.run_end_type, values)
+        return pa.run_end_encoded(arrow_type.run_end_type, values)  # pyright: ignore[reportArgumentType]  # the stubs accept only basic value types; Arrow takes any type here
     if pa.types.is_struct(arrow_type):
         fields = [f.with_type(decode_dictionaries(f.type)) for f in arrow_type]
         return pa.struct(fields)
