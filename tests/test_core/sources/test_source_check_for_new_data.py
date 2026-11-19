@@ -482,7 +482,8 @@ def _pg_connector(keys: list[int]) -> MagicMock:
     connector = MagicMock()
     connector.get_table_names.return_value = ["t"]
     connector.get_pk_columns.return_value = ["k"]
-    connector.current_location.return_value = ("orcapod", "public")
+    connector.current_location.return_value = ("localhost", 5432, "orcapod", "public")
+    connector.given_server.return_value = ("localhost", "")
     connector.get_column_info.return_value = [
         ColumnInfo("k", pa.int64(), False),
         ColumnInfo("x", pa.int64(), False),
@@ -756,7 +757,8 @@ def _connector_without_column_info(x: list[int | None]) -> MagicMock:
     connector = MagicMock()
     connector.get_table_names.return_value = ["t"]
     connector.get_pk_columns.return_value = ["k"]
-    connector.current_location.return_value = ("orcapod", "public")
+    connector.current_location.return_value = ("localhost", 5432, "orcapod", "public")
+    connector.given_server.return_value = ("localhost", "")
     connector.get_column_info.return_value = []
     table = pa.table(
         {"k": pa.array(range(len(x)), pa.int64()), "x": pa.array(x, pa.int64())}
