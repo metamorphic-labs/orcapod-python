@@ -168,9 +168,9 @@ print(by_phase.keys())
 # (('phase',), ('phase', 'unit', 'time'))
 ```
 
-- `s.tag_by("x", "y")` equals `s.tag_by(["x", "y"])`. The new tags follow the stream's
-  tags in the order given, and that order is part of the operator (`TagBy`): the names
-  are a list, never a set.
+- `s.tag_by("x", "y")` equals `s.tag_by(["x", "y"])`, `s.tag_by("y", "x")` and
+  `s.tag_by({"x", "y"})`. The new tags follow the stream's tags in name order, whatever
+  order they are named in. The order of the names is not part of the operator (`TagBy`).
 - Nothing else changes: no row is added, removed or reordered, the data columns keep
   their names, types and values, every data column keeps its own source-info token,
   and the system tags keep their names and values.
@@ -194,7 +194,7 @@ your own classes and logical types (`Path`, `UUID`, arrays) are refused.
 |---|---|
 | `TagBy` / `tag_by` | Makes the data column `x` a data-tag (above); everything else is unchanged. |
 | `Join` | Plain with plain: as before. Plain with data-tag, or data-tag with data-tag: a data-tag and **one** data column `x`. When `x` is a data-tag on several inputs, its source info is one merged token (below). A key that is `T` in one input and `T \| None` in another is `T` in both roles, as for a plain key. Every other data-name collision is still an error. |
-| `GroupBy` | A group key stays scalar in both roles, and its source info is one merged token (below). A non-key loses its tag role, as every non-key tag does, but keeps its data column: a list like every other data column, one source-info token per member. The members are ordered by the tuple of the input's non-key tags (then record ids), the same order for every data list of the group, so all of them stay aligned. |
+| `GroupBy` | A group key stays scalar in both roles, and its source info is one merged token (below). A non-key loses its tag role, as every non-key tag does, but keeps its data column: a list like every other data column, one source-info token per member. The members are ordered by the tags `member_order` names, in its order, then by the input's other non-key tags in name order, then by record ids and last by source ids. That order is the same for every data list of the group, so all of them stay aligned. |
 | `SelectDataColumns`, `DropDataColumns` | Removing the data column removes the data role only: `x` stays a plain tag with the same values, without source info, with a `DataTagMaterializationWarning`. |
 | `SelectTagColumns`, `DropTagColumns` | Removing the tag removes the tag role only: `x` stays a data column, with its source info. |
 | `SelectColumns`, `DropColumns` | `x` is one column, so naming it acts on both roles: selecting it keeps `x` a data-tag, dropping it (or not selecting it) removes the column from both roles. The roles are never split, so nothing is materialized. |
