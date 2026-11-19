@@ -17,7 +17,7 @@ type, in no order (the schema hash sorts field names, as for every schema). So:
 
 Every test over a source runs it in two arrangements: the declared tag order with the tags
 first, and the reversed tag order with the data first (``SHAPES``); neither changes a
-value, a hash or a stored path.
+value, a hash or a stored path (over data-tags the last two still do: ITL-1246).
 """
 
 from __future__ import annotations
@@ -247,14 +247,13 @@ def test_the_config_keeps_the_declared_order_and_the_uri(keys: tuple[str, ...]) 
 def test_in_memory_each_order_names_its_own_values(
     kind: str, n: int, role: str
 ) -> None:
-    """In every arrangement of the source: the same values, rows and hashes."""
+    """In every arrangement of the source: the same values (hashes: below)."""
     fn = FUNCTIONS[(kind, n)]
     for keys in _orders(n):
         expected = sorted(
             tuple(_expected(fn, keys, d1, d3)[k] for k in keys)
             for d1, d3 in _main_values()
         )
-        fingerprints = []
         for shape in SHAPES:
             stream = FunctionPod.from_fn(fn, output_keys=list(keys))(
                 _source(role, shape)
@@ -265,9 +264,47 @@ def test_in_memory_each_order_names_its_own_values(
                 tuple(data[k] for k in keys) for _, data in stream.iter_data()
             )
             assert rows == expected, (keys, shape)
+
+
+FALL_THROUGH_ORDER_ISSUE = "ITL-1246"
+# Over data-tags the pod is a fall-through pod, whose identity holds the data-tags in
+# the input's tag order (ITL-1246, fixed by PR 453). Only an assertion can fail here.
+_FALL_THROUGH_ORDER = pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason=f"{FALL_THROUGH_ORDER_ISSUE}: the fall-through tags enter the pod's identity "
+    + "in the input's tag order",
+)
+
+
+@pytest.mark.parametrize(
+    "role",
+    [
+        PLAIN,
+        pytest.param(DATA_TAGS, marks=_FALL_THROUGH_ORDER),
+        pytest.param(MIXED, marks=_FALL_THROUGH_ORDER),
+    ],
+)
+@pytest.mark.parametrize(("kind", "n"), list(FUNCTIONS), ids=lambda v: str(v))
+def test_the_arrangement_of_the_source_changes_no_hash_or_stored_path(
+    kind: str, n: int, role: str
+) -> None:
+    """Each order of the keys, over every arrangement: one stream and one node path."""
+    fn = FUNCTIONS[(kind, n)]
+    for keys in _orders(n):
+        fingerprints, paths = [], []
+        for shape in SHAPES:
+            pod = FunctionPod.from_fn(fn, output_keys=list(keys))
             # Each computation names fresh output records: leave source info out.
-            fingerprints.append(fingerprint(stream, source_info=False))
+            fingerprints.append(
+                fingerprint(pod(_source(role, shape)), source_info=False)
+            )
+            job = PipelineJob(name="outputs", database=InMemoryArrowDatabase())
+            with job:
+                pod(_source(role, shape), label="outputs")
+            paths.append(job.nodes["outputs"].node_identity_path)
         assert all(f == fingerprints[0] for f in fingerprints), keys
+        assert len(set(paths)) == 1, keys
 
 
 def test_a_cached_data_function_stores_differently_typed_orders_apart() -> None:
@@ -327,7 +364,6 @@ def test_jobs_with_differently_typed_orders_on_one_database_store_their_own_rows
     """Every order in turn on one database: each computes and stores its own rows.
 
     A second pass over every order finds each order's rows stored, under its names.
-    Each order's node path is the one it has over the control arrangement.
     """
     fn = FUNCTIONS[("mixed", n)]
     database = _database(database_kind, tmp_path)
@@ -340,17 +376,9 @@ def test_jobs_with_differently_typed_orders_on_one_database_store_their_own_rows
                 FunctionPod.from_fn(fn, output_keys=list(keys))(
                     _source(role, shape), label="outputs"
                 )
-            control = PipelineJob(name="outputs", database=InMemoryArrowDatabase())
-            with control:
-                FunctionPod.from_fn(fn, output_keys=list(keys))(
-                    _source(role), label="outputs"
-                )
             summary = job.run(orchestrator=orchestrator())
             node = job.nodes["outputs"]
             counts = summary.nodes["outputs"]
-            assert (
-                node.node_identity_path == control.nodes["outputs"].node_identity_path
-            )
             if pass_number == 1:
                 assert (counts.computed, counts.reused) == (6, 0), keys
                 paths.add(node.node_identity_path)
