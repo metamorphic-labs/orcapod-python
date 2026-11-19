@@ -554,7 +554,8 @@ def restrictions_in_force(
 
     Known limit (ITL-1293): a slot keeps one entry. A slot bound to a stream that
     reads two restricted tables (a ``semi_join`` of two restricted sources) reports
-    the first one the walk meets. Every check (the operator-cache refusal, the
+    one source id, one condition and one limit: those of the first table the walk
+    meets. Every check (the operator-cache refusal, the
     one-restriction rule) still reads both.
 
     Only a ``SpiralDBTableSource`` can be restricted today (``restriction_of``;
@@ -567,7 +568,7 @@ def restrictions_in_force(
         Slot name to the source's id, its ``Condition`` and its limit (each ``None``
         when unset), for the sources that restrict their rows: slots in the order
         first met, then direct sources. ``RunSummary`` keeps the three apart
-        (``restricted_source_ids``, ``restrictions``, ``limits``).
+        (``restricted_source_ids``, ``conditions``, ``limits``).
     """
     from orcapod.core.nodes.source_node import SourceJobNode
 

@@ -266,7 +266,7 @@ assert same_session.to_config() == one_session.to_config()
 assert one_unit.content_hash() == events.content_hash()
 job.bind(sources={"spikes": one_unit})  # the slot the unrestricted source fills
 summary = job.run()
-print(summary.restrictions)
+print(summary.conditions)
 # {'spikes': Condition.of({'unit_id': 106})}
 print(summary.restricted_source_ids)
 # {'spikes': 'spikes'}
@@ -334,15 +334,15 @@ print(Condition.of(day=day, started=started, recorded=recorded))
   `condition.equalities` maps each column to its value. A `Condition` has a Python hash,
   consistent with that equality, so it can be a dictionary key or a set member; it never
   enters an Orcapod source or pipeline hash.
-- **Recorded.** `RunSummary.restrictions` maps the slot of each source read under a condition
+- **Recorded.** `RunSummary.conditions` maps the slot of each source read under a condition
   to its `Condition`, `RunSummary.limits` the slot of each source read with a `limit=` to the
   limit, and `RunSummary.restricted_source_ids` every such slot to its source id; the
   summary shows them (`spikes (spikes): where unit_id=106, limit 3`). A saved job records them in
   the source's config, and a loaded job reads with them. Binding does not compare
   restrictions: a restricted source fits the slot of the unrestricted one. A slot keeps one
   entry: a slot bound to a stream over two restricted tables (a `semi_join` of two restricted
-  sources) records the first one found (a known limit, ITL-1293), although every check reads
-  both.
+  sources) reports one condition and one limit, those of the first table found (a known
+  limit, ITL-1293), although every check reads both.
 - **No cache over a restriction.** `CachedSource` (and `source.cached(...)`) refuses a
   restricted source with `ValueError`, naming the restriction: a cache keeps the table's rows
   under the table's identity, which a restriction is not part of, so a restricted read would

@@ -1236,7 +1236,7 @@ data. The rules:
   Arrow range, no conversion) and combines it with where='s, applied by SpiralDB in the
   scan. where() is _copy() then _apply_restriction() in place on the copy, the future
   public copy() and apply_restriction(); other source kinds and limit() are ITL-1219.
-  RunSummary records each restricted source by slot: restrictions (slot to Condition),
+  RunSummary records each restricted source by slot: conditions (slot to Condition),
   limits (slot to limit), restricted_source_ids (every such slot), filled by one walk;
   the saved job keeps where and limit in the source config, bind never compares them, and a job run over a restricted
   source feeding GroupBy, Batch or MergeJoin issues one RestrictedAggregationWarning.
@@ -1247,7 +1247,7 @@ data. The rules:
   what they read) at capture, at compile, by bind before it binds and at the start of every
   run (refuse_restriction_conflicts), whatever streams lead there: projections, operator
   chains, streams built before the capture. A bind's walk matches the job's own slots by object
-  (Rebinding), never by name. RunSummary keeps one restriction per slot (ITL-1293). Every restriction walk goes through a slot's bound source,
+  (Rebinding), never by name. RunSummary keeps one condition and one limit per slot (ITL-1293). Every restriction walk goes through a slot's bound source,
   a SourceProxy's delegate and a CachedSource's source (_streams_beneath); a
   DerivedSource is a root. A CachedSource
   over a restricted source is refused at construction (a cache is kept under the table's

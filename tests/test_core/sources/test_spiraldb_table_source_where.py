@@ -1023,7 +1023,7 @@ class TestRunsAndSavedJobs:
 
         summary = job.run(orchestrator=orchestrator() if orchestrator else None)
 
-        assert summary.restrictions == {"events": Condition.of(subject_id="m1")}
+        assert summary.conditions == {"events": Condition.of(subject_id="m1")}
         assert summary.limits == {"events": 3}
         assert summary.restricted_source_ids == {"events": source.source_id}
         assert "events (events): where subject_id='m1', limit 3" in repr(summary)
@@ -1031,14 +1031,14 @@ class TestRunsAndSavedJobs:
 
     @pytest.mark.parametrize("form", list(_FORMS_OF_ONE_RESTRICTION))
     def test_the_run_summary_records_both_conditions(self, project, tmp_path, form):
-        """``RunSummary.restrictions`` is the same for every form of the restriction."""
+        """``RunSummary.conditions`` is the same for every form of the restriction."""
         source = _source(source_id="events", tag_only_columns=True)
         restricted = _FORMS_OF_ONE_RESTRICTION[form](source)
         job = self._job(tmp_path / "store", restricted, [])
 
         summary = job.run()
 
-        assert summary.restrictions == {
+        assert summary.conditions == {
             "events": Condition.of(subject_id="m1", flag=True)
         }
         assert summary.restricted_source_ids == {"events": "events"}
@@ -1055,7 +1055,7 @@ class TestRunsAndSavedJobs:
 
         summary = job.run()
 
-        assert summary.restrictions == {"events": Condition.of(subject_id="m1")}
+        assert summary.conditions == {"events": Condition.of(subject_id="m1")}
         assert summary.restricted_source_ids == {"events": bound.source_id}
 
     def test_a_slot_bound_to_a_stream_over_the_source_keeps_its_name(
@@ -1069,7 +1069,7 @@ class TestRunsAndSavedJobs:
 
         summary = job.run()
 
-        assert summary.restrictions == {"events": Condition.of(subject_id="m1")}
+        assert summary.conditions == {"events": Condition.of(subject_id="m1")}
         assert summary.restricted_source_ids == {"events": "events"}
 
     def test_two_unbound_sources_of_one_label_are_both_reported(self, project):
@@ -1270,16 +1270,16 @@ class TestRunsAndSavedJobs:
         """A source with no condition and no limit has no entry."""
         job = self._job(tmp_path / "store", _source(source_id="events"), [])
 
-        assert job.run().restrictions == {}
+        assert job.run().conditions == {}
 
     def test_a_limit_alone_is_reported_without_a_condition(self, project, tmp_path):
         """A slot read with a limit only is in ``limits`` and the source ids, not in
-        ``restrictions``."""
+        ``conditions``."""
         job = self._job(tmp_path / "store", _source(source_id="events", limit=2), [])
 
         summary = job.run()
 
-        assert summary.restrictions == {}
+        assert summary.conditions == {}
         assert summary.limits == {"events": 2}
         assert summary.restricted_source_ids == {"events": "events"}
         assert "events (events): limit 2" in repr(summary)
@@ -1312,7 +1312,7 @@ class TestRunsAndSavedJobs:
         node.run()
 
         assert node.last_run is not None
-        assert node.last_run.restrictions == {"events": Condition.of(subject_id="m2")}
+        assert node.last_run.conditions == {"events": Condition.of(subject_id="m2")}
         assert node.last_run.restricted_source_ids == {"events": "events"}
 
     def test_bound_restricted_source_runs_only_matching_rows(self, project, tmp_path):
@@ -1355,9 +1355,7 @@ class TestRunsAndSavedJobs:
         assert loaded_source.content_hash() == source.content_hash()
         assert _timestamps(loaded_source) == [4, 5]
         summary = loaded.run(load_only=True)
-        assert summary.restrictions == {
-            "events": Condition.of(day=_DAY, subject_id="m2")
-        }
+        assert summary.conditions == {"events": Condition.of(day=_DAY, subject_id="m2")}
 
 
 class TestAggregationWarning:
@@ -1518,7 +1516,7 @@ class TestConditionInstances:
 
         summary = job.run()
 
-        assert summary.restrictions == {"events": Condition.of(amplitude=values[0])}
+        assert summary.conditions == {"events": Condition.of(amplitude=values[0])}
 
 
 _RESTRICTED_FORMS: dict[str, tuple[Callable[[], SpiralDBTableSource], list[str]]] = {
@@ -2192,7 +2190,7 @@ class TestOneRestrictionPerSource:
             for name in names:
                 chains[name](_events().where(flag=True, subject_id="m1"))
         summary = job.run()
-        assert summary.restrictions == {
+        assert summary.conditions == {
             "events": Condition.of(subject_id="m1", flag=True)
         }
 
@@ -2252,7 +2250,7 @@ class TestRestrictionsCheckedLive:
             MapData({"channel": "lane"})(slot)
             slot.bound_source = _events().where(subject_id="m1")
             m1.select_data_columns(["amplitude"])
-        assert job.run().restrictions == {"events": Condition.of(subject_id="m1")}
+        assert job.run().conditions == {"events": Condition.of(subject_id="m1")}
 
 
 @pytest.mark.filterwarnings("ignore::orcapod.errors.SemiJoinIgnoredColumnWarning")
@@ -2418,7 +2416,7 @@ class TestBindingTwoSlotsOverOneSource:
 
         assert self._bound(job) == (events, pick)
         summary = job.run()
-        assert summary.restrictions == {
+        assert summary.conditions == {
             "events": Condition.of(subject_id="m2", flag=True),
             "pick": Condition.of(subject_id="m2", flag=True),
         }
@@ -2480,7 +2478,7 @@ class TestBindingTwoSlotsOverOneSource:
         job.bind(sources={slot: new})
 
         assert job.nodes[slot].bound_source is new
-        assert job.run().restrictions == {
+        assert job.run().conditions == {
             "events": Condition.of(subject_id="m1"),
             "pick": Condition.of(subject_id="m1"),
         }

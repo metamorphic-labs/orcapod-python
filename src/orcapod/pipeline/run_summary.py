@@ -80,7 +80,7 @@ class RunSummary:
             for new data at the start of the run (ITL-1102): each raised in
             ``check_for_new_data``, was reported by a ``SourceCheckFailedWarning``,
             and fed the run with the data it already held.
-        restrictions: The ``Condition`` each source of the run read under, by slot
+        conditions: The ``Condition`` each source of the run read under, by slot
             name (the name ``bind`` takes; a source read directly by a node's
             ``run()`` by its label), for the slots whose source has one (ITL-1218).
             A restriction (a condition and/or a limit) chooses which rows flow and is
@@ -90,7 +90,7 @@ class RunSummary:
         limits: The limit each source of the run read with, by slot name, for the
             slots whose source has one.
         restricted_source_ids: The source id of every restricted source (a slot in
-            ``restrictions``, ``limits`` or both), by slot name.
+            ``conditions``, ``limits`` or both), by slot name.
         ran_nothing: Whether the run ran no node: every node held a current run
             (ITL-1095). Decided by the run's plan, which counts every kind of node, so a
             run that ran only a side-effect or operator node is not "nothing to do".
@@ -130,7 +130,7 @@ class RunSummary:
         self.ran_nothing: bool = ran_nothing
         # One mapping split three ways, so the keys cannot disagree.
         restricted = dict(restricted_sources or {})
-        self.restrictions: Mapping[str, Condition] = {
+        self.conditions: Mapping[str, Condition] = {
             slot: condition
             for slot, (_, condition, _) in restricted.items()
             if condition is not None
@@ -230,7 +230,7 @@ class RunSummary:
             return None
         return "restricted sources: " + "; ".join(
             f"{slot} ({source_id}): "
-            + restriction_text(self.restrictions.get(slot), self.limits.get(slot))
+            + restriction_text(self.conditions.get(slot), self.limits.get(slot))
             for slot, source_id in self.restricted_source_ids.items()
         )
 
