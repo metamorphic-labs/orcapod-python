@@ -244,24 +244,28 @@
                 "added": {
                     "arrow-01.json": "3bb8a033757ef0a8945f2fb3f56328ace1460528e6f03d1a4fcabf50b166a457",
                     "datagram-01.json": "598d4a2851819d76ba674e189222e61733ca1861ca82a59e990a8ee5e1b0a7b3",
-                    "pipeline-01.json": "2a9b0c96c1cd7950243e76cf8ad04733c1e2497f1c35b2145c725960599b105a",
+                    "pipeline-01.json": "538958d92057f903d72d5c9e9b35fad23f40078638f4f2291865a536fb643035",
                     "schema-01.json": "79aa2a068e0724891cf43ee528ce8f569e65f08864faa5e34773bfc69ac9576e",
-                    "semantic-01.json": "8e5d9dfff461f9f1d6bdd49a3019e7bf6122e75d799d725b17531d31b080003c",
+                    "semantic-01.json": "45840a7406d232a7686e55805aabe5953594409b447ed175fdff791c49a3f947",
                     "torch-01.json": "af2e8b68d66dffaa37e1d0ad75acd42f595d65b9fae00ddcde81bf9e13a265c8"
                 },
                 "previous": null,
-                "digest": "7a415389e8841c13fe7cbfb56518dbea5b0de409ee3447654383d06ff040d0d6"
+                "digest": "dd77fa0893c55ef8f566e439ee9b6952a21e4ecf1629f3e597ac7f23240da0ed"
             },
             {
                 "date": "2026-11-18",
                 "release": null,
                 "added": {
-                    "pipeline-02.json": "9020aba10fa1d50891ba06cf40ee8d98f6089d636cd0cb8aa03bc80a8d73e756"
+                    "pipeline-02.json": "db0eb5b9fc854fbf2431687448d0adc52f6decc6e6aafd86d468e86f12f4826c"
                 },
-                "previous": "7a415389e8841c13fe7cbfb56518dbea5b0de409ee3447654383d06ff040d0d6",
-                "digest": "22b467a377d3d60e156ec4b7ec71f61cd297dea219184d7e6b062dbcb3cdf17d"
+                "previous": "dd77fa0893c55ef8f566e439ee9b6952a21e4ecf1629f3e597ac7f23240da0ed",
+                "digest": "8e51cbcc5edbb7989b085868bc979ee232c454e2e250c950c43d18cd26acb1df"
             }
-        ]
+        ],
+        "provisional": {
+            "pipeline.json": "42d588512ad1ba11acf6725f8424e28bd85c7a75c0dda5ac129d79e4c07a3322",
+            "semantic.json": "0adfab60f8ced647d841d0a74a0603096b00fab310a8f4686246309d5fb39d3d"
+        }
     },
     "changes": [
         {
