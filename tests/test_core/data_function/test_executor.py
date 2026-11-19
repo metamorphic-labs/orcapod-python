@@ -73,21 +73,21 @@ class SpyExecutor(PythonFunctionExecutorBase):
 
 
 class PythonOnlyExecutor(PythonFunctionExecutorBase):
-    """Executor that only supports python.function.v0."""
+    """Executor that only supports python.function.v1."""
 
     @property
     def executor_type_id(self) -> str:
         return "python-only"
 
     def supported_function_type_ids(self) -> frozenset[str]:
-        return frozenset({"python.function.v0"})
+        return frozenset({"python.function.v1"})
 
     def execute_callable(self, fn, kwargs, executor_options=None, **kw):
         return fn(**kwargs)
 
 
 class NonPythonExecutor(PythonFunctionExecutorBase):
-    """Executor that explicitly does NOT support python.function.v0."""
+    """Executor that explicitly does NOT support python.function.v1."""
 
     @property
     def executor_type_id(self) -> str:
@@ -133,13 +133,13 @@ def local_executor() -> LocalPythonFunctionExecutor:
 class TestPythonFunctionExecutorBase:
     def test_supports_all_when_empty_frozenset(self):
         executor = SpyExecutor(supported_types=frozenset())
-        assert executor.supports("python.function.v0")
+        assert executor.supports("python.function.v1")
         assert executor.supports("wasm.function.v0")
         assert executor.supports("anything")
 
     def test_supports_restricted_types(self):
         executor = PythonOnlyExecutor()
-        assert executor.supports("python.function.v0")
+        assert executor.supports("python.function.v1")
         assert not executor.supports("wasm.function.v0")
 
     def test_get_executor_data_returns_type(self):
@@ -154,10 +154,10 @@ class TestPythonFunctionExecutorBase:
         assert isinstance(new_executor, SpyExecutor)
 
     def test_with_options_preserves_state(self):
-        executor = SpyExecutor(supported_types=frozenset({"python.function.v0"}))
+        executor = SpyExecutor(supported_types=frozenset({"python.function.v1"}))
         new_executor = executor.with_options()
         assert new_executor.supported_function_type_ids() == frozenset(
-            {"python.function.v0"}
+            {"python.function.v1"}
         )
 
 
@@ -171,7 +171,7 @@ class TestLocalExecutor:
         assert local_executor.executor_type_id == "local"
 
     def test_supports_all_types(self, local_executor: LocalPythonFunctionExecutor):
-        assert local_executor.supports("python.function.v0")
+        assert local_executor.supports("python.function.v1")
         assert local_executor.supports("anything.v99")
 
     def test_execute_callable_runs_function(

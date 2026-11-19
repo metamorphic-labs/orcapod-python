@@ -71,8 +71,10 @@ Do these on `main` before the Release workflow runs:
    the `CHANGELOG.md` heading. It appends the release revision to the `golden` history of
    the current data context's manifest, writes its digest under `releases` in
    `src/orcapod/contexts/released_manifests.json`, and at the data context's first release
-   sets `released_in` and the `manifest` pin. It computes no hash and refuses a version
-   already released. Commit both files with the release pull request; the release is tagged
+   sets `released_in` and the `manifest` pin. It also pins every open data function type
+   snapshot (`scripts/data_function_types.py --release`: the sha256 and the version go into
+   `src/orcapod/data_function_types/released.json`; ITL-1259). It computes no hash and
+   refuses a version already released. Commit these files with the release pull request; the release is tagged
    on a commit that contains them. The Release workflow's build job checks this before it
    creates the tag (`scripts/check_golden_tags.py --release-version X.Y.Z`) and stops if the
    release is not recorded, or if a golden file was added after the release step (the
@@ -127,6 +129,13 @@ against are in `docs/reference/golden-hashes.md`.
   step of `0.4.0` freezes v1. Every published version needs the release step, a pre-release
   included (the gate below refuses to tag one without it), so **publishing `0.4.0rc1` would
   freeze v1 at the release candidate**: plan the release around it.
+- Provisional operators (`orcapod.operators.PROVISIONAL_OPERATORS`, ITL-1266) are outside
+  the freeze: the golden values of the cases that depend on one are in
+  `tests/test_hashing/golden/data/v1/provisional/`, which no release step lists or pins. An
+  operator that stops being provisional in a release leaves the list (with its `PROVISIONAL`
+  marker and its golden cases' declarations) before the release step, and
+  `generate_golden_hashes.py --relocate` moves its golden values, unchanged, into a frozen
+  file, so that the release step freezes them.
 - Release tags are protected on `metamorphic-labs/orcapod-python` (and on
   `nauticalab/orcapod-python`, the release repository up to `0.3.0`): the repository ruleset
   `protect-release-tags` (target `refs/tags/v*`; rules deletion, update and non-fast-forward;
