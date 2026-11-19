@@ -361,14 +361,14 @@ def test_add_changes_nothing_when_a_later_group_fails(
     """Every group is computed before anything is written: files and history stay in step."""
     _ = _drop_entries(tree, NEWEST_SCHEMA, 1)
     before = _snapshot(_folder(tree)), store.manifest_path(tree, VERSION).read_bytes()
-    compute = cases.compute_group
+    compute = cases.compute_group_kinds
 
-    def failing(group: str, **kwargs: Any) -> dict[str, Any]:
+    def failing(group: str, **kwargs: Any) -> tuple[dict[str, Any], frozenset[str]]:
         if group == "semantic":
             raise RuntimeError("semantic failed")
         return compute(group, **kwargs)
 
-    monkeypatch.setattr(cases, "compute_group", failing)
+    monkeypatch.setattr(cases, "compute_group_kinds", failing)
     with pytest.raises(RuntimeError, match="semantic failed"):
         main(["--root", str(tree), "--group", "schema", "--group", "semantic"])
     after = _snapshot(_folder(tree)), store.manifest_path(tree, VERSION).read_bytes()
@@ -381,12 +381,15 @@ def test_add_refuses_one_new_entry_name_in_two_groups(
 ) -> None:
     """Two groups that compute the same new entry name in one run write nothing."""
     before = _snapshot(_folder(tree)), store.manifest_path(tree, VERSION).read_bytes()
-    compute = cases.compute_group
+    compute = cases.compute_group_kinds
 
-    def with_shared_entry(group: str, **kwargs: Any) -> dict[str, Any]:
-        return {**compute(group, **kwargs), "shared.new_entry": group}
+    def with_shared_entry(
+        group: str, **kwargs: Any
+    ) -> tuple[dict[str, Any], frozenset[str]]:
+        values, provisional = compute(group, **kwargs)
+        return {**values, "shared.new_entry": group}, provisional
 
-    monkeypatch.setattr(cases, "compute_group", with_shared_entry)
+    monkeypatch.setattr(cases, "compute_group_kinds", with_shared_entry)
     with pytest.raises(SystemExit, match="shared.new_entry"):
         main(["--root", str(tree), "--group", "schema", "--group", "arrow"])
     after = _snapshot(_folder(tree)), store.manifest_path(tree, VERSION).read_bytes()
@@ -738,3 +741,343 @@ def test_a_withdrawn_release_left_in_the_history_is_reported(tree: Path) -> None
     store.write_json(store.pins_path(tree), pins)
     problems = store.tree_problems(tree, VERSION)
     assert any("is a release revision of the history" in p for p in problems), problems
+
+
+# ---------------------------------------------------------------------------
+# Provisional files: outside the history, never frozen (ITL-1266)
+# ---------------------------------------------------------------------------
+
+NEWEST_SEMANTIC = _REPOSITORY_FILES["semantic"][-1].name
+NEXT_SEMANTIC = store.next_file_name(NEWEST_SEMANTIC)
+
+
+def _provisional(root: Path) -> Path:
+    return store.provisional_folder(_folder(root))
+
+
+def _listing(root: Path) -> dict[str, str]:
+    return _manifest(root)["golden"][store.PROVISIONAL]
+
+
+def _everything(root: Path) -> dict[str, bytes]:
+    """Every file of the golden folder (provisional files included) and the manifest."""
+    folder = _folder(root)
+    files = {
+        path.relative_to(folder).as_posix(): path.read_bytes()
+        for path in sorted(folder.rglob("*"))
+        if path.is_file()
+    }
+    files["manifest"] = store.manifest_path(root, VERSION).read_bytes()
+    return files
+
+
+def _set_listing(root: Path, listing: dict[str, str]) -> None:
+    manifest = _manifest(root)
+    manifest["golden"][store.PROVISIONAL] = listing
+    store.write_json(store.manifest_path(root, VERSION), manifest)
+
+
+def _freeze_provisional(root: Path, group: str, frozen_file: str) -> dict[str, Any]:
+    """Put a group's provisional entries into a frozen file, as before ITL-1266."""
+    path = _provisional(root) / f"{group}.json"
+    entries = store.read_json(path)
+    path.unlink()
+    listing = dict(_listing(root))
+    del listing[f"{group}.json"]
+    _set_listing(root, listing)
+    _record(
+        root, frozen_file, {**store.read_json(_folder(root) / frozen_file), **entries}
+    )
+    return entries
+
+
+def _without_declarations(group: str) -> list[tuple[str, Any, tuple[str, ...]]]:
+    """The cases of a group as if no provisional operator were left in it."""
+    return [(name, fn, ()) for name, fn, _ in cases._CASES[group]]
+
+
+def test_the_repository_pins_provisional_entries_outside_the_history() -> None:
+    """The provisional files are listed in golden.provisional, never in a revision."""
+    manifest = store.read_json(store.manifest_path(store.PROJECT_ROOT, VERSION))
+    listing = manifest["golden"][store.PROVISIONAL]
+    assert listing
+    revised = {name for r in manifest["golden"]["history"] for name in r["added"]}
+    assert not revised & set(listing)
+
+
+def test_relocate_moves_provisional_entries_out_of_a_frozen_file(tree: Path) -> None:
+    """The ITL-1266 move on a copy: values unchanged, the frozen file only loses them."""
+    original = _everything(tree)
+    entries = _freeze_provisional(tree, "semantic", NEWEST_SEMANTIC)
+    assert entries
+    main(["--root", str(tree), "--relocate", "--group", "semantic"])
+    after = _everything(tree)
+    assert {k: v for k, v in after.items() if k != "manifest"} == {
+        k: v for k, v in original.items() if k != "manifest"
+    }
+    assert (
+        _listing(tree)
+        == store.read_json(store.manifest_path(store.PROJECT_ROOT, VERSION))["golden"][
+            store.PROVISIONAL
+        ]
+    )
+    assert len(_history(tree)) == 1
+    assert store.tree_problems(tree, VERSION) == []
+
+
+def test_relocate_writes_nothing_when_every_entry_is_in_place(tree: Path) -> None:
+    before = _everything(tree)
+    main(["--root", str(tree), "--relocate", "--group", "semantic"])
+    assert _everything(tree) == before
+
+
+def test_relocate_refuses_a_provisional_entry_in_a_released_file(tree: Path) -> None:
+    """A released value never leaves its file, not even to become provisional."""
+    _ = _freeze_provisional(tree, "semantic", NEWEST_SEMANTIC)
+    main(["--root", str(tree), "--release", "0.3.0"])
+    before = _everything(tree)
+    with pytest.raises(SystemExit, match="release lists"):
+        main(["--root", str(tree), "--relocate", "--group", "semantic"])
+    assert _everything(tree) == before
+
+
+@pytest.mark.parametrize("released", [False, True])
+def test_relocate_freezes_the_entries_of_an_operator_that_left_the_group(
+    tree: Path, monkeypatch: pytest.MonkeyPatch, released: bool
+) -> None:
+    """Graduation: the entries go to the open frozen file, the provisional file goes."""
+    entries = store.read_json(_provisional(tree) / "semantic.json")
+    if released:
+        main(["--root", str(tree), "--release", "0.3.0"])
+    newest = store.read_json(_folder(tree) / NEWEST_SEMANTIC)
+    monkeypatch.setitem(cases._CASES, "semantic", _without_declarations("semantic"))
+    main(["--root", str(tree), "--relocate", "--group", "semantic"])
+    assert not (_provisional(tree) / "semantic.json").exists()
+    assert "semantic.json" not in _listing(tree)
+    if released:
+        assert store.read_json(_folder(tree) / NEWEST_SEMANTIC) == newest
+        assert store.read_json(_folder(tree) / NEXT_SEMANTIC) == entries
+        assert list(_history(tree)[-1]["added"]) == [NEXT_SEMANTIC]
+    else:
+        assert store.read_json(_folder(tree) / NEWEST_SEMANTIC) == {
+            **newest,
+            **entries,
+        }
+    assert store.tree_problems(tree, VERSION) == []
+
+
+def test_check_reports_a_provisional_entry_in_a_frozen_file(tree: Path) -> None:
+    entries = _freeze_provisional(tree, "semantic", NEWEST_SEMANTIC)
+    entry = sorted(entries)[0]
+    with pytest.raises(
+        SystemExit,
+        match=re.escape(f"semantic:{entry} is pinned in a frozen file, but its case"),
+    ):
+        main(["--root", str(tree), "--check", "--group", "semantic"])
+
+
+def test_check_reports_an_entry_in_the_provisional_file_whose_case_is_not(
+    tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entry = sorted(store.read_json(_provisional(tree) / "semantic.json"))[0]
+    monkeypatch.setitem(cases._CASES, "semantic", _without_declarations("semantic"))
+    with pytest.raises(
+        SystemExit,
+        match=re.escape(f"semantic:{entry} is pinned in the provisional file"),
+    ):
+        main(["--root", str(tree), "--check", "--group", "semantic"])
+
+
+@pytest.mark.parametrize("order", [("semantic", "pipeline"), ("pipeline", "semantic")])
+def test_add_writes_provisional_entries_to_their_provisional_files(
+    tree: Path, order: tuple[str, str]
+) -> None:
+    """Two groups, in either order: each provisional file comes back byte for byte."""
+    original = _everything(tree)
+    for name in ("semantic.json", "pipeline.json"):
+        (_provisional(tree) / name).unlink()
+    _set_listing(tree, {})
+    args = ["--root", str(tree)]
+    for group in order:
+        args += ["--group", group]
+    main(args)
+    assert _everything(tree) == original
+    assert store.tree_problems(tree, VERSION) == []
+
+
+def test_a_release_never_lists_a_provisional_file(tree: Path) -> None:
+    """After a release a provisional value still changes by --remove and --add."""
+    listing = dict(_listing(tree))
+    main(["--root", str(tree), "--release", "0.3.0"])
+    assert _history(tree)[-1]["added"] == {}
+    assert _listing(tree) == listing
+    released = store.released_files(_history(tree))
+    assert not released & set(listing)
+    path = _provisional(tree) / "semantic.json"
+    values = store.read_json(path)
+    entry = sorted(values)[0]
+    main(["--root", str(tree), "--remove", entry])
+    assert entry not in store.read_json(path)
+    assert store.tree_problems(tree, VERSION) == []
+    main(["--root", str(tree), "--group", "semantic"])
+    assert store.read_json(path) == values
+    assert _listing(tree) == listing
+    assert store.tree_problems(tree, VERSION) == []
+
+
+def test_removing_every_entry_of_a_provisional_file_removes_it(tree: Path) -> None:
+    path = _provisional(tree) / "semantic.json"
+    main(["--root", str(tree), *(f"--remove={e}" for e in store.read_json(path))])
+    assert not path.exists()
+    assert "semantic.json" not in _listing(tree)
+    assert store.tree_problems(tree, VERSION) == []
+
+
+def test_an_unlisted_provisional_file_is_reported(tree: Path) -> None:
+    _write(_provisional(tree), "schema.json", {"x.y": "z"})
+    assert any(
+        "golden.provisional does not list it" in p
+        for p in store.tree_problems(tree, VERSION)
+    )
+
+
+def test_an_edited_provisional_file_is_reported(tree: Path) -> None:
+    path = _provisional(tree) / "semantic.json"
+    _ = path.write_text(path.read_text() + " ")
+    assert any(
+        "does not have the sha256 golden.provisional lists" in p
+        for p in store.tree_problems(tree, VERSION)
+    )
+
+
+def test_a_missing_listed_provisional_file_is_reported(tree: Path) -> None:
+    (_provisional(tree) / "semantic.json").unlink()
+    assert any(
+        "provisional/semantic.json is missing" in p
+        for p in store.tree_problems(tree, VERSION)
+    )
+
+
+@pytest.mark.parametrize("name", ["unknown.json", "semantic-01.json", "Semantic.json"])
+def test_a_misnamed_provisional_listing_is_reported(tree: Path, name: str) -> None:
+    _set_listing(tree, {**_listing(tree), name: "0" * 64})
+    assert any(
+        f"{name}, listed by golden.provisional, is not a provisional file name" in p
+        for p in store.tree_problems(tree, VERSION)
+    )
+
+
+def test_a_misnamed_file_in_the_provisional_folder_is_an_error(tree: Path) -> None:
+    _write(_provisional(tree), "semantic-01.json", {})
+    with pytest.raises(store.GoldenLayoutError, match="<group>.json"):
+        _ = store.load_folder(_folder(tree))
+
+
+def test_an_entry_in_a_frozen_and_a_provisional_file_is_reported(tree: Path) -> None:
+    entry, value = next(
+        iter(store.read_json(_provisional(tree) / "semantic.json").items())
+    )
+    _record(
+        tree,
+        NEWEST_SEMANTIC,
+        {**store.read_json(_folder(tree) / NEWEST_SEMANTIC), entry: value},
+    )
+    assert any("is pinned twice" in p for p in store.tree_problems(tree, VERSION))
+
+
+def test_a_manifest_without_the_provisional_listing_is_reported(tree: Path) -> None:
+    manifest = _manifest(tree)
+    del manifest["golden"][store.PROVISIONAL]
+    store.write_json(store.manifest_path(tree, VERSION), manifest)
+    assert store.tree_problems(tree, VERSION) == [
+        'the manifest golden field is not {"folder": ..., "history": [...], '
+        '"provisional": {...}}'
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Case declarations: a case using a provisional operator must declare it (ITL-1266)
+# ---------------------------------------------------------------------------
+
+_A, _B = "ProvisionalA", "ProvisionalB"
+
+
+def _using(*names: str) -> Any:
+    def fn() -> dict[str, Any]:
+        from orcapod.core.operators.provisional import warn_provisional_operator
+
+        for name in names:
+            warn_provisional_operator(name)
+        return {"value": list(names)}
+
+    return fn
+
+
+@pytest.fixture
+def two_provisional(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two provisional operators, so declarations can name several."""
+    monkeypatch.setattr(
+        cases, "declarable_provisional_names", lambda: frozenset({_A, _B})
+    )
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
+@pytest.mark.parametrize("used", [(_A, _B), (_B, _A)])
+@pytest.mark.parametrize("declared", [(_A, _B), (_B, _A)])
+def test_a_case_declaring_every_provisional_operator_it_uses_is_provisional(
+    monkeypatch: pytest.MonkeyPatch,
+    two_provisional: None,
+    used: tuple[str, ...],
+    declared: tuple[str, ...],
+) -> None:
+    """Neither the order of use nor of declaration changes what is provisional."""
+    monkeypatch.setitem(
+        cases._CASES,
+        "semantic",
+        [("both", _using(*used), declared), ("plain", _using(), ())],
+    )
+    values, provisional = cases.compute_group_kinds("semantic")
+    assert values == {"both.value": list(used), "plain.value": []}
+    assert provisional == frozenset({"both.value"})
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
+@pytest.mark.parametrize(
+    ("declared", "missing"),
+    [((), [_A, _B]), ((_A,), [_B]), ((_B,), [_A])],
+)
+def test_a_case_using_an_undeclared_provisional_operator_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+    two_provisional: None,
+    declared: tuple[str, ...],
+    missing: list[str],
+) -> None:
+    monkeypatch.setitem(cases._CASES, "semantic", [("both", _using(_B, _A), declared)])
+    with pytest.raises(ValueError, match=re.escape(f"uses the provisional {missing}")):
+        _ = cases.compute_group_kinds("semantic")
+
+
+def test_a_case_declaring_an_unknown_provisional_name_is_refused(
+    monkeypatch: pytest.MonkeyPatch, two_provisional: None
+) -> None:
+    monkeypatch.setitem(
+        cases._CASES, "semantic", [("case", _using(), (_A, "PolarsFilter"))]
+    )
+    with pytest.raises(ValueError, match=re.escape("declares ['PolarsFilter']")):
+        _ = cases.compute_group_kinds("semantic")
+
+
+def test_the_repository_cases_declare_exactly_the_polars_filter_cases() -> None:
+    """The cases that depend on PolarsFilter, measured for ITL-1266, and no other."""
+    declared = {
+        (group, name): names
+        for group, registered in cases._CASES.items()
+        for name, _, names in registered
+        if names
+    }
+    assert declared == {
+        ("semantic", "polars_expr"): ("PolarsFilter",),
+        ("pipeline", "polars_filter"): ("PolarsFilter",),
+        ("pipeline", "polars_filter_expr"): ("PolarsFilter",),
+        ("pipeline", "polars_filter_expr_job"): ("PolarsFilter",),
+    }

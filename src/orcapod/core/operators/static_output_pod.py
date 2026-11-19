@@ -18,6 +18,10 @@ from orcapod.core.data_tags import (
     stream_data_tags,
 )
 from orcapod.core.function_pod import FunctionPodStream
+from orcapod.core.operators.provisional import (
+    provisional_operator_name,
+    warn_provisional_operator,
+)
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
@@ -76,9 +80,20 @@ class StaticOutputOperatorPod(TraceableBase):
     predicate, so no user code runs to learn the column types (ITL-912).
     """
 
+    PROVISIONAL: ClassVar[bool] = False
+    """Whether the operator is provisional: its identity is not frozen (ITL-1266).
+
+    Set to ``True`` exactly by the operators listed in ``PROVISIONAL_OPERATORS``
+    (``core/operators/provisional.py``); constructing one issues
+    ``ProvisionalHashWarning`` once per operator per process.
+    """
+
     def __init__(
         self, tracker_manager: TrackerManagerProtocol | None = None, **kwargs
     ) -> None:
+        provisional = provisional_operator_name(type(self))
+        if provisional is not None:
+            warn_provisional_operator(provisional)
         self.tracker_manager = tracker_manager or DEFAULT_TRACKER_MANAGER
         super().__init__(**kwargs)
 
