@@ -180,5 +180,9 @@
   "group_by_nan_keys.system_tag_columns": [
     "_tag_source_id::b9b2a71e04d7acbbbcb6d4e9ed74068893840cbed90077e3567c6851b533a656::b9b2a71e04d7acbbbcb6d4e9ed74068893840cbed90077e3567c6851b533a656",
     "_tag_record_id::b9b2a71e04d7acbbbcb6d4e9ed74068893840cbed90077e3567c6851b533a656::b9b2a71e04d7acbbbcb6d4e9ed74068893840cbed90077e3567c6851b533a656"
-  ]
+  ],
+  "list_tag_producerless_stream.as_given": "semantic_v1:da5675a8c04bdd9fc0b141862357540d73d790afa4edf4370c37e7a54ebd8d25",
+  "list_tag_producerless_stream.reversed": "semantic_v1:da5675a8c04bdd9fc0b141862357540d73d790afa4edf4370c37e7a54ebd8d25",
+  "tagless_producerless_stream.as_given": "semantic_v1:0793ec47689115dade94c6e432df74a187f9ca632e733892b867414bee02d1db",
+  "tagless_producerless_stream.reordered": "semantic_v1:0793ec47689115dade94c6e432df74a187f9ca632e733892b867414bee02d1db"
 }
