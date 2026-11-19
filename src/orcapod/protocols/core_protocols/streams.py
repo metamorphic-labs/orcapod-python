@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Collection, Iterator, Mapping, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Collection,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from orcapod.protocols.core_protocols.datagrams import DataProtocol, TagProtocol
@@ -425,13 +432,13 @@ class StreamWithOperationsProtocol(StreamProtocol, Protocol):
 
     def tag_by(
         self,
-        *columns: str | Sequence[str],
+        *columns: str | Iterable[str],
         label: str | None = None,
     ) -> "StreamProtocol":
         """
         Give the named data columns the tag role, as data-tags: each stays
         one column, a tag and the data column it was, with its values and source
-        info unchanged. The new tags follow the stream's tags, in the order given.
+        info unchanged. The new tags follow the stream's tags, in name order.
         """
         ...
 
