@@ -490,7 +490,8 @@ A class a user defines is one of two kinds (developer, November 12, 2026, ITL-97
 
 ## Golden hash values
 
-Hash values must stay identical across releases (developer, November 10, 2026). Every hash
+Hash values must stay identical across releases (developer, November 10, 2026). Not covered:
+a provisional operator's identity and every hash downstream of it (ITL-1266, below). Every hash
 Orcapod stores or embeds in a name is pinned in the golden folder of the current data context,
 `tests/test_hashing/golden/data/<folder>/<group>-NN.json`, and checked by
 `tests/test_hashing/golden/test_golden_hashes.py`. The mechanism is
@@ -948,9 +949,11 @@ current data context are the current entries.
 - A released data context manifest (`contexts/data/<version>.json`) is frozen: the digest of
   its canonical JSON without `golden` is pinned in `contexts/released_manifests.json`
   (`manifest`), with one `releases` line per library release (ITL-946). Only its `golden`
-  history grows, by appending. A change that moves a released golden hash value, for any
-  reason (a logical type's own change included), needs a new data context version with its
-  own manifest file, never an edit of a released one. A withdrawn release freezes nothing:
+  section changes: the history grows, by appending, and the `provisional` listing follows the
+  provisional files, which no release freezes (ITL-1266). A change that moves a released
+  golden hash value, for any reason (a logical type's own change included), needs a new data
+  context version with its own manifest file, never an edit of a released one. A withdrawn
+  release freezes nothing:
   its pins move to a `withdrawn` record (0.3.0, ITL-1255: v1 is open until 0.4.0).
 - In memory the data context column is still `_context_key` (`ColumnConfig(context=True)`).
 - A writer refuses an input of another data context than its own

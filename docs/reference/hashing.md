@@ -1529,8 +1529,11 @@ a null. A source whose table has such a column fails when it is constructed.
 A label names the algorithm that produced one hash. It does not say which generation of
 Orcapod's hashing a stored row belongs to. That is the **data context**: one key that changes
 whenever any existing hash value can change (the hashers, the identity definitions, the
-record-id recipes, the libraries behind them). Orcapod v0.3 writes `std:v1:default`;
-everything stored before v0.3 is the earlier generation, `std:v0.1:default`. The manifest of
+record-id recipes, the libraries behind them). This does not cover a provisional operator:
+its identity, and every hash downstream of one, can change in a later release under the same
+key ([Provisional operators](../concepts/operators.md#provisional-operators)). Orcapod v0.3
+writes `std:v1:default`; everything stored before v0.3 is the earlier generation,
+`std:v0.1:default`. The manifest of
 the current data context is `orcapod/contexts/data/v1.json`. It is frozen at the release of
 the library version that contains it and never edited afterwards, except in its `golden`
 section: the history gains revisions as golden values are added and released, and the
