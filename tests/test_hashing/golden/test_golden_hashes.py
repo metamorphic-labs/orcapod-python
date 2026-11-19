@@ -47,18 +47,25 @@ MANIFEST = store.read_json(
 FOLDER = store.golden_folder(store.PROJECT_ROOT, MANIFEST)
 
 
-def _load_golden() -> tuple[dict[str, dict[str, Any]], str | None]:
-    """The pinned entries of every group, and the error that stopped reading them."""
+def _load_golden() -> tuple[dict[str, dict[str, Any]], dict[str, set[str]], str | None]:
+    """The pinned entries of every group (frozen and provisional files), the entries of
+    the provisional files, and the error that stopped reading them."""
     try:
         loaded = store.load_folder(FOLDER)
+        provisional = store.load_provisional(FOLDER)
     except (store.GoldenLayoutError, OSError) as exc:
-        loaded, error = {}, str(exc)
+        loaded, provisional, error = {}, {}, str(exc)
     else:
         error = None
-    return {group: loaded.get(group, {}) for group in {*cases.GROUPS, *loaded}}, error
+    groups = {*cases.GROUPS, *loaded}
+    return (
+        {group: loaded.get(group, {}) for group in groups},
+        {group: set(provisional.get(group, {})) for group in groups},
+        error,
+    )
 
 
-GOLDEN, LOAD_ERROR = _load_golden()
+GOLDEN, PINNED_PROVISIONAL, LOAD_ERROR = _load_golden()
 
 
 GOLDEN_ENTRIES = [
@@ -81,9 +88,19 @@ def _moved_message(group: str, entry: str, expected: Any, actual: Any) -> str:
 
 
 @pytest.fixture(scope="module")
-def live() -> dict[str, dict[str, Any]]:
+def live_with_kinds() -> dict[str, tuple[dict[str, Any], frozenset[str]]]:
+    """Every golden group, computed in this process, with its provisional entries."""
+    return {
+        group: cases.compute_group_kinds(group) for group in cases.available_groups()
+    }
+
+
+@pytest.fixture(scope="module")
+def live(
+    live_with_kinds: dict[str, tuple[dict[str, Any], frozenset[str]]],
+) -> dict[str, dict[str, Any]]:
     """Every golden group, computed in this process."""
-    return cases.compute_all()
+    return {group: values for group, (values, _) in live_with_kinds.items()}
 
 
 def test_golden_folder_reads() -> None:
@@ -123,6 +140,28 @@ def test_no_unpinned_entries(live: dict[str, dict[str, Any]], group: str) -> Non
         f"{len(unpinned)} {group} entries are computed but not pinned (new cases need "
         f"generate_golden_hashes.py --add; check the diff adds entries only): "
         f"{unpinned[:10]}"
+    )
+
+
+@pytest.mark.parametrize("group", GROUP_PARAMS)
+def test_entries_are_in_the_files_their_cases_declare(
+    live_with_kinds: dict[str, tuple[dict[str, Any], frozenset[str]]], group: str
+) -> None:
+    """A provisional case is pinned in the provisional file, any other in a frozen one.
+
+    A value that depends on a provisional operator must never be in a file a release
+    freezes (ITL-1266); ``cases.compute_group_kinds`` already refuses a case that uses one
+    without declaring it.
+    """
+    values, provisional = live_with_kinds[group]
+    here = PINNED_PROVISIONAL[group]
+    frozen = sorted(e for e in provisional if e in GOLDEN[group] and e not in here)
+    thawed = sorted(e for e in here if e in values and e not in provisional)
+    assert not frozen and not thawed, (
+        f"{group} entries in the wrong kind of golden file; run "
+        "generate_golden_hashes.py --relocate (an entry in a released file cannot "
+        f"leave it). Provisional, in a frozen file: {frozen[:10]}. Not provisional, in "
+        f"the provisional file: {thawed[:10]}"
     )
 
 
@@ -599,10 +638,12 @@ version = get_default_context().version
 store.copy_tree(store.PROJECT_ROOT, root, version)
 manifest = store.manifest_path(root, version)
 folder = store.golden_folder(root, store.read_json(manifest))
-before = {p.name: p.read_bytes() for p in [manifest, *sorted(folder.iterdir())]}
+files = [manifest, *sorted(p for p in folder.rglob("*") if p.is_file())]
+before = {str(p): p.read_bytes() for p in files}
 main(["--root", str(root), "--group", "torch"])
 main(["--root", str(root), "--check", "--group", "torch"])
-after = {p.name: p.read_bytes() for p in [manifest, *sorted(folder.iterdir())]}
+files = [manifest, *sorted(p for p in folder.rglob("*") if p.is_file())]
+after = {str(p): p.read_bytes() for p in files}
 print("pins kept:", before == after)
 """
 

@@ -514,6 +514,11 @@ A new name already taken by a column that is not renamed is refused too.
 
 ### PolarsFilter
 
+!!! warning "Provisional"
+    `PolarsFilter` is a [provisional operator](#provisional-operators): its identity is not
+    frozen with data context v1 and may change in a later release (ITL-1247). Building one
+    issues `ProvisionalHashWarning` once per process.
+
 Filter rows using Polars expressions:
 
 ```python
@@ -777,6 +782,44 @@ large variants as described in [Arrow types of operator outputs](#arrow-types-of
 `NOT NULL`: its predicted type (`int`, not `int | None`) is not Optional, so an element or value
 that is `None` raises `ValueError` naming the operator, the column and the row's tag, whatever
 `fail_on_miss` is.
+
+## Provisional operators
+
+Data context v1 freezes the hashes of Orcapod at the 0.4.0 release: from then on a pipeline
+keeps its stored paths, record ids and default source ids from one release to the next. A
+provisional operator is outside that freeze. Its identity is still being decided, so a later
+release may change it, and with it the content and pipeline hashes, stored paths and record
+ids of its results and of every step downstream of it. A pipeline that contains one keeps its
+hashes across releases only until such a change: after it, those steps compute their results
+again instead of reusing them. Nothing stored is lost or wrong; the earlier rows stay where
+they are.
+
+The provisional operators are listed in one place:
+
+```python
+from orcapod.operators import PROVISIONAL_OPERATORS
+
+print(sorted(PROVISIONAL_OPERATORS))
+# ['PolarsFilter']
+```
+
+Each name maps to the issue that decides the operator's identity (`PolarsFilter`: whether
+the order of its predicates belongs to it). Building a provisional operator, directly or
+through a stream method such as `polars_filter`, issues `orcapod.errors.ProvisionalHashWarning`
+once per operator per process. To silence it once you have taken note, filter its class after
+importing Orcapod:
+
+```python
+import warnings
+
+from orcapod.errors import ProvisionalHashWarning
+
+warnings.filterwarnings("ignore", category=ProvisionalHashWarning)
+```
+
+An operator leaves the group at a release: from that release on its identity is frozen like
+every other operator's. Its golden values then move into the frozen golden files (see
+[Golden hashes](../reference/golden-hashes.md#provisional-files)).
 
 ## Arrow types of operator outputs
 
