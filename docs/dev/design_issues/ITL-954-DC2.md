@@ -53,3 +53,11 @@ Known limits, follow-ups:
 - To verify again once the hash-moving branches are combined:
   `uv run pytest tests/test_pipeline/test_pre_v03_tables.py tests/test_databases/test_list_table_paths.py -v`
   (the `as_written` cases then exercise real moved hashes).
+
+**Superseded in part (ITL-1259, developer, November 18, 2026):** the first release, 0.4.0,
+names its layouts `pdb_v1`, `rdb_v1`, `tdb_v1` again, so a v0.2 store's tables look current
+by their last path component. The detection of stores written before 0.4 (the old-layout
+names, the layout-less paths, the job-wide total) and its tests
+(`tests/test_pipeline/test_pre_v03_tables.py`) are removed: nobody has such a store. The
+listing under a node's name stays, for tables of another layout (`tables_of_another_layout`),
+with the side-effect refusal.

@@ -182,7 +182,7 @@ class TestDataFunctionBaseProperties:
 
 class TestPythonDataFunctionConstruction:
     def test_data_function_type_id(self, add_pf):
-        assert add_pf.data_function_type_id == "python.function.v0"
+        assert add_pf.data_function_type_id == "python.function.v1"
 
     def test_canonical_name_from_dunder_name(self):
         pf = PythonDataFunction(add, output_keys="result")
@@ -653,7 +653,7 @@ class TestAsyncConstruction:
         assert add_pf.is_async is False
 
     def test_data_function_type_id_same_for_async(self, async_add_pf):
-        assert async_add_pf.data_function_type_id == "python.function.v0"
+        assert async_add_pf.data_function_type_id == "python.function.v1"
 
     def test_input_schema_correct_for_async(self, async_add_pf):
         schema = async_add_pf.input_data_schema

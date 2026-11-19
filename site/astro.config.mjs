@@ -155,6 +155,7 @@ export default defineConfig({
 					items: [
 						page('Hashing', 'reference/hashing'),
 						page('Golden hashes', 'reference/golden-hashes'),
+						page('Data function types', 'reference/data-function-types'),
 					],
 				},
 				page('Troubleshooting', 'troubleshooting'),
