@@ -412,8 +412,9 @@ class PostgreSQLConnector:
         connection (``PQhost``, ``PQport``): the host name or IP address as given
         (with ``host`` and ``hostaddr`` both given, the host; ``given_server`` tells
         that case apart), or the directory of a Unix-domain socket; the port is the
-        one used, the compiled default when none was given. Never the resolved address, the user, the password or any other
-        connection parameter (ITL-1267).
+        one used (when the DSN gives none, a service file's, else ``PGPORT``, else
+        libpq's compiled default). Never the resolved address, the user, the password
+        or any other connection parameter (ITL-1267).
 
         Returns:
             The host, the port, the database and the schema.
@@ -432,20 +433,25 @@ class PostgreSQLConnector:
         return str(host), int(port), str(row[0]), str(row[1])
 
     def given_server(self) -> tuple[str, str]:
-        """Return the ``host`` and ``hostaddr`` the user gave the connection.
+        """Return the ``host`` and the user's ``hostaddr`` of the connection.
 
-        Each is read from the DSN, else from ``PGHOST`` / ``PGHOSTADDR``; when
-        neither names a host, libpq takes the host (and a ``hostaddr`` the DSN and
-        the environment do not give) from a service file, which only the parameters
-        the connection reports show. Never the parameters psycopg adds: psycopg
-        resolves a host of the DSN or the environment itself and passes the address
-        it reached as ``hostaddr``, so a reported ``hostaddr`` is the user's only when
-        no host came from the DSN or the environment. A value may be a
-        comma-separated list (``host=a,b``, ``postgresql://a:5432,b:5433/db``): libpq
-        then connects to the first server that answers.
+        libpq takes each parameter from the DSN, else from a service file, else from
+        the environment (``PGHOST``, ``PGHOSTADDR``); the connection reports what it
+        took (its parameters), so the host and the address returned are the ones the
+        connection used, wherever they came from. One address is not the user's:
+        psycopg resolves a single host of the DSN or the environment itself (not a
+        Unix-socket directory, and only when neither gives a ``hostaddr``) and passes
+        the address it reached as ``hostaddr``, which overrides a service file's.
+        That address is dropped (``""``) when the host the connection reports is the
+        host psycopg resolved; when a service file's host overrode the environment's,
+        the connection was sent to the environment host's address, which is
+        returned. A value may be a comma-separated list (``host=a,b``,
+        ``postgresql://a:5432,b:5433/db``): libpq then connects to the first server
+        that answers. psycopg splits such a list of the DSN or the environment into
+        one attempt per server, so that list is returned as given.
 
         Returns:
-            The host and the host address as given, each ``""`` when none is.
+            The host and the host address, each ``""`` when there is none.
         """
         from psycopg.conninfo import conninfo_to_dict
 
@@ -455,12 +461,21 @@ class PostgreSQLConnector:
             return str((given[key] if key in given else os.environ.get(envvar)) or "")
 
         host, hostaddr = supplied("host", "PGHOST"), supplied("hostaddr", "PGHOSTADDR")
-        if not host:
-            with self._lock:
-                reported = self._require_open().info.get_parameters()
-            host = reported.get("host", "")
-            hostaddr = hostaddr or reported.get("hostaddr", "")
-        return host, hostaddr
+        if "," in host or "," in hostaddr:
+            return host, hostaddr
+        with self._lock:
+            reported = self._require_open().info.get_parameters()
+        used_host = str(reported.get("host", ""))
+        used_hostaddr = str(reported.get("hostaddr", ""))
+        resolved_by_psycopg = (
+            bool(host)
+            and not hostaddr
+            and not host.startswith("/")
+            and host[1:2] != ":"  # a Windows socket directory, as psycopg tests it
+        )
+        if resolved_by_psycopg and used_host == host:
+            used_hostaddr = ""
+        return used_host, used_hostaddr
 
     def get_pk_columns(self, table_name: str) -> list[str]:
         """Return primary-key column names in key-sequence order."""

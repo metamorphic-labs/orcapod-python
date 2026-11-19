@@ -373,6 +373,7 @@ class TestDefaultSourceIdOnTheServer:
     def test_omitted_port_is_written_as_the_port_used(
         self, server_table: str, no_server_env: None
     ) -> None:
+        _requires_localhost()
         if _SERVER["port"] != "5432":
             pytest.skip("needs the test server on the default port 5432")
         omitted = _source_id(_keyword_dsn(server_table, host="localhost", port=None))
@@ -487,6 +488,61 @@ class TestDefaultSourceIdOnTheServer:
         dsn = _keyword_dsn(
             server_table, **{"host": None, "port": None, "service": "one", **dsn_params}
         )
+        with pytest.raises(ValueError, match="host name alone does not identify"):
+            _source_id(dsn)
+
+    @pytest.mark.parametrize(
+        ("dsn_host", "env_host"),
+        [("localhost", None), (None, "localhost")],
+        ids=["dsn-host", "pghost"],
+    )
+    def test_host_name_beside_a_service_file_hostaddr_keeps_the_default(
+        self,
+        server_table: str,
+        no_server_env: None,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+        dsn_host: str | None,
+        env_host: str | None,
+    ) -> None:
+        # psycopg resolves a host name of the DSN or PGHOST and passes the address it
+        # reached as hostaddr, which overrides the service file's: the connection goes
+        # to the named host, not to the service file's unreachable address (a wrong
+        # claim would fail at connect_timeout).
+        _requires_localhost()
+        service_file = tmp_path / "pg_service.conf"
+        service_file.write_text(f"[one]\nhostaddr=192.0.2.1\nport={_SERVER['port']}\n")
+        monkeypatch.setenv("PGSERVICEFILE", str(service_file))
+        if env_host is not None:
+            monkeypatch.setenv("PGHOST", env_host)
+        dsn = _keyword_dsn(
+            server_table, host=dsn_host, port=None, service="one", connect_timeout="5"
+        )
+        assert _source_id(dsn) == _expected("localhost", server_table)
+
+    @pytest.mark.parametrize(
+        ("service_host", "env_host"),
+        [("localhost", "127.0.0.1"), ("127.0.0.1", "localhost")],
+        ids=["service-name-env-address", "service-address-env-name"],
+    )
+    def test_service_file_host_beside_a_resolved_pghost_has_no_default(
+        self,
+        server_table: str,
+        no_server_env: None,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+        service_host: str,
+        env_host: str,
+    ) -> None:
+        # libpq takes the service file's host over PGHOST, while psycopg resolved
+        # PGHOST and sent the connection to that address: the reported host does not
+        # name the server reached.
+        _requires_localhost()
+        service_file = tmp_path / "pg_service.conf"
+        service_file.write_text(f"[one]\nhost={service_host}\nport={_SERVER['port']}\n")
+        monkeypatch.setenv("PGSERVICEFILE", str(service_file))
+        monkeypatch.setenv("PGHOST", env_host)
+        dsn = _keyword_dsn(server_table, host=None, port=None, service="one")
         with pytest.raises(ValueError, match="host name alone does not identify"):
             _source_id(dsn)
 

@@ -191,13 +191,18 @@ never the address a name resolved to. A `hostaddr` given alone is the host.
 A host name is written in lower case (`DB.Example.ORG` and `db.example.org` are one id); an
 IPv6 address in brackets and in its exploded form, which holds no `::`
 (`[0000:0000:0000:0000:0000:0000:0000:0001]` for `::1`); an IPv4 address and a socket
-directory as given. The port is always the number used, the default `5432` included, so a
-DSN with `port=5432` and one without it give one id. Two spellings of one server are two
+directory as given. The port is always the number used: a DSN without one uses the port of
+a service file, else `PGPORT`, else libpq's compiled default (normally `5432`), so a DSN that
+gives the port the connection would use anyway and one without it give one id. Two spellings of one server are two
 ids (`localhost` and `127.0.0.1`), as two spellings of one CSV path are. A DSN, a `PGHOST`
 or `PGHOSTADDR` setting or a service file that names several servers (`host=a,b`) gives no
 default: the server reached can change from one connection to the next. Neither do
-parameters that give a host beside a `hostaddr` that is not that address
-(`host=db.example.org hostaddr=192.0.2.1`): libpq sends the connection to the address, so
+parameters that give a host beside a different `hostaddr` (`host=db.example.org
+hostaddr=192.0.2.1`; `host=127.0.0.1 hostaddr=127.0.0.1` keeps a default), wherever each
+comes from: libpq takes each parameter from the DSN, else a service file, else the
+environment, so a service file's `hostaddr` counts beside a host of the DSN or `PGHOST`, and a
+service file's host beside a `PGHOST` that psycopg resolved. libpq sends the connection to the
+address, so
 the host name does not name the server, and two such DSNs with one host and two addresses
 would share an id. A name that DNS, a hosts file or a tunnel sends to another server is not
 seen in the parameters: two servers reached under one name that way share a default id and
