@@ -354,15 +354,66 @@ DECODED = {
 }
 
 
+# Several items (CodeRabbit on PR 455): two tags and two data columns, both tag orders,
+# two table layouts, and the three roles of the tags.
+NESTED_TAG_ORDERS = [("a", "b"), ("b", "a")]
+NESTED_LAYOUTS = {
+    "tags_first": ["a", "b", "v", "w"],
+    "interleaved": ["v", "a", "w", "b"],
+}
+NESTED_ROLES = ["plain", "data_tags", "mixed"]
+NESTED_ARRANGEMENTS = pytest.mark.parametrize(
+    ("tag_order", "layout", "roles"),
+    [
+        (order, layout, roles)
+        for order in NESTED_TAG_ORDERS
+        for layout in NESTED_LAYOUTS
+        for roles in NESTED_ROLES
+    ],
+    ids=lambda value: "-".join(value) if isinstance(value, tuple) else str(value),
+)
+
+
+def _nested_table(a: pa.Array[Any], layout: str) -> pa.Table:
+    """Tag ``a`` (the column under test), tag ``b`` and data ``v``, ``w`` in ``layout``."""
+    columns: dict[str, pa.Array[Any]] = {
+        "a": a,
+        "b": pa.array([1, 2, 3], pa.int64()),
+        "v": pa.array([1.0, 2.0, 3.0], pa.float64()),
+        "w": pa.array(["p", "q", "r"], pa.large_string()),
+    }
+    names = NESTED_LAYOUTS[layout]
+    return pa.table([columns[name] for name in names], names=names)
+
+
+def _build_nested(
+    build: str, table: pa.Table, tag_order: tuple[str, str], roles: str
+) -> None:
+    """Build ``table`` as a source or a raw stream with its tags in ``roles``.
+
+    ``mixed`` keeps ``b`` plain and makes ``a`` a data-tag.
+    """
+    if build == "source":
+        tag_only: bool | list[str] = {
+            "plain": True,
+            "data_tags": False,
+            "mixed": ["b"],
+        }[roles]
+        ArrowTableSource(table, tag_columns=list(tag_order), tag_only_columns=tag_only)
+    else:
+        data_tags = {"plain": (), "data_tags": tag_order, "mixed": ("a",)}[roles]
+        ArrowTableStream(table, tag_columns=list(tag_order), data_tags=data_tags)
+
+
+@NESTED_ARRANGEMENTS
 @pytest.mark.parametrize("build", ["source", "stream"])
 @pytest.mark.parametrize("kind", ["list", "struct", "list_view", "large_list_view"])
-def test_a_tag_containing_a_dictionary_is_refused(kind: str, build: str) -> None:
-    table = pa.table({"b": [1, 2, 3], "a": _nested(kind), "v": [1.0, 2.0, 3.0]})
+def test_a_tag_containing_a_dictionary_is_refused(
+    kind: str, build: str, tag_order: tuple[str, str], layout: str, roles: str
+) -> None:
+    table = _nested_table(_nested(kind), layout)
     with pytest.raises(InputValidationError) as info:
-        if build == "source":
-            ArrowTableSource(table, tag_columns=["a", "b"], tag_only_columns=True)
-        else:
-            ArrowTableStream(table, tag_columns=["a", "b"])
+        _build_nested(build, table, tag_order, roles)
     message = str(info.value)
     assert NOT_SUPPORTED in message
     assert re.search(r"tag column 'a' has type \S.*dictionary<", message)
@@ -371,26 +422,32 @@ def test_a_tag_containing_a_dictionary_is_refused(kind: str, build: str) -> None
     assert "tag column 'b'" not in message
 
 
-@pytest.mark.parametrize("kind", ["list_view", "large_list_view"])
-def test_a_list_view_tag_without_a_dictionary_is_handled_as_before(kind: str) -> None:
-    """Only a dictionary inside a list view is refused here (CodeRabbit on PR 455).
-
-    A list view of plain values keeps what it had: a raw stream holds it as given,
-    and a source refuses it because the Arrow hasher cannot hash it (ITL-1129).
-    """
+def _plain_list_view(kind: str) -> pa.Array[Any]:
     plain = pa.array(["x", "y", "x"])
     offsets, sizes = (
         (pa.array([0, 1, 2], pa.int32()), pa.array([1, 1, 1], pa.int32()))
         if kind == "list_view"
         else (pa.array([0, 1, 2], pa.int64()), pa.array([1, 1, 1], pa.int64()))
     )
-    column = (
+    return (
         pa.ListViewArray if kind == "list_view" else pa.LargeListViewArray
     ).from_arrays(offsets, sizes, plain)  # pyright: ignore[reportCallIssue, reportUnknownVariableType]  # the pyarrow stubs omit from_arrays' sizes argument
-    table = pa.table({"b": [1, 2, 3], "a": column, "v": [1.0, 2.0, 3.0]})
-    ArrowTableStream(table, tag_columns=["a", "b"])
+
+
+@NESTED_ARRANGEMENTS
+@pytest.mark.parametrize("kind", ["list_view", "large_list_view"])
+def test_a_list_view_tag_without_a_dictionary_is_handled_as_before(
+    kind: str, tag_order: tuple[str, str], layout: str, roles: str
+) -> None:
+    """Only a dictionary inside a list view is refused here (CodeRabbit on PR 455).
+
+    A list view of plain values keeps what it had: a raw stream holds it as given,
+    and a source refuses it because the Arrow hasher cannot hash it (ITL-1129).
+    """
+    table = _nested_table(_plain_list_view(kind), layout)
+    _build_nested("stream", table, tag_order, roles)
     with pytest.raises(ValueError, match="the Arrow hasher refused") as info:
-        ArrowTableSource(table, tag_columns=["a", "b"], tag_only_columns=True)
+        _build_nested("source", table, tag_order, roles)
     assert NOT_SUPPORTED not in str(info.value)
 
 
