@@ -361,8 +361,10 @@ class SourceNodeBase(TraceableBase, ABC):
     Args:
         name: The input-slot name used as the key in
             ``PipelineJob.bind(sources={name: source})``.
-        tag_schema: Mapping of tag column names to Python types.
-        data_schema: Mapping of data column names to Python types.
+        tag_schema: Mapping of tag column names to Python types, or a ``pa.Schema``
+            (then ``data_schema`` is one too): the slot holds exactly those Arrow
+            types.
+        data_schema: Mapping of data column names to Python types, or a ``pa.Schema``.
         data_context: Optional data context override.
         label: Optional display label override.
         config: Optional config override.
@@ -376,14 +378,31 @@ class SourceNodeBase(TraceableBase, ABC):
     def __init__(
         self,
         name: str,
-        tag_schema: Schema,
-        data_schema: Schema,
+        tag_schema: "Schema | pa.Schema",
+        data_schema: "Schema | pa.Schema",
         data_context: str | contexts.DataContext | None = None,
         label: str | None = None,
         config: OrcapodConfig | None = None,
         arrow_schemas: "tuple[pa.Schema, pa.Schema] | None" = None,
     ) -> None:
         super().__init__(label=label, data_context=data_context, config=config)
+        if isinstance(tag_schema, pa.Schema) or isinstance(data_schema, pa.Schema):
+            # A slot declared in Arrow holds exactly those types (ITL-640).
+            if not (
+                isinstance(tag_schema, pa.Schema) and isinstance(data_schema, pa.Schema)
+            ):
+                raise TypeError(
+                    "declare both tag_schema and data_schema as pa.Schema, or both "
+                    "as Python schemas"
+                )
+            if arrow_schemas is not None:
+                raise ValueError(
+                    "arrow_schemas is given by tag_schema and data_schema already"
+                )
+            arrow_schemas = (tag_schema, data_schema)
+            converter = self.data_context.type_converter
+            tag_schema = Schema(converter.arrow_schema_to_python_schema(tag_schema))
+            data_schema = Schema(converter.arrow_schema_to_python_schema(data_schema))
         self._name = name
         self._tag_schema = tag_schema
         self._data_schema = data_schema
