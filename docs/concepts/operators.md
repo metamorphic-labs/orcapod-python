@@ -376,9 +376,10 @@ Every name in `by` must be a **scalar tag column** of the input. `GroupBy` raise
 the last usually means the stream came from `Batch`, so group *before* batching rather than
 after.
 
-A tag whose type holds a struct or a map (a user class, a `dict[K, V]`) can be neither a key
-nor a non-key tag of the input: every non-key tag orders the members, and a struct has no
-order. `GroupBy` raises `InputValidationError` for it, from the schema alone. Since
+A tag whose type has no order can be neither a key nor a non-key tag of the input, because
+every non-key tag orders the members: a struct or a map (a user class, a `dict[K, V]`), an
+interval, a union. `GroupBy` raises `InputValidationError` for it, from the schema alone. A
+key that is a list of any kind, a fixed-size list included, is refused as list-valued. Since
 `GroupBy` drops a non-key tag anyway, drop it before grouping, with `select_tag_columns`
 naming the tags to keep. A list-valued non-key tag orders the members element by element,
 nulls last at every depth.

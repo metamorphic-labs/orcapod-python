@@ -1318,8 +1318,14 @@ data. The rules:
   groups. A list-valued tag sorts through `(is_null, value)` pairs at every depth (`_sort_key`:
   Polars puts a null inside a list first). The sort frame only sees prepared columns
   (`_polars_ready`: a logical type as its storage, a dictionary decoded in one place,
-  `_without_dictionary`, `float16` as `float32`, `decimal256` as four 64-bit limbs, which
-  Polars cannot read). The output is built from the input's Arrow table: `take()` in the
+  `_without_dictionary`, a temporal value as its integer, `float16` as `float32`, a view as
+  its large variant, `decimal256` as four 64-bit limbs, which Polars cannot read (it panics,
+  which no caller can catch), every list kind, fixed-size lists included, as a large list
+  over its prepared values). What may reach it is one rule, `_unorderable_part` (an integer,
+  float, decimal, boolean, string, binary, date, time, timestamp, duration or null, through
+  logical storage, dictionary values and lists of every kind at every depth), checked from
+  the schema at validation and from the table when grouping (the async path skips
+  validation); anything else is refused, never passed through. The output is built from the input's Arrow table: `take()` in the
   sorted order and list arrays from group offsets (`arrow_utils.aggregated_list_array`, the
   array-based sibling of `build_aggregated_table`), so every key and list element is a value
   a member holds, bit for bit (`time64[ns]` keeps its nanoseconds, a float32 signaling NaN
@@ -1330,10 +1336,11 @@ data. The rules:
   than the canonical quiet NaN, so it wins): never the first row's, never chosen by
   `member_order`. Every other key is the group's first member's (equal values are identical).
   Only the system-tag and key source-info folds read Python values, which are text. A user tag
-  whose type holds a struct or a map (a user class, a `dict[K, V]`) is refused
-  (`InputValidationError`, `_refuse_struct_or_map_tags`), as a key and as a non-key tag
-  (which orders the members): a struct has no decided order (developer, November 19, 2026),
-  so drop it before grouping. `Batch` and `MergeJoin` still rebuild their lists from Python
+  whose type has no order (a struct or a map, such as a user class or a `dict[K, V]`, an
+  interval, a union, a list view) is refused (`InputValidationError`,
+  `_refuse_unorderable_tags`), as a key and as a non-key tag (which orders the members): a
+  struct has no decided order (developer, November 19, 2026), so drop it before grouping. A
+  key that is a list of any kind (a fixed-size list included) is refused as list-valued. `Batch` and `MergeJoin` still rebuild their lists from Python
   (ITL-1281). The stance on `0.0`/`-0.0` and NaN for the whole library (match by value, as
   Polars does; show the smallest bit pattern; rewrite nothing) is ITL-1251.
 - `Data` source-info values may be `str`, `None`, or `list[...]`, nested to any depth; the

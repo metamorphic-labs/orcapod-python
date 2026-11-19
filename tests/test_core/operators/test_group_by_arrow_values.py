@@ -412,3 +412,159 @@ def test_a_struct_bearing_ordering_tag_is_refused(name: str) -> None:
 def test_dropping_the_struct_tag_first_groups() -> None:
     stream = _struct_stream(STRUCT).select_tag_columns(["g"])
     assert GroupBy("g")(stream).as_table().column("v").to_pylist() == [[0, 1], [2]]
+
+
+# ── every list kind orders element by element; nothing unprepared reaches Polars ──
+#
+# Polars panics on a decimal256 (an error no caller can catch), so every tag reaches
+# its sort only through one preparation, through lists, large lists and fixed-size
+# lists at every depth (CodeRabbit, PR 458). Each case has two ordering tags: ``t1``
+# of the type under test and ``t2``, which breaks the tie between rows 0 and 4.
+
+
+def _fixed(values: list[Any], element: pa.DataType, size: int) -> Column:
+    return pa.array(values, pa.list_(element, size))
+
+
+LIST_KIND_CASES: dict[str, tuple[Column, list[int], list[int]]] = {
+    # [1, 5] < [1, null] < [1 + 1e-40, 2] (rows 0 and 4) < null
+    "fixed_size_list<decimal256>": (
+        _fixed(
+            [[_dec(1, 1), _dec(2)], [_dec(1), None], None, [_dec(1), _dec(5)]]
+            + [[_dec(1, 1), _dec(2)]],
+            DEC,
+            2,
+        ),
+        [3, 1, 4, 0, 2],
+        [3, 1, 4, 2, 0],
+    ),
+    # [-0.5] < [2.0] (rows 0 and 4) < [null] < null
+    "fixed_size_list<float16>": (
+        pa.FixedSizeListArray.from_arrays(
+            _floats([0x4000, None, 0xB800, 0, 0x4000], 16),
+            1,
+            mask=pa.array([False, False, False, True, False]),
+        ),
+        [2, 4, 0, 1, 3],
+        [2, 4, 1, 3, 0],
+    ),
+    # nanoseconds two levels down: [[1], [1]] < [[1], [null]] < [[2], [1]] < [null, [0]]
+    "fixed_size_list<fixed_size_list<time64[ns]>>": (
+        _fixed(
+            [[[2], [1]], [[1], [None]], [[1], [1]], [None, [0]], [[2], [1]]],
+            pa.list_(pa.int64(), 1),
+            2,
+        ).cast(pa.list_(pa.list_(NS, 1), 2)),
+        [2, 1, 4, 0, 3],
+        [2, 1, 4, 3, 0],
+    ),
+    # [] < [[1], [1]] < [[2]] (rows 0 and 4) < [null]
+    "large_list<fixed_size_list<decimal256>>": (
+        pa.array(
+            [[[_dec(2)]], [], [[_dec(1)], [_dec(1)]], [None], [[_dec(2)]]],
+            pa.large_list(pa.list_(DEC, 1)),
+        ),
+        [1, 2, 4, 0, 3],
+        [1, 2, 4, 3, 0],
+    ),
+}
+
+
+def _list_kind_columns(t1: Column) -> dict[str, Column]:
+    return {
+        "g": pa.array([1] * 5, pa.int64()),
+        "t1": t1,
+        "t2": pa.array([1, 0, 0, 0, 0], pa.int64()),
+        "rid": pa.array([f"r{i}" for i in range(5)], pa.large_string()),
+        "v": pa.array(range(5), pa.int64()),
+        "w": _ints([10, 11, 12, 13, 14], NS),
+    }
+
+
+@pytest.mark.parametrize("name", list(LIST_KIND_CASES))
+def test_every_list_kind_orders_members_element_by_element(name: str) -> None:
+    t1, by_name, t2_first = LIST_KIND_CASES[name]
+    columns = _list_kind_columns(t1)
+    for order in itertools.permutations(range(5)):
+        source = _source(_permuted(columns, order), ["g", "t1", "t2"])
+        for member_order, expected in ((None, by_name), (["t2"], t2_first)):
+            grouped = source.group_by("g", member_order=member_order)
+            table = grouped.as_table()
+            assert table.column("v").to_pylist() == [expected], member_order
+            assert _exact(table.column("w")) == [[10 + i for i in expected]]
+
+
+@pytest.mark.parametrize("name", list(LIST_KIND_CASES))
+def test_every_list_kind_orders_members_the_same_sync_and_async(name: str) -> None:
+    t1, by_name, _ = LIST_KIND_CASES[name]
+    source = _source(_list_kind_columns(t1), ["g", "t1", "t2"])
+    for rows in (
+        async_rows(GroupBy("g"), source),
+        list(GroupBy("g")(source).iter_data()),
+    ):
+        [(_, data)] = rows
+        assert data.as_table().column("v").to_pylist() == [by_name]
+
+
+def test_a_fixed_size_list_key_is_refused_as_list_valued() -> None:
+    columns = _list_kind_columns(LIST_KIND_CASES["fixed_size_list<decimal256>"][0])
+    source = _source(columns, ["g", "t1", "t2"])
+    with pytest.raises(InputValidationError, match="list-valued"):
+        _ = source.group_by(["g", "t1"])
+    with pytest.raises(InputValidationError, match="list-valued"):
+        _ = async_rows(GroupBy(["t1", "g"]), source)
+
+
+# Tag types GroupBy has no order for, beyond a struct or a map at the top level.
+UNORDERABLE_TAGS: dict[str, Column] = {
+    "month_day_nano_interval": pa.array(
+        # (months, days, nanoseconds): one month against 31 days has no order.
+        [(1, 0, 0), (0, 31, 0), None],
+        pa.month_day_nano_interval(),
+    ),
+    "dense_union": pa.UnionArray.from_dense(
+        pa.array([0, 1, 0], pa.int8()),
+        pa.array([0, 0, 1], pa.int32()),
+        [pa.array([1, 2], pa.int64()), pa.array(["a"], pa.large_string())],
+    ),
+    "large_list_view": pa.array([[1], [2], None], pa.large_list_view(pa.int64())),
+    "large_list<map>": pa.array(
+        [[[("a", 1)]], [[("b", 2)]], []],
+        pa.large_list(pa.map_(pa.large_string(), pa.int64())),
+    ),
+    "fixed_size_list<struct>": pa.FixedSizeListArray.from_arrays(
+        pa.StructArray.from_arrays([pa.array([1, 2, 3], pa.int64())], names=["x"]),
+        1,
+    ),
+}
+
+
+def _unorderable_stream(tag: Column) -> ArrowTableStream:
+    table = _table(
+        {
+            "g": pa.array([1, 1, 2], pa.int64()),
+            "u": pa.array([0, 1, 2], pa.int64()),
+            "s": tag,
+            "v": pa.array([0, 1, 2], pa.int64()),
+            "w": pa.array([3, 4, 5], pa.int64()),
+        }
+    )
+    return ArrowTableStream(table, tag_columns=["g", "u", "s"])
+
+
+@pytest.mark.parametrize("name", list(UNORDERABLE_TAGS))
+def test_a_tag_without_an_order_is_refused_in_every_role(name: str) -> None:
+    """Refused as an ordering tag and as a key, on the sync and the async path."""
+    stream = _unorderable_stream(UNORDERABLE_TAGS[name])
+    for by in (["g"], ["u", "g"]):
+        with pytest.raises(InputValidationError, match="select_tag_columns"):
+            _ = GroupBy(by)(stream)
+        with pytest.raises(InputValidationError, match="select_tag_columns"):
+            _ = async_rows(GroupBy(by), stream)
+    for by in (["s"], ["g", "s"]):
+        with pytest.raises(InputValidationError, match=r"'s'"):
+            _ = GroupBy(by)(stream)
+        with pytest.raises(InputValidationError, match=r"'s'"):
+            _ = async_rows(GroupBy(by), stream)
+    kept = stream.select_tag_columns(["g", "u"])
+    assert GroupBy("g")(kept).as_table().column("v").to_pylist() == [[0, 1], [2]]
