@@ -240,9 +240,10 @@ def _build_data_function_registry() -> dict[str, type]:
         Dict mapping type ID strings to data function classes.
     """
     from orcapod.core.data_function import PythonDataFunction
+    from orcapod.core.data_function import PYTHON_FUNCTION
 
     return {
-        "python.function.v0": PythonDataFunction,
+        PYTHON_FUNCTION.type_id: PythonDataFunction,
     }
 
 

@@ -63,9 +63,10 @@ def test_a_v03_job_loads_with_unchanged_hashes(saved: dict[str, Any]) -> None:
     assert job.nodes["subjects"].pipeline_hash().to_string() == binding["pipeline_hash"]
     # The source keeps its tag plain, as v0.3 built it.
     assert job.nodes["subjects"].keys() == (("subject",), ("age",))
-    records = job.nodes["older"].get_all_records()
-    assert records is not None
-    assert sorted(records.column("older").to_pylist()) == [4, 6]
+    # Its stored rows are at the layouts of that build (pdb_v2, rdb_v2): tables of
+    # another layout are reported, never read (the first release's layouts are v1,
+    # ITL-1259).
+    assert job.nodes["older"].get_all_records() is None
 
 
 def test_a_v03_source_config_rebuilds_the_v03_source(saved: dict[str, Any]) -> None:

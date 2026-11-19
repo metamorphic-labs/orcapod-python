@@ -24,6 +24,16 @@ wanted on purpose starts a new data context version. It never edits a released v
     entries that move, each explained. 0.4.0 freezes `v1`. See
     [Withdrawing a release](#withdrawing-a-release).
 
+!!! note "Provisional operators are outside the freeze"
+    A provisional operator (`orcapod.operators.PROVISIONAL_OPERATORS`, today only
+    `PolarsFilter`) has an identity that no release freezes yet (ITL-1266). The golden values
+    of every case that depends on one, its own hashes and those of every step downstream of
+    it, are in the provisional files, `data/v1/provisional/<group>.json`. They are computed
+    and checked on every run like every other value, but no release lists them: they can
+    change in a later release without a new data context, with the developer's approval of
+    the exact list. So the promise on this page holds for a pipeline only when it contains
+    no provisional operator. See [Provisional files](#provisional-files).
+
 ## The pieces at a glance
 
 The mechanism has five layers. Each one is checked against the layer below it, and the last
@@ -68,12 +78,16 @@ tests/test_hashing/golden/data/
     semantic-01.json
     torch-01.json
     semantic-02.json   # added after 0.4.0: new semantic entries only
+    provisional/       # never frozen: see "Provisional files"
+      pipeline.json
+      semantic.json
 ```
 
 - A file is named after the group of cases it pins plus a two-digit counter:
   `<group>-NN.json`, where the group is one of `cases.GROUPS` (`semantic`, `schema`,
   `arrow`, `datagram`, `pipeline`, `torch`). Names carry no date, issue or release; that
-  information lives in the manifest. The folder holds nothing else.
+  information lives in the manifest. The folder holds nothing else but the `provisional`
+  subfolder ([Provisional files](#provisional-files)).
 - A file maps entry names to values. An entry name appears in exactly one file of the
   folder, whatever its group.
 - A file listed by a released revision is never edited. New values go into the group's next
@@ -99,7 +113,8 @@ tests/test_hashing/golden/data/
      "previous": "d002...", "digest": "d003..."},
     {"date": "2026-12-09", "release": "0.4.1", "added": {},
      "previous": "d003...", "digest": "d004..."}
-  ]
+  ],
+  "provisional": {"pipeline.json": "c86b...", "semantic.json": "2f1d..."}
 }
 ```
 
@@ -112,6 +127,8 @@ tests/test_hashing/golden/data/
   file they list, are fixed.
 - `date` is the date the revision was last changed. It is informational: nothing can verify
   it.
+- `provisional` lists the provisional files, each with the sha256 of its bytes, outside the
+  history: no revision lists them, so no release freezes them.
 
 ### The pins: `src/orcapod/contexts/released_manifests.json`
 
@@ -129,6 +146,37 @@ tests/test_hashing/golden/data/
 - `withdrawn` (optional) holds one record per withdrawn release: the date, the reason, and
   the `manifest` pin and release revision digest (`revision`) that release shipped. A
   withdrawn release has no `releases` line and no release revision, so it freezes nothing.
+
+### Provisional files
+
+`tests/test_hashing/golden/data/v1/provisional/<group>.json` holds the values of the cases
+that depend on a provisional operator (ITL-1266), one file per group and no counter: such a
+file is never frozen, and the generator rewrites it in place.
+
+- **Which entries.** A case declares the provisional operators it depends on:
+  `@case("pipeline", "polars_filter", provisional=("PolarsFilter",))`. The generator runs
+  every case while Orcapod records which provisional operators it builds
+  (`orcapod.utils.provisional.recording_provisional_uses`), and refuses a case that builds
+  one without declaring it, or that declares a name `PROVISIONAL_OPERATORS` does not hold.
+  The golden test checks that every entry is in the kind of file its case declares. So a
+  value that depends on a provisional operator cannot be pinned in a frozen file: neither
+  through a stream method that builds it (`stream.polars_filter`) nor in a step downstream
+  of it.
+- **Today:** the `pipeline` cases `polars_filter`, `polars_filter_expr` and
+  `polars_filter_expr_job`, and the `semantic` case `polars_expr`: the `polars_expr_v1`
+  hashes, which only `PolarsFilter`'s identity feeds in the library. The 86 entries moved
+  out of `pipeline-01.json` and `semantic-01.json`, values unchanged, before `v1` was frozen.
+- **What holds.** Every provisional value is computed and compared on every CI run, so a
+  change nobody intended fails. An intended change needs the developer's approval of the
+  exact list of entries that move, each explained (`--remove`, then `--add`), but no new
+  data context, before or after a release. `--release` neither lists nor pins a provisional
+  file, the manifest pin leaves out `golden`, and the tag check does not compare them.
+- **Leaving the group.** When an operator stops being provisional, at a release, it leaves
+  `PROVISIONAL_OPERATORS`, its `PROVISIONAL` marker and its cases' declarations go, and
+  `generate_golden_hashes.py --relocate` moves its entries, values unchanged, into the open
+  frozen file of their group. The `--release` step then freezes them.
+- **Joining the group.** Only an operator whose values no release lists can become
+  provisional: `--relocate` refuses to move an entry out of a file a release lists.
 
 ### Digest definitions
 
@@ -161,7 +209,12 @@ writes go through `tests/test_hashing/golden/generate_golden_hashes.py`.
    existing value, and it writes nothing when the tree already breaks a rule.
 3. The diff shows only added entries or a new file, and the edit to the open revision.
 4. `--check` computes every case and reports moved, unpinned and no longer produced entries
-   without writing anything.
+   without writing anything, and entries pinned in the wrong kind of file (a provisional
+   case in a frozen file, or the other way round).
+
+An entry of a case that declares a provisional operator goes to the provisional file of its
+group instead ([Provisional files](#provisional-files)). `--relocate` moves pinned entries
+between the frozen and the provisional files, values unchanged, as their cases declare.
 
 Before a release, a value that no release lists can change only with the developer's
 approval and a written migration assessment. `--remove <entry>` (repeatable) takes the entry
@@ -182,11 +235,17 @@ edit and the generator refuses to write over it.
    its digest into `released_manifests.json` under `releases`, and at the data context's first
    release sets `released_in` and the `manifest` pin. It refuses a version already released,
    a development or local version, and a tree that breaks a rule. Try it first on a copy with
-   `--root <dir>` (`store.copy_tree` writes one).
+   `--root <dir>` (`store.copy_tree` writes one). The same step pins the open data function
+   type snapshots (`scripts/data_function_types.py --release`, writing their sha256 and the
+   version into `src/orcapod/data_function_types/released.json`; see
+   [Data function types](data-function-types.md)).
 3. The Release workflow tags the commit it builds, which contains the release revision. From
    then on every file listed up to that revision is frozen.
 4. The tag and the PyPI wheel and sdist, which carry `v1.json` and `released_manifests.json`,
    are records of what shipped, outside the repository.
+
+An operator that stops being provisional in this release has its entries moved into a frozen
+file (`--relocate`) before the release step, so that the release freezes them.
 
 Every published version needs the release step, a pre-release included: the release gate
 refuses to tag a version without it. So the first version of a data context published on
@@ -219,9 +278,11 @@ a logical type's own identifier change. When such a change is wanted on purpose,
 a new data context version, only in a minor release (before 1.0) or a major one, never in a
 patch:
 
-1. The new manifest `v2.json` starts with `"golden": {"folder": "v2", "history": []}`, an
-   empty folder `data/v2/`, and the pin `"v2": {"manifest": null, "releases": {}}`. The
-   generator then writes `v2/<group>-01.json` from the new code.
+1. The new manifest `v2.json` starts with
+   `"golden": {"folder": "v2", "history": [], "provisional": {}}`, an empty folder
+   `data/v2/`, and the pin `"v2": {"manifest": null, "releases": {}}`. The generator then
+   writes `v2/<group>-01.json` from the new code, and `v2/provisional/<group>.json` for the
+   cases that depend on a provisional operator.
 2. The `v1` code, manifest, golden folder and pins move to `orcapod-sanctuary`, which keeps
    them computable.
 3. This repository then carries only the `v2` folder and chain.
@@ -384,8 +445,19 @@ so the bytes that are hashed are the bytes that were committed (4).
 
 `tests/test_hashing/golden/test_golden_hashes.py` and the generator
 
-- **Checks:** the folder holds only `<group>-NN.json` files of known groups, and an entry name
-  appears in only one of them (8).
+- **Checks:** the folder holds only `<group>-NN.json` files of known groups and the
+  `provisional` subfolder of `<group>.json` files, and an entry name appears in only one of
+  all of them (8).
+
+### Placement check
+
+`tests/test_hashing/golden/cases.py` (`compute_group_kinds`) and
+`tests/test_hashing/golden/test_golden_hashes.py`
+
+- **Checks:** a case that builds a provisional operator declares it; every entry of a case
+  that declares one is in a provisional file, and every other entry in a frozen file.
+- **Protects against:** a value that depends on a provisional operator frozen by a release,
+  and a frozen value moved out of the freeze without a declaration.
 
 ## Residual risks and assumptions
 
@@ -398,6 +470,7 @@ so the bytes that are hashed are the bytes that were committed (4).
 | Values on `main` after the last release are open | An unreleased commit has no guarantee | Use a released version for anything that must stay stable |
 | Optional groups skip without their package | `torch` values are unchecked where torch is missing | CI installs every extra |
 | The `date` field cannot be verified | Informational | Order and integrity come from the chain and the tags |
+| Provisional values are outside the freeze | A pipeline with a provisional operator may compute its results again after an upgrade | `ProvisionalHashWarning` when the operator is built; the list in `PROVISIONAL_OPERATORS` and on the operators page |
 
 A deliberate attacker with merge rights who also rewrites history and tags is beyond what any
 check inside the repository can stop; the PyPI artifacts remain the record of what shipped.
@@ -405,6 +478,8 @@ check inside the repository can stop; the PyPI artifacts remain the record of wh
 ## Rules
 
 - A released golden file never changes, and is never removed or renamed.
+- A value of a case that depends on a provisional operator is pinned in a provisional file,
+  never in a frozen one; no release freezes a provisional file.
 - `v1` is open until 0.4.0 (0.3.0 was withdrawn on 2026-11-17): until then, a change to a
   `v1` value needs the developer's approval of the exact list of entries that move, each
   explained. Never edit or regenerate a golden file to make a test pass.
