@@ -1929,7 +1929,7 @@ def with_content_hash_column(
 def sort_by_tag_columns(table: "pa.Table", tag_keys: tuple[str, ...]) -> "pa.Table":
     """Return ``table`` with its rows in tag order: the sort every presentation uses.
 
-    This is the order of ``as_table(sort_by_tags=True)``, ``head`` and the notebook
+    This is the order of ``as_table(columns={"sort_by_tags": True})``, ``head`` and the notebook
     preview. It is not a hash input: a stream's identity keeps its own ordering
     (``ArrowTableStream._identity_table``).
 

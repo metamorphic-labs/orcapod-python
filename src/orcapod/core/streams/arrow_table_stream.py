@@ -225,7 +225,7 @@ class ArrowTableStream(StreamBase):
         THIS ORDER IS A HASH INPUT AND MUST NOT CHANGE: it is the ordering that every
         stream's content hash has been built from since before ITL-1053. It is kept apart
         from ``as_table``'s sort on purpose; the sort in the body is the code
-        ``as_table(sort_by_tags=True)`` had on origin/main, unchanged: the tags and
+        ``as_table(columns={"sort_by_tags": True})`` had on origin/main, unchanged: the tags and
         system tags in this stream's own priority, a type Arrow cannot order leaving the
         rows in stream order, and a stream with nothing to sort by raising.
         """

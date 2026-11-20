@@ -112,8 +112,12 @@ only what is readily available, never compute, poll or deliver a row (they read 
 code (a function, a predicate, a side effect) and never write to a database. `run()` computes
 (see "Computing a stream outside a job" below).
 
-Tag order is ascending by the tag columns, in the stream's tag order, then by the record
-ids. A null goes last, and so does a null inside a list or a struct: a list tag is ordered
+Tag order is ascending by the tag columns, in the stream's tag order. Rows with equal tags
+are ordered by their system tags (their source ids and record ids) by a read that has them:
+`as_table(columns={"sort_by_tags": True})`, `head(n, columns={"sort_by_tags": True})` and
+the preview. `head().sort_by_tags()` and a view's `sort_by_tags()` have no system tags, so
+they keep such rows in the order the view holds them (see "Computing a stream outside a job" below).
+A null goes last, and so does a null inside a list or a struct: a list tag is ordered
 element by element (a shorter list first when it is the start of a longer one), a struct
 field by field. Sorting moves whole rows and never changes a value: every value shown is
 the stream's own, whatever its Arrow type.
@@ -243,7 +247,7 @@ What each kind of object shows:
 sorting included, and applies it to the rows it has before taking the first `n`. The default
 does not sort, as `as_table()` does not, so `head()` shows rows in the order the stream
 holds them. The notebook preview asks for the sorted head, so it shows the same rows
-whatever order they were computed in. With `sort_by_tags=True`, or `all_info=True`, rows are
+whatever order they were computed in. With `columns={"sort_by_tags": True}`, or `all_info=True`, rows are
 sorted by tag first (nulls last; rows with equal tags are ordered by their system tags):
 
 ```python

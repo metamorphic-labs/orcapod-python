@@ -1,7 +1,7 @@
 """A read sorted by tags keeps every value and orders lists and structs (ITL-1295).
 
 When a tag is a list (or a struct holding one), Arrow cannot sort the table, and the
-sort every presentation uses (``as_table(sort_by_tags=True)``, ``head().sort_by_tags()``,
+sort every presentation uses (``as_table(columns={"sort_by_tags": True})``, ``head().sort_by_tags()``,
 the notebook preview) orders it with Polars. It used to carry the whole table through
 Polars: a ``date64`` came back at midnight (tags and data alike) and a ``decimal256``
 made Polars panic. Now Polars sees only the prepared tag columns and the row numbers,
@@ -13,8 +13,9 @@ shorter list first when it is a prefix; a struct field by field). Arrow sorts a 
 tag of scalars itself, in that order, and the fallback gives a struct the same order.
 
 Each table has three tags (``t``, the list or struct under test, ``n: int64``,
-``s: large_string``) in three tag orders, and three data columns (``x``, the row's
-name; ``d: date64`` off midnight; ``e: decimal256``).
+``s: large_string``) in three tag orders and in three roles (plain tags, data-tags, one
+data-tag among plain tags), and three data columns (``x``, the row's name;
+``d: date64`` off midnight; ``e: decimal256``).
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ from orcapod.core.sources import ArrowTableSource
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
+from orcapod.semantic_types.nested_none import NestedNoneNotRestorableError
 
 D = decimal.Decimal
 DAY = 86_400_000
@@ -101,10 +103,32 @@ def _list_of_struct_tag(make: Any, values: list[Any]) -> "pa.Array[Any]":
     )
 
 
+def _list_of_struct_tag_without_null_element(
+    make: Any, values: list[Any]
+) -> "pa.Array[Any]":
+    a, b, _ = values
+    # [(b, 1)], [(a, 2)], [(b, 1), (a, 2)], None, [(a, 0)], [], [(b, 1), (a, 1)]: no
+    # null struct element (a null list and an empty list only), so the list can be a
+    # data-tag a function reads (a null element cannot be read back yet, ITL-1144).
+    elements = pa.StructArray.from_arrays(
+        [
+            make([b, a, b, a, a, b, a]),
+            pa.array([1, 2, 1, 2, 0, 1, 1], pa.int64()),
+        ],
+        names=["v", "i"],
+    )
+    return pa.LargeListArray.from_arrays(
+        pa.array([0, 1, 2, 4, 4, 5, 5, 7], pa.int64()),
+        elements,
+        mask=pa.array([False, False, False, True, False, False, False]),
+    )
+
+
 KINDS = {
     "large_list": _list_tag,
     "struct": _struct_tag,
     "large_list<struct>": _list_of_struct_tag,
+    "large_list<struct without null element>": _list_of_struct_tag_without_null_element,
 }
 TAGS = {
     f"{kind}<{name}>": (build, make, values)
@@ -112,6 +136,10 @@ TAGS = {
     for kind, build in KINDS.items()
 }
 TAG_ORDERS = [("t", "n", "s"), ("n", "s", "t"), ("s", "t", "n")]
+# How the tags are given: plain tags, every tag also a data column (data-tags), or the
+# last tag in tag order a data-tag among plain tags.
+PLAIN, DATA_TAGS, MIXED = "plain", "data_tags", "mixed"
+ROLES = (PLAIN, DATA_TAGS, MIXED)
 
 
 def _exact(array: "pa.Array[Any]") -> list[Any]:
@@ -176,9 +204,21 @@ def _expected(table: pa.Table, tag_order: tuple[str, ...]) -> list[int]:
     )
 
 
-def _source(table: pa.Table, tag_order: tuple[str, ...]) -> ArrowTableSource:
+def _source(
+    table: pa.Table, tag_order: tuple[str, ...], role: str = PLAIN
+) -> ArrowTableSource:
+    tag_only: bool | list[str]
+    if role == PLAIN:
+        tag_only = True
+    elif role == DATA_TAGS:
+        tag_only = []
+    else:
+        tag_only = list(tag_order[:-1])
     return ArrowTableSource(
-        table, tag_columns=list(tag_order), tag_only_columns=True, source_id="sorted"
+        table,
+        tag_columns=list(tag_order),
+        tag_only_columns=tag_only,
+        source_id="sorted",
     )
 
 
@@ -197,14 +237,15 @@ READS = {
 }
 
 
+@pytest.mark.parametrize("role", ROLES)
 @pytest.mark.parametrize("read", list(READS))
 @pytest.mark.parametrize("tag_order", TAG_ORDERS, ids=lambda o: "".join(o))
 @pytest.mark.parametrize("tag_name", list(TAGS))
 def test_a_sorted_read_orders_list_and_struct_tags_and_keeps_every_value(
-    tag_name: str, tag_order: tuple[str, ...], read: str
+    tag_name: str, tag_order: tuple[str, ...], read: str, role: str
 ) -> None:
     table = _table(tag_name, tag_order)
-    result = READS[read](_source(table, tag_order))
+    result = READS[read](_source(table, tag_order, role))
     _assert_rows(result, table, _expected(table, tag_order))
 
 
@@ -284,36 +325,77 @@ def test_nulls_inside_a_list_order_last() -> None:
     ]
 
 
-@function_pod(output_keys="y")
-def plus_one(x: str) -> str:
-    """Return ``x`` marked."""
-    return x + "+"
+@function_pod(output_keys=["y", "z"])
+def marked(x: str, w: str) -> tuple[str, str]:
+    """Return ``x`` and ``w`` marked."""
+    return x + "+", w + "-"
+
+
+TAGS_FIRST, DATA_FIRST = "tags_first", "data_first"
 
 
 @pytest.mark.parametrize("orchestrator", ["sync", "async"])
+@pytest.mark.parametrize("layout", [TAGS_FIRST, DATA_FIRST])
+@pytest.mark.parametrize("role", ROLES)
+@pytest.mark.parametrize("tag_order", TAG_ORDERS, ids=lambda o: "".join(o))
 @pytest.mark.parametrize("tag_name", list(TAGS))
 def test_a_job_node_sorted_read_keeps_every_value(
-    tag_name: str, orchestrator: str
+    tag_name: str,
+    tag_order: tuple[str, ...],
+    role: str,
+    layout: str,
+    orchestrator: str,
+    request: pytest.FixtureRequest,
 ) -> None:
-    tag_order = ("s", "t", "n")
-    table = _table(tag_name, tag_order).select(["s", "t", "n", "x"])
+    """A function node with two data columns in and two out, read sorted: through the
+    node and through its stored records, for every tag order, role and table layout,
+    on the sync and the async orchestrator."""
+    t_is_data_tag = role == DATA_TAGS or (role == MIXED and tag_order[-1] == "t")
+    if tag_name.startswith("large_list<struct><") and t_is_data_tag:
+        # The function reads a data-tag as data; a None struct element inside the
+        # list cannot be read back yet: the sync run records those two rows as failed
+        # (the read misses them), the async run raises.
+        request.applymarker(
+            pytest.mark.xfail(
+                strict=True,
+                raises=AssertionError
+                if orchestrator == "sync"
+                else NestedNoneNotRestorableError,
+                reason="ITL-1144: NestedNoneNotRestorableError: a None inside a "
+                + "container cannot be read back yet, so the rows whose list-of-struct "
+                + "data-tag holds a null element fail in the function",
+            )
+        )
+    full = _table(tag_name, tag_order)
+    data = {"x": full.column("x"), "w": pa.array([f"w{i}" for i in range(7)])}
+    tags = {name: full.column(name) for name in tag_order}
+    columns = {**tags, **data} if layout == TAGS_FIRST else {**data, **tags}
+    # The tags keep their flags; both data columns hold no null.
+    table = pa.Table.from_arrays(
+        list(columns.values()),
+        schema=pa.schema(
+            full.schema.field(name) if name in tags else pa.field(name, col.type, False)
+            for name, col in columns.items()
+        ),
+    )
     job = PipelineJob(name="sorted", database=InMemoryArrowDatabase())
     with job:
-        plus_one.pod(_source(table, tag_order), label="node")
+        marked.pod(_source(table, tag_order, role), label="node")
     job.run(
         orchestrator=SyncPipelineOrchestrator()
         if orchestrator == "sync"
         else AsyncPipelineOrchestrator()
     )
-    order = _expected(table, tag_order)
+    order = _expected(full, tag_order)
     for result in (
         job.nodes["node"].as_table(columns={"sort_by_tags": True}),
         job.nodes["node"].as_source().as_table(columns={"sort_by_tags": True}),
     ):
         for name in tag_order:
-            want = table.column(name).combine_chunks().take(pa.array(order))
+            want = full.column(name).combine_chunks().take(pa.array(order))
             assert _exact(result.column(name).combine_chunks()) == _exact(want), name
         assert result.column("y").to_pylist() == [X[row] + "+" for row in order]
+        assert result.column("z").to_pylist() == [f"w{row}-" for row in order]
 
 
 @pytest.mark.parametrize(

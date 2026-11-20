@@ -859,7 +859,7 @@ def _null_last(value: Any) -> tuple[Any, ...]:
 def assert_sorted_by_tags(table: pa.Table, tag_keys: Sequence[str]) -> None:
     """Assert the rows of ``table`` are in the presentation order ``sort_by_tags`` asks.
 
-    The order of ``as_table(sort_by_tags=True)`` and ``head`` (#354,
+    The order of ``as_table(columns={"sort_by_tags": True})`` and ``head`` (#354,
     ``arrow_utils.sort_by_tag_columns``): ascending by ``tag_keys``, a null cell last (a
     list-valued tag element by element, a null element last too),
     then by the system tag columns the table has, in column order. Rows equal on all of these keep their
