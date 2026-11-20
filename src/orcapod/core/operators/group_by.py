@@ -5,6 +5,13 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping, Sequence, Set
 from typing import Any, ClassVar, TYPE_CHECKING, cast, get_origin
 
+from orcapod.core.operators.arrow_keys import (
+    is_list_kind,
+    part_without_rule,
+    polars_ready,
+    value_type,
+    values_of,
+)
 from orcapod.core.operators.base import UnaryOperator
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.streams import ArrowTableStream
@@ -32,240 +39,6 @@ else:
 # so two keys are one group only when Polars finds them equal (all NaN equal, 0.0 equal
 # to -0.0, ITL-1234 and ITL-1251), and every emitted value is one a member holds, bit
 # for bit. Only the row numbers and the group sizes come back from Polars.
-
-
-def _is_list_kind(arrow_type: "pa.DataType") -> bool:
-    """Return whether a type is a list, a large list or a fixed-size list."""
-    return (
-        pa.types.is_list(arrow_type)
-        or pa.types.is_large_list(arrow_type)
-        or pa.types.is_fixed_size_list(arrow_type)
-    )
-
-
-def _value_type(arrow_type: "pa.DataType") -> "pa.DataType":
-    """Return the type a column's values are read as: a logical type's storage,
-    a dictionary's values, at the top level."""
-    while True:
-        if isinstance(arrow_type, pa.BaseExtensionType):
-            arrow_type = arrow_type.storage_type
-        elif pa.types.is_dictionary(arrow_type):
-            arrow_type = arrow_type.value_type
-        else:
-            return arrow_type
-
-
-def _is_orderable_scalar(arrow_type: "pa.DataType") -> bool:
-    """Return whether ``GroupBy`` has an order for a scalar of this (storage) type.
-
-    Every integer, float, decimal, boolean, string, binary, date, time, timestamp
-    and duration type, and the null type: what ``_polars_ready`` prepares.
-    """
-    types = pa.types
-    return (
-        types.is_null(arrow_type)
-        or types.is_boolean(arrow_type)
-        or types.is_integer(arrow_type)
-        or types.is_floating(arrow_type)
-        or types.is_decimal(arrow_type)
-        or types.is_string(arrow_type)
-        or types.is_large_string(arrow_type)
-        or types.is_string_view(arrow_type)
-        or types.is_binary(arrow_type)
-        or types.is_large_binary(arrow_type)
-        or types.is_binary_view(arrow_type)
-        or types.is_fixed_size_binary(arrow_type)
-        or types.is_date(arrow_type)
-        or types.is_time(arrow_type)
-        or types.is_timestamp(arrow_type)
-        or types.is_duration(arrow_type)
-    )
-
-
-def _unorderable_part(arrow_type: "pa.DataType") -> "pa.DataType | None":
-    """Return the part of a tag's type ``GroupBy`` has no order for, or ``None``.
-
-    The one rule for what may key a group or order its members, used by the
-    validation (from the schema) and by the grouping itself (from the table), so
-    nothing reaches Polars that ``_polars_ready`` does not prepare: Polars panics on
-    some types (``decimal256``), and a panic is not an error a caller can catch. A
-    list, large list or fixed-size list is ordered element by element, through
-    logical storage and dictionary values at every depth. A struct or a map (a user
-    class, a ``dict[K, V]``) has no decided order (developer, November 19, 2026), and
-    neither has any type not named in ``_is_orderable_scalar`` (an interval, a
-    union, a list view).
-
-    Args:
-        arrow_type: The Arrow type of a tag column.
-
-    Returns:
-        The first type found that has no order, or ``None``.
-    """
-    value_type = _value_type(arrow_type)
-    if _is_list_kind(value_type):
-        lists = cast(
-            "pa.LargeListType[Any] | pa.ListType[Any] | pa.FixedSizeListType[Any, Any]",
-            value_type,
-        )
-        return _unorderable_part(lists.value_type)
-    return None if _is_orderable_scalar(value_type) else value_type
-
-
-def _without_dictionary(array: "pa.Array[Any]") -> "pa.Array[Any]":
-    """Decode a dictionary-encoded column to its values; any other column as it is.
-
-    The one place ``GroupBy`` handles a dictionary-encoded tag, a float key's
-    included: the values each member's index points at, bits as stored. (A stream may
-    stop carrying dictionary-encoded tags, ITL-1264; then this goes.)
-
-    Args:
-        array: A column of the input table, or its storage.
-
-    Returns:
-        The decoded array.
-    """
-    if isinstance(array, pa.DictionaryArray):
-        return array.dictionary_decode()
-    return array
-
-
-def _storage(column: "pa.ChunkedArray[Any]") -> "pa.Array[Any]":
-    """Return a column as one array: a logical type as its storage, decoded.
-
-    Args:
-        column: A column of the input table.
-
-    Returns:
-        The column's values as stored.
-    """
-    return _values_of(column.combine_chunks())
-
-
-def _values_of(array: "pa.Array[Any]") -> "pa.Array[Any]":
-    """Return an array as its values are read: through logical types and dictionaries.
-
-    The array twin of ``_value_type``: a logical type's storage and a dictionary's
-    values, alternately, until neither applies, so a dictionary over a logical type
-    (or a logical type over a dictionary) is read as validation reads its type.
-
-    Args:
-        array: A column of the input table, or the values of one.
-
-    Returns:
-        The array of plain values.
-    """
-    while True:
-        if isinstance(array, pa.ExtensionArray):
-            array = array.storage
-        elif isinstance(array, pa.DictionaryArray):
-            array = _without_dictionary(array)
-        else:
-            return array
-
-
-def _decimal256_limbs(array: "pa.Array[Any]") -> "pa.Array[Any]":
-    """Return a decimal256 column as a struct of four 64-bit limbs.
-
-    Polars has no 256-bit decimal. The limbs of the two's-complement value, most
-    significant first (that one signed, the others unsigned), compare and order as
-    the decimals of one column do: the scale is part of the column's type.
-
-    Args:
-        array: A ``decimal256`` array.
-
-    Returns:
-        A struct array with the limbs, null where ``array`` is null.
-    """
-    count = len(array)
-    nulls = array.is_null().to_numpy(zero_copy_only=False)
-    buffer = array.buffers()[1]
-    # A pyarrow Buffer has the buffer protocol; its stub does not declare it.
-    words = (
-        np.frombuffer(buffer, dtype="<u8")  # pyright: ignore[reportCallIssue, reportArgumentType]
-        if buffer is not None
-        else np.zeros(0, dtype="<u8")
-    )
-    limbs = words[array.offset * 4 : (array.offset + count) * 4].reshape(count, 4)
-    return pa.StructArray.from_arrays(
-        [
-            pa.array(limbs[:, 3].view("<i8"), pa.int64()),
-            pa.array(limbs[:, 2], pa.uint64()),
-            pa.array(limbs[:, 1], pa.uint64()),
-            pa.array(limbs[:, 0], pa.uint64()),
-        ],
-        names=["l3", "l2", "l1", "l0"],
-        mask=pa.array(nulls, pa.bool_()),
-    )
-
-
-def _polars_ready(array: "pa.Array[Any]") -> "pa.Array[Any]":
-    """Return a key or ordering column in a form Polars reads, ordered and equal alike.
-
-    Only the sort frame sees it; the output takes every value from the input. Every
-    type ``_unorderable_part`` accepts is prepared here, and no other type reaches
-    it (the caller refuses it first):
-
-    * a logical type is its storage and a dictionary its values, alternately until
-      neither applies (``_values_of``, as ``_value_type`` reads the type);
-    * a date, time, timestamp or duration is its integer (the column's unit and zone
-      are its type, so the integers order and compare as the values do), so no
-      conversion of Polars' own can change it;
-    * a ``float16`` becomes ``float32`` (exact; the Polars this library allows may
-      lack ``Float16``), a string or binary view its large variant;
-    * a ``decimal256`` becomes its limbs (Polars panics on it);
-    * a list, large list or fixed-size list becomes a large list over its prepared
-      values (``_sort_key`` orders a list element by element).
-
-    Args:
-        array: A column of the input table, or the values of one.
-
-    Returns:
-        The prepared array.
-
-    Raises:
-        TypeError: For a type ``_unorderable_part`` refuses; never reached through
-            ``GroupBy``, which refuses the column first.
-    """
-    array = _values_of(array)
-    arrow_type = array.type
-    types = pa.types
-    if types.is_large_list(arrow_type) or types.is_list(arrow_type):
-        lists = cast("pa.LargeListArray[Any] | pa.ListArray[Any]", array)
-        return pa.LargeListArray.from_arrays(
-            cast("pa.Int64Array", lists.offsets.cast(pa.int64())),
-            _polars_ready(lists.values),
-            mask=array.is_null(),
-        )
-    if types.is_fixed_size_list(arrow_type):
-        fixed = cast("pa.FixedSizeListArray[Any]", array)
-        size = cast(int, arrow_type.list_size)
-        values = fixed.values.slice(fixed.offset * size, len(fixed) * size)
-        offsets = pa.array(np.arange(len(fixed) + 1, dtype=np.int64) * size, pa.int64())
-        return pa.LargeListArray.from_arrays(
-            cast("pa.Int64Array", offsets),
-            _polars_ready(values),
-            mask=array.is_null(),
-        )
-    if types.is_decimal256(arrow_type):
-        return _decimal256_limbs(array)
-    if types.is_float16(arrow_type):
-        return array.cast(pa.float32())
-    if (
-        types.is_date(arrow_type)
-        or types.is_time(arrow_type)
-        or types.is_timestamp(arrow_type)
-        or types.is_duration(arrow_type)
-    ):
-        # Not ``is_temporal``, which also takes an interval: that has no order.
-        width = cast(int, arrow_type.bit_width)
-        return array.view(pa.int32() if width == 32 else pa.int64())
-    if types.is_string_view(arrow_type):
-        return array.cast(pa.large_string())
-    if types.is_binary_view(arrow_type):
-        return array.cast(pa.large_binary())
-    if _is_orderable_scalar(arrow_type):
-        return array
-    raise TypeError(f"GroupBy has no order for {arrow_type}")
 
 
 def _sort_key(name: str, dtype: object) -> "pl.Expr":
@@ -306,7 +79,7 @@ def _float_bits(array: "pa.Array[Any]") -> "pa.Array[Any] | None":
     read through its storage or its values.
 
     Args:
-        array: A key column's values as stored (``_storage``).
+        array: A key column's values as stored (``arrow_keys.values_of``).
 
     Returns:
         The unsigned integers of the column's own width, or ``None``.
@@ -323,7 +96,7 @@ def _refuse_unorderable_tags(
     """Refuse a user tag ``GroupBy`` cannot key a group or order members by.
 
     A key must be a scalar value groups are ordered by, and every non-key tag orders
-    the members, so a type with no order (``_unorderable_part``: a struct or a map,
+    the members, so a type with no order (``arrow_keys.part_without_rule``: a struct or a map,
     such as a user class or a ``dict``, an interval, a union) can be neither
     (developer, November 19, 2026: refuse rather than decide an order). A key that
     is a list of any kind is refused too. The refusal depends on the schema only,
@@ -337,14 +110,14 @@ def _refuse_unorderable_tags(
         InputValidationError: Naming the first such tag and its type.
     """
     for name, arrow_type in tag_types.items():
-        if name in by and _is_list_kind(_value_type(arrow_type)):
+        if name in by and is_list_kind(value_type(arrow_type)):
             raise InputValidationError(
                 f"GroupBy: {[name]} are list-valued tag columns and cannot be "
                 + f"grouping keys. Column types: {{{name!r}: {arrow_type}}}. A "
                 + "list-valued tag usually means the stream came from `Batch`; "
                 + "group before batching rather than after."
             )
-        part = _unorderable_part(arrow_type)
+        part = part_without_rule(arrow_type, structs=False)
         if part is None:
             continue
         if name in by:
@@ -610,7 +383,7 @@ class GroupBy(UnaryOperator):
             InputValidationError: If any name in ``by`` is not a tag column, or
                 names a list-valued tag column; or a name in ``member_order`` is
                 not a tag column; or a key is a list of any kind, or a user tag's
-                type has no order (``_unorderable_part``: a struct, a map, an
+                type has no order (``arrow_keys.part_without_rule``: a struct, a map, an
                 interval...); checked here when the stream knows its Arrow types
                 without rows, otherwise when it is grouped.
         """
@@ -677,7 +450,7 @@ class GroupBy(UnaryOperator):
 
         Raises:
             InputValidationError: If a key is a list of any kind, or a user tag's
-                type has no order (``_unorderable_part``).
+                type has no order (``arrow_keys.part_without_rule``).
         """
         table = stream.as_table(columns={"source": True, "system_tags": True})
         tag_columns, _ = stream.keys()
@@ -754,9 +527,9 @@ class GroupBy(UnaryOperator):
         for name, c in zip(
             [*key_names, *order_names], [*self.by, *sort_columns], strict=True
         ):
-            frame_columns[name] = _polars_ready(table.column(c).combine_chunks())
+            frame_columns[name] = polars_ready(table.column(c).combine_chunks())
         # The bits of each float key, to emit the member value with the smallest.
-        key_storage = {c: _storage(table.column(c)) for c in self.by}
+        key_storage = {c: values_of(table.column(c).combine_chunks()) for c in self.by}
         bit_names: dict[str, str] = {}
         for i, c in enumerate(self.by):
             bits = _float_bits(key_storage[c])

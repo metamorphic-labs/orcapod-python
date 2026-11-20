@@ -22,8 +22,9 @@ Prepared for equality and order alike:
 Every other type (a map, an interval, a union, a list view, ...) has no rule:
 ``part_without_rule`` names it, and the caller refuses the column, naming it.
 
-``Join`` and ``SemiJoin`` use this module. ``GroupBy`` keeps its own copy until
-ITL-1281 makes it import this one (its rule refuses structs: ``structs=False``).
+``Join``, ``SemiJoin``, ``MergeJoin`` (through ``Join``'s inner join) and ``GroupBy``
+use this module; ``GroupBy``'s rule refuses structs (``structs=False``: a struct has
+no decided order).
 """
 
 from __future__ import annotations
@@ -43,7 +44,7 @@ else:
     pa = LazyModule("pyarrow")
 
 
-def _is_list_kind(arrow_type: "pa.DataType") -> bool:
+def is_list_kind(arrow_type: "pa.DataType") -> bool:
     """Return whether a type is a list, a large list or a fixed-size list."""
     return (
         pa.types.is_list(arrow_type)
@@ -119,7 +120,7 @@ def part_without_rule(
         The first type found that has no rule, or ``None``.
     """
     plain = value_type(arrow_type)
-    if _is_list_kind(plain):
+    if is_list_kind(plain):
         lists = cast(
             "pa.LargeListType[Any] | pa.ListType[Any] | pa.FixedSizeListType[Any, Any]",
             plain,
