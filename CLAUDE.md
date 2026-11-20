@@ -448,8 +448,7 @@ Developer, November 12, 2026 (ITL-981); see `docs/concepts/arrays.md` and
   (`orcapod.numpy.ndarray`). The leading type text of a value hash is the extension name.
 - `numpy.ndarray`: one `.npy` file per cell (`numpy.lib.format`, format 3.0,
   `allow_pickle=False` on write and read; never raise `max_header_size`). Options:
-  `memory_order`, `byte_order`, `struct_layout`. Where stored arrays must be ordered, order
-  them by value hash (`storage_sort_key`), never by stored bytes.
+  `memory_order`, `byte_order`, `struct_layout`. No operator orders stored arrays (ITL-1281).
 - Library value types are provisional until the library value type audit, after 0.4.0rc1
   (developer, November 13, 2026, ITL-1068; moved past 0.4.0rc1 on November 17, 2026): their
   extension names are listed in `provisional` of `contexts/logical_types.json`, and using
