@@ -32,6 +32,43 @@ it an explicit schema (for example `data_schema=` on `DictSource`).
 
 **Fix.** Leave at least one column out of `tag_columns`. A stream needs something to carry.
 
+### `InputValidationError: dictionary-encoded columns are not currently supported in Orcapod: - tag column '...' has type dictionary<...> (decoded: ...)`
+
+**Cause.** A column, tag or data, is dictionary-encoded, or holds a dictionary inside it (for
+example a list of dictionary values). This comes from an Arrow table built with
+`dictionary_encode()`, a pandas `Categorical` of strings, or a polars `Categorical` or `Enum`.
+Orcapod does not support such columns yet; the message names every one, with its role and the
+type it decodes to.
+
+**Fix.** Decode the column before building the source.
+
+With pyarrow, keep the field's name, nullability and metadata, and keep the table that
+`set_column` returns:
+
+- Take the field: `field = table.schema.field(name)`.
+- Take the decoded type: `decoded = field.type.value_type`. For a column that holds a
+  dictionary inside it (a struct with a dictionary field, a list of dictionary values), use
+  the decoded type the message gives instead, for example
+  `pa.struct([("k", pa.string()), ("n", pa.int64())])`.
+- Replace the column:
+  `table = table.set_column(table.schema.get_field_index(name), field.with_type(decoded), table[name].cast(decoded))`.
+
+Three kinds of column cannot be cast to their decoded type at once, so they need a step
+first (each recipe is tested in `tests/test_core/sources/test_dictionary_columns_refused.py`):
+
+- A dictionary whose values hold a dictionary: decode the top level of each chunk first,
+  `pa.chunked_array([chunk.dictionary_decode() for chunk in column.chunks]).cast(decoded)`.
+- A list view: cast it to a large list of the decoded items,
+  `column.cast(pa.large_list(<decoded item type>))` (a source refuses list views whatever they
+  hold).
+- A run-end-encoded column: cast its values, then expand its runs, chunk by chunk:
+  `pc.run_end_decode(pa.RunEndEncodedArray.from_arrays(chunk.run_ends, chunk.values.cast(<decoded value type>)))`.
+
+With polars, keep the frame `with_columns` returns:
+`df = df.with_columns(pl.col(name).cast(pl.String))`. Or keep the data frame as a value in a cell:
+a pandas or polars `DataFrame` stored whole in one column is a library value, not a dictionary
+column. See [Arrow types of a source](concepts/sources.md#arrow-types-of-a-source).
+
 ### `TypeError: 'PosixPath' object is not iterable` from `CSVSource`
 
 **Cause.** `CSVSource` was given a `pathlib.Path` and no `source_id`. The file path is

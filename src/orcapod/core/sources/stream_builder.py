@@ -359,6 +359,9 @@ class SourceStreamBuilder:
                 tag_columns or a key column are not in the table, a key column's
                 type is not allowed, a key value is null or repeated, or if
                 neither ``source_id`` nor ``source_kind`` is given.
+            InputValidationError: If a column's type is, or contains, a
+                dictionary: dictionary-encoded columns are not currently supported
+                (ITL-1264, ITL-1277).
         """
         tag_columns_tuple = tuple(tag_columns)
         system_tag_columns_tuple = tuple(system_tag_columns)
@@ -374,6 +377,16 @@ class SourceStreamBuilder:
         # A tag never has a meta column's name; the meta columns are dropped next,
         # so say so here rather than report the tag as missing (ITL-1080).
         schema_utils.require_names_not_meta(tag_columns_tuple)
+
+        # Dictionary-encoded columns are not currently supported (ITL-1264,
+        # ITL-1277). The stream refuses them too; checking first reports the
+        # dictionary, not a key column error, and before anything is hashed. It runs
+        # before the system columns are dropped: a hand-built meta, source-info or
+        # system-tag column holding a dictionary is refused, not dropped silently.
+        if found := schema_utils.dictionary_columns(table.schema):
+            raise schema_utils.dictionary_columns_error(
+                found, tag_columns_tuple, data_tags_tuple, system_tag_columns_tuple
+            )
 
         # 1. Drop system columns from raw input.
         table = arrow_utils.drop_system_columns(table)

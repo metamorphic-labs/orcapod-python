@@ -212,26 +212,23 @@ def test_the_tag_order_of_the_input_does_not_change_a_fall_through_pods_hashes(
     assert all(result == first for result in results.values())
 
 
-OUTPUT_KEYS_ISSUE = "ITL-1244 (rule undecided)"
+def test_swapped_output_keys_change_the_uri_exactly_when_they_change_a_type() -> None:
+    """The uri holds the output schema: each key with its type, in no order (ITL-1244).
 
-
-@pytest.mark.xfail(
-    strict=True,
-    reason=f"{OUTPUT_KEYS_ISSUE}: the order of output_keys is not in the identity",
-)
-def test_swapped_output_keys_are_another_function() -> None:
-    """Swapped output keys map the results to other names: not the same function.
-
-    Today both have one uri, so a job serves one's stored values under the other's
-    names.
+    Swapping keys of different types is another function; swapping keys of one type
+    is the same function (a change of what it computes, like a body edit: a version
+    bump). ``test_output_keys_identity.py`` covers it in full.
     """
 
     def make(keys: list[str]):
         @function_pod(output_keys=keys)
-        def stats(d1: int, t2: int) -> tuple[int, int]:
-            return d1 + t2, d1 * t2
+        def stats(d1: int, t2: int, d3: str) -> tuple[int, int, str]:
+            return d1 + t2, d1 * t2, d3
 
-        return stats
+        return stats.pod
 
-    forward, backward = make(["sum", "product"]), make(["product", "sum"])
-    assert forward.pod.uri != backward.pod.uri
+    forward = make(["sum", "product", "label"])
+    same_typed_swap = make(["product", "sum", "label"])
+    typed_swap = make(["label", "product", "sum"])
+    assert forward.uri == same_typed_swap.uri
+    assert forward.uri != typed_swap.uri

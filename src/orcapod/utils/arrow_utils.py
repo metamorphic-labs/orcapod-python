@@ -193,6 +193,80 @@ def _normalize_field_to_large_types(
     return field.with_type(normalize_to_large_types(field.type, keep_null=keep_null))
 
 
+def decode_dictionaries(arrow_type: "pa.DataType") -> "pa.DataType":
+    """Return ``arrow_type`` with every dictionary in it replaced by its value type.
+
+    The type a dictionary-encoded column decodes to: a dictionary at the top level or
+    inside a list (a list view included), a struct, a map, a union or the values of a
+    run-end-encoded type becomes its value type, and nested fields
+    keep their names, nullability and metadata. An extension type is replaced by its
+    decoded storage type when that storage holds a dictionary. A type that holds no
+    dictionary is returned as it is, so ``decode_dictionaries(t) == t`` tells whether
+    ``t`` contains one.
+
+    Args:
+        arrow_type: An Arrow type.
+
+    Returns:
+        The decoded type.
+    """
+    # The base class: a Python extension type and a built-in one (pa.opaque, the
+    # canonical JSON, UUID, tensor and boolean8 types) alike.
+    if isinstance(arrow_type, pa.BaseExtensionType):
+        storage = decode_dictionaries(arrow_type.storage_type)
+        return arrow_type if storage == arrow_type.storage_type else storage
+    if pa.types.is_dictionary(arrow_type):
+        return decode_dictionaries(arrow_type.value_type)
+    if (
+        pa.types.is_list(arrow_type)
+        or pa.types.is_large_list(arrow_type)
+        or pa.types.is_fixed_size_list(arrow_type)
+        or pa.types.is_list_view(arrow_type)
+        or pa.types.is_large_list_view(arrow_type)
+    ):
+        value_field = arrow_type.value_field
+        decoded = value_field.with_type(decode_dictionaries(value_field.type))
+        if decoded.equals(value_field, check_metadata=True):
+            return arrow_type
+        if pa.types.is_list(arrow_type):
+            return pa.list_(decoded)
+        if pa.types.is_large_list(arrow_type):
+            return pa.large_list(decoded)
+        if pa.types.is_list_view(arrow_type):
+            return pa.list_view(decoded)
+        if pa.types.is_large_list_view(arrow_type):
+            return pa.large_list_view(decoded)
+        return pa.list_(decoded, arrow_type.list_size)
+    if pa.types.is_run_end_encoded(arrow_type):
+        values = decode_dictionaries(arrow_type.value_type)
+        if values == arrow_type.value_type:
+            return arrow_type
+        return pa.run_end_encoded(arrow_type.run_end_type, values)  # pyright: ignore[reportArgumentType]  # the stubs accept only basic value types; Arrow takes any type here
+    if pa.types.is_struct(arrow_type):
+        fields = [f.with_type(decode_dictionaries(f.type)) for f in arrow_type]
+        return pa.struct(fields)
+    if pa.types.is_map(arrow_type):
+        # pyarrow accepts key and item Fields here; its stubs only list types.
+        return pa.map_(  # pyright: ignore[reportCallIssue]
+            arrow_type.key_field.with_type(
+                decode_dictionaries(arrow_type.key_field.type)
+            ),
+            arrow_type.item_field.with_type(
+                decode_dictionaries(arrow_type.item_field.type)
+            ),
+            keys_sorted=arrow_type.keys_sorted,
+        )
+    if pa.types.is_union(arrow_type):
+        children = [
+            arrow_type.field(i).with_type(decode_dictionaries(arrow_type.field(i).type))
+            for i in range(arrow_type.num_fields)
+        ]
+        if isinstance(arrow_type, pa.SparseUnionType):
+            return pa.sparse_union(children, arrow_type.type_codes)
+        return pa.dense_union(children, arrow_type.type_codes)
+    return arrow_type
+
+
 def normalize_schema_to_large_types(
     schema: "pa.Schema", *, keep_null: bool = False
 ) -> "pa.Schema":

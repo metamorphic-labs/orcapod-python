@@ -80,6 +80,9 @@ class ArrowTableStream(StreamBase):
         Raises:
             ValueError: If a tag column or a data-tag is not a tag column of
                 the table, or the stream has no data column.
+            InputValidationError: If a column's type is, or contains, a
+                dictionary: dictionary-encoded columns are not currently supported
+                (ITL-1264, ITL-1277).
         """
         super().__init__(**kwargs)
 
@@ -88,6 +91,13 @@ class ArrowTableStream(StreamBase):
 
         # Every table Orcapod presents is in its large variants (ITL-1122).
         table = arrow_utils.normalize_table_to_large_types(table, keep_null=True)
+        # Dictionary-encoded columns are not currently supported (ITL-1264,
+        # ITL-1277): every source and operator result becomes a stream here, so this
+        # refuses them all, tags and data alike.
+        if found := schema_utils.dictionary_columns(table.schema):
+            raise schema_utils.dictionary_columns_error(
+                found, tag_columns, data_tags, system_tag_columns
+            )
 
         data_table, data_context_table = arrow_utils.split_by_column_groups(
             table, [constants.CONTEXT_KEY]

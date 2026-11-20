@@ -56,7 +56,7 @@ Legend: **yes** (with the best test as evidence), **no** (with what the closest 
 | `GroupBy` `by`, member order | yes: `ops/test_group_by.py::TestGroupByShape::test_one_row_per_distinct_key` | keys only on `main` | yes | no on `main` | 1 key on `main` |
 | ↳ covered by PR #434 (ITL-1226) | | `test_group_by_member_order.py::test_the_order_of_by_is_not_identity` | plain, data-tag, mixed | `test_no_arrangement_of_the_input_changes_the_result` (24 × 4, source and raw stream) | `test_a_job_gives_the_same_rows_sync_and_async_for_any_arrangement` |
 | `TagBy` columns | yes: `dt/test_tag_by.py::test_named_data_columns_become_data_tags_in_the_order_given` | yes: `test_the_order_of_the_names_is_part_of_the_identity` (PR #434 reverses this decision) | n/a / yes / refused: `test_an_existing_data_tag_is_refused` | no (1 tag) → NEW `[tag_by/*]` | yes: ASE `tag_by`, `tag_by_reversed` |
-| `AddTags` tags | yes: `ops/test_add_tags.py::TestValues::test_arrow_type_of_each_accepted_value_type` | operator hash and keys: `TestIdentity::test_order_is_part_of_the_identity`; stream hashes → NEW `test_add_tags_order_is_the_order_of_the_new_tags_and_its_identity` | yes: `dt/test_add_tags.py` | no → NEW | yes: ASE `add_tags`, `ref_add_tags` |
+| `AddTags` tags | yes: `ops/test_add_tags.py::TestValues::test_arrow_type_of_each_accepted_value_type` | operator hash and keys: `TestIdentity::test_order_is_not_part_of_the_identity`; stream hashes → NEW `test_add_tags_order_is_neither_the_order_of_the_new_tags_nor_identity` (ITL-1269 made the order free; it was part of the identity when this audit was written) | yes: `dt/test_add_tags.py` | no → NEW | yes: ASE `add_tags`, `ref_add_tags` |
 | `SelectTagColumns` columns | **no** (only one name, or all) → NEW | **no** (`WHF::test_tag_column_spellings_share_identity` uses one name) → NEW | yes: `dt/test_roles.py::test_each_operator_acts_by_role` | no → NEW | yes |
 | `DropTagColumns` columns | **no** → NEW | **no** → NEW | yes | no → NEW | yes |
 | `SelectDataColumns` columns | yes: ASE `select_data_columns` | hash: `WHF::TestColumnSelectionIdentity`; keys, rows → NEW | yes | no → NEW | yes |
@@ -84,7 +84,7 @@ Legend: **yes** (with the best test as evidence), **no** (with what the closest 
 | `CachedSource` | 1 tag | no | **plain only** (data-tag read-back untested) | no | no |
 | `DerivedSource(tags_as_data=)` | yes: `sources/test_derived_source_tags_as_data.py::TestColumns::test_several_copies_follow_map_order` | content hash only: `TestIdentity::test_mapping_order_does_not_change_content_hash` | plain; data-tag origin `dt/test_derived_source.py::test_tags_as_data_over_a_data_tag_node` | one arrangement | yes |
 | function pod, several inputs | 2: `function_pod/test_function_pod_auto_select.py::test_call_selects_once_after_the_join`; 3: `dt/test_edi_end_to_end.py` | **no**: `pod(b, a)` never compared with `pod(a, b)` | data-tag parameter (EDI) | no | yes |
-| `output_keys`, several | yes: `data_function/test_data_function.py::test_multiple_output_keys` | **no**; order is not in the identity: **ITL-1244** | — | — | value only |
+| `output_keys`, several | yes: `data_function/test_data_function.py::test_multiple_output_keys` | decided (ITL-1244): the uri holds the order-free output schema; a swap of differently typed keys is another function, of same-typed keys the same (`function_pod/test_output_keys_identity.py`) | — | — | value only |
 | automatic select of several extra columns | yes: `test_dropping_logs_one_info_message_naming_the_columns` | no (kept list sorted) | one data-tag falls through | no | yes |
 | `PipelineJob.bind(sources=)`, several | yes: `test_pipeline/test_pipeline_job.py::TestPipelineJobBind::test_bind_sources_mutates_job` (membership) | n/a (dict order unused) | plain only | — | — |
 | bind a source in another column order | yes: `test_bind_type_check.py::test_columns_match_by_name_within_each_group_whatever_their_order` (plain, run ok only) | yes (plain) | **mixed roles: ITL-1245** (accepted, then the node's table breaks) | partly | async read in `test_bind_narrower_source.py::test_columns_follow_the_declared_order` |
@@ -97,7 +97,7 @@ Legend: **yes** (with the best test as evidence), **no** (with what the closest 
 | 1 | `MergeJoin(A, B)` and `MergeJoin(B, A)` give the source-info lists of tied values in argument order | stored source info (operator cache, downstream tables); not the hashes | ITL-1241 |
 | 2 | `MapTags` refuses a swap or cycle of data-tags that it accepts for plain tags (`MapData` is right: a data-only move) | error only | ITL-1242 |
 | 3 | `MergeJoin` raises `TypeError` on a null in a colliding column | error only | ITL-1243 |
-| 4 | Swapping `output_keys` keeps the function's uri, so a job serves stored values under swapped names | result cache: wrong values served | ITL-1244 (rule undecided) |
+| 4 | Swapping `output_keys` keeps the function's uri, so a job serves stored values under swapped names | result cache: wrong values served | ITL-1244 (decided: identity right as it is; a same-typed swap that gives a name another value needs a major version bump, swapping the returned values with the keys changes nothing; the cache check is ITL-1253) |
 | 5 | Binding a source with mixed tag roles in another column order is accepted, then the source node's `as_table` raises | error on read; the run is right | ITL-1245 |
 | 6 | A function pod over data-tags (`FallThroughPod`) hashes its fall-through tags in the input's tag order: two sources that differ only in tag order give the function node another content and pipeline hash | pipeline hash, pipeline table path | ITL-1246 |
 | 7 | Input whose table layout differs from its tag order: every unary operator's result keys list the tags in the physical order while its rows use the tag order; Join, SemiJoin, MergeJoin (and, with data-tags, the tag select/drop and `MapTags` forms) give the async rows another column order than the sync rows. In a job, an operator node stores one column order on both orchestrators (measured, tested) | column order only; no hash, no stored table | ITL-1249 |
@@ -107,7 +107,7 @@ Legend: **yes** (with the best test as evidence), **no** (with what the closest 
 
 Order- or role-dependent behaviour that reaches a hash or a stored table first.
 
-1. `output_keys` order: not in identity, stored values served under swapped names (ITL-1244).
+1. `output_keys` order: decided in ITL-1244 (order-free output schema; a same-typed swap that gives a name another value needs a major version bump; keys and returned values swapped together change nothing); the missing check on a cache hit is ITL-1253.
 2. `MergeJoin` tied values: source-info order follows the inputs (ITL-1241).
 3. `PolarsFilter` predicate order in identity, constraint order not; never tested with two (ITL-1247).
 4. `record_id_columns` key order: moves record ids, tokens and the content hash; never compared.
