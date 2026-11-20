@@ -151,9 +151,10 @@ No call, and the **old** values. There is no error and no warning.
 
 !!! warning "Editing a function's code does not recompute its results"
     Orcapod does not look at a function's source code. It identifies a function by three
-    things: its **name**, its **output** (the `output_keys` and return type), and its
-    **major version**. As long as those are the same, stored results are reused, whatever
-    the body now says.
+    things: its **name**, its **output** (each output name with its type, in any order),
+    and its **major version**. As long as those are the same, stored results are reused,
+    whatever the body now says, and whichever position of the returned tuple each output
+    name takes.
 
 ## Bump the major version
 
