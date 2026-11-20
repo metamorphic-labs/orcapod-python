@@ -215,7 +215,7 @@ PREVIEW_PANICS = pytest.mark.xfail(
     strict=True,
     reason="The notebook preview renders its table through Polars "
     + "(StreamView._display_frame), which panics on a decimal256 column whatever the "
-    + "sort does; reported with ITL-1295 part 2, not this sort.",
+    + "sort does: ITL-1302, not this sort.",
 )
 
 
