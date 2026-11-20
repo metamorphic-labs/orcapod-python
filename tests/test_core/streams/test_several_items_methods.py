@@ -3,7 +3,8 @@
 Every stream method that builds an operator from several items (names, a mapping,
 keywords, predicates) gives the stream that operator gives: same rows, hashes and
 column order, for plain tags, data-tags and a mix, on a stream with three tags and three
-data columns. ``polars_filter`` merges ``constraint_map`` and keyword constraints, the
+data columns, with its items in the order given and reversed; a method that takes data
+columns is also given a data-tag. ``polars_filter`` merges ``constraint_map`` and keyword constraints, the
 keywords winning. Several ``ColumnConfig`` groups together give the ``all_info``
 columns of those groups, in the same order.
 """
@@ -11,8 +12,9 @@ columns of those groups, in the same order.
 from __future__ import annotations
 
 import itertools
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import polars as pl
 import pytest
@@ -35,12 +37,15 @@ from orcapod.core.operators import (
     TagBy,
 )
 from orcapod.core.sources import ArrowTableSource
+from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.system_constants import constants
 
 from ..operators.several_items import (
+    DATA_TAGS,
     LAYOUTS,
     MAIN,
+    MIXED,
     P,
     ROLES,
     TAGS_FIRST,
@@ -55,102 +60,193 @@ pytestmark = pytest.mark.filterwarnings(
 )
 
 # The stream methods are on the stream classes, not on ``StreamProtocol``.
-Build = Callable[[ArrowTableSource], StreamProtocol]
+Build = Callable[[ArrowTableSource, Sequence[Any]], StreamProtocol]
+
+# What the order of the items does.
+ORDER_FREE = "order_free"  # nothing but, at most, the column order
+ORDER_IS_IDENTITY = "order_is_identity"  # the same rows, another operator (hash)
+
+# Roles in which every column a case names is a data-tag or data column, never plain.
+DATA_TAG_ROLES = (DATA_TAGS, MIXED)
 
 
 @dataclass(frozen=True)
 class MethodCase:
-    """A stream method call and the operator call it must equal."""
+    """A stream method call and the operator call it must equal, given its items.
+
+    ``items`` are the several items in the order given (pairs for a mapping or
+    keywords); every case is also run with them reversed. ``order`` says what that
+    changes; ``roles`` are the roles of the source in which the case applies.
+    """
 
     label: str
+    items: tuple[Any, ...]
     method: Build
     operator: Build
+    order: str = ORDER_FREE
+    roles: tuple[str, ...] = ROLES
 
 
 CASES = [
     MethodCase(
         "select_tag_columns",
-        lambda s: s.select_tag_columns(["t3", "t1"]),
-        lambda s: SelectTagColumns(["t3", "t1"])(s),
+        ("t3", "t1"),
+        lambda s, i: s.select_tag_columns(list(i)),
+        lambda s, i: SelectTagColumns(list(i))(s),
     ),
     MethodCase(
         "select_data_columns",
-        lambda s: s.select_data_columns(["d3", "d1"]),
-        lambda s: SelectDataColumns(["d3", "d1"])(s),
+        ("d3", "d1"),
+        lambda s, i: s.select_data_columns(list(i)),
+        lambda s, i: SelectDataColumns(list(i))(s),
+    ),
+    MethodCase(
+        "select_data_columns_with_a_data_tag",
+        ("t3", "d1"),
+        lambda s, i: s.select_data_columns(list(i)),
+        lambda s, i: SelectDataColumns(list(i))(s),
+        roles=DATA_TAG_ROLES,
     ),
     MethodCase(
         "drop_tag_columns",
-        lambda s: s.drop_tag_columns(["t3", "t1"]),
-        lambda s: DropTagColumns(["t3", "t1"])(s),
+        ("t3", "t1"),
+        lambda s, i: s.drop_tag_columns(list(i)),
+        lambda s, i: DropTagColumns(list(i))(s),
     ),
     MethodCase(
         "drop_data_columns",
-        lambda s: s.drop_data_columns(["d3", "d1"]),
-        lambda s: DropDataColumns(["d3", "d1"])(s),
+        ("d3", "d1"),
+        lambda s, i: s.drop_data_columns(list(i)),
+        lambda s, i: DropDataColumns(list(i))(s),
+    ),
+    MethodCase(
+        "drop_data_columns_with_a_data_tag",
+        ("t3", "d1"),
+        lambda s, i: s.drop_data_columns(list(i)),
+        lambda s, i: DropDataColumns(list(i))(s),
+        roles=DATA_TAG_ROLES,
     ),
     MethodCase(
         "select_columns_positional",
-        lambda s: s.select_columns("d3", "t2", "d1"),
-        lambda s: SelectColumns(["d3", "t2", "d1"])(s),
+        ("d3", "t2", "d1"),
+        lambda s, i: s.select_columns(*i),
+        lambda s, i: SelectColumns(list(i))(s),
     ),
     MethodCase(
         "drop_columns_positional",
-        lambda s: s.drop_columns("d3", "t2"),
-        lambda s: DropColumns(["d3", "t2"])(s),
+        ("d3", "t2"),
+        lambda s, i: s.drop_columns(*i),
+        lambda s, i: DropColumns(list(i))(s),
     ),
     MethodCase(
         "map_tags",
-        lambda s: s.map_tags({"t3": "u3", "t1": "u1"}),
-        lambda s: MapTags({"t3": "u3", "t1": "u1"})(s),
+        (("t3", "u3"), ("t1", "u1")),
+        lambda s, i: s.map_tags(dict(i)),
+        lambda s, i: MapTags(dict(i))(s),
     ),
     MethodCase(
         "map_data",
-        lambda s: s.map_data({"d3": "e3", "d1": "e1"}),
-        lambda s: MapData({"d3": "e3", "d1": "e1"})(s),
+        (("d3", "e3"), ("d1", "e1")),
+        lambda s, i: s.map_data(dict(i)),
+        lambda s, i: MapData(dict(i))(s),
+    ),
+    MethodCase(
+        "map_data_with_a_data_tag",
+        (("t3", "e3"), ("d1", "e1")),
+        lambda s, i: s.map_data(dict(i)),
+        lambda s, i: MapData(dict(i))(s),
+        roles=DATA_TAG_ROLES,
     ),
     MethodCase(
         "drop_nulls",
-        lambda s: s.drop_nulls(["d2", "t2"]),
-        lambda s: DropNulls(["d2", "t2"])(s),
+        ("d2", "t2"),
+        lambda s, i: s.drop_nulls(list(i)),
+        lambda s, i: DropNulls(list(i))(s),
     ),
+    # The order of the predicates belongs to the filter (docs/concepts/operators.md).
     MethodCase(
         "polars_filter_predicates",
-        lambda s: s.polars_filter(pl.col("d1") > 10, pl.col("t3") == 1),
-        lambda s: PolarsFilter(predicates=[pl.col("d1") > 10, pl.col("t3") == 1])(s),
+        (pl.col("d1") > 10, pl.col("t3") == 1),
+        lambda s, i: s.polars_filter(*i),
+        lambda s, i: PolarsFilter(predicates=list(i))(s),
+        order=ORDER_IS_IDENTITY,
     ),
     MethodCase(
         "polars_filter_constraints",
-        lambda s: s.polars_filter(t1="a", t2=1),
-        lambda s: PolarsFilter(constraints={"t1": "a", "t2": 1})(s),
+        (("t1", "a"), ("t2", 1)),
+        lambda s, i: s.polars_filter(**dict(i)),
+        lambda s, i: PolarsFilter(constraints=dict(i))(s),
     ),
     # Keyword constraints win over the map's value for the same name.
     MethodCase(
         "polars_filter_constraint_map_and_keywords",
-        lambda s: s.polars_filter(constraint_map={"t1": "a", "t2": 2}, t2=1),
-        lambda s: PolarsFilter(constraints={"t1": "a", "t2": 1})(s),
+        (("t1", "a"), ("t2", 2)),
+        lambda s, i: s.polars_filter(constraint_map=dict(i), t2=1),
+        lambda s, i: PolarsFilter(constraints={**dict(i), "t2": 1})(s),
     ),
+    # The new tags are a set (ITL-1269): identity and placement in name order.
     MethodCase(
         "add_tags",
-        lambda s: s.add_tags(x=1, y="z"),
-        lambda s: AddTags({"x": 1, "y": "z"})(s),
+        (("x", 1), ("y", "z")),
+        lambda s, i: s.add_tags(**dict(i)),
+        lambda s, i: AddTags(dict(i))(s),
     ),
+    # TagBy takes data columns only; a data-tag is refused (already a tag).
     MethodCase(
         "tag_by",
-        lambda s: s.tag_by(["d3", "d1"]),
-        lambda s: TagBy(["d3", "d1"])(s),
+        ("d3", "d1"),
+        lambda s, i: s.tag_by(list(i)),
+        lambda s, i: TagBy(list(i))(s),
     ),
 ]
 
 
-@pytest.mark.parametrize("role", ROLES)
-@pytest.mark.parametrize("case", CASES, ids=lambda case: case.label)
+@pytest.mark.parametrize(
+    ("case", "role"),
+    [
+        pytest.param(case, role, id=f"{case.label}-{role}")
+        for case in CASES
+        for role in case.roles
+    ],
+)
 def test_a_stream_method_with_several_items_equals_its_operator(
     case: MethodCase, role: str
 ) -> None:
+    """In the order given and reversed: the method equals its operator.
+
+    Reversing the items keeps the rows; it changes nothing else for an order-free
+    argument, and the operator's identity (content and pipeline hash) for one whose
+    order is part of it.
+    """
     source = make_source(MAIN, Arrangement(MAIN.tags, TAGS_FIRST, role))
-    by_method, by_operator = case.method(source), case.operator(source)
-    assert presentation(by_method) == presentation(by_operator)
-    assert fingerprint(by_method) == fingerprint(by_operator)
+    results = []
+    for items in (case.items, tuple(reversed(case.items))):
+        by_method, by_operator = (
+            case.method(source, items),
+            case.operator(source, items),
+        )
+        assert presentation(by_method) == presentation(by_operator)
+        assert fingerprint(by_method) == fingerprint(by_operator)
+        results.append(by_method)
+    forward, backward = results
+    assert fingerprint(forward)["rows"] == fingerprint(backward)["rows"]
+    if case.order == ORDER_FREE:
+        assert fingerprint(forward) == fingerprint(backward)
+        assert presentation(forward) == presentation(backward)
+    else:
+        assert forward.content_hash() != backward.content_hash()
+        assert forward.pipeline_hash() != backward.pipeline_hash()
+
+
+@pytest.mark.parametrize("role", ROLES)
+def test_tag_by_refuses_a_data_tag_in_either_order(role: str) -> None:
+    """``TagBy`` gives a data column the tag role: a data-tag already has it."""
+    source = make_source(MAIN, Arrangement(MAIN.tags, TAGS_FIRST, role))
+    for names in (["t3", "d1"], ["d1", "t3"]):
+        with pytest.raises(InputValidationError, match="t3"):
+            TagBy(names)(source)
+        with pytest.raises(InputValidationError, match="t3"):
+            source.tag_by(names)
 
 
 @pytest.mark.parametrize("role", ROLES)

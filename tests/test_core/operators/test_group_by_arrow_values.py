@@ -637,8 +637,9 @@ def test_every_list_and_fold_follows_one_member_order(roles: str) -> None:
 #
 # CodeRabbit, PR 458: a dictionary over a logical type passed validation but its
 # preparation unwrapped the logical type before decoding the dictionary, then met it
-# again and raised. Both now read a type through logical storage and dictionary values
-# alternately, until neither applies.
+# again and raised. Since ITL-1264 no stream carries a dictionary-encoded column, so
+# GroupBy reads only logical storage, and a dictionary is a type it has no order for:
+# validation and preparation refuse it alike.
 
 PATH_TYPE = cast(
     pa.BaseExtensionType,
@@ -656,8 +657,9 @@ def _dictionary(values: Column, indices: list[int | None]) -> Column:
     return pa.DictionaryArray.from_arrays(pa.array(indices, pa.int32()), values)
 
 
-def test_a_dictionary_over_a_logical_type_orders_and_keys() -> None:
-    """A dictionary-encoded Path tag orders the members and keys the groups."""
+def test_a_dictionary_over_a_logical_type_never_reaches_group_by() -> None:
+    """A dictionary-encoded Path tag is refused when the stream is built (ITL-1264),
+    with the way to decode it, so GroupBy never sees it."""
     columns: dict[str, Column] = {
         "g": pa.array([1, 1, 1, 2], pa.int64()),
         "t1": _dictionary(_paths(["/b", "/a"]), [0, 1, None, 1]),
@@ -666,22 +668,13 @@ def test_a_dictionary_over_a_logical_type_orders_and_keys() -> None:
         "v": pa.array(range(4), pa.int64()),
     }
     table = _table(columns)
-    stream = ArrowTableStream(table, tag_columns=["g", "t1", "t2"])
-    # "/a" before "/b", null last; for every key path, sync and async.
-    for rows in (
-        list(GroupBy("g")(stream).iter_data()),
-        async_rows(GroupBy("g"), stream),
-    ):
-        lists = sorted(
-            cast(list[int], data.as_table().column("v").to_pylist()[0])
-            for _, data in rows
-        )
-        assert lists == [[1, 0, 2], [3]]
-    for rows in (
-        list(GroupBy(["t1", "t2"])(stream).iter_data()),
-        async_rows(GroupBy(["t2", "t1"]), stream),
-    ):
-        assert len(rows) == 4
+    for tags in (["g", "t1", "t2"], ["t2", "t1", "g"]):
+        with pytest.raises(InputValidationError) as raised:
+            _ = ArrowTableStream(table, tag_columns=tags)
+        message = str(raised.value)
+        assert "dictionary-encoded columns are not currently supported" in message
+        assert "tag column 't1'" in message
+        assert "field.with_type(decoded)" in message
 
 
 AGREEMENT_TYPES: dict[str, Column] = {
@@ -703,6 +696,12 @@ AGREEMENT_TYPES: dict[str, Column] = {
     "duration[s]": _ints([1, None, 2], pa.duration("s")),
     "null": pa.array([None, None, None], pa.null()),
     "logical Path": _paths(["/b", None, "/a"]),
+    "fixed_size_list<decimal256>": _fixed([[_dec(1)], None, [_dec(2)]], DEC, 1),
+    "large_list<fixed_size_list<float16>>": pa.LargeListArray.from_arrays(
+        pa.array([0, 1, 1, 2], pa.int64()),
+        pa.FixedSizeListArray.from_arrays(_floats([0x3C00, 0x4000], 16), 1),
+    ),
+    # Without an order (a dictionary among them: no stream carries one, ITL-1264):
     "dictionary<string>": _dictionary(
         pa.array(["b", "a"], pa.large_string()), [0, None, 1]
     ),
@@ -711,12 +710,6 @@ AGREEMENT_TYPES: dict[str, Column] = {
         pa.array([0, 1, 1, 2], pa.int64()),
         _dictionary(_paths(["/b", "/a"]), [0, 1]),
     ),
-    "fixed_size_list<decimal256>": _fixed([[_dec(1)], None, [_dec(2)]], DEC, 1),
-    "large_list<fixed_size_list<float16>>": pa.LargeListArray.from_arrays(
-        pa.array([0, 1, 1, 2], pa.int64()),
-        pa.FixedSizeListArray.from_arrays(_floats([0x3C00, 0x4000], 16), 1),
-    ),
-    # Without an order:
     "struct": pa.StructArray.from_arrays(
         [pa.array([1, 2, 3], pa.int64())], names=["x"]
     ),
@@ -732,7 +725,7 @@ AGREEMENT_TYPES: dict[str, Column] = {
         [0, None, 1],
     ),
 }
-ORDERABLE = 23
+ORDERABLE = 20
 
 
 @pytest.mark.parametrize("name", list(AGREEMENT_TYPES))

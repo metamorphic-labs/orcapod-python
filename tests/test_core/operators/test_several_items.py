@@ -18,8 +18,9 @@ What is asserted:
   nothing, with two, three and four inputs.
 
 ``GroupBy`` is not here: its arrangement and ``by`` order are tested by ITL-1226
-(``test_group_by_member_order.py``). The order of ``AddTags``'s names is the order of
-the new tags and part of its identity, and is tested as such below.
+(``test_group_by_member_order.py``). The order of ``AddTags``'s names is neither the
+order of the new tags nor part of its identity (ITL-1269: they are held in name order),
+and is tested as such below.
 """
 
 from __future__ import annotations
