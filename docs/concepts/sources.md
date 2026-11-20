@@ -94,6 +94,84 @@ logical types are kept, and the two variants hash identically, so no hash depend
 one you gave. The Arrow `list_view` and `large_list_view` types are not supported: a source
 refuses a column of either type.
 
+Dictionary-encoded columns are not currently supported in Orcapod, tags and data alike. A
+column whose Arrow type is a `dictionary`, or holds one inside it (a list of dictionary values,
+a struct with a dictionary field), is refused with `InputValidationError` when the source or
+stream is built. The message names every such column with its role (tag, data-tag or data), its
+type and the type it decodes to, then says how to decode it. Such columns come from an Arrow
+table of your own, a pandas `Categorical` of strings, or a polars `Categorical` or `Enum`; CSV
+files, Delta tables, database tables and Python values never give one. If keeping the encoding
+is not important, decode the column before building the source:
+
+```python
+import pyarrow as pa
+
+from orcapod.errors import InputValidationError
+from orcapod.sources import ArrowTableSource
+
+coded = pa.table(
+    {
+        "session": pa.array(["s1", "s2", "s1"]).dictionary_encode(),
+        "trial": [1, 1, 2],
+        "response": pa.array([0.4, 0.7, 0.5]).dictionary_encode(),
+    }
+)
+try:
+    ArrowTableSource(coded, tag_columns=["session", "trial"], tag_only_columns=True)
+except InputValidationError as exc:
+    print("\n".join(str(exc).splitlines()[:3]))
+# dictionary-encoded columns are not currently supported in Orcapod:
+#   - tag column 'session' has type dictionary<values=string, indices=int32, ordered=0> (decoded: string)
+#   - data column 'response' has type dictionary<values=double, indices=int32, ordered=0> (decoded: double)
+
+decoded = coded
+for name in ("session", "response"):
+    field = decoded.schema.field(name)
+    value_type = field.type.value_type
+    # The field keeps its name, nullability and metadata; set_column returns a new table.
+    decoded = decoded.set_column(
+        decoded.schema.get_field_index(name),
+        field.with_type(value_type),
+        decoded[name].cast(value_type),
+    )
+source = ArrowTableSource(decoded, tag_columns=["session", "trial"], tag_only_columns=True)
+print(source.as_table().schema.field("session").type)
+# large_string
+```
+
+With polars, `pl.col("session").cast(pl.String)` decodes a `Categorical` or `Enum` column.
+With pandas, `astype` with the categories' dtype decodes a `Categorical` of strings. Both
+return a new frame or column: keep it before building the source.
+
+```python
+import pandas as pd
+import polars as pl
+
+from orcapod.sources import DataFrameSource
+
+frame = pl.DataFrame({"session": ["s1", "s2", "s1"], "trial": [1, 1, 2]}).with_columns(
+    pl.col("session").cast(pl.Categorical())
+)
+frame = frame.with_columns(pl.col("session").cast(pl.String))
+print(DataFrameSource(frame, tag_columns=["session"], tag_only_columns=True).keys())
+# (('session',), ('trial',))
+
+table = pd.DataFrame({"session": ["s1", "s2", "s1"], "trial": [1, 1, 2]})
+table["session"] = table["session"].astype("category")
+table["session"] = table["session"].astype(table["session"].cat.categories.dtype)
+print(DataFrameSource(table, tag_columns=["session"], tag_only_columns=True).keys())
+# (('session',), ('trial',))
+```
+
+A pandas `Categorical` of integers that holds a missing value cannot be cast to an integer
+dtype this way (fill or drop the missing values first). A pandas `Categorical` of integers
+reaches the source as plain integers, so it needs no decoding.
+
+A data frame kept whole as a value in a cell (a pandas or polars `DataFrame` holding a
+categorical column) is not a dictionary column: it is a library value, stored and hashed as one
+(see [Arrays and other library values](arrays.md)), and is accepted. Supporting
+dictionary-encoded columns themselves is future work (ITL-1277).
+
 ### SpiralDB tables
 
 `SpiralDBTableSource` exposes a table in a [SpiralDB](https://spiraldb.com) project as a

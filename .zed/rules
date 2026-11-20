@@ -1018,6 +1018,21 @@ polars, torch) keeps its library's own distinction. list_view and large_list_vie
 supported: a source refuses them (the Arrow hasher cannot hash them) and a raw ArrowTableStream
 holds them as given (ITL-1129).
 
+Dictionary-encoded columns are refused, tags and data alike (developer, November 18, 2026,
+ITL-1264: "Say it is not currently supported in orcapod. We MAY support but not immediately in
+the plan"; November 19, 2026, ITL-1277: "safe default, though could be inconvenient, is to
+reject working with it"). Every column of a stream (tag, data-tag, data, and Orcapod's own
+system-tag, source-info, context and meta columns, which only a hand-built table could encode)
+whose Arrow type is, or contains, a dictionary (list, list-view or fixed-size list item, struct
+child, map key or item, run-end-encoded values, extension storage) raises InputValidationError naming each such
+column with its role, its type and its decoded type (arrow_utils.decode_dictionaries), then
+the pyarrow and polars ways to decode. One rule, schema_utils.dictionary_columns with
+schema_utils.dictionary_columns_error, applied by ArrowTableStream.__init__ (every source
+and operator result) and first by SourceStreamBuilder.build (before the key columns and the
+hash); never check it elsewhere. A library value in a cell (a pandas or polars data frame with
+a categorical column) is an extension column, not a dictionary, and is accepted. Supporting
+dictionary columns later is ITL-1277.
+
 Respect the Arrow types the inputs already have, normalized to their large variants (developer,
 November 10, 2026: large and non-large variants hash identically, so always normalize to large
 for consistency). Infer an Arrow type from Python values only when no Arrow type is known, and
@@ -1316,21 +1331,20 @@ data. The rules:
   Python's precision (`time64[ns]` within a microsecond, `date64` on one day) are separate
   groups. A list-valued tag sorts through `(is_null, value)` pairs at every depth (`_sort_key`:
   Polars puts a null inside a list first). The sort frame only sees prepared columns
-  (`_polars_ready`: a logical type as its storage, a dictionary decoded in one place,
-  `_without_dictionary`, a temporal value as its integer, `float16` as `float32`, a view as
+  (`_polars_ready`: a logical type as its storage, a temporal value as its integer, `float16` as `float32`, a view as
   its large variant, `decimal256` as four 64-bit limbs, which Polars cannot read (it panics,
   which no caller can catch), every list kind, fixed-size lists included, as a large list
   over its prepared values). What may reach it is one rule, `_unorderable_part` (an integer,
   float, decimal, boolean, string, binary, date, time, timestamp, duration or null, through
-  logical storage, dictionary values and lists of every kind at every depth), checked from
+  logical storage and lists of every kind at every depth; no dictionary, since no stream
+  carries one, ITL-1264), checked from
   the schema at validation and from the table when grouping (the async path skips
   validation); anything else is refused, never passed through. The output is built from the input's Arrow table: `take()` in the
   sorted order and list arrays from group offsets (`arrow_utils.aggregated_list_array`, the
   array-based sibling of `build_aggregated_table`), so every key and list element is a value
   a member holds, bit for bit (`time64[ns]` keeps its nanoseconds, a float32 signaling NaN
   its bits; ITL-1248 for `GroupBy`). The hashes read a float's bits, so a group emits, for
-  each float key column (a logical type stored as a float, or a dictionary over floats,
-  included), its members' value with the smallest bit pattern at the column's own width
+  each float key column (a logical type stored as a float included), its members' value with the smallest bit pattern at the column's own width
   (`0.0` over `-0.0`, a positive NaN over a negative one; a signaling NaN has smaller bits
   than the canonical quiet NaN, so it wins): never the first row's, never chosen by
   `member_order`. Every other key is the group's first member's (equal values are identical).
