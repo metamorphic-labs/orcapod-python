@@ -700,6 +700,19 @@ class SpiralDBTableSource(RootSource):
         self._condition = self._condition.combined(condition)
         self._update_modified_time()
 
+    @property
+    def condition(self) -> Condition:
+        """The row conditions this source reads under (``where`` and ``where=``
+        combined), applied by SpiralDB in the scan: the empty ``Condition`` when it
+        reads every row. Part of no identity (``_restriction_identity``)."""
+        return self._condition
+
+    @property
+    def row_limit(self) -> int | None:
+        """The most rows this source reads (``limit=``), or ``None`` for no limit.
+        Part of no identity (``_restriction_identity``)."""
+        return self._limit
+
     def _restriction_identity(self) -> None:
         """Return what ``where``, ``limit`` and ``asof`` add to the source's identity.
 

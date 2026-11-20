@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from typing import Any, ClassVar, TYPE_CHECKING
 
 from typing_extensions import override
@@ -47,50 +47,6 @@ else:
     pa = LazyModule("pyarrow")
 
 logger = logging.getLogger(__name__)
-
-
-def _restricted_cache_error(text: str) -> ValueError:
-    """The refusal of a cache over a restricted read, ``text`` naming the restriction."""
-    return ValueError(
-        "A cache keeps one table's rows under the table's identity; it cannot hold a "
-        f"restricted read ({text}): cache the unrestricted source, or read without a "
-        "cache."
-    )
-
-
-def _require_unrestricted(source: object) -> None:
-    """Refuse a source that reads under a restriction, also through a proxy or a slot.
-
-    Raises:
-        ValueError: If ``source``, or a source it reads (a proxy's delegate, a
-            cached source), is restricted (ITL-1218).
-    """
-    from orcapod.pipeline.node_run import restrictions_beneath, restrictions_text
-
-    found = restrictions_beneath([source])
-    if found:
-        raise _restricted_cache_error(restrictions_text(found))
-
-
-def _require_unrestricted_config(config: Mapping[str, Any]) -> None:
-    """Refuse a saved source config that names a restriction (a ``where`` or a limit).
-
-    Read from the config itself, before the source is rebuilt (or replaced by a
-    ``SourceProxy``, which carries no restriction).
-
-    Raises:
-        ValueError: If the config names a non-empty ``where`` or a ``limit``.
-    """
-    from orcapod.pipeline.run_summary import restriction_text
-    from orcapod.types import Condition
-
-    condition = Condition.from_config(config.get("where") or {})
-    limit = config.get("limit")
-    if condition or limit is not None:
-        name = config.get("source_id") or config.get("source_type", "source")
-        raise _restricted_cache_error(
-            f"{name}: {restriction_text(condition or None, limit)}"
-        )
 
 
 class CachedSource(RootSource):
@@ -149,7 +105,9 @@ class CachedSource(RootSource):
         Raises:
             ValueError: If ``source`` is restricted (a condition or a limit).
         """
-        _require_unrestricted(source)
+        from orcapod.pipeline.restrictions import refuse_restricted_cache_input
+
+        refuse_restricted_cache_input(source)
         if data_context is None:
             data_context = source.data_context_key
         if source_id is None:
@@ -264,7 +222,9 @@ class CachedSource(RootSource):
         # CachedSources can resolve their own cache database references.
         # A saved restricted source never produces a cache, also when the source
         # cannot be rebuilt and a proxy (which carries no restriction) stands in.
-        _require_unrestricted_config(config["inner_source"])
+        from orcapod.pipeline.restrictions import refuse_restricted_cache_config
+
+        refuse_restricted_cache_config(config["inner_source"])
         inner_source = resolve_source_from_config(
             config["inner_source"], fallback_to_proxy=True, db_registry=db_registry
         )
@@ -365,7 +325,9 @@ class CachedSource(RootSource):
         or reads under a restriction (a proxy bound to a restricted source after the
         cache was built, ITL-1218): nothing is read or stored then.
         """
-        _require_unrestricted(self._source)
+        from orcapod.pipeline.restrictions import refuse_restricted_cache_input
+
+        refuse_restricted_cache_input(self._source)
         require_same_data_context(self._source.data_context_key, self.data_context_key)
         live_table = self._source.as_table(
             columns={"source": True, "system_tags": True}

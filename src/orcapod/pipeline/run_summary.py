@@ -16,12 +16,14 @@ from typing import TYPE_CHECKING, Any
 
 from orcapod.core.result_cache import ResultCache
 from orcapod.pipeline.observer import NoOpLogger
+from orcapod.pipeline.restrictions import restriction_text
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from types import FrameType
 
     from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
+    from orcapod.pipeline.restrictions import RestrictedSource
     from orcapod.types import Condition, SchemaLike
 
 _NOOP_LOGGER = NoOpLogger()
@@ -105,9 +107,7 @@ class RunSummary:
         target: str | None = None,
         unchecked_sources: Sequence[str] = (),
         ran_nothing: bool = False,
-        restricted_sources: (
-            Mapping[str, tuple[str, Condition | None, int | None]] | None
-        ) = None,
+        restricted_sources: Mapping[str, RestrictedSource] | None = None,
     ) -> None:
         """Build the summary.
 
@@ -118,9 +118,9 @@ class RunSummary:
             target: The label of the node whose ``run()`` this was, if any.
             unchecked_sources: The sources that could not be checked for new data.
             ran_nothing: Whether the run ran no node (every node held a current run).
-            restricted_sources: Slot name to the source id, the condition and the
-                limit (each ``None`` when unset) of each restricted source of the run
-                (``node_run.restrictions_in_force``).
+            restricted_sources: Slot name to the source id, the condition (empty
+                for none) and the limit of each restricted source of the run
+                (``restrictions.restrictions_in_force``).
         """
         self.job_name: str = job_name
         self.nodes: Mapping[str, NodeRunSummary] = {node.label: node for node in nodes}
@@ -133,7 +133,7 @@ class RunSummary:
         self.conditions: Mapping[str, Condition] = {
             slot: condition
             for slot, (_, condition, _) in restricted.items()
-            if condition is not None
+            if condition
         }
         self.limits: Mapping[str, int] = {
             slot: limit
@@ -343,24 +343,6 @@ def _counts(node: NodeRunSummary, load_only: bool) -> str:
     if node.inputs_incomplete:
         text += f" (inputs incomplete: {', '.join(node.inputs_incomplete)})"
     return text
-
-
-def restriction_text(condition: Condition | None, limit: int | None) -> str:
-    """A source's restriction as words: ``where a='x', b=1, limit 3``.
-
-    Args:
-        condition: The condition the source reads under, if any.
-        limit: The source's limit, if any.
-
-    Returns:
-        The condition's text (``Condition.text``) after ``where``, then the limit.
-    """
-    parts: list[str] = []
-    if condition:
-        parts.append(f"where {condition.text()}")
-    if limit is not None:
-        parts.append(f"limit {limit}")
-    return ", ".join(parts) if parts else "no restriction"
 
 
 def _rows(n: int) -> str:

@@ -300,7 +300,7 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
                 read one source under two restrictions (ITL-1218), whatever streams
                 lead there. Nothing is recorded then.
         """
-        from orcapod.pipeline.node_run import require_one_restriction
+        from orcapod.pipeline.restrictions import require_one_restriction
 
         key = invocation.content_hash().to_string()
         inputs = tuple(invocation.input_streams)
@@ -450,7 +450,7 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         """
         import networkx as _nx
 
-        from orcapod.pipeline.node_run import require_one_restriction
+        from orcapod.pipeline.restrictions import require_one_restriction
 
         # Checked again here, from what the streams read now: a slot rebound after
         # the last invocation would otherwise connect a branch recorded over one

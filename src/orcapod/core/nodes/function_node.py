@@ -347,10 +347,10 @@ def run_job_node(
     from orcapod.pipeline.node_run import (
         check_sources,
         depends_on_job_nodes,
-        refuse_restriction_conflicts,
         refuse_unloadable_inputs,
         run_with_dependencies,
     )
+    from orcapod.pipeline.restrictions import refuse_restriction_conflicts
     from orcapod.pipeline.run_summary import warn_row_failures
 
     # A source read under two restrictions, or a caching operator over a restricted
@@ -3979,7 +3979,8 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         """
         from dataclasses import replace
 
-        from orcapod.pipeline.node_run import commit_run, restrictions_in_force
+        from orcapod.pipeline.node_run import commit_run
+        from orcapod.pipeline.restrictions import restrictions_in_force
         from orcapod.pipeline.run_summary import RunCountingObserver, RunSummary
         from orcapod.utils.database_errors import flush_best_effort
 

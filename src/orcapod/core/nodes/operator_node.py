@@ -332,6 +332,12 @@ class OperatorNodeBase(StreamBase):
     def upstreams(self) -> tuple[StreamProtocol, ...]:
         return self._input_streams
 
+    @property
+    def cache_mode(self) -> CacheMode:
+        """How the node caches its output: ``CacheMode.OFF`` for a node outside a
+        job, which keeps no cache."""
+        return CacheMode.OFF
+
     @upstreams.setter
     def upstreams(self, value: tuple[StreamProtocol, ...]) -> None:
         """Replace the node's inputs.
@@ -340,10 +346,9 @@ class OperatorNodeBase(StreamBase):
             ValueError: If the node caches (``LOG`` or ``REPLAY``) and a source
                 feeding ``value`` is restricted (ITL-1218); nothing changes.
         """
-        from orcapod.pipeline.node_run import refuse_restricted_operator_cache
+        from orcapod.pipeline.restrictions import refuse_restricted_operator_cache
 
-        mode = getattr(self, "_cache_mode", None) or CacheMode.OFF
-        refuse_restricted_operator_cache(self, mode, streams=value)
+        refuse_restricted_operator_cache(self, self.cache_mode, streams=value)
         self._input_streams = value
         self._forget_output_schema()
 
@@ -775,7 +780,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
 
         # DB persistence state (initially None; set via __init__ params or attach_databases)
         self._pipeline_database: ArrowDatabaseProtocol | None = None
-        self._cache_mode = CacheMode.OFF
+        self._cache_mode: CacheMode = CacheMode.OFF
 
         # True for a node rebuilt by ``from_descriptor`` (a job loaded by
         # ``PipelineJob.load``): its output was computed by an earlier run.
@@ -788,6 +793,12 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             )
         # A node that has not run in this process holds nothing and is stale (ITL-1095).
         self._set_modified_time(None)
+
+    @property
+    def cache_mode(self) -> CacheMode:
+        """How the node caches its output (``OFF``, ``LOG`` or ``REPLAY``): set by
+        ``attach_databases``, ``CacheMode.OFF`` until then."""
+        return self._cache_mode
 
     # ------------------------------------------------------------------
     # as_node — return the lightweight OperatorNode equivalent
@@ -889,7 +900,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
                 the cache is kept under the node's identity, which a restriction is
                 not part of. Nothing is attached.
         """
-        from orcapod.pipeline.node_run import refuse_restricted_operator_cache
+        from orcapod.pipeline.restrictions import refuse_restricted_operator_cache
 
         refuse_restricted_operator_cache(self, cache_mode)
         if cache_mode != CacheMode.OFF:
@@ -1632,7 +1643,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
                 feeding ``input_streams`` is restricted (ITL-1218); nothing is
                 read, computed or written.
         """
-        from orcapod.pipeline.node_run import refuse_restricted_operator_cache
+        from orcapod.pipeline.restrictions import refuse_restricted_operator_cache
         from orcapod.pipeline.observer import NoOpObserver
 
         # A loaded node runs only in a load-only run, with its rebuilt operator.
@@ -1778,10 +1789,10 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         from orcapod.pipeline.node_run import (
             check_sources,
             depends_on_job_nodes,
-            refuse_restriction_conflicts,
             refuse_unloadable_inputs,
             run_with_dependencies,
         )
+        from orcapod.pipeline.restrictions import refuse_restriction_conflicts
         from orcapod.pipeline.run_summary import warn_row_failures
 
         if self._loaded and not load_only:
@@ -2132,7 +2143,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
                 feeding its ``upstreams`` (which the channels carry) is restricted
                 (ITL-1218); the output is closed, nothing read or written.
         """
-        from orcapod.pipeline.node_run import refuse_restricted_operator_cache
+        from orcapod.pipeline.restrictions import refuse_restricted_operator_cache
         from orcapod.pipeline.observer import NoOpObserver
 
         # A loaded node runs only in a load-only run, with its rebuilt operator.

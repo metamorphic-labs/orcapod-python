@@ -27,12 +27,14 @@ from orcapod.pipeline.dag import OrcaDAG
 from orcapod.pipeline.node_run import (
     RunPlan,
     check_sources,
+    clear_run_rows,
+    plan_run,
+)
+from orcapod.pipeline.restrictions import (
     refuse_restricted_operator_caches,
     refuse_restriction_conflicts,
     restrictions_in_force,
     warn_restricted_aggregation,
-    clear_run_rows,
-    plan_run,
 )
 from orcapod.pipeline.run_summary import (
     RunCountingObserver,
@@ -42,7 +44,7 @@ from orcapod.pipeline.run_summary import (
 )
 from orcapod.protocols import core_protocols as cp
 from orcapod.databases.utils import as_table_committing
-from orcapod.types import CacheMode, NodeConfig
+from orcapod.types import NodeConfig
 from orcapod.utils.database_errors import flush_best_effort
 
 if TYPE_CHECKING:
@@ -517,8 +519,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             if isinstance(node, FunctionJobNode):
                 node.require_storable_tables(pipeline_db, result_db)
             elif isinstance(node, OperatorJobNode):
-                op_cache_mode = getattr(node, "_cache_mode", None) or CacheMode.OFF
-                node.require_storable_tables(pipeline_db, op_cache_mode)
+                node.require_storable_tables(pipeline_db, node.cache_mode)
             elif isinstance(node, SideEffectJobNode):
                 node.require_storable_tables(pipeline_db)
 
@@ -552,10 +553,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     result_database=result_db,
                 )
             elif isinstance(node, OperatorJobNode):
-                op_cache_mode = getattr(node, "_cache_mode", None) or CacheMode.OFF
                 node.attach_databases(
                     pipeline_database=pipeline_db,
-                    cache_mode=op_cache_mode,
+                    cache_mode=node.cache_mode,
                 )
             elif isinstance(node, SideEffectJobNode):
                 node.attach_databases(pipeline_database=pipeline_db)

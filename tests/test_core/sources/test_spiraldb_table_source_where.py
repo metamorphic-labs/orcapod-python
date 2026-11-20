@@ -25,7 +25,7 @@ from orcapod import PipelineJob, function_pod
 from orcapod.databases import DeltaTableDatabase
 from orcapod.errors import RestrictedAggregationWarning
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
-from orcapod.pipeline.node_run import restrictions_in_force
+from orcapod.pipeline.restrictions import restrictions_in_force
 from orcapod.core.sources.spiraldb_table_source import _checked_conditions
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.cached_source import CachedSource
@@ -1682,6 +1682,7 @@ class TestOperatorCacheOverARestriction:
         assert f"CacheMode.{mode.name}" in str(info.value)
         assert "'rename'" in str(info.value)
         assert "events: " in str(info.value)
+        assert job.nodes["rename"].cache_mode is CacheMode.OFF  # nothing attached
 
     @pytest.mark.parametrize("mode", _CACHING, ids=lambda m: m.name)
     @pytest.mark.parametrize("restriction", list(_RESTRICTIONS))
@@ -1697,6 +1698,7 @@ class TestOperatorCacheOverARestriction:
 
         with pytest.raises(ValueError, match="cannot cache a restricted read"):
             job.bind(sources={"events": _RESTRICTIONS[restriction](events)})
+        assert job.nodes["rename"].cache_mode is mode  # the bind changed nothing
 
         assert slot.bound_source is events
 

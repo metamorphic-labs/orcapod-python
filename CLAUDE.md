@@ -657,7 +657,8 @@ audit is `docs/dev/specs/itl-1271-order-invariance-audit.md`.
 
 ```
 src/orcapod/
-├── types.py                    # Schema, ColumnConfig, ContentHash
+├── types/                      # Schema, ColumnConfig, ContentHash (__init__.py);
+│                               # Condition (condition.py)
 ├── system_constants.py         # Column prefixes and separators
 ├── errors.py                   # InputValidationError, DuplicateTagError
 ├── config.py                   # Config dataclass
@@ -1020,10 +1021,10 @@ current data context are the current entries.
 
 ### Schema types and ColumnConfig
 
-`Schema` (`types.py`) — immutable `Mapping[str, DataType]` with `optional_fields` support.
+`Schema` (`types/__init__.py`) — immutable `Mapping[str, DataType]` with `optional_fields` support.
 `output_schema()` always returns `(tag_schema, data_schema)` as a tuple of Schemas.
 
-`ColumnConfig` (`types.py`) — frozen dataclass controlling which column groups are included.
+`ColumnConfig` (`types/__init__.py`) — frozen dataclass controlling which column groups are included.
 Fields: `meta`, `context`, `source`, `system_tags`, `content_hash`, `sort_by_tags`.
 Normalize via `ColumnConfig.handle_config(columns, all_info)` at the top of `output_schema()`
 and `as_table()` methods. `all_info=True` sets everything to True.
@@ -1280,7 +1281,7 @@ data. The rules:
   every row's record id equal the unrestricted source's (a positional record id is never
   renumbered). Selecting rows as part of what a pipeline computes is an operator
   (`SemiJoin`, `PolarsFilter`). The conditions are one public class, `orcapod.types.Condition`
-  (developer, November 18, 2026): row conditions only, no limit, no source, in no hash; a
+  (defined in `types/condition.py`; developer, November 18, 2026): row conditions only, no limit, no source, in no hash; a
   future in-pipeline filter operator is to take the same class (its identity then: ITL-1265).
   Its factory `Condition.of(mapping=None, /, **columns)` takes `where()`'s arguments and does
   every check that needs no table (`None`, a value not exactly `bool`/`int`/`float`/`str`/
@@ -1301,13 +1302,20 @@ data. The rules:
   Arrow range, no conversion) and combines it with `where=`'s, applied by SpiralDB in the
   scan. `where()` is `_copy()` then `_apply_restriction()` in place on the copy, the future
   public `copy()` and `apply_restriction()`; other source kinds and `limit()` are ITL-1219.
+  A source states its restriction through two read-only members of `SourceProtocol`,
+  `condition` (the empty `Condition` when it reads every row) and `row_limit` (`None`
+  for none): `RootSource` answers the defaults, `SpiralDBTableSource` its own, and a
+  source over another (`CachedSource`, `SourceProxy`) answers for itself only
+  (developer, November 20, 2026: `StreamProtocol` gets them when restrictions reach
+  general streams, ITL-1219). Every rule that reads them is in one module,
+  `pipeline/restrictions.py`, typed, never probing a private attribute.
   `RunSummary` records each restricted source by slot: `conditions` (slot to `Condition`),
   `limits` (slot to limit), `restricted_source_ids` (every such slot), filled by one walk;
   the saved job keeps `where` and `limit` in the source config, bind never compares them, and a job run over a restricted
   source feeding `GroupBy`, `Batch` or `MergeJoin` issues one `RestrictedAggregationWarning`.
   A pipeline keeps one restriction (or none) per source identity (a restriction leaves the
   identity unchanged), so one table restricted two ways (or with and without a restriction) in
-  one pipeline is refused (`node_run.require_one_restriction`, over the sources the streams
+  one pipeline is refused (`restrictions.require_one_restriction`, over the sources the streams
   read now, `sources_read`; nothing is remembered between checks, since a rebound slot changes
   what they read) at capture, at compile, by `bind` before it binds and at the start of every
   run (`refuse_restriction_conflicts`), whatever streams lead there: projections, operator
@@ -1318,12 +1326,14 @@ data. The rules:
   over a restricted source is refused at construction (a cache is kept under the table's
   identity; developer, November 18, 2026), and so is an operator job node that caches (`LOG` or
   `REPLAY`) over a restricted source (developer, November 19, 2026: its cache is kept under the
-  node's identity): `node_run.refuse_restricted_operator_cache(s)`, called where the cache mode
+  node's identity): `restrictions.refuse_restricted_operator_cache(s)`, called where the cache mode
   is attached, by `bind` before it binds, before a job distributes its databases, by the
   `upstreams` setter, by `execute` (on the streams it is handed) and `async_execute`, and at
   the start of `job.run()`, `run_async()` and a job node's `run()`, before any source is
   checked or anything computed or written; a new way to run or rewire a caching operator node
-  calls it too. `CacheMode.OFF` and function nodes are not concerned (`TODO(ITL-1219)`).
+  calls it too (it reads the node's public `cache_mode`). `CacheMode.OFF` and function nodes
+  are not concerned. The refusal is for now: how an operator node logs and replays is to be
+  redesigned to load its cache and then apply the restriction (`TODO(ITL-1219)`).
 - Empty data → `ArrowTableSource` raises `ValueError("Table is empty")`.
 - A side-effect job node delivers only when it runs (developer, November 13, 2026, ITL-1091):
   `job.run()`, `node.run()` (state-driven, ITL-1095: a node holding a current run delivers

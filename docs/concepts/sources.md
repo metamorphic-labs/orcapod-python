@@ -312,7 +312,9 @@ call, as keywords or as a mapping, or across chained calls:
 same rows. The conditions are a `Condition` (`orcapod.types`): `where(...)` builds one with
 `Condition.of(...)`, which takes the same arguments, and a `Condition` built beforehand can be
 given instead (`events.where(Condition.of(unit_id=106, session_index=2))`). A source
-restricted by a condition, a `limit=`, or both is **restricted**; a restriction is not an
+restricted by a condition, a `limit=`, or both is **restricted**. Every source states its
+restriction through two read-only properties: `condition` (the empty `Condition` when it
+reads every row) and `row_limit` (`None` without a limit). A restriction is not an
 operator:
 
 - An operator (`SemiJoin`, `PolarsFilter`) is a step of the pipeline. It is a node of the
@@ -339,6 +341,10 @@ events = SpiralDBTableSource("my-project-123456", "spike_event", source_id="spik
 one_unit = events.where(unit_id=106)  # or events.where({"unit_id": 106})
 one_session = one_unit.where(session_index=2)  # conditions add up
 same_session = events.where(unit_id=106, session_index=2)  # both in one call
+print(one_session.condition)
+# unit_id=106, session_index=2
+print(one_session.row_limit)
+# None
 
 assert same_session.to_config() == one_session.to_config()
 assert one_unit.content_hash() == events.content_hash()
