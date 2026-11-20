@@ -235,8 +235,9 @@ hashes:
   the columns of `select_columns`, `drop_columns`, `drop_nulls` and the other selections,
   the entries of `map_tags`, `map_data` and `map_columns`, the constraints of
   `polars_filter`, `tag_only_columns`, `tags_as_data`;
-- the order of the inputs of an operator that declares itself commutative (`Join`,
-  `MergeJoin`), and of the inputs of a function pod;
+- the order of the inputs of an operator that declares itself commutative (`Join`), and of
+  the inputs of a function pod (`MergeJoin` and `SemiJoin` are ordered: their argument order
+  is an input you give);
 - the path the rows take: the sync and the async run give the same rows.
 
 What follows your order is where the columns are placed: `keys()`, `as_table()` and a
@@ -273,7 +274,7 @@ The order counts only where it is the point of the argument:
 |---|---|
 | `record_id_columns` of every source (by default a database table's primary key) | A record id is the canonical JSON of the key columns in key order, so the key order is part of every record id and of the source's identity. It is the explicit argument that states the order. |
 | `member_order` of `GroupBy` (ITL-1226; not in a release yet) | The explicit order of the members inside each group's lists, the argument that replaces the input's tag order there. |
-| the inputs of an operator whose `argument_symmetry` is a tuple (`SemiJoin`) | The inputs have roles: `SemiJoin(left, right)` keeps the rows of `left`. |
+| the inputs of an operator whose `argument_symmetry` is a tuple (`SemiJoin`, `MergeJoin`) | The inputs have roles: `SemiJoin(left, right)` keeps the rows of `left`; `MergeJoin(a, b)` lists `a`'s value first in every merged list (ITL-1281). |
 | the order of the ROWS given to a source without key columns | Its record ids are the row positions, so a reorder is a change (by decision). Row order, never column order. |
 | the order of the ROWS given to `Batch` | `Batch` groups consecutive rows: row order, never column order. |
 | the fields of a user class (`@dataclass`, `orcapod.dataclass`, pydantic) | A class is identified with its fields in declared order: reordering them declares another type. |

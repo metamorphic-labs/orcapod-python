@@ -195,8 +195,9 @@ print(joined.keys())
 # (('unit', 'time'), ('unit', 'time', 'area', 'amp'))
 ```
 
-`MergeJoin` merges every other colliding data column into a sorted list, and keeps each
-data-tag both inputs share as one column:
+`MergeJoin` merges every other colliding data column into a list in argument order (the
+first input's value, then the second's), and keeps each data-tag both inputs share as one
+column:
 
 ```python
 more = op.sources.DictSource(
@@ -211,7 +212,7 @@ print(merged.keys())
 for tag, data in sorted(merged.iter_data(), key=lambda row: row[0]["time"]):
     print(tag["time"], data["time"], data["amp"])
 # 10 10 [0.5, 0.75]
-# 20 20 [0.125, 0.25]
+# 20 20 [0.25, 0.125]
 ```
 
 ```python

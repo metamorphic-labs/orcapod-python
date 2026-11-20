@@ -124,7 +124,8 @@ class Batch(UnaryOperator):
         )
         kept = table.slice(0, int(offsets[-1].as_py()))
         bounds = cast(list[int], offsets.to_pylist())
-        type_converter = stream.data_context.type_converter
+        # Every stream has a data context; StreamProtocol does not declare it.
+        type_converter = stream.data_context.type_converter  # pyright: ignore[reportAttributeAccessIssue]
 
         fields: list[pa.Field[Any]] = []
         arrays: list[pa.Array[Any]] = []

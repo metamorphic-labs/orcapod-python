@@ -88,7 +88,8 @@ def test_a_tag_data_tag_in_both_is_one_scalar_data_tag_column() -> None:
     rows = _by_k(merged)
     # The key is one value, not a two-element list; the other collision is a list.
     assert {k: row["x"] for k, row in rows.items()} == {1: 10, 2: 20}
-    assert {k: row["v"] for k, row in rows.items()} == {1: [1.0, 3.0], 2: [0.5, 2.0]}
+    # Argument order (ITL-1281): A's value, then B's.
+    assert {k: row["v"] for k, row in rows.items()} == {1: [1.0, 3.0], 2: [2.0, 0.5]}
     for tag, data in merged.iter_data():
         assert tag["x"] == data["x"]
 
@@ -99,8 +100,8 @@ def test_its_source_info_is_one_join_token_of_both_tokens() -> None:
     for k, row in rows.items():
         assert JOIN_TOKEN.match(row[source_x])
         assert row[source_x] == join_fold([f"A::row_{k - 1}::x", f"B::row_{k - 1}::x"])
-    # A merged list keeps one token per member, in the order of its values.
-    assert rows[2][f"{constants.SOURCE_PREFIX}v"] == ["B::row_1::v", "A::row_1::v"]
+    # A merged list keeps one token per member, in argument order, as its values.
+    assert rows[2][f"{constants.SOURCE_PREFIX}v"] == ["A::row_1::v", "B::row_1::v"]
 
 
 def test_the_token_is_the_one_join_gives() -> None:
@@ -113,10 +114,18 @@ def test_the_token_is_the_one_join_gives() -> None:
     }
 
 
-def test_the_inputs_order_does_not_matter() -> None:
-    forward = MergeJoin()(_a(), _b()).as_table(all_info=True)
-    backward = MergeJoin()(_b(), _a()).as_table(all_info=True)
-    assert forward.equals(backward)
+def test_the_inputs_order_orders_the_lists_only() -> None:
+    """MergeJoin is ordered (ITL-1281): swapping the inputs reverses every merged
+    list and its source info; the merged data-tag and its one token are the same."""
+    forward = _by_k(MergeJoin()(_a(), _b()))
+    backward = _by_k(MergeJoin()(_b(), _a()))
+    source_v = f"{constants.SOURCE_PREFIX}v"
+    source_x = f"{constants.SOURCE_PREFIX}x"
+    for k in forward:
+        assert forward[k]["v"] == backward[k]["v"][::-1]
+        assert forward[k][source_v] == backward[k][source_v][::-1]
+        assert forward[k]["x"] == backward[k]["x"]
+        assert forward[k][source_x] == backward[k][source_x]
 
 
 # ── cases 2 and 3: a data-tag in one input only ─────────────────────────────
@@ -247,5 +256,5 @@ def test_plain_inputs_merge_as_before() -> None:
     assert stream_data_tags(merged) == ()
     assert {k: row["v"] for k, row in _by_k(merged).items()} == {
         1: [1.0, 3.0],
-        2: [0.5, 2.0],
+        2: [2.0, 0.5],
     }

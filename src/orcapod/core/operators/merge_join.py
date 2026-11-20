@@ -69,7 +69,9 @@ def _output_types(
 
 
 def _merged_list(
-    first: "pa.ChunkedArray[Any]", second: "pa.ChunkedArray[Any]", list_type: Any
+    first: "pa.ChunkedArray[Any]",
+    second: "pa.ChunkedArray[Any]",
+    list_type: "pa.DataType",
 ) -> "pa.Array[Any]":
     """Return the two-element lists of one merged column, built from the inputs' arrays.
 
@@ -554,7 +556,7 @@ class MergeJoin(BinaryOperator):
         # columns; the list type built above for merged columns), and
         # nullability comes from the captured input flags, falling back to
         # null-count inference for system tag and source-info columns. The
-        # values are the inputs': the cast changes layouts only.
+        # values are the inputs'.
         result_schema = pa.schema(
             [
                 pa.field(
@@ -567,7 +569,15 @@ class MergeJoin(BinaryOperator):
                 for i, col_name in enumerate(joined.column_names)
             ]
         )
-        joined = joined.cast(result_schema)
+        # Only a column whose type differs is cast (a layout change): Arrow's cast of
+        # a ``large_list<null>`` column to its own type corrupts it.
+        joined = pa.Table.from_arrays(
+            [
+                column if column.type == field.type else column.cast(field.type)
+                for column, field in zip(joined.columns, result_schema)
+            ],
+            schema=result_schema,
+        )
         return ArrowTableStream(
             joined,
             tag_columns=tuple(tag_cols),

@@ -1452,27 +1452,6 @@ def aggregated_list_type(
     return pa.large_list(normalize_to_large_types(element_type, keep_null=True))
 
 
-def list_array(values: Sequence[Any], list_type: pa.DataType) -> pa.Array[Any]:
-    """Build a list array of exactly ``list_type`` from Python values.
-
-    The type never depends on ``values``, so an empty array has the same type
-    as a non-empty one. An extension ``list_type`` is built over its storage
-    type and then wrapped.
-
-    Args:
-        values: One Python list per row, holding storage values for an
-            extension element.
-        list_type: The target type, normally from ``aggregated_list_type``.
-
-    Returns:
-        The list array.
-    """
-    if isinstance(list_type, pa.BaseExtensionType):
-        storage = pa.array(values, type=list_type.storage_type)
-        return pa.ExtensionArray.from_storage(list_type, storage)
-    return pa.array(values, type=list_type)
-
-
 def restore_column_types(
     table: pa.Table, reference_types: Mapping[str, pa.DataType]
 ) -> pa.Table:
@@ -1502,74 +1481,6 @@ def restore_column_types(
     return restored.replace_schema_metadata(table.schema.metadata)
 
 
-def build_aggregated_table(
-    rows: "Sequence[Mapping[str, Any]]",
-    input_schema: "pa.Schema",
-    member_columns: "Collection[str]",
-    type_converter: Any,
-) -> "pa.Table":
-    """Build a many->one operator's output table, list-wrapping member columns.
-
-    Columns named in ``member_columns`` become list-valued, one element per
-    group member; every other column keeps its input field unchanged (that is
-    how scalar group keys and folded system tags pass through).
-
-    Logical element types are preserved. Arrow cannot embed an extension type
-    inside a list value field, so ``pa.list_(extension_type)`` raises
-    ``ArrowNotImplementedError`` (see ``docs/dev/design_issues/`` ET1/ET2). For such a
-    column the list is built over the element's *storage* type and then wrapped
-    in the outer ``list[<element>]`` extension type supplied by
-    ``ListLogicalType``. A pod annotated ``-> Path`` therefore groups into
-    ``list[orcapod.path]`` rather than losing the type or failing.
-
-    Args:
-        rows: One mapping per output row, values already aggregated into lists
-            for every member column.
-        input_schema: Schema of the operator's input table, used to derive
-            element types and to pass non-member fields through unchanged.
-        member_columns: Names of the columns to list-wrap.
-        type_converter: The stream's type converter, used to resolve an
-            extension type's Python element type and the matching outer list
-            extension type.
-
-    Returns:
-        The aggregated ``pa.Table``.
-    """
-    member_columns = set(member_columns)
-    fields: list[pa.Field] = []
-    # Extension columns are built as plain storage lists, then re-wrapped.
-    extension_overrides: dict[str, Any] = {}
-
-    for field in input_schema:
-        if field.name not in member_columns:
-            fields.append(field)
-            continue
-        list_type = aggregated_list_type(field.type, type_converter, column=field.name)
-        if isinstance(list_type, pa.BaseExtensionType):
-            extension_overrides[field.name] = list_type
-            fields.append(pa.field(field.name, list_type.storage_type, nullable=False))
-        else:
-            fields.append(pa.field(field.name, list_type, nullable=False))
-
-    table = pa.Table.from_pylist(list(rows), schema=pa.schema(fields))
-
-    for name, list_type in extension_overrides.items():
-        index = table.schema.get_field_index(name)
-        storage = table.column(name)
-        wrapped = pa.chunked_array(
-            [
-                pa.ExtensionArray.from_storage(list_type, chunk)
-                for chunk in storage.chunks
-            ],
-            type=list_type,
-        )
-        table = table.set_column(
-            index, pa.field(name, list_type, nullable=False), wrapped
-        )
-
-    return table
-
-
 def aggregated_list_array(
     values: "pa.Array[Any] | pa.ChunkedArray[Any]",
     offsets: "pa.Int64Array",
@@ -1577,13 +1488,16 @@ def aggregated_list_array(
 ) -> pa.Array[Any]:
     """Build a list column of exactly ``list_type`` from member values and offsets.
 
-    The array-based sibling of ``build_aggregated_table``: the members of row ``i``
-    are ``values[offsets[i]:offsets[i + 1]]``, so the values are never read as Python
-    values and keep every bit (a ``time64[ns]`` value its nanoseconds, a ``date64``
-    its time of day, a float32 signaling NaN its bits; ITL-1250, ITL-1248). The
-    caller puts the values in member order (``take``) and gives ``list_type`` from
-    ``aggregated_list_type``; for a logical element the list is built over the
-    element's storage and wrapped, as ``build_aggregated_table`` does.
+    The one way an operator builds a list column (``Batch``, ``GroupBy``,
+    ``MergeJoin``): the members of row ``i`` are ``values[offsets[i]:offsets[i + 1]]``,
+    so the values are never read as Python values and keep every bit (a
+    ``time64[ns]`` value its nanoseconds, a ``date64`` its time of day, a float32
+    signaling NaN its bits; ITL-1250, ITL-1248, ITL-1281). The caller puts the values
+    in member order (``take``, or a slice of consecutive rows) and gives ``list_type``
+    from ``aggregated_list_type``. Arrow cannot embed an extension type inside a list
+    value field, so for a logical element the list is built over the element's
+    storage and wrapped in the logical list type. The type never depends on the
+    values: a zero-row column has the type of a populated one.
 
     Args:
         values: Every member's value, group after group, in the input column's type.

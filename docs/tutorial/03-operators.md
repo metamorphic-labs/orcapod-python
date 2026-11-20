@@ -290,12 +290,13 @@ print(merged.output_schema()[1])
 print(merged.as_pandas_df().sort_values(pair_tags, ignore_index=True).head(3))
 #   subject_id session  unit    n_spikes
 # 0   mouse_01      s1     0  [149, 215]
-# 1   mouse_01      s1     1  [299, 326]
-# 2   mouse_01      s1     2  [135, 662]
+# 1   mouse_01      s1     1  [326, 299]
+# 2   mouse_01      s1     2  [662, 135]
 ```
 
-The merged lists are sorted, so you can no longer tell which value came from which probe.
-That is the point: `MergeJoin` is for values that are interchangeable.
+Each list holds the first input's value, then the second's: `imec0` first, `imec1` second,
+on every row. `MergeJoin()(imec1, imec0)` would put `imec1` first, and is a different step
+with a different hash.
 
 ## What to remember
 

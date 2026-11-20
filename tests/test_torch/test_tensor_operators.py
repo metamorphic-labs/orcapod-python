@@ -177,14 +177,15 @@ def test_merge_join_colliding_tensor_column(shift: int) -> None:
         )
 
 
-def test_merge_join_order_does_not_depend_on_input_order() -> None:
-    """MergeJoin orders merged tensors the same whichever input comes first."""
+def test_merge_join_order_is_argument_order() -> None:
+    """MergeJoin keeps merged tensors in argument order: swapping the inputs reverses
+    every pair (ITL-1281)."""
     forward = rows(MergeJoin()(tensors_source("a"), tensors_source("b", shift=1)))
     backward = rows(MergeJoin()(tensors_source("b", shift=1), tensors_source("a")))
     for name in NAMES:
         f, b = list(forward[name]["x"]), list(backward[name]["x"])
         assert len(f) == len(b) == 2
-        for x, y in zip(f, b, strict=True):
+        for x, y in zip(f, reversed(b), strict=True):
             assert_tensors_identical(x, y)
 
 
@@ -222,16 +223,22 @@ def assert_merged_groups(got: dict[str, Any], shift: int) -> None:
 
 @pytest.mark.parametrize("shift", [0, 1])
 def test_merge_join_colliding_grouped_tensor_column(shift: int) -> None:
-    """MergeJoin merges colliding ``list[torch.Tensor]`` columns, in a stable order."""
+    """MergeJoin merges colliding ``list[torch.Tensor]`` columns, in argument order."""
     left = grouped_tensors_source("left")
     right = grouped_tensors_source("right", shift)
     out = MergeJoin()(left, right)
     got = {fields(t)["g"]: fields(d)["x"] for t, d in out.iter_data()}
     assert_merged_groups(got, shift)
-    # The swapped call yields the same table. Source info is left out: on tied values
-    # from inputs with one pipeline hash, its order follows the call.
+    # The swapped call holds the same pairs, reversed: MergeJoin is ordered (ITL-1281).
     swapped = MergeJoin()(right, left)
-    assert swapped.as_table().equals(out.as_table())
+    swapped_got = {fields(t)["g"]: fields(d)["x"] for t, d in swapped.iter_data()}
+    assert sorted(swapped_got) == sorted(got)
+    for group, merged in got.items():
+        assert len(swapped_got[group]) == len(merged) == 2
+        for x, y in zip(swapped_got[group], reversed(merged), strict=True):
+            assert len(x) == len(y)
+            for a, b in zip(x, y, strict=True):
+                assert_tensors_identical(a, b)
 
 
 def test_merge_join_colliding_grouped_tensor_column_async_equals_sync() -> None:

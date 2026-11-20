@@ -147,8 +147,8 @@ def xfail(issue: str) -> pytest.MarkDecorator:
 
 # ── inputs ──────────────────────────────────────────────────────────────────
 
-# MergeJoin merges every data column: the rows of MAIN without a null and other values,
-# so no merged pair ties (a tie is ITL-1241, a null ITL-1243).
+# MergeJoin merges every data column: the rows of MAIN without a null and other values.
+# It is ordered (ITL-1281): its argument order is an input, never a tie.
 NON_NULL_ROWS = [0, 2, 3, 4]
 MAIN_OTHER = Spec(
     source_id="s2",
@@ -531,11 +531,13 @@ def test_the_order_of_the_inputs_of_a_commutative_operator_changes_nothing(
     )
 
 
-def test_the_commutative_cases_are_the_joins() -> None:
-    """``Join`` and ``MergeJoin`` declare themselves commutative; ``SemiJoin`` does not."""
-    assert {p.values[0].label for p in _commutative_cases()} == {"join", "merge_join"}
+def test_the_commutative_case_is_the_join() -> None:
+    """``Join`` declares itself commutative; ``SemiJoin`` and ``MergeJoin`` (ITL-1281)
+    are ordered."""
+    assert {p.values[0].label for p in _commutative_cases()} == {"join"}
     two = [source(MAIN, PLAIN, 0, TAGS_FIRST), source(P, PLAIN, 0, TAGS_FIRST)]
     assert isinstance(SemiJoin().argument_symmetry(two), tuple)
+    assert isinstance(MergeJoin().argument_symmetry(two), tuple)
 
 
 # ── sources, streams and pods ───────────────────────────────────────────────

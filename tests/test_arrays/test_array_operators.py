@@ -212,16 +212,22 @@ def _same_array(got: Any, expected: Any) -> bool:
 
 @pytest.mark.parametrize("shift", [0, 1])
 def test_merge_join_colliding_grouped_array_column(shift: int) -> None:
-    """``MergeJoin`` merges colliding lists of arrays (after ``GroupBy``) in a deterministic order."""
+    """``MergeJoin`` merges colliding lists of arrays (after ``GroupBy``), in argument order."""
     left = grouped_arrays_source("left")
     right = grouped_arrays_source("right", shift)
     out = MergeJoin()(left, right)
     got = {fields(t)["g"]: fields(d)["x"] for t, d in out.iter_data()}
     assert_merged_groups(got, shift)
-    # The swapped call yields the same tags and data. Source info is left out: on
-    # tied values from inputs with one pipeline hash, its order follows the call.
+    # The swapped call holds the same pairs, reversed: MergeJoin is ordered (ITL-1281).
     swapped = MergeJoin()(right, left)
-    assert swapped.as_table().equals(out.as_table())
+    swapped_got = {fields(t)["g"]: fields(d)["x"] for t, d in swapped.iter_data()}
+    assert sorted(swapped_got) == sorted(got)
+    for group, merged in got.items():
+        assert len(swapped_got[group]) == len(merged) == 2
+        for x, y in zip(swapped_got[group], reversed(merged), strict=True):
+            assert len(x) == len(y)
+            for a, b in zip(x, y, strict=True):
+                assert_arrays_identical(a, b)
 
 
 def test_merge_join_colliding_grouped_array_column_async_equals_sync() -> None:

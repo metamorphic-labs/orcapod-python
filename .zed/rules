@@ -678,7 +678,7 @@ src/orcapod/
     operators/
       base.py                 — UnaryOperator, BinaryOperator, NonZeroInputOperator
       join.py                 — Join (N-ary inner join, commutative)
-      merge_join.py           — MergeJoin (binary, colliding cols → sorted list[T])
+      merge_join.py           — MergeJoin (binary, ordered; colliding cols → [first, second])
       semijoin.py             — SemiJoin (binary, non-commutative)
       batch.py                — Batch (group rows by count, types become list[T])
       group_by.py             — GroupBy (many→one reduction keyed on tag values)
@@ -971,7 +971,8 @@ generation of hashing; rows of the current data context are the current entries.
 1. Name-preserving — single-stream ops. Column name/value pass through unchanged.
 2. Name-extending — multi-input ops. System tag column name gets
    ::{pipeline_hash}:{canonical_position} appended. Commutative operators sort by
-   pipeline_hash and sort system tag values per row.
+   pipeline_hash and sort system tag values per row. MergeJoin is ordered (ITL-1281): the
+   position is the argument index and nothing is sorted.
 3. Reducing — many→one ops (Batch, GroupBy). Data columns become list[T]; Batch makes every
    user tag list[T] and keeps it a tag, while GroupBy keeps its scalar keys and drops every
    other user tag (ITL-1070). No tag ever moves to the data group. Source-info columns become
@@ -1075,15 +1076,17 @@ data. The rules:
   (arrow_utils.normalize_to_large_types: string to large_string, binary to large_binary, list
   to large_list, recursively). Width, nullability and logical (extension) types are never
   changed; int8 stays int8, and null stays null (operators and the type converter pass
-  keep_null=True; only Data maps null to large_string, the function's default). An
-  operator that round-trips its columns through Polars casts them back
-  to the normalized input types (arrow_utils.restore_column_types, or
-  restore_schema_nullability when nullability is restored too).
+  keep_null=True; only Data maps null to large_string, the function's default).
+  PolarsFilter is the one operator that still round-trips its columns through Polars; it
+  casts them back to the normalized input types (arrow_utils.restore_column_types and
+  restore_schema_nullability). Every other operator takes its values from the input's Arrow
+  arrays (take, a slice, list offsets; Join, SemiJoin, MergeJoin and GroupBy give
+  Polars only prepared keys and row numbers), so its values are the input's, bit for bit.
   This holds for every operator, also one that passes its rows through unchanged (select,
   map, a no-op filter, Join, SemiJoin), on a plain stream as inside a job: its result
   is an ArrowTableStream (ITL-1122).
 - List columns built by Batch, GroupBy and MergeJoin are typed by
-  arrow_utils.aggregated_list_type (directly or through build_aggregated_table):
+  arrow_utils.aggregated_list_type:
   large_list<normalized T>, or for a logical T the logical list type from the type converter
   (it raises, naming the column, if the converter has none; never strip the element to its
   storage type). Source-info list columns are large_list of the incoming source-info type:
@@ -1092,6 +1095,11 @@ data. The rules:
   large_list<large_list<large_string>>, ITL-849). An already list-valued data column
   likewise becomes a list of its incoming list type; never flatten it. Zero-row and
   non-empty results have the same types.
+- Lists built by an operator are parallel by origin row (developer, November 19, 2026,
+  ITL-1281): element i of every list of an output row (each data and tag list and its
+  source-info list) comes from the same input row. A member order is decided once per output
+  row (Batch: the input's row order; GroupBy: its member order; MergeJoin: argument
+  order) and every list follows it; never sort one list column on its own values.
 - When two inputs give the same column different Arrow types, normalize both: equal proceeds,
   anything else raises InputValidationError naming the column and both types — no widening,
   promotion or picking a side. The rule is arrow_utils.shared_arrow_type, which takes only the
@@ -1241,12 +1249,19 @@ data. The rules:
   type has no rule (a map, an interval, a union, a list view) is refused with
   `InputValidationError` naming the column (`base.require_matchable_key`) on both paths,
   before rows are matched (never at validation, which would derive every input's zero-row
-  table on each graph build). `GroupBy` keeps its own copy of the preparation until ITL-1281, which also
-  moves `MergeJoin` off its round trip.
-- MergeJoin requires colliding data columns to have identical Python types; merges into sorted
-  large_list<T> with source columns reordered to match, where T is the large-normalized input
-  Arrow type; inputs whose Arrow types still differ after normalization raise
-  InputValidationError. Non-empty struct columns cannot be merged yet (ITL-839).
+  table on each graph build). `MergeJoin` matches through the same inner join
+  (`join._inner_join`), and `GroupBy` imports the same preparation (ITL-1281), its rule
+  refusing structs (`part_without_rule(..., structs=False)`).
+- MergeJoin is ordered, not commutative (developer, November 19, 2026, ITL-1281):
+  MergeJoin()(a, b) and MergeJoin()(b, a) are two operations with two identities
+  (argument_symmetry is a tuple), and each input's system-tag columns end in its argument
+  index. A colliding data column becomes large_list<T> holding [first argument's value,
+  second argument's value] on every row, and its source-info column the two tokens in the same
+  order; nothing is sorted and no values are compared, so any value merges (a struct, a logical
+  type, a null). The lists are built from the joined Arrow arrays
+  (arrow_utils.aggregated_list_array), so every value is the input's, bit for bit. Colliding
+  columns must have identical Python types; inputs whose Arrow types still differ after
+  normalization raise InputValidationError. T is the large-normalized input Arrow type.
 - Operators predict output schema (including system tag names) without computation. Verify a
   prediction against unary_static_process(stream).output_schema(...), NOT against process(...)
   (circular — it delegates back to the pod) and NOT against as_table() (legitimately differs:
@@ -1339,8 +1354,8 @@ data. The rules:
   interval, a union, a list view) is refused (`InputValidationError`,
   `_refuse_unorderable_tags`), as a key and as a non-key tag (which orders the members): a
   struct has no decided order (developer, November 19, 2026), so drop it before grouping. A
-  key that is a list of any kind (a fixed-size list included) is refused as list-valued. `Batch` and `MergeJoin` still rebuild their lists from Python
-  (ITL-1281). The stance on `0.0`/`-0.0` and NaN for the whole library (match by value, as
+  key that is a list of any kind (a fixed-size list included) is refused as list-valued. `Batch` and `MergeJoin` build their lists from Arrow
+  arrays too (ITL-1281). The stance on `0.0`/`-0.0` and NaN for the whole library (match by value, as
   Polars does; show the smallest bit pattern; rewrite nothing) is ITL-1251.
 - Data source-info values may be str, None, or list[...], nested to any depth; Arrow/Python
   types are derived from the value, with None mapping to large_string. That rule has one
@@ -1349,12 +1364,13 @@ data. The rules:
   columns, so a type the stream already has is never re-inferred. A many→one operator must
   emit a list for EVERY row of a list-valued column — mixing in a bare None makes per-row
   as_table() schemas diverge and pa.concat_tables fail on the barrier path.
-- Aggregating operators (Batch, GroupBy) must build list-valued columns via
-  arrow_utils.build_aggregated_table, never pa.list_(field.type). The helper types every list
-  column with aggregated_list_type: large_list of the large-normalized element, or, because
-  Arrow cannot embed an extension type inside a list value field, the logical list type
+- Operators that build lists (Batch, GroupBy, MergeJoin) build every list-valued column
+  with arrow_utils.aggregated_list_array (member values in member order, lists from offsets),
+  never from Python values and never pa.list_(field.type). Its type comes from
+  aggregated_list_type: large_list of the large-normalized element, or, because Arrow
+  cannot embed an extension type inside a list value field, the logical list type
   (list[<element>] from ListLogicalType) for a logical element such as a pod annotated
-  -> Path; it builds that list over the element's storage and wraps it.
+  -> Path; the list is built over the element's storage and wrapped.
 - Never build an identity or hash input from a type's raw __module__, or from
   repr/str/inspect.formatannotation of a type, without going through
   utils/canonical_type_names.py (canonical_module_name, canonical_type_name,
