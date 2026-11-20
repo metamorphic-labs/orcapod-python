@@ -236,8 +236,8 @@ hashes:
   the entries of `map_tags`, `map_data` and `map_columns`, the constraints of
   `polars_filter`, `tag_only_columns`, `tags_as_data`;
 - the order of the inputs of an operator that declares itself commutative (`Join`), and of
-  the inputs of a function pod (`MergeJoin` and `SemiJoin` are ordered: their argument order
-  is an input you give);
+  the inputs of a function pod (for the ordered operators, see the table of orders that
+  count below);
 - the path the rows take: the sync and the async run give the same rows.
 
 What follows your order is where the columns are placed: `keys()`, `as_table()` and a

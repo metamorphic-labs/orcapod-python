@@ -296,7 +296,7 @@ print(merged.as_pandas_df().sort_values(pair_tags, ignore_index=True).head(3))
 
 Each list holds the first input's value, then the second's: `imec0` first, `imec1` second,
 on every row. `MergeJoin()(imec1, imec0)` would put `imec1` first, and is a different step
-with a different hash.
+with a different content hash.
 
 ## What to remember
 

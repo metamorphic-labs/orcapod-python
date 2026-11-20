@@ -32,9 +32,7 @@ from tests.test_core.operators.test_async_sync_equivalence import (  # noqa: E40
 )
 from tests.test_torch.tensor_cases import (  # noqa: E402
     TENSORS,
-    assert_same_tensors_any_order,
     assert_tensors_identical,
-    same_tensor,
 )
 
 NAMES = sorted(TENSORS)
@@ -172,9 +170,11 @@ def test_merge_join_colliding_tensor_column(shift: int) -> None:
     got = rows(MergeJoin()(left, right))
     assert sorted(got) == NAMES
     for name in NAMES:
-        assert_same_tensors_any_order(
-            list(got[name]["x"]), [expected_x(name), expected_x(name, shift)]
-        )
+        merged = list(got[name]["x"])
+        assert len(merged) == 2
+        # The first argument's value first (ITL-1281).
+        assert_tensors_identical(merged[0], expected_x(name))
+        assert_tensors_identical(merged[1], expected_x(name, shift))
 
 
 def test_merge_join_order_is_argument_order() -> None:
@@ -185,8 +185,11 @@ def test_merge_join_order_is_argument_order() -> None:
     for name in NAMES:
         f, b = list(forward[name]["x"]), list(backward[name]["x"])
         assert len(f) == len(b) == 2
-        for x, y in zip(f, reversed(b), strict=True):
-            assert_tensors_identical(x, y)
+        # Each call holds its first argument's tensor first: "a" (no shift), then "b".
+        assert_tensors_identical(f[0], expected_x(name))
+        assert_tensors_identical(f[1], expected_x(name, 1))
+        assert_tensors_identical(b[0], expected_x(name, 1))
+        assert_tensors_identical(b[1], expected_x(name))
 
 
 def grouped_tensors_source(source_id: str, shift: int = 0) -> StreamProtocol:
@@ -194,31 +197,23 @@ def grouped_tensors_source(source_id: str, shift: int = 0) -> StreamProtocol:
     return GroupBy(by=["g"])(tensors_source(source_id, shift))
 
 
-def assert_merged_groups(got: dict[str, Any], shift: int) -> None:
-    """Each group's merged ``x`` holds the left and the right member lists."""
+def assert_merged_groups(
+    got: dict[str, Any], second_shift: int, first_shift: int = 0
+) -> None:
+    """Each group's merged ``x`` holds the first argument's member list, then the
+    second's, in that order (``MergeJoin`` is ordered, ITL-1281)."""
     assert sorted(got) == ["g0", "g1", "g2"]
     for group, merged in got.items():
         names = [n for n in NAMES if GROUP[n] == group]
-        assert len(merged) == 2
         expected = [
-            [expected_x(n) for n in names],
-            [expected_x(n, shift) for n in names],
+            [expected_x(n, first_shift) for n in names],
+            [expected_x(n, second_shift) for n in names],
         ]
-        # One merged list from each input: match each list to a distinct expected one.
-        remaining = list(expected)
-        for members in merged:
-            match = next(
-                (
-                    i
-                    for i, e in enumerate(remaining)
-                    if len(members) == len(e)
-                    and all(same_tensor(g, x) for g, x in zip(members, e, strict=True))
-                ),
-                None,
-            )
-            assert match is not None, f"group {group}: unexpected member list"
-            del remaining[match]
-        assert not remaining
+        assert len(merged) == len(expected) == 2, group
+        for members, want in zip(merged, expected, strict=True):
+            assert len(members) == len(want), group
+            for one, other in zip(members, want, strict=True):
+                assert_tensors_identical(one, other)
 
 
 @pytest.mark.parametrize("shift", [0, 1])
@@ -232,13 +227,7 @@ def test_merge_join_colliding_grouped_tensor_column(shift: int) -> None:
     # The swapped call holds the same pairs, reversed: MergeJoin is ordered (ITL-1281).
     swapped = MergeJoin()(right, left)
     swapped_got = {fields(t)["g"]: fields(d)["x"] for t, d in swapped.iter_data()}
-    assert sorted(swapped_got) == sorted(got)
-    for group, merged in got.items():
-        assert len(swapped_got[group]) == len(merged) == 2
-        for x, y in zip(swapped_got[group], reversed(merged), strict=True):
-            assert len(x) == len(y)
-            for a, b in zip(x, y, strict=True):
-                assert_tensors_identical(a, b)
+    assert_merged_groups(swapped_got, 0, first_shift=shift)
 
 
 def test_merge_join_colliding_grouped_tensor_column_async_equals_sync() -> None:

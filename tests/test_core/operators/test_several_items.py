@@ -14,8 +14,9 @@ What is asserted:
 * **Order of a set argument.** Column names to select, drop or narrow, and the entries
   of a rename mapping, name a set: their order changes nothing, not even the column
   order of the result, nor the operator's identity.
-* **Order of the inputs of a commutative operator** (``Join``, ``MergeJoin``) changes
-  nothing, with two, three and four inputs.
+* **Order of the inputs of a commutative operator** (``Join``) changes nothing, with
+  two, three and four inputs. ``MergeJoin`` is ordered (ITL-1281): its argument order is
+  tested as an input that counts.
 
 ``GroupBy`` is not here: its arrangement and ``by`` order are tested by ITL-1226
 (``test_group_by_member_order.py``). The order of ``AddTags``'s names is neither the
@@ -723,6 +724,13 @@ def test_merge_join_result_follows_argument_order_only(role: str) -> None:
                 assert _merged_lists(ba, column, reverse=True) == _merged_lists(
                     ab, column
                 )
+                # And which input comes first: the first argument's, in every row.
+                for stream, first, second in ((ab, left, right), (ba, right, left)):
+                    for _, _, tokens in _merged_lists(stream, column):
+                        assert [str(t).split("::")[0] for t in tokens] == [
+                            first.source_id,
+                            second.source_id,
+                        ]
     _assert_all_equal(results["ab"])
     _assert_all_equal(results["ba"])
 

@@ -12,7 +12,8 @@
 4. ``x`` a data-tag in one input and a data-only column in the other is refused (the
    tag and data role check).
 
-Every other colliding data column is merged into a sorted list, as for plain inputs.
+Every other colliding data column is merged into a list in argument order, as for plain
+inputs (ITL-1281).
 A shared key that is ``T`` in one input and ``T | None`` in the other is ``T`` in
 both roles (ITL-829). Every operator is driven through its public call and read
 through the stream's public methods; a schema prediction is checked against

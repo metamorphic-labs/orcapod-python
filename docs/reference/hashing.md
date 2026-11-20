@@ -587,10 +587,13 @@ pipeline-hash sort, and each row's system-tag values at the tied positions are s
 and the same hashes.
 
 **`MergeJoin` is ordered** (developer decision, November 19, 2026, ITL-1281). Its identity
-holds its inputs as a tuple, in argument order, so `MergeJoin()(a, b)` and `MergeJoin()(b, a)`
-have different content and pipeline hashes. Each input's system-tag columns end in its
-argument index (`:0` for the first, `:1` for the second), nothing is sorted, and every merged
-list holds the first argument's value first.
+holds its inputs as a tuple, in argument order. So `MergeJoin()(a, b)` and `MergeJoin()(b, a)`
+have different content hashes whenever `a` and `b` are different sources. Their pipeline
+hashes differ only when the inputs' pipeline hashes differ: two inputs of one schema have
+one pipeline hash, so the ordered pair is the same either way (as for `SemiJoin`). Apart
+from the identity, each input's system-tag columns end in its argument index (`:0` for the
+first, `:1` for the second), nothing is sorted, and every merged list holds the first
+argument's value first.
 
 **Known exclusions from `identity_structure()`:**
 
