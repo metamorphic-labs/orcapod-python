@@ -75,8 +75,7 @@ def _sort_key(name: str, dtype: object) -> "pl.Expr":
 def _float_bits(array: "pa.Array[Any]") -> "pa.Array[Any] | None":
     """Return a float key's bit patterns, or ``None`` when the key is not a float.
 
-    A logical type stored as a float, or a dictionary over floats, is a float key,
-    read through its storage or its values.
+    A logical type stored as a float is a float key, read through its storage.
 
     Args:
         array: A key column's values as stored (``arrow_keys.values_of``).
