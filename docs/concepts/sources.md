@@ -172,6 +172,59 @@ categorical column) is not a dictionary column: it is a library value, stored an
 (see [Arrays and other library values](arrays.md)), and is accepted. Supporting
 dictionary-encoded columns themselves is future work (ITL-1277).
 
+### A CSV file's types: `schema=`
+
+A CSV file holds text only, so `CSVSource` infers each column's type from the file, and
+infers it again on every read: a column of whole numbers is `int64`, and it may be null only
+if the file has an empty cell in it. Pass an Arrow `schema=` to choose the types instead: its
+fields name the file's columns in the file's order, each with its type, width and
+nullability. The source then has exactly those types (in their large variants, as above).
+
+The schema is part of the source's configuration: `to_config()` saves it, field by field
+(Arrow type text, nested fields included, and which fields may be null), and `from_config()`
+and a saved job (`PipelineJob.save` / `PipelineJob.load`) read the file with it again, so the
+reloaded source has the same schema, content hash and pipeline hash as the one you built. A
+source built without `schema=` saves no schema and infers again when it is reloaded.
+
+```python
+import json
+import tempfile
+from pathlib import Path
+
+import pyarrow as pa
+
+from orcapod.sources import CSVSource
+
+csv_dir = Path(tempfile.mkdtemp())
+(csv_dir / "trials.csv").write_text("session,trial,response\ns1,1,0.4\ns1,2,0.7\n")
+trial_schema = pa.schema(
+    [
+        pa.field("session", pa.string(), nullable=False),
+        pa.field("trial", pa.int16(), nullable=False),
+        pa.field("response", pa.float32()),  # nullable: a later file may lack a value
+    ]
+)
+trials = CSVSource(
+    str(csv_dir / "trials.csv"),
+    tag_columns=["session", "trial"],
+    tag_only_columns=True,
+    schema=trial_schema,
+)
+print(trials.to_config()["schema"])
+# {'columns': {'session': 'string', 'trial': 'int16', 'response': 'float'}, 'nullable': ['response']}
+reloaded = CSVSource.from_config(json.loads(json.dumps(trials.to_config())))
+print(reloaded.output_schema())
+# (Schema({'session': str, 'trial': int}), Schema({'response': float | None}))
+print(reloaded.content_hash() == trials.content_hash())
+# True
+```
+
+Arrow metadata cannot be saved. A schema whose fields (at any depth) or whose schema itself
+carry Arrow metadata is accepted by the constructor, and the source's table keeps it, but
+`to_config()` and so `PipelineJob.save` raise `ValueError` naming the field, and the job file
+is not written: build the schema without the metadata to save the source, or do not save it.
+A source never saves a schema it would read back differently.
+
 ### SpiralDB tables
 
 `SpiralDBTableSource` exposes a table in a [SpiralDB](https://spiraldb.com) project as a

@@ -163,7 +163,28 @@ class CSVSource(RootSource):
         return True
 
     def to_config(self, db_registry=None) -> dict[str, Any]:
-        """Serialize this source's configuration to a JSON-compatible dict."""
+        """Serialize this source's configuration to a JSON-compatible dict.
+
+        A source built with ``schema=`` saves it under ``"schema"`` (ITL-1315): every
+        field's Arrow type and nullability, as given, so ``from_config`` reads the
+        file with the same types and the reloaded source has the same schema and
+        hashes. A source built without one saves no ``"schema"`` entry.
+
+        Raises:
+            ValueError: If the explicit schema cannot be saved exactly (field or
+                schema metadata, a type the saved type text cannot restore).
+        """
+        schema_config: dict[str, Any] = {}
+        if self._schema is not None:
+            from orcapod.pipeline.serialization import serialize_arrow_schema
+
+            try:
+                schema_config["schema"] = serialize_arrow_schema(
+                    self._schema, self.data_context.type_converter
+                )
+            except ValueError as exc:
+                exc.add_note(f"CSVSource over {self._file_path!r}")
+                raise
         return {
             "source_type": self.SOURCE_KIND,
             "file_path": self._file_path,
@@ -174,12 +195,23 @@ class CSVSource(RootSource):
             if self._record_id_columns is None
             else list(self._record_id_columns),
             "source_id": self.source_id,
+            **schema_config,
             **self._identity_config(),
         }
 
     @classmethod
     def from_config(cls, config: dict[str, Any], db_registry=None) -> CSVSource:
-        """Reconstruct a CSVSource from a config dict."""
+        """Reconstruct a CSVSource from a config dict.
+
+        The saved ``"schema"`` entry, when there is one, is given to the constructor
+        as ``schema=``; a config without it (a source built without ``schema=``, or a
+        config written before ITL-1315) infers the types from the file.
+        """
+        schema = None
+        if config.get("schema") is not None:
+            from orcapod.pipeline.serialization import deserialize_arrow_schema
+
+            schema = deserialize_arrow_schema(config["schema"])
         return cls(
             file_path=config["file_path"],
             tag_columns=config.get("tag_columns", ()),
@@ -187,4 +219,5 @@ class CSVSource(RootSource):
             system_tag_columns=config.get("system_tag_columns", ()),
             record_id_columns=config.get("record_id_columns"),
             source_id=config.get("source_id"),
+            schema=schema,
         )

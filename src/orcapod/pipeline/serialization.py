@@ -18,6 +18,8 @@ from orcapod.logical_types.identifier import (
 )
 
 if TYPE_CHECKING:
+    import pyarrow as pa
+
     from orcapod.protocols.database_protocols import DatabaseRegistryProtocol
 
 logger = logging.getLogger(__name__)
@@ -915,6 +917,100 @@ def deserialize_output_schema(
             None if saved_nullable is None else saved_nullable["data"],
         ),
     )
+
+
+def serialize_arrow_schema(
+    schema: pa.Schema, type_converter: Any | None = None
+) -> dict[str, Any]:
+    """Return the saved form of an Arrow schema, exactly as given.
+
+    ``{"columns": {...}, "nullable": [...]}``: each field's Arrow type text, in field
+    order (the text of `serialize_schema`, which carries nested field names and their
+    nullability), and the names of the nullable top-level fields, which the type text
+    cannot say (the record of `serialize_nullability`). The types are kept as given,
+    not normalized to their large variants. `deserialize_arrow_schema` reads it back.
+
+    Args:
+        schema: The Arrow schema to save.
+        type_converter: The converter that restores a logical type, used to check the
+            saved form. If omitted, the default data context's converter.
+
+    Returns:
+        The entry, ready for JSON.
+
+    Raises:
+        ValueError: If the saved form would not restore ``schema`` exactly (equal
+            with its metadata compared): a repeated field name, field or schema
+            metadata, or a type the type text cannot restore. The message names the
+            field.
+    """
+    names = [field.name for field in schema]
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    if repeated:
+        raise ValueError(
+            f"The schema repeats the field names {repeated}; it cannot be saved."
+        )
+    entry: dict[str, Any] = {
+        "columns": {field.name: _serialize_arrow_type(field.type) for field in schema},
+        "nullable": [field.name for field in schema if field.nullable],
+    }
+    try:
+        restored = deserialize_arrow_schema(entry, type_converter)
+    except ValueError as exc:
+        raise ValueError(f"The schema cannot be saved: {exc}") from exc
+    for field, restored_field in zip(schema, restored):
+        if not restored_field.equals(field, check_metadata=True):
+            raise ValueError(
+                f"Field {field.name!r} ({field.type}, nullable={field.nullable}"
+                f"{', with metadata' if field.metadata else ''}) cannot be saved "
+                f"exactly: it reads back as {restored_field.type}, "
+                f"nullable={restored_field.nullable}. Field metadata and types the "
+                "saved Arrow type text cannot restore are not saved."
+            )
+    if not restored.equals(schema, check_metadata=True):
+        raise ValueError(
+            "The schema's own metadata cannot be saved: build the schema without it."
+        )
+    return entry
+
+
+def deserialize_arrow_schema(
+    entry: dict[str, Any], type_converter: Any | None = None
+) -> pa.Schema:
+    """Restore an Arrow schema saved by `serialize_arrow_schema`.
+
+    Args:
+        entry: The saved ``{"columns": {...}, "nullable": [...]}`` entry.
+        type_converter: The converter that restores a logical type. If omitted, the
+            default data context's converter.
+
+    Returns:
+        The schema, with its fields in the saved order.
+
+    Raises:
+        ValueError: If a saved type cannot be parsed, or a saved nullable name is not
+            a saved column. The message names the column.
+    """
+    import pyarrow as pa
+
+    columns: dict[str, str] = entry["columns"]
+    nullable = entry["nullable"]
+    _check_nullable_names(columns, nullable)
+    fields = []
+    for name, type_str in columns.items():
+        try:
+            arrow_type = parse_arrow_type_string(type_str, type_converter)
+        except LogicalTypeIdentifierError as exc:
+            raise exc.for_column(name) from exc
+        except SavedSchemaVersionError as exc:
+            raise SavedSchemaVersionError(f"Column {name!r}: {exc}") from exc
+        except ValueError as exc:
+            raise ValueError(
+                f"Column {name!r} has the saved type {type_str!r}, which cannot be "
+                "restored."
+            ) from exc
+        fields.append(pa.field(name, arrow_type, nullable=name in nullable))
+    return pa.schema(fields)
 
 
 def parse_arrow_type_string(type_str: str, type_converter: Any | None = None) -> Any:

@@ -1440,7 +1440,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             path: File path to write JSON output to.
 
         Raises:
-            ValueError: If no compiled pipeline exists.
+            ValueError: If no compiled pipeline exists, or a source cannot save its
+                configuration exactly (a ``CSVSource`` whose explicit schema holds
+                Arrow metadata); nothing is written then.
         """
         import json as _json
         import os
@@ -1474,7 +1476,17 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         sources_block: dict[str, Any] = {}
         for spec_name, source in self._sources.items():
             if hasattr(source, "to_config"):
-                sources_block[spec_name] = source.to_config()
+                try:
+                    # ``hasattr`` checked it: every source declares it.
+                    sources_block[spec_name] = cast(
+                        "cp.SourceProtocol", source
+                    ).to_config()
+                except ValueError as exc:
+                    # A source that cannot save its configuration exactly refuses
+                    # (a CSVSource's explicit schema with Arrow metadata, ITL-1315):
+                    # nothing is written.
+                    exc.add_note(f"Saving the job's source {spec_name!r}")
+                    raise
             else:
                 sources_block[spec_name] = {"source_type": "unknown"}
 
