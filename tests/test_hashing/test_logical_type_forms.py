@@ -1,19 +1,23 @@
-"""A logical type is one thing in every Arrow representation (ITL-640, Codex review of PR 454).
+"""A logical type is one thing in every Arrow representation (ITL-640, Codex reviews of PR 454).
 
 A logical type's identifier is its extension name plus its extension metadata, however a
 field carries it: as a live ``pa.ExtensionType``, or as its storage type with the
-``ARROW:extension:name`` / ``ARROW:extension:metadata`` field metadata (the IPC form of
-a table read back from a store; also what a process sees when pyarrow has not registered
-the extension type). Every place an Arrow schema enters a schema identity, a saved
-schema or a declaration brings it to one form first
-(``logical_types.canonical_form.canonical_logical_schema``), so:
+``ARROW:extension:name`` / ``ARROW:extension:metadata`` field metadata (the storage, or
+IPC, form of a table read back from a store; also what a process sees when pyarrow has
+not registered the extension type). Two forms, one walker
+(``logical_types.canonical_form``):
 
-1. (held: what ``hash_schema`` gives a value-hashed type in metadata form awaits the
-   developer's decision, Codex finding 1 of PR 454);
+1. ``hash_schema`` hashes the storage form (its tests over every registered type are in
+   ``test_schema_hash_storage_form.py``);
 2. a read-only loaded operator (``Index``, ``Pick``) types ``node.as_source()`` from its
    saved Arrow types;
-3. a saved schema keeps an identifier carried in either form, at any depth;
-4. a schema declared in Arrow with a metadata-form field declares that logical type.
+3. the saved-schema writer writes the storage form, so a saved schema keeps an
+   identifier carried in either form, at any depth;
+4. a schema declared in Arrow, and a saved schema read back, take the declaration form
+   (``declaration_form_schema``): a metadata-form identifier at the top of a column
+   declares that logical type;
+5. an identifier nested in a plain list, struct or map stays in the storage form
+   everywhere: Arrow cannot build an empty table of a nested live extension type.
 """
 
 from __future__ import annotations
@@ -35,6 +39,7 @@ from orcapod.contexts import get_default_context
 from orcapod.core.nodes.source_node import SourceNode
 from orcapod.core.operators import Index, MapData, Pick
 from orcapod.core.sources import ArrowTableSource, PollingSource
+from orcapod.core.streams.base import typed_arrow_schemas
 
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import SourceSpecMismatchError
@@ -380,3 +385,241 @@ def test_a_loaded_read_only_operator_keeps_its_arrow_types(
     assert tag_schema.field("k").type == pa.int16()
     assert tag_schema.field("ta").type == pa.int8()
     assert data_schema.field("i8").type == pa.int8()
+
+
+# ── 5. an identifier nested in a plain list, struct or map (Codex review 454b) ─
+#
+# Arrow cannot build an empty table with an extension type inside a list, struct or
+# map. Such an identifier stays in the storage form in a declaration, in a saved
+# schema read back and in the hash: never a nested live type, never dropped.
+
+NESTED_IDENTIFIERS: dict[str, Any] = {"Path": Path, "File": op.File}
+
+
+def _identifier_metadata(python_type: Any) -> dict[bytes | str, bytes | str]:
+    extension = _converter().python_type_to_arrow_type(python_type)
+    assert isinstance(extension, pa.ExtensionType)
+    return {
+        b"ARROW:extension:name": extension.extension_name.encode("utf-8"),
+        b"ARROW:extension:metadata": extension.__arrow_ext_serialize__(),
+    }
+
+
+def _nested_containers(child: pa.Field[Any]) -> dict[str, tuple[pa.DataType, Any]]:
+    """Plain Arrow containers holding ``child``, each with two rows of values."""
+    key = pa.field("key", pa.large_string(), nullable=False)
+    return {
+        "struct": (
+            pa.struct([child, pa.field("q", pa.int8())]),
+            [{child.name: "/a", "q": 1}, {child.name: "/b", "q": 2}],
+        ),
+        "large_list": (pa.large_list(child), [["/a", "/b"], ["/c"]]),
+        "fixed_size_list": (pa.list_(child, 2), [["/a", "/b"], ["/c", "/d"]]),
+        # The saved map text names neither the item field nor its nullability: the
+        # item is in pyarrow's default shape, ``value``, nullable.
+        "map value": (
+            pa.map_(key, child.with_name("value").with_nullable(True)),  # pyright: ignore[reportArgumentType]  # pyarrow takes fields; the stubs name only types
+            [[("u", "/a")], [("u", "/b"), ("v", "/c")]],
+        ),
+    }
+
+
+def _nested(
+    container: str, identifier: str, live: bool = False
+) -> tuple[pa.Schema, pa.Schema, pa.Table]:
+    """Tags ``k``, ``g``; data ``x`` and ``w`` holding the identifier nested."""
+    python_type = NESTED_IDENTIFIERS[identifier]
+    stored = pa.field("p", pa.large_string(), nullable=False).with_metadata(
+        _identifier_metadata(python_type)
+    )
+    child = (
+        pa.field(
+            "p", _converter().python_type_to_arrow_type(python_type), nullable=False
+        )
+        if live
+        else stored
+    )
+    arrow_type, values = _nested_containers(child)[container]
+    stored_type, _ = _nested_containers(stored)[container]
+    tags = pa.schema(
+        [
+            pa.field("k", pa.int64(), nullable=False),
+            pa.field("g", pa.int64(), nullable=False),
+        ]
+    )
+    data = pa.schema([pa.field("x", arrow_type), pa.field("w", arrow_type)])
+    table = pa.table(
+        {
+            "k": pa.array([1, 2], pa.int64()),
+            "g": pa.array([10, 20], pa.int64()),
+            "x": pa.array(values, stored_type),
+            "w": pa.array(list(reversed(values)), stored_type),
+        }
+    ).cast(
+        pa.schema(
+            [
+                *tags,
+                pa.field("x", stored_type),
+                pa.field("w", stored_type),
+            ]
+        )
+    )
+    return tags, data, table
+
+
+# A source cannot hold a map column (the Arrow hasher refuses map data), so the map
+# value is tested where a schema is enough: declaration, saved text and hash.
+SOURCE_CONTAINERS = ("struct", "large_list", "fixed_size_list")
+NESTED_CASES = [
+    (container, identifier)
+    for container in SOURCE_CONTAINERS
+    for identifier in NESTED_IDENTIFIERS
+]
+
+
+def _data_schema(schema: pa.Schema) -> pa.Schema:
+    return pa.schema([schema.field("x"), schema.field("w")])
+
+
+@pytest.mark.parametrize("identifier", list(NESTED_IDENTIFIERS))
+@pytest.mark.parametrize("container", [*SOURCE_CONTAINERS, "map value"])
+@pytest.mark.parametrize("live", [False, True], ids=["storage child", "live child"])
+def test_an_arrow_declared_slot_with_a_nested_identifier_works(
+    container: str, identifier: str, live: bool
+) -> None:
+    """It types, hashes and saves; the identifier stays, in the storage form."""
+    tags, data, table = _nested(container, identifier, live=live)
+    stored = _data_schema(table.schema)
+    slot = SourceNode(name="src", tag_schema=tags, data_schema=data)
+    _, slot_data = typed_arrow_schemas(slot)
+    assert slot_data == stored
+    assert slot_data.empty_table().num_rows == 0
+    other = SourceNode(name="src", tag_schema=tags, data_schema=stored)
+    assert slot.pipeline_hash() == other.pipeline_hash()
+    assert _hasher().hash_schema(data) == _hasher().hash_schema(stored)
+    texts = arrow_type_texts(data)
+    assert all("extension<" in text for text in texts.values())
+    assert arrow_schema_from_texts(texts, _converter(), ["x", "w"]) == stored
+
+
+@pytest.mark.parametrize(("container", "identifier"), NESTED_CASES)
+class TestNestedIdentifier:
+    def _source(self, table: pa.Table) -> ArrowTableSource:
+        return ArrowTableSource(
+            table, tag_columns=["k", "g"], tag_only_columns=True, source_id="nested"
+        )
+
+    @pytest.mark.parametrize("live", [False, True], ids=["storage child", "live child"])
+    def test_an_arrow_declared_slot_is_the_source_and_its_stream_slot(
+        self, container: str, identifier: str, live: bool
+    ) -> None:
+        tags, data, table = _nested(container, identifier, live=live)
+        source = self._source(table)
+        declared = SourceNode(name="src", tag_schema=tags, data_schema=data)
+        from_stream = SourceNode.from_stream(source, name="src")
+        # One Python schema, one Arrow schema, one pipeline hash (coordinator's
+        # condition on the declaration form, PR 454).
+        assert declared.pipeline_hash() == from_stream.pipeline_hash()
+        assert declared.pipeline_hash() == source.pipeline_hash()
+        assert declared.output_schema() == from_stream.output_schema()
+        assert declared.output_schema() == source.output_schema()
+        assert typed_arrow_schemas(declared) == typed_arrow_schemas(from_stream)
+        assert typed_arrow_schemas(declared) == typed_arrow_schemas(source)
+        for tags_or_data in typed_arrow_schemas(declared):
+            assert tags_or_data.empty_table().num_rows == 0
+
+    def test_the_identifier_is_part_of_the_hash(
+        self, container: str, identifier: str
+    ) -> None:
+        tags, data, table = _nested(container, identifier)
+        plain = table.cast(
+            pa.schema(
+                [
+                    pa.field(f.name, _without_identifiers(f.type), f.nullable)
+                    for f in table.schema
+                ]
+            )
+        )
+        assert (
+            self._source(plain).pipeline_hash() != self._source(table).pipeline_hash()
+        )
+
+    @pytest.mark.parametrize("live", [False, True], ids=["storage child", "live child"])
+    def test_the_saved_text_reads_back_typed_and_hashed(
+        self, container: str, identifier: str, live: bool
+    ) -> None:
+        _, data, table = _nested(container, identifier, live=live)
+        texts = arrow_type_texts(data)
+        assert all("extension<" in text for text in texts.values())
+        assert texts == arrow_type_texts(_data_schema(table.schema))
+        restored = arrow_schema_from_texts(texts, _converter(), ["x", "w"])
+        assert restored.empty_table().num_rows == 0
+        assert restored == _data_schema(table.schema)
+        assert _hasher().hash_schema(restored) == _hasher().hash_schema(data)
+        source_types = self._source(table).output_schema()[1]
+        restored_types = _converter().arrow_schema_to_python_schema(restored)
+        assert dict(restored_types) == dict(source_types)
+
+    def test_a_saved_slot_loads_and_binds(
+        self, container: str, identifier: str, tmp_path: Path
+    ) -> None:
+        tags, data, table = _nested(container, identifier)
+        source = self._source(table)
+        slots = {
+            "declared": SourceNode(name="src", tag_schema=tags, data_schema=data),
+            "from a stream": SourceNode.from_stream(source, name="src"),
+        }
+        for label, slot in slots.items():
+            pipeline = Pipeline(name="nested")
+            with pipeline:
+                MapData({"x": "z"})(slot, label="renamed")
+            path = tmp_path / f"{label}.json"
+            pipeline.save(path)
+            loaded = Pipeline.load(path)
+            assert (
+                loaded.nodes["renamed"].pipeline_hash()
+                == pipeline.nodes["renamed"].pipeline_hash()
+            ), label
+            loaded_slot = loaded.nodes["src"]
+            # After the load: the source's Python schema, Arrow schema and hash.
+            assert loaded_slot.pipeline_hash() == source.pipeline_hash(), label
+            assert loaded_slot.output_schema() == source.output_schema(), label
+            assert typed_arrow_schemas(loaded_slot) == typed_arrow_schemas(source)
+            for tags_or_data in typed_arrow_schemas(loaded_slot):
+                assert tags_or_data.empty_table().num_rows == 0, label
+        slot = slots["declared"]
+
+        job = PipelineJob(name="nested", database=InMemoryArrowDatabase())
+        with job:
+            MapData({"x": "z"})(slot, label="renamed")
+        job.bind(sources={"src": self._source(table)})
+        job.run()
+        assert job.nodes["renamed"].as_table().num_rows == 2
+
+
+def _without_identifiers(arrow_type: pa.DataType) -> pa.DataType:
+    """``arrow_type`` with every nested field's metadata removed."""
+    if pa.types.is_struct(arrow_type):
+        return pa.struct(
+            [
+                f.with_type(_without_identifiers(f.type)).remove_metadata()
+                for f in arrow_type
+            ]
+        )
+    if pa.types.is_large_list(arrow_type):
+        item = arrow_type.value_field
+        return pa.large_list(
+            item.with_type(_without_identifiers(item.type)).remove_metadata()
+        )
+    if pa.types.is_fixed_size_list(arrow_type):
+        item = arrow_type.value_field
+        return pa.list_(
+            item.with_type(_without_identifiers(item.type)).remove_metadata(),
+            arrow_type.list_size,
+        )
+    if pa.types.is_map(arrow_type):
+        return pa.map_(
+            arrow_type.key_field.remove_metadata(),  # pyright: ignore[reportArgumentType]  # pyarrow takes fields; the stubs name only types
+            arrow_type.item_field.remove_metadata(),  # pyright: ignore[reportArgumentType]  # as above
+        )
+    return arrow_type

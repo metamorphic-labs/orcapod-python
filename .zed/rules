@@ -1098,6 +1098,18 @@ types are in no schema hash.
   encoding and field metadata other than ARROW:extension:*; it tells apart width, sign,
   nullability at every depth, timestamp unit and zone, decimal precision, date types,
   fixed-size against plain lists, struct fields, and a logical type's whole identifier.
+- hash_schema hashes the DECLARED schema (developer, November 21, 2026, ITL-640, option
+  (a)): every logical type, live, in metadata (IPC) form or unregistered in the process, is
+  first brought to its storage form, its storage type with its identifier as
+  ARROW:extension:* field metadata, at any depth (canonical_form.storage_form_schema,
+  applied by hash_schema itself). No value-handler rewrite, no registry lookup: the
+  identifier pins how the values are hashed. hash_table is unchanged and a separate
+  procedure; never rely on hash_schema(t.schema) being the schema inside hash_table(t).
+  The saved-schema writer writes the storage form; an Arrow declaration and a saved schema
+  read back take declaration_form_schema: a top-level logical type live, a nested one
+  (inside a plain list, struct or map) always in the storage form, never a nested live
+  extension type (Arrow cannot build an empty table of one). The tests enumerate every
+  registered logical type from the converter (test_schema_hash_storage_form.py).
 
 ### Arrow types
 

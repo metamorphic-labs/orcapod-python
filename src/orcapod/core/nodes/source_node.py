@@ -39,7 +39,7 @@ from orcapod.core.streams.base import (
     check_head_size,
 )
 from orcapod.errors import SourceSpecMismatchError, UnboundSourceError
-from orcapod.logical_types.canonical_form import canonical_logical_schema
+from orcapod.logical_types.canonical_form import declaration_form_schema
 from orcapod.logical_types.user_class_identity import equivalent_hints
 from orcapod.system_constants import constants
 from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
@@ -482,8 +482,8 @@ class SourceNodeBase(TraceableBase, ABC):
             converter = self.data_context.type_converter
             # Logical types in one form first: a field declared with its identifier
             # in ARROW:extension:* metadata is that logical type (ITL-640).
-            tag_schema = canonical_logical_schema(tag_schema, converter)
-            data_schema = canonical_logical_schema(data_schema, converter)
+            tag_schema = declaration_form_schema(tag_schema, converter)
+            data_schema = declaration_form_schema(data_schema, converter)
             arrow_schemas = (tag_schema, data_schema)
             tag_schema = Schema(converter.arrow_schema_to_python_schema(tag_schema))
             data_schema = Schema(converter.arrow_schema_to_python_schema(data_schema))

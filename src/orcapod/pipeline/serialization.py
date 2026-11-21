@@ -10,6 +10,11 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, cast
 
 from orcapod.types import Schema
+from orcapod.logical_types.canonical_form import (
+    declaration_form_field,
+    declaration_form_schema,
+    storage_form_schema,
+)
 from orcapod.logical_types.identifier import (
     LogicalTypeIdentifier,
     LogicalTypeIdentifierError,
@@ -792,12 +797,16 @@ def _python_type_of_saved_column(
 ) -> Any:
     """Return the Python type of a saved column: its Arrow type, ``T | None`` if nullable.
 
-    Goes through ``arrow_schema_to_python_schema``, the converter's own rule for a
-    field's nullability, so a restored type hashes as the running node's does.
+    The field is first brought to the declaration form (``declaration_form_field``:
+    a nested logical type in the storage form, never a nested live extension type),
+    then goes through ``arrow_schema_to_python_schema``, the converter's own rule for
+    a field's nullability, so a restored type hashes as the running node's does.
     """
     import pyarrow as pa
 
-    field = pa.field(name, arrow_type, nullable=nullable)
+    field = declaration_form_field(
+        pa.field(name, arrow_type, nullable=nullable), type_converter
+    )
     return type_converter.arrow_schema_to_python_schema(pa.schema([field]))[name]
 
 
@@ -870,10 +879,13 @@ def deserialize_schema(
 def arrow_type_texts(schema: "pa.Schema") -> dict[str, str]:
     """Return the saved type strings of an Arrow schema, its own types (ITL-640).
 
-    The text of each field's own Arrow type (``_serialize_arrow_type``: nested
+    The text of each field's own Arrow type (``_serialize_field_type``: nested
     nullability, units, zones, widths and logical type identifiers), never a type
-    re-derived from a Python type. Top-level nullability is saved apart
-    (``arrow_nullable_names``).
+    re-derived from a Python type. The schema is first brought to the storage form
+    (``storage_form_schema``, the walker ``hash_schema`` applies), so a logical type
+    is written as its identifier, ``extension<name;hex-metadata>``, whether it came
+    live, in metadata form or nested in a list, struct or map. Top-level nullability
+    is saved apart (``arrow_nullable_names``).
 
     Args:
         schema: The Arrow schema.
@@ -881,7 +893,10 @@ def arrow_type_texts(schema: "pa.Schema") -> dict[str, str]:
     Returns:
         A dict mapping field names to Arrow type strings, in the schema's order.
     """
-    return {field.name: _serialize_field_type(field) for field in schema}
+    return {
+        field.name: _serialize_field_type(field)
+        for field in storage_form_schema(schema)
+    }
 
 
 def arrow_nullable_names(schema: "pa.Schema") -> list[str]:
@@ -926,6 +941,11 @@ def arrow_schema_from_texts(
 ) -> "pa.Schema":
     """Rebuild the Arrow schema saved by ``arrow_type_texts`` (ITL-640).
 
+    The rebuilt schema is in the declaration form (``declaration_form_schema``): a
+    logical type at the top of a column is the live type, one inside a list, struct
+    or map is its storage type with its identifier as field metadata, as a schema
+    declared in Arrow is.
+
     Args:
         schema_dict: The saved type strings.
         type_converter: The saved node's converter, for logical type identifiers.
@@ -954,7 +974,7 @@ def arrow_schema_from_texts(
                 name, arrow_type, nullable=nullable is not None and name in nullable
             )
         )
-    return pa.schema(fields)
+    return declaration_form_schema(pa.schema(fields), type_converter)
 
 
 def serialize_output_schema(

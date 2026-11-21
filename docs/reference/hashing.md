@@ -1617,12 +1617,40 @@ converter's schema of them, one Arrow type per Python type; a declaration given 
 | field metadata and schema metadata, except a logical type's `ARROW:extension:*` keys | `fixed_size_list` against `list`; the fields of a struct |
 | | a logical type's whole identifier: extension name and metadata (built-in version, a library type's ignore list, a user class's identity record, a native container `list[T]` / `set[T]`), and a logical type against its storage type |
 
-Each field is hashed under the rule of `hash_table`: a logical type whose columns are hashed
-through a value handler (`File`, `Directory`, `numpy.ndarray`, torch, the pandas and Polars
-types, and `list` or `set` of them) is hashed as a `large_binary` field that carries the
-type's identifier, so its storage type is not part of the hash; a logical type whose stored
-form is its identity (`Path`, `uuid.UUID`, dataclasses and other user classes) is hashed as
-its storage type with the identifier.
+The schema hash is the hash of the declared schema (developer decision, November 21, 2026,
+ITL-640, option (a)). Every logical type, in whatever form it arrives, is first brought to
+one form, its **storage form**: its storage type with its identifier as the
+`ARROW:extension:name` and `ARROW:extension:metadata` field metadata, at any depth (list,
+large list and fixed-size list items, struct children, map keys and items;
+`logical_types.canonical_form.storage_form_schema`). So one logical type has one schema
+hash whether it is a live `pa.ExtensionType`, in the metadata form of a table read back from
+a store or passed through `normalize_extension_columns`, or in a process where pyarrow has
+not registered it. Nothing is looked up and no value handler rewrites a field: the identifier
+pins how the type's values are hashed, so the storage type plus the identifier is enough. This
+holds for every logical type alike, whether its values are hashed by a value handler (`File`,
+`Directory`, `numpy.ndarray`, torch, the pandas and Polars types) or as stored (`Path`,
+`uuid.UUID`, user classes, native containers).
+
+The table hash (§9) is a separate procedure: there a value-hashed type's cells become their
+value hashes in a `large_binary` column that keeps the identifier. So
+`hash_schema(table.schema)` is not the schema inside `hash_table(table)` (it was, under the
+rule before option (a), ITL-981), and nothing may rely on it.
+
+The same walker gives the form of every other place a schema is compared or saved:
+
+- the comparisons of a bind, a polled batch and a stored read (below) compare `hash_schema`
+  of one field each, so they see the storage form;
+- the saved-schema writer (`pipeline.serialization.arrow_type_texts`) writes the storage
+  form, a logical type as `extension<name;hex-metadata>` at any depth;
+- a schema declared in Arrow (a slot's `pa.Schema`, a `PollingSource` implementation's
+  `impl.schema()`) and a saved schema read back (`arrow_schema_from_texts`) take the
+  **declaration form** (`declaration_form_schema`): the storage form, except that a logical
+  type at the top of a column becomes the live type, which is what a source holds and what
+  gives the column its Python type. Arrow cannot build an empty table with an extension type
+  inside a list, struct or map, so an identifier nested in a plain container is never made
+  live: it stays in the storage form, and the slot, a source of the same table and the
+  slot made from that source have one Python schema, one Arrow schema and one pipeline
+  hash.
 
 What a schema must therefore agree on to be one identity:
 

@@ -32,6 +32,11 @@ stores it, hashes it and compares it byte for byte.
 
 - **Stored with the column.** The name and metadata are written as the column's
   `ARROW:extension:name` and `ARROW:extension:metadata`, in memory and in every store.
+- **One identifier in every form.** A field carries it either as a live Arrow extension
+  type or as its storage type with those two metadata keys (a table read back from a store,
+  or read by a process that has not registered the type). The schema hash brings both to
+  the second form first, so a type has one schema hash however it arrives
+  ([hashing reference](../reference/hashing.md#the-arrow-schema-hash)).
 - **Part of the data type, so part of every hash the type takes part in.** The whole
   identifier enters the type hash, the schema hash (a schema is hashed as its Arrow schema,
   whose extension name and metadata are the identifier), the identity of a function whose

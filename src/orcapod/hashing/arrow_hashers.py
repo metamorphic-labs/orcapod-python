@@ -11,6 +11,7 @@ from orcapod.hashing.schema_cleaner import (
     has_extension_type,
 )
 from orcapod.hashing.visitors import SemanticHashingVisitor
+from orcapod.logical_types.canonical_form import storage_form_schema
 from orcapod.utils.arrow_utils import normalize_extension_columns
 from orcapod.types import ContentHash
 
@@ -42,12 +43,13 @@ value hashes built on it (pandas ``DataFrame`` and ``Series``).
 ARROW_SCHEMA_HASH_LABEL = "arrow_schema_v1"
 """``ContentHash.method`` of ``StarfixArrowHasher.hash_schema``: the single definition.
 
-A schema digest is a procedure of its own, not a table digest: the fields as
-``hash_table`` hashes them (``SemanticHashingVisitor.hashed_field``), then the starfix
-schema digest, which ignores column order and the large and non-large variants and
-tells apart every type, width, unit, zone, nullability at every depth and logical type
-identifier (ITL-640). Every schema that enters an identity is hashed by this procedure,
-so it has its own label (ITL-1154).
+A schema digest is a procedure of its own, not a table digest: the declared schema with
+every logical type in the storage form (``storage_form_schema``: its storage type with
+its identifier as field metadata, at any depth), then the starfix schema digest, which
+ignores column order and the large and non-large variants and tells apart every type,
+width, unit, zone, nullability at every depth and logical type identifier (ITL-640).
+Every schema that enters an identity is hashed by this procedure, so it has its own
+label (ITL-1154).
 """
 
 
@@ -183,21 +185,22 @@ class StarfixArrowHasher:
         ``ARROW_SCHEMA_HASH_LABEL``. Schema metadata and field metadata other than a
         logical type's ``ARROW:extension:*`` keys are not part of the hash.
 
-        Each field is hashed under the same rule as in ``hash_table``
-        (``SemanticHashingVisitor.hashed_field``). A logical type whose values
-        are hashed by a value handler is a ``large_binary`` field carrying the
-        type's identifier (extension name and metadata), whatever its storage
-        type: how such a type is stored is not part of its identity. Any other
-        extension type is normalized to its storage type with the extension
-        identity in field metadata, because its stored values are what is
-        hashed.
+        It hashes the DECLARED schema (developer, November 21, 2026, ITL-640, option
+        (a)): every extension type, in whatever form it arrives (a live
+        ``pa.ExtensionType``, the metadata or IPC form of a table read back from a
+        store, a type this process has not registered), is brought to one form, its
+        storage type with its identifier (``ARROW:extension:name`` and
+        ``ARROW:extension:metadata``) as field metadata, recursively inside lists,
+        large lists, fixed-size lists, structs and maps
+        (``logical_types.canonical_form.storage_form_schema``), and then hashed. There
+        is no value-handler rewrite and no registry lookup: the identifier pins how
+        the type's values are hashed, so the storage type plus the identifier is
+        enough. ``hash_table`` is a separate procedure (``arrow_v1``): there a
+        value-hashed type's cells become their value hashes in a ``large_binary``
+        column that keeps the identifier, so ``hash_schema(table.schema)`` is not the
+        schema inside ``hash_table(table)``, and nothing may rely on it.
         """
-        visitor = SemanticHashingVisitor(self._type_converter, self._semantic_hasher)
-        hashed = pa.schema([visitor.hashed_field(field) for field in schema])
-        if schema.metadata is not None:
-            hashed = hashed.with_metadata(dict(schema.metadata))
-        schema = hashed
-        schema = normalize_extension_columns(schema.empty_table()).schema
+        schema = storage_form_schema(schema)
         include_meta = has_extension_metadata(schema) or has_extension_type(schema)
         if include_meta:
             schema = clean_schema_for_hashing(schema)
