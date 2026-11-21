@@ -180,6 +180,24 @@ if the file has an empty cell in it. Pass an Arrow `schema=` to choose the types
 fields name the file's columns in the file's order, each with its type, width and
 nullability. The source then has exactly those types (in their large variants, as above).
 
+Each cell's text is read as its column's declared type, never as an inferred type converted
+afterwards: `007` under a string type stays `"007"`, `1e3` stays `"1e3"`, and `1.005` under
+`decimal128(10, 3)` is exactly `1.005`. A cell that is not a value of its declared type (`1.0`
+under an integer, a date and time under `date32`, `1.005` under two decimal places) raises
+`ValueError`, naming the column and the file. The schema names every column of the file, in
+the file's order. What reads as null:
+
+| Cell in the file | Under `string` / `large_string` | Under any other type |
+|---|---|---|
+| empty: `a,,b` | null | null |
+| quoted empty: `a,"",b` | `""` | null |
+| `NA`, `null`, `N/A`, `NaN` | the text as written | null |
+| any other text | the text as written, spaces included | parsed as the type, or raises |
+
+A null in a field declared non-nullable raises. `float16` and `decimal256` (which pyarrow's
+CSV reader does not parse) are read as text and converted with a checked conversion; a list,
+struct or other nested type cannot be read from a CSV cell and raises.
+
 The schema is part of the source's configuration: `to_config()` saves it, field by field
 (Arrow type text, nested fields included, and which fields may be null), and `from_config()`
 and a saved job (`PipelineJob.save` / `PipelineJob.load`) read the file with it again, so the
