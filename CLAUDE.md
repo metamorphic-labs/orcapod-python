@@ -524,7 +524,7 @@ Orcapod stores or embeds in a name is pinned in the golden folder of the current
   provisional or frozen). The list (developer, November 19, 2026, ITL-1279: "anything whose
   identity choice isn't obvious and feels solid should be put into provisional first"):
   `PolarsFilter`, `GroupBy`, `TagBy`, `AddTags`, `MergeJoin`, `MapTags`, `MapColumns`,
-  `Pick`, `Index`, `Batch`. Frozen: `Join`, `SemiJoin`, `MapData`, the Select/Drop column
+  `Pick`, `Index`, `Batch`, and `Rejoin` (ITL-1336). Frozen: `Join`, `SemiJoin`, `MapData`, the Select/Drop column
   operators, `DropNulls`. An operator joins the group only while no release has frozen its
   values, and leaves it when its identity is decided (before or at a release), never the other
   way after a release. Building one (directly, through a stream method, or by loading a saved
@@ -1455,6 +1455,16 @@ data. The rules:
 - `DerivedSource` over a job node with nothing stored → presents zero rows with the origin's columns
   (no computed records; no error), in the plain form and with `tags_as_data`.
 - Join requires non-overlapping data columns; raises `InputValidationError` on collision.
+- `Rejoin` (provisional, developer, November 21, 2026, ITL-1336) is the operator a diamond
+  (one stream split into branches, then put back together) is expected to use; `Join` is
+  unchanged and still extends every input's system-tag names. Rejoin matches EVERY system-tag
+  column and keeps those columns unchanged (a result row has its origin row's provenance):
+  every input that states its system-tag columns states the same ones (a branch through
+  `Join`, `GroupBy` or `Batch` is refused); an input that states none is checked on its table
+  when computed. At most one row per origin row in each input (a first rule, refused naming the
+  input and the values); a null system-tag value is refused; a shared user tag must agree on
+  matched rows bit for bit (so the result never follows argument order); data columns
+  disjoint; N-ary and commutative; identity `"Rejoin"`; async is the barrier.
 - `Join` and `SemiJoin` give Polars only their key columns and row numbers (ITL-1284): Polars
   decides which rows match, and every output column is taken from the input tables by row
   number (`take`), so every value is the input's, bit for bit (they used to carry every column

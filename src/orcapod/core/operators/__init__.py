@@ -17,11 +17,13 @@ from .mappers import MapColumns, MapData, MapTags
 from .merge_join import MergeJoin
 from .pick import Pick
 from .provisional import PROVISIONAL_OPERATORS
+from .rejoin import Rejoin
 from .semijoin import SemiJoin
 from .tag_by import TagBy
 
 __all__ = [
     "Join",
+    "Rejoin",
     "MergeJoin",
     "SemiJoin",
     "MapTags",

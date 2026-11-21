@@ -336,6 +336,27 @@ class StreamBase(TraceableBase):
 
         return Join()(self, other_stream, label=label)
 
+    def rejoin(
+        self, *other_streams: StreamProtocol, label: str | None = None
+    ) -> StreamBase:
+        """Put this stream back together with other branches of one stream.
+
+        Pairs the rows that come from the same origin row, by matching every system-tag
+        column, and keeps those columns unchanged (``Rejoin``, provisional). For a
+        diamond (one stream split into branches, then put back together); to combine
+        different rows on their tags, use ``join``.
+
+        Args:
+            *other_streams: The other branches, one or more.
+            label: The result's label.
+
+        Returns:
+            The rejoined stream.
+        """
+        from orcapod.core.operators import Rejoin
+
+        return Rejoin()(self, *other_streams, label=label)
+
     def semi_join(
         self,
         other_stream: StreamProtocol,

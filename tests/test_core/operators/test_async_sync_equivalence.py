@@ -43,6 +43,7 @@ from orcapod.core.operators import (
     MapData,
     MapTags,
     MergeJoin,
+    Rejoin,
     Pick,
     PolarsFilter,
     SelectColumns,
@@ -441,7 +442,36 @@ class Case:
     make_sources: Callable[[], tuple[StreamProtocol, ...]]
 
 
+def _branches(
+    source: ArrowTableSource, *data: Sequence[str]
+) -> tuple[StreamProtocol, ...]:
+    """Branches of one source (ITL-1336): each keeps the source's data-tags and the named
+    data columns."""
+    tags, columns = source.keys()
+    data_tags = [name for name in columns if name in tags]
+    return tuple(source.select_data_columns([*data_tags, *names]) for names in data)
+
+
 CASES = [
+    # Rejoin: the branches of one source put back together (ITL-1336), over many narrow
+    # types, with plain tags and with data-tags, two and three inputs.
+    Case(
+        "rejoin_2",
+        Rejoin,
+        lambda: _branches(source_a(), ("i8", "s", "bn"), ("st", "p", "l8", "d", "nul")),
+    ),
+    Case(
+        "rejoin_3_data_tags",
+        Rejoin,
+        lambda: _branches(
+            source_a(with_data_tags=True), ("nul", "s"), ("i8", "p"), ("st", "l8")
+        ),
+    ),
+    Case(
+        "rejoin_two_tags",
+        Rejoin,
+        lambda: _branches(source_two(), ("a",), ()),
+    ),
     Case("join_2", Join, lambda: (source_a(), source_b())),
     Case("join_2_reversed", Join, lambda: (source_b(), source_a())),
     Case("join_3", Join, lambda: (source_a(), source_b(), source_c())),
