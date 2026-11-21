@@ -323,7 +323,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
             FALL_THROUGH_TAGS_KEY,
             SUPPORTED_FORMAT_VERSIONS,
             check_saved_output_schema_is_plain,
-            saved_type_texts_at_version,
+            pipeline_type_texts_at_version,
             arrow_schema_from_texts,
             deserialize_schema,
             saved_fall_through_tags,
@@ -344,7 +344,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
             )
         # Type texts of an earlier format are read in the 0.4.0 grammar from here on,
         # each name as the earlier reader read it (ITL-640).
-        data = saved_type_texts_at_version(data, version)
+        data = pipeline_type_texts_at_version(data, version)
 
         pipeline_meta = data["pipeline"]
         name = tuple(pipeline_meta["name"])

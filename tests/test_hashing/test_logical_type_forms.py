@@ -51,7 +51,9 @@ from orcapod.pipeline import (
 from orcapod.pipeline.serialization import (
     arrow_schema_from_texts,
     arrow_type_texts,
-    saved_type_texts_at_version,
+    job_type_texts_at_version,
+    pipeline_type_texts_at_version,
+    type_text_at_version,
 )
 from orcapod.types import Cursor
 from orcapod.utils.arrow_utils import normalize_extension_columns
@@ -1007,64 +1009,107 @@ def test_older_type_text_reads_as_the_earlier_reader_read_it(
     name: str, version: str
 ) -> None:
     for kind, (text, expected) in _old_texts(OLD_NAMES[name]).items():
-        saved = {"tag_schema": {"c": text}}
-        rewritten = saved_type_texts_at_version(saved, version)
-        restored = arrow_schema_from_texts(rewritten["tag_schema"], _converter(), ["c"])
+        rewritten = {"c": type_text_at_version(text, version)}
+        restored = arrow_schema_from_texts(rewritten, _converter(), ["c"])
         assert _named(restored.field("c").type) == _named(expected), kind
 
 
 def test_the_format_version_decides_how_a_text_is_read() -> None:
     """One text, two meanings: the file's version says which, never a guess."""
-    saved = {"tag_schema": {"c": 'struct<"x": int8>'}}
     names = {}
     for version in ("0.3.0", "0.4.0"):
-        texts = saved_type_texts_at_version(saved, version)["tag_schema"]
+        texts = {"c": type_text_at_version('struct<"x": int8>', version)}
         names[version] = arrow_schema_from_texts(texts, _converter(), ["c"]).field("c")
     assert names["0.3.0"].type.field(0).name == '"x"'
     assert names["0.4.0"].type.field(0).name == "x"
 
 
-def test_every_type_text_of_an_older_file_is_rewritten() -> None:
-    """Node output schemas, slot and source configs, a CSV schema, at any depth;
-    nothing else."""
+def test_only_the_known_places_of_an_older_file_are_rewritten() -> None:
+    """Node output schemas, slot and source schemas, a CSV schema, nested sources along
+    inner_source and origin; a PollingSource's impl_config, an operator's config and
+    any other value pass through byte for byte (sixth Codex review of PR 454)."""
     old = 'struct<"x": int8>'
     new = 'struct<"\\"x\\"": int8>'
-    saved: dict[str, Any] = {
+    opaque = {
+        "data_schema": {"request": old},
+        "tag_schema": {"r": old},
+        "output_schema": {"tag": {"t": old}},
+        "schema": {"columns": {"c": old}},
+        "deeper": [{"data_schema": {"q": old}}],
+    }
+    polling = {
+        "source_type": "polling_source",
+        "impl_module": "user.module",
+        "impl_class": "Impl",
+        "impl_config": opaque,
+    }
+    csv = {
+        "source_type": "csv",
+        "tag_schema": {"t": old},
+        "data_schema": {"d": old},
+        "schema": {"columns": {"c": old}, "nullable": []},
+        "description": old,
+    }
+    pipeline: dict[str, Any] = {
+        "orcapod_pipeline_version": "0.3.0",
         "nodes": {
-            "n": {
+            "slot": {
                 "output_schema": {
                     "tag": {"t": old},
                     "data": {"d": old},
                     "nullable": {},
                 },
-                "source_config": {"tag_schema": {"t": old}, "data_schema": {"d": old}},
-            }
+                "source_config": {
+                    "source_type": "node",
+                    "tag_schema": {"t": old},
+                    "data_schema": {"d": old},
+                },
+            },
+            "op": {
+                "output_schema": {"tag": {"t": old}, "data": {"d": old}},
+                "config": opaque,
+            },
         },
+    }
+    job: dict[str, Any] = {
+        "orcapod_pipeline_job_version": "0.3.0",
+        "pipeline": pipeline,
         "bindings": {
             "sources": {
-                "s": {
-                    "source": {"schema": {"columns": {"c": old}, "nullable": []}},
-                    "description": old,
-                }
+                "a": {
+                    "source_type": "cached",
+                    "inner_source": {"source_type": "derived", "origin": csv},
+                },
+                "b": polling,
+                "c": {"source_type": "delta_table", "schema": {"columns": {"c": old}}},
             }
         },
     }
-    rewritten = saved_type_texts_at_version(saved, "0.3.0")
-    node = rewritten["nodes"]["n"]
-    assert node["output_schema"] == {
-        "tag": {"t": new},
-        "data": {"d": new},
-        "nullable": {},
-    }
-    assert node["source_config"] == {
-        "tag_schema": {"t": new},
-        "data_schema": {"d": new},
-    }
-    source = rewritten["bindings"]["sources"]["s"]
-    assert source["source"]["schema"]["columns"] == {"c": new}
-    assert source["description"] == old  # not a type text
-    assert saved["nodes"]["n"]["output_schema"]["tag"]["t"] == old  # not changed
-    assert saved_type_texts_at_version(saved, "0.4.0") is saved
+    before = json.dumps(job, sort_keys=True)
+    rewritten = pipeline_type_texts_at_version(pipeline, "0.3.0")
+    slot, op = rewritten["nodes"]["slot"], rewritten["nodes"]["op"]
+    assert slot["output_schema"]["tag"] == {"t": new}
+    assert slot["output_schema"]["data"] == {"d": new}
+    assert slot["source_config"]["tag_schema"] == {"t": new}
+    assert op["output_schema"]["tag"] == {"t": new}
+    assert json.dumps(op["config"], sort_keys=True) == json.dumps(
+        opaque, sort_keys=True
+    )
+    sources = job_type_texts_at_version(job, "0.3.0")["bindings"]["sources"]
+    origin = sources["a"]["inner_source"]["origin"]
+    assert origin["tag_schema"] == {"t": new}
+    assert origin["data_schema"] == {"d": new}
+    assert origin["schema"]["columns"] == {"c": new}
+    assert origin["description"] == old
+    assert json.dumps(sources["b"], sort_keys=True) == json.dumps(
+        polling, sort_keys=True
+    )
+    assert sources["c"]["schema"]["columns"] == {"c": old}  # not a CSV source
+    # The embedded pipeline is Pipeline.load's to rewrite, under its own version.
+    assert job_type_texts_at_version(job, "0.3.0")["pipeline"] is pipeline
+    assert json.dumps(job, sort_keys=True) == before  # nothing changed in place
+    assert pipeline_type_texts_at_version(pipeline, "0.4.0") is pipeline
+    assert job_type_texts_at_version(job, "0.4.0") is job
 
 
 def test_an_older_pipeline_file_loads_its_quoted_names_exactly(tmp_path: Path) -> None:

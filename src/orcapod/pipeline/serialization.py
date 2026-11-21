@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 #   0.4.0: a nested field name in saved type text that is not plain is JSON-quoted
 #          (ITL-640, ``_nested_field_name_text``). A file at an earlier version holds
 #          the unquoted grammar, where a quote is part of a name: a load rewrites its
-#          type texts in the 0.4.0 grammar first (``saved_type_texts_at_version``),
+#          type texts in the 0.4.0 grammar first (``type_text_at_version``),
 #          each name exactly as the earlier reader read it.
 # Plain tags are decided by this version, never by a missing key (ITL-1159, ITL-1019):
 # everything in a file at a ``PLAIN_TAG_FORMAT_VERSIONS`` version is plain, and such a
@@ -58,7 +58,7 @@ SUPPORTED_FORMAT_VERSIONS = frozenset({"0.1.0", "0.2.0", "0.3.0", "0.4.0"})
 PLAIN_TAG_FORMAT_VERSIONS = frozenset({"0.1.0", "0.2.0"})
 UNQUOTED_NAME_FORMAT_VERSIONS = frozenset({"0.1.0", "0.2.0", "0.3.0"})
 """The format versions (pipeline and job files alike) whose type text has unquoted
-nested field names (ITL-640): see ``saved_type_texts_at_version``."""
+nested field names (ITL-640): see ``type_text_at_version``."""
 
 # ---------------------------------------------------------------------------
 # LoadStatus
@@ -689,7 +689,7 @@ def _nested_field_name_text(name: str) -> str:
     ``"a:b"``, ``"a\\nb"``, ``""``, which the reader takes back exactly. This is
     the grammar of format 0.4.0; a file of an earlier format, where a quote is part of
     a name, is rewritten in it at load, each name as the earlier reader read it
-    (``saved_type_texts_at_version``), so the reader never guesses.
+    (``type_text_at_version``), so the reader never guesses.
     """
     return name if _PLAIN_FIELD_NAME.fullmatch(name) else _json.dumps(name)
 
@@ -1634,75 +1634,164 @@ def _old_grammar_field(text: str) -> str:
     return f"{_nested_field_name_text(name.strip())}: {_old_grammar_text(type_text)}{suffix}"
 
 
-def saved_type_texts_at_version(saved: Any, version: str) -> Any:
-    """Return a loaded file's content with its type texts in the 0.4.0 grammar (ITL-640).
+def type_text_at_version(text: str, version: str) -> str:
+    """Return one saved type text in the 0.4.0 grammar (ITL-640).
 
     A file at a ``UNQUOTED_NAME_FORMAT_VERSIONS`` version wrote nested field names
     unquoted, so a quote in its type text is part of a name, as the earlier reader read
-    it; the 0.4.0 grammar reads a quote as the start of a quoted name. So every type text
-    of such a file that holds a quote is rewritten first (``_old_grammar_text``): its
-    names exactly as the earlier reader took them, quoted where the 0.4.0 grammar needs
-    it. A text without a quote reads the same in both grammars and is kept. The type
-    texts are where the writers put them, at any depth: a node's ``output_schema``
-    (``tag``, ``data``), a source or slot config's ``tag_schema`` and ``data_schema``,
-    and a ``schema`` entry's ``columns`` (a ``CSVSource``'s). A file at 0.4.0 or later is
-    returned unchanged.
+    it; the 0.4.0 grammar reads a quote as the start of a quoted name. Such a text that
+    holds a quote is rewritten by its text (``_old_grammar_text``): its names exactly as
+    the earlier reader took them, quoted where the 0.4.0 grammar needs it. A text
+    without a quote reads the same in both grammars and is returned as it is, as is
+    every text of a file at 0.4.0 or later.
 
     Args:
-        saved: The loaded JSON content (a pipeline or a job file, or part of one).
+        text: A saved type text.
+        version: The format version of the file it was read from.
+
+    Returns:
+        The text in the 0.4.0 grammar.
+    """
+    if version not in UNQUOTED_NAME_FORMAT_VERSIONS or '"' not in text:
+        return text
+    token = _QUOTED_NAMES.set(False)
+    try:
+        return _old_grammar_text(text)
+    finally:
+        _QUOTED_NAMES.reset(token)
+
+
+# The built-in source kinds that keep a schema of their own in their saved config, and
+# where its type texts are: a ``CSVSource``'s explicit ``schema`` (``columns``).
+SOURCE_CONFIG_SCHEMA_TEXTS: dict[str, tuple[str, str]] = {"csv": ("schema", "columns")}
+
+
+def _texts_at_version(mapping: Any, version: str) -> Any:
+    """A saved ``{column: type text}`` mapping in the 0.4.0 grammar."""
+    if not isinstance(mapping, dict):
+        return mapping
+    return {
+        key: type_text_at_version(value, version) if isinstance(value, str) else value
+        for key, value in cast("dict[str, Any]", mapping).items()
+    }
+
+
+def source_config_type_texts_at_version(config: Any, version: str) -> Any:
+    """Return a saved source config with its type texts in the 0.4.0 grammar (ITL-640).
+
+    Only the places Orcapod writes type texts in a source config are rewritten
+    (``type_text_at_version``): its own ``tag_schema`` and ``data_schema``
+    (``RootSource._identity_config``, a slot's config), the schema a built-in source
+    kind keeps (``SOURCE_CONFIG_SCHEMA_TEXTS``: a ``CSVSource``'s ``schema.columns``),
+    and the source configs nested along ``NESTED_SOURCE_CONFIG_KEYS`` (a cached
+    source's ``inner_source``, a derived source's ``origin``). Every other value is
+    passed through as it is: an implementation's own config (a ``PollingSource``'s
+    ``impl_config``), a filter, anything whose owner is not Orcapod, whatever its keys
+    (sixth Codex review of PR 454).
+
+    Args:
+        config: A saved source config.
         version: The file's format version.
 
     Returns:
-        The content, rewritten where needed (a new object; ``saved`` is not changed).
+        The config (a copy when anything was rewritten; ``config`` is not changed).
+    """
+    if version not in UNQUOTED_NAME_FORMAT_VERSIONS or not isinstance(config, dict):
+        return config
+    out = dict(cast("dict[str, Any]", config))
+    for key in ("tag_schema", "data_schema"):
+        if key in out:
+            out[key] = _texts_at_version(out[key], version)
+    place = SOURCE_CONFIG_SCHEMA_TEXTS.get(out.get("source_type"))  # pyright: ignore[reportArgumentType]  # any saved value
+    if place is not None:
+        entry, texts = place
+        schema = out.get(entry)
+        if isinstance(schema, dict) and texts in schema:
+            schema = dict(cast("dict[str, Any]", schema))
+            schema[texts] = _texts_at_version(schema[texts], version)
+            out[entry] = schema
+    for key in NESTED_SOURCE_CONFIG_KEYS:
+        if key in out:
+            out[key] = source_config_type_texts_at_version(out[key], version)
+    return out
+
+
+def pipeline_type_texts_at_version(
+    saved: dict[str, Any], version: str
+) -> dict[str, Any]:
+    """Return a loaded pipeline file with its type texts in the 0.4.0 grammar (ITL-640).
+
+    The known places only: each node's ``output_schema`` (``tag``, ``data``) and its
+    ``source_config`` (``source_config_type_texts_at_version``). An operator's or a
+    function's config is passed through as it is.
+
+    Args:
+        saved: The loaded pipeline file.
+        version: Its format version.
+
+    Returns:
+        The file (a copy when anything was rewritten; ``saved`` is not changed).
     """
     if version not in UNQUOTED_NAME_FORMAT_VERSIONS:
         return saved
+    out = dict(saved)
+    nodes: dict[str, Any] = {}
+    for label, node in cast("dict[str, Any]", saved.get("nodes", {})).items():
+        if not isinstance(node, dict):
+            nodes[label] = node
+            continue
+        descriptor = dict(cast("dict[str, Any]", node))
+        output = descriptor.get("output_schema")
+        if isinstance(output, dict):
+            output = dict(cast("dict[str, Any]", output))
+            for role in ("tag", "data"):
+                if role in output:
+                    output[role] = _texts_at_version(output[role], version)
+            descriptor["output_schema"] = output
+        if "source_config" in descriptor:
+            descriptor["source_config"] = source_config_type_texts_at_version(
+                descriptor["source_config"], version
+            )
+        nodes[label] = descriptor
+    if "nodes" in saved:
+        out["nodes"] = nodes
+    return out
 
-    def texts(mapping: Any) -> Any:
-        if not isinstance(mapping, dict):
-            return mapping
-        return {
-            key: _old_grammar_text(value)
-            if isinstance(value, str) and '"' in value
-            else value
-            for key, value in cast("dict[str, Any]", mapping).items()
-        }
 
-    def walk(value: Any) -> Any:
-        if isinstance(value, list):
-            return [walk(item) for item in cast("list[Any]", value)]
-        if not isinstance(value, dict):
-            return value
-        out: dict[str, Any] = {}
-        for key, item in cast("dict[str, Any]", value).items():
-            if key == "output_schema" and isinstance(item, dict):
-                schema = dict(cast("dict[str, Any]", item))
-                for role in ("tag", "data"):
-                    if role in schema:
-                        schema[role] = texts(schema[role])
-                out[key] = schema
-            elif key in ("tag_schema", "data_schema"):
-                out[key] = texts(item)
-            elif key == "schema" and isinstance(item, dict) and "columns" in item:
-                schema = dict(cast("dict[str, Any]", item))
-                schema["columns"] = texts(schema["columns"])
-                out[key] = schema
-            else:
-                out[key] = walk(item)
-        return out
+def job_type_texts_at_version(saved: dict[str, Any], version: str) -> dict[str, Any]:
+    """Return a loaded job file with its bindings' type texts in the 0.4.0 grammar.
 
-    token = _QUOTED_NAMES.set(False)
-    try:
-        return walk(saved)
-    finally:
-        _QUOTED_NAMES.reset(token)
+    The known places only: each bound source's config under ``bindings.sources``
+    (``source_config_type_texts_at_version``). The embedded pipeline carries its own
+    version and is rewritten by ``Pipeline.load`` (``pipeline_type_texts_at_version``).
+
+    Args:
+        saved: The loaded job file.
+        version: Its format version.
+
+    Returns:
+        The file (a copy when anything was rewritten; ``saved`` is not changed).
+    """
+    if version not in UNQUOTED_NAME_FORMAT_VERSIONS:
+        return saved
+    bindings = saved.get("bindings")
+    if not isinstance(bindings, dict) or not isinstance(bindings.get("sources"), dict):
+        return saved
+    sources = {
+        slot: source_config_type_texts_at_version(config, version)
+        for slot, config in cast("dict[str, Any]", bindings["sources"]).items()
+    }
+    return {
+        **saved,
+        "bindings": {**cast("dict[str, Any]", bindings), "sources": sources},
+    }
 
 
 _QUOTED_NAMES: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
     "orcapod_saved_text_quoted_names", default=True
 )
 """Whether the type text being read uses the 0.4.0 grammar (quoted names). Only
-``saved_type_texts_at_version`` turns it off, while it reads text of an earlier
+``type_text_at_version`` turns it off, while it reads text of an earlier
 format, where a quote is part of a name."""
 
 
