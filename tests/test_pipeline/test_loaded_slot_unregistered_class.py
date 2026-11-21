@@ -438,10 +438,13 @@ _PRECISE_SCRIPT = textwrap.dedent(
     from orcapod.operators import MapData
     from orcapod.sources import ArrowTableSource
 
-    # Two layouts of one source: column order and declared tag order differ.
+    # Two layouts of one source (column order and declared tag order differ), and the
+    # source with both tags as data-tags (``t`` of the class, ``k`` an int16): plain
+    # tags as True, data-tags as () (ITL-1023-RT4).
     LAYOUTS = {
-        "a": (["t", "k", "p", "n", "m"], ["t", "k"]),
-        "b": (["m", "n", "p", "k", "t"], ["k", "t"]),
+        "a": (["t", "k", "p", "n", "m"], ["t", "k"], True),
+        "b": (["m", "n", "p", "k", "t"], ["k", "t"], True),
+        "datatags": (["t", "k", "p", "n", "m"], ["t", "k"], ()),
     }
 
 
@@ -459,9 +462,12 @@ _PRECISE_SCRIPT = textwrap.dedent(
         table = table.append_column("k", pa.array([7, 8], k_type))
         table = table.append_column("n", pa.array([1, 2], n_type))
         table = table.append_column("m", pa.array([3, 4], pa.int16()))
-        columns, tags = LAYOUTS[layout]
+        columns, tags, tag_only = LAYOUTS[layout]
         return ArrowTableSource(
-            table.select(columns), tag_columns=tags, tag_only_columns=True, source_id="s"
+            table.select(columns),
+            tag_columns=tags,
+            tag_only_columns=tag_only,
+            source_id="s",
         )
 
 
@@ -593,7 +599,7 @@ _PRECISE_SCRIPT = textwrap.dedent(
     """
 )
 
-_LAYOUT_NAMES = ["a", "b"]
+_LAYOUT_NAMES = ["a", "b", "datatags"]
 
 
 @pytest.fixture(params=_LAYOUT_NAMES)
@@ -626,7 +632,8 @@ _PRECISE_ARROW = sorted(
 
 
 def _assert_precise(arrow: list[str]) -> None:
-    assert [column for column in arrow if column[0] in "kmn"] == _PRECISE_ARROW
+    # A data-tag is in the tag and the data schema: each of its fields counts once here.
+    assert sorted({column for column in arrow if column[0] in "kmn"}) == _PRECISE_ARROW
 
 
 def test_the_saved_pipeline_hash_does_not_follow_the_layout(tmp_path: Path) -> None:
@@ -634,7 +641,7 @@ def test_the_saved_pipeline_hash_does_not_follow_the_layout(tmp_path: Path) -> N
     _ = (tmp_path / "classes.py").write_text(_CLASSES)
     _ = (tmp_path / "script.py").write_text(_PRECISE_SCRIPT)
     hashes = set()
-    for layout in _LAYOUT_NAMES:
+    for layout in ("a", "b"):
         work = tmp_path / layout
         work.mkdir()
         hashes.add(_run(tmp_path, "save", str(work), layout)["pipeline_hash"])
@@ -700,6 +707,9 @@ def test_a_loaded_slot_saved_again_keeps_its_precise_types(
             "int32",
             "int16",
         )
+        if layout == "datatags":
+            # Both tags are data-tags: in the tag and in the data group, one text each.
+            assert data_types["k"] == tags["k"] and data_types["t"] == tags["t"]
     assert slot["pipeline_hash"] == precise_job["pipeline_hash"]
     (renamed,) = [d for d in nodes.values() if d["label"] == "renamed"]
     assert renamed["output_schema"]["data"]["nn"] == "int32"

@@ -66,11 +66,6 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
     operator_node_class = OperatorNode
     side_effect_node_class = SideEffectNode
 
-    # The nodes (by hash key) of a pipeline loaded from a file whose descriptor did not
-    # record which columns may be null (ITL-1043), in the output schema and in the
-    # source config. Their schemas are lossy, so saving again must not record them.
-    _unrecorded_output_nullability: frozenset[str] = frozenset()
-    _unrecorded_source_nullability: frozenset[str] = frozenset()
     # The saved output schema of every node of a pipeline loaded from a file (by hash
     # key): a node whose Arrow types cannot be derived yet (below a slot whose class is
     # not registered) is saved again from it, never from its Python types (ITL-640).
@@ -233,11 +228,8 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                         "name": node.name,
                         "tag_schema": dict(saved["tag"]),
                         "data_schema": dict(saved["data"]),
+                        "nullable": copy.deepcopy(saved["nullable"]),
                     }
-                    if "nullable" in saved:
-                        descriptor["source_config"]["nullable"] = copy.deepcopy(
-                            saved["nullable"]
-                        )
                     descriptor["reconstructable"] = True
 
                 case FunctionNode():
@@ -252,11 +244,6 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                         descriptor["operator_config"] = node._operator.to_config()
                     descriptor["table_scope"] = node._table_scope
 
-            # A node loaded from a file without the record: its nullability is unknown.
-            if content_hash_str in self._unrecorded_output_nullability:
-                del descriptor["output_schema"]["nullable"]
-            if content_hash_str in self._unrecorded_source_nullability:
-                descriptor.get("source_config", {}).pop("nullable", None)
             nodes[content_hash_str] = descriptor
 
         output: dict[str, Any] = {
@@ -295,6 +282,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
             FALL_THROUGH_TAGS_KEY,
             PIPELINE_FORMAT_VERSION,
             require_current_format,
+            require_nullability_records,
             arrow_schema_from_texts,
             deserialize_schema,
             saved_fall_through_tags,
@@ -334,20 +322,6 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
             upstream_map.setdefault(down_hash, []).append(up_hash)
 
         reconstructed: dict[str, GraphNode] = {}
-        # A descriptor written before nullability was recorded (ITL-1043) restores
-        # every column as non-null: lossy. Saving the loaded pipeline keeps it
-        # unrecorded, node by node.
-        unrecorded_output_nullability = frozenset(
-            node_hash
-            for node_hash, descriptor in nodes_data.items()
-            if "nullable" not in (descriptor.get("output_schema") or {})
-        )
-        unrecorded_source_nullability = frozenset(
-            node_hash
-            for node_hash, descriptor in nodes_data.items()
-            if "source_config" in descriptor
-            and "nullable" not in descriptor["source_config"]
-        )
 
         for node_hash in topo_order:
             descriptor = nodes_data.get(node_hash)
@@ -360,8 +334,10 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                 deserialize_output_schema,
             )
 
-            # Every function node names its data-tags (ITL-1019).
+            # Every node records its nullability (ITL-1043), and every function node
+            # names its data-tags (ITL-1019).
             try:
+                require_nullability_records(descriptor)
                 if descriptor.get("node_type") == "function":
                     descriptor[FALL_THROUGH_TAGS_KEY] = list(
                         saved_fall_through_tags(descriptor)
@@ -401,36 +377,28 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                     )
                     if not node_name:
                         node_name = descriptor.get("label") or "unknown"
-                    # Which columns may be null; None when the file does not say.
-                    saved_nullable: dict[str, list[str]] | None
+                    # Which columns may be null: recorded (``require_nullability_records``).
+                    saved_nullable: dict[str, list[str]]
                     if "tag_schema" in source_config and "data_schema" in source_config:
                         saved_tag = source_config["tag_schema"]
                         saved_data = source_config["data_schema"]
-                        # A source node's output schema has the same columns: its
-                        # record stands in when the source config has none.
-                        saved_nullable = source_config.get(
-                            "nullable", descriptor["output_schema"].get("nullable")
-                        )
+                        saved_nullable = source_config["nullable"]
                     else:
                         saved_tag = descriptor["output_schema"]["tag"]
                         saved_data = descriptor["output_schema"]["data"]
-                        saved_nullable = descriptor["output_schema"].get("nullable")
+                        saved_nullable = descriptor["output_schema"]["nullable"]
                     tag_schema = Schema(
                         deserialize_schema(
                             saved_tag,
                             context.type_converter,
-                            nullable=None
-                            if saved_nullable is None
-                            else saved_nullable["tag"],
+                            nullable=saved_nullable["tag"],
                         )
                     )
                     data_schema = Schema(
                         deserialize_schema(
                             saved_data,
                             context.type_converter,
-                            nullable=None
-                            if saved_nullable is None
-                            else saved_nullable["data"],
+                            nullable=saved_nullable["data"],
                         )
                     )
                     saved_context = resolve_saved_context(
@@ -441,18 +409,12 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                     try:
                         arrow_schemas = (
                             arrow_schema_from_texts(
-                                saved_tag,
-                                context.type_converter,
-                                None
-                                if saved_nullable is None
-                                else saved_nullable["tag"],
+                                saved_tag, context.type_converter, saved_nullable["tag"]
                             ),
                             arrow_schema_from_texts(
                                 saved_data,
                                 context.type_converter,
-                                None
-                                if saved_nullable is None
-                                else saved_nullable["data"],
+                                saved_nullable["data"],
                             ),
                         )
                     except (ValueError, TypeError, KeyError):
@@ -583,8 +545,6 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
 
         # Build Pipeline instance
         pipeline = cls(name=name, auto_compile=False)
-        pipeline._unrecorded_output_nullability = unrecorded_output_nullability
-        pipeline._unrecorded_source_nullability = unrecorded_source_nullability
         pipeline._loaded_output_schemas = {
             node_hash: descriptor["output_schema"]
             for node_hash, descriptor in nodes_data.items()
@@ -673,8 +633,6 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         clone._node_graph = self._node_graph
         clone._auto_compile = self._auto_compile
         clone._compiled = self._compiled
-        clone._unrecorded_output_nullability = self._unrecorded_output_nullability
-        clone._unrecorded_source_nullability = self._unrecorded_source_nullability
         clone._loaded_output_schemas = self._loaded_output_schemas
         # Mutable per-execution state — own copy so runs don't interfere
         clone._nodes = dict(self._nodes)

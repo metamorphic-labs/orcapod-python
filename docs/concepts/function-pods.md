@@ -1086,14 +1086,10 @@ from that database, and no rows under that key is an empty result, not an error.
   had (a source node whose data was not saved gets its run's content hash once its source is
   bound). The file records which columns may be null (`T | None`), because the Arrow type text
   of a schema cannot say it, and the content hash of each node's run, which the stored rows
-  carry. Whether a file has these records is decided by the records themselves, not by the
-  file's format version: a file without them still loads, but lossy: its schemas read every column as non-null,
-  and a loaded operator node cannot name its run's rows. When the database holds none under the
-  content hash the loaded job computes, its stored view (`as_source()`, `get_all_records()`)
-  raises and says why, rather than presenting stored rows as none. An empty record is
-  not a missing one: it says that no column may be null. Saving such a loaded job again does
-  not record what its file did not. Upgrading such files is left to a migration tool after
-  v0.3.
+  carry. Every saved file has these records: a file without one is malformed, and loading it
+  raises and names the missing record, rather than reading every column as non-null or
+  guessing a run's content hash. An empty record is not a missing one: it says that no column
+  may be null.
 - Sources that read files, such as `CSVSource` and `DeltaTableSource`, are rebuilt from their
   paths. In-memory sources (`DictSource`, `ListSource`, `ArrowTableSource`,
   `DataFrameSource`) keep their data only in memory, so they are not saved; loading logs

@@ -216,28 +216,6 @@ def test_pipeline_load_restores_side_effect_nodes(
     assert sent == delivered_before
 
 
-def test_a_file_without_recorded_nullability_restores_side_effect_nodes(
-    saved: tuple[PipelineJob, list[int], pathlib.Path], tmp_path: pathlib.Path
-) -> None:
-    """A job file without the ``nullable`` records restores them too."""
-    _, _, path = saved
-    data = json.loads(path.read_text())
-    for descriptor in data["pipeline"]["nodes"].values():
-        del descriptor["output_schema"]["nullable"]
-        descriptor.get("source_config", {}).pop("nullable", None)
-    old = tmp_path / "unrecorded.json"
-    old.write_text(json.dumps(data))
-
-    loaded = PipelineJob.load(old)
-    assert set(loaded.nodes) == {"s", "delivered", "down", "tail"}
-    assert loaded.nodes["delivered"].keys() == (("k",), ("x",))
-    # Saving it again keeps the nullability unrecorded, as for every other node.
-    again = tmp_path / "again.json"
-    loaded.save(again)
-    for descriptor in _descriptors(again).values():
-        assert "nullable" not in descriptor["output_schema"]
-
-
 @pytest.mark.parametrize("orchestrator", ["sync", "async"])
 def test_a_load_only_run_passes_rows_through_and_delivers_nothing(
     saved: tuple[PipelineJob, list[int], pathlib.Path], orchestrator: str
@@ -310,25 +288,19 @@ def test_a_loaded_side_effect_node_keeps_the_content_hash_of_the_job_it_was_save
     assert {label: reloaded.nodes[label].content_hash() for label in live} == live
 
 
-def test_a_job_file_without_the_recorded_hash_restores_the_descriptor_hash(
+def test_a_job_file_without_a_side_effect_nodes_run_hash_is_refused(
     saved: tuple[PipelineJob, list[int], pathlib.Path], tmp_path: pathlib.Path
 ) -> None:
-    """A file saved before side-effect nodes' hashes were recorded still loads.
-
-    Such a node then has the hash its descriptor records, the blueprint's, as a
-    loaded function node without a recorded hash has.
-    """
+    """Every side-effect node records its run's content hash; a file without is refused."""
     _, _, path = saved
     data = json.loads(path.read_text())
     for label in SIDE_EFFECT_NODES:
         del data["run"]["node_job_content_hashes"][label]
-    older = tmp_path / "older.json"
-    older.write_text(json.dumps(data))
-    descriptors = _descriptors(older)
-    loaded = PipelineJob.load(older)
-    for label in SIDE_EFFECT_NODES:
-        node = loaded.nodes[label]
-        assert node.content_hash().to_string() == descriptors[label]["content_hash"]
+    malformed = tmp_path / "malformed.json"
+    malformed.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match="have no run content hash") as caught:
+        _ = PipelineJob.load(malformed)
+    assert f"saved nodes {sorted(SIDE_EFFECT_NODES)}" in str(caught.value)
 
 
 class _RunUris(NoOpObserver):

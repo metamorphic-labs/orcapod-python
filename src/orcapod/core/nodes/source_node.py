@@ -505,7 +505,7 @@ class SourceNodeBase(TraceableBase, ABC):
         pipeline_hash: str | None,
         content_hash: str | None,
         saved_types: Mapping[str, Mapping[str, str]],
-        nullable: Mapping[str, Collection[str]] | None,
+        nullable: Mapping[str, Collection[str]],
     ) -> None:
         """Keep what a saved job recorded for this slot (ITL-1138, ITL-640).
 
@@ -522,8 +522,7 @@ class SourceNodeBase(TraceableBase, ABC):
             pipeline_hash: The saved pipeline hash text, or ``None`` if not saved.
             content_hash: The saved content hash text, or ``None`` if not saved.
             saved_types: The saved type texts, ``{"tag": {...}, "data": {...}}``.
-            nullable: The saved nullable column names per role, or ``None`` when the
-                file does not record them.
+            nullable: The saved nullable column names per role.
         """
         if pipeline_hash is not None:
             self._saved_pipeline_hash = ContentHash.from_string(pipeline_hash)
@@ -536,9 +535,7 @@ class SourceNodeBase(TraceableBase, ABC):
             self._saved_arrow_texts = {
                 "tag": dict(saved_types.get("tag", {})),
                 "data": dict(saved_types.get("data", {})),
-                "nullable": None
-                if nullable is None
-                else {role: list(names) for role, names in nullable.items()},
+                "nullable": {role: list(names) for role, names in nullable.items()},
             }
 
     def _take_saved_state_of(self, other: "SourceNodeBase") -> None:
@@ -594,11 +591,10 @@ class SourceNodeBase(TraceableBase, ABC):
         )
 
         converter = self.data_context.type_converter
-        nullable = texts["nullable"]
         python: dict[str, dict[str, Any]] = {}
         arrow: list[pa.Schema] = []
         for role in ("tag", "data"):
-            names = None if nullable is None else nullable[role]
+            names = texts["nullable"][role]
             python[role] = deserialize_schema(texts[role], converter, nullable=names)
             if any(isinstance(value, str) for value in python[role].values()):
                 return False
@@ -633,9 +629,9 @@ class SourceNodeBase(TraceableBase, ABC):
         ``Pipeline.save`` as the slot's ``output_schema`` and its ``source_config``
         (and so by ``PipelineJob.save``, which embeds that pipeline). A resolved slot
         writes its own Arrow pair (``serialize_arrow_schemas``); an unresolved one its
-        saved Arrow type texts as loaded, every column (an ``int32`` stays ``int32``;
-        ``nullable`` only when the file recorded it), never a conversion of its Python
-        types (ITL-640; CodeRabbit on PR 454).
+        saved Arrow type texts and nullability as loaded, every column (an ``int32``
+        stays ``int32``), never a conversion of its Python types (ITL-640; CodeRabbit
+        on PR 454).
         """
         if self._resolve():
             from orcapod.pipeline.serialization import serialize_arrow_schemas
@@ -643,15 +639,13 @@ class SourceNodeBase(TraceableBase, ABC):
             return serialize_arrow_schemas(*self.arrow_schemas)
         texts = self._saved_arrow_texts
         assert texts is not None  # unresolved
-        saved: dict[str, Any] = {
+        return {
             "tag": dict(texts["tag"]),
             "data": dict(texts["data"]),
-        }
-        if texts["nullable"] is not None:
-            saved["nullable"] = {
+            "nullable": {
                 role: list(names) for role, names in texts["nullable"].items()
-            }
-        return saved
+            },
+        }
 
     def _bound_stream(self) -> "StreamProtocol | None":
         """The concrete stream bound to this slot; a declaration has none."""

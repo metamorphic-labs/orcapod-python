@@ -1525,11 +1525,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 node_job_content_hashes[node.label] = node.content_hash().to_string()
             elif isinstance(node, OperatorJobNode):
                 # An operator node's stored rows carry its run's content hash too
-                # (ITL-1043). A node loaded from a file without it cannot know it: its
-                # recomputed hash is not the run's, so it is left out, not guessed.
-                run_content_hash = node._run_content_hash()
-                if run_content_hash is not None:
-                    node_job_content_hashes[node.label] = run_content_hash.to_string()
+                # (ITL-1043); a loaded node has the one its file records.
+                node_job_content_hashes[node.label] = (
+                    node._run_content_hash().to_string()
+                )
             elif isinstance(node, SideEffectJobNode):
                 # Its descriptor holds the blueprint's hash; a loaded side-effect node
                 # takes the job's from here, as a function node does (ITL-1094).
@@ -1783,6 +1782,24 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         node_job_content_hashes: dict[str, str] = run_block.get(
             "node_job_content_hashes", {}
         )
+        # Every function, operator and side-effect node records its run's content hash
+        # (ITL-1043, ITL-1094): its stored rows carry it, and inputs rebuilt from the
+        # file cannot give it. A file without one is malformed and refused, never
+        # loaded with a guessed hash (developer, 2026-11-21: no backward compatibility
+        # for saved files).
+        unrecorded = sorted(
+            bp_node.label
+            for bp_node in pipeline._persistent_node_map.values()
+            if isinstance(bp_node, (_FunctionNode, _OperatorNode, SideEffectNode))
+            and bp_node.label not in node_job_content_hashes
+        )
+        if unrecorded:
+            raise ValueError(
+                f"{path}: saved nodes {unrecorded} have no run content hash "
+                "(run.node_job_content_hashes); a saved job records it for every "
+                "function, operator and side-effect node. Save the job again with this "
+                "version of Orcapod."
+            )
         # The optional, advisory section (ITL-1043): a node with an entry warns when
         # its database holds another number of rows. Without it nothing is checked. The
         # ITL-904 flag (node_has_stored_records) of older files is not used: the database

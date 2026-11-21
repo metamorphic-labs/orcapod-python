@@ -1740,6 +1740,34 @@ FALL_THROUGH_TAGS_KEY = "fall_through_tags"
 through (a list; empty for a plain pod)."""
 
 
+def require_nullability_records(descriptor: dict[str, Any]) -> None:
+    """Refuse a saved node descriptor that does not record which columns may be null.
+
+    A saved file records it for every node, in its ``output_schema`` and, for a source
+    slot, in its ``source_config`` (ITL-1043): the Arrow type text cannot say it. A
+    descriptor without the record is malformed and is refused, never loaded with every
+    column read as non-null (developer, 2026-11-21: no backward compatibility for
+    saved files).
+
+    Args:
+        descriptor: A node descriptor of a saved pipeline.
+
+    Raises:
+        ValueError: If a record is missing, naming it.
+    """
+    missing = []
+    if "nullable" not in (descriptor.get("output_schema") or {}):
+        missing.append("output_schema.nullable")
+    if "source_config" in descriptor and "nullable" not in descriptor["source_config"]:
+        missing.append("source_config.nullable")
+    if missing:
+        raise ValueError(
+            f"the file has no {' or '.join(missing)} record; a saved file records "
+            "which columns may be null for every node. Save the pipeline again with "
+            "this version of Orcapod."
+        )
+
+
 def saved_fall_through_tags(descriptor: dict[str, Any]) -> tuple[str, ...]:
     """Return the data-tags a saved function node lets fall through.
 
