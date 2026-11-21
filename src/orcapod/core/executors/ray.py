@@ -5,6 +5,7 @@ import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from orcapod.core.data_function import PYTHON_FUNCTION
 from orcapod.core.executors.base import PythonFunctionExecutorBase
 from orcapod.types import Schema
 from orcapod.core.executors.capture_wrapper import make_capture_wrapper
@@ -19,7 +20,7 @@ _cloudpickle_dispatch_registered = False
 class RayExecutor(PythonFunctionExecutorBase):
     """Executor that dispatches Python data functions to a Ray cluster.
 
-    Only supports ``data_function_type_id == "python.function.v0"``.
+    Only supports the Python function type (``python.function.v1``).
 
     If Ray has not been initialized yet, this executor will call
     ``ray.init()`` lazily on first use, passing ``ray_address`` and
@@ -40,7 +41,7 @@ class RayExecutor(PythonFunctionExecutorBase):
         never start" in the troubleshooting page.
     """
 
-    SUPPORTED_TYPES: frozenset[str] = frozenset({"python.function.v0"})
+    SUPPORTED_TYPES: frozenset[str] = frozenset({PYTHON_FUNCTION.type_id})
 
     def __init__(
         self,

@@ -52,7 +52,7 @@ stream = DictSource(
         {"subject_id": "mouse_01", "age": 12, "weight": 25.3},
         {"subject_id": "mouse_02", "age": 8, "weight": 22.1},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 ```
 
@@ -78,11 +78,13 @@ tag_keys, data_keys = stream.keys()
 
 ### `iter_data()`
 
-Iterates over (Tag, Data) pairs. Each Tag and Data is an immutable datagram that you can
-inspect with `.as_dict()`:
+Iterates over (Tag, Data) pairs. A stream is itself iterable, and iterating it is the same as
+calling `iter_data()`, so a loop is written `for tag, data in stream:`; the method is there
+for when the iterator is passed on as a value (`list(stream.iter_data())`). Each Tag and Data
+is an immutable datagram that you can inspect with `.as_dict()`:
 
 ```python
-for tag, data in stream.iter_data():
+for tag, data in stream:
     print(tag.as_dict(), data.as_dict())
 # {'subject_id': 'mouse_01'} {'age': 12, 'weight': 25.3}
 # {'subject_id': 'mouse_02'} {'age': 8, 'weight': 22.1}
@@ -110,6 +112,16 @@ only what is readily available, never compute, poll or deliver a row (they read 
 code (a function, a predicate, a side effect) and never write to a database. `run()` computes
 (see "Computing a stream outside a job" below).
 
+Tag order is ascending by the tag columns, in the stream's tag order. Rows with equal tags
+are ordered by their system tags (their source ids and record ids) by a read that has them:
+`as_table(columns={"sort_by_tags": True})`, `head(n, columns={"sort_by_tags": True})` and
+the preview. `head().sort_by_tags()` and a view's `sort_by_tags()` have no system tags, so
+they keep such rows in the order the view holds them (see "Computing a stream outside a job" below).
+A null goes last, and so does a null inside a list or a struct: a list tag is ordered
+element by element (a shorter list first when it is the start of a longer one), a struct
+field by field. Sorting moves whole rows and never changes a value: every value shown is
+the stream's own, whatever its Arrow type.
+
 With no rows to show, a head still has the columns and Arrow types the rows would have. To
 learn them it applies each operator to empty (zero-row) tables, which processes no data: a
 chain of N operators applies up to N operators to empty tables (about 60 ms for 20). A filter
@@ -129,7 +141,7 @@ subjects = DictSource(
         {"subject_id": f"mouse_{i:02d}", "age": 8 + i, "weight": 20.0 + i}
         for i in range(1, 26)
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
     label="subjects",
 )
 
@@ -212,7 +224,7 @@ What `run()` does on each kind of object:
 |---|---|
 | An in-memory source (`DictSource`, `ArrowTableSource`, ...), a Delta or SQL table source | nothing to compute: a view of the rows it holds |
 | A `SpiralDBTableSource` | reads the whole table into memory (`head()` is the bounded read); every call reads again |
-| A `PollingSource` | polls, as `as_table()` does |
+| A `PollingSource` (provisional, see [Provisional sources](sources.md#provisional-sources)) | polls, as `as_table()` does |
 | A `CachedSource` | reads its cache and writes the wrapped source's new rows to it |
 | A function pod's or operator's output stream | computes what is not computed yet |
 | A job node | runs the node as a job run would, after every job node it depends on that holds no current run (each once), commits, and returns the view of that run's rows; a node that holds a current run (completed in this process and not stale) runs nothing. `run(load_only=True)` loads stored results only. `as_table()` of a job node only reads |
@@ -235,7 +247,7 @@ What each kind of object shows:
 sorting included, and applies it to the rows it has before taking the first `n`. The default
 does not sort, as `as_table()` does not, so `head()` shows rows in the order the stream
 holds them. The notebook preview asks for the sorted head, so it shows the same rows
-whatever order they were computed in. With `sort_by_tags=True`, or `all_info=True`, rows are
+whatever order they were computed in. With `columns={"sort_by_tags": True}`, or `all_info=True`, rows are
 sorted by tag first (nulls last; rows with equal tags are ordered by their system tags):
 
 ```python
@@ -281,10 +293,16 @@ the stream's results: each row is computed once and every read yields the same r
 feeds the stream. An upstream finishing its first computation during the read is not a change;
 a `clear_cache()` upstream between the reads is, and the next read starts again.
 
-The display marks the tag columns, which come first: in a notebook their headers are bold
-(in an accent colour), a vertical rule separates them from the data columns and a line under
-the header says "bold = tag"; as text, each tag column's name starts with `*` ("* = tag").
-Only the display is marked: the view's table and `as_table()` keep the plain names.
+The display marks each column's role, with the tag columns first, in tag order. In a
+notebook the marks compose: a tag's header is bold (in an accent colour), a data column's is
+underlined, and a [data-tag](data-tags.md), a tag that is also data, has both; a vertical
+rule separates the tags from the data columns, and a line under the header names each mark
+shown ("bold = tag; underlined = data; bold underlined = data-tag (a tag that is also
+data)"). A data-tag is one column, shown once, among the tags. When `columns` asks for the hidden
+column groups, system tags are marked as tags, and the source-info, context,
+content-hash and meta (`__`) columns are left unmarked. As text, a plain tag's name starts with `*` ("* = tag") and a data-tag's
+with `+` ("+ = data-tag (tag and data)"); a data column's is unmarked. Only the display is
+marked: the view's table and `as_table()` keep the plain names.
 
 In the preview, large cells are summarised (an array as `ndarray float64 (2, 3)`, bytes as
 `bytes (300 B)`, long text and long lists shortened); `head().table` keeps the full values.
@@ -315,7 +333,7 @@ source = DictSource(
         {"subject_id": "mouse_01", "age": 12, "weight": 25.3},
         {"subject_id": "mouse_02", "age": 8, "weight": 22.1},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 # Default: user-facing columns only
@@ -347,7 +365,7 @@ source = DictSource(
         {"subject_id": "mouse_02", "age": 8, "weight": 22.1},
         {"subject_id": "mouse_03", "age": 15, "weight": 27.8},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 # Schema inspection
@@ -358,7 +376,7 @@ print("Data schema:", dict(data_schema))
 # Data schema: {'age': <class 'int'>, 'weight': <class 'float'>}
 
 # Iterate over (Tag, Data) pairs
-for tag, data in source.iter_data():
+for tag, data in source:
     print(f"  {tag.as_dict()} -> {data.as_dict()}")
 # {'subject_id': 'mouse_01'} -> {'age': 12, 'weight': 25.3}
 # {'subject_id': 'mouse_02'} -> {'age': 8, 'weight': 22.1}

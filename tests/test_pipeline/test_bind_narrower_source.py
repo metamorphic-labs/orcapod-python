@@ -204,8 +204,8 @@ def test_a_narrower_tag_column_is_accepted(tmp_path: pathlib.Path) -> None:
 
 @pytest.mark.parametrize(
     "declared, given",
-    [(int | None, str), (int | str | None, int), (int | None, float)],
-    ids=["other-type", "other-union-member", "numeric"],
+    [(int | None, str), (int | None, float)],
+    ids=["other-type", "numeric"],
 )
 def test_only_the_none_member_may_be_missing(
     tmp_path: pathlib.Path, declared: Any, given: type
@@ -223,6 +223,42 @@ def test_only_the_none_member_may_be_missing(
                 )
             }
         )
+
+
+@pytest.mark.parametrize(
+    "data_schema, named",
+    [
+        ({"x": int | str | None}, ["'x' is declared int | str | None"]),
+        (
+            {"w": float, "x": int | str | None, "z": int | bytes},
+            ["'x' is declared int | str | None", "'z' is declared int | bytes"],
+        ),
+    ],
+    ids=["one-column", "two-columns"],
+)
+def test_a_slot_column_without_an_arrow_type_is_refused_when_declared(
+    data_schema: dict[str, Any], named: list[str]
+) -> None:
+    """A union of several types has no Arrow type: the slot cannot be declared (ITL-640).
+
+    Its identity is its Arrow schema, so it is refused when it is constructed, never
+    later at a bind, and the error names each such column and only those.
+    """
+    with pytest.raises(ValueError, match="which ha(s|ve) no Arrow type") as raised:
+        SourceNode(
+            name="src", tag_schema=Schema({"id": int}), data_schema=Schema(data_schema)
+        )
+    message = str(raised.value)
+    for text in named:
+        assert text in message
+    assert "'w'" not in message
+
+
+def test_a_slot_made_from_a_typed_stream_is_not_refused() -> None:
+    """A slot made from a source takes the source's own Arrow types."""
+    source = DictSource([{"id": 0, "x": 1}], tag_columns=["id"], tag_only_columns=True)
+    slot = SourceNode.from_stream(source, name="src")
+    assert slot.arrow_schemas == source.arrow_schemas
 
 
 # ---------------------------------------------------------------------------
@@ -319,7 +355,7 @@ def test_narrower_then_nullable_runs_append_to_one_path(
     assert second.ok
     assert set(database.list_table_paths(())) == paths
     assert sorted(job.nodes["inc"].as_table().column("z").to_pylist()) == [0, 4]
-    stored = [database.get_all_records(path) for path in paths if path[-1] == "pdb_v2"]
+    stored = [database.get_all_records(path) for path in paths if path[-1] == "pdb_v1"]
     assert [None if table is None else table.num_rows for table in stored] == [4]
 
 

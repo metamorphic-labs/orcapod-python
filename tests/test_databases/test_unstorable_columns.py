@@ -957,7 +957,14 @@ class TestTableNameLength:
             connector._conn = None
 
     def test_cached_source_on_postgresql_refused(self):
-        """A cached source's table name holds a hash: over 63 bytes on PostgreSQL."""
+        """A cached source's table name holds a hash: over 63 bytes on PostgreSQL.
+
+        Its system-tag column names hold a hash too. Either refusal comes before
+        anything is created or written. Since the look-up of a table at an older layout
+        is gone (ITL-1259), the read-only listing of tables under the source's name (for
+        tables of another layout) runs first; before, that look-up named the table and
+        was refused before any call.
+        """
         from orcapod.core.sources.cached_source import CachedSource
         from orcapod.errors import UnstorableTableNameError
 
@@ -974,8 +981,16 @@ class TestTableNameLength:
             while err is not None:
                 chain.append(err)
                 err = err.__cause__ or err.__context__
-            assert any(isinstance(e, UnstorableTableNameError) for e in chain), chain
-            assert len(conn.mock_calls) == calls_before
+            assert any(
+                isinstance(e, (UnstorableTableNameError, UnstorableColumnError))
+                for e in chain
+            ), chain
+            statements = " ".join(
+                str(call.args[0]).upper()
+                for call in conn.mock_calls[calls_before:]
+                if call.args and isinstance(call.args[0], str)
+            )
+            assert "CREATE" not in statements and "INSERT" not in statements
         finally:
             connector._conn = None
 

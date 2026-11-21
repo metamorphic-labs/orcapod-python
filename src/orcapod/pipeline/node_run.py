@@ -24,6 +24,7 @@ from orcapod.pipeline.run_summary import (
     RunSummary,
     run_node_summaries,
 )
+from orcapod.pipeline.restrictions import restrictions_in_force, source_name
 from orcapod.utils.database_errors import flush_best_effort
 
 if TYPE_CHECKING:
@@ -227,7 +228,7 @@ def check_sources(streams: Iterable[Any]) -> tuple[str, ...]:
         try:
             source.check_for_new_data()
         except Exception as exc:
-            name = _source_name(source)
+            name = source_name(source)
             unchecked.append(name)
             # Shown at the user's line that started the run, at every run: a fresh
             # registry each time, as for RowFailuresWarning, so the default filter's
@@ -245,14 +246,6 @@ def check_sources(streams: Iterable[Any]) -> tuple[str, ...]:
                 module_globals=caller.f_globals,
             )
     return tuple(unchecked)
-
-
-def _source_name(source: Any) -> str:
-    """A source's name for a report: its source id, or its label without one."""
-    try:
-        return str(source.source_id)
-    except ValueError:
-        return str(source.label)
 
 
 @dataclass(frozen=True)
@@ -456,4 +449,5 @@ def run_with_dependencies(
         target=target.label,
         unchecked_sources=unchecked_sources,
         ran_nothing=not plan.to_run,
+        restricted_sources=restrictions_in_force(graph.nodes()),
     )

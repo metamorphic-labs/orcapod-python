@@ -35,12 +35,12 @@ job = PipelineJob(name="workshop", database=database)
 with job:
     units = CSVSource(
         str(data_dir / "units.csv"),
-        tag_columns=["subject_id", "session", "probe", "unit"],
+        tag_columns=["subject_id", "session", "probe", "unit"], tag_only_columns=True,
         source_id="units",
     )
     sessions = CSVSource(
         str(data_dir / "sessions.csv"),
-        tag_columns=["subject_id", "session"],
+        tag_columns=["subject_id", "session"], tag_only_columns=True,
         source_id="sessions",
     )
     rates = firing_rate.pod(
@@ -87,17 +87,13 @@ two-stream call to `firing_rate` added for you. When a job has several steps of 
 kind, it numbers them (`SelectDataColumns_1`, ...); the numbers tell the steps apart but do
 not follow the order you wrote them in.
 
-If you have Graphviz installed (the `dot` program), the job's pipeline can draw the same
-graph as a picture:
-
-<!-- docs-test: skip -->
-
-```python
-job.pipeline.show_graph()
-```
-
-`show_graph` is a method of `job.pipeline`, not of the job. Without Graphviz it raises
-`ExecutableNotFound`; use `print_lineage` instead.
+The whole graph, rather than one node's lineage, is what the job draws when it is the last
+line of a notebook cell (see [Part 5](05-pipeline-job.md#nodes-where-the-results-are)).
+Clicking a node there shows its columns and its row counts in the last run.
+`job.diagram(direction="TB")` lays it out top to bottom (in the notebook, the `vertical`
+checkbox above the diagram does the same), and `print(job.diagram())` lists it as text.
+[Working in notebooks](../concepts/notebooks.md) shows the diagram, the table preview of a
+node and the run summary as they appear in a notebook.
 
 ## Which rows did a value come from?
 
@@ -131,7 +127,7 @@ source_columns = [c for c in table.columns if c.startswith("_tag_source_id")]
 print(len(source_columns))
 # 2
 print(table.select(source_columns).unique().rows())
-# [('units', 'sessions')]
+# [('sessions', 'units')]
 ```
 
 Two system-tag columns, because two sources feed `rates`; every row depends on one row of
@@ -161,7 +157,7 @@ call. `get_all_records` returns them; ask for the `meta` columns to see the deta
 records = pl.from_arrow(job.nodes["rates"].get_all_records(columns={"meta": True}))
 meta = [c for c in records.columns if c.startswith("__")]
 print(meta)
-# ['__data_id', '__input_data_hash', '__output_data_hash', '__data_context', '__computed', '__is_ephemeral', '__input_data_hash_right', '__pf_var_function_name', '__pf_var_function_version', '__pf_var_function_signature_hash', '__pf_var_function_content_hash', '__pf_var_git_hash', '__pf_exec_executor_type', '__pf_exec_executor_info', '__pf_exec_python_version', '__pf_exec_extra_info', '__pod_ts']
+# ['__data_id', '__input_data_hash', '__output_data_hash', '__data_context', '__computed', '__is_ephemeral', '__input_data_hash_right', '__pf_var_function_name', '__pf_var_function_version', '__pf_var_function_module', '__pf_var_function_signature_hash', '__pf_var_function_content_hash', '__pf_var_git_hash', '__pf_exec_executor_type', '__pf_exec_executor_info', '__pf_exec_python_version', '__pf_exec_extra_info', '__pod_ts']
 ```
 
 The ones you are most likely to want:
@@ -215,7 +211,10 @@ print(session_means.keys())
 ```
 
 A `DerivedSource` is a source like those of Part 1, so it can be joined, filtered and fed to
-pods. Here the next stage flags sessions with a low mean rate:
+pods. The first one you build prints a `ProvisionalHashWarning`, once: its identity is not
+frozen yet, so a later release of Orcapod may compute the stages built on it again instead of
+reusing what they stored (see [Provisional sources](../concepts/sources.md#provisional-sources)).
+Here the next stage flags sessions with a low mean rate:
 
 ```python
 @function_pod(output_keys="is_low")

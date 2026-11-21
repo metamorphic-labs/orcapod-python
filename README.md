@@ -11,32 +11,38 @@ provenance token.
 
 ## Installation
 
-Orcapod supports Python 3.11, 3.12 and 3.13 and is published on PyPI as `orcapod`:
+Orcapod supports Python 3.11, 3.12 and 3.13 and is published on PyPI as `orcapod`.
+No release after 0.1.4 is available there yet: 0.2.0 was never published, and 0.3.0 was
+withdrawn on 2026-11-17. Until 0.4.0 is released, install the development version from the
+repository.
+
+The recommended way to install it is [uv](https://docs.astral.sh/uv/): `uv add` adds
+Orcapod to a uv project (start one with `uv init` in a new directory), and `uv run` runs
+your code in that project's environment:
 
 ```bash
-pip install orcapod
-# or, in a uv project
-uv add orcapod
+uv add git+https://github.com/metamorphic-labs/orcapod-python
 ```
 
-0.3.0 is the first release on PyPI since 0.1.4; 0.2.0 was never published to PyPI. Tables
-written by 0.2.0 or earlier are not read by 0.3.0: see
+In an environment not managed by uv, use
+`pip install git+https://github.com/metamorphic-labs/orcapod-python` instead. Once 0.4.0 is
+out, `uv add orcapod` (or `pip install orcapod`) installs the latest stable release; to try a
+release candidate, name it, for example `uv add "orcapod==0.4.0rc1"`.
+
+Tables written by 0.2.0 or earlier are not read by this version: see
 [Upgrading from 0.2.0](https://github.com/metamorphic-labs/orcapod-python/blob/main/CHANGELOG.md#upgrading-from-020)
 (it also covers 0.1.4).
 
-Optional features are installed as extras:
+Optional features are installed as extras, for example `uv add "orcapod[spiraldb]"`:
 
 | Extra | Adds |
 |-------|------|
 | `orcapod[ray]` | Distributed execution with `RayExecutor` |
 | `orcapod[redis]` | `RedisCacher`, a Redis-backed hash cache |
-| `orcapod[postgresql]` | The PostgreSQL connector, table source and file hash cache |
+| `orcapod[postgresql]` | The PostgreSQL connector, table source and file hash cache (psycopg 3.1.17 or later) |
 | `orcapod[spiraldb]` | The SpiralDB connector and table source |
 | `orcapod[torch]` | PyTorch, for `torch.Tensor` values (any installed `torch` works) |
 | `orcapod[all]` | All of the above |
-
-Rendering pipeline graphs needs the [Graphviz](https://graphviz.org/download/) `dot` binary on
-your `PATH`. It is optional; everything else works without it.
 
 ## A quick example
 
@@ -109,20 +115,26 @@ session.
 
 ## Status
 
-Orcapod is before version 1.0. In 0.3.0:
+Orcapod is before version 1.0. In the development version (0.4.0 is next):
 
-- **Hash values are frozen for data context v1.** Hashes name stored tables and find stored
-  results again, so a hash value released in 0.3.0 does not change in a later release of the
-  same data context; CI checks this. See
-  [Golden hashes](https://github.com/metamorphic-labs/orcapod-python/blob/main/docs/reference/golden-hashes.md).
+- **Hash values of data context v1 freeze at 0.4.0.** Hashes name stored tables and find
+  stored results again, so a hash value released in 0.4.0 will not change in a later release
+  of the same data context; CI checks this. Until 0.4.0 a v1 hash may still change, only by
+  an approved and explained change (0.3.0, which first shipped v1, was withdrawn). This
+  does not cover a provisional operator (today `PolarsFilter`): its identity, and every hash
+  downstream of it, may still change in a later release of v1. See
+  [Golden hashes](https://github.com/metamorphic-labs/orcapod-python/blob/main/docs/reference/golden-hashes.md)
+  and
+  [Provisional operators](https://github.com/metamorphic-labs/orcapod-python/blob/main/docs/concepts/operators.md#provisional-operators).
 - **Library value types are provisional.** The hashes of `numpy.ndarray`, `torch.Tensor`, and
   pandas and polars `DataFrame` and `Series` values are provisional until the library value
   type audit (after 0.4.0rc1) and may change then; results computed from them may then be
   computed again. Using one issues `ProvisionalHashWarning` once per
   type per process.
 - **Stores from earlier versions are not read as current.** Tables written by 0.1.x or 0.2.0
-  are neither read as results nor modified, and results stored by a development build of 0.3
-  are not found again: 0.3.0 computes them again. Read
+  are neither read as results nor modified, and results stored by a development build before
+  v1 was released may not be found again by a later build, which then computes them again.
+  Read
   [Upgrading from 0.2.0](https://github.com/metamorphic-labs/orcapod-python/blob/main/CHANGELOG.md#upgrading-from-020)
   before running a job over an old store, in particular one with side-effect nodes.
 - **Connector databases cannot hold function nodes yet.** A job over a SQLite, PostgreSQL or

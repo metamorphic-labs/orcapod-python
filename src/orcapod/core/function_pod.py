@@ -5,7 +5,7 @@ import itertools
 import dataclasses
 import logging
 from abc import abstractmethod
-from collections.abc import Callable, Collection, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
 from functools import update_wrapper, wraps
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
@@ -14,6 +14,12 @@ from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.config import OrcapodConfig
 from orcapod.core.base import TraceableBase
 from orcapod.core.data_function import CachedDataFunction, PythonDataFunction
+from orcapod.core.datagrams import Data
+from orcapod.core.data_tags import (
+    materialization_diagnostic_off,
+    data_tag_names,
+    stream_data_tags,
+)
 from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
     StreamBase,
@@ -246,9 +252,69 @@ class _FunctionPodBase(TraceableBase):
             ValueError: If inputs are incompatible with the data function schema.
         """
         input_stream = self.handle_input_streams(*streams)
-        incoming_tag_schema, incoming_data_schema = input_stream.output_schema()
-        self._validate_input_schema(incoming_data_schema)
-        self._validate_output_keys(incoming_tag_schema.keys())
+        self._validate_input(*input_stream.output_schema())
+
+    def _validate_input(self, tag_schema: Schema, data_schema: Schema) -> None:
+        """Validate a (joined) input's schemas against the function.
+
+        Its data must fit the function's parameters (``_validate_input_schema``) and no
+        output key may be one of its tags (``_validate_output_keys``). When the data
+        does not fit and the input has data-tags the function does not read,
+        the error says so and names the ways out: this is the exact form, which hands
+        every data column to the function (ITL-1022).
+
+        Args:
+            tag_schema: The input's tag schema.
+            data_schema: The input's data schema.
+
+        Raises:
+            ValueError: If the data does not fit the function's parameters.
+            InputValidationError: If an output key of the function is a tag name.
+        """
+        try:
+            self._validate_input_schema(data_schema)
+        except ValueError as error:
+            parameters = self.input_data_schema
+            unread = [
+                name
+                for name in data_tag_names(tag_schema, data_schema)
+                if name not in parameters
+            ]
+            if not unread:
+                raise
+            # Name only the ways out that can work for this input. Only a plain
+            # ``FunctionPod``'s call lets data-tags fall through (``__call__``),
+            # whatever the other columns. A wrapper pod's call drops their data
+            # columns, and keeping them plain removes them: either leaves the
+            # function a column to read only when a parameter column remains.
+            has_parameter_column = any(name in parameters for name in data_schema)
+            remedies: list[str] = []
+            if isinstance(self, FunctionPod):
+                remedies.append(
+                    "call the pod as pod(stream) to let them pass through as data-tags"
+                )
+            elif has_parameter_column:
+                remedies.append(
+                    "call the pod as pod(stream), which keeps them as plain tags"
+                )
+            if has_parameter_column:
+                remedies.append(
+                    f"add {unread} to the tag_only_columns of the source that "
+                    "declares them (tag_only_columns=True keeps every tag plain)"
+                )
+            way_out = (
+                ", or ".join(remedies)
+                if remedies
+                else "no data column of the input is a parameter of the function, "
+                "so neither calling the pod nor keeping them plain leaves it one"
+            )
+            raise ValueError(
+                f"{error}. {unread} are data-tags of the input (each a tag "
+                "and a data column of one name) that the function does not read, and "
+                "the exact form, pod.process(stream) or pod(stream, strict=True), "
+                f"hands every data column to the function: {way_out}"
+            ) from error
+        self._validate_output_keys(tag_schema.keys())
 
     def _validate_output_keys(self, tag_names: Collection[str]) -> None:
         """Reject an output key that is also a tag column of the input.
@@ -747,14 +813,40 @@ class _FunctionPodBase(TraceableBase):
         input_stream = self.handle_input_streams(*streams)
         _, data_schema = input_stream.output_schema()
         parameters = self.input_data_schema
-        dropped = [name for name in data_schema if name not in parameters]
-        kept = [name for name in data_schema if name in parameters]
+        # Data-tags of the input fall through the pod (developer decision,
+        # November 12, 2026, ITL-1023): their columns are kept for that, and the
+        # pod is the fall-through variant of this one.
+        # Only a plain ``FunctionPod`` has a fall-through variant: a wrapper pod (a
+        # ``CachedFunctionPod`` used directly) keeps its plain behaviour, its
+        # ``process`` being its inner pod's. A fall-through pod itself (one rebuilt
+        # from a saved job) keeps the data-tags it was built with.
+        fall_through_pod = self if isinstance(self, FunctionPod) else None
+        if isinstance(self, FallThroughPod):
+            data_tags = self.fall_through_tags
+        elif fall_through_pod is not None:
+            data_tags = stream_data_tags(input_stream)
+        else:
+            data_tags = ()
+        dropped = [
+            name
+            for name in data_schema
+            if name not in parameters and name not in data_tags
+        ]
+        kept = [name for name in data_schema if name in parameters or name in data_tags]
         # With no parameter column left there is nothing to select: a stream has
         # at least one data column. ``process`` then raises its own error.
         if dropped and kept:
             # A missing column or a type mismatch is raised before a step is added.
+            # A fall-through pod checks its fall-through tags too, which its
+            # validation requires (CodeRabbit on PR #342); a plain pod checks the
+            # parameters only, its data-tags being added by its fall-through variant.
+            checked = (
+                kept
+                if isinstance(self, FallThroughPod)
+                else [name for name in kept if name in parameters]
+            )
             self._validate_input_schema(
-                Schema({name: data_schema[name] for name in kept})
+                Schema({name: data_schema[name] for name in checked})
             )
             from orcapod.core.operators import SelectDataColumns
 
@@ -764,7 +856,14 @@ class _FunctionPodBase(TraceableBase):
                 self.label,
                 dropped,
             )
-            input_stream = SelectDataColumns(columns=kept)(input_stream)
+            # The select is Orcapod's own step: the data-tags it turns into
+            # plain tags are not reported (ITL-1023).
+            with materialization_diagnostic_off():
+                input_stream = SelectDataColumns(columns=kept)(input_stream)
+        if fall_through_pod is not None and data_tags:
+            return FallThroughPod(fall_through_pod, data_tags).process(
+                input_stream, label=label
+            )
         return self.process(input_stream, label=label)
 
     def argument_symmetry(self, streams: Collection[StreamProtocol]) -> ArgumentGroup:
@@ -779,12 +878,13 @@ class _FunctionPodBase(TraceableBase):
         tag_schema, incoming_data_schema = self.multi_stream_handler().output_schema(
             *streams, columns=columns, all_info=all_info
         )
-        # validate that incoming_data_schema is valid
-        self._validate_input_schema(incoming_data_schema)
-        self._validate_output_keys(tag_schema.keys())
+        self._validate_input(tag_schema, incoming_data_schema)
         # The output schema of the FunctionPodProtocol is determined by the data function
         # TODO: handle and extend to include additional columns
         # Namely, the source columns
+        # A pod's output data is the function's outputs only, so every data-tag
+        # of the input is a plain tag of the output, with the same values (developer,
+        # November 12, 2026, ITL-1023).
         return tag_schema, self.data_function.output_data_schema
 
 
@@ -875,9 +975,7 @@ class FunctionPod(_FunctionPodBase):
         input_stream = self.handle_input_streams(*streams)
 
         # perform input stream schema validation
-        tag_schema, data_schema = input_stream.output_schema()
-        self._validate_input_schema(data_schema)
-        self._validate_output_keys(tag_schema.keys())
+        self._validate_input(*input_stream.output_schema())
         self.tracker_manager.record_function_pod_invocation(
             self, input_stream, label=label
         )
@@ -977,6 +1075,7 @@ def function_zero_row_table(
     output_schema: Schema,
     data_context: contexts.DataContext,
     meta_python_schema: Schema | None = None,
+    output_arrow_schema: pa.Schema | None = None,
 ) -> pa.Table | None:
     """The table a function pod's output rows give over ``input_stream``, with no row.
 
@@ -986,13 +1085,16 @@ def function_zero_row_table(
     (``Data.function_output_zero_row_table``): the declared output types, the data
     context column and the source-info columns. Nothing is computed and the function
     is not called (ITL-912). This is the zero-row form of the table the function pod's
-    stream and node build from computed rows.
+    stream and node build from computed rows. A data-tag that falls through
+    the pod (ITL-1023) is one column, the tag's.
 
     Args:
         input_stream: The function pod's input.
         output_schema: The function's declared output schema.
         data_context: The data context the output rows are typed in.
         meta_python_schema: The meta columns every output row carries, if any.
+        output_arrow_schema: The output columns' Arrow types when known apart from
+            ``output_schema`` (a loaded node's saved types, ITL-640).
 
     Returns:
         User tags, system tags, data, ``_context_key``, meta and source-info columns, or
@@ -1008,13 +1110,28 @@ def function_zero_row_table(
         for name in input_table.column_names
         if name.startswith(constants.SYSTEM_TAG_PREFIX)
     ]
-    tags = input_table.select([*input_stream.keys()[0], *system_tags])
-    return arrow_utils.hstack_tables(
-        tags,
-        Data.function_output_zero_row_table(
-            output_schema, data_context, meta_python_schema
-        ),
+    tag_keys = input_stream.keys()[0]
+    tags = input_table.select([*tag_keys, *system_tags])
+    data = Data.function_output_zero_row_table(
+        output_schema, data_context, meta_python_schema, output_arrow_schema
     )
+    # A data-tag that falls through the pod is one column, laid out from the
+    # tags with its source info in the data, as rows lay it out (ITL-1023).
+    if fall_through := [name for name in tag_keys if name in data.column_names]:
+        data = data.drop_columns(fall_through)
+        # Its source info is the input's, of the input's type (a list after
+        # ``Batch``), not a function output's scalar token (CodeRabbit on PR #342).
+        for name in fall_through:
+            source = f"{constants.SOURCE_PREFIX}{name}"
+            if source in data.column_names and source in input_table.column_names:
+                index = data.column_names.index(source)
+                field = data.schema.field(source)
+                data = data.set_column(
+                    index,
+                    field.with_type(input_table.schema.field(source).type),
+                    input_table.column(source),
+                )
+    return arrow_utils.hstack_tables(tags, data)
 
 
 def _no_content_hashes() -> pa.Array[Any]:
@@ -1437,13 +1554,20 @@ class FunctionPodStream(StreamBase):
         tag_tables: list[pa.Table] = []
         all_data = []
         data_schema = None
+        # A data-tag that falls through the pod is one column: it is laid
+        # out from the tags, with its exact Arrow type, never converted from its
+        # Python value (ITL-1023).
+        shared: set[str] = set()
         for tag, data in pairs:
             if data_schema is None:
+                shared = set(tag.keys()) & set(data.keys())
                 data_schema = data.arrow_schema(all_info=True)
+                data_schema = pa.schema(f for f in data_schema if f.name not in shared)
             # Tags are passed through untouched: each row's own Arrow table keeps
             # the input's tag types, a logical type included (ITL-928).
             tag_tables.append(tag.as_table(columns={"system_tags": True}))
-            all_data.append(data.as_dict(all_info=True))
+            row = data.as_dict(all_info=True)
+            all_data.append({k: v for k, v in row.items() if k not in shared})
 
         # TODO: re-verify the implemetation of this conversion
         converter = self.data_context.type_converter
@@ -1818,7 +1942,24 @@ class WrappedFunctionPod(_FunctionPodBase):
         return self._function_pod.uri
 
     def validate_inputs(self, *streams: StreamProtocol) -> None:
-        self._function_pod.validate_inputs(*streams)
+        try:
+            self._function_pod.validate_inputs(*streams)
+        except ValueError:
+            self._refuse_as_this_pod(*streams)
+            raise
+
+    def _refuse_as_this_pod(self, *streams: StreamProtocol) -> None:
+        """Validate ``streams`` as this pod, so a refusal names this pod's call.
+
+        The inner pod words a data-tag refusal for its own call, which may let
+        data-tags fall through where this pod's does not (ITL-1022). Called only when
+        the inner pod refused; when this check passes, the caller re-raises the inner
+        pod's error.
+
+        Raises:
+            ValueError: If the input does not fit this pod, with this pod's advice.
+        """
+        self._validate_input(*self.handle_input_streams(*streams).output_schema())
 
     def argument_symmetry(self, streams: Collection[StreamProtocol]) -> ArgumentGroup:
         return self._function_pod.argument_symmetry(streams)
@@ -1829,15 +1970,345 @@ class WrappedFunctionPod(_FunctionPodBase):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> tuple[Schema, Schema]:
-        return self._function_pod.output_schema(
-            *streams, columns=columns, all_info=all_info
-        )
+        try:
+            return self._function_pod.output_schema(
+                *streams, columns=columns, all_info=all_info
+            )
+        except ValueError:
+            self._refuse_as_this_pod(*streams)
+            raise
 
     # TODO: reconsider whether to return FunctionPodStream here in the signature
     def process(
         self, *streams: StreamProtocol, label: str | None = None
     ) -> StreamProtocol:
         return self._function_pod.process(*streams, label=label)
+
+
+class FallThroughPod(WrappedFunctionPod):
+    """A function pod whose input's data-tags stay data-tags (ITL-1023).
+
+    Developer decision, November 12, 2026: ``pod(stream)`` (the call form) on a stream
+    with data-tags lets those tags fall through the pod. Per row, the function is
+    called exactly as the plain pod calls it, on the row's parameter columns (same
+    inputs, same result identity, same result database); the row's tag is emitted
+    unchanged and, as data, the function's outputs plus the row's own data-tag
+    columns, so the data-tags survive.
+
+    It abbreviates a legal composition: give each row a unique temporary tag, send one
+    copy through the plain pod, join the pod's output back to the input on that tag,
+    keep the data-tag columns and drop the temporary tag. No join runs here, no
+    system tag is renamed, and rows and their order are the pod's. Only the data-tag
+    columns fall through; other input data columns do not (a full append is ITL-1025).
+
+    ``pod.process(stream)`` is the plain pod: there a data-tag becomes a plain
+    tag at the pod boundary.
+
+    The data-tags are a set (developer, November 18, 2026, ITL-1246): the pod holds
+    their sorted names, and its identity, pipeline identity and config hold that
+    tuple, so the order of the input's tag columns never changes the pod's hashes or
+    a job's table paths. Its output lists the data-tags first in the input's own order
+    (its data-tags first, in tag order, ITL-1205): column order is presentation only.
+
+    Args:
+        function_pod: The plain pod.
+        fall_through_tags: The data-tags of the pod's input that fall through, in any
+            order.
+    """
+
+    def __init__(
+        self, function_pod: FunctionPod, fall_through_tags: Collection[str]
+    ) -> None:
+        # The plain pod's tracker manager: the pipeline step is recorded where the
+        # plain pod would record it.
+        super().__init__(function_pod, tracker_manager=function_pod.tracker_manager)
+        self._plain_pod = function_pod
+        # A set of names: sorted, so their order never forms identity (ITL-1246).
+        self._fall_through_tags = tuple(sorted(set(fall_through_tags)))
+        # The plain pod's hooks, the same list: a hook registered on it fires here.
+        self._post_run_hooks = function_pod._post_run_hooks  # pyright: ignore[reportPrivateUsage]  # one pod family
+
+    @property
+    def fall_through_tags(self) -> tuple[str, ...]:
+        """The data-tags that fall through the pod, sorted by name."""
+        return self._fall_through_tags
+
+    def _in_input_order(self, names: Iterable[str]) -> list[str]:
+        """The fall-through tags among ``names``, in the order of ``names``.
+
+        ``names`` are the input's data columns, which list its data-tags first in tag
+        order (ITL-1205), so the output keeps the input's presentation.
+        """
+        return [name for name in names if name in self._fall_through_tags]
+
+    @property
+    def plain_pod(self) -> FunctionPod:
+        """The plain pod: its function, result identity and result database are these."""
+        return self._plain_pod
+
+    def to_config(self) -> dict[str, Any]:
+        """Serialize this pod: the plain pod's config and the fall-through tags (ITL-1019).
+
+        Returns:
+            The plain pod's config with ``fall_through_tags``, the data-tags that fall through.
+        """
+        from orcapod.pipeline.serialization import FALL_THROUGH_TAGS_KEY
+
+        return {
+            **self._plain_pod.to_config(),
+            FALL_THROUGH_TAGS_KEY: list(self._fall_through_tags),
+        }
+
+    @classmethod
+    def from_config(
+        cls, config: dict[str, Any], *, fallback_to_proxy: bool = False
+    ) -> "FallThroughPod":
+        """Rebuild the pod from ``to_config``'s output.
+
+        Args:
+            config: A config written by ``to_config``.
+            fallback_to_proxy: Passed to ``FunctionPod.from_config``.
+
+        Returns:
+            The fall-through pod over the rebuilt plain pod.
+
+        Raises:
+            ValueError: If the config names no ``fall_through_tags``.
+        """
+        from orcapod.pipeline.serialization import FALL_THROUGH_TAGS_KEY
+
+        if FALL_THROUGH_TAGS_KEY not in config:
+            raise ValueError(
+                f"a fall-through pod config names {FALL_THROUGH_TAGS_KEY}; "
+                "this one does not"
+            )
+        plain = {k: v for k, v in config.items() if k != FALL_THROUGH_TAGS_KEY}
+        return cls(
+            FunctionPod.from_config(plain, fallback_to_proxy=fallback_to_proxy),
+            config[FALL_THROUGH_TAGS_KEY],
+        )
+
+    def identity_structure(self) -> Any:
+        return (self._plain_pod, ("fall_through_tags", self._fall_through_tags))
+
+    def pipeline_identity_structure(self) -> Any:
+        return (self._plain_pod, ("fall_through_tags", self._fall_through_tags))
+
+    def function_input(self, data: DataProtocol) -> DataProtocol:
+        """Return the columns of ``data`` the function takes: all but fall-through ones.
+
+        Args:
+            data: An input row's data.
+
+        Returns:
+            The data without the data-tag columns the function does not take.
+        """
+        parameters = self.input_data_schema
+        passed = [
+            k
+            for k in data.keys()
+            if k not in self._fall_through_tags or k in parameters
+        ]
+        if len(passed) == len(data.keys()):
+            return data
+        return data.select(*passed)
+
+    def with_fall_through(
+        self, input_data: DataProtocol, output: DataProtocol | None
+    ) -> DataProtocol | None:
+        """Return the function's output with the row's data-tag columns first.
+
+        The data-tag columns keep their values, Arrow fields and source info.
+
+        Args:
+            input_data: The input row's data, data-tag columns included.
+            output: The function's output, or ``None`` when it filtered the row.
+
+        Returns:
+            The output with the data-tag columns, or ``None``.
+        """
+        if output is None:
+            return None
+        if not isinstance(output, Data):
+            raise TypeError(
+                f"A fall-through pod needs its function's output as Data, got "
+                f"{type(output).__name__}"
+            )
+        return output.with_columns_of(
+            input_data, self._in_input_order(input_data.keys())
+        )
+
+    def function_input_schema(self, input_schema: Schema) -> Schema:
+        """The part of an input data schema the function takes (see ``function_input``)."""
+        parameters = self.input_data_schema
+        return Schema(
+            {
+                k: v
+                for k, v in input_schema.items()
+                if k not in self._fall_through_tags or k in parameters
+            },
+            optional_fields=input_schema.optional_fields - set(self._fall_through_tags),
+        )
+
+    def _validate_input_schema(self, input_schema: Schema) -> None:
+        if missing := [
+            name for name in self._fall_through_tags if name not in input_schema
+        ]:
+            raise ValueError(
+                f"The input has no data column for the data-tags {missing} "
+                f"that fall through this pod (it lets {list(self._fall_through_tags)} fall "
+                "through)"
+            )
+        super()._validate_input_schema(self.function_input_schema(input_schema))
+
+    def validate_inputs(self, *streams: StreamProtocol) -> None:
+        input_stream = self.handle_input_streams(*streams)
+        self._validate_input_schema(input_stream.output_schema()[1])
+
+    def output_schema(
+        self,
+        *streams: StreamProtocol,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> tuple[Schema, Schema]:
+        tag_schema, incoming = self.multi_stream_handler().output_schema(
+            *streams, columns=columns, all_info=all_info
+        )
+        self._validate_input_schema(incoming)
+        self._validate_output_keys(tag_schema.keys())
+        return tag_schema, Schema(
+            {
+                **{name: incoming[name] for name in self._in_input_order(incoming)},
+                **self.data_function.output_data_schema,
+            },
+            optional_fields=(incoming.optional_fields & set(self._fall_through_tags))
+            | self.data_function.output_data_schema.optional_fields,
+        )
+
+    def process(
+        self, *streams: StreamProtocol, label: str | None = None
+    ) -> FunctionPodStream:
+        input_stream = self.handle_input_streams(*streams)
+        tag_keys, _ = input_stream.keys()
+        self._validate_input_schema(input_stream.output_schema()[1])
+        self._validate_output_keys(tag_keys)
+        self.tracker_manager.record_function_pod_invocation(
+            self, input_stream, label=label
+        )
+        return FunctionPodStream(
+            function_pod=self, input_stream=input_stream, label=label
+        )
+
+    def process_data(
+        self,
+        tag: TagProtocol,
+        data: DataProtocol,
+        *,
+        logger: DataExecutionLoggerProtocol | None = None,
+        run_id: str | None = None,
+    ) -> tuple[TagProtocol, DataProtocol | None]:
+        tag, output = self._plain_pod.process_data(
+            tag, self.function_input(data), logger=logger, run_id=run_id
+        )
+        return tag, self.with_fall_through(data, output)
+
+    async def async_process_data(
+        self,
+        tag: TagProtocol,
+        data: DataProtocol,
+        *,
+        logger: DataExecutionLoggerProtocol | None = None,
+        run_id: str | None = None,
+    ) -> tuple[TagProtocol, DataProtocol | None]:
+        tag, output = await self._plain_pod.async_process_data(
+            tag, self.function_input(data), logger=logger, run_id=run_id
+        )
+        return tag, self.with_fall_through(data, output)
+
+    def _invoke_with_hooks(
+        self,
+        tag: TagProtocol,
+        data: DataProtocol,
+        *,
+        logger: DataExecutionLoggerProtocol | None = None,
+        run_id: str | None = None,
+    ) -> tuple[TagProtocol, DataProtocol | None]:
+        """Call the plain pod with its hooks on the function's input, then fall through.
+
+        The hooks see the invocation the function sees: the plain pod's invocation
+        context, built from the same input, so their ``invocation_hash`` is the
+        function's.
+        """
+        tag, output = self._plain_pod._invoke_with_hooks(  # pyright: ignore[reportPrivateUsage]  # one pod family
+            tag, self.function_input(data), logger=logger, run_id=run_id
+        )
+        return tag, self.with_fall_through(data, output)
+
+    async def _async_invoke_with_hooks(
+        self,
+        tag: TagProtocol,
+        data: DataProtocol,
+        *,
+        logger: DataExecutionLoggerProtocol | None = None,
+        run_id: str | None = None,
+    ) -> tuple[TagProtocol, DataProtocol | None]:
+        """Async counterpart of ``_invoke_with_hooks``."""
+        tag, output = await self._plain_pod._async_invoke_with_hooks(  # pyright: ignore[reportPrivateUsage]  # one pod family
+            tag, self.function_input(data), logger=logger, run_id=run_id
+        )
+        return tag, self.with_fall_through(data, output)
+
+
+# One place for the fall-through rule as a function node applies it: a plain pod has
+# no fall-through, and these return what the plain pod does.
+
+
+def fall_through_tags(pod: object) -> tuple[str, ...]:
+    """The data-tags that fall through ``pod`` (none for a plain pod)."""
+    return pod.fall_through_tags if isinstance(pod, FallThroughPod) else ()
+
+
+def result_pod(pod: FunctionPodProtocol) -> FunctionPodProtocol:
+    """The pod whose results a result database holds for ``pod``: its plain pod."""
+    return pod.plain_pod if isinstance(pod, FallThroughPod) else pod
+
+
+def function_input(pod: object, data: DataProtocol) -> DataProtocol:
+    """The part of a row's data that ``pod``'s function takes."""
+    return pod.function_input(data) if isinstance(pod, FallThroughPod) else data
+
+
+def with_fall_through(
+    pod: object, input_data: DataProtocol, output: DataProtocol | None
+) -> DataProtocol | None:
+    """``output`` with the data-tag columns of ``input_data`` that fall through ``pod``."""
+    if isinstance(pod, FallThroughPod):
+        return pod.with_fall_through(input_data, output)
+    return output
+
+
+def function_input_schema(pod: object, input_schema: Schema) -> Schema:
+    """The part of an input data schema that ``pod``'s function takes."""
+    if isinstance(pod, FallThroughPod):
+        return pod.function_input_schema(input_schema)
+    return input_schema
+
+
+def result_data_schema(pod: FunctionPodProtocol, input_schema: Schema) -> Schema:
+    """The data schema of ``pod``'s output for an input with ``input_schema``."""
+    outputs = pod.data_function.output_data_schema
+    data_tags = fall_through_tags(pod)
+    if not data_tags:
+        return outputs
+    # The data-tags in the input's order (data-tags first, in tag order, ITL-1205).
+    return Schema(
+        {
+            **{name: input_schema[name] for name in input_schema if name in data_tags},
+            **outputs,
+        },
+        optional_fields=(input_schema.optional_fields & set(data_tags))
+        | outputs.optional_fields,
+    )
 
 
 def side_effect_function_pod(

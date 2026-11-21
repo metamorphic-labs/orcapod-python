@@ -107,10 +107,9 @@ def delta_path(tmp_path: Path) -> Path:
     return path
 
 
-def _delta(path: Path) -> DeltaTableSource:
-    return DeltaTableSource(
-        path, tag_columns="k", record_id_columns="k", tag_only_columns=True
-    )
+def _delta(path: Path, **kwargs: Any) -> DeltaTableSource:
+    _ = kwargs.setdefault("tag_only_columns", True)
+    return DeltaTableSource(path, tag_columns="k", record_id_columns="k", **kwargs)
 
 
 def test_delta_unchanged_finds_nothing(delta_path: Path) -> None:
@@ -335,10 +334,9 @@ def csv_path(tmp_path: Path) -> Path:
     return path
 
 
-def _csv(path: Path) -> CSVSource:
-    return CSVSource(
-        str(path), tag_columns="k", record_id_columns="k", tag_only_columns=True
-    )
+def _csv(path: Path, **kwargs: Any) -> CSVSource:
+    _ = kwargs.setdefault("tag_only_columns", True)
+    return CSVSource(str(path), tag_columns="k", record_id_columns="k", **kwargs)
 
 
 def test_csv_unchanged_finds_nothing(csv_path: Path) -> None:
@@ -484,7 +482,8 @@ def _pg_connector(keys: list[int]) -> MagicMock:
     connector = MagicMock()
     connector.get_table_names.return_value = ["t"]
     connector.get_pk_columns.return_value = ["k"]
-    connector.current_location.return_value = ("orcapod", "public")
+    connector.current_location.return_value = ("localhost", 5432, "orcapod", "public")
+    connector.given_server.return_value = ("localhost", "")
     connector.get_column_info.return_value = [
         ColumnInfo("k", pa.int64(), False),
         ColumnInfo("x", pa.int64(), False),
@@ -541,7 +540,9 @@ def test_cached_source_job_runs_only_the_new_rows(
 
 
 def test_derived_source_follows_its_source_origin(delta_path: Path) -> None:
-    source = DerivedSource(_delta(delta_path), tags_as_data={"k": "k_value"})
+    source = DerivedSource(
+        _delta(delta_path), tags_as_data={"k": "k_value"}, source_id="with_tags_as_data"
+    )
     assert _values(source, "k_value") == [0, 1, 2]
     assert source.check_for_new_data() is False
     deltalake.write_deltalake(str(delta_path), _rows([3]), mode="append")
@@ -669,8 +670,12 @@ def test_two_derived_sources_over_one_source_both_take_in_its_change(
     delta_path: Path,
 ) -> None:
     origin = _delta(delta_path)
-    first = DerivedSource(origin, tags_as_data={"k": "k_value"})
-    second = DerivedSource(origin, tags_as_data={"k": "k_value"})
+    first = DerivedSource(
+        origin, tags_as_data={"k": "k_value"}, source_id="with_tags_as_data"
+    )
+    second = DerivedSource(
+        origin, tags_as_data={"k": "k_value"}, source_id="with_tags_as_data"
+    )
     assert _values(first, "k_value") == _values(second, "k_value") == [0, 1, 2]
     deltalake.write_deltalake(str(delta_path), _rows([3]), mode="append")
     assert first.check_for_new_data() is True
@@ -758,7 +763,8 @@ def _connector_without_column_info(x: list[int | None]) -> MagicMock:
     connector = MagicMock()
     connector.get_table_names.return_value = ["t"]
     connector.get_pk_columns.return_value = ["k"]
-    connector.current_location.return_value = ("orcapod", "public")
+    connector.current_location.return_value = ("localhost", 5432, "orcapod", "public")
+    connector.given_server.return_value = ("localhost", "")
     connector.get_column_info.return_value = []
     table = pa.table(
         {"k": pa.array(range(len(x)), pa.int64()), "x": pa.array(x, pa.int64())}
@@ -790,7 +796,11 @@ def test_a_derived_source_that_held_no_rows_moves_when_its_origin_runs(
     csv_path: Path,
 ) -> None:
     upstream = _job(_csv(csv_path))
-    derived = DerivedSource(upstream.nodes["rowwise"], tags_as_data={"k": "k_value"})
+    derived = DerivedSource(
+        upstream.nodes["rowwise"],
+        tags_as_data={"k": "k_value"},
+        source_id="with_tags_as_data",
+    )
     downstream = PipelineJob(name="down", database=InMemoryArrowDatabase())
     with downstream:
         twice.pod(derived, label="doubled")

@@ -6,7 +6,7 @@ import logging
 from abc import ABC, abstractmethod
 from collections.abc import Hashable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 
 from orcapod.core.nodes.function_node import FunctionNodeBase
 from orcapod.core.tracker import AutoRegisteringContextBasedTracker
@@ -23,6 +23,7 @@ from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
     import networkx as nx
+    from orcapod.pipeline.diagram import PipelineDiagram
     from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 else:
     nx = LazyModule("networkx")
@@ -292,15 +293,97 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
 
         Args:
             invocation: The pod invocation to record.
+
+        Raises:
+            ValueError: If the invocation reads a source under another restriction
+                than the pipeline's streams read it under now, or two of its inputs
+                read one source under two restrictions (ITL-1218), whatever streams
+                lead there. Nothing is recorded then.
         """
+        from orcapod.pipeline.restrictions import require_one_restriction
+
         key = invocation.content_hash().to_string()
+        inputs = tuple(invocation.input_streams)
+        upstreams = [
+            (upstream, upstream.content_hash().to_string()) for upstream in inputs
+        ]
+        # Checked before anything is recorded, so a refused invocation leaves the
+        # graph as it was. A restriction does not change a source's identity, so the
+        # pipeline keeps one restriction (or none) per source identity, whatever
+        # streams lead to it: every source this invocation reads is checked with
+        # every source the pipeline's streams read now (nothing is remembered: a
+        # slot rebound since the last invocation changes what they read).
+        require_one_restriction([*self._held_streams(), *inputs])
         self._invocation_lut[key] = invocation
         self._hash_graph.add_node(key)
-        for upstream in invocation.input_streams:
-            upstream_hash = upstream.content_hash().to_string()
+        for upstream, upstream_hash in upstreams:
             self._hash_graph.add_edge(upstream_hash, key)
             if upstream_hash not in self._source_streams:
                 self._source_streams[upstream_hash] = upstream
+
+    def _held_streams(self) -> list[Any]:
+        """Every stream the pipeline holds: its leaves and every recorded input."""
+        return [
+            *self._source_streams.values(),
+            *(
+                stream
+                for invocation in self._invocation_lut.values()
+                for stream in invocation.input_streams
+            ),
+        ]
+
+    # ------------------------------------------------------------------
+    # Diagram (ITL-1197)
+    # ------------------------------------------------------------------
+
+    def diagram(
+        self,
+        *,
+        direction: Literal["LR", "TB"] = "LR",
+        collapse: bool = False,
+        max_nodes: int = 400,
+    ) -> PipelineDiagram:
+        """A diagram of the DAG, drawn in a notebook without Graphviz.
+
+        In development: this interface may change. The first diagram made in a
+        process issues ``InDevelopmentWarning``, once.
+
+        Shown at the end of a notebook cell (as the pipeline or job itself is) it is a
+        picture of the nodes and the streams between them; where the notebook runs
+        scripts it can be dragged and zoomed, and selecting a node shows its schema and,
+        for a job, its run status. ``print`` gives a plain-text listing. Making it
+        computes nothing.
+
+        Args:
+            direction: ``"LR"`` lays the graph out left to right, ``"TB"`` top to
+                bottom.
+            collapse: Fold the joins and the column selections, drops and maps that
+                feed exactly one node into the edges they lie on.
+            max_nodes: Above this many nodes, show the text listing instead of the
+                picture.
+
+        Returns:
+            The diagram.
+
+        Raises:
+            RuntimeError: If the pipeline has not been compiled yet.
+        """
+        from orcapod.pipeline.diagram import PipelineDiagram
+
+        return PipelineDiagram(
+            self, direction=direction, collapse=collapse, max_nodes=max_nodes
+        )
+
+    def _repr_mimebundle_(
+        self,
+        include: Any = None,
+        exclude: Any = None,
+        **kwargs: Any,
+    ) -> dict[str, str]:
+        """The notebook display: the diagram, or the plain repr before compiling."""
+        if self._node_graph is None:
+            return {"text/plain": repr(self)}
+        return self.diagram()._repr_mimebundle_()
 
     # ------------------------------------------------------------------
     # reset() — no-op after refactor
@@ -360,8 +443,19 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
 
         This method always rebuilds from scratch; it does NOT perform
         incremental compilation.
+
+        Raises:
+            ValueError: If one source is read under two different restrictions
+                (ITL-1218), judged from what the recorded streams read now.
         """
         import networkx as _nx
+
+        from orcapod.pipeline.restrictions import require_one_restriction
+
+        # Checked again here, from what the streams read now: a slot rebound after
+        # the last invocation would otherwise connect a branch recorded over one
+        # restriction to another (ITL-1218).
+        require_one_restriction(self._held_streams())
 
         source_node_cls = self.source_node_class
 
@@ -470,7 +564,7 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
                 node_dag.add_node(node)
         self._node_graph = node_dag
 
-        # 6. Enrich hash_graph node attributes (used by GraphRenderer and serialization).
+        # 6. Enrich hash_graph node attributes (used by serialization).
         for node_hash, node in node_map.items():
             if node_hash not in self._hash_graph:
                 continue

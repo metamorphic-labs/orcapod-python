@@ -165,7 +165,7 @@ class TestRegistries:
         assert "SelectTagColumns" in OPERATOR_REGISTRY
 
     def test_data_function_registry(self):
-        assert "python.function.v0" in DATA_FUNCTION_REGISTRY
+        assert "python.function.v1" in DATA_FUNCTION_REGISTRY
 
 
 class TestLoadStatus:
@@ -219,18 +219,12 @@ class TestResolveOperatorFromConfig:
 class TestPipelineFormatVersion:
     def test_version_is_string(self):
         assert isinstance(PIPELINE_FORMAT_VERSION, str)
-        assert PIPELINE_FORMAT_VERSION == "0.2.0"
+        assert PIPELINE_FORMAT_VERSION == "0.4.0"
 
-    def test_supported_versions_hold_current_and_previous(self):
-        from orcapod.pipeline.serialization import (
-            PIPELINE_JOB_FORMAT_VERSION,
-            SUPPORTED_FORMAT_VERSIONS,
-            SUPPORTED_JOB_FORMAT_VERSIONS,
-        )
+    def test_the_job_format_is_the_pipeline_format(self):
+        from orcapod.pipeline.serialization import PIPELINE_JOB_FORMAT_VERSION
 
-        assert PIPELINE_JOB_FORMAT_VERSION == "0.2.0"
-        assert SUPPORTED_FORMAT_VERSIONS == frozenset({"0.1.0", "0.2.0"})
-        assert SUPPORTED_JOB_FORMAT_VERSIONS == frozenset({"0.1.0", "0.2.0"})
+        assert PIPELINE_JOB_FORMAT_VERSION == PIPELINE_FORMAT_VERSION == "0.4.0"
 
 
 # ---------------------------------------------------------------------------
@@ -380,6 +374,32 @@ class TestParseArrowTypeStringNested:
         with pytest.raises(ValueError, match="Unknown nested Arrow type"):
             parse_arrow_type_string("frobnicate<int64>")
 
+    @pytest.mark.parametrize(
+        "arrow_type",
+        [
+            pa.struct([]),
+            pa.large_list(pa.struct([])),
+            pa.struct([pa.field("a", pa.struct([]))]),
+            pa.struct([pa.field("a", pa.struct([])), pa.field("b", pa.int16())]),
+            pa.map_(pa.large_string(), pa.struct([])),
+        ],
+        ids=["struct", "list of struct", "nested", "beside a field", "map value"],
+    )
+    def test_an_empty_struct_round_trips(self, arrow_type):
+        """``struct<>`` is the struct with no fields, at any depth (CodeRabbit on PR
+        454): the saved text reads back as the same type."""
+        from orcapod.pipeline.serialization import (
+            arrow_schema_from_texts,
+            arrow_type_texts,
+        )
+
+        schema = pa.schema([pa.field("x", arrow_type), pa.field("y", pa.int32())])
+        texts = arrow_type_texts(schema)
+        assert "struct<>" in texts["x"]
+        restored = arrow_schema_from_texts(texts, None, ["x", "y"])
+        assert restored.equals(schema)
+        assert parse_arrow_type_string(texts["x"]) == arrow_type
+
 
 # ---------------------------------------------------------------------------
 # Schema serialization round-trip
@@ -483,7 +503,7 @@ class TestResolveDataFunctionFallbackToProxy:
         from orcapod.pipeline.serialization import resolve_data_function_from_config
 
         config = {
-            "data_function_type_id": "python.function.v0",
+            "data_function_type_id": "python.function.v1",
             "config": {
                 "module_path": "nonexistent.module.that.does.not.exist",
                 "callable_name": "some_func",
@@ -537,10 +557,10 @@ class TestFunctionPodFromConfigFallbackToProxy:
         from orcapod.core.data_function_proxy import DataFunctionProxy
 
         config = {
-            "uri": ["some_func", "hash123", "v1", "python.function.v0"],
+            "uri": ["some_func", "hash123", "v1", "python.function.v1"],
             "data_function": {
-                "data_function_type_id": "python.function.v0",
-                "uri": ["some_func", "hash123", "v1", "python.function.v0"],
+                "data_function_type_id": "python.function.v1",
+                "uri": ["some_func", "hash123", "v1", "python.function.v1"],
                 "config": {
                     "module_path": "nonexistent.module",
                     "callable_name": "some_func",
@@ -564,7 +584,7 @@ class TestFunctionPodFromConfigFallbackToProxy:
             "some_func",
             "hash123",
             "v1",
-            "python.function.v0",
+            "python.function.v1",
         )
 
 
@@ -837,14 +857,14 @@ def test_function_node_stored_node_uri_from_descriptor():
         "content_hash": f"{SEMANTIC_HASH_LABEL}:abc",
         "pipeline_hash": f"{SEMANTIC_HASH_LABEL}:def",
         "table_scope": "pipeline_hash",
-        "node_uri": ["add_one", "v0", "python.function.v0", "schema_repr"],
+        "node_uri": ["add_one", "v0", "python.function.v1", "schema_repr"],
         "output_schema": {"tag": {"x": "int64"}, "data": {"result": "int64"}},
         "data_context_key": "std:v1:default",
     }
     node = FunctionNode.from_descriptor(
         descriptor, function_pod=None, input_stream=None, databases={}
     )
-    assert node.node_uri == ("add_one", "v0", "python.function.v0", "schema_repr")
+    assert node.node_uri == ("add_one", "v0", "python.function.v1", "schema_repr")
 
 
 def test_operator_node_has_node_uri():

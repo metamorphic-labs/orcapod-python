@@ -147,11 +147,19 @@
                         "additionalProperties": false
                     },
                     "description": "Append-only chain of revisions. A revision lists the golden files it added, each with the sha256 of its bytes, or marks a release (added empty, release set); digest is the sha256 of the canonical JSON (sorted keys, no spaces) of date, release, added and previous"
+                },
+                "provisional": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    },
+                    "description": "The provisional golden files (ITL-1266), <folder>/provisional/<group>.json, each with the sha256 of its bytes: the values of the cases that depend on a provisional operator. Outside the history, so no release freezes them"
                 }
             },
             "required": [
                 "folder",
-                "history"
+                "history",
+                "provisional"
             ],
             "additionalProperties": false,
             "description": "The golden hash files of this data context (ITL-946). The revisions up to the last release revision, and the files they list, never change"

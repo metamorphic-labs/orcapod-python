@@ -2,7 +2,16 @@ from __future__ import annotations
 
 import logging
 from abc import abstractmethod
-from collections.abc import AsyncIterator, Callable, Collection, Iterator, Mapping
+from collections.abc import (
+    AsyncIterator,
+    Callable,
+    Collection,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
+from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
@@ -83,6 +92,27 @@ _ZERO_ROW_MEMO: ContextVar[dict[int, tuple[object, pa.Table | None]] | None] = (
 """The zero-row tables derived during one outermost ``typed_zero_row_table`` call."""
 
 
+@contextmanager
+def shared_zero_row_memo() -> Iterator[None]:
+    """Share one zero-row memo across every ``typed_zero_row_table`` call in the block.
+
+    A caller that types many streams of one graph (a saved job writes every node's
+    Arrow types) derives each stream once, instead of once per call. Inside an outer
+    derivation or another such block, the memo already open is used.
+
+    Yields:
+        Nothing; the memo is discarded when the block exits.
+    """
+    if _ZERO_ROW_MEMO.get() is not None:
+        yield
+        return
+    token = _ZERO_ROW_MEMO.set({})
+    try:
+        yield
+    finally:
+        _ZERO_ROW_MEMO.reset(token)
+
+
 def typed_zero_row_table(stream: object) -> pa.Table | None:
     """Return ``stream``'s table with no rows and the Arrow types its rows would have.
 
@@ -158,6 +188,54 @@ def typed_zero_row_input(stream: object) -> pa.Table | None:
                 for field in table.schema
             ]
         ).with_metadata(table.schema.metadata or {})
+    )
+
+
+def typed_arrow_schemas(
+    stream: object, *, own: bool = True
+) -> tuple[pa.Schema, pa.Schema]:
+    """Return the Arrow schemas of ``stream``'s tag and data columns (ITL-640).
+
+    The Arrow types its rows have, from ``typed_zero_row_table`` (never computing,
+    reading or polling a row): the tag schema holds the columns of the stream's Python
+    tag schema, the data schema those of its data schema (a data-tag in both), each in
+    that order. A
+    stream that cannot type itself without rows (an unbound input, a polling source not
+    yet polled) answers with the data context's conversion of its declared Python
+    schema, the Arrow types its identity is then fixed to.
+
+    A source or an input slot states its Arrow schemas itself (``arrow_schemas``),
+    which is what this returns for one.
+
+    Args:
+        stream: The stream, source or node.
+        own: Whether to return the ``arrow_schemas`` the stream states, when it has
+            them; ``False`` derives them (the stream's own derivation).
+
+    Returns:
+        The tag and data Arrow schemas.
+    """
+    if own:
+        stated = getattr(stream, "arrow_schemas", None)
+        if isinstance(stated, tuple):
+            return cast("tuple[pa.Schema, pa.Schema]", stated)
+    typed = cast(StreamProtocol, stream)
+    # The columns are those of the Python output schema, which the identity has always
+    # named; only their types come from the zero-row table.
+    tag_schema, data_schema = typed.output_schema()
+    table = typed_zero_row_table(stream)
+    if table is None:
+        from orcapod.utils.schema_utils import declared_arrow_schema
+
+        converter = cast(Any, stream).data_context.type_converter
+        return (
+            declared_arrow_schema(tag_schema, converter),
+            declared_arrow_schema(data_schema, converter),
+        )
+    schema = table.schema
+    return (
+        pa.schema([schema.field(name) for name in tag_schema]),
+        pa.schema([schema.field(name) for name in data_schema]),
     )
 
 
@@ -328,6 +406,27 @@ class StreamBase(TraceableBase):
 
         return Join()(self, other_stream, label=label)
 
+    def rejoin(
+        self, *other_streams: StreamProtocol, label: str | None = None
+    ) -> StreamBase:
+        """Put this stream back together with other branches of one stream.
+
+        Pairs the rows that come from the same origin row, by matching every system-tag
+        column, and keeps those columns unchanged (``Rejoin``, provisional). For a
+        diamond (one stream split into branches, then put back together); to combine
+        different rows on their tags, use ``join``.
+
+        Args:
+            *other_streams: The other branches, one or more.
+            label: The result's label.
+
+        Returns:
+            The rejoined stream.
+        """
+        from orcapod.core.operators import Rejoin
+
+        return Rejoin()(self, *other_streams, label=label)
+
     def semi_join(
         self,
         other_stream: StreamProtocol,
@@ -349,6 +448,7 @@ class StreamBase(TraceableBase):
         drop_unmapped: bool = False,
         strict: bool = True,
         label: str | None = None,
+        tag_only: bool = False,
         **renames: str,
     ) -> StreamBase:
         """Rename tag columns. See ``orcapod.core.operators.MapTags``.
@@ -356,7 +456,9 @@ class StreamBase(TraceableBase):
         The renames are one dict, the only positional argument (``map_tags({"subject":
         "animal"})``), or keyword arguments (``map_tags(subject="animal")``), not both.
         A name that is not a Python identifier, or a column named ``drop_unmapped``,
-        ``strict`` or ``label`` (the options), is renamed through the dict.
+        ``strict``, ``label`` or ``tag_only`` (the options), is renamed through the
+        dict. A data-tag is renamed in both roles unless ``tag_only`` is
+        ``True``; see ``MapTags``.
 
         Args:
             name_map: Each tag column to rename, mapped to its new name.
@@ -365,6 +467,7 @@ class StreamBase(TraceableBase):
                 a tag column raises ``InputValidationError``; when ``False`` it is
                 ignored.
             label: Optional node label for the pipeline graph.
+            tag_only: Rename data-tags in the tag role only (ITL-1023).
             **renames: Each column to rename, mapped to its new name, as
                 keyword arguments.
 
@@ -379,9 +482,12 @@ class StreamBase(TraceableBase):
         """
         from orcapod.core.operators import MapTags
 
-        return MapTags(_rename_map(name_map, renames), drop_unmapped, strict=strict)(
-            self, label=label
-        )
+        return MapTags(
+            _rename_map(name_map, renames),
+            drop_unmapped,
+            strict=strict,
+            tag_only=tag_only,
+        )(self, label=label)
 
     def map_data(
         self,
@@ -493,27 +599,33 @@ class StreamBase(TraceableBase):
 
     def group_by(
         self,
-        by: Collection[str],
+        by: str | Collection[str],
         label: str | None = None,
+        *,
+        member_order: str | Sequence[str] | None = None,
     ) -> StreamBase:
         """Reduce rows sharing a key into one row per group.
 
         Group-key columns stay scalar tags and are the only tags of the output;
         every other tag is dropped, and every data column becomes list-valued.
         A dropped tag's values are not carried: make the column data before
-        grouping if a later step needs it.  See
+        grouping if a later step needs it.  The members of a group are ordered
+        by the non-key tags in name order, or as ``member_order`` gives.  See
         ``orcapod.core.operators.GroupBy``.
 
         Args:
-            by: Tag column names to group on.
+            by: Tag column names to group on, or one name as a string.
             label: Optional node label for the pipeline graph.
+            member_order: ``None`` or ``"name"`` (the non-key tags in name
+                order), or a list of non-key tag names to order the members by
+                first.
 
         Returns:
             A stream with one row per distinct group-key tuple.
         """
         from orcapod.core.operators import GroupBy
 
-        return GroupBy(by=by)(self, label=label)
+        return GroupBy(by=by, member_order=member_order)(self, label=label)
 
     def polars_filter(
         self,
@@ -558,6 +670,41 @@ class StreamBase(TraceableBase):
 
         return DropNulls(columns)(self, label=label)
 
+    def tag_by(
+        self,
+        *columns: str | Iterable[str],
+        label: str | None = None,
+    ) -> StreamBase:
+        """Give the named data columns the tag role, as data-tags.
+
+        ``s.tag_by("x", "y")`` equals ``s.tag_by(["x", "y"])``,
+        ``s.tag_by({"y", "x"})`` and ``s.tag_by("y", "x")``. Each named data
+        column becomes a data-tag: one column, both a tag and the data column
+        it was, with its values and source info unchanged. The new tags follow this
+        stream's tags, in name order. See ``orcapod.core.operators.TagBy``.
+
+        Args:
+            *columns: One or more data column names, or one iterable of names
+                (a list, a tuple, a set) as the only positional argument.
+            label: Optional node label for the pipeline graph.
+
+        Returns:
+            The stream with the named columns as data-tags.
+
+        Raises:
+            TypeError: When a name is not a string.
+            ValueError: When a name is repeated.
+            InputValidationError: When a name is reserved, is not a data column of
+                this stream, is already a tag, or has a type that cannot be a tag.
+        """
+        from orcapod.core.operators import TagBy
+
+        if len(columns) == 1 and not isinstance(columns[0], str):
+            names: str | Iterable[str] = columns[0]
+        else:
+            names = cast("tuple[str, ...]", columns)
+        return TagBy(names)(self, label=label)
+
     def add_tags(
         self,
         tags: Mapping[str, bool | int | float | str | bytes] | None = None,
@@ -572,7 +719,9 @@ class StreamBase(TraceableBase):
         "A"})``), or keyword arguments (``add_tags(cohort="A", run=3)``), not both. A
         tag named ``label``, or a name that is not a Python identifier, is given
         through the dict. Each new tag holds the same value on every row and follows
-        the existing tags, in the order given. A value is a ``bool``, ``int``,
+        the existing tags, in name order: the new tags are a set, and the order they are
+        given in is not kept (ITL-1269), so ``add_tags(run=3, cohort="A")`` places
+        ``cohort`` before ``run``. A value is a ``bool``, ``int``,
         ``float``, ``str`` or ``bytes``, and its type is the tag's type. Data
         columns, their values and their source info are unchanged.
 
@@ -1118,13 +1267,17 @@ class StreamBase(TraceableBase):
         Returns:
             The table, or ``None`` when the stream cannot type it without rows.
         """
+        from orcapod.core.data_tags import stream_data_tags
         from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 
         typed = typed_zero_row_table(self)
         if typed is None:
             return None
         return ArrowTableStream(
-            typed, tag_columns=self.keys()[0], data_context=self.data_context_key
+            typed,
+            tag_columns=self.keys()[0],
+            data_tags=stream_data_tags(self),
+            data_context=self.data_context_key,
         ).as_table(columns=config)
 
     def _typed_zero_row_table(self) -> pa.Table | None:

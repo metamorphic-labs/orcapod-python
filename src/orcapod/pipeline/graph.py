@@ -1,8 +1,7 @@
 from __future__ import annotations
 
+import copy
 import logging
-import os
-import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -23,7 +22,6 @@ from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
     import networkx as nx
-    from orcapod.pipeline.dag import GraphProtocol
 else:
     nx = LazyModule("networkx")
 
@@ -33,33 +31,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
-
-
-def _with_pending_nullability(
-    record: dict[str, list[str]],
-    pending: dict[str, list[str]],
-    slot: "cp.StreamProtocol",
-) -> dict[str, list[str]]:
-    """Add a slot's pending nullable columns to a saved nullability record (ITL-1138).
-
-    Args:
-        record: The nullable column names per role, as ``serialize_nullability``
-            writes them.
-        pending: The slot's pending columns that its saved job records as nullable.
-        slot: The source slot, whose tag and data schemas give the column order.
-
-    Returns:
-        The record with the pending names added, in the slot's column order.
-    """
-    tag_schema, data_schema = slot.output_schema()
-    return {
-        role: [
-            name
-            for name in schema
-            if name in record.get(role, []) or name in pending[role]
-        ]
-        for role, schema in (("tag", tag_schema), ("data", data_schema))
-    }
 
 
 class Pipeline(AbstractPipelineBase[GraphNode]):
@@ -95,11 +66,10 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
     operator_node_class = OperatorNode
     side_effect_node_class = SideEffectNode
 
-    # The nodes (by hash key) of a pipeline loaded from a file whose descriptor did not
-    # record which columns may be null (ITL-1043), in the output schema and in the
-    # source config. Their schemas are lossy, so saving again must not record them.
-    _unrecorded_output_nullability: frozenset[str] = frozenset()
-    _unrecorded_source_nullability: frozenset[str] = frozenset()
+    # The saved output schema of every node of a pipeline loaded from a file (by hash
+    # key): a node whose Arrow types cannot be derived yet (below a slot whose class is
+    # not registered) is saved again from it, never from its Python types (ITL-640).
+    _loaded_output_schemas: "dict[str, dict[str, Any]]" = {}
 
     def __init__(
         self,
@@ -134,21 +104,6 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
             self.compile()
 
     # ------------------------------------------------------------------
-    # Graph display
-    # ------------------------------------------------------------------
-
-    def show_graph(self, **kwargs: Any) -> str | None:
-        """Render the pipeline's node graph.
-
-        Args:
-            **kwargs: Forwarded to ``render_graph``.
-
-        Raises:
-            RuntimeError: If the pipeline has not been compiled yet.
-        """
-        return render_graph(self.dag, **kwargs)
-
-    # ------------------------------------------------------------------
     # Serialization
     # ------------------------------------------------------------------
 
@@ -174,17 +129,46 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
 
         import json as _json
         from orcapod.pipeline.serialization import (
+            FALL_THROUGH_TAGS_KEY,
             PIPELINE_FORMAT_VERSION,
-            serialize_nullability,
+            serialize_arrow_schemas,
             serialize_output_schema,
-            serialize_schema,
         )
         from orcapod.core.nodes import OperatorNode, FunctionNode
         from orcapod.core.nodes.source_node import SourceNode as SourceNodeClass
+        from orcapod.core.streams.base import shared_zero_row_memo, typed_arrow_schemas
 
+        # Every node's own Arrow types, derived in one walk: an upstream that several
+        # nodes share is typed once (ITL-640).
+        # A node whose Arrow types cannot be derived yet (a loaded slot whose class is
+        # not registered, and loaded nodes below it) is saved from the type texts it
+        # was loaded with, never from its Python types (ITL-640).
+        arrow_types: dict[str, tuple[Any, Any]] = {}
+        retained: dict[str, dict[str, Any]] = {}
+        # A slot's column types, from the one writer (``saved_type_texts``): its
+        # output_schema and its source_config are both this entry (ITL-640).
+        slot_types: dict[str, dict[str, Any]] = {}
+        with shared_zero_row_memo():
+            for key, node in self._persistent_node_map.items():
+                if isinstance(node, SourceNodeClass):
+                    try:
+                        slot_types[key] = node.saved_type_texts()
+                    except ValueError as exc:
+                        # A type text that would not read back (CodeRabbit on PR 454).
+                        exc.add_note(f"Saving the pipeline's node {node.label!r}")
+                        raise
+                    continue
+                try:
+                    arrow_types[key] = typed_arrow_schemas(node)
+                except (ValueError, TypeError):
+                    stored = getattr(node, "_stored_schema", None) or (
+                        self._loaded_output_schemas.get(key)
+                    )
+                    if not stored:
+                        raise
+                    retained[key] = stored
         nodes: dict[str, Any] = {}
         for content_hash_str, node in self._persistent_node_map.items():
-            tag_schema, data_schema = node.output_schema()
             try:
                 type_converter = node.data_context.type_converter
             except (AttributeError, TypeError):
@@ -211,14 +195,38 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
             _cfg = node.orcapod_config
             config_val = None if _cfg == _DEFAULT_CONFIG else dataclasses.asdict(_cfg)
 
+            try:
+                output_schema: dict[str, Any] = (
+                    copy.deepcopy(slot_types[content_hash_str])
+                    if content_hash_str in slot_types
+                    else serialize_arrow_schemas(
+                        *arrow_types[content_hash_str], type_converter
+                    )
+                    if content_hash_str in arrow_types
+                    else dict(retained[content_hash_str])
+                    if content_hash_str in retained
+                    # Only this branch reads the node's Python schema: a loaded node
+                    # whose saved schema names an unregistered logical type keeps
+                    # its retained texts above, and saving again never asks for a
+                    # Python type it cannot restore (CodeRabbit on PR 454).
+                    else serialize_output_schema(*node.output_schema(), type_converter)
+                )
+            except ValueError as exc:
+                # A type text that would not read back (CodeRabbit on PR 454).
+                exc.add_note(f"Saving the pipeline's node {node.label!r}")
+                raise
+
             descriptor: dict[str, Any] = {
                 "node_type": node.node_type,
                 "label": node.label,
                 "content_hash": node.content_hash().to_string(),
                 "pipeline_hash": node.pipeline_hash().to_string(),
-                "output_schema": serialize_output_schema(
-                    tag_schema, data_schema, type_converter
-                ),
+                # A node's own Arrow types are the saved authority (ITL-640): the
+                # types its rows have, from its typed zero-row table, never types
+                # re-derived from Python ones (which lose time64[ns] or a decimal's
+                # precision). A slot whose class is not registered keeps its saved
+                # text below (ITL-1138).
+                "output_schema": output_schema,
                 "node_uri": list(node.node_uri),
                 "data_context_key": data_context_key,
                 "config": config_val,
@@ -226,48 +234,44 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
 
             match node:
                 case SourceNodeClass():
+                    # The slot's column types from the one writer (ITL-640): its own
+                    # Arrow pair, or, while unresolved, the Arrow type texts it was
+                    # loaded with, every column (an int32 stays int32).
+                    saved = slot_types[content_hash_str]
                     descriptor["source_config"] = {
                         "source_type": "node",
                         "name": node.name,
-                        "tag_schema": serialize_schema(node.tag_schema, type_converter),
-                        "data_schema": serialize_schema(
-                            node.data_schema, type_converter
-                        ),
-                        "nullable": serialize_nullability(
-                            node.tag_schema, node.data_schema, type_converter
-                        ),
+                        "tag_schema": dict(saved["tag"]),
+                        "data_schema": dict(saved["data"]),
+                        "nullable": copy.deepcopy(saved["nullable"]),
                     }
                     descriptor["reconstructable"] = True
-                    # A column whose saved type is still text keeps its saved
-                    # nullability, which the text cannot give (ITL-1138).
-                    pending = node._pending_nullable_columns()  # pyright: ignore[reportPrivateUsage]  # the saver is the one caller
-                    output_nullable = descriptor["output_schema"].get("nullable")
-                    if output_nullable is not None:
-                        descriptor["output_schema"]["nullable"] = (
-                            _with_pending_nullability(output_nullable, pending, node)
-                        )
-                    source_nullable = serialize_nullability(
-                        node.tag_schema, node.data_schema, type_converter
-                    )
-                    descriptor["source_config"]["nullable"] = _with_pending_nullability(
-                        source_nullable, pending, node
-                    )
 
                 case FunctionNode():
                     if node._function_pod is not None:
                         descriptor["function_config"] = node._function_pod.to_config()
+                    elif "function_config" in node._descriptor:
+                        # A loaded read-only node (its pod not rebuilt, e.g. an output
+                        # of an unregistered class) writes its saved config back as it
+                        # is, so saving again keeps the file's entry (PR 454).
+                        descriptor["function_config"] = copy.deepcopy(
+                            node._descriptor["function_config"]
+                        )
                     descriptor["table_scope"] = node._table_scope
+                    # Written for every function node, also a plain one (ITL-1019).
+                    descriptor[FALL_THROUGH_TAGS_KEY] = list(node.declared_data_tags())
 
                 case OperatorNode():
                     if node._operator is not None:
                         descriptor["operator_config"] = node._operator.to_config()
+                    elif "operator_config" in node._descriptor:
+                        # A loaded read-only node writes its saved config back as it
+                        # is (PR 454).
+                        descriptor["operator_config"] = copy.deepcopy(
+                            node._descriptor["operator_config"]
+                        )
                     descriptor["table_scope"] = node._table_scope
 
-            # A node loaded from a file without the record: its nullability is unknown.
-            if content_hash_str in self._unrecorded_output_nullability:
-                del descriptor["output_schema"]["nullable"]
-            if content_hash_str in self._unrecorded_source_nullability:
-                descriptor.get("source_config", {}).pop("nullable", None)
             nodes[content_hash_str] = descriptor
 
         output: dict[str, Any] = {
@@ -298,12 +302,18 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
             A compiled ``Pipeline`` instance with SourceNode leaf nodes.
 
         Raises:
-            ValueError: If the file's format version is unsupported.
+            ValueError: If the file's format version is not the one this Orcapod
+                writes (an earlier format is refused, never migrated).
         """
         import json as _json
         from orcapod.pipeline.serialization import (
-            SUPPORTED_FORMAT_VERSIONS,
+            FALL_THROUGH_TAGS_KEY,
+            PIPELINE_FORMAT_VERSION,
+            require_current_format,
+            require_nullability_records,
+            arrow_schema_from_texts,
             deserialize_schema,
+            saved_fall_through_tags,
         )
         from orcapod.core.nodes import FunctionNode, OperatorNode
         from orcapod.core.nodes.source_node import SourceNode as SourceNodeClass
@@ -313,12 +323,13 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         with open(path) as f:
             data = _json.load(f)
 
-        version = data.get("orcapod_pipeline_version", "")
-        if version not in SUPPORTED_FORMAT_VERSIONS:
-            raise ValueError(
-                f"Unsupported pipeline format version {version!r}. "
-                f"Supported: {sorted(SUPPORTED_FORMAT_VERSIONS)}"
+        try:
+            require_current_format(
+                data.get("orcapod_pipeline_version", ""), PIPELINE_FORMAT_VERSION
             )
+        except ValueError as exc:
+            exc.add_note(f"Loading the pipeline file {path}")
+            raise
 
         pipeline_meta = data["pipeline"]
         name = tuple(pipeline_meta["name"])
@@ -339,20 +350,6 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
             upstream_map.setdefault(down_hash, []).append(up_hash)
 
         reconstructed: dict[str, GraphNode] = {}
-        # A descriptor written before nullability was recorded (ITL-1043) restores
-        # every column as non-null: lossy. Saving the loaded pipeline keeps it
-        # unrecorded, node by node.
-        unrecorded_output_nullability = frozenset(
-            node_hash
-            for node_hash, descriptor in nodes_data.items()
-            if "nullable" not in (descriptor.get("output_schema") or {})
-        )
-        unrecorded_source_nullability = frozenset(
-            node_hash
-            for node_hash, descriptor in nodes_data.items()
-            if "source_config" in descriptor
-            and "nullable" not in descriptor["source_config"]
-        )
 
         for node_hash in topo_order:
             descriptor = nodes_data.get(node_hash)
@@ -364,6 +361,19 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                 SavedSchemaVersionError,
                 deserialize_output_schema,
             )
+
+            # Every node records its nullability (ITL-1043), and every function node
+            # names its data-tags (ITL-1019).
+            try:
+                require_nullability_records(descriptor)
+                if descriptor.get("node_type") == "function":
+                    descriptor[FALL_THROUGH_TAGS_KEY] = list(
+                        saved_fall_through_tags(descriptor)
+                    )
+            except ValueError as exc:
+                raise ValueError(
+                    f"{path}: saved node {descriptor.get('label')!r}: {exc}"
+                ) from exc
 
             # Validate even a leaf node's saved identifiers before exposing the job.
             context = resolve_saved_context(descriptor.get("data_context_key"))
@@ -395,45 +405,54 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                     )
                     if not node_name:
                         node_name = descriptor.get("label") or "unknown"
-                    # Which columns may be null; None when the file does not say.
-                    saved_nullable: dict[str, list[str]] | None
+                    # Which columns may be null: recorded (``require_nullability_records``).
+                    saved_nullable: dict[str, list[str]]
                     if "tag_schema" in source_config and "data_schema" in source_config:
                         saved_tag = source_config["tag_schema"]
                         saved_data = source_config["data_schema"]
-                        # A source node's output schema has the same columns: its
-                        # record stands in when the source config has none.
-                        saved_nullable = source_config.get(
-                            "nullable", descriptor["output_schema"].get("nullable")
-                        )
+                        saved_nullable = source_config["nullable"]
                     else:
                         saved_tag = descriptor["output_schema"]["tag"]
                         saved_data = descriptor["output_schema"]["data"]
-                        saved_nullable = descriptor["output_schema"].get("nullable")
+                        saved_nullable = descriptor["output_schema"]["nullable"]
                     tag_schema = Schema(
                         deserialize_schema(
                             saved_tag,
                             context.type_converter,
-                            nullable=None
-                            if saved_nullable is None
-                            else saved_nullable["tag"],
+                            nullable=saved_nullable["tag"],
                         )
                     )
                     data_schema = Schema(
                         deserialize_schema(
                             saved_data,
                             context.type_converter,
-                            nullable=None
-                            if saved_nullable is None
-                            else saved_nullable["data"],
+                            nullable=saved_nullable["data"],
                         )
                     )
+                    saved_context = resolve_saved_context(
+                        descriptor.get("data_context_key")
+                    )
+                    # The slot's Arrow types, rebuilt from the saved text (ITL-640);
+                    # none while a column's class is not registered in this process.
+                    try:
+                        arrow_schemas = (
+                            arrow_schema_from_texts(
+                                saved_tag, context.type_converter, saved_nullable["tag"]
+                            ),
+                            arrow_schema_from_texts(
+                                saved_data,
+                                context.type_converter,
+                                saved_nullable["data"],
+                            ),
+                        )
+                    except (ValueError, TypeError, KeyError):
+                        arrow_schemas = None
                     node = SourceNodeClass(
                         name=node_name,
                         tag_schema=tag_schema,
                         data_schema=data_schema,
-                        data_context=resolve_saved_context(
-                            descriptor.get("data_context_key")
-                        ),
+                        data_context=saved_context,
+                        arrow_schemas=arrow_schemas,
                     )
                     # The saved hashes, and the saved type text of a column whose
                     # class this process has not registered yet (ITL-1138).
@@ -481,6 +500,10 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                         )
 
                         operator = resolve_operator_from_config(op_config)
+                    except Warning:
+                        # A warning turned into an error (a ProvisionalHashWarning
+                        # under an error filter) propagates (ITL-1331).
+                        raise
                     except Exception as exc:
                         logger.warning(
                             "Could not reconstruct operator %r from config — "
@@ -488,6 +511,18 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                             op_config.get("class_name"),
                             exc,
                         )
+                if operator is None and op_config:
+                    # A provisional operator kept read-only (Pick and Index have no
+                    # config to rebuild from, ITL-1326) never reaches its constructor:
+                    # the loaded job warns for it here, as a rebuilt one does (ITL-1279).
+                    from orcapod.core.operators.provisional import (
+                        PROVISIONAL_OPERATORS,
+                        warn_provisional_operator,
+                    )
+
+                    saved_name = op_config.get("class_name")
+                    if saved_name in PROVISIONAL_OPERATORS:
+                        warn_provisional_operator(saved_name)
                 if operator is not None:
                     from orcapod.logical_types.identifier import (
                         LogicalTypeIdentifierError,
@@ -538,8 +573,11 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
 
         # Build Pipeline instance
         pipeline = cls(name=name, auto_compile=False)
-        pipeline._unrecorded_output_nullability = unrecorded_output_nullability
-        pipeline._unrecorded_source_nullability = unrecorded_source_nullability
+        pipeline._loaded_output_schemas = {
+            node_hash: descriptor["output_schema"]
+            for node_hash, descriptor in nodes_data.items()
+            if isinstance(descriptor.get("output_schema"), dict)
+        }
         pipeline._persistent_node_map = dict(reconstructed)
 
         nodes_by_label: dict[str, GraphNode] = {}
@@ -623,375 +661,10 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         clone._node_graph = self._node_graph
         clone._auto_compile = self._auto_compile
         clone._compiled = self._compiled
-        clone._unrecorded_output_nullability = self._unrecorded_output_nullability
-        clone._unrecorded_source_nullability = self._unrecorded_source_nullability
+        clone._loaded_output_schemas = self._loaded_output_schemas
         # Mutable per-execution state — own copy so runs don't interfere
         clone._nodes = dict(self._nodes)
         return clone
 
     def __dir__(self) -> list[str]:
         return list(super().__dir__()) + list(self._nodes.keys())
-
-
-# ===========================================================================
-# Graph Rendering Utilities
-# ===========================================================================
-
-
-class GraphRenderer:
-    """Improved GraphRenderer with centralized default styling"""
-
-    # ====================
-    # CENTRALIZED DEFAULTS
-    # ====================
-    DEFAULT_STYLES = {
-        "rankdir": "TB",
-        "node_shape": "box",
-        "node_style": "filled",
-        "node_color": "navy",
-        "font_color": "white",
-        "type_font_color": "#54508C",  # muted navy blue
-        "font_name": "sans-serif",
-        "font_path": None,  # Set to None by default
-        # 'font_path': './assets/fonts/LexendDeca-Medium.ttf',
-        "edge_color": "black",
-        "dpi": 150,
-        # HTML Label defaults
-        "main_font_size": 14,  # Main label font size
-        "type_font_size": 11,  # PodProtocol type font size (small)
-        "type_style": "normal",  # PodProtocol type text style
-    }
-
-    DEFAULT_STYLE_RULES = {
-        "source": {
-            "fillcolor": "white",
-            "shape": "rect",
-            "fontcolor": "black",
-            "style": "filled",
-            "typefontcolor": "#3A3737",  # dark gray
-        },
-        "operator": {
-            "fillcolor": "#DFD6CF",  # pale beige
-            "shape": "diamond",
-            "fontcolor": "black",
-            "style": "filled",
-            "typefontcolor": "#3A3737",  # dark gray
-        },
-        "function": {
-            "fillcolor": "#f5f5f5",  # off white
-            "shape": "cylinder",
-            "fontcolor": "#090271",  # darker navy blue
-            "style": "filled",
-            "typefontcolor": "#3A3737",  # dark gray
-        },
-    }
-
-    DARK_THEME_RULES = {
-        "source": {
-            "fillcolor": "black",
-            "shape": "rect",
-            "fontcolor": "white",
-            "style": "filled",
-            "typefontcolor": "lightgray",  # Light text for dark background
-        },
-        "operator": {
-            "fillcolor": "#026e8e",  # ocean blue
-            "shape": "diamond",
-            "fontcolor": "white",
-            "style": "filled",
-            "typefontcolor": "lightgray",  # Light text for dark background
-        },
-        "function": {
-            "fillcolor": "#090271",  # darker navy blue
-            "shape": "cylinder",
-            "fontcolor": "white",
-            "style": "filled",
-            "typefontcolor": "lightgray",  # Light text for dark background
-        },
-    }
-
-    def __init__(self):
-        pass
-
-    def _sanitize_node_id(self, node_id: GraphNode) -> str:
-        return f"node_{hash(node_id)}"
-
-    def _create_default_html_label(
-        self, node: GraphNode, node_attrs: dict[str, str]
-    ) -> str:
-        """Create HTML for the label (text) section of the node.
-
-        Format:
-        node_type      (11pt, small text)
-        main_label     (14pt, normal text)
-        """
-        main_label = str(node.label)
-        node_type = node.node_type
-
-        # Create HTML label: small node_type above, main label below
-        main_size = self.DEFAULT_STYLES["main_font_size"]
-        type_size = self.DEFAULT_STYLES["type_font_size"]
-        font_name = self.DEFAULT_STYLES["font_name"]
-        type_font_color = node_attrs.get(
-            "typefontcolor", self.DEFAULT_STYLES["type_font_color"]
-        )
-
-        html_label = f'''<
-        <TABLE BORDER="0" CELLBORDER="0" CELLSPACING="0">
-            <TR><TD ALIGN="CENTER"><FONT POINT-SIZE="{type_size}" COLOR="{type_font_color}" FACE="{font_name}, bold">{node_type}</FONT></TD></TR>
-            <TR><TD ALIGN="CENTER"><FONT POINT-SIZE="{main_size}">{main_label}</FONT></TD></TR>
-        </TABLE>
-        >'''
-
-        return html_label
-
-    def _get_node_label(
-        self,
-        node: GraphNode,
-        label_lut: dict[GraphNode, str] | None = None,
-    ) -> str:
-        if label_lut and node in label_lut:
-            return label_lut[node]
-        return str(node.label)
-
-    def _get_node_attributes(
-        self,
-        node: GraphNode,
-        style_rules: dict[str, dict[str, str]] | None = None,
-    ) -> dict[str, str]:
-        """Get styling attributes for a specific node based on its node_type."""
-        rules = style_rules or self.DEFAULT_STYLE_RULES
-
-        default_attrs = {
-            "fillcolor": self.DEFAULT_STYLES["node_color"],
-            "shape": self.DEFAULT_STYLES["node_shape"],
-            "fontcolor": self.DEFAULT_STYLES["font_color"],
-            "fontname": self.DEFAULT_STYLES["font_name"],
-            "fontsize": self.DEFAULT_STYLES.get("fontsize", "14"),
-            "style": self.DEFAULT_STYLES["node_style"],
-            "typefontcolor": self.DEFAULT_STYLES["type_font_color"],
-        }
-
-        if node.node_type in rules:
-            default_attrs.update(rules[node.node_type])
-
-        return default_attrs
-
-    def _merge_styles(self, **override_styles) -> dict:
-        """
-        CENTRAL STYLE MERGING
-        Takes the default styles and overrides them with any user-provided styles.
-        """
-        merged = self.DEFAULT_STYLES.copy()
-        merged.update(override_styles)  # Override defaults with user choices
-        return merged
-
-    def generate_dot(
-        self,
-        graph: "GraphProtocol[GraphNode]",
-        label_lut: dict[GraphNode, str] | None = None,
-        style_rules: dict[str, dict[str, str]] | None = None,
-        **style_overrides,
-    ) -> str:
-        styles = self._merge_styles(**style_overrides)
-
-        import graphviz
-
-        dot = graphviz.Digraph(comment="NetworkX Graph")
-
-        # Apply global styles
-        dot.attr(rankdir=styles["rankdir"], dpi=str(styles["dpi"]))
-        dot.attr(fontname=styles["font_name"])
-        if styles.get("fontsize"):
-            dot.attr(fontsize=str(styles["fontsize"]))
-        if styles["font_path"]:
-            dot.attr(fontpath=styles["font_path"])
-
-        # Set default edge attributes
-        dot.attr("edge", color=styles["edge_color"])
-
-        # Add nodes with styling based on node_type
-        for node in graph.nodes():
-            sanitized_id = self._sanitize_node_id(node)
-            node_attrs = self._get_node_attributes(node, style_rules)
-
-            if label_lut and node in label_lut:
-                label = label_lut[node]
-            else:
-                label = self._create_default_html_label(node, node_attrs)
-
-            dot.node(sanitized_id, label=label, **node_attrs)
-
-        # Add edges
-        for source, target in graph.edges():
-            source_id = self._sanitize_node_id(source)
-            target_id = self._sanitize_node_id(target)
-            dot.edge(source_id, target_id)
-
-        return dot.source
-
-    def render_graph(
-        self,
-        graph: "GraphProtocol[GraphNode]",
-        label_lut: dict[GraphNode, str] | None = None,
-        show: bool = True,
-        output_path: str | None = None,
-        raw_output: bool = False,
-        figsize: tuple = (12, 8),
-        dpi: int = 150,
-        style_rules: dict[str, dict[str, str]] | None = None,
-        **style_overrides,
-    ) -> str | None:
-        # Always generate DOT first
-        dot_text = self.generate_dot(graph, label_lut, style_rules, **style_overrides)
-
-        if raw_output:
-            return dot_text
-
-        # For rendering, continue with the existing logic but return DOT text
-        styles = self._merge_styles(**style_overrides)
-
-        import graphviz
-
-        dot = graphviz.Digraph(comment="NetworkX Graph")
-
-        # Apply styles directly
-        dot.attr(rankdir=styles["rankdir"], dpi=str(dpi))
-        dot.attr(fontname=styles["font_name"])
-        if styles.get("fontsize"):
-            dot.attr(fontsize=styles["fontsize"])
-        if styles["font_path"]:
-            dot.attr(fontpath=styles["font_path"])
-
-        # Set default edge attributes
-        dot.attr("edge", color=styles["edge_color"])
-
-        # Add nodes with specific styling
-        for node in graph.nodes():
-            sanitized_id = self._sanitize_node_id(node)
-            node_attrs = self._get_node_attributes(node, style_rules)
-
-            if label_lut and node in label_lut:
-                label = label_lut[node]
-            else:
-                label = self._create_default_html_label(node, node_attrs)
-
-            dot.node(sanitized_id, label=label, **node_attrs)
-
-        # Add edges
-        for source, target in graph.edges():
-            source_id = self._sanitize_node_id(source)
-            target_id = self._sanitize_node_id(target)
-            dot.edge(source_id, target_id)
-
-        if output_path:
-            name, ext = os.path.splitext(output_path)
-            format_type = ext[1:] if ext else "png"
-            dot.render(name, format=format_type, cleanup=True)
-            print(f"Graph saved to {output_path}")
-
-        import matplotlib.image as mpimg
-        import matplotlib.pyplot as plt
-
-        if show:
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                dot.render(tmp.name[:-4], format="png", cleanup=True)
-                img = mpimg.imread(tmp.name)
-                plt.figure(figsize=figsize, dpi=dpi)
-                plt.imshow(img)
-                plt.axis("off")
-                plt.tight_layout()
-                plt.show()
-                os.unlink(tmp.name)
-
-        # Always return DOT text (like the spec)
-        return dot_text
-
-
-# =====================
-# CONVENIENCE FUNCTION
-# =====================
-def render_graph(
-    graph: "GraphProtocol[GraphNode]",
-    label_lut: dict[GraphNode, str] | None = None,
-    style_rules: dict[str, dict[str, str]] | None = None,
-    **kwargs,
-) -> str | None:
-    """Convenience function with conditional node styling.
-
-    Args:
-        graph: NetworkX DiGraph whose nodes are GraphNode instances.
-        label_lut: Optional mapping from node to custom display label.
-        style_rules: Mapping from node_type to graphviz attribute overrides.
-        **kwargs: Other styling arguments forwarded to GraphRenderer.
-    """
-    renderer = GraphRenderer()
-    return renderer.render_graph(graph, label_lut, style_rules=style_rules, **kwargs)
-
-
-def render_graph_dark_theme(
-    graph: "GraphProtocol[GraphNode]",
-    label_lut: dict[GraphNode, str] | None = None,
-    **kwargs,
-) -> str | None:
-    """Render with dark theme — dark backgrounds, light fonts."""
-    renderer = GraphRenderer()
-    return renderer.render_graph(
-        graph, label_lut, style_rules=renderer.DARK_THEME_RULES, **kwargs
-    )
-
-
-# =============================================
-# STYLE RULE SETS
-# =============================================
-
-
-class StyleRuleSets:
-    """Access to different theme style rules"""
-
-    @staticmethod
-    def get_default_rules():
-        """Mixed theme - light node fill colors with dark colored fonts"""
-        return GraphRenderer.DEFAULT_STYLE_RULES
-
-    @staticmethod
-    def get_dark_rules():
-        """Dark theme - dark node fill colors with light colored fonts"""
-        return GraphRenderer.DARK_THEME_RULES
-
-    @staticmethod
-    def create_custom_rules(
-        source_bg="lightgreen",
-        operator_bg="orange",
-        pod_bg="darkslateblue",
-        source_main_fcolor="black",
-        operator_main_fcolor="black",
-        pod_main_fcolor="white",
-        source_type_fcolor="darkgray",
-        operator_type_fcolor="darkgray",
-        node_type_fcolor="lightgray",
-    ) -> dict[str, dict[str, str]]:
-        """Create custom theme rules."""
-        return {
-            "source": {
-                "fillcolor": source_bg,
-                "shape": "ellipse",
-                "fontcolor": source_main_fcolor,
-                "style": "filled",
-                "typefontcolor": source_type_fcolor,
-            },
-            "operator": {
-                "fillcolor": operator_bg,
-                "shape": "diamond",
-                "fontcolor": operator_main_fcolor,
-                "style": "filled",
-                "typefontcolor": operator_type_fcolor,
-            },
-            "function": {
-                "fillcolor": pod_bg,
-                "shape": "box",
-                "fontcolor": pod_main_fcolor,
-                "style": "filled,rounded",
-                "typefontcolor": node_type_fcolor,
-            },
-        }

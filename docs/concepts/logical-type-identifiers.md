@@ -32,8 +32,14 @@ stores it, hashes it and compares it byte for byte.
 
 - **Stored with the column.** The name and metadata are written as the column's
   `ARROW:extension:name` and `ARROW:extension:metadata`, in memory and in every store.
+- **One identifier in every form.** A field carries it either as a live Arrow extension
+  type or as its storage type with those two metadata keys (a table read back from a store,
+  or read by a process that has not registered the type). The schema hash brings both to
+  the second form first, so a type has one schema hash however it arrives
+  ([hashing reference](../reference/hashing.md#the-arrow-schema-hash)).
 - **Part of the data type, so part of every hash the type takes part in.** The whole
-  identifier enters the type hash, the schema hash, the identity of a function whose
+  identifier enters the type hash, the schema hash (a schema is hashed as its Arrow schema,
+  whose extension name and metadata are the identifier), the identity of a function whose
   signature names the type, the pipeline hash, and the hash of every row that holds a
   value of the type. In those hashes it is written as the extension name, a `;`, and the
   metadata bytes in hexadecimal:
@@ -125,9 +131,10 @@ a list; conceptually they are an ordinary list or set of `T`. By design:
   JSON as text, a logical type used inside `list[T]` or `set[T]` must have extension
   metadata that is valid UTF-8, for its current identifier and for every older one it
   declares readable.
-- **In the type and schema hash it is hashed like any other generic type**, `list[int]`
-  included: as its origin (`list` or `set`) and its argument. The element's identifier enters
-  through the argument.
+- **In the type hash it is hashed like any other generic type**, `list[int]` included: as its
+  origin (`list` or `set`) and its argument. The element's identifier enters through the
+  argument. In a schema hash, which hashes the Arrow schema, the container is its extension
+  type, whose name and metadata hold the element's identifier.
 - **A change to how native containers are stored or hashed is a change of Orcapod's core
   hashing**, recorded by the data context (the global hash version), never a change of a
   logical type.

@@ -27,7 +27,7 @@ def compute_bmi(weight: float, height: float) -> float:
 
 
 def mice(rows):
-    return DictSource(data=rows, tag_columns=["subject_id"], source_id="mice")
+    return DictSource(data=rows, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
 
 
 cohort_a = [
@@ -249,9 +249,14 @@ print(job_a.nodes["bmi"].as_table().num_rows, job_b.nodes["bmi"].as_table().num_
 
 `sources` maps a source slot's name (the `source_id` used when the blueprint was recorded)
 to the source to use. A source bound to a slot must have the slot's tag and data columns
-with the same Python types (a column the slot declares `T | None` also accepts `T`); any
-other source raises `SourceSpecMismatchError`, and an unknown slot name raises `ValueError`.
-Binding a source never changes a node's schema or where its results are stored.
+with the same Arrow types (a column the slot declares nullable also accepts a non-null one);
+any other source raises `SourceSpecMismatchError`, and an unknown slot name raises
+`ValueError`. A slot made from a source keeps that source's Arrow types, so an `int32`
+column refuses an `int64` source. A slot declared with Python types (`SourceNode(name,
+tag_schema=Schema({...}), data_schema=Schema({...}))`) means one Arrow type per Python type
+(`int` is `int64`, `datetime` is `timestamp[us, tz=UTC]`); to accept other widths, units or
+zones, declare the slot with Arrow schemas (`tag_schema=pa.schema([...])`). Binding a source
+never changes a node's schema or where its results are stored.
 
 A job made without sources has **unbound** slots. It can still be run: nodes that depend on
 an unbound source are skipped, and `job.unbound_sources` lists what is missing. Bind later
@@ -270,8 +275,86 @@ print(job_c.nodes["bmi"].as_table().num_rows)
 # 1
 ```
 
-Every job also carries its blueprint as `job.pipeline`. That object has `show_graph()`,
-which draws the pipeline and needs the Graphviz `dot` program to be installed.
+Every job also carries its blueprint as `job.pipeline`.
+
+## Seeing the graph
+
+!!! caution "In development"
+    `Pipeline.diagram()`, `PipelineJob.diagram()`, `PipelineDiagram` and its methods and
+    arguments, the look of the picture and the notebook display may change in any release
+    without a deprecation period. The first diagram in a Python session issues
+    `orcapod.errors.InDevelopmentWarning` once, as a reminder; to silence it, run
+    `warnings.filterwarnings("ignore", category=InDevelopmentWarning)` after importing
+    it from `orcapod.errors`.
+
+In a notebook, a job or a pipeline shown at the end of a cell draws itself: a diagram of its
+nodes (sources, operators, function pods, side-effect pods) and the streams between them,
+laid out left to right. It is drawn as wide as the cell, at most 1.25 times its own size; a
+diagram that would then be drawn below 0.8 times its size, where its labels get hard to
+read, starts at 0.8 times from its left (or top) end, and a shaded edge with an arrow shows
+that there is more: click it or drag to move along, or use `fit` to see all of it. Drag to
+move it and use the `+`, `−` and `fit` buttons (or Ctrl or Cmd with the mouse wheel) to zoom; from the keyboard, focus the diagram and use the arrow keys
+to move it, `+` and `-` to zoom and `0` to fit, and Tab to reach the nodes. Click a node (or focus it and press Enter) to see its
+schema: its tag and data columns, the nodes it reads from and, for a job, its run status and
+the row counts of the job's last run. `diagram()` makes the same diagram with options, and
+`print` shows it as text:
+
+```python
+print(job_c.diagram())
+# Job 'bmi': 2 nodes
+#   mice (source · DictSource · bound)
+#   bmi (function pod · compute_bmi · current) <- mice
+print(pipeline.diagram())
+# Pipeline 'bmi': 2 nodes
+#   mice (source)
+#   bmi (function pod · compute_bmi) <- mice
+```
+
+Each line is a node: its name, its kind, what it is when the name does not say it (the
+function of a function pod, the class of a bound source), and for a job its status:
+
+- `not run`: the node has not run in this Python session, or was cleared (`clear_cache()`).
+- `current`: it holds the rows of its last run, and nothing it depends on has changed (also
+  when the job's last run kept it without running it again; a function pod's details then
+  count those rows as held).
+- `stale`: something it depends on changed after its run (a source was bound again, a node
+  above it was cleared); the next run computes it again.
+- `failed`: its last run (the job's, or the node's own `run()`) had rows whose function
+  raised; select the node to see the first error of the job's last run.
+- `loaded only`: filled by `job.run(load_only=True)`.
+- `partial`: it ran, but a node above it had failed rows, so it holds the results of the
+  rows that did not fail; the next run computes it again.
+- `bound` or `unbound`, for a source slot.
+
+A selected node also shows the row counts of the job's last run (`job.last_run`).
+
+The options:
+
+- `direction="TB"` lays the graph out top to bottom instead of left to right.
+- `collapse=True` folds the steps that only choose, rename or join columns (joins, column
+  selections, drops and maps, among them the join and select a function pod adds for you)
+  into the edge they lie on: the edge is dashed, and the node it leads to lists them. A step
+  is folded by what its operator is, whatever label it was given.
+- `max_nodes` (400 by default): a larger graph is shown as the text listing instead.
+
+In a notebook that runs scripts, two checkboxes next to the zoom buttons switch the layout
+in place: `vertical` (top to bottom, or left to right when unticked) and `collapse` (which
+appears only when there is something to fold). `direction=` and `collapse=` set the layout
+shown first, and the one shown where scripts do not run. A selected node stays selected
+when it is in the new layout. The checkboxes appear for graphs of up to 100 nodes: a larger
+diagram carries only the layout its arguments ask for, which keeps a notebook small.
+
+In each node, the kind line under the name (kind, what it is, status) is wrapped onto
+short lines, so a node is about as wide as its name.
+
+Drawing a diagram never computes anything. Like `head()`, it reads only what is already
+known: each node's columns (which Orcapod knows without computing) and the run state the job
+holds in memory. It runs no function, reads no source and no database. It needs no Graphviz
+and nothing from the network: the picture is part of the cell's output, so it stays in a saved
+notebook and in an HTML export. Where a notebook does not run scripts (an untrusted notebook,
+a preview on a website), the picture is still shown, without pan, zoom or selection; open
+the **Nodes** table below the picture for each node's columns and status.
+`job.diagram().save("pipeline.html")` writes it as a page that opens in any browser.
 
 ## Saving and loading
 
@@ -279,7 +362,10 @@ which draws the pipeline and needs the Graphviz `dot` program to be installed.
 each source was configured. `PipelineJob.load(path)` reads it back, for example in a later
 Python session. An `InMemoryArrowDatabase` has no location to record, so here the database
 is passed again; `PipelineJob.load(path, database=...)` is also how you point a loaded job
-at a database that has moved.
+at a database that has moved. The file records each node's own Arrow types, so saving types
+every node from its inputs' types, as previewing an empty job does, and costs what that
+preview costs: a pipeline whose joins keep many system-tag columns saves as slowly as it
+previews.
 
 ```python
 job_a.save("bmi_job.json")

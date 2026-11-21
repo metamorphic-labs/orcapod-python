@@ -507,20 +507,3 @@ class LogicalTorchTensor(IgnoreListLogicalType):
                 loader reads.
         """
         return tensor_from_bytes(bytes(storage_value))
-
-    def storage_sort_key(self, storage_value: Any) -> tuple[Any, ...]:
-        """Ordering key for stored values, used where operators sort values.
-
-        The stored bytes are PyTorch's and give no stable order, so a cell is
-        ordered by the strict value hash of the tensor it holds; ``None`` sorts
-        first.
-
-        Args:
-            storage_value: The stored bytes of a cell, or ``None``.
-
-        Returns:
-            A tuple that orders stored cells deterministically.
-        """
-        if storage_value is None:
-            return (0,)
-        return (1, tensor_digest(tensor_from_bytes(bytes(storage_value))))

@@ -1,20 +1,50 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from orcapod import contexts
 from orcapod.config import OrcapodConfig
-from orcapod.core.streams.base import StreamBase, typed_zero_row_table
+from orcapod.core.streams.base import (
+    StreamBase,
+    typed_arrow_schemas,
+    typed_zero_row_table,
+)
 from orcapod.system_constants import constants
 from orcapod.core.streams.view import StreamView
 from orcapod.protocols.core_protocols import StreamProtocol
-from orcapod.types import ColumnConfig, Schema
+from orcapod.types import ColumnConfig, Condition, ContentHash, Schema
+from orcapod.core.sources.provisional import warn_provisional_source
+from orcapod.utils.provisional import note_provisional_use, provisional_class_name
+from orcapod.utils.schema_utils import arrow_schema_identity
 
 if TYPE_CHECKING:
     import pyarrow as pa
 
     from orcapod.core.sources.cached_source import CachedSource
     from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
+    from orcapod.protocols.hashing_protocols import SemanticHasherProtocol
+
+
+def saved_tag_only_columns(config: dict[str, Any]) -> bool | list[str]:
+    """Return the ``tag_only_columns`` of a saved source config (ITL-1019).
+
+    A saved config always holds it (``serialization.require_tag_only_columns``).
+
+    Args:
+        config: A saved source config.
+
+    Returns:
+        ``True`` (every tag plain) or the names of the plain tags.
+
+    Raises:
+        ValueError: If the config does not hold ``tag_only_columns``.
+    """
+    if "tag_only_columns" not in config:
+        raise ValueError(
+            f"source config {config.get('source_type')!r} has no tag_only_columns: "
+            "a saved source config states its plain tags (format 0.3.0)"
+        )
+    return config["tag_only_columns"]
 
 
 class RootSource(StreamBase):
@@ -50,6 +80,19 @@ class RootSource(StreamBase):
     ``identity_structure()``.
     """
 
+    # Whether the source takes ``tag_only_columns`` and saves it in its config
+    # (ITL-1019): from format 0.3.0 on such a config always holds it.
+    TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = False
+
+    PROVISIONAL: ClassVar[bool] = False
+    """Whether the source is provisional: its identity is not frozen (ITL-1314).
+
+    Set to ``True`` exactly by the sources listed in ``PROVISIONAL_SOURCES``
+    (``core/sources/provisional.py``); constructing one issues
+    ``ProvisionalHashWarning`` once per source kind per process. It enters no hash,
+    identifier, config or stored path.
+    """
+
     def __init__(
         self,
         source_id: str | None = None,
@@ -57,6 +100,10 @@ class RootSource(StreamBase):
         data_context: str | contexts.DataContext | None = None,
         config: OrcapodConfig | None = None,
     ) -> None:
+        # A provisional source warns once per process at construction (ITL-1314).
+        provisional = provisional_class_name(type(self))
+        if provisional is not None:
+            warn_provisional_source(provisional)
         super().__init__(
             label=label,
             data_context=data_context,
@@ -84,14 +131,76 @@ class RootSource(StreamBase):
     # Source identity
     # -------------------------------------------------------------------------
 
+    def _note_provisional_identity_use(self) -> None:
+        """Record a use of this source's identity if it is provisional (ITL-1314).
+
+        The warning is issued at construction only; the use is recorded wherever the
+        identity is read (``source_id``, ``content_hash``, ``pipeline_hash``, the identity
+        structures; ITL-1331), so the
+        golden tool refuses a case that reads a provisional source built before the
+        case ran. The record enters no hash.
+        """
+        provisional = provisional_class_name(type(self))
+        if provisional is not None:
+            note_provisional_use(provisional)
+
+    def content_hash(self, hasher: SemanticHasherProtocol | None = None) -> ContentHash:
+        """Return the content hash, recording a provisional source's use (ITL-1314).
+
+        Args:
+            hasher: The semantic hasher, as for ``ContentIdentifiableBase.content_hash``.
+
+        Returns:
+            The content hash, unchanged by the record.
+        """
+        self._note_provisional_identity_use()
+        return super().content_hash(hasher)
+
+    def pipeline_hash(
+        self, hasher: SemanticHasherProtocol | None = None
+    ) -> ContentHash:
+        """Return the pipeline hash, recording a provisional source's use (ITL-1314).
+
+        Args:
+            hasher: The semantic hasher, as for ``PipelineElementBase.pipeline_hash``.
+
+        Returns:
+            The pipeline hash, unchanged by the record.
+        """
+        self._note_provisional_identity_use()
+        return super().pipeline_hash(hasher)
+
     @property
     def source_id(self) -> str:
         """Canonical name for this source used in the registry and provenance
         strings. If not set, raises ``ValueError``.
         """
+        self._note_provisional_identity_use()
         if self._source_id is None:
             raise ValueError("source_id is not set")
         return self._source_id
+
+    # -------------------------------------------------------------------------
+    # Restriction (ITL-1218)
+    # -------------------------------------------------------------------------
+
+    @property
+    def condition(self) -> Condition:
+        """The row conditions this source reads under (ITL-1218).
+
+        The empty ``Condition``: a source reads every row unless its kind can be
+        restricted (``SpiralDBTableSource.where``). A source that reads through
+        another (``CachedSource``, ``SourceProxy``) answers for itself only; what
+        it reads through is reached by the restriction walk
+        (``orcapod.pipeline.restrictions``).
+        """
+        return Condition()
+
+    @property
+    def row_limit(self) -> int | None:
+        """The most rows this source reads (ITL-1218): ``None``, no limit, unless
+        its kind can be limited (``SpiralDBTableSource(limit=...)``)."""
+        return None
 
     # -------------------------------------------------------------------------
     # Content identity
@@ -101,17 +210,45 @@ class RootSource(StreamBase):
     """The resolved key columns of the record ids, in key order; ``()`` for the
     position. Every concrete source sets it in ``__init__``."""
 
+    _arrow_schemas_cache: "tuple[pa.Schema, pa.Schema] | None" = None
+
+    @property
+    def arrow_schemas(self) -> "tuple[pa.Schema, pa.Schema]":
+        """The Arrow schemas of this source's tag and data columns (ITL-640).
+
+        The Arrow types its rows have (``_compute_arrow_schemas``), derived once: a
+        source's schema is fixed when it is built, whatever rows it reads later.
+        """
+        if self._arrow_schemas_cache is None:
+            self._arrow_schemas_cache = self._compute_arrow_schemas()
+        return self._arrow_schemas_cache
+
+    def _compute_arrow_schemas(self) -> "tuple[pa.Schema, pa.Schema]":
+        """Derive ``arrow_schemas``: the typed zero-row table's types (``typed_arrow_schemas``)."""
+        return typed_arrow_schemas(self, own=False)
+
+    def _schema_identity(self) -> tuple[ContentHash, ContentHash]:
+        """The identity of this source's schema: its Arrow tag and data schemas (ITL-640).
+
+        The Arrow schemas its rows have (``typed_arrow_schemas``), hashed by the one rule
+        (``schema_utils.arrow_schema_identity``): two sources whose columns differ only
+        in an Arrow type (``int32`` and ``int64``) are two identities, with two pipeline
+        hashes, stored paths and system-tag column names.
+        """
+        return arrow_schema_identity(*self.arrow_schemas, self.data_context)
+
     def identity_structure(self) -> Any:
-        """Identity from the class name, output schema, ``source_id`` and key columns.
+        """Identity from the class name, Arrow schema, ``source_id`` and key columns.
 
         The key columns are the resolved ``record_id_columns`` (``()`` for the
         position): two sources that differ only in how they name their rows are two
         sources, so their records never share a cache (developer, November 16, 2026,
         ITL-1154). The pipeline hash stays schema-only.
         """
+        self._note_provisional_identity_use()  # a direct read is a use (ITL-1331)
         return (
             self.__class__.__name__,
-            self.output_schema(),
+            self._schema_identity(),
             self.source_id,
             self._key_columns,
         )
@@ -142,14 +279,28 @@ class RootSource(StreamBase):
             "nullable": serialize_nullability(tag_schema, data_schema, type_converter),
         }
 
-    def pipeline_identity_structure(self) -> Any:
-        """Return (tag_schema, data_schema) as the pipeline identity for this
-        source.  Schema-only: no data content is included, so sources with
-        identical schemas share the same pipeline hash and therefore the same
-        pipeline database table.
+    def _tag_only_config(self) -> dict[str, Any]:
+        """Return ``tag_only_columns`` for ``to_config``: always written (ITL-1019).
+
+        A missing key is never read as a default: a saved config states its plain
+        tags, ``True`` when every tag is plain and the names otherwise
+        (``saved_tag_only_columns`` reads it back).
         """
-        tag_schema, data_schema = self.output_schema()
-        return (tag_schema, data_schema)
+        tag_columns = tuple(getattr(self, "_tag_columns", ()))
+        tag_only = tuple(getattr(self, "_tag_only_columns", tag_columns))
+        if tag_only == tag_columns:
+            return {"tag_only_columns": True}
+        return {"tag_only_columns": list(tag_only)}
+
+    def pipeline_identity_structure(self) -> Any:
+        """Return the hashes of the Arrow tag and data schemas: the pipeline identity.
+
+        Schema-only: no data content is included, so sources whose Arrow schemas are
+        equal share the same pipeline hash and therefore the same pipeline database
+        table; sources whose Arrow types differ do not (ITL-640).
+        """
+        self._note_provisional_identity_use()  # a direct read is a use (ITL-1331)
+        return self._schema_identity()
 
     # -------------------------------------------------------------------------
     # StreamProtocol protocol
@@ -286,6 +437,10 @@ class RootSource(StreamBase):
 
         Returns:
             A ``CachedSource`` that caches this source's output.
+
+        Raises:
+            ValueError: If this source is restricted (a condition or a limit): a cache
+                is kept under the table's identity, which a restriction is not part of.
         """
         from orcapod.core.sources.cached_source import CachedSource
 

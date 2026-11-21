@@ -5,8 +5,9 @@ from __future__ import annotations
 import types
 import typing
 from collections.abc import Collection, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import Any, ClassVar, TYPE_CHECKING
 
+from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.datagrams import Data, Tag
@@ -18,6 +19,7 @@ from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, ContentHash, DataType, Schema
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
+from orcapod.utils.schema_utils import column_names
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -93,6 +95,9 @@ class DropNulls(UnaryOperator):
         ValueError: If ``columns`` is an empty collection.
     """
 
+    # Data-tags (ITL-1023): handled.
+    DATA_TAGS_ISSUE: ClassVar[str | None] = None
+
     def __init__(
         self, columns: str | Collection[str] | None = None, **kwargs: Any
     ) -> None:
@@ -102,7 +107,7 @@ class DropNulls(UnaryOperator):
             # applied to; resolved per input, never stored.
             self.columns = None
         else:
-            names = (columns,) if isinstance(columns, str) else tuple(columns)
+            names = column_names(columns)
             if not names:
                 raise ValueError(
                     "DropNulls needs at least one column name; got an empty"
@@ -155,10 +160,13 @@ class DropNulls(UnaryOperator):
         """
         if self.columns is not None:
             return self.columns
+        # A data-tag is one column in both lists: named once.
         return tuple(
-            name
-            for name in (*tag_columns, *data_columns)
-            if not name.startswith(constants.META_PREFIX)
+            dict.fromkeys(
+                name
+                for name in (*tag_columns, *data_columns)
+                if not name.startswith(constants.META_PREFIX)
+            )
         )
 
     # ------------------------------------------------------------------
@@ -307,6 +315,7 @@ class DropNulls(UnaryOperator):
         return ArrowTableStream(
             self._narrow_table(table, self._target_columns(tag_columns, data_columns)),
             tag_columns=tag_columns,
+            data_tags=stream_data_tags(stream),
             data_context=stream.data_context,  # pyright: ignore[reportAttributeAccessIssue]  # StreamProtocol omits data_context, which every concrete stream provides (ITL-844)
         )
 

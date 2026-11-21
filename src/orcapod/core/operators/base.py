@@ -10,6 +10,8 @@ from orcapod.core.operators.meta_columns import (
     without_meta_fields,
 )
 from orcapod.channels import ReadableChannel, WritableChannel
+from orcapod.core.data_tags import data_tags_first
+from orcapod.core.operators.arrow_keys import part_without_rule
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import (
@@ -62,6 +64,38 @@ def require_shared_arrow_type(
     return shared
 
 
+def require_matchable_key(operator: str, name: str, arrow_type: pa.DataType) -> None:
+    """Raise if a join key's type has no rule for matching rows in Polars.
+
+    The rule is ``arrow_keys.part_without_rule`` (structs allowed: a struct
+    matches field by field); this adds the error an operator raises for a key
+    column it cannot match. Called with the input tables (the sync path, also
+    on zero-row tables) or the first rows (an async path) before rows are
+    matched, so no such column reaches Polars. Not at validation: that would
+    derive every input's zero-row table each time a graph is built
+    (``tests/test_pipeline/test_graph_walk_cost.py``).
+
+    Args:
+        operator: The operator's name, for the error message.
+        name: The key column's name, for the error message.
+        arrow_type: The key column's Arrow type.
+
+    Raises:
+        InputValidationError: If a part of the type (at the top level, or inside
+            a list or a struct) has no rule, such as a map, an interval or a
+            union. The message names the operator, the column and the type.
+    """
+    part = part_without_rule(arrow_type, structs=True)
+    if part is not None:
+        raise InputValidationError(
+            f"{operator} cannot match rows on the tag {name!r}: its type "
+            + f"{arrow_type} holds {part}, which has no rule for comparing values "
+            + "(a map, an interval, a union, a list view or a dictionary has none). Match on "
+            + "other tags: drop this one from one input "
+            + f"(stream.drop_tag_columns([{name!r}]))."
+        )
+
+
 def require_tag_data_roles_agree(
     first_tags: Collection[str],
     first_data: Collection[str],
@@ -88,9 +122,12 @@ def require_tag_data_roles_agree(
             in which role (``first`` or ``second`` of the two given) and
             suggests the remedy.
     """
-    for name in sorted(set(first_tags) & set(second_data)):
+    # A name that is a tag and a data column of one input is a data-tag
+    # (ITL-1023): it may meet a tag of that name in the other input (a join then
+    # equates the two), so only a data-only column counts here.
+    for name in sorted(set(first_tags) & (set(second_data) - set(second_tags))):
         raise _tag_data_error(name, "first", "second")
-    for name in sorted(set(second_tags) & set(first_data)):
+    for name in sorted(set(second_tags) & (set(first_data) - set(first_tags))):
         raise _tag_data_error(name, "second", "first")
 
 
@@ -98,8 +135,8 @@ def _tag_data_error(name: str, tag_side: str, data_side: str) -> InputValidation
     return InputValidationError(
         f"column {name!r} is a tag in the {tag_side} input and a data column in the "
         + f"{data_side}, and a name cannot be both. Rename it in one input with "
-        + "map_tags or map_data, or declare it a tag at the source that has it as "
-        + "a data column."
+        + "map_tags or map_data, or make it a tag of the input that has it as a data column (declare it "
+        + "a tag at its source, or mark it with tag_by)."
     )
 
 
@@ -139,6 +176,7 @@ class UnaryOperator(StaticOutputOperatorPod):
 
     def static_process(self, *streams: StreamProtocol) -> StreamProtocol:
         """Forward to ``unary_static_process`` with the single input stream."""
+        self._note_provisional_identity_use()
         stream = streams[0]
         # No operator carries its input's Data meta columns (ITL-1080).
         return without_input_meta(self.unary_static_process(stream), streams)
@@ -153,8 +191,9 @@ class UnaryOperator(StaticOutputOperatorPod):
         tag_schema, data_schema = self.unary_output_schema(
             stream, columns=columns, all_info=all_info
         )
-        # The prediction of ``without_input_meta`` in ``static_process``.
-        return tag_schema, without_meta_fields(data_schema)
+        # The prediction of ``without_input_meta`` in ``static_process``, with
+        # data-tags first among the data columns (ITL-1205).
+        return tag_schema, data_tags_first(tag_schema, without_meta_fields(data_schema))
 
     def argument_symmetry(self, streams: Collection[StreamProtocol]) -> ArgumentGroup:
         # return single stream as a tuple
@@ -239,6 +278,7 @@ class BinaryOperator(StaticOutputOperatorPod):
 
     def static_process(self, *streams: StreamProtocol) -> StreamProtocol:
         """Forward to ``binary_static_process`` with two input streams."""
+        self._note_provisional_identity_use()
         left_stream, right_stream = streams
         # No operator carries its inputs' Data meta columns (ITL-1080).
         return without_input_meta(
@@ -255,8 +295,9 @@ class BinaryOperator(StaticOutputOperatorPod):
         tag_schema, data_schema = self.binary_output_schema(
             left_stream, right_stream, columns=columns, all_info=all_info
         )
-        # The prediction of ``without_input_meta`` in ``static_process``.
-        return tag_schema, without_meta_fields(data_schema)
+        # The prediction of ``without_input_meta`` in ``static_process``, with
+        # data-tags first among the data columns (ITL-1205).
+        return tag_schema, data_tags_first(tag_schema, without_meta_fields(data_schema))
 
     def validate_inputs(self, *streams: StreamProtocol) -> None:
         if len(streams) != 2:

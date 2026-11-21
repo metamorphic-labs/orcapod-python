@@ -25,6 +25,14 @@ from collections.abc import Collection, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from orcapod import contexts
+from orcapod.core.data_tags import (
+    mark_data_tags,
+    data_tag_names,
+    require_database_keeps_marker,
+    stored_data_tags,
+    stream_data_tags,
+    without_tag_kind_marks,
+)
 from orcapod.channels import Channel, ChannelClosed, ReadableChannel, WritableChannel
 from orcapod.config import OrcapodConfig
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
@@ -47,6 +55,7 @@ from orcapod.core.streams.view import (
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
 from orcapod.core.nodes.staleness import RunHoldingNode
 from orcapod.errors import (
+    InputValidationError,
     PipelineJobRequiredError,
     OrcapodDatabaseReadError,
     OrcapodDatabaseWriteError,
@@ -57,9 +66,7 @@ from orcapod.contexts.stored import (
     require_storable,
     keep_rows_of_data_context,
     require_same_data_context,
-    account_for_stale_tables,
     describe_database_table,
-    find_stale_tables,
     report_rows_of_other_data_contexts,
     report_unexpected_row_count,
     with_data_context,
@@ -151,21 +158,6 @@ class _InputTap:
 # ---------------------------------------------------------------------------
 # OperatorNodeBase — shared base (no DB)
 # ---------------------------------------------------------------------------
-
-
-class _LoadedCacheUnreadableError(RuntimeError):
-    """A loaded operator node in REPLAY cannot read its run's stored rows.
-
-    ``as_table()`` and ``iter_data()`` raise it; ``head()``, which never raises on a
-    loaded node, shows no rows with ``head_note`` as the reason.
-
-    Attributes:
-        head_note: The short reason a head shows.
-    """
-
-    def __init__(self, message: str, head_note: str) -> None:
-        super().__init__(message)
-        self.head_note = head_note
 
 
 class OperatorNodeBase(StreamBase):
@@ -325,10 +317,98 @@ class OperatorNodeBase(StreamBase):
     def upstreams(self) -> tuple[StreamProtocol, ...]:
         return self._input_streams
 
+    @property
+    def cache_mode(self) -> CacheMode:
+        """How the node caches its output: ``CacheMode.OFF`` for a node outside a
+        job, which keeps no cache."""
+        return CacheMode.OFF
+
     @upstreams.setter
     def upstreams(self, value: tuple[StreamProtocol, ...]) -> None:
+        """Replace the node's inputs.
+
+        Raises:
+            ValueError: If the node caches (``LOG`` or ``REPLAY``) and a source
+                feeding ``value`` is restricted (ITL-1218); nothing changes.
+        """
+        from orcapod.pipeline.restrictions import refuse_restricted_operator_cache
+
+        refuse_restricted_operator_cache(self, self.cache_mode, streams=value)
         self._input_streams = value
         self._forget_output_schema()
+
+    @property
+    def arrow_schemas(self) -> "tuple[pa.Schema, pa.Schema] | None":
+        """A read-only loaded node's tag and data Arrow schemas, as saved (ITL-640).
+
+        A node whose operator cannot be rebuilt (``Index``, ``Pick``, ITL-1326) cannot
+        type its zero-row table, but its saved ``output_schema`` text holds the Arrow
+        types its rows have; ``typed_arrow_schemas`` takes them from here, as a loaded
+        function node takes its saved output types. ``None`` for a node with an
+        operator, which derives its types, and for a saved text that cannot be
+        restored.
+        """
+        if self._operator is not None or not self._stored_schema:
+            return None
+        from orcapod.pipeline.serialization import arrow_schema_from_texts
+
+        saved = self._stored_schema
+        nullable = saved.get("nullable")
+        converter = self.data_context.type_converter
+        try:
+            return (
+                arrow_schema_from_texts(
+                    saved.get("tag", {}),
+                    converter,
+                    None if nullable is None else nullable.get("tag", []),
+                ),
+                arrow_schema_from_texts(
+                    saved.get("data", {}),
+                    converter,
+                    None if nullable is None else nullable.get("data", []),
+                ),
+            )
+        except (ValueError, TypeError):
+            return None
+
+    def _saved_zero_row_table(self) -> "pa.Table | None":
+        """A read-only loaded node's table with no rows, typed by its saved Arrow pair.
+
+        The user tag and data columns, each once (a data-tag among the tags), with the
+        Arrow types and nullability its saved ``output_schema`` records: the Arrow
+        schema is never computed (ITL-912), so a saved ``int32`` stays ``int32``
+        (CodeRabbit on PR 454). No system-tag or source-info column: the saved schema
+        does not name them. ``None`` when the node has an operator, or when
+        ``arrow_schemas`` cannot restore the saved text (a logical type this process
+        has not registered).
+        """
+        schemas = self.arrow_schemas
+        if schemas is None:
+            return None
+        tag_schema, data_schema = schemas
+        fields = [
+            *tag_schema,
+            *(f for f in data_schema if f.name not in tag_schema.names),
+        ]
+        return pa.schema(fields).empty_table()
+
+    def _zero_row_table(self, config: ColumnConfig) -> "pa.Table | None":
+        """This node's table with no rows; a read-only node's from its saved types."""
+        if self._operator is not None:
+            return super()._zero_row_table(config)
+        # ``head`` and the preview: the same saved types ``_make_empty_table`` uses.
+        # ``_typed_zero_row_table`` stays ``None`` for such a node: what it promises a
+        # downstream consumer (system-tag and source-info columns) the saved schema
+        # does not name.
+        saved = self._saved_zero_row_table()
+        if saved is None:
+            return None
+        return ArrowTableStream(
+            saved,
+            tag_columns=self.keys()[0],
+            data_tags=stream_data_tags(self),
+            data_context=self.data_context,
+        ).as_table(columns=config)
 
     def keys(
         self,
@@ -459,10 +539,43 @@ class OperatorNodeBase(StreamBase):
                 to detach. Ignored by operator nodes in v1.
         """
 
+    # ---------------------------------------------------------------------------
+    # OperatorNode — thin blueprint (no DB)
+    # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# OperatorNode — thin blueprint (no DB)
-# ---------------------------------------------------------------------------
+    def _typed_zero_row_table(self) -> "pa.Table | None":
+        """This node's zero-row table: its operator applied to zero-row inputs.
+
+        The sync path's rule (ITL-912): each input is the upstream's zero-row table
+        (``StaticOutputOperatorPod._zero_row_input``), and the operator's result over
+        those is this node's table with no rows, with the Arrow types, nullability,
+        system-tag and source-info columns its rows have. No row is computed or read,
+        no function is called and nothing is stored, and a result the node holds is
+        not consulted: the types follow from the inputs' types alone.
+
+        Returns:
+            The zero-row table with system tags and source info, or ``None`` when the
+            node has no operator or an input cannot say its Arrow types without rows
+            (see ``typed_zero_row_table``).
+        """
+        if self._operator is None:
+            return None
+        inputs: list[StreamProtocol] = []
+        for upstream in self._input_streams:
+            zero_rows = StaticOutputOperatorPod._zero_row_input(upstream)
+            if zero_rows is None:
+                return None
+            inputs.append(zero_rows)
+        # zero_row_result calls static_process, not process: an invocation recorded by
+        # a tracker would add a step to whatever pipeline is being built while this
+        # table is read.
+        operator = cast(StaticOutputOperatorPod, self._operator)
+        result = operator.zero_row_result(*inputs)
+        # In the column order of the node's rows; an operator's own table may order
+        # them otherwise (a join lists its data before its system tags).
+        return StaticOutputOperatorPod._in_row_order(
+            result.as_table(columns=ZERO_ROW_INPUT_COLUMNS), result.keys()[0]
+        )
 
 
 class OperatorNode(OperatorNodeBase):
@@ -718,8 +831,6 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
     # Set once a read has reported the stored rows it skipped (rows of another data
     # context); a class default so nodes rebuilt from a saved descriptor start unset.
     _skipped_rows_reported: bool = False
-    # Set once a table found at the older layout has been accounted for.
-    _stale_tables_checked: bool = False
     # The job file's expected row count for a loaded node, and whether it was checked
     # against the attached database (ITL-1043). Advisory: a mismatch only warns.
     _expected_row_count: int | None = None
@@ -729,26 +840,9 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
     def _stored_table_path(self) -> tuple[str, ...]:
         """Path of this node's stored table: the identity path plus the layout version.
 
-        Every read and write of the operator-cache table uses this path. The identity
-        path itself is where Orcapod up to v0.2 stored the table (the old layout).
+        Every read and write of the operator-cache table uses this path.
         """
         return self.node_identity_path + (OPERATOR_DB_SCHEMA_VERSION,)
-
-    def _account_for_stale_tables(self) -> None:
-        """Report, once per node object, a table found at the older layout.
-
-        A table written by an earlier version of Orcapod holds no ``__data_context``
-        column. Its rows are not read as results and are left unchanged; their number
-        is reported (ITL-944).
-        """
-        if self._stale_tables_checked or self._pipeline_database is None:
-            return
-        self._stale_tables_checked = True
-        account_for_stale_tables(
-            find_stale_tables(self._pipeline_database, (self.node_identity_path,)),
-            delivers_side_effects=False,
-            current_context=self.data_context_key,
-        )
 
     def __init__(
         self,
@@ -777,7 +871,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
 
         # DB persistence state (initially None; set via __init__ params or attach_databases)
         self._pipeline_database: ArrowDatabaseProtocol | None = None
-        self._cache_mode = CacheMode.OFF
+        self._cache_mode: CacheMode = CacheMode.OFF
 
         # True for a node rebuilt by ``from_descriptor`` (a job loaded by
         # ``PipelineJob.load``): its output was computed by an earlier run.
@@ -790,6 +884,12 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             )
         # A node that has not run in this process holds nothing and is stale (ITL-1095).
         self._set_modified_time(None)
+
+    @property
+    def cache_mode(self) -> CacheMode:
+        """How the node caches its output (``OFF``, ``LOG`` or ``REPLAY``): set by
+        ``attach_databases``, ``CacheMode.OFF`` until then."""
+        return self._cache_mode
 
     # ------------------------------------------------------------------
     # as_node — return the lightweight OperatorNode equivalent
@@ -880,12 +980,28 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         Args:
             pipeline_database: Database for pipeline records.
             cache_mode: Caching behaviour (OFF, LOG, or REPLAY).
+
+        Raises:
+            InputValidationError: If the node's output has data-tags, the cache
+                mode stores or replays them (``LOG`` or ``REPLAY``), and the database
+                cannot keep the marker that states them (ITL-1019). Nothing is
+                attached or written.
+            ValueError: If the cache mode is ``LOG`` or ``REPLAY`` and a source
+                feeding the node is restricted (a condition or a limit, ITL-1218):
+                the cache is kept under the node's identity, which a restriction is
+                not part of. Nothing is attached.
         """
+        from orcapod.pipeline.restrictions import refuse_restricted_operator_cache
+
+        refuse_restricted_operator_cache(self, cache_mode)
+        if cache_mode != CacheMode.OFF:
+            # A stored table states its data-tags; refuse a database that
+            # cannot, before anything runs or is written (ITL-1019).
+            require_database_keeps_marker(pipeline_database, stream_data_tags(self))
+
         # A database that cannot store the cache refuses it now, before anything
         # runs or changes (ITL-1162).
         self.require_storable_tables(pipeline_database, cache_mode)
-        # Another database has its own tables of other generations to account for.
-        self._stale_tables_checked = False
         self._skipped_rows_reported = False
         self._row_count_checked = False
         self._pipeline_database = pipeline_database
@@ -928,7 +1044,8 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             databases: Mapping of database role names (``"pipeline"``)
                 to database instances.
             job_content_hash: The content hash of the node in the saved job's run,
-                which its stored rows carry; ``None`` when the file does not record it.
+                which its stored rows carry (``PipelineJob.load`` refuses a file that
+                does not record it).
             expected_row_count: How many rows the database held under the run's key when
                 the job was saved, from the job file's optional ``run.expected_rows``;
                 ``None`` when not recorded. Advisory: a read returns what the database
@@ -1050,20 +1167,105 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         return node
 
     # ------------------------------------------------------------------
+    # Data-tags in the stored table (ITL-1019)
+    # ------------------------------------------------------------------
+
+    def declared_data_tags(self) -> tuple[str, ...]:
+        """Return the data-tags of this node's output, as the node declares them.
+
+        A node built in this process declares its operator's predicted output: the
+        names in both halves of ``keys()``. A node loaded by ``PipelineJob.load``
+        declares its saved descriptor's output schema, the saved job being an
+        independent point of verification of the stored table (developer, November 16,
+        2026). These are the tags the node's stored table must mark.
+
+        Returns:
+            The data-tags, in tag order; empty for a plain output.
+        """
+        saved = self._descriptor.get("output_schema") if self._loaded else None
+        if saved is not None:
+            return data_tag_names(saved.get("tag", {}), saved.get("data", {}))
+        return stream_data_tags(self)
+
+    def _check_stored_data_tags(self, schema: "pa.Schema") -> None:
+        """Refuse a stored table whose data-tag marker disagrees with the node.
+
+        The stored table states its bindings (developer, November 16, 2026, ITL-1019):
+        a data-tag column carries the marker of ``data_tags``. The node
+        reads the table only when it agrees with what the node declares
+        (``declared_data_tags``).
+
+        Args:
+            schema: The schema of the node's stored table.
+
+        Raises:
+            InputValidationError: If the table's marker is invalid, or the table and
+                the node disagree on which tags are data-tags.
+        """
+        assert self._pipeline_database is not None
+        table_path = self._pipeline_database.base_path + self._stored_table_path
+        try:
+            stored = stored_data_tags(schema)
+        except ValueError as exc:
+            raise InputValidationError(
+                f"Operator node {self.label!r}, stored table {table_path}: {exc}"
+            ) from exc
+        expected = self.declared_data_tags()
+        if set(stored) != set(expected):
+            declarer = "saved job" if self._loaded else "operator"
+            raise InputValidationError(
+                f"Operator node {self.label!r}: the stored table {table_path} marks "
+                f"the data-tags {sorted(stored)}, but the node's {declarer} "
+                f"declares {sorted(expected)}. The table was not written by this "
+                "node's pipeline; nothing was read."
+            )
+
+    def _stream_over_stored(self, records: "pa.Table") -> ArrowTableStream:
+        """Return a stream over rows read from the stored table, without the marker.
+
+        In a stream the binding is the shared name of a tag and a data column, so the
+        marker stays with the stored table: carried on, it would be written by a
+        downstream store whose binding it is not.
+
+        The binding is the node's (``declared_data_tags``), which every read checked
+        against the table's marker (``_check_stored_data_tags``).
+
+        Args:
+            records: The stored rows, without the bookkeeping columns.
+
+        Returns:
+            The stream, in this node's data context.
+        """
+        # Stored rows are this node's: give them its data context, not the default.
+        # ``data_context`` types the Python datagrams only; the rows' Arrow context
+        # column comes from the table, and a stream fills a missing one with the
+        # default key.
+        rows = without_tag_kind_marks(records)
+        if constants.CONTEXT_KEY not in rows.column_names:
+            rows = rows.append_column(
+                pa.field(constants.CONTEXT_KEY, pa.large_string(), nullable=False),
+                pa.array([self.data_context_key] * rows.num_rows, pa.large_string()),
+            )
+        return ArrowTableStream(
+            rows,
+            tag_columns=self.keys()[0],
+            data_tags=self.declared_data_tags(),
+            data_context=self.data_context,
+        )
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _run_content_hash(self) -> ContentHash | None:
-        """Return the content hash this node's run stores its rows under, if known.
+    def _run_content_hash(self) -> ContentHash:
+        """Return the content hash this node's run stores its rows under.
 
-        A node that runs computes it. A loaded node knows it only when its saved job
-        recorded it (ITL-1043); otherwise ``None``, because the hash it recomputes from
-        inputs rebuilt from the file is not the run's.
+        A node that runs computes it. A loaded node has the one its saved job records
+        (ITL-1043; ``PipelineJob.load`` refuses a file without it): the hash it would
+        recompute from inputs rebuilt from the file is not the run's.
         """
-        if not self._loaded:
+        if not self._loaded or self._saved_run_content_hash is None:
             return self.content_hash()
-        if self._saved_run_content_hash is None:
-            return None
         return ContentHash.from_string(self._saved_run_content_hash)
 
     def _expected_row_count_to_save(self, run_finished: bool) -> int | None:
@@ -1162,7 +1364,14 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
     # ------------------------------------------------------------------
 
     def _store_output_stream(self, stream: StreamProtocol) -> None:
-        """Materialize stream and store in the pipeline database with per-row dedup."""
+        """Materialize stream and store in the pipeline database with per-row dedup.
+
+        The stored table states its bindings (developer, November 16, 2026, ITL-1019):
+        the columns of the node's data-tags carry the marker of
+        ``data_tags``, written from the operator's own output binding and
+        never from metadata that came in from upstream. The marker is put on after the
+        per-row record hashes are computed, so it never enters them.
+        """
         pipeline_database = self._pipeline_database
         if pipeline_database is None:
             raise RuntimeError(
@@ -1227,11 +1436,13 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         # deduplicates exact re-runs of the same node within a single run.
         # The data context column is appended after the record hashes are computed:
         # it names the generation of hashing that produced them and is not hashed.
-        self._account_for_stale_tables()
         try:
             pipeline_database.add_records(
                 self._stored_table_path,
-                with_data_context(output_table, self.data_context_key),
+                with_data_context(
+                    mark_data_tags(output_table, stream_data_tags(self)),
+                    self.data_context_key,
+                ),
                 record_id_column=self.HASH_COLUMN_NAME,
                 skip_duplicates=True,
             )
@@ -1271,17 +1482,26 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         The rows of every run that shares the table, before ``_filter_by_content_hash``
         keeps this node's. Rows of another data context are left out and reported once.
 
+        Every read of the stored table goes through here, so every read checks the
+        table's data-tag marker against the node (``_check_stored_data_tags``).
+        The rows keep the marker; a read into a stream drops it
+        (``_stream_over_stored``).
+
         Returns:
             The rows, with ``HASH_COLUMN_NAME`` and ``NODE_CONTENT_HASH_COL`` and without
             the ``__data_context`` column, or ``None`` when the table does not exist.
+
+        Raises:
+            InputValidationError: If the table and the node disagree on which tags are
+                data-tags (ITL-1019).
         """
         assert self._pipeline_database is not None
-        self._account_for_stale_tables()
         records = self._pipeline_database.get_all_records(
             self._stored_table_path, record_id_column=self.HASH_COLUMN_NAME
         )
         if records is None:
             return None
+        self._check_stored_data_tags(records.schema)
         stored_rows = records.num_rows
         records = keep_rows_of_data_context(records, self.data_context_key)
         if records.num_rows < stored_rows and not self._skipped_rows_reported:
@@ -1321,55 +1541,25 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             return records
         return records.select(order)
 
-    def _typed_zero_row_table(self) -> "pa.Table | None":
-        """This node's zero-row table: its operator applied to zero-row inputs.
-
-        The sync path's rule (ITL-912): each input is the upstream's zero-row table
-        (``StaticOutputOperatorPod._zero_row_input``), and the operator's result over
-        those is this node's table with no rows, with the Arrow types, nullability,
-        system-tag and source-info columns its rows have. No row is computed or read,
-        no function is called and nothing is stored, and a result the node holds is
-        not consulted: the types follow from the inputs' types alone.
-
-        Returns:
-            The zero-row table with system tags and source info, or ``None`` when the
-            node has no operator or an input cannot say its Arrow types without rows
-            (see ``typed_zero_row_table``).
-        """
-        if self._operator is None:
-            return None
-        inputs: list[StreamProtocol] = []
-        for upstream in self._input_streams:
-            zero_rows = StaticOutputOperatorPod._zero_row_input(upstream)
-            if zero_rows is None:
-                return None
-            inputs.append(zero_rows)
-        # zero_row_result calls static_process, not process: an invocation recorded by
-        # a tracker would add a step to whatever pipeline is being built while this
-        # table is read.
-        operator = cast(StaticOutputOperatorPod, self._operator)
-        result = operator.zero_row_result(*inputs)
-        # In the column order of the node's rows; an operator's own table may order
-        # them otherwise (a join lists its data before its system tags).
-        return StaticOutputOperatorPod._in_row_order(
-            result.as_table(columns=ZERO_ROW_INPUT_COLUMNS), result.keys()[0]
-        )
-
     def _make_empty_table(self) -> "pa.Table":
         """Build the zero-row table this node reads as when it holds no rows.
 
-        The node's operator applied to its inputs' zero-row tables
+        The one place a node's zero-row table is built, for every path that reads
+        it (``as_table``, ``_load_cached_stream_from_db`` in REPLAY, the stored
+        view): the node's operator applied to its inputs' zero-row tables
         (``_typed_zero_row_table``), so the columns, Arrow types and nullability are
-        those of the node's rows. When an input cannot say its Arrow types without
-        rows (a known limitation, see ``as_table``), the table is built from the
-        node's Python output schema with ``arrow_utils.make_empty_table``: plain
-        types give ``nullable=False`` fields and ``T | None`` types
-        ``nullable=True`` fields.
-
-        Requires ``self._operator is not None`` (pre-existing limitation shared
-        with ``_replay_from_cache``).
+        those of the node's rows. A loaded node without its operator (``Index``,
+        ``Pick``) takes its saved Arrow pair (``_saved_zero_row_table``): a saved
+        ``int32`` stays ``int32`` (CodeRabbit on PR 454). Only when neither can say
+        the Arrow types (an input that cannot type itself without rows, a known
+        limitation, see ``as_table``; a saved text naming an unregistered logical
+        type) is the table built from the node's Python output schema with
+        ``arrow_utils.make_empty_table``: plain types give ``nullable=False`` fields
+        and ``T | None`` types ``nullable=True`` fields.
         """
         typed = self._typed_zero_row_table()
+        if typed is None:
+            typed = self._saved_zero_row_table()
         if typed is not None:
             return typed
         tag_schema, data_schema = self.output_schema()
@@ -1381,45 +1571,15 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
     def _read_run_records(self) -> "pa.Table | None":
         """Read the stored rows of this node's run: its content hash, current context.
 
-        A loaded node names its run by the content hash its job file records. A file
-        saved before Orcapod recorded it leaves the node only the hash the loaded job
-        computes; when the database holds no rows under that hash, an empty answer would
-        make stored results look dropped, so this raises instead (ITL-1043).
+        A loaded node names its run by the content hash its job file records (every
+        saved job records it, ``PipelineJob.load``; ITL-1043).
 
         Returns:
             The run's stored rows (``_read_stored_records``), or ``None`` when the table
             does not exist.
-
-        Raises:
-            RuntimeError: If a loaded node's job file does not record its run's
-                content hash and the database holds no rows under the hash the loaded
-                job computes.
         """
         stored = self._read_current_context_records()
         records = None if stored is None else self._filter_by_content_hash(stored)
-        if (
-            self._loaded
-            and self._saved_run_content_hash is None
-            and (records is None or records.num_rows == 0)
-        ):
-            found = (
-                "is absent from the attached database"
-                if stored is None
-                else f"holds {stored.num_rows} stored rows, none of them under the "
-                f"content hash the loaded job computes ({self.content_hash().to_string()})"
-            )
-            raise _LoadedCacheUnreadableError(
-                f"OperatorJobNode {self.label!r}: the job file does not record the "
-                "content hash of this node's run (a file saved before Orcapod recorded "
-                "it), so the loaded job cannot name the run's rows, and its cache table "
-                f"({'/'.join(self._stored_table_path)}) {found}. Upgrading such files is "
-                "left to the migration tool after v0.3 (ITL-1048); until then build the "
-                "job from code and attach the node with CacheMode.REPLAY to read them.",
-                head_note=(
-                    "loaded node: the job file does not record its run's content hash "
-                    "(an older file; ITL-1048)"
-                ),
-            )
         return records
 
     def _load_cached_stream_from_db(self) -> "ArrowTableStream | None":
@@ -1439,15 +1599,9 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             - Returns ``None`` if ``_cache_mode != CacheMode.REPLAY``
               (LOG/OFF modes may have stale historical records in the DB).
 
-        The database is the source of truth: a loaded node whose job file records its
-        run's content hash reads exactly as a node that runs does, so an absent table or
-        a table with no rows under that hash is an empty result.
-
-        Raises:
-            RuntimeError: If a loaded REPLAY node's job file does not record its run's
-                content hash and the database holds no rows under the hash the loaded job
-                computes: the node cannot name its run's rows, so an empty result would
-                make stored results look dropped.
+        The database is the source of truth: a loaded node reads under its run's
+        content hash, which its job file records, exactly as a node that runs does, so
+        an absent table or a table with no rows under that hash is an empty result.
         """
         if self._pipeline_database is None:
             return None
@@ -1462,6 +1616,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
                 # schema without a live operator. Return None so callers fall
                 # back to iter([]) / _make_empty_table() guarded paths.
                 return None
+            # A loaded node without its operator gets its saved Arrow types here.
             records_table = self._make_empty_table()
         else:
             records_table = records
@@ -1473,11 +1628,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             ]
             if cols_to_drop:
                 records_table = records_table.drop(cols_to_drop)
-        tag_keys = self.keys()[0]
-        # Stored rows are this node's: give them its data context, not the default.
-        return ArrowTableStream(
-            records_table, tag_columns=tag_keys, data_context=self.data_context
-        )
+        return self._stream_over_stored(records_table)
 
     def get_cached_output(self) -> StreamProtocol | None:
         """Return cached output stream in REPLAY mode, else None.
@@ -1511,12 +1662,19 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
 
         Returns:
             Materialized list of (tag, data) pairs.
+
+        Raises:
+            ValueError: If the node caches (``LOG`` or ``REPLAY``) and a source
+                feeding ``input_streams`` is restricted (ITL-1218); nothing is
+                read, computed or written.
         """
+        from orcapod.pipeline.restrictions import refuse_restricted_operator_cache
         from orcapod.pipeline.observer import NoOpObserver
 
         # A loaded node runs only in a load-only run, with its rebuilt operator.
         if self._loaded and (not load_only or self._operator is None):
             raise self._cannot_compute_error()
+        refuse_restricted_operator_cache(self, self._cache_mode, streams=input_streams)
 
         node_label = self.label
         node_hash = self.content_hash().to_string()
@@ -1617,10 +1775,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             if cols_to_drop:
                 records = records.drop(cols_to_drop)
 
-        tag_keys = self.keys()[0]
-        self._cached_output_stream = ArrowTableStream(
-            records, tag_columns=tag_keys, data_context=self.data_context
-        )
+        self._cached_output_stream = self._stream_over_stored(records)
         self._update_modified_time()
 
     def run(self, *, load_only: bool = False) -> StreamView:
@@ -1653,6 +1808,8 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         Raises:
             RuntimeError: If the node was loaded by ``PipelineJob.load`` and
                 ``load_only`` is false.
+            ValueError: If this node or one it depends on caches (``LOG`` or
+                ``REPLAY``) over a restricted source (ITL-1218); nothing has run.
         """
         from orcapod.pipeline.node_run import (
             check_sources,
@@ -1660,10 +1817,15 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             refuse_unloadable_inputs,
             run_with_dependencies,
         )
+        from orcapod.pipeline.restrictions import refuse_restriction_conflicts
         from orcapod.pipeline.run_summary import warn_row_failures
 
         if self._loaded and not load_only:
             raise self._cannot_compute_error()
+        # A source read under two restrictions, or a caching operator over a restricted
+        # source, is refused before any source is checked and before anything is
+        # computed or written (ITL-1218).
+        refuse_restriction_conflicts([self])
         # Every source feeding the run first takes in any new data (ITL-1102).
         unchecked = check_sources([self])
         if self.holds_current_run(load_only=load_only):
@@ -1794,31 +1956,24 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         That zero-row table has the columns, Arrow types and nullability of the
         node's rows, system tags and source info included: it is the operator's
         result over its inputs' zero-row tables, got without computing or reading
-        a row (ITL-912). Known limitation: when an input cannot say its Arrow
-        types without rows (a ``PollingSource`` before its first poll, an unbound
-        input slot or ``SourceProxy``, a ``DerivedSource``, or a loaded node with
-        no live upstream), the table is built from the node's Python output
-        schema: an ``int8`` column reads as ``int64`` and the system-tag columns
-        are absent (ITL-1089, ITL-985).
+        a row (ITL-912). A loaded node without its operator (``Index``, ``Pick``)
+        has the Arrow types its saved ``output_schema`` records
+        (``_saved_zero_row_table``), without system-tag columns. Known limitation:
+        when an input cannot say its Arrow types without rows (a ``PollingSource``
+        before its first poll, an unbound input slot or ``SourceProxy``, a
+        ``DerivedSource``, or a loaded node with no live upstream), the table is
+        built from the node's Python output schema: an ``int8`` column reads as
+        ``int64`` and the system-tag columns are absent (ITL-1089, ITL-985).
         """
         current = self._current_output()
         if current is not None:
             return current.as_table(columns=columns, all_info=all_info)
-        if self._operator is None:
-            # A node rebuilt without its operator: the columns of its saved schema.
-            tag_schema, data_schema = self.output_schema()
-            empty = pa.Table.from_pylist(
-                [],
-                schema=self.data_context.type_converter.python_schema_to_arrow_schema(
-                    tag_schema + data_schema
-                ),
-            )
-            return ArrowTableStream(
-                empty, tag_columns=tuple(tag_schema), data_context=self.data_context
-            ).as_table(columns=columns, all_info=all_info)
+        # Every node, one with an operator or one rebuilt without it, from the one
+        # builder of its zero-row table (``_make_empty_table``).
         empty_stream = ArrowTableStream(
             self._make_empty_table(),
             tag_columns=self.keys()[0],
+            data_tags=stream_data_tags(self),
             data_context=self.data_context,
         )
         return empty_stream.as_table(columns=columns, all_info=all_info)
@@ -1871,6 +2026,14 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         per ``ColumnConfig`` conventions.  Returns ``None`` when no
         database is attached or no matching records exist. Switching to OFF
         does not remove records stored by an earlier LOG run.
+
+        This is the raw records view: a data-tag column keeps the marker the
+        stored table states it with (ITL-1019), checked against the node on read.
+        ``as_source()`` reads the binding from it.
+
+        Raises:
+            InputValidationError: If the stored table and the node disagree on which
+                tags are data-tags.
         """
         if self._pipeline_database is None:
             return None
@@ -1921,21 +2084,28 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
     # DerivedSource
     # ------------------------------------------------------------------
 
-    def as_source(self, tags_as_data: "Mapping[str, str] | None" = None):
+    def as_source(
+        self,
+        tags_as_data: "Mapping[str, str] | None" = None,
+        *,
+        source_id: str | None = None,
+    ):
         """Return a DerivedSource backed by the DB records of this node.
 
-        Its ``source_id`` is the ``DerivedSource`` default: without
-        ``tags_as_data``, ``derived:<algorithm label>:<hex>`` of this node's
-        content hash.
+        Without ``tags_as_data`` and ``source_id``, its ``source_id`` is the
+        ``DerivedSource`` default, ``derived:<algorithm label>:<hex>`` of this
+        node's content hash.
 
         Args:
             tags_as_data: Maps a tag column of this node to the name of a data
                 column that receives a copy of it. When given, the result is a
-                new root source with its own provenance and a ``source_id``
-                derived from this node's content hash and the mapping; see
-                ``DerivedSource``.
+                new root source with its own provenance, which needs a
+                ``source_id``; see ``DerivedSource``.
+            source_id: The source's name. Required with ``tags_as_data``, which
+                has no default (ITL-1313).
 
         Raises:
+            ValueError: If ``tags_as_data`` is given without a ``source_id``.
             RuntimeError: If no database is attached.
             InputValidationError: If ``tags_as_data`` is not valid for this
                 node's columns.
@@ -1945,11 +2115,12 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
 
         from orcapod.core.sources.derived_source import DerivedSource
 
-        # No source_id is given: the source takes the DerivedSource default
-        # (``derived:<algorithm label>:<hex>`` of this node's content hash, or the
-        # ``tags_as_data`` id when a mapping is given).
+        # Without a source_id the plain form takes the DerivedSource default
+        # (``derived:<algorithm label>:<hex>`` of this node's content hash); the
+        # ``tags_as_data`` form refuses to be built without one (ITL-1313).
         return DerivedSource(
             origin=self,
+            source_id=source_id,
             tags_as_data=tags_as_data,
             data_context=self.data_context_key,
             config=self.orcapod_config,
@@ -1988,13 +2159,24 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             output: Writable channel for output (tag, data) pairs.
             observer: Optional execution observer for hooks.
             load_only: As for ``execute``: a ``LOG`` node stores nothing (ITL-1095).
+
+        Raises:
+            ValueError: If the node caches (``LOG`` or ``REPLAY``) and a source
+                feeding its ``upstreams`` (which the channels carry) is restricted
+                (ITL-1218); the output is closed, nothing read or written.
         """
+        from orcapod.pipeline.restrictions import refuse_restricted_operator_cache
         from orcapod.pipeline.observer import NoOpObserver
 
         # A loaded node runs only in a load-only run, with its rebuilt operator.
         if self._loaded and (not load_only or self._operator is None):
             await output.close()
             raise self._cannot_compute_error()
+        try:
+            refuse_restricted_operator_cache(self, self._cache_mode)
+        except ValueError:
+            await output.close()
+            raise
 
         obs = observer if observer is not None else NoOpObserver()
         node_label = self.label

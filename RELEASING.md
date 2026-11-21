@@ -26,7 +26,8 @@ setting, secret or environment.
 `nauticalab/orcapod-python`: `main` was pushed there by fast-forward at a release point, the
 Release workflow ran there, and the tag was fetched back into `metamorphic-labs`
 (ITL-1007). Every release tag up to `v0.3.0` is also here, on the same commit; `v0.2.0` (a
-tag only, never published) exists only here and stays as it is.
+tag only, never published) exists only here and stays as it is. `0.3.0` was withdrawn on
+2026-11-17 (see *Withdrawn releases*); the next release is `0.4.0`.
 
 ## Branching Model
 
@@ -70,8 +71,10 @@ Do these on `main` before the Release workflow runs:
    the `CHANGELOG.md` heading. It appends the release revision to the `golden` history of
    the current data context's manifest, writes its digest under `releases` in
    `src/orcapod/contexts/released_manifests.json`, and at the data context's first release
-   sets `released_in` and the `manifest` pin. It computes no hash and refuses a version
-   already released. Commit both files with the release pull request; the release is tagged
+   sets `released_in` and the `manifest` pin. It also pins every open data function type
+   snapshot (`scripts/data_function_types.py --release`: the sha256 and the version go into
+   `src/orcapod/data_function_types/released.json`; ITL-1259). It computes no hash and
+   refuses a version already released. Commit these files with the release pull request; the release is tagged
    on a commit that contains them. The Release workflow's build job checks this before it
    creates the tag (`scripts/check_golden_tags.py --release-version X.Y.Z`) and stops if the
    release is not recorded, or if a golden file was added after the release step (the
@@ -91,7 +94,8 @@ Per-release checklists live in `docs/dev/plans/` (for example
 
 ## Pre-release checklist
 
-All of these hold before the developer runs the Release workflow:
+All of these hold before the developer runs the Release workflow for a final version. A
+release candidate (or another pre-release) has its own, shorter list: see *Pre-releases*.
 
 1. **The full suite is green**: `uv run pytest tests/` passes on the commit to be released.
 2. **The release pull request is merged** (`CHANGELOG.md` folded, section dated,
@@ -105,6 +109,8 @@ All of these hold before the developer runs the Release workflow:
 6. **The Linear release is named** (see *Linear Release System*): the open release of the
    Linear release pipeline has the version `vX.Y.Z`, and nothing merges into `main` until
    `linear-complete` has finished. Not for a hotfix run, which leaves the open release as it is.
+7. **The security exceptions are reviewed**: every exception in
+   `docs/dev/security-exceptions.md` whose advisory has a published fix is removed.
 
 ## Golden hash values
 
@@ -118,13 +124,52 @@ against are in `docs/reference/golden-hashes.md`.
   (before 1.0) or a major one, never in a patch.
 - When a new data context starts, the old context's golden files and code move to
   `orcapod-sanctuary`; this repository carries only the current context's golden folder.
+- Data context v1 is open until `0.4.0` (developer, November 17, 2026, ITL-1255): `0.3.0` is
+  withdrawn, so no v1 golden file is released. Until `0.4.0`, a change to a v1 value needs the
+  developer's approval of the exact list of entries that move, each explained. The release
+  step of `0.4.0` freezes v1.
+- **A pre-release freezes nothing** (developer, November 21, 2026, ITL-1329): only a final
+  version runs the release step. A candidate (`0.4.0rc1`) carries the hashes intended to be
+  final; the gate checks that HEAD does *not* record it as a release, and
+  `generate_golden_hashes.py --release` refuses it. Between a candidate and the final
+  release a golden value changes only for a blocking reason, with the developer's approval
+  of the exact list of entries that move, and a new candidate follows. Data stored with a
+  candidate is not guaranteed to be valid under the final release; the candidate's GitHub
+  Release says so (the workflow writes it). What an earlier final release froze stays
+  protected in a pre-release run: the tag check runs for every version.
+- Provisional operators (`orcapod.operators.PROVISIONAL_OPERATORS`, ITL-1266) are outside
+  the freeze: the golden values of the cases that depend on one are in
+  `tests/test_hashing/golden/data/v1/provisional/`, which no release step lists or pins. An
+  operator that stops being provisional in a release leaves the list (with its `PROVISIONAL`
+  marker and its golden cases' declarations) before the release step, and
+  `generate_golden_hashes.py --relocate` moves its golden values, unchanged, into a frozen
+  file, so that the release step freezes them.
 - Release tags are protected on `metamorphic-labs/orcapod-python` (and on
   `nauticalab/orcapod-python`, the release repository up to `0.3.0`): the repository ruleset
   `protect-release-tags` (target `refs/tags/v*`; rules deletion, update and non-fast-forward;
   no bypass actors) is in place since 2026-11-15. A `v*` tag can be created, as the Release workflow does, but never moved
   or deleted. This is a precondition of the CI tag check (`scripts/check_golden_tags.py`),
   which compares HEAD with every release tag of the current data context. Agents never change
-  repository settings.
+  repository settings. The one exception is the tag `v0.3.0` of the withdrawn release, which
+  the developer deletes (see *Withdrawn releases*).
+
+### Withdrawn releases
+
+`0.3.0` (2026-11-17) was withdrawn by the developer on 2026-11-17, before anyone used it, so
+that data context v1 is frozen at `0.4.0` instead, after every open question that can move a
+golden value is settled (ITL-1255). The developer's acts, never an agent's: withdrawing the
+version from PyPI (yanked or deleted), lifting `protect-release-tags` to delete the tag
+`v0.3.0` (here and on `nauticalab`), and deleting its GitHub Release. In the repository the
+release revision left the v1 golden history and its pins moved to the `withdrawn` record in
+`src/orcapod/contexts/released_manifests.json`, with the date and the reason
+(`docs/reference/golden-hashes.md`, *Withdrawing a release*). The tag check compares the tag,
+while it exists, with that record, so CI passes before and after the tag is deleted.
+
+- The version `0.3.0` is never used again: PyPI never takes a version twice, and
+  `generate_golden_hashes.py --release` and the release gate refuse a withdrawn version.
+- The version of a build comes from the git tags (`hatch-vcs`). After `v0.3.0` is deleted, a
+  build from `main` reports a `0.2.x` development version until the next tag exists, so a
+  project that requires `orcapod>=0.3.1.dev0` no longer resolves to a build of `main`.
 
 ## Cutting a Release
 
@@ -153,10 +198,10 @@ on origin, and the ruleset `protect-release-tags` forbids deleting a `v*` tag, s
    ```
 
    - Pre-flight: branch validation, then tests on Python 3.11, 3.12 and 3.13 and license check (parallel after validation); the tests are skipped only with `skip_tests`
-   - Build: normalises version (strips a leading `v`), checks the golden release step and the release tags, creates the local tag, builds wheel + sdist with `uv build`, aborts if the tag already exists on origin, pushes the tag, uploads `dist/` as an artifact
+   - Build: classifies the version input (`check_golden_tags.py --classify-version`, the one normalization: it strips one leading `v`, says final or pre-release, and refuses a version not in its PEP 440 normal form; every later step uses its output), checks the golden release step (for a pre-release: that HEAD does not record it) and the release tags, creates the local tag, builds wheel + sdist with `uv build`, aborts if the tag already exists on origin, pushes the tag, uploads `dist/` as an artifact
    - TestPyPI: in the `testpypi` environment, `uv publish --publish-url https://test.pypi.org/legacy/ dist/*` with an OIDC token (`id-token: write`) — a staging upload
-   - PyPI: in the `pypi` environment, after TestPyPI succeeds and a reviewer approves, `uv publish dist/*` with an OIDC token, then creates the GitHub Release for the tag with generated release notes and the dist files attached
-   - Linear: `linear-sync` starts immediately after build (parallel to publish); `linear-complete` runs after both PyPI publish and linear-sync succeed (see *Linear Release System*)
+   - PyPI: in the `pypi` environment, after TestPyPI succeeds and a reviewer approves, `uv publish dist/*` with an OIDC token, then creates the GitHub Release for the tag with generated release notes and the dist files attached; a pre-release is marked as one, and its notes start with a paragraph saying that it freezes nothing
+   - Linear: `linear-sync` starts immediately after build (parallel to publish); `linear-complete` runs after both PyPI publish and linear-sync succeed (see *Linear Release System*). Neither runs for a pre-release
 
 The tag is created by the workflow in this repository; there is nothing to fetch back.
 
@@ -172,8 +217,8 @@ This is an exception, for a pinch: the release tests take a long time and repeat
 `Run Tests` already ran on the same commit. Use it only when all of these hold:
 
 - The exact commit being released (the tip of the **Branch** input) has green CI: the
-  `Run Tests` workflow on that commit passed on Python 3.11, 3.12 and 3.13. Check the commit
-  id, not the branch name.
+  `Run Tests` workflow on that commit passed on Python 3.11, 3.12 and 3.13 (checks
+  `Tests (3.11)`, `Tests (3.12)` and `Tests (3.13)`). Check the commit id, not the branch name.
 - The pre-release checklist above holds, the full suite included.
 - The developer chose it for this run. An agent never runs the Release workflow, with or
   without the option.
@@ -217,15 +262,14 @@ secrets or environments:
 5. The `LINEAR_ACCESS_KEY` repository secret, for the Linear jobs (see *Linear Release
    System*). Codecov needs no secret (see *Coverage uploads*).
 6. Before the first release cut here: the latest GitHub Release in this repository is
-   `v0.1.2` (the GitHub Release of `v0.3.0` is on `nauticalab`), and the generated
-   release notes start at the latest earlier Release. Create a GitHub Release for `v0.3.0`
-   here (its notes copied from `nauticalab`) so that the next notes start at `v0.3.0`, or edit
-   the next Release's notes after the run.
+   `v0.1.2` (`0.3.0` is withdrawn and has none), and the generated release notes start at the
+   latest earlier Release. Edit the notes of `0.4.0` after the run, or create a GitHub Release
+   for `v0.2.0` here first so that the next notes start there.
 
 ### Coverage uploads
 
-The coverage jobs of `Run Tests`, `Run PostgreSQL Tests` and `Run Objective Tests` upload to
-Codecov without a stored token (ITL-1193). The organization secret `CODECOV_TOKEN` is shared
+The coverage jobs of `Run Tests`, `Run PostgreSQL Tests` and `Run Specification Tests` upload
+to Codecov without a stored token (ITL-1193). The organization secret `CODECOV_TOKEN` is shared
 with private and internal repositories only, so it would vanish when this repository became
 public, and a token upload would then fail silently.
 
@@ -289,11 +333,54 @@ replace the secret as above. The job fails in between; that is the price of cont
 
 ## Pre-releases
 
-Release candidates (e.g. `0.1.0rc1`) follow exactly the same path — enter the version in the
-workflow input. PyPI handles the stable vs pre-release distinction natively:
+A pre-release is a version with an alpha, beta or release candidate part, or a development
+part, as PEP 440 defines it: `0.4.0a1`, `0.4.0b2`, `0.4.0rc1`, `0.4.0.dev3`. One rule tells it
+from a final version, `release_version` in `scripts/check_golden_tags.py`. A version that is
+neither `X.Y.Z` (or `X.Y.Z.postN`) nor such a pre-release is refused, never guessed.
 
-- `pip install orcapod` — installs the latest **stable** release only
-- `pip install --pre orcapod` — installs the latest release including pre-releases
+A pre-release goes through the same Release workflow, with four differences (ITL-1329):
+
+- It freezes nothing: the build job requires that no release record at HEAD names a
+  pre-release, in any spelling the gate accepts (no `releases` or `withdrawn` key of any
+  data context, no `released_in` of the data context manifest, no release revision in the
+  golden history, no data function type snapshot pinned as released in one; a record the
+  gate cannot classify is refused, for every version; so no golden release step, and
+  `data_function_types.py --release` refuses a pre-release too), and it allows data
+  function type snapshots that are not pinned yet. The tag check still runs, so what
+  earlier final releases froze stays protected; it skips every pre-release tag, which
+  protects nothing.
+- The GitHub Release is marked as a pre-release, and its notes begin with a paragraph saying
+  that it freezes nothing and that data stored with it is not guaranteed to be valid under
+  the final release.
+- `linear-sync` and `linear-complete` do not run: the open Linear release stays open for the
+  final version (see *Linear Release System*).
+- The version must be given in its PEP 440 normal form, with at most one leading lowercase
+  `v` (`0.4.0rc1` or `v0.4.0rc1`; not `0.4.0-rc.1`, `0.4.0RC1` or `vv0.4.0rc1`), so that the tag, the package, the GitHub Release and the Linear release name
+  one version; the build job refuses any other spelling and names the normal form.
+
+### Cutting a release candidate
+
+1. **No release pull request**: no `CHANGELOG.md` fold (the `changelog.d/` fragments stay for
+   the final release) and **no golden release step** (`generate_golden_hashes.py --release`
+   refuses a pre-release).
+2. **The version is free**: no tag `v<version>` on `metamorphic-labs`, and the version is on
+   neither PyPI nor TestPyPI.
+3. **`main` is green**, and the full suite passes on the commit to be released.
+4. **Do not rename the open Linear release**: it stays open for the final version.
+5. **Run Release** with the version in its normal form (`0.4.0rc1`), as in *Cutting a
+   Release*, and approve the PyPI deployment.
+6. **Install it** with `pip install orcapod==0.4.0rc1` (or `pip install --pre orcapod`, the
+   latest version including pre-releases; `pip install orcapod` installs the latest **final**
+   version only).
+
+### Between a candidate and the final release
+
+A candidate carries the hashes intended to be final. A golden value changes before the final
+release only for a blocking reason, with the developer's approval of the exact list of
+entries that move (`generate_golden_hashes.py --remove`, then `--add`), and a new candidate
+(`0.4.0rc2`) follows. Data stored with a candidate is not guaranteed to be valid under the
+final release. The final release is cut as usual, with the release pull request and the
+golden release step (*Pre-release checklist*).
 
 ## Cutting a Hotfix Release
 
@@ -331,7 +418,8 @@ failure in a later job leaves the tag behind.
 | `linear-sync` | Unknown: it needs only `build` and runs in parallel with publishing, so it can fail before anything is published | Check `publish-testpypi` and `publish-pypi` first and recover them by their rows above. Then re-run `linear-sync`; it does not affect publishing |
 | `linear-complete` | Release is published (it runs only after `publish-pypi` and `linear-sync` succeed) | Re-run the failed job; it does not affect publishing |
 
-Never delete a tag whose version has been published to any package index.
+Never delete a tag whose version has been published to any package index. The one
+exception is `v0.3.0`, whose release the developer withdrew (see *Withdrawn releases*).
 
 ## Release Lineage
 
@@ -350,7 +438,9 @@ being built and `hatch-vcs` reads that tag. The fix those two releases carried i
 | Alpha | `vMAJOR.MINOR.PATCHaN` | `v0.1.0a1` |
 | Beta | `vMAJOR.MINOR.PATCHbN` | `v0.1.0b1` |
 
-The workflow input accepts any of the above (with or without a leading `v`). The version is
+The workflow input accepts any of the above, with or without one leading lowercase `v`, in
+its PEP 440 normal form (`0.1.0rc1`, not `0.1.0-rc.1`): the build job refuses another
+spelling. The version is
 derived from the git tag by `hatch-vcs` (`dynamic = ["version"]` in `pyproject.toml`) — no
 manual version bump is needed.
 
@@ -367,8 +457,13 @@ run.
 | Trigger | Workflow / Job | Command | What it does |
 |---------|---------------|---------|--------------|
 | Push to `main` | `release-sync.yml / sync` | `sync` (no version) | Scans the commits since the last synced commit for Linear issue ids and pull request numbers, and adds them to the pipeline's open release (today one with no version set) |
-| Release workflow `build` succeeds | `release.yml / linear-sync` | `sync --version vX.Y.Z` | Targets the release whose version is `vX.Y.Z`, or **creates** one, and adds the commits since the last synced commit |
-| After `publish-pypi` succeeds | `release.yml / linear-complete` | `complete --version vX.Y.Z` | Completes the release whose version is `vX.Y.Z` |
+| Release workflow `build` succeeds, final version | `release.yml / linear-sync` | `sync --version vX.Y.Z` | Targets the release whose version is `vX.Y.Z`, or **creates** one, and adds the commits since the last synced commit |
+| After `publish-pypi` succeeds, final version | `release.yml / linear-complete` | `complete --version vX.Y.Z` | Completes the release whose version is `vX.Y.Z` |
+
+Neither release job runs for a pre-release (ITL-1329): with a version, `sync` creates or
+targets a Linear release of exactly that version, so a candidate's sync would split its
+issues from the final release, and nothing would complete it. The open release stays open
+until the final version's run; do not rename it for a candidate.
 
 The workflow only syncs and completes the Linear release; any change of issue status that
 comes with a completed release is made by Linear, as the workspace configures it.

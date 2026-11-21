@@ -41,19 +41,27 @@ class TestNormalizeColumnList:
         assert _normalize_column_list([]) == []
 
     def test_integer_raises_type_error(self):
-        with pytest.raises(TypeError, match="tag_columns must be a string or iterable"):
+        with pytest.raises(
+            TypeError, match="tag_columns: column names must be a string or iterable"
+        ):
             _normalize_column_list(42)
 
     def test_float_raises_type_error(self):
-        with pytest.raises(TypeError, match="tag_columns must be a string or iterable"):
+        with pytest.raises(
+            TypeError, match="tag_columns: column names must be a string or iterable"
+        ):
             _normalize_column_list(3.14)
 
     def test_list_with_non_string_element_raises_type_error(self):
-        with pytest.raises(TypeError, match="All tag_columns elements must be strings"):
+        with pytest.raises(
+            TypeError, match="tag_columns: column names must be strings"
+        ):
             _normalize_column_list([1, "b"])
 
     def test_list_with_all_non_string_elements_raises_type_error(self):
-        with pytest.raises(TypeError, match="All tag_columns elements must be strings"):
+        with pytest.raises(
+            TypeError, match="tag_columns: column names must be strings"
+        ):
             _normalize_column_list([1, 2, 3])
 
     def test_single_char_string_not_iterated(self):
@@ -73,7 +81,9 @@ class TestNormalizeColumnList:
     def test_none_raises_type_error(self):
         # None is not accepted by the helper — callers that allow None as
         # "use primary key" must guard before calling _normalize_column_list.
-        with pytest.raises(TypeError, match="tag_columns must be a string or iterable"):
+        with pytest.raises(
+            TypeError, match="tag_columns: column names must be a string or iterable"
+        ):
             _normalize_column_list(None)
 
     def test_error_message_includes_type_name_for_non_iterable(self):

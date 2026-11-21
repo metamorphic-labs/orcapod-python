@@ -3,12 +3,22 @@
 import inspect
 import logging
 import sys
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from types import UnionType
-from typing import Any, Union, get_args, get_origin, get_type_hints
+from typing import TYPE_CHECKING, Any, Union, get_args, get_origin, get_type_hints
 
 from orcapod.errors import InputValidationError
-from orcapod.types import Schema, SchemaLike
+from orcapod.types import ContentHash, Schema, SchemaLike
+
+if TYPE_CHECKING:
+    import pyarrow as pa
+else:
+    from orcapod.utils.lazy_module import LazyModule
+
+    pa = LazyModule("pyarrow")
+
+if TYPE_CHECKING:
+    import pyarrow as pa
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +142,25 @@ def schema_incompatibility(
             return f"required parameter '{key}' has no matching column"
 
     return None
+
+
+def _declares_none(annotation: object) -> bool:
+    """Whether a return annotation, as read, is ``-> None``.
+
+    ``typing.get_type_hints`` turns ``-> None`` into ``NoneType``. When it fails on
+    another annotation, a postponed annotation (``from __future__ import annotations``)
+    is still text: ``"None"``, or ``"'None'"`` when it was written as a string
+    (``-> "None"``).
+
+    Args:
+        annotation: The return annotation as ``get_type_hints`` or the signature gives it.
+
+    Returns:
+        True when it is ``None`` written in one of those forms.
+    """
+    if annotation is type(None):
+        return True
+    return isinstance(annotation, str) and annotation.strip("'\"") == "None"
 
 
 def extract_function_schemas(
@@ -259,6 +288,10 @@ def extract_function_schemas(
 
     # get_type_hints stores the return annotation under the key 'return'
     return_annot = resolved_hints.get("return", signature.return_annotation)
+    # ``-> None`` declares no outputs (ITL-1257), which is not an output whose value is
+    # None: the number of outputs is the number of output keys.
+    if _declares_none(return_annot):
+        return_annot = None
     inferred_output_types: Schema = {}
     if return_annot is not inspect.Signature.empty and return_annot is not None:
         output_item_types = []
@@ -456,55 +489,169 @@ def intersection_schemas(*schemas: SchemaLike) -> Schema:
     return Schema(intersection)
 
 
+def arrow_schema_identity(
+    tag_schema: "pa.Schema", data_schema: "pa.Schema", data_context: Any
+) -> tuple[ContentHash, ContentHash]:
+    """Return the identity of a ``(tag, data)`` schema pair: the one rule (ITL-640).
+
+    A schema enters an identity as its Arrow schema, hashed by the data context's
+    ``arrow_hasher.hash_schema`` (labelled ``arrow_schema_v1``): two schemas whose
+    Arrow types differ (width, unit, zone, precision, nullability at any depth, a
+    logical type's identifier) are two identities, and column order, large and
+    non-large variants, list item field names, dictionary encoding and field metadata
+    are not part of it. The tag and data schemas are hashed apart, so a data-tag (a
+    column in both) differs from a plain tag. The pair of ``ContentHash`` objects is
+    what a source's pipeline and content identity embed; the structure hasher keeps
+    each hash's label.
+
+    Args:
+        tag_schema: The Arrow schema of the tag columns.
+        data_schema: The Arrow schema of the data columns (data-tags included).
+        data_context: The data context whose ``arrow_hasher`` hashes the schemas.
+
+    Returns:
+        The labelled hashes of the tag schema and of the data schema.
+    """
+    return _hash_schema(tag_schema, data_context), _hash_schema(
+        data_schema, data_context
+    )
+
+
+def _hash_schema(schema: "pa.Schema", data_context: Any) -> ContentHash:
+    """``hash_schema`` of ``schema``; a logical type it cannot read names its column."""
+    from orcapod.logical_types.identifier import LogicalTypeIdentifierError
+
+    hasher = data_context.arrow_hasher
+    try:
+        return hasher.hash_schema(schema)
+    except LogicalTypeIdentifierError as exc:
+        for field in schema:
+            try:
+                hasher.hash_schema(pa.schema([field]))
+            except LogicalTypeIdentifierError as column_exc:
+                raise column_exc.for_column(field.name) from exc
+        raise
+
+
+def stored_type_mismatch(
+    expected: "pa.Schema", stored: "pa.Schema", hasher: Any
+) -> "tuple[pa.Field[Any], pa.Field[Any]] | None":
+    """The first column whose stored Arrow type is not the expected one (ITL-640).
+
+    The rule for every read of stored rows that must present a source's declared types
+    (a ``DerivedSource``'s stored read, a ``CachedSource``'s cache read): a store that
+    gives a column back as another type (Delta reads a fixed-size list back as a list,
+    ITL-1275) would present rows of another schema under the source's identity. Types
+    are compared as ``hash_schema`` compares them (one field each), so a large and a
+    non-large variant agree. A column's top-level nullability is not compared: the
+    stored rows say it. Columns missing from either side are not compared.
+
+    Args:
+        expected: The declared Arrow schema.
+        stored: The Arrow schema of the stored rows.
+        hasher: The data context's Arrow hasher.
+
+    Returns:
+        The expected and the stored field of the first column that differs, or
+        ``None`` when every shared column agrees.
+    """
+    for field in expected:
+        if field.name not in stored.names:
+            continue
+        given = stored.field(field.name)
+        if hasher.hash_schema(pa.schema([given.with_nullable(True)])) != (
+            hasher.hash_schema(pa.schema([field.with_nullable(True)]))
+        ):
+            return field, given
+    return None
+
+
+def declared_arrow_schema(schema: SchemaLike, converter: Any) -> "pa.Schema":
+    """The Arrow schema a declared Python schema stands for: the converter's (ITL-640).
+
+    Each declared Python type means exactly one Arrow type (``int`` is ``int64``,
+    ``datetime`` is ``timestamp[us, tz=UTC]``); ``T | None`` is a nullable field. A
+    class a factory covers (a dataclass, a pydantic model) that nothing has registered
+    yet is registered first, as hashing it registers it: field by field, so only a
+    field that needs it goes through registration (which refuses some annotations the
+    converter takes directly, such as a tuple; CodeRabbit on PR 454).
+
+    Args:
+        schema: The declared Python schema.
+        converter: The data context's type converter.
+
+    Returns:
+        The Arrow schema.
+
+    Raises:
+        TypeError, ValueError: If a field has no Arrow type even after registration.
+    """
+    try:
+        return converter.python_schema_to_arrow_schema(schema)
+    except (TypeError, ValueError):
+        pass
+    optional = getattr(schema, "optional_fields", frozenset())
+    fields = []
+    for name, python_type in schema.items():
+        single = Schema(
+            {name: python_type}, optional_fields=[name] if name in optional else None
+        )
+        try:
+            converted = converter.python_schema_to_arrow_schema(single)
+        except (TypeError, ValueError):
+            converter.ensure_types_registered_for_schemas(single)
+            converted = converter.python_schema_to_arrow_schema(single)
+        fields.append(converted.field(name))
+    return pa.schema(fields)
+
+
 def compute_schema_hash(
-    tag_schema: Schema,
-    data_schema: Schema,
-    semantic_hasher: Any,
+    tag_schema: "pa.Schema",
+    data_schema: "pa.Schema",
+    data_context: Any,
     char_count: int | None,
 ) -> str:
     """Compute the schema hash used for system-tag column naming.
 
-    This is the same hash that ``SourceStreamBuilder`` embeds in system-tag
-    column names when building an ``ArrowTableStream`` from a source table.
-    Extracting it here lets ``SourceNodeBase`` predict the system-tag column
-    names from its declared schemas alone, without requiring a live source.
+    This is the hash that ``SourceStreamBuilder`` embeds in system-tag column names
+    when building an ``ArrowTableStream`` from a source table: the semantic hash of
+    ``arrow_schema_identity`` of the pair, so a slot can predict the names from its
+    Arrow schemas alone, without a live source. A hash inside a name is the bare hex
+    digest.
 
     Args:
-        tag_schema: Python tag schema (``Schema`` mapping column names to types).
-        data_schema: Python data schema.
-        semantic_hasher: Hasher from the active ``DataContext``
-            (``data_context.semantic_hasher``).
-        char_count: Number of hex characters to include. ``None`` (the default)
-            returns the full hex digest. Pass a positive integer to truncate
-            (e.g. for backwards compatibility with stored data).
+        tag_schema: The Arrow schema of the tag columns.
+        data_schema: The Arrow schema of the data columns (data-tags included).
+        data_context: The active ``DataContext``.
+        char_count: Number of hex characters to include. ``None`` returns the full
+            hex digest.
 
     Returns:
-        Hex string — full digest length when ``char_count`` is ``None``,
-        otherwise truncated to ``char_count`` characters.
+        Hex string: the full digest when ``char_count`` is ``None``, otherwise
+        truncated to ``char_count`` characters.
     """
-    return semantic_hasher.hash_object((tag_schema, data_schema)).to_hex(
+    identity = arrow_schema_identity(tag_schema, data_schema, data_context)
+    return data_context.semantic_hasher.hash_object(identity).to_hex(
         char_count=char_count
     )
 
 
 def compute_source_schema_hash(
-    tag_schema: Schema,
-    data_schema: Schema,
+    tag_schema: "pa.Schema",
+    data_schema: "pa.Schema",
     data_context: Any,
     config: Any,
 ) -> str:
     """Compute the schema hash for system-tag column naming from a ``DataContext`` and config.
 
     This is the canonical single entry-point used by ``SourceStreamBuilder``,
-    ``SourceNodeBase``, and ``PollingSource`` so the unpacking of
-    ``data_context.semantic_hasher`` and ``config.hashing.schema_n_char``
-    is not replicated at every call site.
+    ``SourceNodeBase``, and ``PollingSource`` so the truncation by
+    ``config.hashing.schema_n_char`` is not replicated at every call site.
 
     Args:
-        tag_schema: Python tag schema (``Schema`` mapping column names to types).
-        data_schema: Python data schema.
-        data_context: Active ``DataContext`` — its ``semantic_hasher`` attribute
-            is used for hashing.
+        tag_schema: The Arrow schema of the tag columns.
+        data_schema: The Arrow schema of the data columns (data-tags included).
+        data_context: The active ``DataContext``.
         config: Active ``OrcapodConfig`` — ``config.hashing.schema_n_char``
             controls hash truncation.
 
@@ -513,19 +660,55 @@ def compute_source_schema_hash(
         characters.
     """
     return compute_schema_hash(
-        tag_schema,
-        data_schema,
-        data_context.semantic_hasher,
-        config.hashing.schema_n_char,
+        tag_schema, data_schema, data_context, config.hashing.schema_n_char
     )
 
 
-def _normalize_column_list(value: Any) -> list[str]:
-    """Normalize a column-list argument to a plain list of strings.
+def column_names(columns: str | Iterable[str]) -> tuple[str, ...]:
+    """Return the column names an argument gives, in the order given: the one rule.
 
-    Accepts a bare string (wraps it in a list), any iterable of strings
-    (converts to list), or raises ``TypeError`` for non-string non-iterable
-    inputs or iterables that contain non-string elements.
+    A bare string is one column name, never a collection of one-character names
+    (ITL-1221); any other iterable gives its elements. Every operator and source
+    argument that takes column names reads it through this function; the caller
+    then applies its own rules (sorting, repeats, an empty collection).
+
+    Args:
+        columns: One column name, or an iterable of column names.
+
+    Returns:
+        The names, in the order given.
+
+    Raises:
+        TypeError: If ``columns`` is ``bytes`` or ``bytearray`` (empty or not),
+            neither a string nor an iterable, or an element is not a string.
+    """
+    if isinstance(columns, str):
+        return (columns,)
+    if isinstance(columns, (bytes, bytearray)):
+        # Iterable, but of integers; an empty one would pass as no names.
+        raise TypeError(
+            "column names must be a string or iterable of strings, "
+            f"got {type(columns).__name__!r}"
+        )
+    try:
+        names = tuple(columns)
+    except TypeError:
+        raise TypeError(
+            "column names must be a string or iterable of strings, "
+            f"got {type(columns).__name__!r}"
+        ) from None
+    bad = [name for name in names if not isinstance(name, str)]
+    if bad:
+        raise TypeError(
+            f"column names must be strings; got {[type(x).__name__ for x in bad]!r}"
+        )
+    return names
+
+
+def _normalize_column_list(value: Any) -> list[str]:
+    """Normalize a ``tag_columns`` argument to a plain list of strings.
+
+    The rule is ``column_names``: a bare string is one name.
 
     Args:
         value: A single column name (``str``) or an iterable of column names.
@@ -537,22 +720,10 @@ def _normalize_column_list(value: Any) -> list[str]:
         TypeError: If ``value`` is not a ``str`` or iterable, or if any
             element of the iterable is not a ``str``.
     """
-    if isinstance(value, str):
-        return [value]
     try:
-        result = list(value)
-    except TypeError:
-        raise TypeError(
-            f"tag_columns must be a string or iterable of strings, "
-            f"got {type(value).__name__!r}"
-        )
-    bad = [x for x in result if not isinstance(x, str)]
-    if bad:
-        raise TypeError(
-            f"All tag_columns elements must be strings; "
-            f"got {[type(x).__name__ for x in bad]!r}"
-        )
-    return result
+        return list(column_names(value))
+    except TypeError as exc:
+        raise TypeError(f"tag_columns: {exc}") from None
 
 
 def require_output_keys_not_tags(
@@ -630,6 +801,247 @@ def require_names_not_meta(names: Collection[str]) -> None:
                 f"column name {name!r} starts with {constants.META_PREFIX!r}, which is "
                 "reserved for meta columns; a tag or data column needs another name."
             )
+
+
+DICTIONARY_COLUMNS_NOT_SUPPORTED = (
+    "dictionary-encoded columns are not currently supported in Orcapod"
+)
+"""The start of the error for a dictionary-encoded column (ITL-1264, ITL-1277)."""
+
+
+def dictionary_columns(
+    arrow_schema: "pa.Schema",
+) -> "list[tuple[str, pa.DataType, pa.DataType]]":
+    """Return every column whose Arrow type is, or contains, a dictionary.
+
+    Developer decisions, November 18 and 19, 2026 (ITL-1264, ITL-1277): dictionary-encoded
+    columns are not currently supported in Orcapod, tags and data alike. A dictionary at
+    the top level of a column's type or inside it (a list, list-view or fixed-size list
+    item, a struct child, a map key or item, the values of a run-end-encoded type, an
+    extension type's storage) counts. A library value in a cell (a pandas or polars data
+    frame holding a categorical column) is an extension column stored as bytes, not a
+    dictionary, and does not count.
+
+    ``ArrowTableStream.__init__`` (every source and operator result becomes a stream
+    there) and the source builder (first, before its key columns and its hash) refuse
+    what this finds, with ``dictionary_columns_error``.
+
+    Args:
+        arrow_schema: The Arrow schema of a table about to become a stream.
+
+    Returns:
+        ``(name, type, decoded type)`` for each such column, in schema order.
+    """
+    from orcapod.utils.arrow_utils import decode_dictionaries
+
+    found: list[tuple[str, pa.DataType, pa.DataType]] = []
+    for field in arrow_schema:
+        decoded = decode_dictionaries(field.type)
+        if decoded != field.type:
+            found.append((field.name, field.type, decoded))
+    return found
+
+
+def dictionary_columns_error(
+    found: "Sequence[tuple[str, pa.DataType, pa.DataType]]",
+    tag_columns: Collection[str],
+    data_tags: Collection[str],
+    system_tag_columns: Collection[str] = (),
+) -> InputValidationError:
+    """Return the error refusing the dictionary-encoded columns ``found``.
+
+    Its job is the report, so it takes the roles it names. A user's table can hold a
+    dictionary only in its own columns: Orcapod writes system tags, source info, the
+    data context and meta columns as plain strings, so a dictionary there comes from a
+    hand-built table, and is refused the same way.
+
+    Args:
+        found: The columns, as ``dictionary_columns`` returns them.
+        tag_columns: The stream's tag columns, in tag order.
+        data_tags: The tags that are data-tags.
+        system_tag_columns: Names the stream will read as system tags beside those with
+            the system-tag prefix.
+
+    Returns:
+        An ``InputValidationError`` naming each column (tags first, in tag order, then
+        the others in table order) with its role, its type and the type it decodes to,
+        and how to decode it.
+    """
+    tags = list(tag_columns)
+    ordered = sorted(
+        found,
+        key=lambda item: (0, tags.index(item[0])) if item[0] in tags else (1, 0),
+    )
+    lines = [
+        f"  - {_column_role(name, tag_columns, data_tags, system_tag_columns)} column "
+        f"{name!r} has type {arrow_type} (decoded: {decoded})"
+        for name, arrow_type, decoded in ordered
+    ]
+    return InputValidationError(
+        f"{DICTIONARY_COLUMNS_NOT_SUPPORTED}:\n"
+        + "\n".join(lines)
+        + "\nIf keeping the dictionary encoding is not important, decode each such "
+        "column before building the source or stream. With pyarrow, cast it to the "
+        "decoded type shown and replace it keeping its field: "
+        "table.set_column(i, field.with_type(decoded), column.cast(decoded)). Three "
+        "kinds need a step first: a dictionary whose values hold a dictionary "
+        "(chunk.dictionary_decode() on each chunk, then the cast), a list view (cast "
+        "it to a large list of the decoded items) and a run-end-encoded column (cast "
+        "its values, then expand its runs with pyarrow.compute.run_end_decode); the "
+        "troubleshooting page gives each call. With polars, "
+        "df = df.with_columns(pl.col(name).cast(pl.String)) decodes a Categorical or "
+        "Enum column."
+    )
+
+
+def _column_role(
+    name: str,
+    tag_columns: Collection[str],
+    data_tags: Collection[str],
+    system_tag_columns: Collection[str],
+) -> str:
+    """The role a stream gives the column ``name``, for an error that names it."""
+    from orcapod.system_constants import constants
+
+    if name in data_tags:
+        return "data-tag"
+    if name in tag_columns:
+        return "tag"
+    if name in system_tag_columns or name.startswith(constants.SYSTEM_TAG_PREFIX):
+        return "system-tag"
+    if name.startswith(constants.SOURCE_PREFIX):
+        return "source-info"
+    if name == constants.CONTEXT_KEY:
+        return "data context"
+    if name.startswith(constants.META_PREFIX):
+        return "meta"
+    return "data"
+
+
+SCHEMA_HASH_REJECTED_COLUMNS_NOT_SUPPORTED = (
+    "union, list-view and run-end-encoded columns are not supported in Orcapod"
+)
+"""The start of the error for a column whose type the schema hash rejects (ITL-640)."""
+
+SCHEMA_HASH_REJECTED_KINDS: tuple[str, ...] = (
+    "is_union",
+    "is_list_view",
+    "is_large_list_view",
+    "is_run_end_encoded",
+)
+"""The ``pyarrow.types`` predicates of the types the Arrow schema hash rejects (ITL-640).
+
+The kinds starfix refuses in a schema, at any depth (as starfix 0.5.0 and 0.6.0 do:
+list views, unions and run-end-encoded types). This is the one list; it is not imported
+from starfix's private module, and ``tests/test_core/sources/
+test_schema_hash_rejected_columns_refused.py`` checks it against starfix's public
+``ArrowDigester.hash_schema`` over a battery of types, so a type starfix starts
+rejecting fails there rather than reaching a stream.
+"""
+
+
+def _is_schema_hash_rejected(arrow_type: "pa.DataType") -> bool:
+    return any(
+        getattr(pa.types, name)(arrow_type) for name in SCHEMA_HASH_REJECTED_KINDS
+    )
+
+
+def _holds_schema_hash_rejected(arrow_type: "pa.DataType") -> bool:
+    """Whether ``arrow_type`` is, or contains at any depth, a type the schema hash rejects."""
+    if isinstance(arrow_type, pa.BaseExtensionType):
+        return _holds_schema_hash_rejected(arrow_type.storage_type)
+    if _is_schema_hash_rejected(arrow_type):
+        return True
+    if pa.types.is_dictionary(arrow_type):
+        return _holds_schema_hash_rejected(arrow_type.value_type)
+    if (
+        pa.types.is_list(arrow_type)
+        or pa.types.is_large_list(arrow_type)
+        or pa.types.is_fixed_size_list(arrow_type)
+    ):
+        return _holds_schema_hash_rejected(arrow_type.value_type)
+    if pa.types.is_struct(arrow_type):
+        return any(_holds_schema_hash_rejected(child.type) for child in arrow_type)
+    if pa.types.is_map(arrow_type):
+        return _holds_schema_hash_rejected(
+            arrow_type.key_type
+        ) or _holds_schema_hash_rejected(arrow_type.item_type)
+    return False
+
+
+def schema_hash_rejected_columns(
+    arrow_schema: "pa.Schema",
+) -> "list[tuple[str, pa.DataType]]":
+    """Return every column whose Arrow type is, or contains, a type the schema hash rejects.
+
+    Developer decision, November 21, 2026 (ITL-640), for unions and list views, and the
+    same for run-end-encoded types (coordinator, same day: one rule for every type the
+    schema hash rejects): a stream's identity is its Arrow schema hash, and the Arrow
+    schema hash (starfix) cannot hold a union (dense or sparse), a list view
+    (``list_view``, ``large_list_view``) or a run-end-encoded type
+    (``SCHEMA_HASH_REJECTED_KINDS``), so a stream with such a column could not have an
+    identity. Such a type at the top of a column or inside it (a list, large list or
+    fixed-size list item, a struct child, a map key or item, a dictionary's values, an
+    extension type's storage) counts.
+
+    ``ArrowTableStream.__init__`` (every source and operator result becomes a stream
+    there) and the source builder (first, before its key columns and its hash) refuse
+    what this finds, with ``schema_hash_rejected_columns_error``, beside the dictionary
+    refusal (``dictionary_columns``).
+
+    Args:
+        arrow_schema: The Arrow schema of a table about to become a stream.
+
+    Returns:
+        ``(name, type)`` for each such column, in schema order.
+    """
+    return [
+        (field.name, field.type)
+        for field in arrow_schema
+        if _holds_schema_hash_rejected(field.type)
+    ]
+
+
+def schema_hash_rejected_columns_error(
+    found: "Sequence[tuple[str, pa.DataType]]",
+    tag_columns: Collection[str],
+    data_tags: Collection[str],
+    system_tag_columns: Collection[str] = (),
+) -> InputValidationError:
+    """Return the error refusing the columns ``found`` whose types the schema hash rejects.
+
+    Its job is the report, so it takes the roles it names.
+
+    Args:
+        found: The columns, as ``schema_hash_rejected_columns`` returns them.
+        tag_columns: The stream's tag columns, in tag order.
+        data_tags: The tags that are data-tags.
+        system_tag_columns: Names the stream will read as system tags beside those with
+            the system-tag prefix.
+
+    Returns:
+        An ``InputValidationError`` naming each column (tags first, in tag order, then
+        the others in table order) with its role and its type, and what to do.
+    """
+    tags = list(tag_columns)
+    ordered = sorted(
+        found,
+        key=lambda item: (0, tags.index(item[0])) if item[0] in tags else (1, 0),
+    )
+    lines = [
+        f"  - {_column_role(name, tag_columns, data_tags, system_tag_columns)} column "
+        f"{name!r} has type {arrow_type}"
+        for name, arrow_type in ordered
+    ]
+    return InputValidationError(
+        f"{SCHEMA_HASH_REJECTED_COLUMNS_NOT_SUPPORTED}: a stream's identity is its Arrow "
+        "schema hash, which cannot hold them:\n"
+        + "\n".join(lines)
+        + "\nCast a list view to the large list of the same items "
+        "(column.cast(pa.large_list(item_type))); expand a run-end-encoded column "
+        "(pyarrow.compute.run_end_decode); a union has no Orcapod type: split it into "
+        "one column per member type, or drop it, before building the source or stream."
+    )
 
 
 def require_names_not_system(names: Collection[str]) -> None:

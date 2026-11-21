@@ -1,0 +1,99 @@
+{
+  "execution": [
+    {
+      "arrow_type": "large_string",
+      "meaning": "the executor that ran the function (local, ray, none)",
+      "name": "executor_type",
+      "nullable": true,
+      "python_type": "str"
+    },
+    {
+      "arrow_type": "large_list<item: struct<key: large_string, value: large_string>>",
+      "meaning": "the executor's own settings, as text",
+      "name": "executor_info",
+      "nullable": true,
+      "python_type": "dict[str, str]"
+    },
+    {
+      "arrow_type": "large_string",
+      "meaning": "the Python version that ran the function (3.12.3)",
+      "name": "python_version",
+      "nullable": true,
+      "python_type": "str"
+    },
+    {
+      "arrow_type": "large_list<item: struct<key: large_string, value: large_string>>",
+      "meaning": "further facts about the run, as text; empty today",
+      "name": "extra_info",
+      "nullable": true,
+      "python_type": "dict[str, str]"
+    }
+  ],
+  "identity": [
+    "the function's name: its __name__, or the function_name given",
+    "the hash of the output schema: each output key with its type, in no order",
+    "v<major> of the function's own version (the part before the first dot)",
+    "the type and its major: python.function.v1"
+  ],
+  "major": 1,
+  "revision": 1,
+  "revision_component": "rev1",
+  "run_rules": [
+    "inputs are bound to the function's parameters by name, as keyword arguments",
+    "a parameter with a default may be left out of the inputs",
+    "the returned value is mapped to the output keys by position: one key takes the whole value, several keys take the items of a returned sequence",
+    "a function with no output keys (-> None or no return annotation) has no outputs; a returned value other than None is refused",
+    "a returned value must conform to its declared output type",
+    "variadic (*args, **kwargs) and positional-only parameters are refused"
+  ],
+  "type_id": "python.function.v1",
+  "type_name": "python.function",
+  "variation": [
+    {
+      "arrow_type": "large_string",
+      "meaning": "the function's name, as in the uri",
+      "name": "function_name",
+      "nullable": true,
+      "python_type": "str"
+    },
+    {
+      "arrow_type": "large_string",
+      "meaning": "the full version string the function was declared with (v3.7)",
+      "name": "function_version",
+      "nullable": true,
+      "python_type": "str"
+    },
+    {
+      "arrow_type": "large_string",
+      "meaning": "the function's module (__module__)",
+      "name": "function_module",
+      "nullable": true,
+      "python_type": "str | None"
+    },
+    {
+      "arrow_type": "large_binary",
+      "covers": "{\"inputs\": {<name>: {\"type\": <type hash>, \"default\": <value hash, only when the parameter has one>}}, \"outputs\": [{\"key\": <output key>, \"type\": <type hash>}]}: effective types (input_schema= / output_schema=, else the annotations); inputs keyed by name in no order, outputs in declared order; not the name, module, parameter kind or order, version or body",
+      "hash_label": "function_signature_v1",
+      "meaning": "the hash of the function's declared interface",
+      "name": "function_signature_hash",
+      "nullable": true,
+      "python_type": "bytes"
+    },
+    {
+      "arrow_type": "large_binary",
+      "covers": "{\"source\": <the source text from the def line on, as written: docstring, comments and whitespace included, decorator lines excluded; for a lambda the enclosing line>}",
+      "hash_label": "function_content_v1",
+      "meaning": "the hash of the function as written (a lambda: its enclosing lines); absent when its source cannot be read (a plain REPL, python -c, exec) or, for a function other than a lambda, does not start at a def statement",
+      "name": "function_content_hash",
+      "nullable": true,
+      "python_type": "bytes | None"
+    },
+    {
+      "arrow_type": "large_string",
+      "meaning": "the git commit of the function's file or working directory, with -dirty, -untracked and -<source> suffixes; unknown outside git",
+      "name": "git_hash",
+      "nullable": true,
+      "python_type": "str"
+    }
+  ]
+}

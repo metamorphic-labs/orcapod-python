@@ -31,7 +31,9 @@ content.
 
 One rule holds for every operator: **no data element comes from a tag value**. An operator may
 use tags to join, filter, group or order rows, but it never turns a tag column into a data
-column, so a function pod never receives tag content.
+column, so a function pod never receives the content of a plain tag. A
+[data-tag](data-tags.md) is different: it is a tag and a data column at once, so a function
+reads its data role.
 
 An operator may add a tag, never data. A tag labels rows; it is not a data value, so
 [`AddTags`](#addtags) can add tags with constant values while every data column passes through
@@ -71,12 +73,20 @@ Takes one or more streams. Used for `Join`, which performs an N-ary inner join.
 N-ary inner join on shared tag columns. Requires that input streams have non-overlapping
 data columns (raises `InputValidationError` on collision). Join is **commutative** -- the
 order of input streams does not affect the result. Like every operator, Join drops its
-inputs' meta (`__`-prefixed) columns, so they never collide. Rows match on equality of every shared tag column, whatever
-its type (lists and structs compare element by element). A row with a null in any shared tag
+inputs' meta (`__`-prefixed) columns, so they never collide. Rows match on equality of every shared tag column
+(lists and structs compare element by element). A row with a null in any shared tag
 column matches nothing, a null list or struct included, and rows with null on both sides do
 not match each other (the SQL convention for nulls; `MergeJoin` and `SemiJoin` follow it too, on the sync and the async path, while `GroupBy` is the exception by design and puts null keys in one group); a null *inside* a list or struct is an ordinary element that equals
 another null, an empty list is not a null, and NaN equals NaN. The async path gives the same
 rows.
+
+`Join` and `SemiJoin` keep every value exactly: each output column is taken from the inputs
+as it is, bit for bit (a `time64[ns]` keeps its nanoseconds, a `date64` its time of day, a
+`decimal256` its 76 digits), and a data column of any Arrow type passes through. A shared tag
+column must be a type they can compare: an integer, float, decimal, boolean, string, binary,
+date, time, timestamp or duration, a logical type stored as one, or a list or struct of
+those. A key that holds a map, an interval or a union is refused with `InputValidationError`
+naming the column; drop it from one input (`drop_tag_columns`) to join on the other tags.
 
 Because a null key matches nothing, a shared tag column may differ between the inputs in
 nullability alone: `T` in one input and `T | None` in another is accepted by `Join`, `MergeJoin`
@@ -85,12 +95,12 @@ and `SemiJoin`. In the output of `Join` and `MergeJoin` the column is `T` when a
 input's type. Any other type difference is still an error, and a data column is never
 reconciled this way.
 
-A name is a tag or a data column, never both: if one input has `x` as a tag column and another has it as a data column, `Join` (and `MergeJoin`) raises `InputValidationError` when the graph is built; rename one with `map_tags` or `map_data`.
+A plain tag and a data column never share a name across inputs: if one input has `x` as a plain tag column and another has it as a data column only, `Join` (and `MergeJoin`) raises `InputValidationError` when the graph is built; rename one with `map_tags` or `map_data`. A data-tag is the exception: it is one column in both roles, and `Join` merges a key that is a data-tag on its inputs (or plain on one and a data-tag on another) into a data-tag with one data column (see [Data-tags](data-tags.md)).
 
-Column order follows each operator's argument symmetry: commutative operators (`Join`,
-`MergeJoin`) list tag and data columns by first appearance across their inputs in canonical
-pipeline-hash order, so `Join()(a, b)` and `Join()(b, a)` have the same columns in the same
-order, while ordered operators such as `SemiJoin` keep operand order; either way, address
+Column order follows each operator's argument symmetry: a commutative operator (`Join`)
+lists tag and data columns by first appearance across its inputs in canonical pipeline-hash
+order, so `Join()(a, b)` and `Join()(b, a)` have the same columns in the same order, while
+ordered operators such as `SemiJoin` and `MergeJoin` keep operand order; either way, address
 columns by name rather than by position.
 
 ```python
@@ -102,7 +112,7 @@ subjects = DictSource(
         {"subject_id": "mouse_01", "age": 12},
         {"subject_id": "mouse_02", "age": 8},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 measurements = DictSource(
@@ -110,7 +120,7 @@ measurements = DictSource(
         {"subject_id": "mouse_01", "weight": 25.3},
         {"subject_id": "mouse_02", "weight": 22.1},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 join = Join()
@@ -121,11 +131,132 @@ print(joined.as_table().to_pandas())
 # 1   mouse_02    22.1    8
 ```
 
+### Rejoin
+
+`Rejoin` puts the branches of one stream back together, row by origin row. A **diamond** is
+a pipeline that splits one stream into branches (a filter in one, a function pod or a
+rename in another) and then puts the branches back together: Rejoin is the operator a
+diamond is expected to use.
+
+`Join` is not wrong on a diamond, it is the wrong tool. Join combines rows on their user
+tags, and rows with equal tags may come from different origins, so Join keeps every
+input's system-tag columns, each renamed for its input (see
+[System tags](../reference/hashing.md)). On a diamond that doubles the system-tag columns at
+every Join, and stacked diamonds grow them exponentially. Rejoin pairs the rows of the
+branches that come from the **same origin row**, by matching every system-tag column, and
+keeps those columns as they are: a result row has its origin row's provenance, and the
+number of system-tag columns stays constant.
+
+```python
+import polars as pl
+
+rows = [
+    {"subject_id": "mouse_01", "unit": 1, "rate": 4.0, "depth": 150},
+    {"subject_id": "mouse_01", "unit": 2, "rate": 9.5, "depth": 320},
+    {"subject_id": "mouse_02", "unit": 3, "rate": 2.5, "depth": 410},
+]
+units = DictSource(
+    data=rows, tag_columns=["subject_id", "unit"], tag_only_columns=True, source_id="units"
+)
+
+# Two branches of one stream: a filter in one, a rename in the other.
+fast = units.select_data_columns(["rate"]).polars_filter(pl.col("rate") > 3)
+deep = units.select_data_columns(["depth"]).map_data({"depth": "depth_um"})
+
+rejoined = fast.rejoin(deep)
+for row in sorted(rejoined.as_table().to_pylist(), key=lambda row: row["unit"]):
+    print(row["unit"], row["rate"], row["depth_um"])
+# 1 4.0 150
+# 2 9.5 320
+
+
+def system_tags(stream):
+    return [
+        name
+        for name in stream.as_table(all_info=True).column_names
+        if name.startswith("_tag")
+    ]
+
+
+print(len(system_tags(units)), len(system_tags(rejoined)), len(system_tags(fast.join(deep))))
+# 2 2 4
+
+
+def diamond(stream, put_back):
+    """Split ``stream`` into two branches and put them back together."""
+    left = stream.select_data_columns(["rate"])
+    right = stream.select_data_columns(["rate"]).map_data({"rate": "rate_copy"})
+    return put_back(left, right).select_data_columns(["rate"])
+
+
+by_join = by_rejoin = units
+for _ in range(3):
+    by_join = diamond(by_join, lambda a, b: a.join(b))
+    by_rejoin = diamond(by_rejoin, lambda a, b: a.rejoin(b))
+print(len(system_tags(by_join)), len(system_tags(by_rejoin)))
+# 16 2
+```
+
+The rules:
+
+- **Branches of one stream.** Every input has the same system-tag columns, which it keeps
+  when each branch goes only through operators that keep system tags: filters, column
+  selection and renaming, `AddTags` and function pods. A branch that went through `Join`,
+  `GroupBy` or `Batch` has other system-tag columns, and Rejoin refuses it
+  (`InputValidationError`, naming each input's system-tag columns and pointing to `Join`).
+  The inputs that state their system-tag columns are compared when the rejoin is built; an
+  input whose schema states none (a raw stream without system tags, or a node of a loaded
+  job downstream of a function node, whose saved schema holds none) is checked when the
+  rejoin is computed, on its rows, by the same rule.
+- **One row per origin row.** Rows are matched on every system-tag column. A first rule,
+  deliberate and open to relaxing later: each input holds at most one row of an origin row,
+  so pairing is one to one; an input with two rows of one origin row is refused, naming the
+  input and the system-tag values. No operator that keeps system tags duplicates rows today.
+- **Shared tags agree, bit for bit.** A user tag present in several inputs must hold the
+  same value on matched rows, bit for bit (`-0.0` is not `0.0`, NaNs of different payloads
+  differ), so the result never depends on the order of the inputs; otherwise Rejoin refuses,
+  naming the tag. A tag of one input only is kept.
+- **Provenance is never null, and exact.** An input with a null in a system-tag column is
+  refused, naming the column. Matched system-tag values are compared bit for bit too, like
+  shared tags.
+- **One data context.** The inputs' rows must be of one data context; the result keeps
+  it, and rows of different data contexts are refused. Only the default data context
+  ships, so this matters only for a stream built in another one. A known limitation
+  (ITL-1339): some operators (`PolarsFilter` and `MergeJoin`, likely `Join` and
+  `SemiJoin` too) return their rows in the default data context whatever their input's,
+  so in another data context a branch through one of them is refused beside a branch
+  that kept its context.
+- **Data columns are disjoint**, as in `Join`; a data-tag present in several inputs is one
+  column.
+- **Different sources give nothing.** Two sources with the same schema have the same
+  system-tag column names but no origin row in common: their rejoin is empty, not an error.
+- **Symmetric.** Like `Join`, Rejoin takes two or more inputs (one input passes through) in
+  any order, with the same result, hashes and columns. Its async path gives the same rows.
+
+```python
+other = DictSource(
+    data=rows, tag_columns=["subject_id", "unit"], tag_only_columns=True, source_id="other"
+)
+print(units.select_data_columns(["rate"]).rejoin(other.select_data_columns(["depth"])).as_table().num_rows)
+# 0
+```
+
+!!! note "Provisional"
+    `Rejoin` is a provisional operator (ITL-1336): building one issues a
+    `ProvisionalHashWarning`, and its identity, so the hashes and stored paths of its
+    results, may still change in a later release. `Join` is unchanged.
+
 ### MergeJoin
 
-Binary join that handles colliding data columns by merging their values into sorted
-`list[T]`. Both inputs must have the same type for any colliding data columns. MergeJoin
-is **commutative** -- the order of the two input streams does not affect the result.
+Binary join that handles colliding data columns by merging their values into `list[T]`.
+Both inputs must have the same type for any colliding data columns. Each merged list holds
+the first input's value, then the second input's: MergeJoin is **ordered, not commutative**
+(ITL-1281). Nothing is sorted, so the lists of a row are parallel: element 0 of every merged
+column (and of its source-info list) comes from the first input's row, element 1 from the
+second's. Any value merges, a struct, a logical type or a null included, and every value is
+kept exactly as the input holds it. (A data column of the Arrow `null` type keeps that type
+in the result's table; read as rows, or on the async path, it is typed `large_string`, as
+every row reads a `null` column: ITL-1319.)
 
 ```python
 from orcapod.sources import DictSource
@@ -133,24 +264,35 @@ from orcapod.operators import MergeJoin
 
 scale_a = DictSource(
     data=[
-        {"subject_id": "mouse_01", "weight": 25.3},
-        {"subject_id": "mouse_02", "weight": 22.1},
+        {"subject_id": "mouse_01", "weight": 25.3, "length": 8.1},
+        {"subject_id": "mouse_02", "weight": 22.1, "length": 7.6},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 scale_b = DictSource(
     data=[
-        {"subject_id": "mouse_01", "weight": 24.9},
-        {"subject_id": "mouse_02", "weight": 22.6},
+        {"subject_id": "mouse_01", "weight": 24.9, "length": 8.4},
+        {"subject_id": "mouse_02", "weight": 22.6, "length": 7.2},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
+def by_subject(stream):
+    return sorted(stream, key=lambda row: row[0].as_dict()["subject_id"])
+
 merged = MergeJoin()(scale_a, scale_b)
-for tag, data in merged.iter_data():
+for tag, data in by_subject(merged):
     print(tag.as_dict(), "->", data.as_dict())
-# {'subject_id': 'mouse_01'} -> {'weight': [24.9, 25.3]}
-# {'subject_id': 'mouse_02'} -> {'weight': [22.1, 22.6]}
+# {'subject_id': 'mouse_01'} -> {'weight': [25.3, 24.9], 'length': [8.1, 8.4]}
+# {'subject_id': 'mouse_02'} -> {'weight': [22.1, 22.6], 'length': [7.6, 7.2]}
+
+swapped = MergeJoin()(scale_b, scale_a)
+for tag, data in by_subject(swapped):
+    print(tag.as_dict(), "->", data.as_dict())
+# {'subject_id': 'mouse_01'} -> {'weight': [24.9, 25.3], 'length': [8.4, 8.1]}
+# {'subject_id': 'mouse_02'} -> {'weight': [22.6, 22.1], 'length': [7.2, 7.6]}
+print(merged.content_hash() == swapped.content_hash())
+# False
 ```
 
 Passing the same two streams to `Join` instead raises `InputValidationError`, because both
@@ -184,18 +326,18 @@ all_subjects = DictSource(
         {"subject_id": "mouse_02", "age": 8},
         {"subject_id": "mouse_03", "age": 15},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 weighed = DictSource(
     data=[
         {"subject_id": "mouse_01", "weight": 25.3},
         {"subject_id": "mouse_02", "weight": 22.1},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 only_weighed = SemiJoin()(all_subjects, weighed)
-for tag, data in only_weighed.iter_data():
+for tag, data in only_weighed:
     print(tag.as_dict(), "->", data.as_dict())
 # {'subject_id': 'mouse_01'} -> {'age': 12}
 # {'subject_id': 'mouse_02'} -> {'age': 8}
@@ -215,12 +357,12 @@ source = DictSource(
         {"subject_id": "mouse_01", "age": 12},
         {"subject_id": "mouse_02", "age": 8},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 batch = Batch()
 batched = batch.process(source)
-for tag, data in batched.iter_data():
+for tag, data in batched:
     print("Tags:", tag.as_dict())
     # Tags: {'subject_id': ['mouse_01', 'mouse_02']}
     print("Data:", data.as_dict())
@@ -255,13 +397,13 @@ source = DictSource(
         {"subject_id": "mouse_01", "probe": "imec1", "spike_count": 980},
         {"subject_id": "mouse_02", "probe": "imec0", "spike_count": 1450},
     ],
-    tag_columns=["subject_id", "probe"],
+    tag_columns=["subject_id", "probe"], tag_only_columns=True,
 )
 
 grouped = GroupBy(by=["subject_id"])(source)
 print(grouped.keys())
 # (('subject_id',), ('spike_count',))
-for tag, data in grouped.iter_data():
+for tag, data in grouped:
     print("Tags:", tag.as_dict(), "Data:", data.as_dict())
     # Tags: {'subject_id': 'mouse_01'} Data: {'spike_count': [1200, 980]}
     # Tags: {'subject_id': 'mouse_02'} Data: {'spike_count': [1450]}
@@ -272,23 +414,28 @@ The output schema follows three rules:
 - **Group keys stay scalar tag columns** (`subject_id: str`), in the input's tag order. They are
   the only tag columns of the output.
 - **A tag that is not a key is dropped** (`probe`). A list of the members' values is not a key
-  for the group, just as SQL drops a non-key, non-aggregated column after `GROUP BY`.
+  for the group, just as SQL drops a non-key, non-aggregated column after `GROUP BY`. A
+  [data-tag](data-tags.md) that is not a key loses its tag role only: its data
+  column stays, as a list like any other.
 - **Data columns become `list[T]`** (`spike_count: list[int]`), one element per member.
 
 !!! warning "Member tag values are not carried"
-    `GroupBy` does not keep the members' values of a non-key tag, as a tag or as data. If a
-    later step needs to know which member each element came from, make the column data
-    *before* grouping: declare it as data at the source, or derive a source that offers the tag
-    as data with `DerivedSource(origin, tags_as_data={...})`.
+    `GroupBy` does not keep the members' values of a plain non-key tag, as a tag or as data.
+    If a later step needs to know which member each element came from, make the column data
+    *before* grouping: keep the tag a data-tag at the source (the default without
+    `tag_only_columns`), declare it as data at the source, or derive a source that offers the
+    tag as data with `DerivedSource(origin, tags_as_data={...})`.
 
 ```python
 from orcapod.sources import DerivedSource
 
-with_probe = DerivedSource(source, tags_as_data={"probe": "probe_name"})
+with_probe = DerivedSource(
+    source, tags_as_data={"probe": "probe_name"}, source_id="spikes_with_probe"
+)
 by_subject = GroupBy(by=["subject_id"])(with_probe)
 print(by_subject.keys())
 # (('subject_id',), ('spike_count', 'probe_name'))
-for tag, data in by_subject.iter_data():
+for tag, data in by_subject:
     print(tag.as_dict(), data.as_dict())
     # {'subject_id': 'mouse_01'} {'spike_count': [1200, 980], 'probe_name': ['imec0', 'imec1']}
     # {'subject_id': 'mouse_02'} {'spike_count': [1450], 'probe_name': ['imec0']}
@@ -296,27 +443,96 @@ for tag, data in by_subject.iter_data():
 
 The data columns of the output are exactly the data columns of the input: a function pod that
 follows `GroupBy` receives `spike_count` (and `probe_name`, when the source offers it), never a
-tag.
+plain tag. A data-tag group key stays a data column too (scalar, in both roles), so a
+following function can read its value (see [Data-tags](data-tags.md)).
 
 Ordering is deterministic by construction, because orcapod hashes the emitted lists to build
-cache keys: members are sorted by the input's non-key tag values (with the internal record id
-as a final tiebreaker), even though those tags are dropped, and groups are emitted in group-key
-order. A reordered input therefore produces a byte-identical output table.
+cache keys:
+
+- **Members** are sorted by the input's non-key tags, even though those tags are dropped.
+  The tags are taken in name order, each ascending with NaN after every number and nulls
+  last, and the internal record id breaks ties. `member_order` names tags to sort by first, in its order; the other
+  non-key tags follow in name order. A member is never ordered by a data value: a name in
+  `member_order` must be a tag of the input (a data-tag counts), and a data column is
+  refused (make it a tag first with `tag_by`).
+- **Groups** are emitted sorted by their keys, taken in name order. The order of the names
+  in `by` is not part of the operator: `GroupBy(by=["a", "b"])` and `GroupBy(by=["b", "a"])`
+  are one operator.
+- **Keys** group by their Arrow value, as the joins match them, except for null: rows with
+  equal keys form one group, all rows with a null key form one group, and so do all rows
+  with a NaN key (NaN equals NaN here; `0.0` equals `-0.0`). A NaN key sorts after every
+  number and before null. `GroupBy` compares and orders values with Polars, never as Python
+  values, so keys that differ only below what Python keeps are two groups: `time64[ns]`
+  values of 1 ns and 2 ns, or two `date64` values on one day.
+  When the members of a group hold a float key with different bits (`0.0` and `-0.0`, or NaN
+  with another sign or payload), the group emits the one with the smallest bit pattern at
+  the column's own width (`float16`, `float32` or `float64`; a logical type stored as a
+  float is read through its storage), for
+  each key column: `0.0` over `-0.0`, and a positive NaN over a negative one. A signaling
+  NaN has smaller bits than the canonical quiet NaN, so when a member holds one, it is the
+  key emitted. The emitted key is always a value a member holds, bit for bit, and neither
+  the order of the rows nor `member_order` decides it.
+- **Values are kept exactly.** Every emitted key and every element of a data list is taken
+  from the input's Arrow columns, so a list holds its members' values bit for bit: a
+  `time64[ns]` value keeps its nanoseconds, a `date64` value its time of day, a float its
+  bits (a signaling NaN stays signaling).
+- **No arrangement of the input's columns changes the result.** The order of its tags, the
+  order of its data columns and the layout of its table leave every value, record id and
+  hash of the output unchanged. The output lists its columns as the input does (the keys in
+  the input's tag order); that order is presentation, and no hash depends on it.
+- **The order of the input's rows** changes nothing when the source has key columns
+  (`record_id_columns`): its record ids follow the rows' content, so a reordered input gives
+  a byte-identical output table. Without key columns a record id is the row's position, so
+  reordering the rows is a change: the folded record ids differ, and members that share
+  every tag (ordered by record id) can swap places in the lists.
+
+```python
+units = DictSource(
+    data=[
+        {"subject_id": "mouse_01", "unit": 0, "probe": "imec1", "spike_count": 980},
+        {"subject_id": "mouse_01", "unit": 1, "probe": "imec0", "spike_count": 1200},
+        {"subject_id": "mouse_01", "unit": 0, "probe": "imec0", "spike_count": 1100},
+    ],
+    tag_columns=["subject_id", "unit", "probe"], tag_only_columns=True,
+)
+for _, data in units.group_by(["subject_id"]).iter_data():
+    print(data.as_dict())
+    # {'spike_count': [1100, 1200, 980]}
+for _, data in units.group_by(["subject_id"], member_order=["unit"]).iter_data():
+    print(data.as_dict())
+    # {'spike_count': [1100, 980, 1200]}
+```
+
+By default the members are ordered by `probe`, then `unit` (name order), whatever the order
+of `tag_columns`. With `member_order=["unit"]`, they are ordered by `unit`, then `probe`. The
+option is part of the operator's identity only when it is given, so a `GroupBy` without it
+keeps its hash.
 
 A grouped stream can be grouped again on a coarser key; its data lists then nest one level
 deeper (`list[list[T]]`). The members of the second grouping are ordered by the first
-grouping's keys that are not in the coarser key, then by record id; a tag the first grouping
-dropped no longer takes part.
+grouping's keys that are not in the coarser key (in name order, or as `member_order` gives),
+then by record id; a tag the first grouping dropped no longer takes part.
 
 Every name in `by` must be a **scalar tag column** of the input. `GroupBy` raises
 `InputValidationError` for an unknown column, a data column, or a list-valued tag column --
 the last usually means the stream came from `Batch`, so group *before* batching rather than
 after.
 
-Streams also expose this as a fluent method:
+A tag whose type has no order can be neither a key nor a non-key tag of the input, because
+every non-key tag orders the members: a struct or a map (a user class, a `dict[K, V]`), an
+interval, a union. `GroupBy` raises `InputValidationError` for it, from the schema alone. A
+key that is a list of any kind, a fixed-size list included, is refused as list-valued. Since
+`GroupBy` drops a non-key tag anyway, drop it before grouping, with `select_tag_columns`
+naming the tags to keep. A list-valued non-key tag orders the members element by element,
+nulls last at every depth.
+
+Streams also expose this as a fluent method. A single column may be given as a string, as
+for every operator that takes column names (a string is one name, never its characters):
 
 ```python
 grouped = source.group_by(["subject_id"])
+same = source.group_by("subject_id")
+assert same.content_hash() == grouped.content_hash()
 ```
 
 ### Column selection
@@ -338,7 +554,7 @@ source = DictSource(
         {"subject_id": "mouse_02", "age": 8, "weight": 22.1},
         {"subject_id": "mouse_03", "age": 15, "weight": 27.8},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 select = SelectDataColumns(columns=["weight"])
@@ -366,7 +582,7 @@ sessions = DictSource(
         {"subject_id": "mouse_01", "session": 1, "age": 12, "weight": 25.3},
         {"subject_id": "mouse_02", "session": 2, "age": 8, "weight": 22.1},
     ],
-    tag_columns=["subject_id", "session"],
+    tag_columns=["subject_id", "session"], tag_only_columns=True,
 )
 
 dropped = sessions.drop_columns("session", "age")
@@ -441,6 +657,11 @@ A new name already taken by a column that is not renamed is refused too.
 
 ### PolarsFilter
 
+!!! warning "Provisional"
+    `PolarsFilter` is a [provisional operator](#provisional-operators): its identity is not
+    frozen with data context v1 and may change in a later release (ITL-1247). Building one
+    issues `ProvisionalHashWarning` once per process.
+
 Filter rows using Polars expressions:
 
 ```python
@@ -449,7 +670,7 @@ from orcapod.operators import PolarsFilter
 
 filt = PolarsFilter(predicates=[pl.col("age") > 10])
 filtered = filt.process(source)
-for tag, pkt in filtered.iter_data():
+for tag, pkt in filtered:
     print(f"{tag.as_dict()} -> {pkt.as_dict()}")
 # {'subject_id': 'mouse_01'} -> {'age': 12, 'weight': 25.3}
 # {'subject_id': 'mouse_03'} -> {'age': 15, 'weight': 27.8}
@@ -530,7 +751,7 @@ recordings = ArrowTableSource(
             ]
         ),
     ),
-    tag_columns=["session"],
+    tag_columns=["session"], tag_only_columns=True,
 )
 print(recordings.output_schema()[1])
 # Schema({'start_ms': int | None})
@@ -606,7 +827,7 @@ visits = ArrowTableSource(
             "notes": pa.array([None, "noisy", None, "ok"], pa.large_string()),
         }
     ),
-    tag_columns=["session"],
+    tag_columns=["session"], tag_only_columns=True,
 )
 print(visits.output_schema())
 # (Schema({'session': str | None}), Schema({'start_ms': int | None, 'notes': str | None}))
@@ -653,14 +874,23 @@ keyword arguments or as one dict (the only positional argument), as `map_tags` t
 ```python
 labelled = sessions.add_tags(cohort="A", run=3)
 print(labelled.keys())  # (('subject_id', 'session', 'cohort', 'run'), ('age', 'weight'))
-for tag, data in labelled.iter_data():
+for tag, data in labelled:
     print(tag.as_dict(), "->", data.as_dict())
 # {'subject_id': 'mouse_01', 'session': 1, 'cohort': 'A', 'run': 3} -> {'age': 12, 'weight': 25.3}
 # {'subject_id': 'mouse_02', 'session': 2, 'cohort': 'A', 'run': 3} -> {'age': 8, 'weight': 22.1}
 ```
 
-The new tags follow the input's tags, in the order given. Data columns, their source info and
-the system tags are unchanged. A value's type is the tag's type, with no inference: a `bool`
+The new tags follow the input's tags, in name order: they are a set, and the order they are
+given in is not kept. `add_tags(run=3, cohort="A")` is the same operator, with the same hashes
+and the same columns:
+
+```python
+reordered = sessions.add_tags(run=3, cohort="A")
+print(reordered.keys())  # (('subject_id', 'session', 'cohort', 'run'), ('age', 'weight'))
+print(reordered.content_hash() == labelled.content_hash())  # True
+```
+
+Data columns, their source info and the system tags are unchanged. A value's type is the tag's type, with no inference: a `bool`
 becomes Arrow `bool`, an `int` `int64`, a `float` `double`, a `str` `large_string` and a `bytes`
 `large_binary`, and every new tag is non-nullable:
 
@@ -681,8 +911,12 @@ except InputValidationError as error:
 # add_tags: cannot add a tag with an existing column's name: 'age' is a data column
 ```
 
-The names and values, in order, are the operator's identity, so two different values are two
-operators, with different hashes and stored tables.
+The names and values, in name order, are the operator's identity, so two different values are
+two operators, with different hashes and stored tables, while two orders of the same tags are
+one operator.
+
+On a stream with [data-tags](data-tags.md), the data-tags stay data-tags and the new tags are
+plain: a constant tag is never a data value.
 
 ### Pick and Index
 
@@ -701,6 +935,69 @@ large variants as described in [Arrow types of operator outputs](#arrow-types-of
 `NOT NULL`: its predicted type (`int`, not `int | None`) is not Optional, so an element or value
 that is `None` raises `ValueError` naming the operator, the column and the row's tag, whatever
 `fail_on_miss` is.
+
+## Provisional operators
+
+Data context v1 freezes the hashes of Orcapod at the 0.4.0 release: from then on a pipeline
+keeps its stored paths, record ids and default source ids from one release to the next. A
+provisional operator is outside that freeze. Its identity is still being decided, so a later
+release may change it, and with it the content and pipeline hashes, stored paths and record
+ids of its results and of every step downstream of it. A pipeline that contains one keeps its
+hashes across releases only until such a change: after it, those steps compute their results
+again instead of reusing them. Nothing stored is lost or wrong; the earlier rows stay where
+they are.
+
+The provisional operators are listed in one place:
+
+```python
+from orcapod.operators import PROVISIONAL_OPERATORS
+
+print(sorted(PROVISIONAL_OPERATORS))
+# ['AddTags', 'Batch', 'GroupBy', 'Index', 'MapColumns', 'MapTags', 'MergeJoin', 'Pick', 'PolarsFilter', 'Rejoin', 'TagBy']
+```
+
+They are the operators whose identity choice is not yet obvious and solid (developer,
+November 19, 2026). Each name maps to the issue that decides its identity or output:
+
+| Operator | What is still open |
+|---|---|
+| `GroupBy`, `Batch` | their output for a data-tag and its data column (ITL-1017) |
+| `MergeJoin` | its rules for data-tags (ITL-1018); it became ordered in this release |
+| `MapTags` | its rename rules for data-tags (ITL-1018) |
+| `MapColumns` | its behaviour with data-tags (ITL-1022) |
+| `Pick`, `Index` | the policy for a miss, which changes the output (ITL-439) |
+| `PolarsFilter` | whether the order of its predicates belongs to its identity (ITL-1247) |
+| `TagBy`, `AddTags` | days old, their identities just changed: the review of the tag operators (ITL-1290) |
+| `Rejoin` | new: puts the branches of one stream back together by matching system tags (ITL-1336) |
+
+Every other operator is frozen with data context v1: `Join`, `SemiJoin`, `MapData`, the
+column selections (`SelectTagColumns`, `SelectDataColumns`, `DropTagColumns`,
+`DropDataColumns`, `SelectColumns`, `DropColumns`) and `DropNulls`.
+
+What you get with a provisional operator: the same results as with any other operator, a
+warning, and, should a later release change the operator's identity, a recomputation of its
+steps (and of every step downstream) instead of reuse; nothing stored is lost or wrong.
+Building one, directly, through a stream method such as `group_by` or `polars_filter`, or by
+loading a saved job that holds one, issues `orcapod.errors.ProvisionalHashWarning` once per
+operator per process. It reads, for example, `GroupBy is provisional: its identity is not
+frozen with data context v1 and may change in a later release. ...` and points to this
+section. A notebook shows it once, below the first cell that builds the operator; it is a
+warning, not an error, and the cell runs. To silence it once you have taken note, filter its
+class after importing Orcapod:
+
+```python
+import warnings
+
+from orcapod.errors import ProvisionalHashWarning
+
+warnings.filterwarnings("ignore", category=ProvisionalHashWarning)
+```
+
+An operator leaves the group (its identity is decided) at a release, or before one: from then
+on its identity is frozen like every other operator's, and its golden values move into the
+frozen golden files (see [Golden hashes](../reference/golden-hashes.md#provisional-files)). An
+operator can join the group only while no release has frozen its values: a frozen identity
+never becomes provisional again.
 
 ## Arrow types of operator outputs
 
@@ -734,7 +1031,8 @@ silent widening; convert explicitly.
   `large_string`), the join proceeds. Otherwise (for example `int16` and `int32`, or two
   timestamp units) it raises `InputValidationError` naming the column and both types; cast
   one input explicitly. Because `output_schema()` reports Python types, this is detected when
-  the join runs, not when the pipeline is built.
+  the join runs, not when the pipeline is built. Two such inputs already have different
+  pipeline hashes, since a schema enters every hash as its Arrow schema.
 - **Sync and async execution agree.** An operator run asynchronously (`async_execute`, as in
   an async pipeline) yields rows with the same Arrow types, column order, system tags and
   content hashes as the same operator run synchronously, whether its inputs are sources or
@@ -743,6 +1041,9 @@ silent widening; convert explicitly.
   where the sync path returns an empty stream with typed columns the async path emits
   nothing. An operator node that received no rows still reads back the sync path's columns
   and Arrow types: its operator applied to its inputs' zero-row tables (ITL-858, ITL-912).
+  A second limit: a data column of the Arrow `null` type (or a list of it) is typed
+  `large_string` in a row, so the async path, which carries rows, types it so too
+  (ITL-1319).
 
 ```python
 import pyarrow as pa
@@ -755,7 +1056,7 @@ def counts(values):
             "count": pa.array(values, type=pa.int8()),
         }
     )
-    return ArrowTableSource(table, tag_columns=["subject_id"])
+    return ArrowTableSource(table, tag_columns=["subject_id"], tag_only_columns=True)
 
 merged = MergeJoin()(counts([1, 2]), counts([3, 4]))
 print(merged.as_table().schema.field("count").type)
@@ -794,7 +1095,7 @@ Every stream also exposes the operators as methods, which reads well when chaini
 import polars as pl
 
 adults = subjects.join(measurements).polars_filter(pl.col("age") > 10)
-for tag, data in adults.iter_data():
+for tag, data in adults:
     print(tag.as_dict(), "->", data.as_dict())
 # {'subject_id': 'mouse_01'} -> {'weight': 25.3, 'age': 12}
 ```

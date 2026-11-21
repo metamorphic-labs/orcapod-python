@@ -3,8 +3,12 @@
 
 from __future__ import annotations
 
+import pathlib
+import socket
+from typing import Any
 from unittest.mock import MagicMock, patch
 
+import psycopg
 import pyarrow as pa
 import pytest
 
@@ -309,3 +313,462 @@ class TestSchemaIntrospectionUnit:
         result = connector.get_pk_columns("my_table")
         assert result == []
         connector._conn = None
+
+
+class TestServerLocationUnit:
+    """``current_location`` and ``given_server`` (ITL-1267), mocked connection.
+
+    The values a live server reports are asserted by the postgres-marked tests in
+    ``tests/test_core/sources/test_postgresql_table_source_integration.py``.
+    """
+
+    @staticmethod
+    def _connector(
+        dsn: str = "postgresql://localhost/test",
+        *,
+        host: str = "localhost",
+        port: int = 5432,
+        parameters: dict[str, str] | None = None,
+    ) -> PostgreSQLConnector:
+        with patch("psycopg.connect") as mock_connect:
+            conn = MagicMock()
+            conn.info.host = host
+            conn.info.port = port
+            conn.info.get_parameters.return_value = (
+                {"host": host} if parameters is None else parameters
+            )
+            cursor = MagicMock()
+            cursor.__enter__ = lambda s: s
+            cursor.__exit__ = MagicMock(return_value=False)
+            cursor.fetchone.return_value = ("testdb", "public")
+            conn.cursor.return_value = cursor
+            mock_connect.return_value = conn
+            return PostgreSQLConnector(dsn)
+
+    @pytest.mark.parametrize(
+        ("host", "port"),
+        [("db.example.org", 5433), ("/var/run/postgresql", 5432), ("::1", 6543)],
+    )
+    def test_current_location_reports_the_connection(
+        self, host: str, port: int
+    ) -> None:
+        connector = self._connector(host=host, port=port)
+        assert connector.current_location() == (host, port, "testdb", "public")
+        connector._conn = None
+
+    # ── given_server: what libpq takes, from the DSN, a service file, the environment
+    #
+    # Each case hands psycopg's own first connection attempt for the DSN (its host
+    # resolution included, every host name resolving to PSYCOPG_ADDRESS) to libpq's
+    # PQconnectStart, which applies the DSN, then the service file, then the
+    # environment, before it connects; nothing listens at any address used, and the
+    # attempt is abandoned once its parameters are read. So the precedence tested is
+    # libpq's own, not a model of it.
+
+    PSYCOPG_ADDRESS = "203.0.113.9"
+    SOCKET = "/var/run/postgresql"
+    SERVER_ENV = ("PGHOST", "PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE", "PGSYSCONFDIR")
+
+    @pytest.fixture
+    def isolated_env(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> pathlib.Path:
+        """No server variable of the caller's; no service file but the test's."""
+        for envvar in self.SERVER_ENV:
+            monkeypatch.delenv(envvar, raising=False)
+        monkeypatch.setenv("PGSYSCONFDIR", str(tmp_path))
+        monkeypatch.setenv("PGSERVICEFILE", str(tmp_path / "pg_service.conf"))
+        return tmp_path
+
+    def _as_libpq_takes(self, dsn: str) -> PostgreSQLConnector:
+        """A connector whose connection reports the parameters libpq takes for dsn."""
+        from psycopg import pq
+        from psycopg.conninfo import conninfo_attempts, conninfo_to_dict, make_conninfo
+
+        resolved = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", (self.PSYCOPG_ADDRESS, 5432))
+        ]
+        with patch("socket.getaddrinfo", return_value=resolved):
+            attempt = conninfo_attempts(conninfo_to_dict(dsn))[0]
+        pgconn = pq.PGconn.connect_start(make_conninfo("", **attempt).encode())
+        try:
+            reported = {
+                option.keyword.decode(): option.val.decode()
+                for option in pgconn.info
+                if option.val and option.keyword in (b"host", b"hostaddr")
+            }
+        finally:
+            pgconn.finish()
+        return self._connector(dsn, parameters=reported)
+
+    def _given(
+        self,
+        isolated_env: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+        dsn: list[str],
+        env: dict[str, str],
+        service: list[str] | None,
+        reverse: bool,
+    ) -> tuple[str, str]:
+        """``given_server`` for the DSN keywords, environment and service file lines.
+
+        ``reverse`` writes the DSN keywords, the variables and the service file lines
+        in the other order.
+        """
+
+        def ordered(items: list[str]) -> list[str]:
+            return items[::-1] if reverse else items
+
+        if service is not None:
+            lines = ordered(service)
+            (isolated_env / "pg_service.conf").write_text(
+                "\n".join(["[one]", *lines]) + "\n"
+            )
+            dsn = [*dsn, "service=one"]
+        for envvar in ordered(list(env)):
+            monkeypatch.setenv(envvar, env[envvar])
+        connector = self._as_libpq_takes(" ".join(ordered([*dsn, "dbname=x"])))
+        try:
+            return connector.given_server()
+        finally:
+            connector._conn = None
+
+    @pytest.mark.parametrize("reverse", [False, True], ids=["in-order", "reversed"])
+    @pytest.mark.parametrize(
+        ("dsn", "expected"),
+        [
+            (["host=db.example.org"], ("db.example.org", "")),
+            ([f"host={SOCKET}"], (SOCKET, "")),
+            (["host=192.0.2.1"], ("192.0.2.1", "")),
+            (["hostaddr=192.0.2.1"], ("", "192.0.2.1")),
+            (["host=192.0.2.1", "hostaddr=192.0.2.1"], ("192.0.2.1", "192.0.2.1")),
+            (
+                ["host=db.example.org", "hostaddr=192.0.2.1"],
+                ("db.example.org", "192.0.2.1"),
+            ),
+            ([f"host={SOCKET}", "hostaddr=192.0.2.1"], (SOCKET, "192.0.2.1")),
+            (
+                ["host=a.example.org,b.example.org", "port=5432"],
+                ("a.example.org,b.example.org", ""),
+            ),
+            (["hostaddr=192.0.2.1,192.0.2.2"], ("", "192.0.2.1,192.0.2.2")),
+        ],
+    )
+    def test_given_in_the_dsn(
+        self,
+        isolated_env: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+        dsn: list[str],
+        expected: tuple[str, str],
+        reverse: bool,
+    ) -> None:
+        given = self._given(isolated_env, monkeypatch, dsn, {}, None, reverse)
+        assert given == expected
+
+    @pytest.mark.parametrize(
+        ("dsn", "expected"),
+        [
+            ("postgresql://u:p@db.example.org:5432/x", ("db.example.org", "")),
+            (
+                "postgresql://u@db.example.org/x?hostaddr=192.0.2.1",
+                ("db.example.org", "192.0.2.1"),
+            ),
+            (
+                "postgresql:///x?hostaddr=192.0.2.1&host=db.example.org",
+                ("db.example.org", "192.0.2.1"),
+            ),
+            (
+                "postgresql://u:p@b.example.org:5433,a.example.org:5432/x",
+                ("b.example.org,a.example.org", ""),
+            ),
+            ("postgresql:///x?hostaddr=192.0.2.1", ("", "192.0.2.1")),
+        ],
+    )
+    def test_given_in_a_uri(
+        self, isolated_env: pathlib.Path, dsn: str, expected: tuple[str, str]
+    ) -> None:
+        connector = self._as_libpq_takes(dsn)
+        assert connector.given_server() == expected
+        connector._conn = None
+
+    @pytest.mark.parametrize("reverse", [False, True], ids=["in-order", "reversed"])
+    @pytest.mark.parametrize(
+        ("dsn", "env", "expected"),
+        [
+            ([], {"PGHOST": "db.example.org"}, ("db.example.org", "")),
+            ([], {"PGHOSTADDR": "192.0.2.1"}, ("", "192.0.2.1")),
+            (
+                [],
+                {"PGHOST": "db.example.org", "PGHOSTADDR": "192.0.2.1"},
+                ("db.example.org", "192.0.2.1"),
+            ),
+            (
+                ["host=db.example.org"],
+                {"PGHOSTADDR": "192.0.2.1"},
+                ("db.example.org", "192.0.2.1"),
+            ),
+            (
+                ["hostaddr=192.0.2.1"],
+                {"PGHOST": "db.example.org"},
+                ("db.example.org", "192.0.2.1"),
+            ),
+            ([], {"PGHOST": SOCKET, "PGHOSTADDR": "192.0.2.1"}, (SOCKET, "192.0.2.1")),
+            # The DSN overrides the environment, key by key.
+            (
+                ["host=db.example.org"],
+                {"PGHOST": "a.example.org,b.example.org"},
+                ("db.example.org", ""),
+            ),
+            (
+                ["host=db.example.org", "hostaddr=192.0.2.1"],
+                {"PGHOSTADDR": "192.0.2.7,192.0.2.8"},
+                ("db.example.org", "192.0.2.1"),
+            ),
+            (
+                [],
+                {"PGHOST": "a.example.org,b.example.org"},
+                ("a.example.org,b.example.org", ""),
+            ),
+            ([], {"PGHOSTADDR": "192.0.2.1,192.0.2.2"}, ("", "192.0.2.1,192.0.2.2")),
+        ],
+    )
+    def test_given_in_the_environment(
+        self,
+        isolated_env: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+        dsn: list[str],
+        env: dict[str, str],
+        expected: tuple[str, str],
+        reverse: bool,
+    ) -> None:
+        given = self._given(isolated_env, monkeypatch, dsn, env, None, reverse)
+        assert given == expected
+
+    @pytest.mark.parametrize("reverse", [False, True], ids=["in-order", "reversed"])
+    @pytest.mark.parametrize(
+        ("service", "dsn", "env", "expected"),
+        [
+            # Host and address from the service file alone.
+            (["host=svc.invalid"], [], {}, ("svc.invalid", "")),
+            (
+                ["host=svc.invalid", "hostaddr=192.0.2.50"],
+                [],
+                {},
+                ("svc.invalid", "192.0.2.50"),
+            ),
+            (
+                ["host=192.0.2.50", "hostaddr=192.0.2.50"],
+                [],
+                {},
+                ("192.0.2.50", "192.0.2.50"),
+            ),
+            (["hostaddr=192.0.2.50"], [], {}, ("", "192.0.2.50")),
+            (
+                ["host=a.invalid,b.invalid"],
+                [],
+                {},
+                ("a.invalid,b.invalid", ""),
+            ),
+            # The service file's address beside a host of the DSN or the environment:
+            # psycopg resolves a host name and passes its address, which overrides the
+            # service file's; it does not resolve a socket directory, so the service
+            # file's address is the one used.
+            (
+                ["hostaddr=192.0.2.50"],
+                ["host=db.example.org"],
+                {},
+                ("db.example.org", ""),
+            ),
+            (["hostaddr=192.0.2.50"], [f"host={SOCKET}"], {}, (SOCKET, "192.0.2.50")),
+            (
+                ["hostaddr=192.0.2.50"],
+                [],
+                {"PGHOST": "db.example.org"},
+                ("db.example.org", ""),
+            ),
+            (["hostaddr=192.0.2.50"], [], {"PGHOST": SOCKET}, (SOCKET, "192.0.2.50")),
+            # The service file overrides the environment, key by key.
+            (
+                ["hostaddr=192.0.2.50"],
+                [],
+                {"PGHOSTADDR": "192.0.2.60"},
+                ("", "192.0.2.50"),
+            ),
+            (
+                ["host=svc.invalid"],
+                [],
+                {"PGHOST": "db.example.org"},
+                ("svc.invalid", PSYCOPG_ADDRESS),
+            ),
+            (["host=svc.invalid"], [], {"PGHOST": SOCKET}, ("svc.invalid", "")),
+            (
+                ["host=svc.invalid"],
+                [],
+                {"PGHOST": "db.example.org", "PGHOSTADDR": "192.0.2.60"},
+                ("svc.invalid", "192.0.2.60"),
+            ),
+            # The service file's host beside an address of the DSN or the environment.
+            (
+                ["host=svc.invalid"],
+                ["hostaddr=192.0.2.1"],
+                {},
+                ("svc.invalid", "192.0.2.1"),
+            ),
+            (
+                ["host=svc.invalid"],
+                [],
+                {"PGHOSTADDR": "192.0.2.60"},
+                ("svc.invalid", "192.0.2.60"),
+            ),
+            # The DSN overrides the service file.
+            (
+                ["host=svc.invalid", "hostaddr=192.0.2.50"],
+                ["host=db.example.org"],
+                {},
+                ("db.example.org", ""),
+            ),
+            (
+                ["host=svc.invalid", "hostaddr=192.0.2.50"],
+                ["hostaddr=192.0.2.1"],
+                {},
+                ("svc.invalid", "192.0.2.1"),
+            ),
+        ],
+    )
+    def test_given_in_a_service_file(
+        self,
+        isolated_env: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+        service: list[str],
+        dsn: list[str],
+        env: dict[str, str],
+        expected: tuple[str, str],
+        reverse: bool,
+    ) -> None:
+        given = self._given(isolated_env, monkeypatch, dsn, env, service, reverse)
+        assert given == expected
+
+    @pytest.mark.parametrize(
+        ("at_connect", "later", "expected"),
+        [
+            # psycopg resolved PGHOST: a PGHOSTADDR set later does not make its
+            # address the user's.
+            (
+                {"PGHOST": "db.example.org"},
+                {"PGHOSTADDR": "192.0.2.7"},
+                ("db.example.org", ""),
+            ),
+            # Another host later, in place of the one connected to.
+            (
+                {"PGHOST": "db.example.org"},
+                {"PGHOST": "other.example.org"},
+                ("db.example.org", ""),
+            ),
+            # Several servers at connect time stay several when PGHOST is unset.
+            (
+                {"PGHOST": "a.example.org,b.example.org"},
+                {"PGHOST": None},
+                ("a.example.org,b.example.org", ""),
+            ),
+            # One server at connect time stays one when PGHOST becomes a list.
+            (
+                {"PGHOST": "db.example.org"},
+                {"PGHOST": "a.example.org,b.example.org"},
+                ("db.example.org", ""),
+            ),
+        ],
+    )
+    def test_the_environment_is_read_when_the_connector_connects(
+        self,
+        isolated_env: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+        at_connect: dict[str, str],
+        later: dict[str, str | None],
+        expected: tuple[str, str],
+    ) -> None:
+        for envvar, value in at_connect.items():
+            monkeypatch.setenv(envvar, value)
+        connector = self._as_libpq_takes("dbname=x")
+        for envvar, value in later.items():
+            if value is None:
+                monkeypatch.delenv(envvar)
+            else:
+                monkeypatch.setenv(envvar, value)
+        try:
+            assert connector.given_server() == expected
+        finally:
+            connector._conn = None
+
+
+class TestPsycopgResolvesTheHost:
+    """The psycopg behaviour ``given_server`` relies on, pinned (ITL-1267).
+
+    psycopg's ``Connection.connect`` resolves a single host name of the DSN or
+    ``PGHOST`` itself, when neither gives a ``hostaddr``, and passes the address to
+    libpq as ``hostaddr`` (psycopg 3.1.17 and later; earlier releases passed the DSN
+    unchanged). Real name resolution of ``localhost`` and psycopg's own connect
+    loop: only the step that would open the connection is replaced, to record the
+    connection string psycopg hands to libpq. If a future psycopg stops doing this
+    (or renames that step), these tests fail.
+    """
+
+    @staticmethod
+    def _passed_to_libpq(dsn: str) -> list[dict[str, Any]]:
+        from psycopg.conninfo import conninfo_to_dict
+
+        passed: list[str] = []
+
+        def refuse(conninfo: str, **_: Any) -> Any:
+            passed.append(conninfo)
+            raise psycopg.OperationalError("not connecting in a unit test")
+
+        with patch.object(psycopg.Connection, "_connect_gen", side_effect=refuse):
+            with pytest.raises(psycopg.OperationalError):
+                psycopg.connect(dsn)
+        assert passed, "psycopg did not reach the step that opens the connection"
+        return [conninfo_to_dict(conninfo) for conninfo in passed]
+
+    @staticmethod
+    def _addresses(name: str) -> set[str]:
+        return {
+            str(info[4][0])
+            for info in socket.getaddrinfo(
+                name, 5432, proto=socket.IPPROTO_TCP, type=socket.SOCK_STREAM
+            )
+        }
+
+    @pytest.fixture(autouse=True)
+    def _no_server_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for envvar in ("PGHOST", "PGHOSTADDR", "PGSERVICE"):
+            monkeypatch.delenv(envvar, raising=False)
+
+    @pytest.mark.parametrize("via", ["dsn", "PGHOST"])
+    def test_a_host_name_is_passed_with_the_address_psycopg_resolved(
+        self, monkeypatch: pytest.MonkeyPatch, via: str
+    ) -> None:
+        if via == "PGHOST":
+            monkeypatch.setenv("PGHOST", "localhost")
+        dsn = "host=localhost dbname=x" if via == "dsn" else "dbname=x"
+        attempts = self._passed_to_libpq(dsn)
+        addresses = self._addresses("localhost")
+        assert {attempt["hostaddr"] for attempt in attempts} <= addresses
+        assert all(
+            attempt.get("host", "localhost") == "localhost" for attempt in attempts
+        )
+
+    @pytest.mark.parametrize(
+        ("dsn", "hostaddr"),
+        [
+            ("host=127.0.0.1 dbname=x", "127.0.0.1"),
+            ("host=localhost hostaddr=192.0.2.1 dbname=x", "192.0.2.1"),
+            ("hostaddr=192.0.2.1 host=localhost dbname=x", "192.0.2.1"),
+        ],
+    )
+    def test_an_address_is_passed_as_given(self, dsn: str, hostaddr: str) -> None:
+        assert [attempt["hostaddr"] for attempt in self._passed_to_libpq(dsn)] == [
+            hostaddr
+        ]
+
+    def test_a_socket_directory_is_not_resolved(self) -> None:
+        attempts = self._passed_to_libpq("host=/var/run/postgresql dbname=x")
+        assert [attempt.get("hostaddr") for attempt in attempts] == [None]

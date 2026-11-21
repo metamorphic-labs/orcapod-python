@@ -13,7 +13,7 @@ from orcapod.sources import CSVSource
 data_dir = make_dataset()
 sessions = CSVSource(
     str(data_dir / "sessions.csv"),
-    tag_columns=["subject_id", "session"],
+    tag_columns=["subject_id", "session"], tag_only_columns=True,
     source_id="sessions",
 )
 durations = sessions.select_data_columns(["duration_s"])
@@ -138,7 +138,8 @@ Not covered here, with pointers:
   with different sources or databases using `PipelineJob.from_pipeline(...)` and
   `job.bind(...)`. See [Pipelines and jobs](../concepts/pipeline-job.md).
 - **Other sources.** pandas and Polars DataFrames, Delta tables, SQLite and PostgreSQL
-  tables, and `PollingSource` for data that keeps arriving. See
+  tables, and `PollingSource` for data that keeps arriving (provisional in this release: its
+  hashes may still change). See
   [Sources](../concepts/sources.md) and the [API reference](../api/sources.md).
 - **Running in parallel.** The `orcapod[ray]` extra adds an executor that runs function
   calls on a [Ray](https://www.ray.io/) cluster. `AsyncPipelineOrchestrator` in

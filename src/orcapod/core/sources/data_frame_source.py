@@ -4,10 +4,10 @@ import logging
 from collections.abc import Collection
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from orcapod.core.referential_tags import TagOnlyColumns, check_tag_only_columns
 from orcapod.core.sources.base import RootSource
+from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
+from orcapod.core.sources.stream_builder import SourceStreamBuilder
 from orcapod.core.sources.stream_builder import (
-    SourceStreamBuilder,
     normalize_record_id_columns,
 )
 from orcapod.utils import arrow_utils, polars_data_utils
@@ -31,11 +31,19 @@ class DataFrameSource(RootSource):
     The DataFrame is converted to an Arrow table and enriched by
     ``SourceStreamBuilder`` (source-info, schema-hash, system tags).
 
-    Plain tags: ``tag_only_columns`` (keyword-only) is ``True``, the default, and keeps
-    every tag column a tag only, not data, as every source does in v0.3. Any other value
-    is refused: referential tags arrive in v0.4, where tags become referential by default
-    and ``tag_only_columns`` names the tags kept plain.
+    Data-tags (ITL-1023): every declared tag column is a data-tag by default,
+    also a data column of the same name. ``tag_only_columns`` (keyword-only) names the
+    tags kept plain (tag only, not data, as in v0.3); ``True`` keeps all of them plain.
+
+    ``hash_in_key_order`` (keyword-only, ITL-1272): when the source has key columns and
+    no ``source_id``, hash its table for the default source id with the rows sorted by
+    the key columns, in key order, so the same rows in any order give one default
+    source id and one content hash. The rows are presented in the order given either
+    way. Off by default: the rows are hashed in the order given. Refused with a
+    ``source_id`` or without key columns.
     """
+
+    TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = True
 
     # The config type key; also the kind prefix of the default source id.
     SOURCE_KIND: ClassVar[str] = "data_frame"
@@ -48,11 +56,11 @@ class DataFrameSource(RootSource):
         source_id: str | None = None,
         schema: pa.Schema | None = None,
         *,
-        tag_only_columns: TagOnlyColumns = True,
+        tag_only_columns: TagOnlyColumns = (),
         record_id_columns: str | Collection[str] | None = None,
+        hash_in_key_order: bool = False,
         **kwargs: Any,
     ) -> None:
-        check_tag_only_columns(tag_only_columns)
         super().__init__(source_id=source_id, **kwargs)
 
         df = pl.DataFrame(data)
@@ -91,14 +99,19 @@ class DataFrameSource(RootSource):
         result = builder.build(
             arrow_table,
             tag_columns=tag_columns,
+            data_tags=source_data_tags(tag_columns, tag_only_columns),
             source_id=self._source_id,
             source_kind=self.SOURCE_KIND,
             record_id_columns=self._key_columns,
+            hash_in_key_order=hash_in_key_order,
             system_tag_columns=system_tag_columns,
         )
 
         self._stream = result.stream
         self._tag_columns = result.tag_columns
+        self._tag_only_columns = tuple(
+            c for c in result.tag_columns if c not in result.data_tags
+        )
         if self._source_id is None:
             self._source_id = result.source_id
 
@@ -107,6 +120,7 @@ class DataFrameSource(RootSource):
         return {
             "source_type": self.SOURCE_KIND,
             "tag_columns": list(self._tag_columns),
+            **self._tag_only_config(),
             "source_id": self.source_id,
             **self._identity_config(),
         }

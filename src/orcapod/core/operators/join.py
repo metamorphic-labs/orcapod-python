@@ -1,7 +1,9 @@
 import asyncio
+import functools
 import itertools
+import json
 from collections.abc import Callable, Collection, Mapping, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import Any, ClassVar, TYPE_CHECKING
 
 from orcapod.core.operators.meta_columns import (
     WithoutMetaWriter,
@@ -11,10 +13,19 @@ from orcapod.core.operators.meta_columns import (
 )
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.match_keys import frozen_scalar
+from orcapod.core.operators.arrow_keys import polars_key_frame
 from orcapod.core.operators.base import (
     NonZeroInputOperator,
+    require_matchable_key,
     require_shared_arrow_type,
     require_tag_data_roles_agree,
+)
+from orcapod.core.data_tags import (
+    check_namespaces,
+    data_tag_names,
+    data_tags_first,
+    merge_source_info,
+    stream_data_tags,
 )
 from orcapod.core.operators.key_nullability import (
     key_nullable,
@@ -41,7 +52,111 @@ else:
     pl = LazyModule("polars")
 
 
+# The row-number columns of the frames Polars joins (``_inner_join``); a tag, so a
+# key, never starts with the meta prefix ``__``.
+_LEFT_ROW = "__join_left_row"
+_RIGHT_ROW = "__join_right_row"
+
+# Temporary name of the right input's source info of a merged data-tag column
+# during the join (``static_process``); never in an output.
+_MERGED_SOURCE_PREFIX = "__join_merged_source__"
+
+# A column that is a data-tag on several inputs gets ONE merged token per value, folded once
+# over every input's token (ITL-1017), not pairwise: a pairwise fold would depend on
+# the order of the join chain, which inputs tied on pipeline hash leave to the
+# argument order. Between the pairwise steps of one join, each token position holds
+# the members met so far, as this marker followed by their JSON array; the join folds
+# them when it emits a row (``_fold_pending``). Never in an output.
+_PENDING_MEMBERS = "\x00join-pending-members\x00"
+
+
+def _inner_join(left: "pa.Table", right: "pa.Table", keys: list[str]) -> "pa.Table":
+    """Inner-join two tables on their key columns, every value taken from the tables.
+
+    Polars decides which rows match, from the prepared keys and the row numbers
+    only (``arrow_keys``, ITL-1284); every output column is taken from ``left`` or
+    ``right`` by those row numbers, so each value is the input's, bit for bit. The
+    layout is the one Polars' join gives: the left columns (one of each key, the
+    left row's value), then the right columns that are not keys, a name the left
+    table also has taking the suffix ``_right``. The rows are in the order of
+    Polars' join.
+
+    Args:
+        left: The left table.
+        right: The right table.
+        keys: The key columns, in both tables, each checked by
+            ``require_matchable_key``.
+
+    Returns:
+        The joined table. Its fields carry no flags of the inputs (every field
+        nullable); the caller restores them.
+    """
+    pairs = polars_key_frame(left, keys, _LEFT_ROW).join(
+        polars_key_frame(right, keys, _RIGHT_ROW), on=keys, how="inner"
+    )
+    left_rows = pairs.get_column(_LEFT_ROW).to_arrow()
+    right_rows = pairs.get_column(_RIGHT_ROW).to_arrow()
+    names: list[str] = []
+    arrays: list[Any] = []
+    for name in left.column_names:
+        names.append(name)
+        arrays.append(left.column(name).take(left_rows))
+    for name in right.column_names:
+        if name in keys:
+            continue
+        names.append(f"{name}_right" if name in left.column_names else name)
+        arrays.append(right.column(name).take(right_rows))
+    return pa.Table.from_arrays(arrays, names=names)
+
+
+def _members(token: str | None) -> list[str | None]:
+    """The member tokens a token position holds so far (itself, if not pending)."""
+    if token is not None and token.startswith(_PENDING_MEMBERS):
+        return json.loads(token.removeprefix(_PENDING_MEMBERS))
+    return [token]
+
+
+def _pending(tokens: Sequence[str | None]) -> str:
+    """Hold the members of ``tokens`` at one token position until the join emits."""
+    members = [member for token in tokens for member in _members(token)]
+    return _PENDING_MEMBERS + json.dumps(members, ensure_ascii=False)
+
+
+def _merge_pending(left: Any, right: Any) -> Any:
+    """Merge two inputs' source info of one merged column, keeping its shape."""
+    return merge_source_info([left, right], combine=_pending)
+
+
+JOIN_FOLD_LABEL = "join_v1"
+"""Label of the fold of ``Join``: the one source-info token of a column that is a data-tag on
+several inputs is ``"join_v1:<hex>"`` (ITL-1017, ITL-1154). It names the operation;
+the procedure is the members' tokens sorted (a missing token last), then
+``arrow_utils.fold_system_tag_values``. The sort is part of it: the join meets the
+members in the order of its chain, which is not canonical, and the provenance of N
+equal values is a multiset. Change it only when this fold would give an existing
+member list a different value.
+"""
+
+
+def _fold_members(tokens: Sequence[str | None]) -> str:
+    """Fold the members' tokens of one merged value into its one token (``join_v1``)."""
+    ordered = sorted(tokens, key=lambda token: (token is None, token or ""))
+    return arrow_utils.fold_system_tag_values(ordered, label=JOIN_FOLD_LABEL)
+
+
+def _fold_pending(value: Any) -> Any:
+    """Replace every pending token position of ``value`` by its merged token."""
+    if isinstance(value, list):
+        return [_fold_pending(item) for item in value]
+    if isinstance(value, str) and value.startswith(_PENDING_MEMBERS):
+        return _fold_members(_members(value))
+    return value
+
+
 class Join(NonZeroInputOperator):
+    # Data-tags (ITL-1023): handled.
+    DATA_TAGS_ISSUE: ClassVar[str | None] = None
+
     @property
     def kernel_id(self) -> tuple[str, ...]:
         """
@@ -80,9 +195,13 @@ class Join(NonZeroInputOperator):
             tag_schema, data_schema = streams[0].output_schema(
                 columns=columns, all_info=all_info
             )
-            return tag_schema, without_meta_fields(data_schema)
+            return tag_schema, data_tags_first(
+                tag_schema, without_meta_fields(data_schema)
+            )
 
         tag_schema, data_schema = self._joined_user_schemas(*streams)
+        # Data-tags first among the data columns, in tag order (ITL-1205).
+        data_schema = data_tags_first(tag_schema, data_schema)
 
         # Add system tag columns if requested
         if columns_config.system_tags:
@@ -110,37 +229,131 @@ class Join(NonZeroInputOperator):
         Args:
             *streams: Two or more input streams.
 
+        Data-tags (specification section 9): a shared tag ``x`` that is
+        a data-tag in either input is a data-tag in the output. When it is
+        a data-tag in both, their data columns ``x`` are merged into one: the join
+        equated the tags, so the values are equal (section 9.3). Every other data
+        column shared by two inputs is still an error, and so is a plain tag of one
+        input named like a data column of another (section 4.3).
+
         Returns:
             The ``(tag_schema, data_schema)`` of the joined user columns.
 
         Raises:
-            InputValidationError: If two inputs share a data column.
+            InputValidationError: If two inputs share a data column that is not the
+                target of a data-tag both of them join on, a merged column's
+                types differ, or a plain tag would share a name with a data column.
         """
         self._require_tag_data_roles_agree(streams)
         ordered_streams = self.order_input_streams(*streams)
         stream = ordered_streams[0]
         tag_schema, data_schema = stream.output_schema()
         data_schema = without_meta_fields(data_schema)
+        data_tags = set(data_tag_names(tag_schema, data_schema))
         for other_stream in ordered_streams[1:]:
             other_tag_schema, other_data_schema = other_stream.output_schema()
             other_data_schema = without_meta_fields(other_data_schema)
+            other_data_tags = set(data_tag_names(other_tag_schema, other_data_schema))
+            merged = self._merged_data_tags(
+                tag_schema, data_tags, other_tag_schema, other_data_tags
+            )
             # A shared tag key that differs in nullability only is non-nullable
-            # (ITL-829): a null key matches nothing.
-            tag_schema = schema_utils.union_schemas(
-                *reconcile_key_nullability(tag_schema, other_tag_schema)
+            # (ITL-829): a null key matches nothing. A data-tag key is one
+            # column, so its data role takes the same type (ITL-1023).
+            reconciled, other_reconciled = reconcile_key_nullability(
+                tag_schema, other_tag_schema
             )
-            intersection_data_schema = schema_utils.intersection_schemas(
-                data_schema, other_data_schema
+            data_schema = self._narrow_data_tags(
+                data_schema, tag_schema, reconciled, data_tags
             )
-            data_schema = schema_utils.union_schemas(data_schema, other_data_schema)
-            if intersection_data_schema:
-                raise InputValidationError(
-                    f"Datas should not have overlapping keys, but {data_schema.keys()} found in {stream} and {other_stream}."
+            other_data_schema = self._narrow_data_tags(
+                other_data_schema, other_tag_schema, other_reconciled, other_data_tags
+            )
+            tag_schema, other_tag_schema = reconciled, other_reconciled
+            shared_data = set(data_schema) & set(other_data_schema)
+            if unmerged := shared_data - merged:
+                # A shared data column of two types is reported as a type conflict,
+                # as for plain inputs; of one type, as an overlap.
+                _ = schema_utils.intersection_schemas(
+                    {name: data_schema[name] for name in unmerged},
+                    {name: other_data_schema[name] for name in unmerged},
                 )
+                raise InputValidationError(
+                    f"Datas should not have overlapping keys, but {sorted(shared_data - merged)} found in {stream} and {other_stream}."
+                )
+            for name in sorted(merged):
+                if data_schema[name] != other_data_schema[name]:
+                    raise InputValidationError(
+                        f"{type(self).__name__}: data-tag {name!r} has type "
+                        f"{data_schema[name]} in one input and "
+                        f"{other_data_schema[name]} in another"
+                    )
+            tag_schema = schema_utils.union_schemas(tag_schema, other_tag_schema)
+            data_schema = schema_utils.union_schemas(data_schema, other_data_schema)
+            data_tags |= other_data_tags
+            check_namespaces(tag_schema, data_schema, data_tags)
         return tag_schema, data_schema
 
     @staticmethod
-    def _require_tag_data_roles_agree(streams: Sequence[StreamProtocol]) -> None:
+    def _narrow_data_tags(
+        data_schema: Schema,
+        tag_schema: Schema,
+        reconciled: Schema,
+        data_tags: Collection[str],
+    ) -> Schema:
+        """Give a data-tag key narrowed by ``reconcile_key_nullability`` its data type.
+
+        A data-tag is one column in two roles (ITL-1023): when the join makes
+        the key non-nullable (ITL-829), its data role is that type too.
+
+        Args:
+            data_schema: One input's data schema.
+            tag_schema: The input's tag schema.
+            reconciled: The tag schema after ``reconcile_key_nullability``.
+            data_tags: The input's data-tags.
+
+        Returns:
+            ``data_schema`` with each narrowed data-tag key given its tag type.
+        """
+        narrowed = [
+            name
+            for name in data_tags
+            if name in data_schema and reconciled[name] != tag_schema[name]
+        ]
+        return Schema(
+            {
+                name: reconciled[name] if name in narrowed else data_type
+                for name, data_type in data_schema.items()
+            },
+            optional_fields=data_schema.optional_fields,
+        )
+
+    @staticmethod
+    def _merged_data_tags(
+        tags: Collection[str],
+        data_tags: Collection[str],
+        other_tags: Collection[str],
+        other_data_tags: Collection[str],
+    ) -> set[str]:
+        """Return the data columns two join inputs merge into one (section 9.5).
+
+        A data column is merged when it is the target of a data-tag in both
+        inputs and that tag is a join key (a tag of both inputs). ``Join`` joins on
+        every shared tag, so the second condition holds for every shared data-tag.
+
+        Args:
+            tags: The first input's tag names.
+            data_tags: The first input's data-tags.
+            other_tags: The second input's tag names.
+            other_data_tags: The second input's data-tags.
+
+        Returns:
+            The names of the merged data columns.
+        """
+        keys = set(tags) & set(other_tags)
+        return keys & set(data_tags) & set(other_data_tags)
+
+    def _require_tag_data_roles_agree(self, streams: Sequence[StreamProtocol]) -> None:
         """Raise if a name is a tag in one input and a data column in another.
 
         Every pair of inputs is checked, in call order, so the error does not
@@ -159,7 +372,8 @@ class Join(NonZeroInputOperator):
                 require_tag_data_roles_agree(*keys[i], *keys[j])
             except InputValidationError as exc:
                 raise InputValidationError(
-                    f"Join of input {i + 1} (the first) and input {j + 1} (the "
+                    f"{type(self).__name__} of input {i + 1} (the first) and input "
+                    + f"{j + 1} (the "
                     + f"second): {exc}"
                 ) from exc
 
@@ -213,6 +427,9 @@ class Join(NonZeroInputOperator):
         stream = ordered_streams[0]
 
         tag_keys, _ = [set(k) for k in stream.keys()]
+        data_tags = set(stream_data_tags(stream))
+        # Source-info columns of merged data-tag columns, folded once at the end.
+        merged_source: set[str] = set()
         table = without_meta_columns(
             stream.as_table(columns={"source": True, "system_tags": True}), tag_keys
         )
@@ -242,41 +459,58 @@ class Join(NonZeroInputOperator):
                 0, COMMON_JOIN_KEY, pa.array([0] * len(next_table), type=pa.int8())
             )
 
-            # Polars sets every field nullable; capture the schema before the join.
-            next_ref_schema = next_table.schema
-
             common_tag_keys = tag_keys.intersection(next_tag_keys)
+            next_data_tags = set(stream_data_tags(next_stream))
+            merged = self._merged_data_tags(
+                tag_keys, data_tags, next_tag_keys, next_data_tags
+            )
+            # The merged columns are join keys, so the join keeps one of each. Their
+            # source info is kept from both sides: the right side's is set aside
+            # under a temporary name and merged after the join (section 9.4).
+            right_source = {
+                f"{constants.SOURCE_PREFIX}{name}": f"{_MERGED_SOURCE_PREFIX}{name}"
+                for name in sorted(merged)
+            }
+            if right_source:
+                next_table = next_table.rename_columns(
+                    [right_source.get(c, c) for c in next_table.column_names]
+                )
+            # The joined table is built from arrays, with no field flags; capture
+            # the schemas before the join.
+            next_ref_schema = next_table.schema
             # A shared tag key must have one Arrow type in both inputs (up to
-            # layout); otherwise Polars would join and keep one side's type.
+            # layout); otherwise Polars would join and keep one side's type. And
+            # it must be a type Polars can be given (``arrow_keys``).
             for key in sorted(common_tag_keys):
-                _ = require_shared_arrow_type(
+                key_type = require_shared_arrow_type(
                     "Join",
                     key,
                     arrow_utils.column_arrow_type(table.schema, key),
                     arrow_utils.column_arrow_type(next_table.schema, key),
                 )
+                require_matchable_key("Join", key, key_type)
             common_tag_keys.add(COMMON_JOIN_KEY)
 
-            # Capture the left-side schema before the Polars join, which sets all
-            # fields to nullable=True regardless of the original schema.
             table_ref_schema = table.schema
-            table = (
-                pl.DataFrame(table)
-                .join(pl.DataFrame(next_table), on=list(common_tag_keys), how="inner")
-                .to_arrow()
-            )
+            table = _inner_join(table, next_table, list(common_tag_keys))
             table = arrow_utils.restore_schema_nullability(
                 table, table_ref_schema, next_ref_schema
             )
             table = self._shared_key_nullability(
                 table, table_ref_schema, next_ref_schema, common_tag_keys
             )
+            for left_name, right_name in right_source.items():
+                table = self._merge_source_columns(table, left_name, right_name)
+            merged_source |= set(right_source)
 
             tag_keys.update(next_tag_keys)
+            data_tags |= next_data_tags
 
         # reorder columns to bring tag columns to the front
         # TODO: come up with a better algorithm
         table = table.drop(COMMON_JOIN_KEY)
+        for name in sorted(merged_source):
+            table = self._fold_source_column(table, name)
 
         # Sort system tag values for same-pipeline-hash streams to ensure commutativity
         table = arrow_utils.sort_system_tag_values(table)
@@ -287,7 +521,8 @@ class Join(NonZeroInputOperator):
         # keys from ``tag_columns``, so both must follow it. No hash or record
         # ID depends on column order.
         tag_order = list(tag_schema.keys())
-        data_order = list(data_schema.keys())
+        # A data-tag's column is laid out once, among the tags.
+        data_order = [name for name in data_schema if name not in tag_schema]
         listed = {*tag_order, *data_order}
         result_table = table.select(
             tag_order
@@ -297,7 +532,57 @@ class Join(NonZeroInputOperator):
         return ArrowTableStream(
             result_table,
             tag_columns=tuple(tag_order),
+            data_tags=data_tag_names(tag_schema, data_schema),
         )
+
+    @staticmethod
+    def _merge_source_columns(
+        table: "pa.Table", left_name: str, right_name: str
+    ) -> "pa.Table":
+        """Replace two source-info columns of one merged data column by their merge.
+
+        Args:
+            table: The joined table.
+            left_name: The left side's source-info column; replaced in place, with its
+                type and field kept (the merge keeps the shape of the data column).
+            right_name: The right side's source-info column; removed.
+
+        Returns:
+            The table with ``left_name`` holding both sides' members, pending until
+            the join folds them (``_fold_source_column``).
+        """
+        field = table.schema.field(left_name)
+        merged = pa.array(
+            [
+                _merge_pending(left, right)
+                for left, right in zip(
+                    table.column(left_name).to_pylist(),
+                    table.column(right_name).to_pylist(),
+                )
+            ],
+            type=field.type,
+        )
+        index = table.schema.get_field_index(left_name)
+        table = table.set_column(index, field, merged)
+        return table.drop_columns([right_name])
+
+    @staticmethod
+    def _fold_source_column(table: "pa.Table", name: str) -> "pa.Table":
+        """Fold the pending members of a merged source-info column into merged tokens.
+
+        Args:
+            table: The joined table.
+            name: The source-info column.
+
+        Returns:
+            The table with one merged token at every token position of ``name``.
+        """
+        field = table.schema.field(name)
+        folded = pa.array(
+            [_fold_pending(value) for value in table.column(name).to_pylist()],
+            type=field.type,
+        )
+        return table.set_column(table.schema.get_field_index(name), field, folded)
 
     @staticmethod
     def _shared_key_nullability(
@@ -556,7 +841,7 @@ class Join(NonZeroInputOperator):
                         current_reader,
                         renamed_readers[i],
                         target_writer,
-                        self._merge_pair_passthrough,
+                        functools.partial(self._merge_pair_passthrough, final=is_last),
                     )
                 )
 
@@ -711,8 +996,9 @@ class Join(NonZeroInputOperator):
     ) -> None:
         """Raise if a shared tag key has disagreeing Arrow types in two inputs.
 
-        The async counterpart of the check ``static_process`` runs on the input
-        tables before its join, applied to the first row of each side.
+        The async counterpart of the checks ``static_process`` runs on the input
+        tables before its join, applied to the first row of each side: one Arrow
+        type in both, and one the sync join can match on.
 
         Args:
             first: A tag from one input.
@@ -721,16 +1007,18 @@ class Join(NonZeroInputOperator):
 
         Raises:
             InputValidationError: If a key's large-normalized Arrow types differ
-                (``require_shared_arrow_type``).
+                (``require_shared_arrow_type``), or its type has no rule for
+                matching (``require_matchable_key``).
         """
         first_schema, second_schema = first.arrow_schema(), second.arrow_schema()
         for key in keys:
-            _ = require_shared_arrow_type(
+            key_type = require_shared_arrow_type(
                 "Join",
                 key,
                 arrow_utils.column_arrow_type(first_schema, key),
                 arrow_utils.column_arrow_type(second_schema, key),
             )
+            require_matchable_key("Join", key, key_type)
 
     @staticmethod
     async def _rename_sys_tags(
@@ -851,35 +1139,109 @@ class Join(NonZeroInputOperator):
         return Tag(table, system_tags=system_tags, data_context=data_context_key)
 
     @staticmethod
-    def _merge_data(left: DataProtocol, right: DataProtocol) -> DataProtocol:
+    def _merge_data(
+        left_tag: TagProtocol,
+        left: DataProtocol,
+        right_tag: TagProtocol,
+        right: DataProtocol,
+        final: bool = True,
+    ) -> DataProtocol:
         """Merge two data datagrams as Arrow, left columns first.
 
         Every column keeps the Arrow type it already has, and the source info
         of both sides is carried over. Neither side's meta columns are, as in
-        ``static_process`` (``meta_columns.without_meta_columns``).
+        ``static_process`` (``meta_columns.without_meta_columns``). A data column
+        that is the target of a data-tag on both sides, joined on, is kept
+        once, with the source info of both inputs, merged as ``static_process``
+        merges it.
 
         Args:
+            left_tag: The left row's tag.
             left: The canonically earlier data (in a staggered join, the
                 result of the joins so far).
+            right_tag: The right row's tag.
             right: The later data.
+            final: Whether this row is emitted by the join (the last step of a
+                staggered chain, or a two-input join): then every merged column's
+                pending members are folded into merged tokens.
 
         Returns:
             The merged data, in the context of ``left``.
 
         Raises:
             InputValidationError: If both sides have a data column of the same
-                name.
+                name that is not such a data-tag.
         """
         from orcapod.core.datagrams import Data
 
         left_table, right_table = left.as_table(), right.as_table()
-        if overlap := set(left_table.column_names) & set(right_table.column_names):
+        merged = Join._merged_data_tags(
+            left_tag.keys(),
+            data_tag_names(left_tag.keys(), left_table.column_names),
+            right_tag.keys(),
+            data_tag_names(right_tag.keys(), right_table.column_names),
+        )
+        overlap = set(left_table.column_names) & set(right_table.column_names)
+        if overlap - merged:
             raise InputValidationError(
-                f"Join: inputs share data columns {sorted(overlap)}."
+                f"Join: inputs share data columns {sorted(overlap - merged)}."
             )
+        source_info = {**left.source_info(), **right.source_info()}
+        if merged:
+            left_info, right_info = left.source_info(), right.source_info()
+            for name in merged:
+                source_info[name] = _merge_pending(
+                    left_info.get(name), right_info.get(name)
+                )
+        if final:
+            source_info = {
+                name: _fold_pending(value) for name, value in source_info.items()
+            }
+        # Column order as ``static_process`` lays it out: the data-tag columns
+        # first, in the merged tag order, then each side's other data columns.
+        tag_order = [*left_tag.keys()]
+        tag_order += [name for name in right_tag.keys() if name not in tag_order]
+        with_data_tags = [
+            name
+            for name in tag_order
+            if name in left_table.column_names or name in right_table.column_names
+        ]
+        if not with_data_tags:
+            return Data(
+                arrow_utils.hstack_tables(left_table, right_table),
+                source_info=source_info,
+                data_context=left.data_context_key,
+            )
+        left_rest = left_table.drop_columns(
+            [c for c in with_data_tags if c in left_table.column_names]
+        )
+        right_rest = right_table.drop_columns(
+            [c for c in with_data_tags if c in right_table.column_names]
+        )
+        owners = [
+            left_table if name in left_table.column_names else right_table
+            for name in with_data_tags
+        ]
+        # A data-tag join key is one column: its data role is nullable only
+        # when the key is nullable in both tags, as the merged tag is (ITL-829).
+        left_tags, right_tags = left_tag.as_table().schema, right_tag.as_table().schema
+        fields = [
+            owner.schema.field(name).with_nullable(
+                key_nullable(
+                    left_tags.field(name).nullable, right_tags.field(name).nullable
+                )
+            )
+            if name in left_tags.names and name in right_tags.names
+            else owner.schema.field(name)
+            for owner, name in zip(owners, with_data_tags)
+        ]
+        data_tags = pa.Table.from_arrays(
+            [owner.column(name) for owner, name in zip(owners, with_data_tags)],
+            schema=pa.schema(fields),
+        )
         return Data(
-            arrow_utils.hstack_tables(left_table, right_table),
-            source_info={**left.source_info(), **right.source_info()},
+            arrow_utils.hstack_tables(data_tags, left_rest, right_rest),
+            source_info=source_info,
             data_context=left.data_context_key,
         )
 
@@ -915,7 +1277,7 @@ class Join(NonZeroInputOperator):
             merged_sys,
             left_tag.data_context_key,
         )
-        return merged_tag, Join._merge_data(left_pkt, right_pkt)
+        return merged_tag, Join._merge_data(left_tag, left_pkt, right_tag, right_pkt)
 
     @staticmethod
     def _merge_pair_passthrough(
@@ -923,12 +1285,14 @@ class Join(NonZeroInputOperator):
         left_pkt: DataProtocol,
         right_tag: TagProtocol,
         right_pkt: DataProtocol,
+        final: bool = True,
     ) -> tuple[TagProtocol, DataProtocol]:
         """Merge a matched pair, passing system tags through without renaming.
 
         Used in the staggered chain where system tags have already been
         pre-renamed by ``_rename_sys_tags``. The merged row is built from the
         inputs' Arrow tables, in the left (canonically first) tag's context.
+        ``final`` is true only for the chain's last step (see ``_merge_data``).
         """
         # Combine system tags (already renamed)
         merged_sys: dict[str, DataValue] = {}
@@ -942,7 +1306,9 @@ class Join(NonZeroInputOperator):
             merged_sys,
             left_tag.data_context_key,
         )
-        return merged_tag, Join._merge_data(left_pkt, right_pkt)
+        return merged_tag, Join._merge_data(
+            left_tag, left_pkt, right_tag, right_pkt, final=final
+        )
 
     @staticmethod
     def _sort_merged_system_tags(merged_sys: dict) -> dict:

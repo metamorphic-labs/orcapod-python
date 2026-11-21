@@ -12,7 +12,8 @@ Principles
 - **Dict for value access**: ``__getitem__``, ``get``, ``as_dict()`` always operate through
   the Python dict (loaded lazily from Arrow when needed).
 - **Arrow for hashing**: ``content_hash()`` always uses the Arrow table (loaded lazily from
-  dict when needed) via the data context's ``ArrowTableHandler``.
+  dict when needed), marked ``OrcapodTable`` and hashed by the data context's Arrow
+  hasher's ``hash_table`` (``OrcapodTableHandler``; the float rule, ITL-1179).
 - **Meta is always dict**: meta columns are stored as a Python dict regardless of how the
   primary data was provided; the Arrow meta table is built lazily.
 """
@@ -26,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Self, cast
 
 from uuid_utils import uuid7
 
+from orcapod.hashing.orcapod_table import OrcapodTable
 from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.core.base import ContentIdentifiableBase
@@ -446,15 +448,16 @@ class Datagram(ContentIdentifiableBase):
         return arrow_utils.join_arrow_schemas(*all_schemas)
 
     def identity_structure(self) -> Any:
-        """Return the primary data table as this datagram's identity.
+        """Return the primary data table, marked as a table Orcapod built.
 
-        The semantic hasher dispatches ``pa.Table`` to ``ArrowTableHandler``,
-        which delegates to the data context's ``arrow_hasher``.  This means
-        ``content_hash()`` (inherited from ``ContentIdentifiableBase``) produces
-        a stable, content-addressed hash of the data columns without any
-        special-casing in ``Datagram`` itself.
+        The semantic hasher dispatches ``OrcapodTable`` to ``OrcapodTableHandler``,
+        which delegates to the data context's ``arrow_hasher.hash_table``: Orcapod's
+        float rule applies (``-0.0`` as ``0.0``, every NaN as the ordinary NaN;
+        ITL-1179), where a bare ``pa.Table`` given as a value would be hashed strictly.
+        So ``content_hash()`` (inherited from ``ContentIdentifiableBase``) is the table
+        hash, without any special-casing in ``Datagram`` itself.
         """
-        return self._ensure_data_table()
+        return OrcapodTable(self._ensure_data_table())
 
     @property
     def datagram_uuid(self) -> uuid.UUID:
@@ -689,8 +692,18 @@ class Datagram(ContentIdentifiableBase):
                 raise ValueError(f"Columns not found: {missing}")
             new_d = self.copy(include_cache=False)
             new_d._data_table = self._data_table.select(list(column_names))
-            new_d._data_dict = None
-            new_d._data_python_schema = None
+            # The Python values held beside the table (a function's own objects)
+            # are kept for the selected columns, never rebuilt from Arrow.
+            new_d._data_dict = (
+                {k: self._data_dict[k] for k in column_names}
+                if self._data_dict is not None
+                else None
+            )
+            new_d._data_python_schema = (
+                Schema({k: self._data_python_schema[k] for k in column_names})
+                if self._data_python_schema is not None and self._data_dict is not None
+                else None
+            )
             new_d._data_arrow_schema = None
             return new_d
         else:
@@ -700,12 +713,9 @@ class Datagram(ContentIdentifiableBase):
                 raise ValueError(f"Columns not found: {missing}")
             schema = self._ensure_python_schema()
             new_d = self.copy(include_cache=False)
-            new_d._data_dict = {
-                k: v for k, v in self._data_dict.items() if k in column_names
-            }
-            new_d._data_python_schema = Schema(
-                {k: v for k, v in schema.items() if k in column_names}
-            )
+            # In the order given, as documented and as the Arrow branch does.
+            new_d._data_dict = {k: self._data_dict[k] for k in column_names}
+            new_d._data_python_schema = Schema({k: schema[k] for k in column_names})
             new_d._data_arrow_schema = None
             return new_d
 
@@ -737,8 +747,22 @@ class Datagram(ContentIdentifiableBase):
             new_d = self.copy(include_cache=False)
             if existing:
                 new_d._data_table = self._data_table.drop_columns(existing)
-            new_d._data_dict = None
-            new_d._data_python_schema = None
+            # The Python values held beside the table are kept for the remaining
+            # columns, never rebuilt from Arrow.
+            if self._data_dict is not None and self._data_python_schema is not None:
+                new_d._data_dict = {
+                    k: v for k, v in self._data_dict.items() if k not in existing
+                }
+                new_d._data_python_schema = Schema(
+                    {
+                        k: v
+                        for k, v in self._data_python_schema.items()
+                        if k not in existing
+                    }
+                )
+            else:
+                new_d._data_dict = None
+                new_d._data_python_schema = None
             new_d._data_arrow_schema = None
             return new_d
         else:

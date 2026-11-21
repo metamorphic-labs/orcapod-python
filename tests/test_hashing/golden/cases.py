@@ -75,55 +75,258 @@ def available_groups() -> tuple[str, ...]:
     return tuple(g for g in GROUPS if group_available(g))
 
 
-_CASES: dict[str, list[tuple[str, CaseFn]]] = {group: [] for group in GROUPS}
+_CASES: dict[str, list[tuple[str, CaseFn, tuple[str, ...]]]] = {
+    group: [] for group in GROUPS
+}
 
 
-def case(group: str, name: str) -> Callable[[CaseFn], CaseFn]:
+def case(
+    group: str, name: str, *, provisional: tuple[str, ...] = ()
+) -> Callable[[CaseFn], CaseFn]:
     """Register a golden case under ``group``.
 
     Args:
         group: One of ``GROUPS``; selects the golden files (``<group>-NN.json``) that
             pin the entries.
         name: Case name, used as the prefix of every entry the case returns.
+        provisional: The provisional features the case depends on
+            (``declarable_provisional_names``; ITL-1266). A case that declares one is
+            pinned in the provisional file of its group, which no release freezes. A case
+            that uses a provisional feature must declare it (``compute_group_kinds``).
 
     Returns:
         A decorator that registers the case function and returns it unchanged.
     """
 
     def register(fn: CaseFn) -> CaseFn:
-        _CASES[group].append((name, fn))
+        _CASES[group].append((name, fn, tuple(provisional)))
         return fn
 
     return register
 
 
-def compute_group(group: str, *, allow_errors: bool = False) -> dict[str, Any]:
-    """Compute every entry of one golden group.
+# The provisional sources a case may declare: DerivedSource only (ITL-1331). A PollingSource
+# is never pinned, declared or not: the developer agreed to no PollingSource pins, and its
+# identity is to be redesigned (ITL-1314, ITL-1316). So a case that builds one is refused.
+DECLARABLE_PROVISIONAL_SOURCES = frozenset({"DerivedSource"})
+
+
+def declarable_provisional_names() -> frozenset[str]:
+    """The names a case may declare provisional: the provisional operators (ITL-1266),
+    ``DECLARABLE_PROVISIONAL_SOURCES`` (ITL-1331) and the provisional library value
+    types, by extension name (the ``provisional`` list of ``contexts/logical_types.json``;
+    ITL-1324). ``PollingSource`` is not declarable: a case that builds one is refused,
+    declared or not (ITL-1314)."""
+    import importlib.resources
+
+    from orcapod.core.operators.provisional import PROVISIONAL_OPERATORS
+
+    registration = json.loads(
+        importlib.resources.files("orcapod.contexts")
+        .joinpath("logical_types.json")
+        .read_text()
+    )
+    return (
+        frozenset(PROVISIONAL_OPERATORS)
+        | DECLARABLE_PROVISIONAL_SOURCES
+        | frozenset(registration.get("provisional", []))
+    )
+
+
+# The provisional library value types, by the name a case declares (ITL-1324).
+NUMPY_NDARRAY = "orcapod.numpy.ndarray"
+PANDAS_DATAFRAME = "orcapod.pandas.dataframe"
+PANDAS_SERIES = "orcapod.pandas.series"
+POLARS_DATAFRAME = "orcapod.polars.dataframe"
+POLARS_SERIES = "orcapod.polars.series"
+TORCH_TENSOR = "orcapod.torch.tensor"
+POLARS_TYPES = (POLARS_DATAFRAME, POLARS_SERIES)
+NUMPY_PANDAS_TYPES = (NUMPY_NDARRAY, PANDAS_DATAFRAME, PANDAS_SERIES)
+
+
+def _library_type_name(tp: type) -> str | None:
+    """The provisional library value type a class is (or derives from), by name."""
+    kinds: list[tuple[str, str, str]] = [
+        ("numpy", "ndarray", NUMPY_NDARRAY),
+        ("pandas", "DataFrame", PANDAS_DATAFRAME),
+        ("pandas", "Series", PANDAS_SERIES),
+        ("polars", "DataFrame", POLARS_DATAFRAME),
+        ("polars", "Series", POLARS_SERIES),
+        ("torch", "Tensor", TORCH_TENSOR),
+    ]
+    import sys
+
+    for module, name, declared in kinds:
+        # Only a library already imported can have made the class.
+        cls = getattr(sys.modules.get(module), name, None)
+        if isinstance(cls, type) and issubclass(tp, cls):
+            return declared
+    return None
+
+
+def provisional_types_of(
+    item: Any, _seen: frozenset[int] = frozenset()
+) -> frozenset[str]:
+    """The provisional library value types a value or a type is, or embeds (ITL-1324).
+
+    A type embeds one through its generic arguments (``list[np.ndarray]``) and a user
+    class through its fields, at any depth: a user class's identity record holds the
+    identifier of each field's logical type, so a class with a field of a provisional
+    type has provisional hashes too. A value embeds one through its type and, for a
+    container, its elements. This is how a golden case splits its items into frozen
+    and provisional entries: the tool's use record cannot see a dependence hidden
+    behind an identity built earlier and cached (a registered user class), so the
+    split is declared from the types (``test_golden_provisional_types.py`` checks it
+    against each fixture class's identity record).
+
+    Args:
+        item: A value or a type.
+
+    Returns:
+        The declared names (``NUMPY_NDARRAY``, ...) of the types found.
+    """
+    import typing
+
+    from orcapod.logical_types.user_class_identity import type_hints
+
+    if id(item) in _seen:
+        return frozenset()
+    seen = _seen | {id(item)}
+    names: set[str] = set()
+    if isinstance(item, type) or typing.get_origin(item) is not None:
+        tp: Any = item
+        for arg in typing.get_args(tp):
+            names |= provisional_types_of(arg, seen)
+        origin = typing.get_origin(tp)
+        if origin is not None:
+            tp = origin
+        if isinstance(tp, type):
+            declared = _library_type_name(tp)
+            if declared is not None:
+                names.add(declared)
+            elif dataclasses.is_dataclass(tp) or issubclass(tp, pydantic.BaseModel):
+                for hint in type_hints(tp).values():
+                    names |= provisional_types_of(hint, seen)
+        return frozenset(names)
+    if isinstance(item, dict):
+        for key, value in item.items():
+            names |= provisional_types_of(key, seen) | provisional_types_of(value, seen)
+    elif isinstance(item, (list, tuple, set, frozenset)):
+        for element in item:
+            names |= provisional_types_of(element, seen)
+    return frozenset(names | provisional_types_of(type(item), seen))
+
+
+def _recording() -> Any:
+    """``recording_provisional_uses`` of the library, or an empty record for an older one.
+
+    The generator is also run against an older checkout's library (``--stdout``), which
+    has no record of provisional uses.
+    """
+    try:
+        from orcapod.utils.provisional import recording_provisional_uses
+    except ImportError:
+        return contextlib.nullcontext(set())
+    return recording_provisional_uses()
+
+
+def compute_group_kinds(
+    group: str, *, allow_errors: bool = False
+) -> tuple[dict[str, Any], frozenset[str]]:
+    """Compute every entry of one golden group, and say which entries are provisional.
+
+    Each case runs while the library records the provisional features it uses
+    (``orcapod.utils.provisional.recording_provisional_uses``). A provisional operator is
+    recorded when it is built, when its own ``content_hash``, ``pipeline_hash`` or
+    identity structure is read, when it is applied (``process``, its call, a stream
+    method, ``static_process``), and when a stream it produced is hashed, read or
+    previewed. A provisional source is recorded when it is built or loaded and when its
+    ``source_id``, hashes or identity structure is read (a ``DerivedSource`` also when its
+    rows are read or previewed). So an operator or source built before the case (at module
+    level) is recorded too. A provisional library value type is recorded when it is
+    resolved. A case that uses one it does not declare, or declares a name
+    ``declarable_provisional_names`` does not hold (``PollingSource`` among them), is
+    refused. The fixtures are registered first, outside every record, so registering one
+    is not a case's use.
+
+    Limits: the guard sees a provisional object built or read inside the case, not one
+    hidden behind a hash computed before the case. A stream, source or node downstream of
+    a provisional operator or source that was built and hashed, or computed, before the
+    case returns its cached hash or kept result without reaching it, so it records
+    nothing. The convention that makes the guard enough: every case builds its sources,
+    operators and jobs inside the case function, which
+    ``test_golden_store.test_cases_hold_no_prebuilt_pipeline_objects`` checks. A user class with a
+    field of a provisional library type embeds that type's identifier in its identity,
+    which is built once, at registration, and cached; a later use of the class records
+    nothing. Such items are split out by ``provisional_types_of`` instead
+    (``test_golden_provisional_types.py``).
 
     Args:
         group: One of ``GROUPS``.
         allow_errors: When true, a case that raises records a single
-            ``"ERROR: <type>: <message>"`` entry instead of propagating. Used only when
-            running the generator against an older release.
+            ``"ERROR: <type>: <message>"`` entry instead of propagating, and the
+            declarations are not checked. Used only when running the generator against an
+            older release.
 
     Returns:
-        A dict of ``<case>.<entry>`` names to JSON-compatible values, sorted by name.
+        A dict of ``<case>.<entry>`` names to JSON-compatible values, sorted by name, and
+        the names of the entries of cases that declare a provisional feature.
+
+    Raises:
+        ValueError: A case declares an unknown provisional name, uses a provisional
+            feature it does not declare, or two cases produce one entry name.
     """
     out: dict[str, Any] = {}
-    for name, fn in _CASES[group]:
+    provisional_entries: set[str] = set()
+    # The fixtures are registered before any case records its uses (ITL-1324).
+    register_logical_classes()
+    for name, fn, declared in _CASES[group]:
+        if not allow_errors:
+            unknown = sorted(set(declared) - declarable_provisional_names())
+            if unknown:
+                raise ValueError(
+                    f"golden case {group}:{name} declares {unknown} provisional, but "
+                    "they are not provisional (orcapod.operators.PROVISIONAL_OPERATORS, "
+                    "or 'provisional' of contexts/logical_types.json)"
+                )
         try:
-            values = fn()
+            with _recording() as used:
+                values = fn()
         except Exception as exc:
             if not allow_errors:
                 raise
             out[name] = f"ERROR: {type(exc).__name__}: {str(exc).splitlines()[0][:200]}"
             continue
+        undeclared = sorted(set(used) - set(declared))
+        if undeclared and not allow_errors:
+            raise ValueError(
+                f"golden case {group}:{name} uses the provisional {undeclared} without "
+                f"declaring it: register it with @case({group!r}, {name!r}, "
+                f"provisional={tuple(sorted(used))!r}), so that its values go to the "
+                "provisional file, never to a frozen one"
+            )
         for key, value in values.items():
             full = f"{name}.{key}" if key else name
             if full in out:
                 raise ValueError(f"duplicate golden entry {full!r}")
             out[full] = value
-    return dict(sorted(out.items()))
+            if declared:
+                provisional_entries.add(full)
+    return dict(sorted(out.items())), frozenset(provisional_entries)
+
+
+def compute_group(group: str, *, allow_errors: bool = False) -> dict[str, Any]:
+    """Compute every entry of one golden group (``compute_group_kinds``, values only).
+
+    Args:
+        group: One of ``GROUPS``.
+        allow_errors: Passed to ``compute_group_kinds``.
+
+    Returns:
+        A dict of ``<case>.<entry>`` names to JSON-compatible values, sorted by name.
+    """
+    values, _ = compute_group_kinds(group, allow_errors=allow_errors)
+    return values
 
 
 def compute_all(*, allow_errors: bool = False) -> dict[str, dict[str, Any]]:
@@ -313,9 +516,19 @@ class GoldenHolder:
     note: str
 
 
+_REGISTERED_WITH: set[int] = set()
+
+
 def register_logical_classes() -> None:
-    """Register the dataclass and pydantic fixtures with the default type converter."""
+    """Register the dataclass and pydantic fixtures with the default type converter.
+
+    Once per type converter: ``compute_group_kinds`` registers them before the recorded
+    cases, so registering (which resolves a field's provisional type, ``GoldenWithArray``)
+    is not counted as a case's use of that type (ITL-1324).
+    """
     tc = _ctx().type_converter
+    if id(tc) in _REGISTERED_WITH:
+        return
     tc.register_python_class(GoldenPoint)
     tc.register_python_class(GoldenModel)
     for cls in (
@@ -330,6 +543,7 @@ def register_logical_classes() -> None:
         GoldenHolder,
     ):
         tc.register_python_class(cls)
+    _REGISTERED_WITH.add(id(tc))
 
 
 PATH_A = Path("/golden/data/a.txt")
@@ -425,8 +639,24 @@ SEMANTIC_VALUES: dict[str, Any] = {
 
 @case("semantic", "value")
 def semantic_values() -> dict[str, Any]:
+    """The values of every type but the provisional library value types."""
     hasher = _ctx().semantic_hasher
-    return {k: hasher.hash_object(v).to_string() for k, v in SEMANTIC_VALUES.items()}
+    return {
+        k: hasher.hash_object(v).to_string()
+        for k, v in SEMANTIC_VALUES.items()
+        if not provisional_types_of(v)
+    }
+
+
+@case("semantic", "value", provisional=NUMPY_PANDAS_TYPES)
+def semantic_library_values() -> dict[str, Any]:
+    """The NumPy and pandas values of ``semantic:value``: provisional (ITL-1324)."""
+    hasher = _ctx().semantic_hasher
+    return {
+        k: hasher.hash_object(v).to_string()
+        for k, v in SEMANTIC_VALUES.items()
+        if provisional_types_of(v)
+    }
 
 
 def golden_fn_plain(a: int, b: str) -> float:
@@ -454,6 +684,16 @@ def golden_fn_kinds(a: int, /, b: int, *, c: int = 0) -> int:
 def golden_scaled(age: int, factor: float = 2.0) -> float:
     """Data function with a default, pinned by its stored signature hash. DO NOT MOVE."""
     return age * factor
+
+
+def golden_stats2(a: int, b: int) -> tuple[int, int]:
+    """Two outputs of one type: the order of the output keys is in the stored signature."""
+    return a + b, a * b
+
+
+def golden_stats3(a: int, b: int) -> tuple[int, str, float]:
+    """Three outputs of three types."""
+    return a + b, f"{a}-{b}", a / 4
 
 
 @case("semantic", "function")
@@ -484,6 +724,65 @@ def semantic_functions() -> dict[str, Any]:
         out[f"stored_signature.{name}"] = _bytes_text(
             variation["function_signature_hash"]
         )
+        # ITL-1256: the function as written, from its def line on.
+        out[f"stored_content.{name}"] = _bytes_text(variation["function_content_hash"])
+    out.update(_stored_record_cases())
+    return out
+
+
+def _stored_record_cases() -> dict[str, Any]:
+    """The record of python.function.v1 rev1 (ITL-1256) in more declarations.
+
+    Output keys in two orders (two and three keys), an ``input_schema=`` override, the
+    three ways of making a pod, and a function whose source cannot be read (its content
+    hash is absent: ``None``).
+    """
+    from orcapod import function_pod
+    from orcapod.core.data_function import PythonDataFunction
+    from orcapod.core.function_pod import FunctionPod
+
+    def signature(data_function: Any) -> str:
+        return _bytes_text(
+            data_function.get_function_variation_data()["function_signature_hash"]
+        )
+
+    out: dict[str, Any] = {
+        "stored_signature.stats2.forward": signature(
+            PythonDataFunction(golden_stats2, output_keys=["sum", "product"])
+        ),
+        "stored_signature.stats2.backward": signature(
+            PythonDataFunction(golden_stats2, output_keys=["product", "sum"])
+        ),
+        "stored_signature.stats3.forward": signature(
+            PythonDataFunction(golden_stats3, output_keys=["total", "label", "quarter"])
+        ),
+        "stored_signature.stats3.rotated": signature(
+            PythonDataFunction(golden_stats3, output_keys=["label", "quarter", "total"])
+        ),
+        "stored_signature.scaled.input_schema": signature(
+            PythonDataFunction(
+                golden_scaled, output_keys="scaled", input_schema={"age": float}
+            )
+        ),
+        "stored_signature.stats2.from_fn": signature(
+            FunctionPod.from_fn(
+                golden_stats2, output_keys=["sum", "product"]
+            ).data_function
+        ),
+        "stored_signature.stats2.decorator": signature(
+            function_pod(output_keys=["sum", "product"])(
+                golden_stats2
+            ).pod.data_function
+        ),
+    }
+    namespace: dict[str, Any] = {"__name__": "golden_repl"}
+    exec("def typed_in(x: int) -> int:\n    return x + 1\n", namespace)
+    without_source = PythonDataFunction(namespace["typed_in"], output_keys="y")
+    variation = without_source.get_function_variation_data()
+    out["stored_signature.without_source"] = _bytes_text(
+        variation["function_signature_hash"]
+    )
+    out["stored_content.without_source"] = variation["function_content_hash"]
     return out
 
 
@@ -526,9 +825,26 @@ def _semantic_types() -> dict[str, Any]:
 
 @case("semantic", "type")
 def semantic_types() -> dict[str, Any]:
+    """Every type but the provisional library value types."""
     register_logical_classes()
     hasher = _ctx().semantic_hasher
-    return {k: hasher.hash_object(t).to_string() for k, t in _semantic_types().items()}
+    return {
+        k: hasher.hash_object(t).to_string()
+        for k, t in _semantic_types().items()
+        if not provisional_types_of(t)
+    }
+
+
+@case("semantic", "type", provisional=NUMPY_PANDAS_TYPES)
+def semantic_library_types() -> dict[str, Any]:
+    """The NumPy and pandas types of ``semantic:type``: provisional (ITL-1324)."""
+    register_logical_classes()
+    hasher = _ctx().semantic_hasher
+    return {
+        k: hasher.hash_object(t).to_string()
+        for k, t in _semantic_types().items()
+        if provisional_types_of(t)
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -546,14 +862,17 @@ def _arrow_type_text(arrow_type: pa.DataType) -> str:
     return str(arrow_type)
 
 
-@case("schema", "single_field")
-def schema_single_field() -> dict[str, Any]:
+def _schema_single_field(library: bool) -> dict[str, Any]:
+    """``schema:single_field`` of the provisional library value types (``library``) or of
+    every other type."""
     from orcapod.types import Schema
 
     register_logical_classes()
     ctx = _ctx()
     out: dict[str, Any] = {}
     for name, tp in _semantic_types().items():
+        if bool(provisional_types_of(tp)) != library:
+            continue
         out[f"{name}.arrow_type"] = _arrow_type_text(
             ctx.type_converter.python_type_to_arrow_type(tp)
         )
@@ -561,6 +880,18 @@ def schema_single_field() -> dict[str, Any]:
             Schema({"c": tp})
         ).to_string()
     return out
+
+
+@case("schema", "single_field")
+def schema_single_field() -> dict[str, Any]:
+    """Every type but the provisional library value types."""
+    return _schema_single_field(library=False)
+
+
+@case("schema", "single_field", provisional=NUMPY_PANDAS_TYPES)
+def schema_library_single_field() -> dict[str, Any]:
+    """The NumPy and pandas types of ``schema:single_field``: provisional (ITL-1324)."""
+    return _schema_single_field(library=True)
 
 
 @case("schema", "multi_field")
@@ -590,15 +921,25 @@ def _tag_data_schemas() -> tuple[Any, Any]:
     )
 
 
+def _tag_data_arrow_schemas() -> tuple[pa.Schema, pa.Schema]:
+    """The Arrow schemas the converter gives ``_tag_data_schemas`` (ITL-640)."""
+    converter = _ctx().type_converter
+    tag_schema, data_schema = _tag_data_schemas()
+    return (
+        converter.python_schema_to_arrow_schema(tag_schema),
+        converter.python_schema_to_arrow_schema(data_schema),
+    )
+
+
 @case("schema", "compute_schema_hash")
 def schema_compute_schema_hash() -> dict[str, Any]:
     from orcapod.utils.schema_utils import compute_schema_hash
 
-    tag_schema, data_schema = _tag_data_schemas()
-    hasher = _ctx().semantic_hasher
+    tag_schema, data_schema = _tag_data_arrow_schemas()
+    ctx = _ctx()
     return {
-        "full": compute_schema_hash(tag_schema, data_schema, hasher, None),
-        "chars_16": compute_schema_hash(tag_schema, data_schema, hasher, 16),
+        "full": compute_schema_hash(tag_schema, data_schema, ctx, None),
+        "chars_16": compute_schema_hash(tag_schema, data_schema, ctx, 16),
     }
 
 
@@ -608,7 +949,7 @@ def schema_source_schema_hash() -> dict[str, Any]:
     from orcapod.utils.arrow_utils import system_tag_column_names
     from orcapod.utils.schema_utils import compute_source_schema_hash
 
-    tag_schema, data_schema = _tag_data_schemas()
+    tag_schema, data_schema = _tag_data_arrow_schemas()
     schema_hash = compute_source_schema_hash(
         tag_schema, data_schema, _ctx(), DEFAULT_CONFIG
     )
@@ -645,14 +986,15 @@ def schema_source_stream_builder() -> dict[str, Any]:
 
     builder = SourceStreamBuilder(_ctx(), DEFAULT_CONFIG)
     out: dict[str, Any] = {}
-    for variant, kwargs in {
+    variants: dict[str, dict[str, Any]] = {
         "default_source_id": {"source_kind": "arrow_table"},
         "named_source_id": {"source_id": "golden_source"},
         "record_id_column": {
             "source_id": "golden_source",
             "record_id_columns": "subject",
         },
-    }.items():
+    }
+    for variant, kwargs in variants.items():
         result = builder.build(_builder_table(), tag_columns=["subject"], **kwargs)
         out[f"{variant}.schema_hash"] = result.schema_hash
         out[f"{variant}.table_hash"] = result.table_hash.to_string()
@@ -712,33 +1054,130 @@ def schema_row_identifiers() -> dict[str, Any]:
     return out
 
 
-class GoldenPollingImpl:
-    """A polling source implementation whose identity is fixed (default source id).
+# Rows of the hash_in_key_order case: two tag columns, no single one a key, given out
+# of key order for both key orders, which sort them differently.
+KEY_ORDER_ROWS = [
+    {"subject": "s2", "trial": 1, "weight": 19.0},
+    {"subject": "s1", "trial": 2, "weight": 22.25},
+    {"subject": "s2", "trial": 2, "weight": 21.75},
+    {"subject": "s1", "trial": 1, "weight": 20.5},
+]
+# Rows whose two key columns rise together: both key orders sort them into one table.
+ALIGNED_KEY_ROWS = [
+    {"subject": "s2", "trial": 2, "weight": 22.25},
+    {"subject": "s3", "trial": 3, "weight": 19.0},
+    {"subject": "s1", "trial": 1, "weight": 20.5},
+]
 
-    Only ``identity`` is used by the golden case; the source is never polled.
+
+@case("schema", "hash_in_key_order")
+def schema_hash_in_key_order() -> dict[str, Any]:
+    """Pin default source ids hashed with ``hash_in_key_order`` (ITL-1272).
+
+    For each in-memory source kind, over rows given out of key order: with
+    ``hash_in_key_order=True``, both orders of the two key columns (two values), each in
+    two row orders (``given`` and ``reversed``, one value); without it, the two row
+    orders (two values). Then rows whose two key columns rise together
+    (``aligned``): both key orders sort them alike, so they give one default source id
+    and two content hashes (the key order is in the root-source identity). Pinned: the
+    default source id and the content hash, and the builder's table hash for the same
+    variants.
+
+    Returns:
+        Each variant's source id, content hash and table hash.
     """
+    from orcapod import DEFAULT_CONFIG
+    from orcapod.core.sources import (
+        ArrowTableSource,
+        DataFrameSource,
+        DictSource,
+        ListSource,
+    )
+    from orcapod.core.sources.stream_builder import SourceStreamBuilder
 
-    def identity(self) -> Any:
-        return ("golden_polling", 1)
+    tags = ["subject", "trial"]
+    row_orders = {"given": KEY_ORDER_ROWS, "reversed": KEY_ORDER_ROWS[::-1]}
+    schema = pa.schema(
+        [
+            pa.field("subject", pa.large_string(), nullable=False),
+            pa.field("trial", pa.int64(), nullable=False),
+            pa.field("weight", pa.float64(), nullable=False),
+        ]
+    )
 
-    def to_config(self) -> dict[str, Any] | None:
-        return None
+    def build(kind: str, rows: list[dict[str, Any]], **kw: Any) -> Any:
+        if kind == "arrow_table":
+            return ArrowTableSource(
+                pa.Table.from_pylist(rows, schema=schema),
+                tag_columns=tags,
+                tag_only_columns=True,
+                data_context=_ctx(),
+                **kw,
+            )
+        if kind == "dict":
+            return DictSource(
+                rows, tag_columns=tags, tag_only_columns=True, data_context=_ctx(), **kw
+            )
+        if kind == "data_frame":
+            import polars as pl
 
-    @classmethod
-    def from_config(cls, config: dict[str, Any]) -> GoldenPollingImpl:
-        raise NotImplementedError
+            return DataFrameSource(
+                pl.DataFrame(rows),
+                tag_columns=tags,
+                tag_only_columns=True,
+                data_context=_ctx(),
+                **kw,
+            )
+        by_weight = {row["weight"]: row for row in rows}
+        return ListSource(
+            "weight",
+            [row["weight"] for row in rows],
+            tag_function=lambda w, _i: {t: by_weight[w][t] for t in tags},
+            expected_tag_keys=tags,
+            data_context=_ctx(),
+            **kw,
+        )
 
-    def schema(self) -> Any:
-        return None
-
-    async def poll(self, cursor: Any = None) -> bool:
-        return False
-
-    async def fetch(self, cursor: Any = None) -> Any:
-        raise NotImplementedError
-
-    async def close(self) -> None:
-        return None
+    variants: dict[str, dict[str, Any]] = {
+        "key_order.subject_trial": {
+            "record_id_columns": ["subject", "trial"],
+            "hash_in_key_order": True,
+        },
+        "key_order.trial_subject": {
+            "record_id_columns": ["trial", "subject"],
+            "hash_in_key_order": True,
+        },
+        "as_given.subject_trial": {"record_id_columns": ["subject", "trial"]},
+    }
+    out: dict[str, Any] = {}
+    for kind in ("arrow_table", "dict", "data_frame", "list"):
+        for variant, kwargs in variants.items():
+            for order, rows in row_orders.items():
+                source = build(kind, rows, **kwargs)
+                prefix = f"{kind}.{variant}.{order}"
+                out[f"{prefix}.source_id"] = source.source_id
+                out[f"{prefix}.content_hash"] = source.content_hash().to_string()
+        for key_name, key in (
+            ("subject_trial", ["subject", "trial"]),
+            ("trial_subject", ["trial", "subject"]),
+        ):
+            source = build(
+                kind, ALIGNED_KEY_ROWS, record_id_columns=key, hash_in_key_order=True
+            )
+            prefix = f"{kind}.aligned.{key_name}"
+            out[f"{prefix}.source_id"] = source.source_id
+            out[f"{prefix}.content_hash"] = source.content_hash().to_string()
+    builder = SourceStreamBuilder(_ctx(), DEFAULT_CONFIG)
+    for variant, kwargs in variants.items():
+        for order, rows in row_orders.items():
+            result = builder.build(
+                pa.Table.from_pylist(rows, schema=schema),
+                tag_columns=tags,
+                source_kind="arrow_table",
+                **kwargs,
+            )
+            out[f"builder.{variant}.{order}.table_hash"] = result.table_hash.to_string()
+    return out
 
 
 @case("schema", "location_default_source_ids")
@@ -749,8 +1188,8 @@ def schema_location_default_source_ids() -> dict[str, Any]:
     temporary directory (``rows.csv``, a Delta folder ``golden_delta``, a SQLite table
     ``golden_trials``), so no value depends on the machine. Pinned: the default
     ``<kind>:<location>`` and the stream summary (record ids are ``row_<n>``, and the
-    primary key's JSON for SQLite). The polling source's default is the semantic hash of its
-    implementation's identity.
+    primary key's JSON for SQLite). A ``PollingSource`` is provisional (ITL-1314): no
+    golden case builds one.
 
     Returns:
         Each source's default source id and stream summary.
@@ -764,7 +1203,6 @@ def schema_location_default_source_ids() -> dict[str, Any]:
     from orcapod.core.sources import (
         CSVSource,
         DeltaTableSource,
-        PollingSource,
         SQLiteTableSource,
     )
 
@@ -803,20 +1241,17 @@ def schema_location_default_source_ids() -> dict[str, Any]:
                 out.update(_prefixed(kind, stream_summary(source)))
         finally:
             os.chdir(previous)
-    polling = PollingSource(
-        GoldenPollingImpl(), tag_columns="subject", record_id_columns="subject"
-    )
-    out["polling_source.source_id"] = polling.source_id
     return out
 
 
-@case("schema", "derived_source_tags_as_data")
+@case("schema", "derived_source_tags_as_data", provisional=("DerivedSource",))
 def schema_derived_source_tags_as_data() -> dict[str, Any]:
     """Pin a source derived from another source with a tag also offered as data (ITL-939).
 
-    Three variants: the default source id (``tags_as_data:<label>:<hex>``, the derivation
-    hash), an explicit source id, and the default source id with a ``record_id_column``
-    (which enters the derivation hash).
+    Provisional: ``DerivedSource`` is (ITL-1331).
+
+    Two variants, each with its own source id, as this form requires (ITL-1313): by
+    position, and with a ``record_id_column``.
 
     Returns:
         Each variant's source id and stream summary.
@@ -832,15 +1267,48 @@ def schema_derived_source_tags_as_data() -> dict[str, Any]:
     )
     out: dict[str, Any] = {}
     for variant, kwargs in {
-        "default_source_id": {},
         "named_source_id": {"source_id": "golden_derived"},
-        "record_id_column": {"record_id_columns": "subject"},
+        "record_id_column": {
+            "source_id": "golden_derived_keyed",
+            "record_id_columns": "subject",
+        },
     }.items():
         derived = DerivedSource(
             origin, tags_as_data={"subject": "subject_value"}, **kwargs
         )
         out[f"{variant}.source_id"] = derived.source_id
         out.update(_prefixed(variant, stream_summary(derived)))
+    return out
+
+
+@case("schema", "key_policy_identity", provisional=("DerivedSource",))
+def schema_key_policy_identity_derived() -> dict[str, Any]:
+    """The ``derived_tags_as_data`` entries of ``key_policy_identity``: provisional, as
+    ``DerivedSource`` is (ITL-1331). Its origin is the ``arrow_table`` variant's source."""
+    from orcapod.core.sources import ArrowTableSource, DerivedSource
+
+    out: dict[str, Any] = {}
+    for variant, key in {"position": None, "key": "subject"}.items():
+        arrow = ArrowTableSource(
+            _builder_table(),
+            tag_columns=["subject"],
+            record_id_columns=key,
+            source_id="golden_keys",
+            data_context=_ctx(),
+            tag_only_columns=True,
+        )
+        derived = DerivedSource(
+            arrow,
+            tags_as_data={"subject": "subject_value"},
+            source_id="golden_keys_derived",
+            record_id_columns=key,
+        )
+        out[f"derived_tags_as_data.{variant}.content_hash"] = (
+            derived.content_hash().to_string()
+        )
+        out[f"derived_tags_as_data.{variant}.pipeline_hash"] = (
+            derived.pipeline_hash().to_string()
+        )
     return out
 
 
@@ -851,8 +1319,8 @@ def schema_key_policy_identity() -> dict[str, Any]:
     A root source's identity holds its resolved key columns (``()`` for the
     position), so two sources with one ``source_id`` and schema that name their rows
     differently have different content hashes and the same pipeline hash. Pinned per
-    source kind, for two key policies each: the content hash, and the pipeline hash
-    where the source has a schema without polling.
+    source kind, for two key policies each: the content hash and the pipeline hash. A
+    ``PollingSource`` is provisional (ITL-1314): no golden case builds one.
 
     Returns:
         Each variant's content hash and pipeline hash.
@@ -862,19 +1330,16 @@ def schema_key_policy_identity() -> dict[str, Any]:
 
     from orcapod.core.sources import (
         ArrowTableSource,
-        DerivedSource,
         ListSource,
-        PollingSource,
         SQLiteTableSource,
     )
 
     table = _builder_table()
     out: dict[str, Any] = {}
 
-    def pin(variant: str, source: Any, *, pipeline: bool = True) -> None:
+    def pin(variant: str, source: Any) -> None:
         out[f"{variant}.content_hash"] = source.content_hash().to_string()
-        if pipeline:
-            out[f"{variant}.pipeline_hash"] = source.pipeline_hash().to_string()
+        out[f"{variant}.pipeline_hash"] = source.pipeline_hash().to_string()
 
     for variant, key in {"position": None, "key": "subject"}.items():
         arrow = ArrowTableSource(
@@ -886,13 +1351,6 @@ def schema_key_policy_identity() -> dict[str, Any]:
             tag_only_columns=True,
         )
         pin(f"arrow_table.{variant}", arrow)
-        derived = DerivedSource(
-            arrow,
-            tags_as_data={"subject": "subject_value"},
-            source_id="golden_keys_derived",
-            record_id_columns=key,
-        )
-        pin(f"derived_tags_as_data.{variant}", derived)
     for variant, key in {"position": None, "key": "element_index"}.items():
         listed = ListSource(
             "value",
@@ -902,17 +1360,6 @@ def schema_key_policy_identity() -> dict[str, Any]:
             data_context=_ctx(),
         )
         pin(f"list.{variant}", listed)
-    for variant, key in {
-        "subject": "subject",
-        "subject_count": ["subject", "count"],
-    }.items():
-        polling = PollingSource(
-            GoldenPollingImpl(),
-            tag_columns="subject",
-            record_id_columns=key,
-            source_id="golden_keys_polling",
-        )
-        pin(f"polling_source.{variant}", polling, pipeline=False)
     with tempfile.TemporaryDirectory() as tmp:
         path = f"{tmp}/golden.sqlite"
         with contextlib.closing(sqlite3.connect(path)) as conn, conn:
@@ -1165,6 +1612,166 @@ def arrow_extension_schema_hashes() -> dict[str, Any]:
     }
 
 
+_FLOAT_RULE_BITS: dict[str, dict[int, int]] = {
+    "0": {16: 0x0000, 32: 0x00000000, 64: 0x0000000000000000},
+    "-0": {16: 0x8000, 32: 0x80000000, 64: 0x8000000000000000},
+    "nan": {16: 0x7E00, 32: 0x7FC00000, 64: 0x7FF8000000000000},
+    "-nan": {16: 0xFE00, 32: 0xFFC00000, 64: 0xFFF8000000000000},
+    "payload_nan": {16: 0x7E01, 32: 0x7FC00001, 64: 0x7FF8000000000001},
+    "signaling_nan": {16: 0x7C01, 32: 0x7F800001, 64: 0x7FF0000000000001},
+}
+"""Bit patterns of the float rule cases: every NaN pins the value of ``nan``, ``-0`` that
+of ``0`` (ITL-1251, ITL-1179)."""
+
+
+def _float_rule_array(name: str, width: int) -> Any:  # pyright: ignore[reportExplicitAny]  # an Arrow array
+    unsigned = {16: pa.uint16(), 32: pa.uint32(), 64: pa.uint64()}[width]
+    floating = {16: pa.float16(), 32: pa.float32(), 64: pa.float64()}[width]
+    bits = _FLOAT_RULE_BITS[name][width]
+    return pa.array([bits, _FLOAT_RULE_BITS["0"][width], None], unsigned).view(floating)
+
+
+@case("arrow", "float_rule")
+def arrow_float_rule_hashes() -> dict[str, Any]:
+    """Tables Orcapod builds holding -0.0 and NaNs of several bit patterns (ITL-1179).
+
+    ``hash_table`` hashes -0.0 as 0.0 and every NaN as the ordinary NaN, so every
+    ``-0`` entry equals its ``0`` twin and every NaN entry equals its ``nan`` twin: in a
+    column of each width, a list, a struct, a dictionary, and a source's tag and data
+    hashes.
+    """
+    from orcapod.sources import ArrowTableSource
+
+    hasher = _ctx().arrow_hasher
+    out: dict[str, Any] = {}
+    for name in _FLOAT_RULE_BITS:
+        for width in (16, 32, 64):
+            column = _float_rule_array(name, width)
+            out[f"f{width}.{name}.column"] = hasher.hash_table(
+                pa.table({"x": column})
+            ).to_string()
+            out[f"f{width}.{name}.list"] = hasher.hash_table(
+                pa.table(
+                    {
+                        "x": pa.ListArray.from_arrays(
+                            pa.array([0, 2, 3], pa.int32()), column
+                        )
+                    }
+                )
+            ).to_string()
+            out[f"f{width}.{name}.struct"] = hasher.hash_table(
+                pa.table(
+                    {
+                        "x": pa.StructArray.from_arrays(
+                            [column, pa.array([1, 2, 3], pa.int64())], names=["f", "i"]
+                        )
+                    }
+                )
+            ).to_string()
+            out[f"f{width}.{name}.dictionary"] = hasher.hash_table(
+                pa.table(
+                    {
+                        "x": pa.DictionaryArray.from_arrays(
+                            pa.array([2, 0, 1, 0], pa.int32()), column
+                        )
+                    }
+                )
+            ).to_string()
+        source = ArrowTableSource(
+            pa.table(
+                {
+                    "g": pa.array(["a", "b", "c"], pa.large_string()),
+                    "k": _float_rule_array(name, 64),
+                    "x": _float_rule_array(name, 32),
+                    "y": pa.array([1.5, 2.5, 3.5], pa.float64()),
+                }
+            ),
+            tag_columns=["g", "k"],
+            tag_only_columns=True,
+            source_id="golden_float_rule",
+        )
+        tag, data = next(iter(source.iter_data()))
+        out[f"source.{name}.tag_hash"] = tag.content_hash().to_string()
+        out[f"source.{name}.data_hash"] = data.content_hash().to_string()
+    return out
+
+
+def _storage_form_field(name: str, extension: Any) -> Any:  # pyright: ignore[reportExplicitAny]  # an Arrow extension type; returns a field
+    """A field in the storage form, built by hand: the storage type and the identifier.
+
+    Written out here, not taken from ``canonical_form.storage_form_schema``, so the pins
+    below fix the form itself (ITL-640, option (a)).
+    """
+    return pa.field(
+        name,
+        extension.storage_type,
+        metadata={
+            b"ARROW:extension:name": extension.extension_name.encode("utf-8"),
+            b"ARROW:extension:metadata": extension.__arrow_ext_serialize__(),
+        },
+    )
+
+
+def _schema_forms(python_types: dict[str, Any]) -> dict[str, Any]:  # pyright: ignore[reportExplicitAny]  # Python types; Arrow schemas
+    """Each type as a one-column schema, live and in the storage form."""
+    converter = _ctx().type_converter
+    forms: dict[str, Any] = {}
+    for label, python_type in python_types.items():
+        extension = converter.python_type_to_arrow_type(python_type)
+        forms[f"{label}.live"] = pa.schema([pa.field("c", extension)])
+        forms[f"{label}.storage"] = pa.schema([_storage_form_field("c", extension)])
+    return forms
+
+
+@case("arrow", "schema_storage_form")
+def arrow_schema_storage_form() -> dict[str, Any]:
+    """The schema hash of a value-hashed logical type is its storage form's (ITL-640).
+
+    Each type live and in the storage form (its storage type with its identifier as
+    field metadata): one value per type, both entries equal. Also ``list[File]`` and a
+    plain struct with a ``Directory`` field, whose nested identifier stays in the
+    storage form.
+    """
+    import orcapod as op
+
+    hasher = _ctx().arrow_hasher
+    converter = _ctx().type_converter
+    schemas = _schema_forms(
+        {"File": op.File, "Directory": op.Directory, "list[File]": list[op.File]}
+    )
+    directory = converter.python_type_to_arrow_type(op.Directory)
+    count = pa.field("n", pa.int64(), nullable=False)
+    schemas["struct_with_Directory.live"] = pa.schema(
+        [pa.field("c", pa.struct([pa.field("d", directory), count]))]
+    )
+    schemas["struct_with_Directory.storage"] = pa.schema(
+        [pa.field("c", pa.struct([_storage_form_field("d", directory), count]))]
+    )
+    return {k: hasher.hash_schema(t).to_string() for k, t in schemas.items()}
+
+
+@case(
+    "arrow",
+    "schema_storage_form_library",
+    provisional=(*NUMPY_PANDAS_TYPES, *POLARS_TYPES),
+)
+def arrow_schema_storage_form_library() -> dict[str, Any]:
+    """As ``schema_storage_form``, for the provisional library value types."""
+    import polars as pl
+
+    hasher = _ctx().arrow_hasher
+    schemas = _schema_forms(
+        {
+            "numpy.ndarray": np.ndarray,
+            "pandas.DataFrame": pd.DataFrame,
+            "pandas.Series": pd.Series,
+            "polars.DataFrame": pl.DataFrame,
+            "polars.Series": pl.Series,
+        }
+    )
+    return {k: hasher.hash_schema(t).to_string() for k, t in schemas.items()}
+
+
 # ---------------------------------------------------------------------------
 # Group: datagram — public sources carrying each logical type
 # ---------------------------------------------------------------------------
@@ -1259,8 +1866,12 @@ def _make_datagram_case(name: str) -> CaseFn:
     return run
 
 
-for _name in _datagram_rows():
-    case("datagram", _name)(_make_datagram_case(_name))
+# A datagram case whose rows hold a provisional library value type, or a user class
+# embedding one, declares it (ITL-1324).
+for _name, _rows in _datagram_rows().items():
+    case("datagram", _name, provisional=tuple(sorted(provisional_types_of(_rows))))(
+        _make_datagram_case(_name)
+    )
 
 
 def _arrow_source(column: pa.Array[Any], nullable: bool = False) -> Any:
@@ -1440,7 +2051,7 @@ def pipeline_join_pod() -> dict[str, Any]:
     return out
 
 
-@case("pipeline", "merge_join")
+@case("pipeline", "merge_join", provisional=("MergeJoin",))
 def pipeline_merge_join() -> dict[str, Any]:
     from orcapod.operators import MergeJoin, SelectDataColumns
 
@@ -1485,14 +2096,8 @@ def _keyed(source_id: str, value: str, nullable_key: bool) -> Any:
     )
 
 
-@case("pipeline", "join_key_nullability")
-def pipeline_join_key_nullability() -> dict[str, Any]:
-    """Pin the joins over a tag key that is ``T`` in one input and ``T | None`` in the other.
-
-    Accepted since ITL-829 (it raised before, so nothing was stored): ``Join`` and
-    ``MergeJoin`` give the key ``T``; ``SemiJoin`` keeps the left input's schema.
-    """
-    from orcapod.operators import Join, MergeJoin, SemiJoin
+def _nullability_inputs() -> tuple[Callable[[], Any], Callable[[], Any]]:
+    """The two inputs of ``join_key_nullability``: a nullable and a plain key."""
 
     def nullable() -> Any:
         return _keyed("golden_nullable_key", "x", nullable_key=True)
@@ -1500,10 +2105,29 @@ def pipeline_join_key_nullability() -> dict[str, Any]:
     def plain() -> Any:
         return _keyed("golden_plain_key", "y", nullable_key=False)
 
+    return nullable, plain
+
+
+@case("pipeline", "join_key_nullability", provisional=("MergeJoin",))
+def pipeline_join_key_nullability_merge_join() -> dict[str, Any]:
+    """The ``MergeJoin`` entries of ``join_key_nullability``: provisional (ITL-1279)."""
+    from orcapod.operators import MergeJoin
+
+    nullable, plain = _nullability_inputs()
+    return _prefixed("merge_join", stream_summary(MergeJoin()(nullable(), plain())))
+
+
+@case("pipeline", "join_key_nullability")
+def pipeline_join_key_nullability() -> dict[str, Any]:
+    """Pin the joins over a tag key that is ``T`` in one input and ``T | None`` in the other.
+
+    Accepted since ITL-829 (it raised before, so nothing was stored): ``Join`` and
+    ``MergeJoin`` give the key ``T``; ``SemiJoin`` keeps the left input's schema.
+    """
+    from orcapod.operators import Join, SemiJoin
+
+    nullable, plain = _nullability_inputs()
     out = _prefixed("join", stream_summary(Join()(nullable(), plain())))
-    out.update(
-        _prefixed("merge_join", stream_summary(MergeJoin()(nullable(), plain())))
-    )
     out.update(
         _prefixed(
             "semi_join_left_nullable", stream_summary(SemiJoin()(nullable(), plain()))
@@ -1517,21 +2141,21 @@ def pipeline_join_key_nullability() -> dict[str, Any]:
     return out
 
 
-@case("pipeline", "batch")
+@case("pipeline", "batch", provisional=("Batch",))
 def pipeline_batch() -> dict[str, Any]:
     from orcapod.operators import Batch
 
     return stream_summary(Batch(batch_size=2)(_subjects()))
 
 
-@case("pipeline", "group_by")
+@case("pipeline", "group_by", provisional=("GroupBy",))
 def pipeline_group_by() -> dict[str, Any]:
     from orcapod.operators import GroupBy
 
     return stream_summary(GroupBy(by=["cohort"])(_grouped()))
 
 
-@case("pipeline", "index_pick")
+@case("pipeline", "index_pick", provisional=("Index", "Pick"))
 def pipeline_index_pick() -> dict[str, Any]:
     from orcapod.operators import Index, Pick
     from orcapod.sources import DictSource
@@ -1637,7 +2261,7 @@ def pipeline_tag_and_data_columns() -> dict[str, Any]:
     return out
 
 
-@case("pipeline", "map_columns")
+@case("pipeline", "map_columns", provisional=("MapColumns",))
 def pipeline_map_columns() -> dict[str, Any]:
     """``MapColumns``: tag and data columns renamed in one step (ITL-1160).
 
@@ -1673,7 +2297,7 @@ def pipeline_map_columns() -> dict[str, Any]:
     return out
 
 
-@case("pipeline", "polars_filter")
+@case("pipeline", "polars_filter", provisional=("PolarsFilter",))
 def pipeline_polars_filter() -> dict[str, Any]:
     from orcapod.operators import PolarsFilter
 
@@ -1778,21 +2402,21 @@ def _polars_types() -> dict[str, Any]:
     return {"dataframe": pl.DataFrame, "series": pl.Series}
 
 
-@case("semantic", "polars_value")
+@case("semantic", "polars_value", provisional=POLARS_TYPES)
 def semantic_polars_values() -> dict[str, Any]:
     """Semantic hash of each Polars value (the ``PolarsDataFrameHandler`` digest)."""
     hasher = _ctx().semantic_hasher
     return {k: hasher.hash_object(v).to_string() for k, v in _polars_values().items()}
 
 
-@case("semantic", "polars_type")
+@case("semantic", "polars_type", provisional=POLARS_TYPES)
 def semantic_polars_types() -> dict[str, Any]:
     """Semantic hash of the ``pl.DataFrame`` and ``pl.Series`` type objects."""
     hasher = _ctx().semantic_hasher
     return {k: hasher.hash_object(t).to_string() for k, t in _polars_types().items()}
 
 
-@case("schema", "polars_single_field")
+@case("schema", "polars_single_field", provisional=POLARS_TYPES)
 def schema_polars_single_field() -> dict[str, Any]:
     """Stored Arrow type and single-field ``Schema`` hash of each Polars class."""
     from orcapod.types import Schema
@@ -1809,7 +2433,7 @@ def schema_polars_single_field() -> dict[str, Any]:
     return out
 
 
-@case("datagram", "polars_data_hash")
+@case("datagram", "polars_data_hash", provisional=POLARS_TYPES)
 def datagram_polars_data_hash() -> dict[str, Any]:
     """Content hash of the ``Data`` holding each Polars value in its only data column."""
     from orcapod.sources import DictSource
@@ -1872,11 +2496,14 @@ def _make_polars_datagram_case(name: str) -> CaseFn:
     return run
 
 
-for _name in ("polars_dataframe", "polars_series"):
-    case("datagram", _name)(_make_polars_datagram_case(_name))
+for _name, _declared in (
+    ("polars_dataframe", (POLARS_DATAFRAME,)),
+    ("polars_series", (POLARS_SERIES,)),
+):
+    case("datagram", _name, provisional=_declared)(_make_polars_datagram_case(_name))
 
 
-@case("arrow", "polars_extension_no_values")
+@case("arrow", "polars_extension_no_values", provisional=POLARS_TYPES)
 def arrow_polars_extension_columns_without_values() -> dict[str, Any]:
     """Table hashes of Polars-typed columns with zero rows or nulls only.
 
@@ -1918,14 +2545,16 @@ def _polars_exprs() -> dict[str, Any]:
     }
 
 
-@case("semantic", "polars_expr")
+# In the library only PolarsFilter feeds polars_expr_v1 (its predicates), so these hashes are
+# as provisional as PolarsFilter is (ITL-1266), although the case builds no operator.
+@case("semantic", "polars_expr", provisional=("PolarsFilter",))
 def semantic_polars_exprs() -> dict[str, Any]:
     """Record the ``polars_expr_v1`` semantic hash of each representative expression."""
     hasher = _ctx().semantic_hasher
     return {k: hasher.hash_object(e).to_string() for k, e in _polars_exprs().items()}
 
 
-@case("pipeline", "polars_filter_expr")
+@case("pipeline", "polars_filter_expr", provisional=("PolarsFilter",))
 def pipeline_polars_filter_expr() -> dict[str, Any]:
     """Record expression-only and expression-plus-keyword filter streams."""
     import polars as pl
@@ -1949,7 +2578,7 @@ def pipeline_polars_filter_expr() -> dict[str, Any]:
     return out
 
 
-@case("pipeline", "polars_filter_expr_job")
+@case("pipeline", "polars_filter_expr_job", provisional=("PolarsFilter",))
 def pipeline_polars_filter_expr_job() -> dict[str, Any]:
     """Record a job with an expression filter upstream of a join and a function pod."""
     import polars as pl
@@ -1992,8 +2621,7 @@ def pipeline_polars_filter_expr_job() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@case("arrow", "extension_no_values")
-def arrow_extension_columns_without_values() -> dict[str, Any]:
+def _arrow_extension_columns_without_values(library: bool) -> dict[str, Any]:
     """Table hashes of value-hashed logical-type columns with zero rows or nulls only.
 
     Such a column has no cell token, so its logical type enters the hash through
@@ -2016,16 +2644,32 @@ def arrow_extension_columns_without_values() -> dict[str, Any]:
     entries: dict[str, Any] = {}
     for rows, label in ((0, "zero_rows"), (2, "all_null")):
         for name, python_type in types.items():
+            if bool(provisional_types_of(python_type)) != library:
+                continue
             arrow_type = ctx.type_converter.python_type_to_arrow_type(python_type)
             storage = pa.array([None] * rows, arrow_type.storage_type)
             column = pa.ExtensionArray.from_storage(arrow_type, storage)
             entries[f"{label}.{name}"] = ctx.arrow_hasher.hash_table(
                 pa.table({"c": column})
             ).to_string()
-        entries[f"{label}.plain_large_binary"] = ctx.arrow_hasher.hash_table(
-            pa.table({"c": pa.array([None] * rows, pa.large_binary())})
-        ).to_string()
+        if not library:
+            entries[f"{label}.plain_large_binary"] = ctx.arrow_hasher.hash_table(
+                pa.table({"c": pa.array([None] * rows, pa.large_binary())})
+            ).to_string()
     return entries
+
+
+@case("arrow", "extension_no_values")
+def arrow_extension_columns_without_values() -> dict[str, Any]:
+    """Every type but the provisional library value types."""
+    return _arrow_extension_columns_without_values(library=False)
+
+
+@case("arrow", "extension_no_values", provisional=NUMPY_PANDAS_TYPES)
+def arrow_library_extension_columns_without_values() -> dict[str, Any]:
+    """The NumPy and pandas columns of ``arrow:extension_no_values``: provisional
+    (ITL-1324)."""
+    return _arrow_extension_columns_without_values(library=True)
 
 
 def _nullable_readings() -> Any:
@@ -2089,7 +2733,7 @@ def pipeline_drop_nulls_all() -> dict[str, Any]:
     return out
 
 
-@case("pipeline", "add_tags")
+@case("pipeline", "add_tags", provisional=("AddTags",))
 def pipeline_add_tags() -> dict[str, Any]:
     """Pin ``AddTags`` (ITL-1196): its identity, one value of each type, and the rows."""
     from orcapod.operators import AddTags
@@ -2159,13 +2803,10 @@ def pipeline_default_source_ids() -> dict[str, Any]:
 
     A source built with no ``source_id`` is named ``<source kind>:<algorithm
     label>:<hex>``; a source made with ``node.as_source()`` is named
-    ``derived:<algorithm label>:<hex>``.
+    ``derived:<algorithm label>:<hex>`` (provisional: ``pipeline_default_source_ids_as_source``).
     """
     import polars as pl
 
-    from orcapod import PipelineJob
-    from orcapod.databases import InMemoryArrowDatabase
-    from orcapod.operators import Join
     from orcapod.sources import (
         ArrowTableSource,
         DataFrameSource,
@@ -2189,7 +2830,18 @@ def pipeline_default_source_ids() -> dict[str, Any]:
     for name, source in sources.items():
         out[f"{name}.source_id"] = source.source_id
         out[f"{name}.content_hash"] = source.content_hash().to_string()
+    return out
 
+
+@case("pipeline", "default_source_ids", provisional=("DerivedSource",))
+def pipeline_default_source_ids_as_source() -> dict[str, Any]:
+    """The ``as_source[...]`` entries of ``default_source_ids``: provisional, as
+    ``DerivedSource`` is (ITL-1331)."""
+    from orcapod import PipelineJob
+    from orcapod.databases import InMemoryArrowDatabase
+    from orcapod.operators import Join
+
+    out: dict[str, Any] = {}
     job = PipelineJob(
         name="golden_default_source_ids", database=InMemoryArrowDatabase()
     )
@@ -2293,14 +2945,14 @@ def unavailable_entries(group: str) -> set[str]:
     }
 
 
-@case("torch", "value")
+@case("torch", "value", provisional=(TORCH_TENSOR,))
 def torch_values() -> dict[str, Any]:
     """Semantic hashes of the pinned tensors."""
     hasher = _ctx().semantic_hasher
     return {k: hasher.hash_object(v).to_string() for k, v in _torch_values().items()}
 
 
-@case("torch", "type")
+@case("torch", "type", provisional=(TORCH_TENSOR,))
 def torch_type() -> dict[str, Any]:
     """Semantic hash of the ``torch.Tensor`` type."""
     import torch
@@ -2310,7 +2962,7 @@ def torch_type() -> dict[str, Any]:
     }
 
 
-@case("torch", "single_field")
+@case("torch", "single_field", provisional=(TORCH_TENSOR,))
 def torch_single_field() -> dict[str, Any]:
     """Arrow type and schema hash of a one-field ``torch.Tensor`` schema."""
     import torch
@@ -2328,7 +2980,17 @@ def torch_single_field() -> dict[str, Any]:
     }
 
 
-@case("torch", "datagram")
+@case("torch", "schema_storage_form", provisional=(TORCH_TENSOR,))
+def torch_schema_storage_form() -> dict[str, Any]:
+    """As ``arrow`` ``schema_storage_form``, for ``torch.Tensor`` (ITL-640)."""
+    import torch
+
+    hasher = _ctx().arrow_hasher
+    schemas = _schema_forms({"torch.Tensor": torch.Tensor})
+    return {k: hasher.hash_schema(t).to_string() for k, t in schemas.items()}
+
+
+@case("torch", "datagram", provisional=(TORCH_TENSOR,))
 def torch_datagram() -> dict[str, Any]:
     """Identity of a two-row tensor source."""
     import torch
@@ -2353,8 +3015,8 @@ def torch_datagram() -> dict[str, Any]:
 def pipeline_tagless_producerless_stream() -> dict[str, Any]:
     """Pin the content hash of a stream with no tag column and no producer (ITL-1053).
 
-    Its identity hashes the rows sorted by their system tags, so the hash is the same
-    for rows given in any order.
+    Its identity hashes its rows in the canonical row order of an identity table
+    (ITL-1227), so the hash is the same for rows given in any order.
 
     Returns:
         The content hash for two orders of the same rows.
@@ -2387,8 +3049,9 @@ def pipeline_tagless_producerless_stream() -> dict[str, Any]:
 def pipeline_list_tag_producerless_stream() -> dict[str, Any]:
     """Pin the content hash of a stream with a list-valued tag and no producer (ITL-1053).
 
-    Arrow cannot order a list column, so the stream's identity hashes its rows in the
-    order given: the hash of the same rows in two orders differs.
+    A list column is no sort key of the canonical row order of an identity table
+    (ITL-1227): the rows' own hashes settle their order, so the same rows in two orders
+    hash the same.
 
     Returns:
         The content hash for two orders of the same rows.
@@ -2564,4 +3227,179 @@ def semantic_annotated_functions() -> dict[str, Any]:
         info = extractor.extract_function_info(fn)
         out[f"{name}.info"] = hasher.hash_object(info).to_string()
         out[f"{name}.object"] = hasher.hash_object(fn).to_string()
+    return out
+
+
+# ---------------------------------------------------------------------------
+# GroupBy over several tags and several data columns (ITL-1226)
+# ---------------------------------------------------------------------------
+
+# Two non-key tags, ``x`` and ``y``, whose orders disagree; ``y`` and ``b`` hold nulls;
+# the rows 1 and 2 share every tag, so only the record id orders them.
+GROUP_MEMBER_ORDER_FIELDS = {
+    "g": (pa.large_string(), False, ["a", "a", "a", "a", "a", "a"]),
+    "k": (pa.int64(), False, [1, 1, 1, 2, 2, 2]),
+    "x": (pa.int64(), False, [2, 1, 1, 1, 2, 1]),
+    "y": (pa.large_string(), True, ["p", "q", "q", None, "p", "r"]),
+    "w": (pa.float64(), False, [0.5, 1.5, 2.5, 3.5, 4.5, 5.5]),
+    "n": (pa.int32(), True, [10, 20, 30, 40, None, 60]),
+    "s": (pa.large_string(), False, ["u", "v", "w", "x", "y", "z"]),
+}
+
+
+def _group_member_order_source(tag_columns: list[str], layout: list[str]) -> Any:  # pyright: ignore[reportExplicitAny]  # a source
+    """One set of rows, with the tags declared and the table laid out as given."""
+    from orcapod.sources import ArrowTableSource
+
+    fields = GROUP_MEMBER_ORDER_FIELDS
+    table = pa.table(
+        {name: pa.array(fields[name][2], fields[name][0]) for name in layout},
+        schema=pa.schema(
+            [
+                pa.field(name, fields[name][0], nullable=fields[name][1])
+                for name in layout
+            ]
+        ),
+    )
+    return ArrowTableSource(
+        table,
+        tag_columns=tag_columns,
+        tag_only_columns=True,
+        source_id="golden_group_member_order",
+    )
+
+
+GROUP_MEMBER_ORDER_ARRANGEMENTS: dict[str, tuple[list[str], list[str], list[str]]] = {
+    # name: (tag_columns, table layout, by)
+    "tags_first": (
+        ["g", "k", "x", "y"],
+        ["g", "k", "x", "y", "w", "n", "s"],
+        ["g", "k"],
+    ),
+    "reversed": (["y", "x", "k", "g"], ["s", "n", "w", "y", "x", "k", "g"], ["k", "g"]),
+    "interleaved": (
+        ["k", "y", "g", "x"],
+        ["w", "k", "s", "y", "n", "g", "x"],
+        ["g", "k"],
+    ),
+}
+"""Arrangements of one input whose ``GroupBy`` entries must be equal (ITL-1226):
+``tests/test_hashing/golden/test_group_by_arrangements.py`` asserts it."""
+
+
+@case("pipeline", "group_by_arrangement", provisional=("GroupBy",))
+def pipeline_group_by_arrangement() -> dict[str, Any]:
+    """Pin ``GroupBy`` over several tags and data columns, in several arrangements.
+
+    The default member order (the non-key tags in name order, then the record id),
+    an explicit ``member_order``, and a grouped stream grouped again. Every
+    arrangement of the input's columns and of ``by`` pins the same values.
+    """
+    from orcapod.operators import GroupBy
+
+    out: dict[str, Any] = {}
+    for name, (tags, layout, by) in GROUP_MEMBER_ORDER_ARRANGEMENTS.items():
+        source = _group_member_order_source(tags, layout)
+        out.update(_prefixed(f"default.{name}", stream_summary(GroupBy(by=by)(source))))
+        out.update(
+            _prefixed(
+                f"member_order_y.{name}",
+                stream_summary(GroupBy(by=by, member_order=["y"])(source)),
+            )
+        )
+        out.update(
+            _prefixed(
+                f"grouped_again.{name}",
+                stream_summary(GroupBy(by=["g"])(GroupBy(by=by)(source))),
+            )
+        )
+    return out
+
+
+# GroupBy over a float key with NaN and -0.0 (ITL-1234)
+# ---------------------------------------------------------------------------
+
+
+@case("pipeline", "group_by_nan_keys", provisional=("GroupBy",))
+def pipeline_group_by_nan_keys() -> dict[str, Any]:
+    """Pin ``GroupBy`` over a float key whose NaN and zero values differ in bits.
+
+    The three NaN keys (the canonical quiet NaN, one with the sign bit set, one with
+    a payload) form one group, which emits the canonical NaN; ``0.0`` and ``-0.0``
+    form one group, which emits ``0.0``; the null keys form one group.
+    """
+    from orcapod.operators import GroupBy
+    from orcapod.sources import ArrowTableSource
+
+    key_bits = [
+        0xFFF8000000000000,
+        0x8000000000000000,
+        0x7FF8000000000001,
+        None,
+        0x0,
+        0x7FF8000000000000,
+        None,
+    ]
+    table = pa.table(
+        {
+            "k": pa.array(key_bits, pa.uint64()).view(pa.float64()),
+            "t": pa.array([1, 2, 3, 4, 5, 6, 7], pa.int64()),
+            "v": pa.array([10, 20, 30, 40, 50, 60, 70], pa.int64()),
+        }
+    )
+    source = ArrowTableSource(
+        table,
+        tag_columns=["k", "t"],
+        tag_only_columns=True,
+        source_id="golden_group_by_nan_keys",
+    )
+    grouped = GroupBy(by=["k"])(source)
+    out = stream_summary(grouped)
+    out.update(_group_key_identity(grouped, pa.uint64()))
+
+    # A data-tag key of float32 (the key is data too): a signaling NaN, whose bits are
+    # the smallest of the NaN group, is emitted bit for bit; the key's data hash and
+    # its folded source-info token are pinned with the rest.
+    data_tag_bits = [0x7FC00000, 0x80000000, 0x7F800001, None, 0x0, 0xFFC00000]
+    data_tag_table = pa.table(
+        {
+            "k": pa.array(data_tag_bits, pa.uint32()).view(pa.float32()),
+            "t": pa.array([1, 2, 3, 4, 5, 6], pa.int64()),
+            "v": pa.array([10, 20, 30, 40, 50, 60], pa.int64()),
+        }
+    )
+    data_tag_source = ArrowTableSource(
+        data_tag_table,
+        tag_columns=["k", "t"],
+        tag_only_columns=["t"],
+        source_id="golden_group_by_nan_keys_data_tag",
+    )
+    data_tag_grouped = GroupBy(by=["k"])(data_tag_source)
+    out.update(
+        _prefixed(
+            "data_tag_key",
+            {
+                **stream_summary(data_tag_grouped),
+                **_group_key_identity(data_tag_grouped, pa.uint32()),
+            },
+        )
+    )
+    return out
+
+
+def _group_key_identity(stream: Any, unsigned: Any) -> dict[str, Any]:  # pyright: ignore[reportExplicitAny]  # a stream and an Arrow type
+    """Per row of a grouping on ``k``: the tag hash, the key's bits and its source info.
+
+    ``stream_summary`` keys a row by its tag values, where every NaN reads ``NaN``;
+    the bits and the tag hash pin which NaN (or which zero) the group emits.
+    """
+    out: dict[str, Any] = {}
+    bits = stream.as_table().column("k").combine_chunks().view(unsigned).to_pylist()
+    for (tag, data), key_bits in zip(stream.iter_data(), bits, strict=True):
+        row = _row_key(tag.as_dict())
+        out[f"row[{row}].tag_hash"] = tag.content_hash().to_string()
+        out[f"row[{row}].key_bits"] = None if key_bits is None else f"{key_bits:x}"
+        source_info = data.as_dict(all_info=True).get("_source_k")
+        if source_info is not None:
+            out[f"row[{row}]._source_k"] = _jsonable(source_info)
     return out

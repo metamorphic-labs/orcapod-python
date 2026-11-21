@@ -10,6 +10,7 @@ from __future__ import annotations
 import _thread
 import asyncio
 import signal
+import sys
 import threading
 import time
 import warnings
@@ -17,12 +18,15 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
+from typing_extensions import override
+
 import pyarrow as pa
 import pytest
 
 from orcapod import PipelineJob, function_pod
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
+from orcapod.pipeline.observer import NoOpObserver
 from orcapod.sources import DictSource
 
 # Columns that differ between any two runs by design, also between two script runs: the
@@ -285,12 +289,19 @@ after_calls: list[int] = []
 
 @function_pod(output_keys="y")
 def stuck_on_first_row(x: int) -> int:
-    """Row 0 presses the interrupt button twice and does not return until released."""
+    """Row 0 presses the interrupt button twice; no row returns until released.
+
+    Every row waits for the release, not only row 0: a row that returned would reach
+    ``after``, and a row of ``after`` still in progress when the cancellation lands is
+    named in the warning too (ITL-1192), so the nodes named would depend on timing
+    (ITL-1229).
+    """
     stuck_calls.append(x)
-    if x == 0 and press_interrupt.is_set():
-        _thread.interrupt_main()  # first press: cancels the run, which then waits
-        # Second press, while the run waits for this function to return.
-        threading.Timer(1.0, _thread.interrupt_main).start()
+    if press_interrupt.is_set():
+        if x == 0:
+            _thread.interrupt_main()  # first press: cancels the run, which then waits
+            # Second press, while the run waits for the functions to return.
+            threading.Timer(1.0, _thread.interrupt_main).start()
         _ = stuck_release.wait(timeout=30)
     return x
 
@@ -302,9 +313,14 @@ def after_stuck(y: int) -> int:
     return y + 1
 
 
+# Fewer rows than the smallest default thread pool (one CPU plus four threads), so every
+# row of ``stuck_on_first_row`` has a thread while all of them wait for the release.
+N_STUCK_ROWS = 4
+
+
 def make_stuck_job(store: Any) -> PipelineJob:
-    """Six rows through ``stuck_on_first_row`` and then ``after_stuck``."""
-    rows = [{"k": f"r{i}", "x": i} for i in range(6)]
+    """Four rows through ``stuck_on_first_row`` and then ``after_stuck``."""
+    rows = [{"k": f"r{i}", "x": i} for i in range(N_STUCK_ROWS)]
     job = PipelineJob(name="stuck_demo", database=store)
     with job:
         source = DictSource(
@@ -331,9 +347,9 @@ def test_second_interrupt_returns_and_a_late_function_writes_nothing(
 ) -> None:
     """A second interrupt returns at once; the function returning later stores nothing.
 
-    The first interrupt cancels the run, which then waits for row 0's function, still
-    running on a thread where it cannot be interrupted. The second interrupt returns
-    control with a warning naming the node. When the function returns afterwards, no
+    The first interrupt cancels the run, which then waits for the node's functions, still
+    running on threads where they cannot be interrupted. The second interrupt returns
+    control with a warning naming the node. When the functions return afterwards, no
     database write happens and no row reaches the next node, and row 0's result is never
     stored: a later run computes it.
     """
@@ -384,6 +400,176 @@ def test_second_interrupt_returns_and_a_late_function_writes_nothing(
     rerun = make_stuck_job(inner)
     _ = rerun.run()
     assert 0 in stuck_calls
+
+
+run_ended = threading.Event()
+next_row_entered = threading.Event()
+next_row_returned = threading.Event()
+next_row_threads: list[threading.Thread] = []
+next_row_saw_run_end: list[bool] = []
+second_press_helpers: list[threading.Thread] = []
+second_press_stop = threading.Event()
+second_press_lock = threading.Lock()
+
+
+class RunEndSignal(NoOpObserver):
+    """Sets ``run_ended`` when the run ends: after a cancellation, once every row task is gone."""
+
+    @override
+    def on_run_end(self, run_id: str) -> None:
+        """Signal the end of the run."""
+        run_ended.set()
+
+
+class NamedANodeWhoseFunctionReturned(Exception):
+    """The second-interrupt warning named a node whose function had returned (ITL-1192)."""
+
+
+def pool_thread_is_done(thread: threading.Thread) -> bool:
+    """Whether the thread-pool ``thread`` has finished the work item it ran.
+
+    It has once it is back in its loop waiting for work, or has ended (the cancelled
+    run shuts its thread pool down): the function and anything around it have returned.
+    """
+    if not thread.is_alive() or thread.ident is None:
+        return True
+    frame = sys._current_frames().get(thread.ident)  # pyright: ignore[reportPrivateUsage]  # the standard way to read another thread's frame
+    return frame is None or frame.f_code.co_name == "_worker"
+
+
+def caller_waits_for_the_run() -> bool:
+    """Whether the main thread is blocked in the orchestrator's wait for the run's thread.
+
+    Asked after the cancelled run has ended, so the wait is the one after the first
+    interrupt: the main thread cancels the run only after leaving the first wait.
+    """
+    ident = threading.main_thread().ident
+    frame = sys._current_frames().get(ident) if ident is not None else None  # pyright: ignore[reportPrivateUsage]  # the standard way to read another thread's frame
+    while frame is not None:
+        code = frame.f_code
+        if code.co_name == "_wait_until" and code.co_filename.endswith(
+            "async_orchestrator.py"
+        ):
+            return True
+        frame = frame.f_back
+    return False
+
+
+def press_interrupt_once_next_row_returned() -> None:
+    """The second press, once the next row's work is done and the caller waits again.
+
+    Does not press when that never happens (the test then fails rather than reach the
+    expected failure), nor once the test has stopped it (``second_press_stop``), so it
+    never interrupts the test's cleanup or a later test.
+    """
+    if not next_row_returned.wait(timeout=30):
+        return
+    deadline = time.monotonic() + 30
+    while not (pool_thread_is_done(next_row_threads[0]) and caller_waits_for_the_run()):
+        if time.monotonic() > deadline or second_press_stop.is_set():
+            # No press: the run then ends without the warning, and the test fails.
+            return
+        time.sleep(0.01)
+    with second_press_lock:
+        if not second_press_stop.is_set():
+            _thread.interrupt_main()
+
+
+@function_pod(output_keys="y")
+def stuck_until_next_row_runs(x: int) -> int:
+    """Row 0 presses the interrupt button once the next node's row is in its function."""
+    if x == 0:
+        _ = next_row_entered.wait(timeout=30)
+        _thread.interrupt_main()  # first press: cancels the run, which then waits
+        helper = threading.Thread(target=press_interrupt_once_next_row_returned)
+        second_press_helpers.append(helper)
+        helper.start()
+        _ = stuck_release.wait(timeout=30)
+    return x
+
+
+@function_pod(output_keys="z")
+def returns_after_the_run_ended(y: int) -> int:
+    """In progress when the cancellation lands; returns once the cancelled run has ended."""
+    next_row_threads.append(threading.current_thread())
+    next_row_entered.set()
+    next_row_saw_run_end.append(run_ended.wait(timeout=30))
+    next_row_returned.set()
+    return y + 1
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=NamedANodeWhoseFunctionReturned,
+    reason=(
+        "ITL-1192: a row task cancelled while its function runs gets no end event, so "
+        "the warning names its node although the function has returned"
+    ),
+)
+@pytest.mark.usefixtures("interrupt_raises_keyboard_interrupt")
+def test_second_interrupt_does_not_name_a_node_whose_function_returned() -> None:
+    """The warning names only the nodes whose functions have not returned.
+
+    Two rows: row 0 stays in ``stuck``, row 1 goes on to ``after``. Row 1 of ``after`` is
+    in its function when the first interrupt cancels the run; the function returns once
+    the cancelled run has ended, and the interrupt is pressed again only when its pool
+    thread has finished that work and the caller is back in its wait for the run, while
+    row 0 of ``stuck`` still runs. Every step waits for the one before, so the outcome
+    does not depend on timing. Today the warning names ``after``
+    too: a known defect (ITL-1192), pinned here so the fix flips this test. Only that
+    warning, naming exactly ``stuck`` and ``after``, is the expected failure; any other
+    failed check, or any other wrong warning, fails the test.
+    """
+    for event in (
+        stuck_release,
+        run_ended,
+        next_row_entered,
+        next_row_returned,
+        second_press_stop,
+    ):
+        event.clear()
+    next_row_threads.clear()
+    next_row_saw_run_end.clear()
+    second_press_helpers.clear()
+    rows = [{"k": f"r{i}", "x": i} for i in range(2)]
+    job = PipelineJob(name="returned_demo", database=InMemoryArrowDatabase())
+    with job:
+        source = DictSource(
+            data=rows, tag_columns=["k"], tag_only_columns=True, source_id="rows"
+        )
+        stuck = stuck_until_next_row_runs.pod(source, label="stuck")
+        _ = returns_after_the_run_ended.pod(stuck, label="after")
+
+    async def notebook_cell() -> None:
+        """A notebook cell: the job run inside the kernel's running loop."""
+        _ = job.run(orchestrator=AsyncPipelineOrchestrator(), observer=RunEndSignal())
+
+    loop = asyncio.new_event_loop()
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(KeyboardInterrupt):
+                loop.run_until_complete(notebook_cell())
+    finally:
+        with second_press_lock:
+            second_press_stop.set()
+        for helper in second_press_helpers:
+            helper.join(timeout=30)
+        loop.close()
+        stuck_release.set()
+        deadline = time.monotonic() + 30
+        while bridge_threads() and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+    assert next_row_returned.is_set()
+    assert len(next_row_threads) == 1, next_row_threads
+    assert next_row_saw_run_end == [True], "the cancelled run did not end"
+    messages = [str(w.message) for w in caught if w.category is RuntimeWarning]
+    assert len(messages) == 1, messages
+    # The known defect, exactly; any other wrong warning fails the assertion below.
+    if "but a function in nodes 'stuck', 'after' has not returned yet" in messages[0]:
+        raise NamedANodeWhoseFunctionReturned(messages[0])
+    assert "but a function in node 'stuck' has not returned yet" in messages[0]
 
 
 async def async_stuck_on_first_row(x: int) -> int:

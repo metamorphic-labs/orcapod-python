@@ -4,8 +4,9 @@ Usage::
 
     uv run python tests/test_hashing/golden/generate_golden_hashes.py            # add
     uv run python tests/test_hashing/golden/generate_golden_hashes.py --check    # report
-    uv run python tests/test_hashing/golden/generate_golden_hashes.py --release 0.3.0
+    uv run python tests/test_hashing/golden/generate_golden_hashes.py --release 0.4.0
     uv run python tests/test_hashing/golden/generate_golden_hashes.py --remove <entry>
+    uv run python tests/test_hashing/golden/generate_golden_hashes.py --relocate
 
 The golden values of the current data context live in
 ``tests/test_hashing/golden/data/<folder>/<group>-NN.json``, and the manifest of the data
@@ -20,8 +21,18 @@ key, or embeds in a column name or a database table path. A changed value means 
 by an earlier release is no longer found, is keyed differently, or is read under another
 column name. **A changed value is a breaking change.**
 
-The rules (developer, November 15, 2026, ITL-946):
+The rules (developer, November 15, 2026, ITL-946; reopened November 17, 2026, ITL-1255):
 
+0. Data context v1 is open until the 0.4.0 release. 0.3.0 was withdrawn (2026-11-17) before
+   anyone used it: its release revision is out of the history and its pins are kept under
+   ``withdrawn`` in ``released_manifests.json``, so no file is released today. Until 0.4.0,
+   a change to any v1 value needs the developer's approval of the exact list of entries
+   that move, each explained; it is made with ``--remove`` then ``--add`` (rule 4). 0.4.0
+   freezes v1 with ``--release 0.4.0``. A pre-release (``0.4.0rc1``) freezes nothing
+   (developer, November 21, 2026, ITL-1329): it carries the hashes intended to be final,
+   ``--release`` refuses it, and the Release workflow publishes it without the release step.
+   Between a candidate and the final release a value changes only for a blocking reason,
+   with the developer's approval of the exact list, and a new candidate follows.
 1. A golden file listed by a released revision never changes and is never removed. This
    script never rewrites one.
 2. Adding values is allowed in any release. ``--add`` (the default) writes the entries the
@@ -37,6 +48,16 @@ The rules (developer, November 15, 2026, ITL-946):
    and a written migration assessment: ``--remove <entry>`` takes the entry out of its
    unreleased file and records that file again in the open revision (it refuses an entry a
    release lists), then ``--add`` writes the new value.
+
+5. Provisional operators (``orcapod.operators.PROVISIONAL_OPERATORS``, ITL-1266) are outside
+   the freeze. A case that depends on one declares it (``@case(..., provisional=(...))``);
+   its entries go to ``<folder>/provisional/<group>.json``, which the manifest lists in
+   ``golden.provisional``, outside the history, so no release freezes them. Their values
+   are checked like every other and change only with the developer's approval of the exact
+   list (``--remove`` then ``--add``), without a new data context. ``--relocate`` moves
+   pinned entries, values unchanged, to the kind of file their case declares: out of an
+   unreleased frozen file into the provisional file, or, when an operator leaves the group
+   before a release, into the open frozen file of its group.
 
 Never edit a golden file to make a failing test pass. If a test fails and you did not mean to
 change a hash, the code change is the bug.
@@ -56,8 +77,8 @@ Releasing
 ``--release X.Y.Z`` is the golden step of a release pull request: it appends the release
 revision (``added`` empty), pins its digest under ``releases`` in
 ``src/orcapod/contexts/released_manifests.json``, and, at the data context's first release,
-sets ``released_in`` and pins the digest of the manifest without ``golden``. It computes no
-hash. Try it on a copy first with ``--root`` (``store.copy_tree`` makes one).
+sets ``released_in`` and pins the digest of the manifest without ``golden``. It keeps the
+``withdrawn`` records and refuses a withdrawn version. It computes no hash. Try it on a copy first with ``--root`` (``store.copy_tree`` makes one).
 
 Comparing releases
 ------------------
@@ -118,8 +139,93 @@ def _require_sound(root: pathlib.Path, version: str) -> None:
         )
 
 
+def _provisional_listing(manifest: dict[str, Any]) -> dict[str, str]:
+    """A copy of the manifest's ``golden.provisional`` listing."""
+    return dict(manifest["golden"][store.PROVISIONAL])
+
+
+def _set_provisional_listing(manifest: dict[str, Any], listing: dict[str, str]) -> None:
+    manifest["golden"][store.PROVISIONAL] = dict(sorted(listing.items()))
+
+
+def _open_frozen_file(
+    folder: pathlib.Path,
+    files: dict[str, list[pathlib.Path]],
+    released: set[str],
+    group: str,
+) -> pathlib.Path:
+    """The frozen file new entries of ``group`` go to.
+
+    The newest file of the group when no release lists it, otherwise a new
+    ``<group>-NN.json`` with the next counter.
+    """
+    existing = files.get(group, [])
+    latest = existing[-1] if existing else None
+    if latest is not None and latest.name not in released:
+        return latest
+    number = 1
+    if latest is not None:
+        match = store.FILE_NAME.match(latest.name)
+        assert match is not None
+        number = int(match["number"]) + 1
+    if number > 99:
+        raise SystemExit(f"{group} has no free file counter")
+    return folder / f"{group}-{number:02d}.json"
+
+
+class _Plan:
+    """Files to write and the history and listing that record them; nothing written yet."""
+
+    def __init__(self, folder: pathlib.Path, manifest: dict[str, Any]) -> None:
+        self.folder = folder
+        self.history: list[dict[str, Any]] = manifest["golden"]["history"]
+        self.listing = _provisional_listing(manifest)
+        self.contents: dict[pathlib.Path, dict[str, Any]] = {}
+
+    def values(self, path: pathlib.Path) -> dict[str, Any]:
+        """The planned entries of a file, read from disk on first use."""
+        if path not in self.contents:
+            self.contents[path] = dict(store.read_json(path)) if path.exists() else {}
+        return self.contents[path]
+
+    def write(self, manifest: dict[str, Any], manifest_path: pathlib.Path) -> None:
+        """Write the planned files, record them, and write the manifest."""
+        provisional = store.provisional_folder(self.folder)
+        writes: list[tuple[pathlib.Path, bytes | None]] = []
+        for path, values in self.contents.items():
+            if path.parent == provisional:
+                if values:
+                    data = dump(values).encode("utf-8")
+                    self.listing[path.name] = hashlib.sha256(data).hexdigest()
+                    writes.append((path, data))
+                else:
+                    # An emptied provisional file is removed, with its listing.
+                    self.listing.pop(path.name, None)
+                    writes.append((path, None))
+            else:
+                data = dump(values).encode("utf-8")
+                self.history = store.with_file(
+                    self.history, path.name, hashlib.sha256(data).hexdigest(), _today()
+                )
+                writes.append((path, data))
+        for path, data in writes:
+            if data is None:
+                path.unlink(missing_ok=True)
+                print(f"removed {path}")
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                _ = path.write_bytes(data)
+                print(f"wrote {path}")
+        manifest["golden"]["history"] = self.history
+        _set_provisional_listing(manifest, self.listing)
+        store.write_json(manifest_path, manifest)
+
+
 def add(root: pathlib.Path, version: str, groups: list[str]) -> list[str]:
     """Write the computed entries that no golden file pins yet.
+
+    An entry of a case that declares a provisional feature goes to the provisional file of
+    its group; any other to the group's open frozen file.
 
     Args:
         root: Project root.
@@ -127,7 +233,7 @@ def add(root: pathlib.Path, version: str, groups: list[str]) -> list[str]:
         groups: Groups to compute.
 
     Returns:
-        Names of the files written.
+        Names of the files written, relative to the golden folder.
     """
     _require_sound(root, version)
     path = store.manifest_path(root, version)
@@ -136,13 +242,13 @@ def add(root: pathlib.Path, version: str, groups: list[str]) -> list[str]:
     pinned = store.load_folder(folder)
     owner = {entry: group for group, values in pinned.items() for entry in values}
     files = store.group_files(folder)
-    history = manifest["golden"]["history"]
-    released = store.released_files(history)
+    released = store.released_files(manifest["golden"]["history"])
+    plan = _Plan(folder, manifest)
     # Compute and plan every group before writing anything, so a failure leaves the files
     # and their history as they were.
-    planned: list[tuple[pathlib.Path, bytes, int]] = []
+    counts: dict[pathlib.Path, int] = {}
     for group in groups:
-        live = cases.compute_group(group)
+        live, provisional = cases.compute_group_kinds(group)
         clash = sorted(e for e in live if owner.get(e, group) != group)
         if clash:
             raise SystemExit(f"{group} entries pinned under another group: {clash}")
@@ -151,35 +257,32 @@ def add(root: pathlib.Path, version: str, groups: list[str]) -> list[str]:
             continue
         # An entry name appears once in a folder: claim it before the next group plans.
         owner.update(dict.fromkeys(new, group))
-        existing = files.get(group, [])
-        latest = existing[-1] if existing else None
-        if latest is not None and latest.name not in released:
-            target = latest
-            values = {**store.read_json(latest), **new}
-        else:
-            number = 1
-            if latest is not None:
-                match = store.FILE_NAME.match(latest.name)
-                assert match is not None
-                number = int(match["number"]) + 1
-            if number > 99:
-                raise SystemExit(f"{group} has no free file counter")
-            target = folder / f"{group}-{number:02d}.json"
-            values = new
-        data = dump(values).encode("utf-8")
-        history = store.with_file(
-            history, target.name, hashlib.sha256(data).hexdigest(), _today()
-        )
-        planned.append((target, data, len(new)))
-    if not planned:
+        frozen_target = _open_frozen_file(folder, files, released, group)
+        provisional_target = store.provisional_folder(folder) / f"{group}.json"
+        for entry, value in new.items():
+            target = provisional_target if entry in provisional else frozen_target
+            plan.values(target)[entry] = value
+            counts[target] = counts.get(target, 0) + 1
+    if not plan.contents:
         print("nothing to add: every computed entry is pinned")
         return []
-    for target, data, count in planned:
-        _ = target.write_bytes(data)
-        print(f"added {count} entries to {target}")
-    manifest["golden"]["history"] = history
-    store.write_json(path, manifest)
-    return [target.name for target, _, _ in planned]
+    for target, count in counts.items():
+        print(f"adding {count} entries to {target}")
+    plan.write(manifest, path)
+    return [target.relative_to(folder).as_posix() for target in plan.contents]
+
+
+def _misplaced(
+    pinned_provisional: set[str], live: dict[str, Any], provisional: frozenset[str]
+) -> tuple[list[str], list[str]]:
+    """Entries pinned in the wrong kind of file: (to make provisional, to freeze)."""
+    to_provisional = sorted(
+        e for e in live if e in provisional and e not in pinned_provisional
+    )
+    to_frozen = sorted(
+        e for e in pinned_provisional if e in live and e not in provisional
+    )
+    return to_provisional, to_frozen
 
 
 def check(root: pathlib.Path, version: str, groups: list[str]) -> list[str]:
@@ -191,16 +294,19 @@ def check(root: pathlib.Path, version: str, groups: list[str]) -> list[str]:
         groups: Groups to compute.
 
     Returns:
-        One sentence per difference or rule problem.
+        One sentence per difference or rule problem, including an entry pinned in a
+        frozen file whose case is provisional, or the other way round.
     """
     problems = store.tree_problems(root, version)
     manifest = store.read_json(store.manifest_path(root, version))
+    folder = store.golden_folder(root, manifest)
     try:
-        pinned = store.load_folder(store.golden_folder(root, manifest))
+        pinned = store.load_folder(folder)
+        pinned_provisional = store.load_provisional(folder)
     except store.GoldenLayoutError as exc:
         return [*problems, str(exc)]
     for group in groups:
-        live = cases.compute_group(group)
+        live, provisional = cases.compute_group_kinds(group)
         pins = pinned.get(group, {})
         skipped = cases.unavailable_entries(group)
         for entry in sorted(set(live) | set(pins)):
@@ -214,6 +320,19 @@ def check(root: pathlib.Path, version: str, groups: list[str]) -> list[str]:
                 problems.append(
                     f"{group}:{entry} moved: pinned {pins[entry]!r}, live {live[entry]!r}"
                 )
+        here = set(pinned_provisional.get(group, {}))
+        to_provisional, to_frozen = _misplaced(here, live, provisional)
+        problems.extend(
+            f"{group}:{e} is pinned in a frozen file, but its case is provisional: "
+            "run generate_golden_hashes.py --relocate"
+            for e in to_provisional
+            if e in pins
+        )
+        problems.extend(
+            f"{group}:{e} is pinned in the provisional file, but its case is not "
+            "provisional: run generate_golden_hashes.py --relocate"
+            for e in to_frozen
+        )
     return problems
 
 
@@ -222,7 +341,8 @@ def remove(root: pathlib.Path, version: str, entries: list[str]) -> list[str]:
 
     The first step of an approved change to an unreleased value: remove the entry, then
     ``--add`` writes its new value. An entry in a file a release lists is refused, and
-    nothing is written unless every entry can be removed.
+    nothing is written unless every entry can be removed. A provisional file is never
+    listed by a release; one left without entries is removed.
 
     Args:
         root: Project root.
@@ -230,47 +350,99 @@ def remove(root: pathlib.Path, version: str, entries: list[str]) -> list[str]:
         entries: Entry names to remove.
 
     Returns:
-        Names of the files rewritten.
+        Names of the files rewritten, relative to the golden folder.
     """
     _require_sound(root, version)
     path = store.manifest_path(root, version)
     manifest = store.read_json(path)
     folder = store.golden_folder(root, manifest)
-    history = manifest["golden"]["history"]
-    released = store.released_files(history)
-    where = {
-        entry: file
-        for files in store.group_files(folder).values()
-        for file in files
-        for entry in store.read_json(file)
-    }
+    released = store.released_files(manifest["golden"]["history"])
+    files = [
+        *(file for paths in store.group_files(folder).values() for file in paths),
+        *store.provisional_files(folder).values(),
+    ]
+    where = {entry: file for file in files for entry in store.read_json(file)}
     unknown = sorted(e for e in entries if e not in where)
     if unknown:
         raise SystemExit(f"no golden file pins {unknown}; nothing written")
-    frozen = sorted(e for e in entries if where[e].name in released)
+    frozen = sorted(
+        e for e in entries if where[e].parent == folder and where[e].name in released
+    )
     if frozen:
         raise SystemExit(
             f"{frozen} are in files a release lists; a released value never changes "
             "(a change needs a new data context version); nothing written"
         )
-    planned: dict[pathlib.Path, dict[str, Any]] = {}
+    plan = _Plan(folder, manifest)
     for entry in dict.fromkeys(entries):
-        file = where[entry]
-        values = planned.setdefault(file, store.read_json(file))
-        _ = values.pop(entry)
-    writes: list[tuple[pathlib.Path, bytes]] = []
-    for file, values in planned.items():
-        data = dump(values).encode("utf-8")
-        history = store.with_file(
-            history, file.name, hashlib.sha256(data).hexdigest(), _today()
+        _ = plan.values(where[entry]).pop(entry)
+    plan.write(manifest, path)
+    return [file.relative_to(folder).as_posix() for file in plan.contents]
+
+
+def relocate(root: pathlib.Path, version: str, groups: list[str]) -> list[str]:
+    """Move pinned entries to the kind of file their case declares; values unchanged.
+
+    An entry of a provisional case pinned in a frozen file moves to the provisional file
+    of its group: refused, with nothing written, for a file a release lists, since a
+    frozen value never leaves. An entry pinned in a provisional file whose case no longer
+    declares a provisional feature (its operator left the group) moves to the open frozen
+    file of its group, to be frozen by the next release. Every value is copied as it is
+    pinned; nothing is computed into a file.
+
+    Args:
+        root: Project root.
+        version: Data context version.
+        groups: Groups whose cases are computed to learn their kinds.
+
+    Returns:
+        Names of the files rewritten, relative to the golden folder.
+    """
+    _require_sound(root, version)
+    path = store.manifest_path(root, version)
+    manifest = store.read_json(path)
+    folder = store.golden_folder(root, manifest)
+    files = store.group_files(folder)
+    released = store.released_files(manifest["golden"]["history"])
+    pinned_provisional = store.load_provisional(folder)
+    where = {
+        entry: file
+        for paths in files.values()
+        for file in paths
+        for entry in store.read_json(file)
+    }
+    plan = _Plan(folder, manifest)
+    for group in groups:
+        live, provisional = cases.compute_group_kinds(group)
+        here = pinned_provisional.get(group, {})
+        to_provisional, to_frozen = _misplaced(set(here), live, provisional)
+        to_provisional = [e for e in to_provisional if e in where]
+        stuck = sorted(e for e in to_provisional if where[e].name in released)
+        if stuck:
+            raise SystemExit(
+                f"{stuck} are provisional but pinned in files a release lists; a "
+                "released value never leaves its file; nothing written"
+            )
+        provisional_file = store.provisional_folder(folder) / f"{group}.json"
+        for entry in to_provisional:
+            value = plan.values(where[entry]).pop(entry)
+            plan.values(provisional_file)[entry] = value
+        if to_frozen:
+            target = _open_frozen_file(folder, files, released, group)
+            for entry in to_frozen:
+                plan.values(target)[entry] = plan.values(provisional_file).pop(entry)
+        if to_provisional or to_frozen:
+            print(
+                f"{group}: {len(to_provisional)} entries to the provisional file, "
+                f"{len(to_frozen)} to a frozen file"
+            )
+    if not plan.contents:
+        print(
+            "nothing to relocate: every entry is in the kind of file its case declares"
         )
-        writes.append((file, data))
-    for file, data in writes:
-        _ = file.write_bytes(data)
-        print(f"removed entries from {file}")
-    manifest["golden"]["history"] = history
-    store.write_json(path, manifest)
-    return [file.name for file, _ in writes]
+        return []
+    plan.write(manifest, path)
+    return [file.relative_to(folder).as_posix() for file in plan.contents]
 
 
 def release(root: pathlib.Path, version: str, release_text: str) -> str:
@@ -295,6 +467,11 @@ def release(root: pathlib.Path, version: str, release_text: str) -> str:
     pin = pins[version]
     if name in pin["releases"]:
         raise SystemExit(f"{name} is already released")
+    if name in store.withdrawn_releases(pin):
+        raise SystemExit(
+            f"{name} was withdrawn and is never released again: a package index never "
+            "takes a version twice; release the next version"
+        )
     history = manifest["golden"]["history"]
     if not history:
         raise SystemExit("the golden history lists no file")
@@ -304,6 +481,7 @@ def release(root: pathlib.Path, version: str, release_text: str) -> str:
         manifest["released_in"] = name
     fixed = store.fixed_manifest_digest(manifest)
     pins[version] = {
+        **pin,
         "manifest": fixed,
         "releases": {**pin["releases"], name: history[-1]["digest"]},
     }
@@ -311,6 +489,146 @@ def release(root: pathlib.Path, version: str, release_text: str) -> str:
     store.write_json(store.pins_path(root), pins)
     print(f"released {name}: revision {history[-1]['digest']}, manifest {fixed}")
     return history[-1]["digest"]
+
+
+def refuse_pre_release(release_text: str) -> None:
+    """Refuse to run the release step for a pre-release (ITL-1329).
+
+    Only a final release freezes a data context; a pre-release carries the hashes intended
+    to be final and is published without the release step. The rule is the Release
+    workflow's gate, ``release_version`` in ``scripts/check_golden_tags.py`` (standard
+    library only, so the workflow runs it before installing anything), loaded from this
+    repository by path: ``scripts`` is not a package.
+
+    Args:
+        release_text: The version given to ``--release``.
+
+    Raises:
+        SystemExit: If ``release_text`` is a pre-release, or not a release version.
+    """
+    import importlib.util
+
+    script = _PROJECT_ROOT / "scripts" / "check_golden_tags.py"
+    spec = importlib.util.spec_from_file_location("check_golden_tags_script", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    try:
+        name, prerelease = module.release_version(release_text)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if prerelease:
+        raise SystemExit(
+            f"{name} is a pre-release: a pre-release never runs the release step, only a "
+            "final release freezes a data context (RELEASING.md, Pre-releases); nothing "
+            "was released"
+        )
+
+
+def _data_function_types_script(root: pathlib.Path) -> Any | None:
+    """The module ``scripts/data_function_types.py`` of ``root``.
+
+    Returns ``None`` for a root without the snapshot folder (a test's copy of the golden
+    store): it has nothing to check or pin.
+
+    Raises:
+        SystemExit: If the root has snapshots but not the script that checks and pins
+            them: a release would otherwise leave them open.
+    """
+    import importlib.util
+
+    snapshots = root / "src" / "orcapod" / "data_function_types"
+    script = root / "scripts" / "data_function_types.py"
+    if not snapshots.is_dir():
+        return None
+    if not script.is_file():
+        raise SystemExit(
+            f"{snapshots} holds data function type snapshots but {script} is missing: "
+            "they cannot be checked or pinned; nothing was released"
+        )
+    spec = importlib.util.spec_from_file_location("data_function_types_script", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def check_data_function_types(root: pathlib.Path) -> None:
+    """Refuse a release whose data function type snapshots are not sound (ITL-1259).
+
+    Runs before anything of the release is written, so that a snapshot to fix never
+    leaves the golden history released and the snapshots unpinned.
+
+    Args:
+        root: Project root.
+
+    Raises:
+        SystemExit: Naming every problem ``scripts/data_function_types.py --check``
+            finds.
+    """
+    module = _data_function_types_script(root)
+    if module is None:
+        return
+    problems = module.check(root / "src" / "orcapod" / "data_function_types")
+    if problems:
+        raise SystemExit(
+            "the data function type snapshots are not sound; nothing was released:\n"
+            + "\n".join(problems)
+        )
+
+
+def golden_release_recorded(
+    root: pathlib.Path, version: str, release_text: str
+) -> bool:
+    """Whether the golden step of ``release_text`` is recorded and nothing came after it.
+
+    True when the pins record the release and the last revision of the golden history
+    is that release's revision (the digest the pins name): a release step whose snapshot
+    pinning failed may then be run again to finish it. Any later change to the golden
+    history makes it False, and the release is refused as before.
+
+    Args:
+        root: Project root.
+        version: Data context version.
+        release_text: The library version, e.g. ``0.4.0``.
+
+    Returns:
+        Whether the golden release is recorded and current.
+    """
+    try:
+        name = store.normalize_release(release_text)
+    except ValueError:
+        return False
+    pins = store.read_json(store.pins_path(root))
+    digest = pins.get(version, {}).get("releases", {}).get(name)
+    if digest is None:
+        return False
+    history = store.read_json(store.manifest_path(root, version))["golden"]["history"]
+    return (
+        bool(history)
+        and history[-1].get("release") == name
+        and (history[-1].get("digest") == digest)
+    )
+
+
+def pin_data_function_types(root: pathlib.Path, release_text: str) -> None:
+    """Pin the open data function type snapshots as released (ITL-1259).
+
+    The same release step as the golden files: ``scripts/data_function_types.py``
+    pins every open snapshot under ``src/orcapod/data_function_types``. A root without
+    that folder (a test's copy of the golden store) has nothing to pin. Run
+    ``check_data_function_types`` first.
+
+    Args:
+        root: Project root.
+        release_text: The library version, e.g. ``0.4.0``.
+    """
+    module = _data_function_types_script(root)
+    if module is None:
+        return
+    snapshots = root / "src" / "orcapod" / "data_function_types"
+    for relative in module.release(snapshots, release_text):
+        print(f"pinned data function type snapshot {relative} for {release_text}")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -348,6 +666,14 @@ def main(argv: list[str] | None = None) -> None:
         ),
     )
     _ = mode.add_argument(
+        "--relocate",
+        action="store_true",
+        help=(
+            "move pinned entries, values unchanged, between the frozen files and the "
+            "provisional files, as their cases declare (ITL-1266)"
+        ),
+    )
+    _ = mode.add_argument(
         "--stdout",
         action="store_true",
         help="print all computed groups as one JSON object; write nothing",
@@ -373,7 +699,21 @@ def main(argv: list[str] | None = None) -> None:
         _ = remove(args.root, version, args.remove)
         return
     if args.release is not None:
-        _ = release(args.root, version, args.release)
+        refuse_pre_release(args.release)
+        check_data_function_types(args.root)
+        module = _data_function_types_script(args.root)
+        snapshots = args.root / "src" / "orcapod" / "data_function_types"
+        if golden_release_recorded(args.root, version, args.release):
+            # A release step whose snapshot pinning failed: finish it, nothing else.
+            if module is None or not module.open_snapshots(snapshots):
+                raise SystemExit(f"{args.release} is already released")
+            _require_sound(args.root, version)
+            print(
+                f"the golden step of {args.release} is recorded; pinning the snapshots"
+            )
+        else:
+            _ = release(args.root, version, args.release)
+        pin_data_function_types(args.root, args.release)
         return
 
     unavailable = [g for g in args.group or [] if not cases.group_available(g)]
@@ -393,6 +733,9 @@ def main(argv: list[str] | None = None) -> None:
             g: cases.compute_group(g, allow_errors=args.allow_errors) for g in groups
         }
         _ = sys.stdout.write(dump(computed))
+        return
+    if args.relocate:
+        _ = relocate(args.root, version, groups)
         return
     if args.check:
         problems = check(args.root, version, groups)

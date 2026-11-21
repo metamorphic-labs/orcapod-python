@@ -1,8 +1,8 @@
 {
     "context_key": "std:v1:default",
     "version": "v1",
-    "description": "Data context of Orcapod v0.3: the hashing generation H1. Frozen when v0.3.0 is released, except its golden history, which only grows; editable in place while that release is prepared.",
-    "released_in": "0.3.0",
+    "description": "Data context std:v1, the hashing generation H1, first released in Orcapod 0.4.0. Frozen when 0.4.0 is released, except its golden history, which only grows; editable in place until then.",
+    "released_in": null,
     "previous": "std:v0.1:default",
     "file_hasher": {
         "_class": "orcapod.hashing.file_hashers.FileHasher",
@@ -167,6 +167,15 @@
                 ],
                 [
                     {
+                        "_type": "orcapod.hashing.orcapod_table.OrcapodTable"
+                    },
+                    {
+                        "_class": "orcapod.hashing.semantic_hashing.builtin_handlers.OrcapodTableHandler",
+                        "_config": {}
+                    }
+                ],
+                [
+                    {
                         "_type": "polars.Expr"
                     },
                     {
@@ -222,7 +231,7 @@
         "type_conversion": "type_conversion_v1"
     },
     "libraries": {
-        "starfix": "0.5.0 (hash format 2, digest prefix 000002): Arrow table and schema hashes",
+        "starfix": "0.6.0 or newer, the Rust implementation (hash format 2, digest prefix 000002): Arrow table and schema hashes, with normalize_negative_zero and normalize_nan explicitly on for the Arrow tables Orcapod builds (starfix's own default is off) and off for library values; stored values are never rewritten",
         "pyarrow": "23.0.1: conversion of Python values to Arrow types, which are hashed",
         "polars": "1.41.2: serialisation of filter expressions, which is hashed"
     },
@@ -230,41 +239,46 @@
         "folder": "v1",
         "history": [
             {
-                "date": "2026-11-16",
+                "date": "2026-11-21",
                 "release": null,
                 "added": {
-                    "arrow-01.json": "c66fa55619178f2631d04232555cd58059813e97e9ecd2b9de9e63699e60c964",
-                    "datagram-01.json": "598d4a2851819d76ba674e189222e61733ca1861ca82a59e990a8ee5e1b0a7b3",
-                    "pipeline-01.json": "ec0049a39e85645d59d9a276a17528bfa64a91f349aa0094052a6d55bc930be5",
-                    "schema-01.json": "79aa2a068e0724891cf43ee528ce8f569e65f08864faa5e34773bfc69ac9576e",
-                    "semantic-01.json": "8e5d9dfff461f9f1d6bdd49a3019e7bf6122e75d799d725b17531d31b080003c",
-                    "torch-01.json": "af2e8b68d66dffaa37e1d0ad75acd42f595d65b9fae00ddcde81bf9e13a265c8"
+                    "arrow-01.json": "fa69c71eca676cb308cb1f5eb1a8db23b6d3e31ed76f0f6b36b88d76915581d6",
+                    "datagram-01.json": "6fb0d0152535924cf0461cca1d8b46c0d1c4bf8e069c365ddf9b582a5ae853e7",
+                    "pipeline-01.json": "844e6d53cbcee78276acc0b2a35eac08af15a53af5e152d8bec0c3dffacfb4c8",
+                    "schema-01.json": "28cf99e17be5ceb8e1a407c16fe05a9b758150f9d8504ac82bd4de59cbb5d22b",
+                    "semantic-01.json": "3784a1353e9c818f57debc0c26f65fc1622e14e22f9004187a312b1c37033254",
+                    "torch-01.json": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
                 },
                 "previous": null,
-                "digest": "0a789cf9e8d1df9fb762d6dc2fabffcd3383cd6a21ef147e8c6583f963280c2e"
+                "digest": "31968049a3f2d71128c3376892a7ff909fd21bafe8af182a00c02916c478e4d1"
             },
             {
-                "date": "2026-11-17",
-                "release": "0.3.0",
-                "added": {},
-                "previous": "0a789cf9e8d1df9fb762d6dc2fabffcd3383cd6a21ef147e8c6583f963280c2e",
-                "digest": "6cdd29cdc6fa98df322931e2ab0ff9df151fdb47d3381adecd9f58fd55d2fb22"
-            },
-            {
-                "date": "2026-11-17",
+                "date": "2026-11-21",
                 "release": null,
                 "added": {
-                    "pipeline-02.json": "6d01f7186e09e8383c62f97e4063d1030a19e465248d85c401b966e62b587f0a"
+                    "pipeline-02.json": "9670ed5461361418da32112cfb84a695fb9e17d9fd7f1cb975634c29f125f54f"
                 },
-                "previous": "6cdd29cdc6fa98df322931e2ab0ff9df151fdb47d3381adecd9f58fd55d2fb22",
-                "digest": "19e2f1fcfd66a085a398d6bd8c80246e9f051f858877747260078cf5e3000ac6"
+                "previous": "31968049a3f2d71128c3376892a7ff909fd21bafe8af182a00c02916c478e4d1",
+                "digest": "2679c83cc942a759751e8e73afd19365c40ad99aedc6325f61d2dcacbbe22b7e"
             }
-        ]
+        ],
+        "provisional": {
+            "arrow.json": "a44e0f9b4312a2ac5edeedf9f3e35bda43a3ee012bd7c5a1e66f7269eaacd05e",
+            "datagram.json": "8182f8d7dbbdea27ad4dc29175be5a79a8a8d723b0513d6054e0b4d6d2634fd3",
+            "pipeline.json": "47ec5bf4623200644fb11d579e0931d289821cc0e2d257f61dfdc6cec6239402",
+            "schema.json": "56f5e9f0a6acaedfa29c6b78afafabba4b7255fed67923dcf2be0b9294abc65d",
+            "semantic.json": "a046be33210299869770043468c2ce5fab05ee32125e7e7e7bc6eb66d37a49b5",
+            "torch.json": "4691f15b9b4e2db3fd6fcf99ad06ab28a183c3ac84dc198aa448d06c784fb48a"
+        }
     },
     "changes": [
         {
             "definition": "arrow_hasher",
             "change": "starfix hash format 1 (starfix 0.4) to hash format 2 (starfix 0.5): every Arrow-derived hash value (ITL-910)"
+        },
+        {
+            "definition": "arrow_hasher",
+            "change": "starfix 0.6 (the Rust implementation; with the float options off byte-identical to 0.5.0, except two dictionary inputs 0.5.0 got wrong: a dictionary over a sliced nested fixed-size list, ITL-1223, and a dictionary whose empty dictionary has no offsets buffer) with the float rule for the Arrow tables Orcapod builds: -0.0 hashes as 0.0 and every NaN as the ordinary NaN; a pyarrow table given as a value is hashed strictly under its own label, arrow_strict_v1; library values unchanged (ITL-1179, ITL-1251)"
         },
         {
             "definition": "semantic_hasher",

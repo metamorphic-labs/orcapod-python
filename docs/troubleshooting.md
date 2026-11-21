@@ -32,6 +32,43 @@ it an explicit schema (for example `data_schema=` on `DictSource`).
 
 **Fix.** Leave at least one column out of `tag_columns`. A stream needs something to carry.
 
+### `InputValidationError: dictionary-encoded columns are not currently supported in Orcapod: - tag column '...' has type dictionary<...> (decoded: ...)`
+
+**Cause.** A column, tag or data, is dictionary-encoded, or holds a dictionary inside it (for
+example a list of dictionary values). This comes from an Arrow table built with
+`dictionary_encode()`, a pandas `Categorical` of strings, or a polars `Categorical` or `Enum`.
+Orcapod does not support such columns yet; the message names every one, with its role and the
+type it decodes to.
+
+**Fix.** Decode the column before building the source.
+
+With pyarrow, keep the field's name, nullability and metadata, and keep the table that
+`set_column` returns:
+
+- Take the field: `field = table.schema.field(name)`.
+- Take the decoded type: `decoded = field.type.value_type`. For a column that holds a
+  dictionary inside it (a struct with a dictionary field, a list of dictionary values), use
+  the decoded type the message gives instead, for example
+  `pa.struct([("k", pa.string()), ("n", pa.int64())])`.
+- Replace the column:
+  `table = table.set_column(table.schema.get_field_index(name), field.with_type(decoded), table[name].cast(decoded))`.
+
+Three kinds of column cannot be cast to their decoded type at once, so they need a step
+first (each recipe is tested in `tests/test_core/sources/test_dictionary_columns_refused.py`):
+
+- A dictionary whose values hold a dictionary: decode the top level of each chunk first,
+  `pa.chunked_array([chunk.dictionary_decode() for chunk in column.chunks]).cast(decoded)`.
+- A list view: cast it to a large list of the decoded items,
+  `column.cast(pa.large_list(<decoded item type>))` (a source or stream refuses list views
+  whatever they hold).
+- A run-end-encoded column: cast its values, then expand its runs, chunk by chunk:
+  `pc.run_end_decode(pa.RunEndEncodedArray.from_arrays(chunk.run_ends, chunk.values.cast(<decoded value type>)))`.
+
+With polars, keep the frame `with_columns` returns:
+`df = df.with_columns(pl.col(name).cast(pl.String))`. Or keep the data frame as a value in a cell:
+a pandas or polars `DataFrame` stored whole in one column is a library value, not a dictionary
+column. See [Arrow types of a source](concepts/sources.md#arrow-types-of-a-source).
+
 ### `TypeError: 'PosixPath' object is not iterable` from `CSVSource`
 
 **Cause.** `CSVSource` was given a `pathlib.Path` and no `source_id`. The file path is
@@ -113,10 +150,13 @@ compute a boolean column in a function pod and filter on it. See
 
 ### `AttributeError: 'PipelineJob' has no attribute 'show_graph'. Available node labels: [...]`
 
-**Cause.** `show_graph` is a method of the job's pipeline.
+**Cause.** `show_graph()` (and `render_graph()`, the Graphviz renderer) was removed,
+with Orcapod's dependencies on Graphviz and matplotlib. A `Pipeline` gives the same error,
+naming `'Pipeline'`.
 
-**Fix.** `job.pipeline.show_graph()`. It needs the Graphviz `dot` program; without it you
-get `ExecutableNotFound`.
+**Fix.** Show `job` (or `job.diagram()`) at the end of a notebook cell, `print(job.diagram())`
+for a text listing, or `job.diagram().save("pipeline.html")` for a page; the same works for a
+`Pipeline`. See [Seeing the graph](concepts/pipeline-job.md#seeing-the-graph).
 
 ### `FileNotFoundError: File: path does not exist: ...` / `IsADirectoryError: File: path is a directory: ...`
 
@@ -333,8 +373,10 @@ Reading a Delta table yourself with `deltalake.DeltaTable(...).to_pyarrow_table(
 
 - **`pygraphviz` fails to build** (`fatal error: 'graphviz/cgraph.h' file not found`). You
   are installing a version of Orcapod older than 0.2, which required the Graphviz
-  development headers. Install Orcapod 0.2 or newer.
-- **`ExecutableNotFound: failed to execute 'dot'`** when calling `show_graph()`. Install
-  Graphviz (`brew install graphviz`, `apt install graphviz`, or `conda install graphviz`),
-  or do without the picture.
+  development headers. Install Orcapod 0.2 or newer. Until 0.4.0 is released, a plain
+  `uv add orcapod` installs 0.1.4 (0.3.0 was withdrawn): install the development version,
+  `uv add git+https://github.com/metamorphic-labs/orcapod-python`.
 - **Python version.** Orcapod needs Python 3.11 or newer.
+- **A release candidate is not installed.** `uv add orcapod` (like `pip install orcapod`)
+  takes the latest stable release and skips pre-releases. Name the release candidate:
+  `uv add "orcapod==0.4.0rc1"`.

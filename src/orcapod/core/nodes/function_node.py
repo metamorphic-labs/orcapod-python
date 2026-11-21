@@ -28,9 +28,24 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 from orcapod import contexts
+from orcapod.core.function_pod import (
+    fall_through_tags,
+    function_input,
+    function_input_schema,
+    result_data_schema,
+    result_pod,
+    with_fall_through,
+)
+from orcapod.core.data_tags import (
+    mark_data_tags,
+    require_database_keeps_marker,
+    stored_data_tags,
+    without_tag_kind_marks,
+)
 from orcapod.channels import Channel, ReadableChannel, WritableChannel
 from orcapod.config import OrcapodConfig
 from orcapod.core.cached_function_pod import CachedFunctionPod
+from orcapod.core.data_function import declaration_for
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
@@ -91,7 +106,6 @@ from orcapod.protocols.observability_protocols import (
 )
 from orcapod.system_constants import (
     constants,
-    OLD_PIPELINE_DB_SCHEMA_VERSIONS,
     PIPELINE_DB_SCHEMA_VERSION,
     RESULT_DB_SCHEMA_VERSION,
 )
@@ -128,7 +142,7 @@ _PIPELINE_RECOMPUTATION_INDEX_COL = "__pipeline_recomputation_index"
 
 
 def _pipeline_meta_schema() -> pa.Schema:
-    """The bookkeeping columns of a function node's pipeline record (``pdb_v2``).
+    """The bookkeeping columns of a function node's pipeline record (``pdb_v1``).
 
     The record holds the tags, system tags and input source-info columns, then
     these. One definition for the writer (``add_pipeline_record``) and for the
@@ -336,8 +350,13 @@ def run_job_node(
         refuse_unloadable_inputs,
         run_with_dependencies,
     )
+    from orcapod.pipeline.restrictions import refuse_restriction_conflicts
     from orcapod.pipeline.run_summary import warn_row_failures
 
+    # A source read under two restrictions, or a caching operator over a restricted
+    # source, is refused before any source is checked and before anything is
+    # computed or written (ITL-1218).
+    refuse_restriction_conflicts([node])
     # Every source feeding the run first takes in any new data (ITL-1102).
     unchecked = check_sources([node])
     if node.holds_current_run(load_only=load_only):
@@ -408,8 +427,10 @@ class FunctionNodeBase(StreamBase):
             # Use the pod's exposed input schema (ctx excluded) rather than the
             # data function's full schema, because ctx is auto-injected per row.
             expected_data_schema = function_pod.input_data_schema
+            # Fall-through columns (ITL-1023) pass by the function.
             reason = schema_utils.schema_incompatibility(
-                incoming_data_types, expected_data_schema
+                function_input_schema(function_pod, incoming_data_types),
+                expected_data_schema,
             )
             if reason is not None:
                 raise ValueError(
@@ -446,6 +467,31 @@ class FunctionNodeBase(StreamBase):
             )
         self._table_scope = table_scope
         self._node_identity_path_cache: tuple[str, ...] | None = None
+
+    def declared_data_tags(self) -> tuple[str, ...]:
+        """Return the data-tags this node lets fall through, as it declares them.
+
+        A node with a pod declares the pod's (``FallThroughPod``); a node
+        loaded from a saved file declares the file's record (``fall_through_tags``
+        of its descriptor, ITL-1019). They are what the node's stored pipeline table
+        must mark.
+
+        Returns:
+            The data-tags; empty for a plain pod.
+
+        Raises:
+            ValueError: If the node has neither a pod nor a saved record.
+        """
+        if self._function_pod is not None:
+            return fall_through_tags(self._function_pod)
+        from orcapod.pipeline.serialization import FALL_THROUGH_TAGS_KEY
+
+        if FALL_THROUGH_TAGS_KEY not in self._descriptor:
+            raise ValueError(
+                f"Function node {self.label!r} has no pod and no saved "
+                f"{FALL_THROUGH_TAGS_KEY}: its data-tags are unknown"
+            )
+        return tuple(self._descriptor[FALL_THROUGH_TAGS_KEY])
 
     # ------------------------------------------------------------------
     # load_status
@@ -573,7 +619,9 @@ class FunctionNodeBase(StreamBase):
             all_info,
             lambda: (
                 self._input_stream.output_schema(columns=columns, all_info=all_info)[0],
-                self._data_function.output_data_schema,
+                result_data_schema(
+                    self._function_pod, self._input_stream.output_schema()[1]
+                ),
             ),
         )
 
@@ -695,8 +743,34 @@ class FunctionNodeBase(StreamBase):
         from orcapod.core.function_pod import function_zero_row_table
 
         return function_zero_row_table(
-            self._input_stream, self.output_schema()[1], self.data_context
+            self._input_stream,
+            self.output_schema()[1],
+            self.data_context,
+            output_arrow_schema=self._saved_output_arrow_schema(),
         )
+
+    def _saved_output_arrow_schema(self) -> "pa.Schema | None":
+        """A loaded node's output data types as saved, or ``None`` for a live one.
+
+        The saved text holds the Arrow types the node's rows were stored with; the
+        Python types restored from it can stand for several (``set[int8]`` reads as
+        ``set[int]``), so the zero-row table of a loaded node takes the saved Arrow
+        types themselves (ITL-640).
+        """
+        if self._function_pod is not None or not self._stored_schema:
+            return None
+        from orcapod.pipeline.serialization import arrow_schema_from_texts
+
+        saved = self._stored_schema
+        nullable = saved.get("nullable")
+        try:
+            return arrow_schema_from_texts(
+                saved.get("data", {}),
+                self.data_context.type_converter,
+                None if nullable is None else nullable.get("data", []),
+            )
+        except (ValueError, TypeError):
+            return None
 
     def _typed_zero_row_table(self) -> "pa.Table | None":
         """This node's zero-row table, without calling the function (ITL-912)."""
@@ -756,6 +830,10 @@ class FunctionNodeBase(StreamBase):
             )
         except InputValidationError as exc:
             raise InputValidationError(f"Function node {self.label!r}: {exc}") from exc
+        # A data-tag is one column: laid out once, among the tags.
+        shared = [c for c in data_table.column_names if c in tag_table.column_names]
+        if shared:
+            data_table = data_table.drop_columns(shared)
         return arrow_utils.hstack_tables(tag_table, data_table)
 
     def _shape_table(
@@ -1148,11 +1226,16 @@ class _ResultDatabaseReader:
     def record_path(self) -> tuple[str, ...]:
         """Path to cached records in the result database (versioned).
 
-        Returns the v1 schema path: ``_record_path + (RESULT_DB_SCHEMA_VERSION,)``.
-        Matches ``CachedFunctionPod.record_path`` semantics so that stub nodes
-        (loaded from a saved job) resolve to the same storage location as live nodes.
+        ``_record_path + (revision, RESULT_DB_SCHEMA_VERSION)``, as
+        ``CachedFunctionPod.record_path``, so that stub nodes (loaded from a saved job)
+        resolve to the same storage location as live nodes. ``_record_path`` is the
+        saved uri, whose last part is the data function type and its major; the
+        revision is the one this version of Orcapod declares for that type (ITL-1259).
         """
-        return self._record_path + (RESULT_DB_SCHEMA_VERSION,)
+        if not self._record_path:
+            return ()
+        revision = declaration_for(self._record_path[-1]).revision_component
+        return self._record_path + (revision, RESULT_DB_SCHEMA_VERSION)
 
 
 # ---------------------------------------------------------------------------
@@ -1174,14 +1257,116 @@ class _JoinedRecords(NamedTuple):
             was not found in either database (cross-session miss). Empty dict
             when no ephemeral misses occurred.
         empty_taginfo_rows: Mapping from ``base_entry_id`` bytes to the raw
-            taginfo row dict for each entry in ``empty_data_tokens``. Used
-            by ``_load_cached_entries`` to reconstruct the tag for each token.
+            taginfo row dict for each entry in ``empty_data_tokens``: its
+            bookkeeping columns (the recomputation index) are read from it.
+        empty_taginfo_tables: Mapping from ``base_entry_id`` bytes to the same
+            taginfo row as a one-row Arrow table, with its stored Arrow types.
+            ``_load_cached_entries`` builds the tag of each token from it, never
+            from Python values (ITL-1298).
+        data_tags: The data-tags the pipeline table marks (ITL-1019),
+            checked against the node's pod when it has one.
     """
 
     table: pa.Table
     taginfo_columns: tuple[str, ...]
     empty_data_tokens: dict[bytes, EmptyData]
     empty_taginfo_rows: dict[bytes, dict]
+    empty_taginfo_tables: dict[bytes, pa.Table]
+    data_tags: tuple[str, ...]
+
+
+# ``_fetch_joined_records`` decides which stored rows belong together with Polars,
+# and takes every column of its result from the stored Arrow tables (ITL-1295):
+# Polars changed some types on the way through (a ``date64`` value came back at
+# midnight) and panicked on others (``decimal256``). Polars sees only the
+# bookkeeping columns below and a row number per table; the row-number columns are
+# meta-prefixed, so no stored column has their names.
+_TAGINFO_ROW = "__fetch_taginfo_row"
+_RESULT_ROW = "__fetch_result_row"
+_EPHEMERAL_RESULT_ROW = "__fetch_ephemeral_result_row"
+
+# The pipeline-table columns the fetch filters, joins and reads entries by.
+_TAGINFO_MATCH_COLUMNS = (
+    constants.NODE_CONTENT_HASH_COL,
+    constants.IS_EPHEMERAL_COL,
+    constants.DATA_RECORD_ID,
+    _PIPELINE_BASE_ENTRY_ID_COL,
+    _PIPELINE_RECOMPUTATION_INDEX_COL,
+)
+
+
+def _row_frame(table: "pa.Table", columns: Sequence[str], row: str) -> "pl.DataFrame":
+    """Return a Polars frame of some of a table's columns and its row numbers.
+
+    Args:
+        table: A stored table.
+        columns: The columns to include; those the table lacks are left out.
+        row: The name of the row-number column (``int64``).
+
+    Returns:
+        The frame: the present ``columns``, in their order, then ``row``.
+    """
+    names = [name for name in columns if name in table.column_names]
+    arrays = [table.column(name) for name in names]
+    arrays.append(pa.chunked_array([pa.array(range(table.num_rows), pa.int64())]))
+    return cast(
+        "pl.DataFrame", pl.from_arrow(pa.Table.from_arrays(arrays, names=[*names, row]))
+    )
+
+
+def _joined_from_stored(
+    matched: "pl.DataFrame",
+    taginfo: "pa.Table",
+    parts: Sequence[tuple[str, "pa.Table"]],
+) -> "pa.Table":
+    """Build the joined records from the stored tables, by the rows Polars matched.
+
+    The layout is the one Polars' join and diagonal concatenation gave: every
+    pipeline-table column, then each result column other than the record id (a name
+    the pipeline table also has takes the suffix ``_right``), in order of first
+    appearance across ``parts``; a column a part lacks is null in that part's rows.
+
+    Args:
+        matched: The matched rows, in output order: a ``_TAGINFO_ROW`` column and,
+            per part, its row-number column (null in the other parts' rows). The
+            rows of each part are contiguous, in the order of ``parts``.
+        taginfo: The stored pipeline table.
+        parts: Per result table, in concatenation order: its row-number column in
+            ``matched`` and the table.
+
+    Returns:
+        The joined table, every value taken from the stored tables.
+    """
+    taginfo_rows = matched.get_column(_TAGINFO_ROW).to_arrow()
+    names = list(taginfo.column_names)
+    columns: list[Any] = [taginfo.column(name).take(taginfo_rows) for name in names]
+    # Output name -> stored column name, per part.
+    result_names: dict[str, str] = {}
+    for _, results in parts:
+        for name in results.column_names:
+            if name == constants.DATA_RECORD_ID:
+                continue
+            out = f"{name}_right" if name in taginfo.column_names else name
+            result_names.setdefault(out, name)
+    part_rows = []
+    for row_column, _ in parts:
+        rows = matched.get_column(row_column)
+        part_rows.append(rows.drop_nulls().to_arrow())
+    for out, name in result_names.items():
+        chunks: list[Any] = []
+        arrow_type = next(
+            results.schema.field(name).type
+            for _, results in parts
+            if name in results.column_names
+        )
+        for (_, results), rows in zip(parts, part_rows):
+            if name in results.column_names:
+                chunks.extend(results.column(name).take(rows).chunks)
+            else:
+                chunks.append(pa.nulls(len(rows), arrow_type))
+        names.append(out)
+        columns.append(pa.chunked_array(chunks, type=arrow_type))
+    return pa.Table.from_arrays(columns, names=names)
 
 
 class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
@@ -1369,12 +1554,6 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         delivers = self._delivers_side_effects
         found = find_stale_tables(
             self._pipeline_database,
-            # Orcapod v0.1 stored the table at the path without a layout component.
-            tuple(
-                self.node_identity_path + (layout,)
-                for layout in OLD_PIPELINE_DB_SCHEMA_VERSIONS
-            )
-            + (self.node_identity_path,),
             current=(self._versioned_pipeline_path, context_key)
             if delivers and not self._current_tables_checked
             else None,
@@ -1430,11 +1609,18 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 ``pipeline_database.at("_result")``, as in ``attach_databases``.
 
         Raises:
+            InputValidationError: If the node passes data-tags through and
+                ``pipeline_database`` cannot keep their marker (ITL-1019).
             UnstorableColumnError: If a database cannot store a column, naming
                 this node.
         """
         if self._function_pod is None:
             return
+        # A table must state its data-tags (ITL-1019): a database that cannot
+        # is refused first, with the two ways out, as ``attach_databases`` refuses it.
+        require_database_keeps_marker(
+            pipeline_database, fall_through_tags(self._function_pod)
+        )
         if result_database is None:
             result_database = pipeline_database.at("_result")
         self.require_storable_results(result_database)
@@ -1500,9 +1686,15 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 result_database = pipeline_database.at("_result")
 
             if self._function_pod is not None:
+                # A table must state its data-tags: refuse a database that
+                # cannot, before anything is written (ITL-1019).
+                require_database_keeps_marker(
+                    pipeline_database, fall_through_tags(self._function_pod)
+                )
                 # Normal path: wrap in CachedFunctionPod for compute + cache.
+                # A fall-through pod's results are its plain pod's (ITL-1023).
                 self._cached_function_pod = CachedFunctionPod(
-                    self._function_pod,
+                    result_pod(self._function_pod),
                     result_database=result_database,
                 )
             else:
@@ -1969,7 +2161,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         self.ephemeral_result_database = database
         if database is not None and self._function_pod is not None:
             self._ephemeral_cached_pod = CachedFunctionPod(
-                self._function_pod,
+                result_pod(self._function_pod),
                 result_database=database,
             )
         else:
@@ -2468,6 +2660,62 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
 
         return output
 
+    def _empty_data_cache_hit(
+        self, tag: TagProtocol, data: EmptyData, base_entry_id: bytes
+    ) -> tuple[TagProtocol, DataProtocol]:
+        """Return the stored result for an ``EmptyData`` input, or raise.
+
+        An ``EmptyData`` input stands for an upstream ephemeral result that is gone:
+        no computation can run, only the result cache answers. A node whose pod lets
+        data-tags fall through (ITL-1023) refuses the hit: the result store holds
+        the function's plain output, and the data columns of the data-tags come
+        from the input row, which is gone with their source info. Returning the
+        plain output would give a row without the data columns the node declares
+        (CodeRabbit on PR #342); the refusal is the same error as a miss.
+
+        Args:
+            tag: The input row's tag.
+            data: The ``EmptyData`` input.
+            base_entry_id: The row's base entry id.
+
+        Returns:
+            The tag and the stored result.
+
+        Raises:
+            EphemeralResultMissingError: On a cache miss, and on every input of a
+                node that lets data-tags fall through.
+        """
+        if passed := fall_through_tags(self._function_pod):
+            raise EphemeralResultMissingError(
+                tag=tag,
+                cached_content_hash=data.cached_content_hash,
+                node_identity_path=self.node_identity_path,
+                message=(
+                    "EmptyData input for a node that lets the data-tags "
+                    f"{list(passed)} fall through: their data columns come from the "
+                    "input row, which is gone with the ephemeral upstream result, "
+                    "so the stored result alone cannot give the node's output. "
+                    "Recompute the upstream node."
+                ),
+            )
+        if self._cached_function_pod is not None:
+            cached = self._cached_function_pod.lookup_cached_data(data)
+            if cached is not None:
+                self._cached_output_datas[base_entry_id] = (tag, cached)
+                self._cached_output_table = None
+                self._cached_content_hash_column = None
+                return tag, cached
+        raise EphemeralResultMissingError(
+            tag=tag,
+            cached_content_hash=data.cached_content_hash,
+            node_identity_path=self.node_identity_path,
+            message=(
+                "Downstream cache miss for EmptyData input — "
+                "ephemeral result is gone and downstream has not yet computed "
+                "a result for this input hash."
+            ),
+        )
+
     def _process_data_internal(
         self,
         tag: TagProtocol,
@@ -2521,23 +2769,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         if base_entry_id is None:
             base_entry_id = self.compute_base_entry_id(tag, data)
         if isinstance(data, EmptyData):
-            if self._cached_function_pod is not None:
-                cached = self._cached_function_pod.lookup_cached_data(data)
-                if cached is not None:
-                    self._cached_output_datas[base_entry_id] = (tag, cached)
-                    self._cached_output_table = None
-                    self._cached_content_hash_column = None
-                    return tag, cached
-            raise EphemeralResultMissingError(
-                tag=tag,
-                cached_content_hash=data.cached_content_hash,
-                node_identity_path=self.node_identity_path,
-                message=(
-                    "Downstream cache miss for EmptyData input — "
-                    "ephemeral result is gone and downstream has not yet computed "
-                    "a result for this input hash."
-                ),
-            )
+            return self._empty_data_cache_hit(tag, data, base_entry_id)
 
         ephemeral_result = bool(self._node_config.is_result_ephemeral)
 
@@ -2549,7 +2781,10 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                     "an ArrowDatabaseProtocol before executing this node."
                 )
             tag_out, output_data = self._ephemeral_cached_pod.process_data(
-                tag, data, logger=logger, run_id=run_id
+                tag,
+                function_input(self._function_pod, data),
+                logger=logger,
+                run_id=run_id,
             )
             if output_data is not None:
                 result_computed = bool(
@@ -2569,7 +2804,10 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                     )
         elif self._cached_function_pod is not None:
             tag_out, output_data = self._cached_function_pod.process_data(
-                tag, data, logger=logger, run_id=run_id
+                tag,
+                function_input(self._function_pod, data),
+                logger=logger,
+                run_id=run_id,
             )
             if output_data is not None:
                 result_computed = bool(
@@ -2589,6 +2827,11 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             tag_out, output_data = self._function_pod.process_data(
                 tag, data, logger=logger, run_id=run_id
             )
+
+        if ephemeral_result or self._cached_function_pod is not None:
+            # The stored result is the function's; the row's data-tag columns fall
+            # through onto it, as the pod does (ITL-1023).
+            output_data = with_fall_through(self._function_pod, data, output_data)
 
         # Store by base_entry_id (stable across recomputation cycles) and invalidate caches
         self._cached_output_datas[base_entry_id] = (tag_out, output_data)
@@ -2664,23 +2907,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         if base_entry_id is None:
             base_entry_id = self.compute_base_entry_id(tag, data)
         if isinstance(data, EmptyData):
-            if self._cached_function_pod is not None:
-                cached = self._cached_function_pod.lookup_cached_data(data)
-                if cached is not None:
-                    self._cached_output_datas[base_entry_id] = (tag, cached)
-                    self._cached_output_table = None
-                    self._cached_content_hash_column = None
-                    return tag, cached
-            raise EphemeralResultMissingError(
-                tag=tag,
-                cached_content_hash=data.cached_content_hash,
-                node_identity_path=self.node_identity_path,
-                message=(
-                    "Downstream cache miss for EmptyData input — "
-                    "ephemeral result is gone and downstream has not yet computed "
-                    "a result for this input hash."
-                ),
-            )
+            return self._empty_data_cache_hit(tag, data, base_entry_id)
 
         ephemeral_result = bool(self._node_config.is_result_ephemeral)
 
@@ -2692,7 +2919,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                     "an ArrowDatabaseProtocol before executing this node."
                 )
             tag_out, output_data = await self._ephemeral_cached_pod.async_process_data(
-                tag, data, logger=logger
+                tag, function_input(self._function_pod, data), logger=logger
             )
             if output_data is not None:
                 result_computed = bool(
@@ -2712,7 +2939,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                     )
         elif self._cached_function_pod is not None:
             tag_out, output_data = await self._cached_function_pod.async_process_data(
-                tag, data, logger=logger
+                tag, function_input(self._function_pod, data), logger=logger
             )
             if output_data is not None:
                 result_computed = bool(
@@ -2732,6 +2959,11 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             tag_out, output_data = await self._function_pod.async_process_data(
                 tag, data, logger=logger
             )
+
+        if ephemeral_result or self._cached_function_pod is not None:
+            # The stored result is the function's; the row's data-tag columns fall
+            # through onto it, as the pod does (ITL-1023).
+            output_data = with_fall_through(self._function_pod, data, output_data)
 
         # Store by base_entry_id (stable across recomputation cycles) and invalidate caches
         self._cached_output_datas[base_entry_id] = (tag_out, output_data)
@@ -2957,11 +3189,16 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             schema=_pipeline_meta_schema(),
         )
 
-        # Combine: tag (with system tags) + input source columns + meta columns
-        combined_record = arrow_utils.hstack_tables(
-            tag.as_table(columns={"system_tags": True}),
-            input_source_table,
-            meta_table,
+        # Combine: tag (with system tags) + input source columns + meta columns. The
+        # table states which tags are data-tags: the ones that fall through this
+        # node's pod, marked on their stored column (ITL-1019).
+        combined_record = mark_data_tags(
+            arrow_utils.hstack_tables(
+                tag.as_table(columns={"system_tags": True}),
+                input_source_table,
+                meta_table,
+            ),
+            fall_through_tags(self._function_pod),
         )
 
         try:
@@ -3068,21 +3305,28 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
 
         return joined if joined.num_rows > 0 else None
 
-    def as_source(self, tags_as_data: "Mapping[str, str] | None" = None):
+    def as_source(
+        self,
+        tags_as_data: "Mapping[str, str] | None" = None,
+        *,
+        source_id: str | None = None,
+    ):
         """Return a DerivedSource backed by the DB records of this node.
 
-        Its ``source_id`` is the ``DerivedSource`` default: without
-        ``tags_as_data``, ``derived:<algorithm label>:<hex>`` of this node's
-        content hash.
+        Without ``tags_as_data`` and ``source_id``, its ``source_id`` is the
+        ``DerivedSource`` default, ``derived:<algorithm label>:<hex>`` of this
+        node's content hash.
 
         Args:
             tags_as_data: Maps a tag column of this node to the name of a data
                 column that receives a copy of it. When given, the result is a
-                new root source with its own provenance and a ``source_id``
-                derived from this node's content hash and the mapping; see
-                ``DerivedSource``.
+                new root source with its own provenance, which needs a
+                ``source_id``; see ``DerivedSource``.
+            source_id: The source's name. Required with ``tags_as_data``, which
+                has no default (ITL-1313).
 
         Raises:
+            ValueError: If ``tags_as_data`` is given without a ``source_id``.
             RuntimeError: If no database is attached.
             InputValidationError: If ``tags_as_data`` is not valid for this
                 node's columns.
@@ -3092,11 +3336,12 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
 
         from orcapod.core.sources.derived_source import DerivedSource
 
-        # No source_id is given: the source takes the DerivedSource default
-        # (``derived:<algorithm label>:<hex>`` of this node's content hash, or the
-        # ``tags_as_data`` id when a mapping is given).
+        # Without a source_id the plain form takes the DerivedSource default
+        # (``derived:<algorithm label>:<hex>`` of this node's content hash); the
+        # ``tags_as_data`` form refuses to be built without one (ITL-1313).
         return DerivedSource(
             origin=self,
+            source_id=source_id,
             tags_as_data=tags_as_data,
             data_context=self.data_context_key,
             config=self.orcapod_config,
@@ -3163,9 +3408,11 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
 
         taginfo_columns = tuple(taginfo.column_names)
         taginfo_schema = taginfo.schema
+        data_tags = self._stored_data_tags(taginfo_schema)
 
         is_ephemeral_col = constants.IS_EPHEMERAL_COL
-        taginfo_df = pl.DataFrame(taginfo)
+        # Polars sees only the bookkeeping columns and row numbers (ITL-1295).
+        taginfo_df = _row_frame(taginfo, _TAGINFO_MATCH_COLUMNS, _TAGINFO_ROW)
 
         # Per-node isolation: when sharing a pipeline table in pipeline_hash scope,
         # filter to rows written by this node to prevent cross-node contamination.
@@ -3191,6 +3438,8 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         # Persistent join
         # ------------------------------------------------------------------
         results_schema = None
+        results: pa.Table | None = None
+        eph_results: pa.Table | None = None
         persistent_df = pl.DataFrame()
         if persistent_taginfo_df.height > 0:
             results = self._cached_function_pod.result_database.get_all_records(
@@ -3215,7 +3464,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             else:
                 results_schema = results.schema
                 full_persistent_df = persistent_taginfo_df.join(
-                    pl.DataFrame(results),
+                    _row_frame(results, (constants.DATA_RECORD_ID,), _RESULT_ROW),
                     on=constants.DATA_RECORD_ID,
                     how="inner",
                 )
@@ -3236,9 +3485,10 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         ephemeral_df = pl.DataFrame()
         empty_data_tokens: dict[bytes, EmptyData] = {}
         empty_taginfo_rows: dict[bytes, dict] = {}
+        empty_taginfo_tables: dict[bytes, pa.Table] = {}
 
         if ephemeral_taginfo_df.height > 0:
-            eph_results = None
+            eph_frame: pl.DataFrame | None = None
             if self._ephemeral_cached_pod is not None:
                 eph_results = (
                     self._ephemeral_cached_pod.result_database.get_all_records(
@@ -3252,24 +3502,31 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 )
                 if results_schema is None:
                     results_schema = eph_results.schema
+                eph_frame = _row_frame(
+                    eph_results, (constants.DATA_RECORD_ID,), _EPHEMERAL_RESULT_ROW
+                )
                 ephemeral_df = ephemeral_taginfo_df.join(
-                    pl.DataFrame(eph_results),
+                    eph_frame,
                     on=constants.DATA_RECORD_ID,
                     how="inner",
                 )
 
             # Emit EmptyData tokens for unmatched ephemeral rows
             # (cross-session miss: ephemeral data is gone).
-            if eph_results is not None:
+            if eph_frame is not None:
                 unmatched_df = ephemeral_taginfo_df.join(
-                    pl.DataFrame(eph_results),
-                    on=constants.DATA_RECORD_ID,
-                    how="anti",
+                    eph_frame, on=constants.DATA_RECORD_ID, how="anti"
                 )
             else:
                 # No ephemeral database or empty database — all ephemeral rows are misses.
                 unmatched_df = ephemeral_taginfo_df
-            for row in unmatched_df.iter_rows(named=True):
+            # The rows themselves are read from the pipeline table, not from Polars.
+            # Each is kept as its one-row Arrow table too: its tag is built from
+            # that, with the stored types (ITL-1298).
+            unmatched_table = taginfo.take(
+                unmatched_df.get_column(_TAGINFO_ROW).to_arrow()
+            )
+            for index, row in enumerate(unmatched_table.to_pylist()):
                 base_eid = row[_PIPELINE_BASE_ENTRY_ID_COL]
                 previous = empty_taginfo_rows.get(base_eid)
                 if (
@@ -3302,6 +3559,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                     data_context=self.data_context,
                 )
                 empty_taginfo_rows[base_eid] = row
+                empty_taginfo_tables[base_eid] = unmatched_table.slice(index, 1)
 
         # ------------------------------------------------------------------
         # Keep both databases' rows until latest-recomputation selection. Persistent
@@ -3321,6 +3579,8 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 taginfo_columns=taginfo_columns,
                 empty_data_tokens=empty_data_tokens,
                 empty_taginfo_rows=empty_taginfo_rows,
+                empty_taginfo_tables=empty_taginfo_tables,
+                data_tags=data_tags,
             )
 
         # Apply base_entry_id filter if requested
@@ -3329,11 +3589,25 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 pl.col(_PIPELINE_BASE_ENTRY_ID_COL).is_in(base_entry_ids)
             )
 
-        joined = merged_df.to_arrow()
-        if results_schema is not None:
-            joined = arrow_utils.restore_schema_nullability(
-                joined, taginfo_schema, results_schema
-            )
+        # Every column comes from the stored tables, by the rows Polars matched; the
+        # ephemeral rows come first, as concatenated above.
+        parts: list[tuple[str, pa.Table]] = []
+        if ephemeral_df.height > 0:
+            parts.append((_EPHEMERAL_RESULT_ROW, cast("pa.Table", eph_results)))
+        if persistent_df.height > 0:
+            parts.append((_RESULT_ROW, cast("pa.Table", results)))
+        joined = _joined_from_stored(merged_df, taginfo, parts)
+        # The table is built from arrays, with no field flags: restore them from the
+        # pipeline table in every case (its data-tag marker included), and from the
+        # result table when one was read.
+        joined = arrow_utils.restore_schema_nullability(
+            joined,
+            *(
+                (taginfo_schema,)
+                if results_schema is None
+                else (taginfo_schema, results_schema)
+            ),
+        )
         # In memory, each row names its data context in the datagram context column.
         joined = joined.append_column(
             pa.field(constants.CONTEXT_KEY, pa.large_string(), nullable=False),
@@ -3344,7 +3618,48 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             taginfo_columns=taginfo_columns,
             empty_data_tokens=empty_data_tokens,
             empty_taginfo_rows=empty_taginfo_rows,
+            empty_taginfo_tables=empty_taginfo_tables,
+            data_tags=data_tags,
         )
+
+    def _stored_data_tags(self, taginfo_schema: "pa.Schema") -> tuple[str, ...]:
+        """Return the data-tags the pipeline table marks, checked against the pod.
+
+        The stored table states its bindings (developer, November 16, 2026, ITL-1019):
+        a data-tag column carries the marker of ``data_tags``. The node
+        reads the table only when it agrees with what the node declares
+        (``declared_data_tags``: its pod's, or a loaded node's saved record, an
+        independent point of verification).
+
+        Args:
+            taginfo_schema: The schema of the stored pipeline table.
+
+        Returns:
+            The data-tags, in the order the node declares them.
+
+        Raises:
+            InputValidationError: If the table's marker is invalid, or the table
+                and the node disagree on which tags are data-tags.
+        """
+        table_path = self._require_pipeline_database().base_path + (
+            self._versioned_pipeline_path
+        )
+        try:
+            stored = stored_data_tags(taginfo_schema)
+        except ValueError as exc:
+            raise InputValidationError(
+                f"Function node {self.label!r}, pipeline table {table_path}: {exc}"
+            ) from exc
+        expected = self.declared_data_tags()
+        if set(stored) != set(expected):
+            source = "pod" if self._function_pod is not None else "saved job"
+            raise InputValidationError(
+                f"Function node {self.label!r}: the pipeline table {table_path} marks "
+                f"the data-tags {sorted(stored)}, but the node's {source} "
+                f"declares {sorted(expected)}. The table was not written by this "
+                "node's pipeline; nothing was read."
+            )
+        return expected
 
     def _stored_tag_keys(self, fetched: _JoinedRecords) -> tuple[str, ...]:
         """Return the user tag columns of the records in *fetched*.
@@ -3422,8 +3737,13 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             uuid.UUID(bytes=bytes(cast(bytes, record_id)))
             for record_id in joined.column(constants.DATA_RECORD_ID).to_pylist()
         ]
+        # A fall-through column is the stored tag column in its data role (ITL-1023):
+        # the table states which (ITL-1019). In the stream the binding is the shared
+        # name, so the marker stays with the stored table.
         stream = ArrowTableStream(
-            joined.drop(drop_cols), tag_columns=self._stored_tag_keys(fetched)
+            without_tag_kind_marks(joined.drop(drop_cols)),
+            tag_columns=self._stored_tag_keys(fetched),
+            data_tags=fetched.data_tags,
         )
         return base_entry_ids, stream, data_ids
 
@@ -3480,14 +3800,23 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             if base_eid in loaded:
                 # A matched result at least as recent as the missing one wins.
                 continue
-            raw_row = fetched.empty_taginfo_rows[base_eid]
-            tag_data = {k: v for k, v in raw_row.items() if k in tag_keys}
-            system_tags = {
-                k: v
-                for k, v in raw_row.items()
-                if k.startswith(constants.SYSTEM_TAG_PREFIX)
-            }
-            tag = Tag(tag_data, system_tags=system_tags, data_context=self.data_context)
+            # The stored row with its stored Arrow types, never Python values: a
+            # type inferred again (int8 as int64) would give the tag another hash,
+            # and a struct tag could not be read at all (ITL-1298). The columns
+            # keep the stored row's order, tags and system tags. The storage-only
+            # data-tag mark is dropped, as for a stored row read into a stream.
+            row_table = without_tag_kind_marks(fetched.empty_taginfo_tables[base_eid])
+            tag = Tag(
+                row_table.select(
+                    [
+                        name
+                        for name in row_table.column_names
+                        if name in tag_keys
+                        or name.startswith(constants.SYSTEM_TAG_PREFIX)
+                    ]
+                ),
+                data_context=self.data_context,
+            )
             loaded[base_eid] = (tag, empty_data)
 
         return loaded
@@ -3705,6 +4034,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         from dataclasses import replace
 
         from orcapod.pipeline.node_run import commit_run
+        from orcapod.pipeline.restrictions import restrictions_in_force
         from orcapod.pipeline.run_summary import RunCountingObserver, RunSummary
         from orcapod.utils.database_errors import flush_best_effort
 
@@ -3741,6 +4071,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             load_only=load_only,
             target=self.label,
             unchecked_sources=unchecked_sources,
+            restricted_sources=restrictions_in_force([self]),
         )
 
     def _incomplete_inputs(self) -> list[str]:
@@ -3973,7 +4304,14 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                                 stamped_tag = tag.with_meta_columns(
                                     **{_TAG_NODE_INPUT_REF: correlation_key}
                                 )
-                                await compute_channel.writer.send((stamped_tag, data))
+                                # The function takes the row without its
+                                # fall-through columns (ITL-1023).
+                                await compute_channel.writer.send(
+                                    (
+                                        stamped_tag,
+                                        function_input(self._function_pod, data),
+                                    )
+                                )
                     finally:
                         await compute_channel.writer.close()
 
@@ -4006,6 +4344,15 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                                 node_label=node_label, tag=original_tag.as_dict()
                             )
                             raise
+                        # The row's data-tag columns fall through onto the stored
+                        # result, as on the sync path (ITL-1023).
+                        # Not None: the result channel carries only results.
+                        output_data = cast(
+                            DataProtocol,
+                            with_fall_through(
+                                self._function_pod, input_data, output_data
+                            ),
+                        )
                         # Update in-memory cache so iter_data() sees the result.
                         clean_tag = output_tag.drop_meta_columns(
                             _TAG_NODE_INPUT_REF, ignore_missing=True
@@ -4186,3 +4533,20 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 # A close that raises or is cancelled fails the run: no rows.
                 self.clear_cache()
                 raise
+
+
+def _last_run_failed(node: FunctionJobNode) -> int:
+    """Rows of ``node``'s last completed run whose function raised.
+
+    Set by every run of the node (the job's run and the node's own ``run()``); 0 before
+    a run and after ``clear_cache()``. Internal: the pipeline diagram reads a node's
+    failed state through this one helper (ITL-1197). ITL-1209 replaces it: a job node
+    will keep the summary of its own last run.
+
+    Args:
+        node: The function job node.
+
+    Returns:
+        The number of failed rows of its last completed run.
+    """
+    return node._run_failed  # pyright: ignore[reportPrivateUsage]  # ITL-1209: the one internal reader

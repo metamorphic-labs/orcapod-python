@@ -1137,7 +1137,12 @@ class TestPollingSourceSchemaValidation:
             polling_config=PollingConfig(interval=1.0),
         )
 
-        with pytest.raises(SchemaInconsistencyError, match="tag schema incompatible"):
+        # The batch is refused on its Arrow types, before commit (ITL-640).
+        with pytest.raises(
+            SchemaInconsistencyError,
+            match="fetched column 'id' has the Arrow type int64, but the source "
+            "declares large_string",
+        ):
             list(src.iter_data())
 
     def test_declared_data_schema_type_mismatch_raises(self):
@@ -1154,7 +1159,12 @@ class TestPollingSourceSchemaValidation:
             polling_config=PollingConfig(interval=1.0),
         )
 
-        with pytest.raises(SchemaInconsistencyError, match="data schema incompatible"):
+        # The batch is refused on its Arrow types, before commit (ITL-640).
+        with pytest.raises(
+            SchemaInconsistencyError,
+            match="fetched column 'val' has the Arrow type int64, but the source "
+            "declares large_string",
+        ):
             list(src.iter_data())
 
     def test_declared_schema_missing_data_column_raises(self):
@@ -1756,3 +1766,57 @@ class TestPollingSourceZeroRowBatch:
             rows.append((tag, data))
 
         assert len(rows) == 1
+
+
+class TestPollingSourceTagOrder:
+    """The order of ``tag_columns`` is not part of the identity (ITL-1271)."""
+
+    @staticmethod
+    def _source(tags: list[str], keys: list[str]) -> PollingSource[Any]:
+        batch = pa.table(
+            {
+                "a": pa.array(["x", "y"], pa.large_string()),
+                "b": pa.array([1, 2], pa.int64()),
+                "c": pa.array([True, False]),
+                "val": pa.array([10, 20], pa.int64()),
+            }
+        )
+        return PollingSource(
+            FakeDynamicSource(batches=[batch]), tag_columns=tags, record_id_columns=keys
+        )
+
+    def test_tag_column_order_changes_no_hash_or_row(self):
+        keys = ["a", "b", "c"]
+        sources = [
+            self._source(order, keys)
+            for order in (["a", "b", "c"], ["c", "b", "a"], ["b", "c", "a"])
+        ]
+        assert len({s.content_hash() for s in sources}) == 1
+        assert len({s.pipeline_hash() for s in sources}) == 1
+        assert len({s.source_id for s in sources}) == 1
+        rows = [
+            sorted(
+                (
+                    tag.content_hash().to_string(),
+                    data.content_hash().to_string(),
+                    repr(sorted(tag.system_tags().items())),
+                )
+                for tag, data in s.iter_data()
+            )
+            for s in sources
+        ]
+        assert rows[0] == rows[1] == rows[2]
+        # The declared order still places the columns.
+        assert [s.keys()[0] for s in sources] == [
+            ("a", "b", "c"),
+            ("c", "b", "a"),
+            ("b", "c", "a"),
+        ]
+
+    def test_key_column_order_counts(self):
+        """``record_id_columns`` is the explicit key order: it is part of the identity."""
+        tags = ["a", "b", "c"]
+        assert (
+            self._source(tags, ["a", "b", "c"]).content_hash()
+            != self._source(tags, ["c", "b", "a"]).content_hash()
+        )

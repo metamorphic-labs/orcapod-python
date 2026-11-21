@@ -22,7 +22,7 @@ class TestFunctionPodConfig:
         pod = FunctionPod(data_function=pf)
         config = pod.to_config()
         assert "data_function" in config
-        assert config["data_function"]["data_function_type_id"] == "python.function.v0"
+        assert config["data_function"]["data_function_type_id"] == "python.function.v1"
 
     def test_round_trip(self):
         pf = PythonDataFunction(function=sample_transform, output_keys=["age_plus_one"])

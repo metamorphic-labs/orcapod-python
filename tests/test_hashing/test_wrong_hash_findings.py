@@ -599,24 +599,28 @@ def _weights(source_id: str, weight: float) -> DictSource:
 
 
 class TestCommutativeInputIdentity:
-    """Finding E, reviewed and KEPT by decision (developer, November 11, 2026).
+    """Finding E, reviewed and KEPT by decision (developer, November 11, 2026), for
+    commutative operators: their inputs are an unordered set compared by identity.
 
-    A pipeline hash covers the structure of the pipeline, not only schemas:
-    ``MergeJoin(m1, m1)`` (a stream joined with itself) is a different pipeline
-    from ``MergeJoin(m1, m2)`` even when both inputs share one schema. Inputs are
-    an unordered set, so two inputs with the same source identity count as one.
+    ``MergeJoin`` was the operator this finding was stated with. It is ordered since
+    ITL-1281 (developer, November 19, 2026): its identity holds its inputs as a tuple,
+    in argument order, like ``SemiJoin``. So its pipeline hash is its inputs' pipeline
+    hashes in argument order: a self-merge and a merge of two sources of one schema
+    share it (as for ``SemiJoin``), and their content hashes tell them apart.
     """
 
-    def test_self_merge_join_is_a_different_pipeline(self) -> None:
-        """A stream joined with itself is its own pipeline structure."""
+    def test_self_merge_join_differs_by_content_not_by_pipeline(self) -> None:
+        """An ordered operator over two inputs of one schema: one pipeline hash,
+        two content hashes."""
         m1 = _weights("m", 1.0)
         m2 = _weights("m2", 3.0)
         assert (
-            MergeJoin()(m1, m1).pipeline_hash() != MergeJoin()(m1, m2).pipeline_hash()
+            MergeJoin()(m1, m1).pipeline_hash() == MergeJoin()(m1, m2).pipeline_hash()
         )
+        assert MergeJoin()(m1, m1).content_hash() != MergeJoin()(m1, m2).content_hash()
 
     def test_inputs_with_one_source_identity_count_as_one(self) -> None:
-        """Inputs with one source identity count as one input."""
+        """Inputs with one source identity are one input."""
         m1 = _weights("m", 1.0)
         m1b = _weights("m", 2.0)  # same source_id: same source identity
         assert MergeJoin()(m1, m1b).content_hash() == MergeJoin()(m1, m1).content_hash()
@@ -624,14 +628,11 @@ class TestCommutativeInputIdentity:
             MergeJoin()(m1, m1b).pipeline_hash() == MergeJoin()(m1, m1).pipeline_hash()
         )
 
-    def test_input_order_is_not_identity(self) -> None:
-        """Argument order of a commutative operator is not identity."""
+    def test_input_order_is_identity_of_an_ordered_operator(self) -> None:
+        """Argument order of ``MergeJoin`` (ordered, ITL-1281) is identity."""
         m1 = _weights("m", 1.0)
         m2 = _weights("m2", 3.0)
-        assert MergeJoin()(m1, m2).content_hash() == MergeJoin()(m2, m1).content_hash()
-        assert (
-            MergeJoin()(m1, m2).pipeline_hash() == MergeJoin()(m2, m1).pipeline_hash()
-        )
+        assert MergeJoin()(m1, m2).content_hash() != MergeJoin()(m2, m1).content_hash()
 
 
 # ---------------------------------------------------------------------------

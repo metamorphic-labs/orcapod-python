@@ -5,6 +5,7 @@ import logging
 from collections.abc import Collection, Iterator
 from typing import TYPE_CHECKING, Any
 
+from orcapod.hashing.orcapod_table import OrcapodTable
 from orcapod import contexts
 from orcapod.core.datagrams import Data, Tag
 from orcapod.core.streams.base import (
@@ -60,8 +61,30 @@ class ArrowTableStream(StreamBase):
         source_info: dict[str, SourceInfoValue] | None = None,
         producer: PodProtocol | None = None,
         upstreams: tuple[StreamProtocol, ...] = (),
-        **kwargs,
+        data_tags: Collection[str] = (),
+        **kwargs: Any,
     ) -> None:
+        """Wrap ``table`` as a stream.
+
+        Args:
+            table: The rows: tag, data, system-tag and source-info columns.
+            tag_columns: The user tag columns.
+            system_tag_columns: Columns to rename into system tags.
+            source_info: Source-info tokens to add, by column.
+            producer: The pod that produced the stream, if any.
+            upstreams: The streams the producer read.
+            data_tags: The tag columns that are data-tags: each is also a data
+                column of the same name, stored once (specification "Referential
+                Tags", section 4). Must be a subset of ``tag_columns``.
+            **kwargs: Passed to ``StreamBase``.
+
+        Raises:
+            ValueError: If a tag column or a data-tag is not a tag column of
+                the table, or the stream has no data column.
+            InputValidationError: If a column's type is, or contains, a
+                dictionary: dictionary-encoded columns are not currently supported
+                (ITL-1264, ITL-1277).
+        """
         super().__init__(**kwargs)
 
         self._producer = producer
@@ -69,6 +92,20 @@ class ArrowTableStream(StreamBase):
 
         # Every table Orcapod presents is in its large variants (ITL-1122).
         table = arrow_utils.normalize_table_to_large_types(table, keep_null=True)
+        # Dictionary-encoded columns are not currently supported (ITL-1264,
+        # ITL-1277): every source and operator result becomes a stream here, so this
+        # refuses them all, tags and data alike.
+        if found := schema_utils.dictionary_columns(table.schema):
+            raise schema_utils.dictionary_columns_error(
+                found, tag_columns, data_tags, system_tag_columns
+            )
+        # Nor are columns of a type the schema hash rejects (a union, a list view, a
+        # run-end-encoded type; developer, November 21, 2026, ITL-640): a stream's
+        # identity is its Arrow schema hash, which cannot hold them.
+        if found := schema_utils.schema_hash_rejected_columns(table.schema):
+            raise schema_utils.schema_hash_rejected_columns_error(
+                found, tag_columns, data_tags, system_tag_columns
+            )
 
         data_table, data_context_table = arrow_utils.split_by_column_groups(
             table, [constants.CONTEXT_KEY]
@@ -120,14 +157,30 @@ class ArrowTableStream(StreamBase):
             raise ValueError(
                 f"Specified tag columns {delta} are not present in the table."
             )
+        if unknown := set(data_tags) - set(self._tag_columns):
+            raise ValueError(
+                f"Data-tags {sorted(unknown)} are not tag columns of the stream."
+            )
+        # A data-tag is one column in both roles: a tag, and a data column of
+        # the same name (tag order).
+        self._data_tags = tuple(c for c in self._tag_columns if c in set(data_tags))
+        tag_only = tuple(c for c in self._all_tag_columns if c not in self._data_tags)
         table, prefix_tables = arrow_utils.prepare_prefixed_columns(
             table,
             prefix_info,
-            exclude_columns=self._all_tag_columns,
+            exclude_columns=tag_only,
         )
         # now table should only contain tag columns and data columns
-        self._data_columns = tuple(
-            c for c in table.column_names if c not in self._all_tag_columns
+        # Data-tags come first among the data columns, in tag order, then the other
+        # data columns in table order (developer decision, November 17, 2026,
+        # ITL-1205): a table built from rows lays a data-tag out among the tags, so
+        # this is the order of every row, on every path. Only the keys follow it: the
+        # table keeps its column order, and no stream, schema, row or table hash
+        # depends on the order of a stream's columns.
+        self._data_columns = self._data_tags + tuple(
+            c
+            for c in table.column_names
+            if c not in tag_only and c not in self._data_tags
         )
         # No user column name holds the source-info separator (ITL-1154).
         schema_utils.require_names_without_separator(
@@ -152,7 +205,7 @@ class ArrowTableStream(StreamBase):
         )
         all_tag_schema = arrow_utils.join_arrow_schemas(tag_schema, system_tag_schema)
         data_schema = pa.schema(
-            f for f in self._table.schema if f.name in self._data_columns
+            self._table.schema.field(name) for name in self._data_columns
         )
 
         self._tag_schema = tag_schema
@@ -166,43 +219,71 @@ class ArrowTableStream(StreamBase):
     def identity_structure(self) -> Any:
         if self._producer is not None:
             return super().identity_structure()
-        # Every column group except the per-row content hash: that column is derived
-        # from the data columns already in the table, and its values carry the Arrow
-        # hash label, which must never enter a hash input.
+        # A raw stream (no producer) is its table, its tag columns and its data-tags,
+        # none of them in an order the input chose (developer, November 18 and 19,
+        # 2026, ITL-1227): the table in its canonical row order (``_identity_table``),
+        # hashed whole by the Arrow table handler, and the names as sorted tuples.
         return (
             self.__class__.__name__,
-            self._identity_table(),
-            self._tag_columns,
+            # A table Orcapod built: hashed by ``hash_table`` (Orcapod's float rule),
+            # never as a pyarrow value (ITL-1179).
+            OrcapodTable(self._identity_table()),
+            tuple(sorted(self._tag_columns)),
+        ) + (
+            # Only when there is one: a plain stream keeps its identity, and a stream
+            # with data-tags and a plain one over one table differ (ITL-1023).
+            (("data_tags", tuple(sorted(self._data_tags))),) if self._data_tags else ()
         )
 
-    def _identity_table(self) -> "pa.Table":
-        """Return the rows in the order and columns that ``identity_structure`` hashes.
+    @property
+    def data_tags(self) -> tuple[str, ...]:
+        """The data-tags: tag columns that are also data columns (tag order)."""
+        return self._data_tags
 
-        THIS ORDER IS A HASH INPUT AND MUST NOT CHANGE: it is the ordering that every
-        stream's content hash has been built from since before ITL-1053. It is kept apart
-        from ``as_table``'s sort on purpose; the sort in the body is the code
-        ``as_table(sort_by_tags=True)`` had on origin/main, unchanged: the tags and
-        system tags in this stream's own priority, a type Arrow cannot order leaving the
-        rows in stream order, and a stream with nothing to sort by raising.
+    def _identity_table(self) -> "pa.Table":
+        """Return the table ``identity_structure`` hashes, its rows in canonical order.
+
+        Developer decisions, November 18 and 19, 2026 (ITL-1227): a raw stream's identity
+        depends on neither the order of its rows nor that of its columns: "take the
+        data, order it as we had agreed and then hash the entirety of the arrow table".
+        The table holds every column group but the per-row content hash: user tags,
+        system tags, data, source info, data context and meta columns. Its rows are put
+        in the canonical row order of an identity table
+        (``arrow_utils.canonical_identity_row_order``: a value sort over a closed list
+        of column types, ties settled by each tied row's own hash), and the table is
+        hashed whole, once, by the Arrow table handler (``hash_table``, ``arrow_v1``),
+        which covers its schema and ignores column order: a stream with no rows still
+        commits to its columns. A row that occurs twice is there twice. There is no
+        special case for no rows, no tag column, tied tags, list tags or library values.
+
+        THIS RULE IS A HASH INPUT AND MUST NOT CHANGE.
+
+        Returns:
+            The identity table in canonical row order.
         """
         table = self._assemble_table(
             ColumnConfig(meta=True, context=True, source=True, system_tags=True),
             limit=None,
         )
-        try:
-            return table.sort_by(
-                [(column, "ascending") for column in self._all_tag_columns]
-            )
-        except pa.ArrowTypeError:
-            # If sorting fails, fall back to unsorted table
-            return table
+        return arrow_utils.canonical_identity_row_order(
+            table, self._tag_columns, self.data_context.arrow_hasher
+        )
 
     def pipeline_identity_structure(self) -> Any:
         if self._producer is None or not isinstance(
             self._producer, PipelineElementProtocol
         ):
+            # A stream with no pipeline producer is a root: the Arrow schemas of its
+            # Python output schema's columns, from the table it holds (ITL-640).
+            from orcapod.utils.schema_utils import arrow_schema_identity
+
             tag_schema, data_schema = self.output_schema()
-            return (tag_schema, data_schema)
+            held = self._table.schema
+            return arrow_schema_identity(
+                pa.schema([held.field(name) for name in tag_schema]),
+                pa.schema([held.field(name) for name in data_schema]),
+                self.data_context,
+            )
         return super().pipeline_identity_structure()
 
     @property
@@ -333,7 +414,7 @@ class ArrowTableStream(StreamBase):
             if columns_config.sort_by_tags and (
                 self._tag_columns or columns_config.system_tags
             ):
-                # The presentation sort (not the identity order, see
+                # The presentation sort (the identity has no row order, see
                 # ``_identity_table``). A stream with no tag column is sorted only when
                 # the system tags are asked for. The system tags stay in the table
                 # through the sort: they break ties between equal tags.
@@ -415,7 +496,8 @@ class ArrowTableStream(StreamBase):
             yield from self._cached_elements
 
     def __repr__(self) -> str:
+        refs = f", data_tags={self._data_tags}" if self._data_tags else ""
         return (
             f"{self.__class__.__name__}(table={self._table.column_names}, "
-            f"tag_columns={self._tag_columns})"
+            f"tag_columns={self._tag_columns}{refs})"
         )

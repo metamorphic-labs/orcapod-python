@@ -378,7 +378,7 @@ class TestKeyRowIdentifiers:
 class TestUnhashableColumnTypes:
     """A column the Arrow hasher refuses is named in the error (ITL-926, ITL-967).
 
-    The hasher (starfix 0.5, ITL-910) raises ``ValueError`` for a type it does not hash,
+    The hasher (starfix, ITL-910) raises ``ValueError`` for a type it does not hash,
     such as ``map``, and names only the first such column. The source names every one,
     with its type. ``fixed_size_list`` is hashed since starfix 0.5.
     """

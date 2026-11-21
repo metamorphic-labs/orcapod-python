@@ -1,0 +1,249 @@
+# Design Spec: the pipeline DAG as a diagram in notebooks (ITL-1197)
+
+**Date:** 2026-11-17
+**Issue:** [ITL-1197](https://linear.app/metamorphic/issue/ITL-1197)
+**Status:** Approved by the coordinator for the workshop version (2026-11-17); the
+developer approved a vendored library in principle for the follow-up (section 8).
+
+Implementation: `src/orcapod/pipeline/diagram.py`, its style sheet and script in
+`src/orcapod/pipeline/diagram_assets/` (`diagram.css`, `diagram.js`; section 3),
+`Pipeline.diagram()` / `PipelineJob.diagram()` and the rich display in
+`src/orcapod/pipeline/base.py`, tests in
+`tests/test_pipeline/test_diagram.py`. Screenshots of the tutorial job (before and after a
+run, light and dark, a node selected, scripts removed, folded, top to bottom, and `partial`
+after a run where `firing_rate` failed for one unit) are in `itl-1197-pipeline-diagram/`,
+made by `docs/dev/scripts/itl_1197/diagram_screenshots.py`. The two JupyterLab shots were
+taken by hand (section 3): notebooks with a `python3` kernelspec (no kernel dialog), the
+news notification turned off in a scratch settings directory, and in the trusted one a
+small script added to the output after the diagram clicks the `rates` node, as a reader
+would, so its details pane shows. The trusted one shows the collapse checkbox (unticked).
+
+**In development** (developer, November 17, 2026): the diagram, its interface and the
+notebook display may change in any release without a deprecation period. The docs say so
+in a caution box, the docstrings and the changelog (Added and Known limitations), and the
+rendered view carries a small "preview" tag next to the title (also in the no-script
+fallback). The first diagram made in a process issues `orcapod.errors.InDevelopmentWarning`
+(developer, November 17, 2026: once per process, modelled on `ProvisionalHashWarning`; a
+general class for any feature in development, bookkeeping in
+`orcapod/utils/in_development.py`); importing Orcapod, `repr`, `head()` and the plain display
+of an uncompiled pipeline never issue it. `to_dict()` has no version marker; its shape may change.
+The developer confirmed the diagram as the default rich display of `Pipeline` and
+`PipelineJob` (November 17, 2026).
+
+## 1. What is displayed, read without computing
+
+- Nodes: every node of `pipeline.dag` (source, operator, function pod, function pod with
+  side effects, side-effect pod), by `node_type`. Shape and colour by kind, plus the kind
+  written in the node (not colour alone).
+- Node text: label (its key in `pipeline.nodes`) and a kind line: kind, the operator's or
+  function's name when the label does not already say it (`function pod · firing_rate`; not for `SelectDataColumns_2`), for a job the
+  run status.
+- Edges: the DAG's edges (streams). Under `collapse=True`, dashed when steps were folded.
+- Selected node (click/Enter; hover tooltip on the inline picture): tag and data schema from
+  `node.output_schema()` (predicted, never computed), its inputs, and for a job: status,
+  last-run counts, first error, folded steps.
+- Job status, all from memory: source `bound`/`unbound` (`bound_source`); other nodes
+  `not run` (`last_modified is None`), `stale` (`is_stale`), `failed` (the node's own
+  failed-row count, set by a job run and by the node's own `run()`, read through one
+  internal helper until ITL-1209 gives a node its own run summary), `current`
+  (`holds_current_run()`, whether the job's last run ran or kept it: `held` was dropped
+  as a status after the Copilot review, since `job.last_run` records held rows for function
+  nodes only; a function node's facts count them), `loaded only`
+  (`holds_current_run(load_only=True)`),
+  `partial` (ran, not current, and a node it reads from is `failed` or `partial`: it holds
+  the results of the rows that did not fail; Copilot review of #424).
+  Row counts from `job.last_run` (function nodes: rows, computed, reused, failed, held,
+  not stored). Operators: status only (no count without reading).
+- Never: `as_table`, `iter_data`, `head`, `check_for_new_data`, any database call, any
+  user function. A `DerivedSource` with `tags_as_data` used to read its origin's rows to
+  give `output_schema()`; it now derives them from the origin's zero-row table (fixed in
+  this PR, found by the Copilot review). `last_modified`, `is_stale`, `holds_current_run` read attributes only.
+
+## 2. Public API
+
+- `Pipeline.diagram(*, direction="LR", collapse=False, max_nodes=400) -> PipelineDiagram`
+  and the same on `PipelineJob`.
+- `PipelineDiagram`: `_repr_mimebundle_` (text/html + text/plain), `to_html()`,
+  `to_svg()`, `to_text()`, `save(path)` (standalone page), `__repr__`/`print` = text
+  listing (used by doc samples), and `to_dict()`: the plain JSON-able model (nodes, edges,
+  labels, kinds, schemas as text, status, facts) that any renderer consumes.
+- `Pipeline` and `PipelineJob` get `_repr_mimebundle_` delegating to `diagram()` with
+  defaults; `__repr__` unchanged. Uncompiled pipeline: text/plain only.
+- `show_graph()` (Graphviz) is kept as is, for image files and for users with `dot`.
+  Docs point to the diagram first; show_graph stays the "export a PNG/PDF" path.
+- collapse: the automatic join and select (ITL-807) are by design indistinguishable from
+  hand-written ones, so `collapse=True` folds by kind: Join, Select*/Drop*/Map* operators
+  with exactly one consumer are folded into the edge (dashed) and listed in the consumer's
+  details. Decided by the operator's class, never its label (a user's `Join(label="joined")`
+  is folded, a `DropNulls(label="Join")` is not); an operator's detail is its class name.
+- Collapse checkbox (developer, November 17, 2026): the layout stays in Python, so the
+  output embeds both layouts: the one `collapse=` asks for as the image, the node table
+  and the model block, and the other as a second JSON block (`op-dag-other`: its model and
+  its standalone SVG, base64). The script builds a `collapse` checkbox beside the zoom
+  buttons and switches pictures; selection, pan, zoom and the details panel keep working,
+  and the selected node stays selected when it is in both layouts (else the panel
+  closes). The checkbox exists only where scripts run, only when folding changes
+  something, and only when the other layout has at most `max_nodes` nodes. The no-script
+  fallback shows the `collapse=` layout. Output is deterministic. Size: the other layout
+  adds about half again (100 joined branches, 401 nodes, 201 folded: 923 KiB of HTML
+  instead of about 613 KiB; built in 0.03 s). Default False (the tutorial teaches the node names, SelectDataColumns_1 etc.).
+- Direction checkbox (developer, November 17, 2026; ITL-1232): the output embeds every
+  layout of both directions and both collapse states, in one JSON block (`op-dag-views`,
+  which replaced `op-dag-other`): the shown direction and collapse state, the other
+  collapse state's model (when folding changes something and it has at most `max_nodes`
+  nodes) and the other layouts' standalone SVGs, base64: up to three. The script builds a
+  `vertical` checkbox (ticked for top to bottom) and the `collapse` checkbox for the
+  layouts the block holds, and fits each new picture as on first display. Above
+  `_MAX_EMBEDDED_NODES` (100) nodes no other layout is embedded and neither checkbox
+  appears. Sizes (wrapped node text): the tutorial job 31 KiB with one layout, 61 KiB
+  with four; 100 foldable nodes 174 KiB with one, 516 KiB with four; 200 nodes 335 KiB
+  and 1,019 KiB; 400 nodes (the default `max_nodes`, one layout above the limit) 659 KiB.
+- Node text (ITL-1232): the kind line is wrapped at its ` · ` separators to the width of
+  the label or its widest part (within the node width limits), one 13 px line more per
+  wrapped line; nothing is dropped from it. Tutorial job left to right: 1,664 x 134 px
+  before, 1,213 x 186 px after (top to bottom 428 x 668, 383 x 772); a two-node job
+  499 x 68 before, 279 x 94 after. At a 1,280 px JupyterLab window (a 1,062 px view)
+  the tutorial job now fits at 0.88, above the 0.8 floor of ITL-1231: shown whole.
+
+## 3. Rendering approach
+
+(a) RECOMMENDED for Thursday: Python layered layout (written here, ~250 lines, stdlib
+only) -> inline SVG with presentation attributes (draws with no CSS and no JS), one
+`<style>` and one inline `<script>` as enhancement (pan by drag, ctrl/cmd-wheel and
++/-/fit zoom, click/Enter details panel, edge highlight). Node data for the panel in a
+`<script type="application/json">` block, inserted with textContent only. No dependency,
+nothing vendored, no network, no binary. Survives save/reopen and nbconvert HTML export
+(it is just HTML+SVG). When scripts do not run (untrusted notebook, GitHub, a sanitizer)
+the picture and a `<details>` node table remain.
+Front ends: JupyterLab / Notebook 7 run the script for trusted (freshly produced)
+outputs; classic Notebook 6 evaluates scripts through jQuery (no
+`document.currentScript`: the script falls back to the last un-initialised container);
+VS Code and Colab run output scripts in their webview/iframe.
+
+The style sheet and the script are source files shipped as package data beside the
+module (developer review, November 17, 2026): `src/orcapod/pipeline/diagram_assets/diagram.css`
+and `diagram.js`, formatted one rule or statement per line, with their explanatory
+comments. The wheel (`packages = ["src/orcapod"]`) and the sdist (`only-include`
+`src/orcapod`) carry them with no configuration change. `diagram._asset` reads each through
+`importlib.resources.files("orcapod.pipeline")` on first use (cached per process; never at
+import) and every output still embeds both inline, because a notebook output cannot fetch
+a package file. Embedded compacted by `diagram._compact`, a deterministic text step and not
+a minifier: CSS `/* */` comments, script comment lines (whole lines starting with `//`, the
+only comment form `diagram.js` uses), indentation and blank lines are dropped; every other
+line is kept as written and line breaks stay, so statements end where they did. The
+tutorial job's HTML grows from 34,035 to 35,052 bytes (the readable spacing); as written,
+with comments and indentation, it would carry 4,405 bytes more per output (39,457). The over-`max_nodes` listing
+(no style sheet, no script) is unchanged at 932 bytes. Nothing from the user is ever
+written into either file; the script reads the model from the JSON blocks with
+`textContent`. `_asset` refuses a file holding `</style`, `</script` or `<!--` (any letter
+case), so an edit cannot end its element.
+
+Checked by hand in JupyterLab 4.6.6 (headless server, headless Chrome; screenshots
+`itl-1197-pipeline-diagram/jupyterlab-*.png`): for an untrusted notebook its sanitizer
+removes inline `<svg>` (keeping only its text, so the hover texts showed as a wall of
+text) and `<style>`, and keeps `<img>` with any `src` (it checks schemes on `href` and
+`cite` only). So the picture is shipped as `<img src="data:image/svg+xml;base64,...">`,
+drawn on its own light background in a fixed text colour (an image does not take the
+page's colours), and the script, where it runs, swaps it for the same SVG inline (no
+background, `currentColor`) and creates the zoom buttons itself, so nothing inert is left
+in a sanitized output. Untrusted: the picture and the Nodes table. Trusted: interactive.
+(b) Vendored library: see section 8 (later end state).
+(c) anywidget/ipywidgets: rejected: new dependencies, widget state lost on save/export
+unless widget state is saved, Colab needs its custom widget manager.
+
+### Scale and size of the view (ITL-1231)
+
+Developer and coordinator decision, November 17, 2026. The view keeps a scale (screen
+pixels per picture unit) and the picture point at its centre; the viewBox is derived from
+them and the view's size every time, so it always has the view's proportions. Before, the
+script fitted once, while JupyterLab had not yet given the cell its final width, kept that
+viewBox, and so drew the tutorial job at about 0.26 of its size in a much larger box.
+
+- `MAX_SCALE` = 1.25 (`diagram.js`, and `diagram._MAX_SCALE` for the image): labels (13 px)
+  at 16 px, the kind line (11 px) at 13.75 px; a two-node job is not blown up.
+- Fit (button, `0`) shows the whole picture, scaled up or down, at most `MAX_SCALE`.
+- First display: as fit, but never below `MIN_FIRST_SCALE` = 0.8 (labels at 10.4 px). The
+  tutorial job is 1664 px wide (seven layers), so in a cell narrower than 1330 px it starts
+  at 0.8 from its left end (a top-to-bottom picture taller than the view, from its top).
+  Each edge beyond which the picture goes on shows a grey fade with an arrow (made by the
+  script; a click moves half a view that way).
+- The view's height is the picture's at its first-display scale, at most 560 px, at least
+  120 px unless the picture is shorter at `MAX_SCALE`: no empty band.
+- A change of the view's width (observed on the title line, so the new height does not
+  feed back) redraws as on first display, or as fit after fit; after a zoom or pan it keeps
+  the scale and centre.
+- Keys the diagram handles stop propagating (JupyterLab's arrow keys and `0 0`); in
+  JupyterLab 4.6.6 they had no effect on the notebook even before.
+- No script: the image is `width:100%` with `max-width` at 1.25 times its own width;
+  JupyterLab keeps that style in an untrusted notebook.
+- Checked in JupyterLab 4.6.6 (headless Chrome, 820 and 1280 px windows, light and dark,
+  trusted and untrusted): `docs/dev/scripts/itl_1231/` and the pictures in
+  `docs/dev/specs/itl-1231-diagram-scale/`. The report that a scripted zoom did nothing
+  was not reproduced: clicks and focused keys zoom on `main` too; a key sent while the
+  diagram is not focused goes to the notebook. Making the nodes narrower, so that the whole
+  tutorial job reads at fit, is ITL-1214.
+
+## 4. Layout quality
+
+Layers by longest path (a root sits just before its first consumer), dummy points for
+long edges, 12 barycenter sweeps keeping the fewest-crossings order, balanced placement
+(average of the up- and down-pushed solutions), cubic Bezier edges through the dummies.
+Deterministic: nodes in topological order with ties broken by label, edges sorted, no
+set/dict iteration order or hash() in the output; marker id from a SHA-256 of the graph.
+150-node random DAG: layout 0.01 s, 173 KiB HTML, readable with zoom. max_nodes (default
+400) switches to the text listing beyond it.
+
+## 5. Tests (no browser) and docs
+
+- Model: tutorial-like job: nodes, kinds, labels, edges, schemas; statuses before run,
+  after run, failed rows, stale after rebind/clear_cache, held rows on a rerun, loaded only.
+- Kind: from the object drawn (`isinstance(pipeline, PipelineJob)`), so an empty
+  compiled job is `Job '...'` with `kind="job"` (ITL-1214, Copilot review).
+- Assets: both files resolve through `importlib.resources`, are embedded compacted, hold
+  no `</script`, `</style` or `<!--`, and the loader refuses one that does; the embedded
+  script passes `node --check` when Node.js is on `PATH`.
+- Determinism: two diagrams of the same pipeline are byte-identical; recording order of
+  independent branches does not change the output.
+- Escaping: label, column name, pipeline name and error message containing
+  `</script><script>`, `<img onerror>`, `"><svg onload>`: parse the HTML with
+  html.parser and assert only our tag names, no `on*` attribute, no extra script element;
+  JSON block contains no `<`.
+- No computing: function with a call counter, a database wrapper that fails on any read
+  or write, a source whose check/read fails: rendering before and after run leaves all
+  untouched.
+- Layout: no overlapping boxes within a layer, every edge goes forward, a 300-node graph
+  lays out in under a second.
+- Docs: `print(job.diagram())` (deterministic text listing) in the pipeline concept page
+  section and tutorial Part 5; Part 8 and troubleshooting point to `job.diagram()`
+  instead of show_graph. Browser checks stay manual (headless Chrome screenshots).
+
+## 6. Accessibility and themes
+
+Text and edges use `currentColor` (the notebook's own text colour), kinds a solid stroke
+with a 14% fill: readable on light and dark themes in JupyterLab, VS Code, Colab without
+theme detection. Kind and status are also written as text and drawn as shape/dash (not run,
+stale, partial, unbound dashed), never colour alone. `role="group"` + `<title>` on the
+inline SVG (it holds the node controls; the `<img>` fallback carries image semantics and
+`alt`), nodes
+`role="button"`, `tabindex=0`, `aria-label`, Enter/Space selects; panel `aria-live`.
+
+## 7. Thursday version vs later
+
+Thursday: diagram module, `diagram()` on Pipeline and PipelineJob, rich repr, options
+direction/collapse/max_nodes, details panel, job status, tests, docs, changelog.
+Later: vendored-library renderer (section 8), live updates during a run (the approach
+allows it: `display(..., display_id=True)` and `handle.update(job.diagram())` from an
+observer), `node.diagram()` for one node's ancestry, operator arguments in details,
+search/filter for huge graphs, reuse by the docs site (ITL-1170).
+
+## 8. Later vendored library: recommendation
+
+@dagrejs/dagre 3.1.3: MIT; `dist/dagre.min.js` 49 KB (17 KB gzip) with graphlib
+included; a plain IIFE global (no AMD/UMD wrapper, so no RequireJS clash in classic
+Notebook); layout only (network-simplex ranking, layered, good for DAGs of this kind) and
+we draw the SVG from the same `to_dict()` model. Inlined into each output: offline, works
+in JupyterLab, VS Code, Colab and exported HTML; with no scripts the Python SVG remains.
+Not chosen: elkjs 0.12.1 (best layered quality, orthogonal routing, ports, compound nodes
+for collapsed groups, but 1.6 MB / 480 KB gzip per output and licence EPL-2.0 OR
+GPL-3.0); cytoscape 3.35 (MIT, canvas: no static picture, 443 KB min / 139 KB gzip, plus a dagre extension for layered layout); mermaid 12 (MIT,
+multi-MB); d3-dag 1.3 (MIT, 143 KB, light maintenance).

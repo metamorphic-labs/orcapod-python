@@ -258,9 +258,11 @@ def test_a_class_no_factory_covers_hashes_by_its_name_stably(
     hasher = get_default_context().semantic_hasher
     expected = hasher.hash_object(f"type:{module.__name__}.Opaque")
     assert hasher.hash_object(opaque) == expected
-    slot_hash = _slot(opaque).pipeline_hash()
+    # A schema is hashed as its Arrow schema (ITL-640): a slot of a class with no
+    # Arrow type has no identity, and says which type.
+    with pytest.raises((TypeError, ValueError), match="Opaque"):
+        _slot(opaque).pipeline_hash()
     assert hasher.hash_object(opaque) == expected
-    assert _slot(opaque).pipeline_hash() == slot_hash
     assert get_default_context().type_converter.get_logical_type(opaque) is None
 
 
@@ -458,7 +460,7 @@ def test_one_stored_table_per_node_whatever_is_built_first(tmp_path: Path) -> No
     assert second == third == {"computed": 0, "from_store": 1}
 
     job_tables = DeltaTableDatabase(tmp_path / "store" / "job").list_table_paths()
-    pipeline_tables = [p for p in job_tables if p[-1] == "pdb_v2"]
+    pipeline_tables = [p for p in job_tables if p[-1] == "pdb_v1"]
     assert len(pipeline_tables) == 1, pipeline_tables
     operator_tables = DeltaTableDatabase(
         tmp_path / "store" / "operators"

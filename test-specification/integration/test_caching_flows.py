@@ -1,0 +1,251 @@
+"""Specification-derived integration tests for DB-backed caching flows.
+
+Tests FunctionNode and OperatorNode caching behavior
+as documented in the design specification.
+"""
+
+from __future__ import annotations
+
+import pyarrow as pa
+
+from orcapod.core.function_pod import FunctionPod
+from orcapod.core.nodes.function_node import FunctionJobNode
+from orcapod.core.nodes.operator_node import OperatorJobNode
+from orcapod.core.operators import Join
+from orcapod.core.data_function import CachedDataFunction, PythonDataFunction
+from orcapod.core.sources import ArrowTableSource, DerivedSource
+from orcapod.databases import InMemoryArrowDatabase
+from orcapod.types import CacheMode
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+_DOUBLE_CALLS: list[int] = []
+
+
+def _double(x: int) -> int:
+    _DOUBLE_CALLS.append(x)
+    return x * 2
+
+
+def _make_source(n: int = 3) -> ArrowTableSource:
+    table = pa.table(
+        {
+            "id": pa.array(list(range(n)), type=pa.int64()),
+            "x": pa.array(list(range(n)), type=pa.int64()),
+        }
+    )
+    return ArrowTableSource(
+        table, tag_columns=["id"], tag_only_columns=True, infer_nullable=True
+    )
+
+
+# ===================================================================
+# FunctionNode caching
+# ===================================================================
+
+
+class TestFunctionNodeCaching:
+    """Per design: first run computes and stores; second run replays cached."""
+
+    def test_first_run_computes_all(self):
+        pf = PythonDataFunction(_double, output_keys="result")
+        pod = FunctionPod(data_function=pf)
+        source = _make_source(3)
+        pipeline_db = InMemoryArrowDatabase()
+        result_db = InMemoryArrowDatabase()
+        node = FunctionJobNode(
+            function_pod=pod,
+            input_stream=source,
+            pipeline_database=pipeline_db,
+            result_database=result_db,
+        )
+        node.run()
+        records = node.get_all_records()
+        assert records is not None
+        assert records.num_rows == 3
+
+    def test_second_run_uses_cache(self):
+        pf = PythonDataFunction(_double, output_keys="result")
+        pod = FunctionPod(data_function=pf)
+        source = _make_source(3)
+        pipeline_db = InMemoryArrowDatabase()
+        result_db = InMemoryArrowDatabase()
+
+        # First run
+        node1 = FunctionJobNode(
+            function_pod=pod,
+            input_stream=source,
+            pipeline_database=pipeline_db,
+            result_database=result_db,
+        )
+        node1.run()
+
+        # Second run with same inputs — should use cached results
+        node2 = FunctionJobNode(
+            function_pod=pod,
+            input_stream=source,
+            pipeline_database=pipeline_db,
+            result_database=result_db,
+        )
+        # A node shows rows only after a run (ITL-1095); this run reads them all.
+        _DOUBLE_CALLS.clear()
+        node2.run()
+        data = list(node2.iter_data())
+        assert len(data) == 3
+        assert _DOUBLE_CALLS == []  # every result came from the store
+
+
+class TestDerivedSourceReingestion:
+    """Per design: FunctionNode → DerivedSource → further pipeline."""
+
+    def test_derived_source_as_pipeline_input(self):
+        pf = PythonDataFunction(_double, output_keys="result")
+        pod = FunctionPod(data_function=pf)
+        source = _make_source(3)
+        pipeline_db = InMemoryArrowDatabase()
+        result_db = InMemoryArrowDatabase()
+
+        node = FunctionJobNode(
+            function_pod=pod,
+            input_stream=source,
+            pipeline_database=pipeline_db,
+            result_database=result_db,
+        )
+        node.run()
+
+        # Create DerivedSource from the node's results
+        derived = node.as_source()
+        assert isinstance(derived, DerivedSource)
+
+        # Should be able to iterate data from derived source
+        data = list(derived.iter_data())
+        assert len(data) == 3
+
+
+# ===================================================================
+# OperatorNode caching
+# ===================================================================
+
+
+class TestOperatorNodeCaching:
+    """Per design: CacheMode.LOG stores results, REPLAY loads from DB."""
+
+    def test_log_mode_stores_results(self):
+        source_a = ArrowTableSource(
+            pa.table(
+                {
+                    "id": pa.array([1, 2, 3], type=pa.int64()),
+                    "age": pa.array([25, 30, 35], type=pa.int64()),
+                }
+            ),
+            tag_columns=["id"],
+            tag_only_columns=True,
+            infer_nullable=True,
+        )
+        source_b = ArrowTableSource(
+            pa.table(
+                {
+                    "id": pa.array([2, 3, 4], type=pa.int64()),
+                    "score": pa.array([85, 90, 95], type=pa.int64()),
+                }
+            ),
+            tag_columns=["id"],
+            tag_only_columns=True,
+            infer_nullable=True,
+        )
+        join = Join()
+        db = InMemoryArrowDatabase()
+        node = OperatorJobNode(
+            operator=join,
+            input_streams=[source_a, source_b],
+            pipeline_database=db,
+            cache_mode=CacheMode.LOG,
+        )
+        node.run()
+        records = node.get_all_records()
+        assert records is not None
+        assert records.num_rows == 2
+
+    def test_replay_mode_loads_from_db(self):
+        source_a = ArrowTableSource(
+            pa.table(
+                {
+                    "id": pa.array([1, 2, 3], type=pa.int64()),
+                    "age": pa.array([25, 30, 35], type=pa.int64()),
+                }
+            ),
+            tag_columns=["id"],
+            tag_only_columns=True,
+            infer_nullable=True,
+        )
+        source_b = ArrowTableSource(
+            pa.table(
+                {
+                    "id": pa.array([2, 3, 4], type=pa.int64()),
+                    "score": pa.array([85, 90, 95], type=pa.int64()),
+                }
+            ),
+            tag_columns=["id"],
+            tag_only_columns=True,
+            infer_nullable=True,
+        )
+        join = Join()
+        db = InMemoryArrowDatabase()
+
+        # First: LOG
+        node1 = OperatorJobNode(
+            operator=join,
+            input_streams=[source_a, source_b],
+            pipeline_database=db,
+            cache_mode=CacheMode.LOG,
+        )
+        node1.run()
+
+        # Second: REPLAY
+        node2 = OperatorJobNode(
+            operator=join,
+            input_streams=[source_a, source_b],
+            pipeline_database=db,
+            cache_mode=CacheMode.REPLAY,
+        )
+        node2.run()
+        table = node2.as_table()
+        assert table.num_rows == 2
+
+
+# ===================================================================
+# CachedDataFunction end-to-end
+# ===================================================================
+
+
+class TestCachedDataFunctionEndToEnd:
+    """End-to-end test of CachedDataFunction with InMemoryArrowDatabase."""
+
+    def test_full_caching_flow(self):
+        db = InMemoryArrowDatabase()
+        inner_pf = PythonDataFunction(_double, output_keys="result")
+        cached_pf = CachedDataFunction(inner_pf, result_database=db)
+        cached_pf.set_auto_flush(True)
+
+        from orcapod.core.datagrams.tag_data import Data
+
+        # Process multiple data
+        for x in [1, 2, 3]:
+            result = cached_pf.call(Data({"x": x}))
+            assert result is not None
+            assert result["result"] == x * 2
+
+        # All should be cached
+        all_outputs = cached_pf.get_all_cached_outputs()
+        assert all_outputs is not None
+        assert all_outputs.num_rows == 3
+
+        # Re-calling should use cache
+        for x in [1, 2, 3]:
+            result = cached_pf.call(Data({"x": x}))
+            assert result is not None
+            assert result["result"] == x * 2

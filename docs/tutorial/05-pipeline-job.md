@@ -23,12 +23,12 @@ data_dir = make_dataset()
 
 sessions = CSVSource(
     str(data_dir / "sessions.csv"),
-    tag_columns=["subject_id", "session"],
+    tag_columns=["subject_id", "session"], tag_only_columns=True,
     source_id="sessions",
 )
 units = CSVSource(
     str(data_dir / "units.csv"),
-    tag_columns=["subject_id", "session", "probe", "unit"],
+    tag_columns=["subject_id", "session", "probe", "unit"], tag_only_columns=True,
     source_id="units",
 )
 
@@ -111,6 +111,53 @@ names, in an order that can differ from one Python session to the next.)
 - A function pod is listed under the `label` you gave it. Without a label it gets the
   function's name.
 - Operators are named after their kind, numbered when there are several.
+
+To see how the nodes connect, put `job` on the last line of a notebook cell: the job draws
+itself as a diagram. [Working in notebooks](../concepts/notebooks.md#the-pipeline-diagram)
+has a picture of this job's diagram and what each display in a notebook shows.
+
+!!! caution "In development"
+    `Pipeline.diagram()`, `PipelineJob.diagram()`, `PipelineDiagram` and its methods and
+    arguments, the look of the picture and the notebook display may change in any release
+    without a deprecation period. The first diagram in a Python session issues
+    `orcapod.errors.InDevelopmentWarning` once, as a reminder; to silence it, run
+    `warnings.filterwarnings("ignore", category=InDevelopmentWarning)` after importing
+    it from `orcapod.errors`.
+
+Drag it to move it, zoom with the `+` and `−` buttons, and click a node to see its schema
+(its tag and data columns) and how many rows the last run computed or read. Outside a notebook,
+`print(job.diagram())` gives the same graph as text, one node per line with the nodes it
+reads from:
+
+```python
+print(job.diagram())
+# Job 'workshop': 9 nodes
+#   sessions (source · CSVSource · bound)
+#   SelectDataColumns_1 (operator · current) <- sessions
+#   units (source · CSVSource · bound)
+#   SelectDataColumns_3 (operator · current) <- units
+#   Join (operator · current) <- SelectDataColumns_1, SelectDataColumns_3
+#   rates (function pod · firing_rate · current) <- Join
+#   GroupBy (operator · current) <- rates
+#   SelectDataColumns_2 (operator · current) <- GroupBy
+#   session_means (function pod · mean_rate · current) <- SelectDataColumns_2
+```
+
+The `Join` is there because `firing_rate` was given two streams: the pod joins them for you.
+`current` means the node holds the rows of the run you just did; before `job.run()` every
+node but the sources says `not run`. `job.diagram(collapse=True)` hides the steps that only
+choose or join columns, leaving the sources, the function pods and the `GroupBy` (in the
+notebook, the `collapse` checkbox above the diagram does the same):
+
+```python
+print(job.diagram(collapse=True))
+# Job 'workshop': 5 nodes
+#   sessions (source · CSVSource · bound)
+#   units (source · CSVSource · bound)
+#   rates (function pod · firing_rate · current) <- sessions, units
+#   GroupBy (operator · current) <- rates
+#   session_means (function pod · mean_rate · current) <- GroupBy
+```
 
 A node is a stream. Everything from Part 1 works on it:
 
@@ -263,7 +310,7 @@ job = PipelineJob(name="depths", database=DeltaTableDatabase("exercise_db"))
 with job:
     units = CSVSource(
         str(data_dir / "units.csv"),
-        tag_columns=["subject_id", "session", "probe", "unit"],
+        tag_columns=["subject_id", "session", "probe", "unit"], tag_only_columns=True,
         source_id="units",
     )
     to_mm.pod(units.select_data_columns(["depth_um"]), label="depth_mm")

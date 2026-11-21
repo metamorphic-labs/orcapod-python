@@ -26,7 +26,7 @@ from orcapod.sources import CSVSource
 
 subjects = CSVSource(
     str(data_dir / "subjects.csv"),
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
     source_id="subjects",
 )
 print(subjects.as_pandas_df())
@@ -54,10 +54,11 @@ Every column of a source is either a tag column or a data column.
   uses tags to match rows when it combines tables.
 - **Data columns** are everything else: the values that were measured or recorded.
 
-A tag column is a tag only, never also a data column. `CSVSource`, like every source built
-from a table, accepts `tag_only_columns=True`, which says exactly that and is the default in
-this version. From Orcapod v0.4 tags become referential by default (a tag that is also the
-data column of the same name), and `tag_only_columns=True` keeps them plain as they are here.
+By default a declared tag column is also a data column: `CSVSource`, like every source built
+from a table, makes its tags **data-tags**, one column seen both as a tag and as the data
+column of the same name (see [Data-tags](../concepts/data-tags.md)). This
+tutorial keeps its tags plain with `tag_only_columns=True`: a plain tag is a tag only, never
+also a data column, so the data columns below are exactly the columns that are not tags.
 
 You choose the tag columns; all remaining columns become data columns. `output_schema()`
 returns both groups, with their types:
@@ -89,7 +90,7 @@ session name:
 ```python
 sessions = CSVSource(
     str(data_dir / "sessions.csv"),
-    tag_columns=["subject_id", "session"],
+    tag_columns=["subject_id", "session"], tag_only_columns=True,
     source_id="sessions",
 )
 print(sessions.output_schema())
@@ -102,11 +103,11 @@ What a source gives you is a **stream**: an ordered, read-only sequence of rows,
 pair of (tag, data). Every step you add later takes streams in and gives a stream back, so
 the four ways of looking at a stream shown in this part work at every stage of a pipeline.
 
-You have seen `output_schema()` and `keys()`. To walk through the rows, use `iter_data()`.
-Each row comes as two objects; call `.as_dict()` on either to get a plain dictionary:
+You have seen `output_schema()` and `keys()`. To walk through the rows, loop over the stream
+(the same as calling its `iter_data()` method). Each row comes as two objects; call `.as_dict()` on either to get a plain dictionary:
 
 ```python
-for tag, data in sessions.iter_data():
+for tag, data in sessions:
     print(tag.as_dict(), "->", data.as_dict())
 # {'subject_id': 'mouse_01', 'session': 's1'} -> {'date': datetime.date(2026, 10, 5), 'duration_s': 60.0}
 # {'subject_id': 'mouse_01', 'session': 's2'} -> {'date': datetime.date(2026, 10, 12), 'duration_s': 120.0}
@@ -147,7 +148,7 @@ probes = DictSource(
         {"probe": "imec0", "region": "V1", "n_channels": 384},
         {"probe": "imec1", "region": "CA1", "n_channels": 384},
     ],
-    tag_columns=["probe"],
+    tag_columns=["probe"], tag_only_columns=True,
     source_id="probes",
 )
 print(probes.as_pandas_df())
@@ -182,7 +183,7 @@ have?
     ```python
     units = CSVSource(
         str(data_dir / "units.csv"),
-        tag_columns=["subject_id", "session", "probe", "unit"],
+        tag_columns=["subject_id", "session", "probe", "unit"], tag_only_columns=True,
         source_id="units",
     )
     print(units.output_schema())
@@ -204,7 +205,7 @@ column of `subjects.csv` a tag.
 
     ```python
     try:
-        CSVSource(str(data_dir / "subjects.csv"), tag_columns=["mouse"])
+        CSVSource(str(data_dir / "subjects.csv"), tag_columns=["mouse"], tag_only_columns=True)
     except ValueError as err:
         print(err)
     # tag_columns not found in table: {'mouse'}. Available columns: ['subject_id', 'sex', 'age_weeks', 'genotype']
@@ -212,7 +213,7 @@ column of `subjects.csv` a tag.
     try:
         CSVSource(
             str(data_dir / "subjects.csv"),
-            tag_columns=["subject_id", "sex", "age_weeks", "genotype"],
+            tag_columns=["subject_id", "sex", "age_weeks", "genotype"], tag_only_columns=True,
         )
     except ValueError as err:
         print(err)

@@ -68,6 +68,7 @@ class CachedFunctionPod(WrappedFunctionPod):
         self._cache = ResultCache(
             result_database=result_database,
             record_path=self.uri,  # no prefix; db is pre-scoped
+            revision=function_pod.data_function.declaration.revision_component,
             auto_flush=auto_flush,
             # A pod that takes the invocation context performs an external action.
             delivers_side_effects=function_pod.ctx_arg_name is not None,
@@ -483,9 +484,7 @@ class CachedFunctionPod(WrappedFunctionPod):
         active trackers (so a ``PipelineJob`` records this pod).
         """
         input_stream = self.handle_input_streams(*streams)
-        tag_schema, data_schema = input_stream.output_schema()
-        self._validate_input_schema(data_schema)
-        self._validate_output_keys(tag_schema.keys())
+        self._validate_input(*input_stream.output_schema())
         # The pod has no ``from_config`` (it cannot be rebuilt without its cache
         # database), the one member of FunctionPodProtocol it lacks; the tracker uses
         # none of it.

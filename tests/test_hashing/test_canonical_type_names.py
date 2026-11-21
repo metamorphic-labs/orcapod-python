@@ -32,7 +32,11 @@ import pytest
 import upath
 
 from orcapod.contexts import get_default_context
-from orcapod.core.data_function import PythonDataFunction
+from orcapod.core.data_function import (
+    FUNCTION_CONTENT_HASH_LABEL,
+    FUNCTION_SIGNATURE_HASH_LABEL,
+    PythonDataFunction,
+)
 from orcapod.hashing.hash_utils import (
     canonical_annotation_str,
     get_function_components,
@@ -314,23 +318,30 @@ class TestFunctionPodGolden:
 
     def test_function_signature_hash(self, data_function: PythonDataFunction):
         variation = data_function.get_function_variation_data()
-        assert variation["function_signature_hash"] == (
-            b"semantic_v1:\t\xab;\xa6\x95t\xa2\xc7\xcc\t \xe7\xdb\x14\x1c6\xa4y\xea8"
-            b"\xeb\xe6\xfc@K\x10\x12\xd3\xcb\xf0\x86\xe9"
+        # The declared interface: effective input and output types (ITL-1256).
+        assert variation[
+            "function_signature_hash"
+        ] == f"{FUNCTION_SIGNATURE_HASH_LABEL}:".encode() + (
+            bytes.fromhex(
+                "17505601cf72363bc26298fa318af1aa9af33c73e6936693f6583bc02ceb8cb8"
+            )
         )
 
     def test_function_content_hash(self, data_function: PythonDataFunction):
         variation = data_function.get_function_variation_data()
-        # Covers the ``annotations:`` component, which embeds ``str(type)``.
-        assert variation["function_content_hash"] == (
-            b"semantic_v1:p\x08\xe2\xa0>\xe2\x08\xc1\x9a\xacx\x16\xaa\xcbq\x0c`-d"
-            b"\xa2V\xe2\x05\xcf\x82\xe0H\x96\x0f\xd5\xc6\xa1"
+        # The source text from the def line on (ITL-1256): no type text enters it.
+        assert variation[
+            "function_content_hash"
+        ] == f"{FUNCTION_CONTENT_HASH_LABEL}:".encode() + (
+            bytes.fromhex(
+                "38bc75652f872d24efa789c5c3e77f2893092509a0d2466a25fba7a8678797d1"
+            )
         )
 
     def test_uri(self, data_function: PythonDataFunction):
         assert data_function.uri == (
             "golden_pod_fn",
-            "7f73f4eca0b57ef29a6acbea0664eb60e3a7e5886b75be06b3463ed1f56b981a",
+            "809b59f28984f4c35967225612597bffca25adeda8356c148e45e99a46d3345a",
             "v0",
-            "python.function.v0",
+            "python.function.v1",
         )

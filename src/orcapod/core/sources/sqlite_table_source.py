@@ -28,12 +28,13 @@ from collections.abc import Collection, Iterator
 from contextlib import contextmanager
 from typing import Any, ClassVar, TYPE_CHECKING
 
+from orcapod.core.data_tags import TagOnlyColumns
 from typing_extensions import override
 
-from orcapod.core.referential_tags import TagOnlyColumns, check_tag_only_columns
 from orcapod.core.sources.db_table_source import DBTableSource
 from orcapod.core.sources.source_ids import joined_location
 from orcapod.core.sources.stream_builder import normalize_record_id_columns
+from orcapod.core.sources.base import saved_tag_only_columns
 from orcapod.databases.sqlite_connector import SQLiteConnector
 from orcapod.protocols.db_connector_protocol import DBConnectorProtocol
 from orcapod.utils.schema_utils import _normalize_column_list
@@ -90,10 +91,8 @@ class SQLiteTableSource(DBTableSource):
         data_context: Data context governing type conversion and hashing.
         config: OrcaPod configuration.
         tag_only_columns: Tag columns kept as tags only, not data, exactly as in
-            v0.3; ``True`` for all of them. Keyword-only. ``True`` is the default and
-            the only value v0.3 accepts: any other value is refused, because
-            referential tags arrive in v0.4 (tags then become referential by default
-            and ``tag_only_columns`` keeps a tag plain).
+            v0.3; ``True`` for all of them. Keyword-only. Every other tag column is
+            a data-tag: also a data column of the same name (ITL-1023).
 
     Raises:
         ValueError: If the table is not found or is empty.
@@ -115,9 +114,8 @@ class SQLiteTableSource(DBTableSource):
         data_context: str | contexts.DataContext | None = None,
         config: "OrcapodConfig | None" = None,
         *,
-        tag_only_columns: TagOnlyColumns = True,
+        tag_only_columns: TagOnlyColumns = (),
     ) -> None:
-        check_tag_only_columns(tag_only_columns)
         self._db_path = db_path
         # A check (ITL-1102) reopens the database found now, whatever the working
         # directory is then; an in-memory database or a URI is kept as given.
@@ -240,7 +238,7 @@ class SQLiteTableSource(DBTableSource):
             db_path=config["db_path"],
             table_name=config["table_name"],
             tag_columns=config.get("tag_columns"),
-            tag_only_columns=config.get("tag_only_columns", True),
+            tag_only_columns=saved_tag_only_columns(config),
             system_tag_columns=config.get("system_tag_columns", ()),
             record_id_columns=config.get("record_id_columns"),
             source_id=config.get("source_id"),

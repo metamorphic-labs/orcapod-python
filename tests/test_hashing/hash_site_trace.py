@@ -17,7 +17,7 @@ It records, with the library call site of each event:
   linked to the site that produced that digest.
 
 A call site is ``<path under src/orcapod>:<function>``; the ``origin`` of an event is the
-first frame outside the hashing machinery (``hashing/``, ``types.py``, the content-identity
+first frame outside the hashing machinery (``hashing/``, ``types/__init__.py``, the content-identity
 base classes), which says what the hash is for. Events with no library frame on the stack
 (a test reading a hash directly) are recorded under ``<test>``.
 """
@@ -45,7 +45,7 @@ _MACHINERY = tuple(
     _SRC + part
     for part in (
         "hashing" + os.sep,
-        "types.py",
+        "types" + os.sep + "__init__.py",
         "core" + os.sep + "base.py",
     )
 )
@@ -259,7 +259,6 @@ def run_scenario() -> None:
     warnings.filterwarnings("ignore")
     import orcapod as op
     from orcapod.contexts import get_default_context
-    from orcapod.core.sources.list_source import ListSource
     from tests.test_hashing.golden import cases
 
     _ = cases.compute_all()
@@ -268,19 +267,6 @@ def run_scenario() -> None:
         root = _Path(tmp)
         (root / "a.txt").write_text("alpha")
         _ = hasher.hash_object([op.Directory(root), op.File(root / "a.txt")])
-    _ = ListSource(
-        name="item",
-        data=[1, 2],
-        tag_function=_scenario_tag,
-        expected_tag_keys=["index"],
-        tag_function_hash_mode="content",
-    ).content_hash()
-
-
-def _scenario_tag(element: int, index: int) -> dict[str, int]:
-    """Tag function of the scenario's ``ListSource``."""
-    del element
-    return {"index": index}
 
 
 def pytest_configure(config: pytest.Config) -> None:

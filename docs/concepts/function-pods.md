@@ -23,7 +23,18 @@ def compute_bmi(weight: float, height: float) -> float:
 Key points:
 
 - **`output_keys`** names the output data column(s). A single string means one output
-  column; a list of strings means the function returns multiple values.
+  column; a list of strings means the function returns multiple values. A function with
+  no outputs (it only reads its inputs) is annotated `-> None`, or not annotated, and
+  takes no `output_keys`; its pod has no output columns. `-> None` together with
+  `output_keys` raises `ValueError` when the pod is created, and a value other than
+  `None` returned by a function with no outputs raises `NoOutputsDeclaredError` (an
+  `OutputTypeError`): to keep the value, declare an output key with its type (a return
+  annotation or `output_schema`), or return nothing. Such a pod is
+  limited for now: in a job its rows fail, over data-tags and before an operator it
+  raises (ITL-1260); for a function run for its effect, use a `SideEffectPod`. An
+  output that may be
+  missing is not "no outputs": it is one output key typed `T | None`, and a returned
+  `None` is stored as a null.
 - **Function parameters** are matched to the input stream's data columns by name: one data
   column per parameter. A parameter with a default value may be left out of the stream, and
   the default is used. Data columns the function does not take are dropped when the pod is
@@ -34,6 +45,9 @@ Key points:
   dataclass instance, raises `TypeError` when the pod is created, naming the parameter. Use
   a hashable default and build the object inside the function, or supply the value as an
   input column. See [Function values and parameter defaults](../reference/hashing.md#1d-function-values-and-parameter-defaults).
+- **Inputs are passed by name.** A parameter may be keyword-only (after `*`), but a
+  positional-only parameter (before `/`) and `*args` / `**kwargs` raise `ValueError`
+  when the pod is created.
 - **Parameter types** are used to validate schema compatibility. Give each parameter a type
   annotation, or supply its type through the decorator's `input_schema` mapping. A parameter
   with neither raises `ValueError` when the pod is created.
@@ -68,7 +82,7 @@ source = DictSource(
         {"subject_id": "mouse_01", "weight": 25.3, "height": 0.12},
         {"subject_id": "mouse_02", "weight": 22.1, "height": 0.10},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 # Apply the function pod to the source stream
@@ -82,13 +96,15 @@ print("Data schema:", dict(data_schema))
 # Data schema: {'bmi': <class 'float'>}
 
 # Iterate over results
-for tag, data in result.iter_data():
+for tag, data in result:
     print(f"  {tag.as_dict()} -> {data.as_dict()}")
 # {'subject_id': 'mouse_01'} -> {'bmi': 1756.9444444444446}
 # {'subject_id': 'mouse_02'} -> {'bmi': 2209.9999999999995}
 ```
 
-The function pod preserves tags and replaces data columns with the function's output.
+The function pod preserves tags and replaces data columns with the function's output. A
+data-tag is the exception: called as `pod(stream)`, the pod lets it fall through, so it stays
+both a tag and a data column of the output (see [Data-tags](data-tags.md)).
 
 !!! tip
     Calling a function pod, `compute_bmi.pod(source)`, is the convenient form of
@@ -108,11 +124,11 @@ wide = DictSource(
         {"subject_id": "mouse_01", "weight": 25.3, "height": 0.12, "age": 12},
         {"subject_id": "mouse_02", "weight": 22.1, "height": 0.10, "age": 8},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 result = compute_bmi.pod(wide)  # 'age' is not a parameter: it is dropped
-for tag, data in result.iter_data():
+for tag, data in result:
     print(f"{tag.as_dict()} -> {data.as_dict()}")
 # {'subject_id': 'mouse_01'} -> {'bmi': 1756.9444444444446}
 # {'subject_id': 'mouse_02'} -> {'bmi': 2209.9999999999995}
@@ -200,7 +216,7 @@ from orcapod.errors import OutputTypeError
 def halve(weight: float) -> int:
     return weight / 2  # a float, although the function says it returns an int
 
-weights = DictSource(data=[{"subject_id": "mouse_01", "weight": 25.3}], tag_columns=["subject_id"])
+weights = DictSource(data=[{"subject_id": "mouse_01", "weight": 25.3}], tag_columns=["subject_id"], tag_only_columns=True)
 
 try:
     list(halve.pod(weights).iter_data())
@@ -233,6 +249,9 @@ The function-output rule is: the returned value must be an instance of the decla
 | `dict[K, V]` | another mapping, such as `MappingProxyType` or `UserDict` | rejected: return `dict(value)` |
 | `Literal[...]` | a value that is not a member, or equals one with another type (`True`, `1.0` or `numpy.int64(1)` for `Literal[1]`) | rejected: a `Literal` names exact values, so no numeric exception applies |
 | `date` | `datetime` | accepted as a Python subclass; storage keeps the date only |
+| `datetime` | an aware `datetime` in any zone | accepted; stored as the same instant, in UTC (see "Dates and times" below) |
+| `datetime` | a naive `datetime` (no time zone) | rejected: attach its zone, e.g. `value.replace(tzinfo=timezone.utc)` |
+| `datetime` | a `pandas.Timestamp` with a part below one microsecond | rejected, not truncated: `value.floor("us")` or `value.round("us")` |
 | `int` | `bool` | accepted as a Python subclass; stored as an integer |
 | `int` | float, Decimal, Fraction | rejected; choose an explicit conversion |
 | `bool` | `int` | rejected: return `bool(value)` explicitly |
@@ -287,13 +306,95 @@ explicit:
 def twice(weight: float) -> list[float]:
     return list((weight, weight * 2))
 
-for tag, data in twice.pod(weights).iter_data():
+for tag, data in twice.pod(weights):
     print(data.as_dict())
 # {'weights': [25.3, 50.6]}
 ```
 
 Previously stored rows are served unchanged; this check does not repair or recompute them.
 Input-source conformance remains outside this change.
+
+### Dates and times
+
+Every Arrow timestamp column reads as the Python type `datetime`, whatever its unit and its
+time zone, and a source stores it as given. What a function receives follows the column:
+
+| Column | A function receives |
+|---|---|
+| `timestamp[s]`, `timestamp[ms]`, `timestamp[us]` (no zone) | a naive `datetime`: the wall time |
+| `timestamp[s, tz=...]`, `timestamp[ms, tz=...]`, `timestamp[us, tz=...]` | an aware `datetime`, in the column's zone |
+| `timestamp[ns]`, with or without a zone | a `pandas.Timestamp` (a `datetime` subclass), naive or aware likewise |
+
+An output declared `-> datetime` is an instant, stored as `timestamp[us, tz=UTC]` for every
+function:
+
+- An aware value in any zone is stored as its exact instant, in UTC: 09:00 in Los Angeles on
+  2 January (UTC-8) is stored as 17:00 UTC, and 09:00 there on 2 July (UTC-7, daylight
+  saving time) as 16:00 UTC; each reads back as the same instant, also for an offset with a
+  part below one second.
+- A naive value names no instant, so it is refused with an `OutputTypeError` that says so
+  and how to attach a zone.
+- A value with a part below one microsecond (a `pandas.Timestamp` from an `ns` column with
+  nanoseconds) is refused, not truncated: `value.floor("us")` or `value.round("us")` says
+  what to keep. One whose part below a microsecond is zero is stored exactly.
+- The same rule holds for a `datetime` inside a list, a dict or a class field, and for the
+  Python values of a `DictSource` or a `ListSource`. There it raises `NaiveDatetimeError`
+  or `SubMicrosecondDatetimeError`, both `ValueError`s, and names the value. A
+  `DataFrameSource` given a plain dict or list is not covered yet: Polars converts the
+  values before Orcapod sees them, so a naive value is stored without a zone and
+  nanoseconds are dropped (ITL-1330). Over a real data frame, a `DataFrameSource` keeps
+  each timestamp column's unit and zone as given.
+
+A function over a column without a zone therefore says which zone its wall times are in:
+
+```python
+from datetime import datetime, timedelta, timezone
+
+import pyarrow as pa
+from orcapod.sources import ArrowTableSource
+
+# A timestamp column without a time zone: its wall times are UTC.
+started = pa.array([1_700_000_000, 1_700_003_600], pa.int64()).cast(pa.timestamp("s"))
+sessions = ArrowTableSource(
+    pa.table(
+        {"session": ["s1", "s2"], "started": started.cast(pa.timestamp("us"))},
+        schema=pa.schema(
+            [
+                pa.field("session", pa.large_string(), nullable=False),
+                pa.field("started", pa.timestamp("us"), nullable=False),
+            ]
+        ),
+    ),
+    tag_columns=["session"],
+    tag_only_columns=True,
+    source_id="sessions",
+)
+
+@function_pod(output_keys="ended")
+def end_naive(started: datetime) -> datetime:
+    return started + timedelta(minutes=30)  # still naive
+
+try:
+    list(end_naive.pod(sessions).iter_data())
+except OutputTypeError as err:
+    print(err)
+# Function 'end_naive' returned datetime.datetime for output 'ended', which is declared datetime.datetime: Naive datetime (no timezone info) is not supported under the current 'strict' timezone policy: a datetime is stored as an instant, in UTC, and a value without a time zone names no instant. The output does not conform. Use a timezone-aware datetime: attach the time zone its wall time is in, e.g. value.replace(tzinfo=timezone.utc) when it is UTC or value.replace(tzinfo=ZoneInfo("Europe/Berlin")) for another zone (value.astimezone() takes this machine's local time zone).
+
+@function_pod(output_keys="ended")
+def end(started: datetime) -> datetime:
+    # Say which zone the wall time is in; the result is an instant.
+    return started.replace(tzinfo=timezone.utc) + timedelta(minutes=30)
+
+ended = end.pod(sessions).as_table()
+print(ended.schema.field("ended").type)
+# timestamp[us, tz=UTC]
+print(sorted(value.isoformat() for value in ended.column("ended").to_pylist()))
+# ['2023-11-14T22:43:20+00:00', '2023-11-14T23:43:20+00:00']
+```
+
+There is no way yet to declare an output without a time zone or with nanoseconds
+(ITL-1325). A `date` output is stored as `date32`. A time of day (`datetime.time`) has no
+type yet: a column of `time64` reads as `Any`, and an output annotated `-> time` is refused.
 
 ## `PipelineJob` -- database-backed, cached execution
 
@@ -322,7 +423,7 @@ db = InMemoryArrowDatabase()
 
 job = PipelineJob(name="bmi_demo", database=db)
 with job:
-    source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     compute_bmi.pod(source, label="bmi")
 
 job.run()
@@ -371,7 +472,7 @@ mice.append({"subject_id": "mouse_03", "weight": 27.8, "height": 0.11})
 
 job = PipelineJob(name="bmi_demo", database=db)
 with job:
-    source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     compute_bmi.pod(source, label="bmi")
 
 job.run()
@@ -392,6 +493,12 @@ print("function calls:", len(calls))
     values. To force recomputation after changing what a function does, bump the major
     version, e.g. `@function_pod(output_keys="bmi", version="v1.0")` (the default is
     `"v0.0"`; a minor bump such as `"v0.1"` is not enough), or rename the function.
+    The same holds when an output name now receives another value because you reordered
+    `output_keys` among outputs of the same type without reordering the returned values
+    (or the reverse): the output schema is a set of named, typed outputs, so its identity
+    does not change, and only a major version bump makes the function compute the new
+    values. Reordering both together changes nothing (see *Change detection* in
+    [Identity & Hashing](identity.md#change-detection)).
 
 !!! note "When the database cannot be read"
     A table that does not exist yet reads as empty, and its rows are computed. In a
@@ -437,7 +544,7 @@ from orcapod.pipeline import AsyncPipelineOrchestrator
 
 job = PipelineJob(name="bmi_async", database=InMemoryArrowDatabase())
 with job:
-    source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     compute_bmi.pod(source, label="bmi")
 
 job.run(orchestrator=AsyncPipelineOrchestrator())
@@ -476,7 +583,7 @@ import asyncio
 
 job = PipelineJob(name="bmi_awaited", database=InMemoryArrowDatabase())
 with job:
-    source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     compute_bmi.pod(source, label="bmi")
 
 
@@ -501,7 +608,7 @@ Running the same job again computes nothing new, and the summary says so:
 ```python
 job = PipelineJob(name="bmi_demo", database=db)
 with job:
-    source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     compute_bmi.pod(source, label="bmi")
 
 summary = job.run()
@@ -523,7 +630,7 @@ def careless_bmi(weight: float, height: float) -> float:
 
 job = PipelineJob(name="bmi_typo", database=InMemoryArrowDatabase())
 with job:
-    source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     careless_bmi.pod(source, label="bmi")
 
 summary = job.run()
@@ -566,7 +673,7 @@ more_mice = mice + [{"subject_id": "mouse_04", "weight": 30.0, "height": 0.12}]
 
 load_job = PipelineJob(name="bmi_demo", database=db)
 with load_job:
-    source = DictSource(data=more_mice, tag_columns=["subject_id"], source_id="mice")
+    source = DictSource(data=more_mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     compute_bmi.pod(source, label="bmi")
 
 print(load_job.nodes["bmi"].as_table().num_rows)  # not run in this process: empty
@@ -626,7 +733,8 @@ A node is stale, and runs, when:
 - `clear_cache()` was called on it, or on any job node above it;
 - a job node above it ran again;
 - its source was bound again (`job.bind(sources=...)`), or the bound source's own modified
-  time moved (a `CachedSource` that read new rows, a `PollingSource` that found new rows).
+  time moved (a `CachedSource` that read new rows, a `PollingSource` that found new rows;
+  `PollingSource` is provisional, see [Provisional sources](sources.md#provisional-sources)).
 
 Staleness comes from modified times only, so every run first asks each source feeding it,
 once, whether its data changed (`check_for_new_data()`, ITL-1102): `job.run()`,
@@ -666,7 +774,7 @@ from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 for orchestrator in (SyncPipelineOrchestrator, AsyncPipelineOrchestrator):
     job = PipelineJob(name="bmi_typo_fast", database=InMemoryArrowDatabase())
     with job:
-        source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+        source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
         careless_bmi.pod(source, label="bmi")
     try:
         job.run(orchestrator=orchestrator(error_policy="fail_fast"))
@@ -776,6 +884,12 @@ output, and it then reads as a zero-row table, as before the first run, until th
 An operator node attached in `CacheMode.REPLAY` does not compute: its run replays the rows
 stored under its key by `CacheMode.LOG` runs, every logged run of that key, not only the
 latest; before its run it shows nothing, like every node (a narrower replay is ITL-1098).
+An operator node that caches (`CacheMode.LOG` or `CacheMode.REPLAY`) cannot read a restricted
+source (one restricted with `where` or `limit=`; see
+[Restricting a source versus filtering in the pipeline](sources.md#restricting-a-source-versus-filtering-in-the-pipeline)):
+its cache is kept under the node's identity, which a restriction is not part of, so it is
+refused with `ValueError` before anything is read or written, and no log is ever written from
+a restricted read. `CacheMode.OFF` is not concerned.
 
 ### When the database cannot be written
 
@@ -854,7 +968,7 @@ def notify(ctx, weight: float, height: float) -> None:
 
 notify_job = PipelineJob(name="notify_demo", database=InMemoryArrowDatabase())
 with notify_job:
-    mice_source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+    mice_source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     SideEffectPod(notify)(mice_source, label="notify")
 
 notify_job.run()
@@ -889,10 +1003,10 @@ source was configured. `PipelineJob.load(path)` reads it back, for example in a 
 session, so that you can read the results the job stored. The file also records
 `orcapod_version`, the Orcapod release that wrote it (the same text as `orcapod.__version__`;
 a development checkout gives a development version). It is informational: loading never
-depends on it. Adding the field moved the file format version from `0.1.0` to `0.2.0`; a
-`0.1.0` file, written by v0.2.0, still loads as before, and any other version is rejected.
-The reverse does not hold: v0.2.0 cannot load a file saved by v0.3.0, because hashes differ
-between the two releases.
+depends on it. The file format version is `0.4.0`, and a load reads only that version: a
+file saved by an earlier release (format `0.1.0` to `0.3.0`) is refused, with a message
+saying so. Rebuild the pipeline from code and save it again; taking older files to the
+current format is the work of a separate migration tool, not of `load`.
 
 For example:
 
@@ -906,7 +1020,7 @@ workdir = Path(tempfile.mkdtemp())  # any directory you keep
 
 job = PipelineJob(name="bmi_demo", database=DeltaTableDatabase(workdir / "store"))
 with job:
-    source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     compute_bmi.pod(source, label="bmi")
 
 job.run()
@@ -932,7 +1046,7 @@ the results stored for those inputs. Nodes below a source that is not available 
 `node.run(load_only=True)` does the same for one node and what it depends on.
 
 ```python
-loaded.bind(sources={"mice": DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")})
+loaded.bind(sources={"mice": DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")})
 summary = loaded.run(load_only=True)
 print(loaded.nodes["bmi"].as_table().num_rows, summary.nodes["bmi"].not_stored)
 # 3 0
@@ -972,26 +1086,22 @@ from that database, and no rows under that key is an empty result, not an error.
   had (a source node whose data was not saved gets its run's content hash once its source is
   bound). The file records which columns may be null (`T | None`), because the Arrow type text
   of a schema cannot say it, and the content hash of each node's run, which the stored rows
-  carry. Whether a file has these records is decided by the records themselves, not by the
-  file's format version: a file without them (format `0.1.0`, or a `0.2.0` file written
-  before they existed) still loads, but lossy: its schemas read every column as non-null,
-  and a loaded operator node cannot name its run's rows. When the database holds none under the
-  content hash the loaded job computes, its stored view (`as_source()`, `get_all_records()`)
-  raises and says why, rather than presenting stored rows as none. An empty record is
-  not a missing one: it says that no column may be null. Saving such a loaded job again does
-  not record what its file did not. Upgrading such files is left to a migration tool after
-  v0.3.
+  carry. Every saved file has these records: a file without one is malformed, and loading it
+  raises and names the missing record, rather than reading every column as non-null or
+  guessing a run's content hash. An empty record is not a missing one: it says that no column
+  may be null.
 - Sources that read files, such as `CSVSource` and `DeltaTableSource`, are rebuilt from their
   paths. In-memory sources (`DictSource`, `ListSource`, `ArrowTableSource`,
   `DataFrameSource`) keep their data only in memory, so they are not saved; loading logs
   this at INFO level. This does not affect reading the other nodes. To read such a source
   node itself, bind a source to it: `loaded.bind(sources={"mice": source})`. The source must
-  have the slot's tag and data columns with the same Python types, except that a column the
-  slot declares `T | None` may be `T` (the slot then reads it as `T | None`); `bind` refuses
-  any other (`SourceSpecMismatchError`, an `InputValidationError`). The pipeline determines
-  every node's schema: binding a source never changes a node's stored path or the schema of
-  any node's or stored table, only the values. The check compares Python types, so a
-  difference in Arrow width only (`int32` against `int64`) is not yet refused (ITL-949). A
+  have the slot's tag and data columns with the same Arrow types (the slot keeps the Arrow
+  types of the source it was saved from), except that a column the slot declares nullable
+  may be non-null (the slot then reads it as nullable); `bind` refuses any other
+  (`SourceSpecMismatchError`, an `InputValidationError`), also a difference in Arrow width
+  only (`int32` against `int64`). The pipeline determines every node's schema: binding a
+  source never changes a node's stored path or the schema of any node's or stored table,
+  only the values. A
   joined or merged stream (one pair of system-tag columns per input), or one with no
   system-tag columns, is refused too: make the join part of the pipeline, or store the joined
   stream and bind the stored source. A pipeline built directly over a raw `ArrowTableStream`
@@ -1015,11 +1125,9 @@ An unknown type is reported with its node and column, and affected operators bec
 stubs. An incompatible identifier raises `LogicalTypeIdentifierError` instead of using a stub.
 Stored data independently validates its full identifier when values are read.
 
-Older files containing name-only extension type text cannot be loaded by this reader: the
-error says the file was saved by an earlier version. Use that version to read the old file,
-and save a new job from the original pipeline under this version. Files with only supported
-primitive schema types still load; results from pre-v0.3 table layouts remain excluded as
-described below. This changes saved schema text only, not stored tables or hashes.
+Only files of format `0.4.0` load, whatever their schema types: a file of an earlier format
+is refused, as described above. Rebuild the pipeline from code and save it again under this
+version.
 
 ### A store written by an older version
 
@@ -1027,35 +1135,28 @@ Every row Orcapod stores names the **data context** that wrote it, in the column
 `__data_context`: `std:v1:default` since v0.3. The data context is one key for the whole of
 Orcapod's hashing, so rows that share it were keyed in exactly the same way (see
 [The data context of a stored row](../reference/hashing.md#the-data-context-of-a-stored-row)).
-Tables written before v0.3 have no such column and are stored at an older table layout
-(`pdb_v1`, `rdb_v1`). Orcapod **does not read them as results**: it does not refuse the
+A table at another layout than this build's (another last path component; see
+[Data function types](../reference/data-function-types.md) for the result table path) was
+written by another build. Orcapod **does not read it as results**: it does not refuse the
 store, and it does not reuse those rows.
 
-- The first run of v0.3 on a database written by v0.2 computes every input again and stores the
-  rows in its own tables (`pdb_v2`, `rdb_v2`).
+- A run on such a store computes every input again and stores the rows in its own tables.
 - Reading a node (`as_table()`, `iter_data()`, `get_all_records()`) returns the rows of the
-  current data context only: nothing before that first run, one row per input after it.
-- The old tables are never changed or deleted. They stay readable with the version that
-  wrote them and are kept for a later migration. To see which data contexts a table holds,
+  current data context only.
+- The other tables are never changed or deleted. To see which data contexts a table holds,
   use `orcapod.contexts.stored_data_contexts`.
-- When Orcapod finds a table at an older layout, it logs one warning with the number of
-  rows: `Found 3 rows in stored table '...' written by an earlier version of Orcapod (older
-  table layout, data context std:v0.1:default). They are not used and are left unchanged;
-  they can be migrated later.`
-- The hashes in a table path can differ between versions, so older tables are looked for
-  by name: Orcapod lists the tables stored under the job and function name and treats every
-  table that is not at a current layout as written by an earlier version. Tables found this
-  way are reported once per node, without a number of rows; a table of another function
-  with the same name in the same job is included. A job run also reports one total of the
-  older tables that belong to none of its function nodes (operator caches, cached sources,
-  nodes that left the job).
+- The hashes in a table path can differ between builds, so such tables are looked for by
+  name: Orcapod lists the tables stored under the job and function name and reports, once
+  per node, every table there that is not at a current layout; a table of another function
+  with the same name in the same job is included. Stores of the versions before 0.4 are not
+  looked for otherwise: nobody has one (ITL-1259).
 - Nodes that perform side effects are the exception: side-effect pods, and function pods
   that take the invocation context (`ctx_arg`). A side effect is an external action, and
-  completions stored by v0.2 cannot be matched with current inputs, so running the node
-  would do everything a second time. Instead the node raises
+  completions stored at another layout cannot be matched with current inputs, so running the
+  node would do everything a second time. Instead the node raises
   `SideEffectLogDataContextError` (from `orcapod.errors`, a `OrcapodDatabaseError`), naming the
-  tables, before it does anything. Every older table under the node's function or pod name
-  in the job counts. Keep using the version that wrote them. A fresh database is not a safe
+  tables, before it does anything. Every such table under the node's function or pod name
+  in the job counts. Keep using the build that wrote them. A fresh database is not a safe
   way around the error: it holds no completions, so on it the node performs every side
   effect again; use one only when a repeated delivery is acceptable. If the database cannot
   list its tables, the node warns that it could not check, and runs.
@@ -1123,15 +1224,15 @@ def count_rows(readings: pl.DataFrame) -> int:
 
 recordings = DictSource(
     data=[{"session": "s1", "n_samples": 2}, {"session": "s2", "n_samples": 3}],
-    tag_columns=["session"],
+    tag_columns=["session"], tag_only_columns=True,
 )
 readings = load_readings.pod(recordings)
-for tag, data in readings.iter_data():
+for tag, data in readings:
     print(tag["session"], dict(data["readings"].schema))
 # s1 {'sample': UInt16, 'voltage': Float32}
 # s2 {'sample': UInt16, 'voltage': Float32}
 
-for tag, data in count_rows.pod(readings).iter_data():
+for tag, data in count_rows.pod(readings):
     print(tag["session"], data["n_rows"])
 # s1 2
 # s2 3
@@ -1160,7 +1261,7 @@ ITL-1144.
 try:
     DictSource(
         data=[{"sample": "s1", "labels": [{1, 2}, None]}],
-        tag_columns=["sample"],
+        tag_columns=["sample"], tag_only_columns=True,
         data_schema={"sample": str, "labels": list[set[int] | None]},
     )
 except ValueError as error:
@@ -1169,10 +1270,10 @@ except ValueError as error:
 
 labels = DictSource(
     data=[{"sample": "s1", "counts": [3, None, 1]}],
-    tag_columns=["sample"],
+    tag_columns=["sample"], tag_only_columns=True,
     data_schema={"sample": str, "counts": list[int | None]},
 )
-for tag, data in labels.iter_data():
+for tag, data in labels:
     print(data["counts"])
 # [3, None, 1]
 ```
@@ -1202,18 +1303,18 @@ weights = DictSource(
         {"subject_id": "mouse_01", "weight": 25.3},
         {"subject_id": "mouse_02", "weight": 22.1},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 heights = DictSource(
     data=[
         {"subject_id": "mouse_01", "height": 0.12},
         {"subject_id": "mouse_02", "height": 0.10},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 result = compute_bmi.pod(weights, heights)
-for tag, data in result.iter_data():
+for tag, data in result:
     print(f"{tag.as_dict()} -> {data.as_dict()}")
 # {'subject_id': 'mouse_01'} -> {'bmi': 1756.9444444444446}
 # {'subject_id': 'mouse_02'} -> {'bmi': 2209.9999999999995}
@@ -1233,11 +1334,11 @@ Two consequences:
 ```python
 chosen = DictSource(
     data=[{"subject_id": "mouse_02", "cohort": "b"}],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 result = compute_bmi.pod(weights, heights, chosen)
-for tag, data in result.iter_data():
+for tag, data in result:
     print(f"{tag.as_dict()} -> {data.as_dict()}")
 # {'subject_id': 'mouse_02'} -> {'bmi': 2209.9999999999995}
 ```

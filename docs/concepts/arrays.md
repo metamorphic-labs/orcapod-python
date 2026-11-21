@@ -23,7 +23,7 @@ source = DictSource(
     tag_columns=["trial"],
     source_id="trials",
 )
-for tag, data in scale.pod(source).iter_data():
+for tag, data in scale.pod(source):
     print(tag["trial"], data["scaled"].dtype, data["scaled"].shape)
 # t1 float32 (2, 3)
 ```
@@ -53,6 +53,11 @@ Using one of these types issues `orcapod.errors.ProvisionalHashWarning` once per
 process, on whichever use comes first: a value hashed, a source column of the type, a function
 pod with a parameter or output of the type, or stored results of the type read back. It names
 the type, for example `orcapod.numpy.ndarray`.
+
+A user class with a field of one of these types is provisional too: its identity holds the
+identifier of each field's type, so if the audit changes the array type's identifier, the
+class's own identity, and every hash it feeds, changes with it. Registering such a class, or
+storing its values, issues the same warning (for the field's type).
 
 In practice nothing needs to change. Use these types as described on this page. If the audit
 changes how one of them is hashed, a result Orcapod computed earlier from such a value gets a
@@ -246,14 +251,14 @@ big = np.asfortranarray(np.arange(6, dtype=">f4").reshape(2, 3))
 kept = DictSource(
     data=[{"trial": "t1", "signal": big}], tag_columns=["trial"], source_id="kept"
 )
-for tag, data in kept.iter_data():
+for tag, data in kept:
     print(data["signal"].dtype.str, data["signal"].flags.f_contiguous)
 # >f4 True
 ```
 
 A stored array costs at least 128 bytes of `.npy` header. The stored bytes are NumPy's and
-may differ between NumPy versions; nothing in Orcapod depends on them. Where an operator has
-to order arrays (`MergeJoin` sorts the values it merges), it orders them by their value hash.
+may differ between NumPy versions; nothing in Orcapod depends on them. No operator orders
+arrays by their values: `MergeJoin` keeps its inputs' arrays in argument order.
 
 ## How an array is hashed
 
@@ -269,9 +274,9 @@ values have different hashes.
 ## PyTorch tensors
 
 A `torch.Tensor` can be a data value too. PyTorch is an optional dependency. Tensor support
-works whenever PyTorch can be imported, however it was installed: `pip install "orcapod[torch]"`
-installs it from PyPI, or install the build that suits your hardware yourself (see
-pytorch.org; on Linux the PyPI build includes CUDA, and pytorch.org also offers smaller
+works whenever PyTorch can be imported, however it was installed: `uv add "orcapod[torch]"`
+(or `pip install "orcapod[torch]"`) installs it from PyPI, or install the build that suits
+your hardware yourself (see pytorch.org; on Linux the PyPI build includes CUDA, and pytorch.org also offers smaller
 CPU-only builds). Orcapod needs PyTorch 2.6 or later, the first version whose restricted
 loader (below) reads `uint16`, `uint32` and `uint64` tensors, and is tested with PyTorch 2.15. Orcapod
 hashes a tensor's elements through NumPy (`Tensor.numpy()`), so your PyTorch build must
@@ -299,7 +304,7 @@ tensors = DictSource(
     tag_columns=["trial"],
     source_id="tensor_trials",
 )
-for tag, data in scale_tensor.pod(tensors).iter_data():
+for tag, data in scale_tensor.pod(tensors):
     print(tag["trial"], data["scaled"].dtype, tuple(data["scaled"].shape))
 # t1 torch.float32 (2, 3)
 ```

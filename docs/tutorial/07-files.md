@@ -54,7 +54,7 @@ def spike_file_rows():
 
 spike_files = DictSource(
     data=spike_file_rows(),
-    tag_columns=["subject_id", "session", "probe"],
+    tag_columns=["subject_id", "session", "probe"], tag_only_columns=True,
     source_id="spike_files",
 )
 print(spike_files.output_schema())
@@ -95,7 +95,7 @@ def run_counts():
     with job:
         files = DictSource(
             data=spike_file_rows(),
-            tag_columns=["subject_id", "session", "probe"],
+            tag_columns=["subject_id", "session", "probe"], tag_only_columns=True,
             source_id="spike_files",
         )
         count_spikes.pod(files, label="counts")
@@ -161,7 +161,7 @@ with job:
                 "spikes": op.File(moved),
             }
         ],
-        tag_columns=["subject_id", "session", "probe"],
+        tag_columns=["subject_id", "session", "probe"], tag_only_columns=True,
         source_id="spike_files",
     )
     count_spikes.pod(one_file, label="counts")
@@ -203,7 +203,7 @@ job = PipelineJob(name="files", database=database)
 with job:
     files = DictSource(
         data=spike_file_rows(),
-        tag_columns=["subject_id", "session", "probe"],
+        tag_columns=["subject_id", "session", "probe"], tag_only_columns=True,
         source_id="spike_files",
     )
     write_summary.pod(files, label="summaries")
@@ -213,7 +213,7 @@ summaries = job.nodes["summaries"]
 print(summaries.output_schema()[1])
 # Schema({'summary': Path})
 wanted = {"subject_id": "mouse_01", "session": "s1", "probe": "imec0"}
-data = next(data for tag, data in summaries.iter_data() if tag.as_dict() == wanted)
+data = next(data for tag, data in summaries if tag.as_dict() == wanted)
 print(data.as_dict()["summary"].read_text())
 # n_spikes: 1737
 # last_spike_s: 59.9999
@@ -260,7 +260,7 @@ def run_folders():
                 }
                 for d in sorted((data_dir / "sessions").iterdir())
             ],
-            tag_columns=["subject_id", "session"],
+            tag_columns=["subject_id", "session"], tag_only_columns=True,
             source_id="session_folders",
         )
         count_spike_files.pod(folders, label="n_files")
@@ -377,7 +377,7 @@ containing the total number of spikes over both probes. (Hint: Part 4. After
     # Schema({'spikes': list[orcapod.logical_types.file_type.File]})
 
     totals = write_session_total.pod(per_session)
-    for tag, data in totals.iter_data():
+    for tag, data in totals:
         path = data.as_dict()["total_file"]
         print(path.name, path.read_text().strip())
     # mouse_01_s1_total.txt 2897
@@ -411,7 +411,7 @@ containing the total number of spikes over both probes. (Hint: Part 4. After
                     }
                     for d in sorted((data_dir / "sessions").iterdir())
                 ],
-                tag_columns=["subject_id", "session"],
+                tag_columns=["subject_id", "session"], tag_only_columns=True,
                 source_id="session_folders",
             )
             count_spike_files.pod(folders, label="n_files")

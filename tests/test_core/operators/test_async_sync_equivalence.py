@@ -14,6 +14,7 @@ struct, a logical type (``Path``), and nullable and non-nullable columns.
 from __future__ import annotations
 
 import asyncio
+import decimal
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -42,12 +43,14 @@ from orcapod.core.operators import (
     MapData,
     MapTags,
     MergeJoin,
+    Rejoin,
     Pick,
     PolarsFilter,
     SelectColumns,
     SelectDataColumns,
     SelectTagColumns,
     SemiJoin,
+    TagBy,
 )
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.sources import ArrowTableSource
@@ -102,19 +105,24 @@ def _source(
     tags: Sequence[str],
     source_id: str,
     nullable: Sequence[str] = (),
+    with_data_tags: bool = False,
 ) -> ArrowTableSource:
-    """Build a source; every column not listed in ``nullable`` is non-nullable."""
+    """Build a source; every column not listed in ``nullable`` is non-nullable.
+
+    Its tags are plain (``tag_only_columns``), as in v0.3, unless ``with_data_tags``
+    (ITL-1023): then every tag is also a data column of the same name.
+    """
     table = pa.table(list(columns.values()), names=list(columns))
     schema = pa.schema([f.with_nullable(f.name in nullable) for f in table.schema])
     return ArrowTableSource(
         table.cast(schema),
         tag_columns=list(tags),
         source_id=source_id,
-        tag_only_columns=True,
+        tag_only_columns=not with_data_tags,
     )
 
 
-def source_a() -> ArrowTableSource:
+def source_a(with_data_tags: bool = False) -> ArrowTableSource:
     """Tags ``k: int16`` (non-nullable) and ``ta: int8``; many narrow data columns."""
     return _source(
         {
@@ -136,10 +144,39 @@ def source_a() -> ArrowTableSource:
         tags=("k", "ta"),
         source_id="a",
         nullable=("nul", "s"),
+        with_data_tags=with_data_tags,
     )
 
 
-def source_b(nested: bool = True) -> ArrowTableSource:
+def source_mid(with_data_tags: bool = True) -> ArrowTableSource:
+    """Data ``a``, tag ``k`` and data ``y``: the tag is not the first column (ITL-1205)."""
+    return _source(
+        {
+            "a": pa.array([1.5, 2.5, 3.5], pa.float32()),
+            "k": pa.array([1, 2, 3], pa.int16()),
+            "y": pa.array(["p", "q", "r"], pa.string()),
+        },
+        tags=("k",),
+        source_id="mid",
+        with_data_tags=with_data_tags,
+    )
+
+
+def source_two(with_data_tags: bool = True) -> ArrowTableSource:
+    """Tags ``k`` and ``u``, each unique per row, and data ``a`` (ITL-1205)."""
+    return _source(
+        {
+            "k": pa.array([1, 2, 3], pa.int16()),
+            "u": pa.array([7, 8, 9], pa.int32()),
+            "a": pa.array([1.5, 2.5, 3.5], pa.float32()),
+        },
+        tags=("k", "u"),
+        source_id="two",
+        with_data_tags=with_data_tags,
+    )
+
+
+def source_b(nested: bool = True, with_data_tags: bool = False) -> ArrowTableSource:
     """Tag ``k: int16``; scalar data columns, plus list columns when ``nested``."""
     columns: dict[str, Column] = {
         "k": pa.array([1, 2, 3], pa.int16()),
@@ -151,10 +188,16 @@ def source_b(nested: bool = True) -> ArrowTableSource:
     if nested:
         columns["ll"] = pa.array([[0.5], [1.5, 2.5], []], pa.large_list(pa.float32()))
         columns["lnn"] = pa.array([[1], [2], [3]], NON_NULL_ITEMS)
-    return _source(columns, tags=("k",), source_id="b", nullable=("f32",))
+    return _source(
+        columns,
+        tags=("k",),
+        source_id="b",
+        nullable=("f32",),
+        with_data_tags=with_data_tags,
+    )
 
 
-def source_c() -> ArrowTableSource:
+def source_c(with_data_tags: bool = False) -> ArrowTableSource:
     """Tags ``k: int16`` and nullable ``tc: uint8``; a third input for the staggered path."""
     return _source(
         {
@@ -166,6 +209,7 @@ def source_c() -> ArrowTableSource:
         tags=("k", "tc"),
         source_id="c",
         nullable=("tc", "c8"),
+        with_data_tags=with_data_tags,
     )
 
 
@@ -197,7 +241,82 @@ def source_shared_data() -> ArrowTableSource:
     )
 
 
-def merge_source(source_id: str, offset: int) -> ArrowTableSource:
+def source_exact(
+    source_id: str, offset: int, with_data_tags: bool = False
+) -> ArrowTableSource:
+    """Tags ``k: date64`` (off midnight) and ``kd: decimal256``; data of both, in a
+    list and in a struct (ITL-1284): the sync ``Join`` and ``SemiJoin`` used to
+    move a ``date64`` to midnight and panic on ``decimal256``."""
+    dates = pa.array([1, 86_400_001, 2], pa.int64()).cast(pa.date64())
+    decimals = pa.array(
+        [decimal.Decimal(f"{n}.{offset + n:040d}") for n in range(3)],
+        pa.decimal256(76, 40),
+    )
+    lists = pa.LargeListArray.from_arrays(pa.array([0, 1, 2, 3], pa.int64()), decimals)
+    return _source(
+        {
+            "k": dates,
+            "kd": pa.array(
+                [decimal.Decimal(f"0.{n:040d}") for n in (1, 2, 3)],
+                pa.decimal256(76, 40),
+            ),
+            f"date_{source_id}": pa.array(
+                [1 + offset, 86_400_001 + offset, 3], pa.int64()
+            ).cast(pa.date64()),
+            f"dec_{source_id}": decimals,
+            f"list_{source_id}": lists,
+            f"struct_{source_id}": pa.StructArray.from_arrays(
+                [dates, decimals], names=["a", "b"]
+            ),
+        },
+        tags=("k", "kd"),
+        source_id=source_id,
+        with_data_tags=with_data_tags,
+    )
+
+
+def source_exact_colliding(
+    source_id: str, offset: int, with_data_tags: bool = False
+) -> ArrowTableSource:
+    """Tags ``k: date64`` (off midnight) and ``n: int64``; data columns that two such
+    sources share (``MergeJoin`` merges them) of the types Python changed (ITL-1281):
+    ``time64[ns]``, ``date64`` off midnight, a float32 signaling NaN, ``decimal256``,
+    a list and a struct of them; and one column of its own."""
+    dates = pa.array([1, 86_400_001, 2], pa.int64()).cast(pa.date64())
+    decimals = pa.array(
+        [decimal.Decimal(f"{n}.{offset + n:040d}") for n in range(3)],
+        pa.decimal256(76, 40),
+    )
+    times = pa.array([1 + offset, 1001 + offset, 2], pa.int64()).cast(pa.time64("ns"))
+    return _source(
+        {
+            "k": dates,
+            "n": pa.array([7, 8, 9], pa.int64()),
+            "time": times,
+            "date": pa.array([1 + offset, 86_400_001 + offset, 3], pa.int64()).cast(
+                pa.date64()
+            ),
+            "nan": pa.array(
+                [0x7F800001 + offset, 0x3F800000, 0xFFC00000], pa.uint32()
+            ).view(pa.float32()),
+            "dec": decimals,
+            "list": pa.LargeListArray.from_arrays(
+                pa.array([0, 1, 2, 3], pa.int64()), times
+            ),
+            "struct": pa.StructArray.from_arrays([dates, decimals], names=["a", "b"]),
+            f"only_{source_id}": pa.array(
+                [f"{source_id}{i}" for i in range(3)], pa.large_string()
+            ),
+        },
+        tags=("k", "n"),
+        source_id=source_id,
+        with_data_tags=with_data_tags,
+    )
+
+
+def merge_source(
+    source_id: str, offset: int, with_data_tags: bool = False
+) -> ArrowTableSource:
     """A ``MergeJoin`` input; two of them collide on every data column but one."""
     only = f"only_{source_id}"
     return _source(
@@ -212,6 +331,7 @@ def merge_source(source_id: str, offset: int) -> ArrowTableSource:
         tags=("k",),
         source_id=source_id,
         nullable=("xs",),
+        with_data_tags=with_data_tags,
     )
 
 
@@ -253,10 +373,15 @@ def _row_key(tag: TagProtocol) -> str:
 
 
 def _row_schema(tag: TagProtocol, data: DataProtocol) -> pa.Schema:
-    """The row's Arrow schema: user and system tags, then data."""
-    return arrow_utils.join_arrow_schemas(
-        tag.arrow_schema(columns={"system_tags": True}), data.arrow_schema()
-    )
+    """The row's Arrow schema: user and system tags, then data.
+
+    A data-tag (ITL-1023) is one column, named among the tags and the data:
+    it is listed once, among the tags.
+    """
+    tag_schema = tag.arrow_schema(columns={"system_tags": True})
+    data_schema = data.arrow_schema()
+    data_schema = pa.schema(f for f in data_schema if f.name not in tag_schema.names)
+    return arrow_utils.join_arrow_schemas(tag_schema, data_schema)
 
 
 def _paired(expected: list[Row], actual: list[Row]) -> list[tuple[Row, Row]]:
@@ -317,7 +442,36 @@ class Case:
     make_sources: Callable[[], tuple[StreamProtocol, ...]]
 
 
+def _branches(
+    source: ArrowTableSource, *data: Sequence[str]
+) -> tuple[StreamProtocol, ...]:
+    """Branches of one source (ITL-1336): each keeps the source's data-tags and the named
+    data columns."""
+    tags, columns = source.keys()
+    data_tags = [name for name in columns if name in tags]
+    return tuple(source.select_data_columns([*data_tags, *names]) for names in data)
+
+
 CASES = [
+    # Rejoin: the branches of one source put back together (ITL-1336), over many narrow
+    # types, with plain tags and with data-tags, two and three inputs.
+    Case(
+        "rejoin_2",
+        Rejoin,
+        lambda: _branches(source_a(), ("i8", "s", "bn"), ("st", "p", "l8", "d", "nul")),
+    ),
+    Case(
+        "rejoin_3_data_tags",
+        Rejoin,
+        lambda: _branches(
+            source_a(with_data_tags=True), ("nul", "s"), ("i8", "p"), ("st", "l8")
+        ),
+    ),
+    Case(
+        "rejoin_two_tags",
+        Rejoin,
+        lambda: _branches(source_two(), ("a",), ()),
+    ),
     Case("join_2", Join, lambda: (source_a(), source_b())),
     Case("join_2_reversed", Join, lambda: (source_b(), source_a())),
     Case("join_3", Join, lambda: (source_a(), source_b(), source_c())),
@@ -358,9 +512,55 @@ CASES = [
         SemiJoin,
         lambda: (source_b(nested=False), source_shared_data()),
     ),
+    # Values Polars changed or could not read on the sync path (ITL-1284).
+    Case(
+        "join_exact_values",
+        Join,
+        lambda: (source_exact("e", 0), source_exact("f", 5)),
+    ),
+    Case(
+        "join_3_exact_values_data_tags",
+        Join,
+        lambda: (
+            source_exact("e", 0, with_data_tags=True),
+            source_exact("f", 5, with_data_tags=True),
+            source_exact("g", 9, with_data_tags=True),
+        ),
+    ),
+    Case(
+        "semijoin_exact_values",
+        SemiJoin,
+        lambda: (source_exact("e", 0, with_data_tags=True), source_exact("f", 5)),
+    ),
+    # Values Python changed when MergeJoin and Batch built their lists (ITL-1281).
+    Case(
+        "merge_join_exact_values",
+        MergeJoin,
+        lambda: (source_exact_colliding("e", 0), source_exact_colliding("f", 5)),
+    ),
+    Case(
+        "merge_join_exact_values_data_tags",
+        MergeJoin,
+        lambda: (
+            source_exact_colliding("f", 5, with_data_tags=True),
+            source_exact_colliding("e", 0, with_data_tags=True),
+        ),
+    ),
+    Case(
+        "batch_2_exact_values",
+        lambda: Batch(batch_size=2),
+        lambda: (source_exact_colliding("e", 0, with_data_tags=True),),
+    ),
+    Case(
+        "batch_all_exact_values",
+        Batch,
+        lambda: (source_exact_colliding("e", 0),),
+    ),
     Case("batch_2", lambda: Batch(batch_size=2), lambda: (source_a(),)),
     Case("batch_all", Batch, lambda: (source_a(),)),
     Case("group_by", lambda: GroupBy(["ta"]), lambda: (source_a(),)),
+    # A bare string is one column name (ITL-1221).
+    Case("group_by_bare_string", lambda: GroupBy("ta"), lambda: (source_a(),)),
     Case(
         "polars_filter",
         lambda: PolarsFilter(constraints={"ta": 5}),
@@ -417,6 +617,265 @@ CASES = [
     ),
     # No names: every tag and data column, among them struct, logical and list ones.
     Case("drop_nulls_all", lambda: DropNulls(), lambda: (source_a(),)),
+    # Data-tags (ITL-1023): every tag of these sources is also data.
+    Case(
+        "ref_join_2",
+        Join,
+        lambda: (source_a(with_data_tags=True), source_b(with_data_tags=True)),
+    ),
+    Case(
+        "ref_join_2_plain_left",
+        Join,
+        lambda: (source_a(), source_b(with_data_tags=True)),
+    ),
+    Case(
+        "ref_join_2_plain_right",
+        Join,
+        lambda: (source_a(with_data_tags=True), source_b()),
+    ),
+    Case(
+        "ref_join_3",
+        Join,
+        lambda: (
+            source_a(with_data_tags=True),
+            source_b(with_data_tags=True),
+            source_c(with_data_tags=True),
+        ),
+    ),
+    Case(
+        # Two key-only inputs with data-tags tie on pipeline hash (ITL-1017).
+        "ref_join_3_tied",
+        Join,
+        lambda: (
+            _source(
+                {"k": pa.array([1, 2, 3], pa.int16())}, ("k",), "p", with_data_tags=True
+            ),
+            source_b(with_data_tags=True),
+            _source(
+                {"k": pa.array([1, 2, 3], pa.int16())}, ("k",), "q", with_data_tags=True
+            ),
+        ),
+    ),
+    Case(
+        # The group key's merged token, merged again by the join (ITL-1017).
+        "ref_join_after_group_by",
+        Join,
+        lambda: (
+            GroupBy(["k"])(source_a(with_data_tags=True)),
+            source_b(with_data_tags=True),
+        ),
+    ),
+    Case(
+        # A data-tag key T on one side and T | None on the other (ITL-829).
+        "ref_join_key_nullability",
+        Join,
+        lambda: (
+            source_b(with_data_tags=True),
+            _source(
+                {
+                    "k": pa.array([1, None, 3], pa.int16()),
+                    "kn": pa.array([7, 8, 9], pa.int32()),
+                },
+                ("k",),
+                "n",
+                nullable=("k",),
+                with_data_tags=True,
+            ),
+        ),
+    ),
+    # MergeJoin on data-tags (ITL-1194): one merged scalar column for a tag
+    # a data-tag in both inputs; the other colliding columns merged into lists.
+    Case(
+        "ref_merge_join_2",
+        MergeJoin,
+        lambda: (
+            merge_source("m", 0, with_data_tags=True),
+            merge_source("n", 10, with_data_tags=True),
+        ),
+    ),
+    Case(
+        "ref_merge_join_plain_left",
+        MergeJoin,
+        lambda: (merge_source("m", 0), merge_source("n", 10, with_data_tags=True)),
+    ),
+    Case(
+        "ref_merge_join_plain_right",
+        MergeJoin,
+        lambda: (merge_source("m", 0, with_data_tags=True), merge_source("n", 10)),
+    ),
+    Case(
+        # ``tc`` is a data-tag on one input and absent from the other.
+        "ref_merge_join_absent",
+        MergeJoin,
+        lambda: (
+            source_c(with_data_tags=True),
+            merge_source("n", 10, with_data_tags=True),
+        ),
+    ),
+    Case(
+        # A data-tag key T on one side and T | None on the other (ITL-829).
+        "ref_merge_join_key_nullability",
+        MergeJoin,
+        lambda: (
+            merge_source("m", 0, with_data_tags=True),
+            _source(
+                {
+                    "k": pa.array([1, None, 3], pa.int16()),
+                    "x8": pa.array([7, 8, 9], pa.int8()),
+                },
+                ("k",),
+                "n",
+                nullable=("k",),
+                with_data_tags=True,
+            ),
+        ),
+    ),
+    Case(
+        "ref_semijoin",
+        SemiJoin,
+        lambda: (source_a(with_data_tags=True), source_b(with_data_tags=True)),
+    ),
+    Case(
+        "ref_group_by_key",
+        lambda: GroupBy(["ta"]),
+        lambda: (source_a(with_data_tags=True),),
+    ),
+    # Batch keeps every tag list-valued; a data-tag is the same list in both
+    # roles and stays a data-tag (ITL-1017).
+    Case(
+        "ref_batch_2",
+        lambda: Batch(batch_size=2),
+        lambda: (source_a(with_data_tags=True),),
+    ),
+    Case(
+        "ref_batch_2_drop_partial",
+        lambda: Batch(batch_size=2, drop_partial_batch=True),
+        lambda: (source_a(with_data_tags=True),),
+    ),
+    Case("ref_batch_all", Batch, lambda: (source_a(with_data_tags=True),)),
+    Case(
+        # The group key's merged tokens are listed, one per member: nothing new is folded.
+        "ref_batch_after_group_by",
+        lambda: Batch(batch_size=2),
+        lambda: (GroupBy(["k"])(source_a(with_data_tags=True)),),
+    ),
+    Case(
+        "ref_polars_filter",
+        lambda: PolarsFilter(constraints={"ta": 5}),
+        lambda: (source_a(with_data_tags=True),),
+    ),
+    Case(
+        "ref_select_data_columns",
+        lambda: SelectDataColumns(["i8", "ta"]),
+        lambda: (source_a(with_data_tags=True),),
+    ),
+    Case(
+        "ref_drop_tag_columns",
+        lambda: DropTagColumns(["ta"]),
+        lambda: (source_a(with_data_tags=True),),
+    ),
+    # Not selecting a data-tag removes its tag role only (ITL-1195).
+    Case(
+        "ref_select_tag_columns",
+        lambda: SelectTagColumns(["k"]),
+        lambda: (source_a(with_data_tags=True),),
+    ),
+    Case(
+        "ref_drop_data_columns",
+        lambda: DropDataColumns(["k"]),
+        lambda: (source_a(with_data_tags=True),),
+    ),
+    # A data-tag named or not named is kept or removed in both roles (ITL-1022).
+    Case(
+        "ref_select_columns",
+        lambda: SelectColumns(["k", "i8", "st"]),
+        lambda: (source_a(with_data_tags=True),),
+    ),
+    Case(
+        "ref_drop_columns",
+        lambda: DropColumns(["ta", "s"]),
+        lambda: (source_a(with_data_tags=True),),
+    ),
+    Case(
+        "ref_index",
+        lambda: Index("l8", 0, out="first"),
+        lambda: (source_a(with_data_tags=True),),
+    ),
+    Case(
+        "ref_drop_nulls_all",
+        lambda: DropNulls(),
+        lambda: (source_a(with_data_tags=True),),
+    ),
+    Case(
+        "ref_map_tags",
+        lambda: MapTags({"ta": "tb"}),
+        lambda: (source_a(with_data_tags=True),),
+    ),
+    Case(
+        "ref_map_tags_tag_only",
+        lambda: MapTags({"ta": "tb"}, tag_only=True),
+        lambda: (source_a(with_data_tags=True),),
+    ),
+    Case(
+        "ref_map_data",
+        lambda: MapData({"ta": "tb"}),
+        lambda: (source_a(with_data_tags=True),),
+    ),
+    # TagBy gives data columns the tag role, as data-tags (ITL-1175).
+    Case("tag_by", lambda: TagBy(["i8", "bn"]), lambda: (source_a(),)),
+    Case("tag_by_reversed", lambda: TagBy(["bn", "i8"]), lambda: (source_a(),)),
+    Case("tag_by_b", lambda: TagBy(["u8", "ls"]), lambda: (source_b(),)),
+    Case("ref_tag_by", lambda: TagBy("i8"), lambda: (source_a(with_data_tags=True),)),
+    # A data-tag that is not the table's first column (ITL-1205): the barrier
+    # path rebuilds its input from rows, data-tags first; the sync path agrees.
+    Case(
+        "ref_mid_polars_filter",
+        lambda: PolarsFilter(constraints={"k": 2}),
+        lambda: (source_mid(),),
+    ),
+    Case("ref_mid_tag_by", lambda: TagBy("y"), lambda: (source_mid(),)),
+    Case("ref_mid_drop_nulls", lambda: DropNulls(), lambda: (source_mid(),)),
+    # A data-tag that loses its tag role moves behind the remaining data-tags:
+    # the async path puts every row's data-tags first, as the sync path does
+    # (ITL-1205; CodeRabbit on PR #342).
+    Case(
+        "ref_drop_first_tag_columns",
+        lambda: DropTagColumns(["k"]),
+        lambda: (source_two(),),
+    ),
+    Case(
+        "ref_select_second_tag_columns",
+        lambda: SelectTagColumns(["u"]),
+        lambda: (source_two(),),
+    ),
+    Case(
+        "ref_map_tags_drop_unmapped",
+        lambda: MapTags({"u": "uu"}, drop_unmapped=True),
+        lambda: (source_two(),),
+    ),
+    Case(
+        "ref_map_data_first",
+        lambda: MapData({"k": "kk"}),
+        lambda: (source_two(),),
+    ),
+    # Downstream of a demoted data-tag: a join and a group on the remaining one.
+    Case(
+        "ref_join_after_demoted",
+        Join,
+        lambda: (DropTagColumns(["u"])(source_two()), source_b(with_data_tags=True)),
+    ),
+    Case(
+        "ref_group_by_after_demoted",
+        lambda: GroupBy(["u"]),
+        lambda: (DropTagColumns(["k"])(source_two()),),
+    ),
+    # AddTags keeps the input's data-tags; the new tags are plain (ITL-1196).
+    Case(
+        "ref_add_tags",
+        lambda: AddTags({"cohort": "A", "run": 3}),
+        lambda: (source_a(with_data_tags=True),),
+    ),
+    Case("ref_mid_add_tags", lambda: AddTags({"cohort": "A"}), lambda: (source_mid(),)),
     # Every accepted value type, after the input's two tags (ITL-1196).
     Case(
         "add_tags",
@@ -653,6 +1112,11 @@ def _zero_row_cases() -> list[Any]:
     """Every case with all inputs empty, and each multi-input case with one input empty."""
     params: list[Any] = []
     for case in CASES:
+        if "exact_values" in case.label:
+            # ``no_rows`` filters with ``PolarsFilter``, which carries every column
+            # through Polars and panics on ``decimal256``; these cases' zero-row
+            # inputs are tested in ``test_join_arrow_values.py``.
+            continue
         n_inputs = len(case.make_sources())
         empty_sets = [tuple(range(n_inputs))]
         if n_inputs > 1:
@@ -804,6 +1268,26 @@ def test_async_provenance_equals_sync(case: Case) -> None:
     )
 
 
+@pytest.mark.parametrize("empty", [False, True], ids=["rows", "no_rows"])
+def test_batch_of_a_batch_keeps_its_data_tags_on_both_paths(empty: bool) -> None:
+    """A batched data-tag batched again nests one level deeper, in both roles.
+
+    Outside the matrix: its list-valued ``k`` cannot be emptied by ``no_rows``, so the
+    rows are removed before the first ``Batch`` (ITL-1017).
+    """
+    source = source_a(with_data_tags=True)
+    batched = Batch(batch_size=2)(no_rows(source) if empty else source)
+    expected = sync_rows(Batch(), batched)
+    op = Batch()
+    _ = op(batched)
+    actual = async_rows(op, batched)
+    assert len(actual) == len(expected) == (0 if empty else 1)
+    assert_equivalent(expected, actual)
+    assert_same_provenance(expected, actual)
+    for tag, data in actual:
+        assert tag["k"] == data["k"] == [[1, 2], [3]]
+
+
 def test_semijoin_with_nested_columns() -> None:
     """SemiJoin over inputs with struct and list data columns, both paths."""
     sources = (source_a(), source_b())
@@ -851,8 +1335,9 @@ def _with_meta(source: StreamProtocol, meta: dict[str, Column]) -> ArrowTableStr
     table = source.as_table(columns={"source": True, "system_tags": True})
     for name, column in meta.items():
         table = table.append_column(name, column)
-    tags = source.keys()[0]
-    return ArrowTableStream(table, tag_columns=tags)
+    tags, data = source.keys()
+    data_tags = [name for name in tags if name in data]
+    return ArrowTableStream(table, tag_columns=tags, data_tags=data_tags)
 
 
 def _meta_columns(prefix: str, n_rows: int) -> dict[str, Column]:
@@ -961,6 +1446,7 @@ def _narrow_source(column: str, source_id: str) -> ArrowTableSource:
     table = pa.table(
         {"k": pa.array([1, 2], pa.int16()), column: pa.array([3, 4], pa.int8())}
     )
+    # Its hashes are pinned below: plain tags, as in v0.3 (ITL-1023).
     return ArrowTableSource(
         table, tag_columns=["k"], source_id=source_id, tag_only_columns=True
     )
@@ -980,10 +1466,10 @@ PINNED_ROW_HASHES = {
     ),
 }
 PINNED_STREAM_CONTENT_HASH = (
-    "semantic_v1:1a1287b527e0b08f2bc4af1084a9da9e1e7c1177b73f757ca5c6d742dc832067"
+    "semantic_v1:9c4e6769cdf7193685ebd44a2d223454f9537d532c4b1d2601c1fd93349c8cbf"
 )
 PINNED_STREAM_PIPELINE_HASH = (
-    "semantic_v1:45e033fc620875ff4704cc3ca60aee3c5f219a664c15f482428cda95bae2588e"
+    "semantic_v1:6d8e7c5123d673755b71714a7159774d4c76bad30a6291dc8d3e6051a71dcd39"
 )
 
 

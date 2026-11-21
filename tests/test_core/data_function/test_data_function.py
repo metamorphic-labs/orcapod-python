@@ -182,7 +182,7 @@ class TestDataFunctionBaseProperties:
 
 class TestPythonDataFunctionConstruction:
     def test_data_function_type_id(self, add_pf):
-        assert add_pf.data_function_type_id == "python.function.v0"
+        assert add_pf.data_function_type_id == "python.function.v1"
 
     def test_canonical_name_from_dunder_name(self):
         pf = PythonDataFunction(add, output_keys="result")
@@ -222,9 +222,9 @@ class TestPythonDataFunctionConstruction:
         schema = add_pf.output_data_schema
         assert schema["result"] is int
 
-    def test_output_keys_string_normalised_to_list(self):
+    def test_output_keys_string_normalised_to_tuple(self):
         pf = PythonDataFunction(add, output_keys="result")
-        assert pf._output_keys == ["result"]
+        assert pf._output_keys == ("result",)
 
     def test_output_keys_collection_preserved(self):
         pf = PythonDataFunction(multi, output_keys=["sum", "product"])
@@ -362,6 +362,7 @@ class TestGetFunctionVariationData:
         assert set(data.keys()) == {
             "function_name",
             "function_version",
+            "function_module",
             "function_signature_hash",
             "function_content_hash",
             "git_hash",
@@ -653,7 +654,7 @@ class TestAsyncConstruction:
         assert add_pf.is_async is False
 
     def test_data_function_type_id_same_for_async(self, async_add_pf):
-        assert async_add_pf.data_function_type_id == "python.function.v0"
+        assert async_add_pf.data_function_type_id == "python.function.v1"
 
     def test_input_schema_correct_for_async(self, async_add_pf):
         schema = async_add_pf.input_data_schema
@@ -860,7 +861,8 @@ class TestVariationHashSchema:
     def test_variation_schema_has_bytes_types(self, add_pf):
         schema = add_pf.get_function_variation_data_schema()
         assert schema["function_signature_hash"] is bytes
-        assert schema["function_content_hash"] is bytes
+        # Absent when the function's source cannot be read (ITL-1256).
+        assert schema["function_content_hash"] == bytes | None
 
     def test_variation_hash_decodes_to_content_hash(self, add_pf):
         """Both variation hash bytes round-trip through ContentHash.from_prefixed_digest."""

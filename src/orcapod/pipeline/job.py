@@ -14,18 +14,14 @@ from orcapod.core.nodes import JobNode
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.nodes.operator_node import OperatorJobNode
 from orcapod.core.nodes.source_node import SourceJobNode
+from orcapod.core.sources.derived_source import DerivedSource
 from orcapod.core.streams.base import StreamBase
 from orcapod.side_effects import SideEffectJobNode, SideEffectNode
 from orcapod.core.tracker import AutoRegisteringContextBasedTracker
-from orcapod.contexts.stored import (
-    report_unclaimed_tables,
-    unclaimed_tables_written_before_v03,
-)
 from orcapod.errors import (
     OrcapodDatabaseError,
     OrcapodDatabaseReadError,
     OrcapodDatabaseWriteError,
-    TableListingNotSupportedError,
 )
 from orcapod.pipeline.base import AbstractPipelineBase
 from orcapod.pipeline.dag import OrcaDAG
@@ -35,6 +31,12 @@ from orcapod.pipeline.node_run import (
     clear_run_rows,
     plan_run,
 )
+from orcapod.pipeline.restrictions import (
+    refuse_restricted_operator_caches,
+    refuse_restriction_conflicts,
+    restrictions_in_force,
+    warn_restricted_aggregation,
+)
 from orcapod.pipeline.run_summary import (
     RunCountingObserver,
     RunSummary,
@@ -43,7 +45,7 @@ from orcapod.pipeline.run_summary import (
 )
 from orcapod.protocols import core_protocols as cp
 from orcapod.databases.utils import as_table_committing
-from orcapod.types import CacheMode, NodeConfig
+from orcapod.types import NodeConfig
 from orcapod.utils.database_errors import flush_best_effort
 
 if TYPE_CHECKING:
@@ -418,7 +420,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         Raises:
             SourceSpecMismatchError: If any source's columns differ from its slot's
                 declared names, roles or types.
-            ValueError: If a source key has no matching ``SourceJobNode`` slot.
+            ValueError: If a source key has no matching ``SourceJobNode`` slot, or an
+                operator node that caches (``LOG`` or ``REPLAY``) would read a
+                restricted source, one this bind binds or one already bound
+                (ITL-1218); the job is left as it was.
             UnstorableColumnError: If *database* cannot store a table of a node
                 (ITL-1162); the job is left as it was.
         """
@@ -444,7 +449,20 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     node.validate(sources[node.name])
 
         # A database that cannot store a node's tables is refused before anything
-        # changes too (ITL-1162).
+        # changes too (ITL-1162), and so is a caching operator over a restricted
+        # source, one this bind binds or one already bound (ITL-1218): a bind of a
+        # database alone would otherwise set it and fail while distributing it.
+        # The slots this bind changes are the job's own, matched by object: a source
+        # being bound may itself be a slot of another job with the same name.
+        to_bind = sources or {}
+        rebinding = [
+            (node, to_bind[node.name])
+            for node in (self._persistent_node_map or {}).values()
+            if isinstance(node, SourceJobNode) and node.name in to_bind
+        ]
+        refuse_restriction_conflicts(
+            (self._persistent_node_map or {}).values(), rebinding=rebinding
+        )
         if database_changed and database is not None:
             self._require_storable_tables(database)
 
@@ -502,8 +520,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             if isinstance(node, FunctionJobNode):
                 node.require_storable_tables(pipeline_db, result_db)
             elif isinstance(node, OperatorJobNode):
-                op_cache_mode = getattr(node, "_cache_mode", None) or CacheMode.OFF
-                node.require_storable_tables(pipeline_db, op_cache_mode)
+                node.require_storable_tables(pipeline_db, node.cache_mode)
             elif isinstance(node, SideEffectJobNode):
                 node.require_storable_tables(pipeline_db)
 
@@ -523,7 +540,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             )
 
         # Every node is checked before any is attached, so a refused database
-        # leaves every node as it was (ITL-1162).
+        # leaves every node as it was (ITL-1162), and so is a caching operator over
+        # a restricted source (ITL-1218).
+        refuse_restricted_operator_caches((self._persistent_node_map or {}).values())
         self._require_storable_tables(self._database)
         pipeline_db = self._database.at(*self._name)
         result_db = pipeline_db.at("_result")
@@ -535,59 +554,12 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     result_database=result_db,
                 )
             elif isinstance(node, OperatorJobNode):
-                op_cache_mode = getattr(node, "_cache_mode", None) or CacheMode.OFF
                 node.attach_databases(
                     pipeline_database=pipeline_db,
-                    cache_mode=op_cache_mode,
+                    cache_mode=node.cache_mode,
                 )
             elif isinstance(node, SideEffectJobNode):
                 node.attach_databases(pipeline_database=pipeline_db)
-
-    def _report_unclaimed_tables_written_before_v03(
-        self, excluded_hashes: set[str]
-    ) -> None:
-        """Report, once per run, the pre-v0.3 tables no node of this job reports itself.
-
-        A function or side-effect node looks under its own name in the database and
-        reports, or refuses, the tables an earlier version of Orcapod wrote there.
-        Operator caches and cached sources have no name in their path that survives
-        a change of hashes, and a node that left the job has no node to report it.
-        This lists the tables stored under the job's name once and reports one
-        total of what is left (ITL-954). The tables are not read.
-
-        Args:
-            excluded_hashes: Keys of the nodes this run leaves out (an unbound
-                source and everything downstream of it). Such a node does not
-                run, so it reports nothing itself and claims no table.
-        """
-        if self._database is None:
-            return
-        pipeline_db = self._database.at(*self._name)
-        claimed: set[tuple[str, ...]] = set()
-        for node_hash, node in (self._persistent_node_map or {}).items():
-            if node_hash in excluded_hashes:
-                continue
-            if isinstance(node, FunctionJobNode):
-                name_path = node.node_name_path
-                if name_path:
-                    claimed.update({name_path, ("_result",) + name_path})
-            elif isinstance(node, SideEffectJobNode):
-                claimed.add(node.node_uri)
-        try:
-            unclaimed = unclaimed_tables_written_before_v03(pipeline_db, claimed)
-        except TableListingNotSupportedError as exc:
-            logger.info(
-                "The database cannot list its tables (%s), so tables written by an "
-                "earlier version of Orcapod are reported only where a node finds "
-                "them at its own path.",
-                exc,
-            )
-            return
-        if unclaimed:
-            report_unclaimed_tables(
-                pipeline_db.base_path,
-                [pipeline_db.base_path + path for path in unclaimed],
-            )
 
     # ------------------------------------------------------------------
     # _iter_function_job_nodes() / apply_node_config()
@@ -1291,16 +1263,17 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         pipeline_db = self._database.at(*self._name)
         result_db = pipeline_db.at("_result")
 
+        # A source read under two restrictions, or a caching operator over a restricted
+        # source, is refused before any source is checked and before anything is
+        # computed or written (ITL-1218).
+        refuse_restriction_conflicts(exec_dag.nodes())
         # Every source first takes in any new data, moving its modified time, before
         # the state rule judges any node (ITL-1102).
         unchecked = check_sources(exec_dag.nodes())
+        # A restricted source under an aggregation is allowed, and said (ITL-1218).
+        warn_restricted_aggregation(exec_dag)
         # The state rule (ITL-1095): a node that holds a current run is not run again.
         plan = plan_run(exec_dag, load_only=load_only)
-        # Pre-v0.3 tables are reported for a run that runs a node or leaves one out
-        # (ITL-954): an excluded node reports nothing itself, so the job's total counts
-        # its tables. Only a run that runs nothing and leaves nothing out lists no database.
-        if plan.to_run or excluded_hashes:
-            self._report_unclaimed_tables_written_before_v03(excluded_hashes)
         # A database that commits a table by itself at batch_size: commit what it already
         # holds pending (writes made without a flush, or a failed run's batches) before
         # this run writes. Those rows would otherwise count towards a table's
@@ -1440,6 +1413,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             load_only=load_only,
             unchecked_sources=unchecked_sources,
             ran_nothing=not plan.to_run,
+            restricted_sources=restrictions_in_force(prepared.exec_dag.nodes()),
         )
         return self._last_run
 
@@ -1467,7 +1441,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             path: File path to write JSON output to.
 
         Raises:
-            ValueError: If no compiled pipeline exists.
+            ValueError: If no compiled pipeline exists, or a source cannot save its
+                configuration exactly (a ``CSVSource`` whose explicit schema holds
+                Arrow metadata); nothing is written then.
         """
         import json as _json
         import os
@@ -1501,7 +1477,17 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         sources_block: dict[str, Any] = {}
         for spec_name, source in self._sources.items():
             if hasattr(source, "to_config"):
-                sources_block[spec_name] = source.to_config()
+                try:
+                    # ``hasattr`` checked it: every source declares it.
+                    sources_block[spec_name] = cast(
+                        "cp.SourceProtocol", source
+                    ).to_config()
+                except ValueError as exc:
+                    # A source that cannot save its configuration exactly refuses
+                    # (a CSVSource's explicit schema with Arrow metadata, ITL-1315):
+                    # nothing is written.
+                    exc.add_note(f"Saving the job's source {spec_name!r}")
+                    raise
             else:
                 sources_block[spec_name] = {"source_type": "unknown"}
 
@@ -1539,11 +1525,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 node_job_content_hashes[node.label] = node.content_hash().to_string()
             elif isinstance(node, OperatorJobNode):
                 # An operator node's stored rows carry its run's content hash too
-                # (ITL-1043). A node loaded from a file without it cannot know it: its
-                # recomputed hash is not the run's, so it is left out, not guessed.
-                run_content_hash = node._run_content_hash()
-                if run_content_hash is not None:
-                    node_job_content_hashes[node.label] = run_content_hash.to_string()
+                # (ITL-1043); a loaded node has the one its file records.
+                node_job_content_hashes[node.label] = (
+                    node._run_content_hash().to_string()
+                )
             elif isinstance(node, SideEffectJobNode):
                 # Its descriptor holds the blueprint's hash; a loaded side-effect node
                 # takes the job's from here, as a function node does (ITL-1094).
@@ -1605,7 +1590,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             results.
 
         Raises:
-            ValueError: If the file's format version is unsupported, or if it was
+            ValueError: If the file's format version is not the one this Orcapod
+                writes (an earlier format is refused, never migrated), or if it was
                 saved before the database key was renamed (``bindings.store``
                 instead of ``bindings.database``) and no ``database`` is given.
                 An explicit ``database`` makes the saved block irrelevant, so
@@ -1619,7 +1605,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         from orcapod.core.nodes.source_node import SourceNodeBase
         from orcapod.pipeline.graph import Pipeline
         from orcapod.pipeline.serialization import (
-            SUPPORTED_JOB_FORMAT_VERSIONS,
+            PIPELINE_JOB_FORMAT_VERSION,
+            check_saved_source_config,
+            check_source_config_binding,
+            require_current_format,
+            require_tag_only_columns,
             resolve_source_from_config,
         )
 
@@ -1627,12 +1617,14 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         with open(path) as f:
             data = _json.load(f)
 
-        version = data.get("orcapod_pipeline_job_version", "")
-        if version not in SUPPORTED_JOB_FORMAT_VERSIONS:
-            raise ValueError(
-                f"Unsupported PipelineJob format version {version!r}. "
-                f"Supported: {sorted(SUPPORTED_JOB_FORMAT_VERSIONS)}"
+        try:
+            require_current_format(
+                data.get("orcapod_pipeline_job_version", ""),
+                PIPELINE_JOB_FORMAT_VERSION,
             )
+        except ValueError as exc:
+            exc.add_note(f"Loading the job file {path}")
+            raise
 
         # Reconstruct pipeline from embedded blueprint data
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as tmp:
@@ -1640,6 +1632,12 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             _json.dump(data["pipeline"], tmp)
         try:
             pipeline = Pipeline.load(tmp_path)
+        except ValueError as exc:
+            # The embedded pipeline was read from a temporary file: name the job file.
+            message = str(exc)
+            if tmp_path in message:
+                exc.args = (message.replace(tmp_path, str(path)),)
+            raise
         finally:
             os.unlink(tmp_path)
 
@@ -1654,6 +1652,25 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             data.get("bindings", {}).get("sources", {}).items()
         ):
             source_type = src_config.get("source_type")
+            # Every source states its plain tags (ITL-1019): a refusal is the file's
+            # error, not a source that could not be rebuilt.
+            try:
+                require_tag_only_columns(src_config)
+                # A tags_as_data source saved without its required source id is an
+                # invalid file, refused here; the best-effort rebuild below would
+                # leave the slot unbound instead (ITL-1313).
+                DerivedSource.require_saved_source_id(src_config)
+                if spec_name in slots:
+                    slot = slots[spec_name]
+                    check_source_config_binding(
+                        src_config, slot.tag_schema.keys(), slot.data_schema.keys()
+                    )
+                # A malformed entry of a source's own (a CSVSource's saved schema,
+                # ITL-1315) is the file's error: refused here, where the best-effort
+                # rebuild below would leave the slot unbound.
+                check_saved_source_config(src_config)
+            except ValueError as exc:
+                raise ValueError(f"{path}: source {spec_name!r}: {exc}") from exc
             try:
                 source = resolve_source_from_config(src_config)
                 if source is not None:
@@ -1675,6 +1692,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     spec_name,
                     spec_name,
                 )
+            except Warning:
+                # A warning turned into an error (a ProvisionalHashWarning under an
+                # error filter) is the caller's request: it propagates, never read as a
+                # source that could not be rebuilt (ITL-1331).
+                raise
             except Exception as exc:
                 logger.warning(
                     "Could not reconstruct source %r (%s) from its saved config: %s. "
@@ -1760,6 +1782,26 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         node_job_content_hashes: dict[str, str] = run_block.get(
             "node_job_content_hashes", {}
         )
+        # Every function, operator and side-effect node records its run's content hash
+        # (ITL-1043, ITL-1094): its stored rows carry it, and inputs rebuilt from the
+        # file cannot give it. A file without one is malformed and refused, never
+        # loaded with a guessed hash (developer, 2026-11-21: no backward compatibility
+        # for saved files).
+        # An entry that is not a hash text (null, a number) is no record either
+        # (CodeRabbit on PR 454).
+        unrecorded = sorted(
+            bp_node.label
+            for bp_node in pipeline._persistent_node_map.values()
+            if isinstance(bp_node, (_FunctionNode, _OperatorNode, SideEffectNode))
+            and not isinstance(node_job_content_hashes.get(bp_node.label), str)
+        )
+        if unrecorded:
+            raise ValueError(
+                f"{path}: saved nodes {unrecorded} have no run content hash text "
+                "(run.node_job_content_hashes); a saved job records it for every "
+                "function, operator and side-effect node. Save the job again with this "
+                "version of Orcapod."
+            )
         # The optional, advisory section (ITL-1043): a node with an entry warns when
         # its database holds another number of rows. Without it nothing is checked. The
         # ITL-904 flag (node_has_stored_records) of older files is not used: the database
@@ -1772,7 +1814,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 continue
 
             if isinstance(bp_node, _SourceNode):
-                # Keeps the loaded slot's saved hashes and pending types (ITL-1138).
+                # Keeps the loaded slot's saved hashes and saved type texts (ITL-1138).
                 sjn = SourceJobNode._from_loaded_slot(  # pyright: ignore[reportPrivateUsage]  # the loader is the one caller
                     bp_node, bound_source=sources.get(bp_node.name)
                 )

@@ -3,11 +3,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
 from orcapod.protocols.core_protocols.streams import StreamProtocol
-from orcapod.types import Cursor
+from orcapod.types import Condition, Cursor
 
 T = TypeVar("T")
 
 if TYPE_CHECKING:
+    import pyarrow as pa
     from polars._typing import FrameInitTypes
 
     from orcapod.protocols.database_protocols import DatabaseRegistryProtocol
@@ -24,10 +25,27 @@ class SourceProtocol(StreamProtocol, Protocol):
     - ``source`` is always ``None`` (no upstream pod)
     - ``upstreams`` is always empty
     - ``source_id`` provides a canonical name for registry and provenance
+    - ``condition`` and ``row_limit`` state the source's restriction (ITL-1218):
+      which of its rows it reads. A restriction is part of no identity, schema or
+      saved hash. Only sources answer them for now; ``StreamProtocol`` gets them
+      when restrictions reach general streams (ITL-1219). The name ``limit`` is kept
+      for the planned method ``source.limit(n)``, the counterpart of ``where()``
+      (ITL-1219).
     """
 
     @property
     def source_id(self) -> str: ...
+
+    @property
+    def condition(self) -> Condition:
+        """The row conditions the source reads under: the empty ``Condition`` when
+        it reads every row."""
+        ...
+
+    @property
+    def row_limit(self) -> int | None:
+        """The most rows the source reads, or ``None`` for no limit."""
+        ...
 
     def to_config(
         self, db_registry: DatabaseRegistryProtocol | None = None
@@ -225,12 +243,18 @@ class DynamicSourceProtocol(Protocol[T]):
         """
         ...
 
-    def schema(self) -> Schema | None:
+    def schema(self) -> "Schema | pa.Schema | None":
         """Return the unified column schema for this source, or ``None``.
 
         When non-``None``, ``PollingSource`` uses this as the declared schema
         and splits it into tag columns (based on the ``tag_columns`` argument)
         and data columns — no schema-inference fetch is needed upfront.
+
+        The declared schema fixes the source's identity (ITL-640): a Python
+        ``Schema`` means the one Arrow type the data context converts each Python
+        type to (``int`` is ``int64``, ``datetime`` is ``timestamp[us, tz=UTC]``),
+        and a ``pa.Schema`` means exactly its Arrow types. A fetched batch whose
+        Arrow types differ is refused before it is committed.
 
         When ``None``, schema is inferred from the first batch returned by
         ``fetch()``.
@@ -241,9 +265,9 @@ class DynamicSourceProtocol(Protocol[T]):
         ``PollingSource`` construction time.
 
         Returns:
-            A flat ``Schema`` mapping column names to Python types covering
-            all columns (both tag and data), or ``None`` if the schema is not
-            known ahead of time.
+            A flat ``Schema`` mapping column names to Python types, or a
+            ``pa.Schema``, covering all columns (both tag and data), or ``None`` if
+            the schema is not known ahead of time.
 
         Example::
 

@@ -14,3 +14,7 @@ CI job failed.
 **Fix:** Removed `pygraphviz` from `pyproject.toml` and `uv.lock`, and dropped
 `libgraphviz-dev` from all workflows (the `graphviz` apt package stays for `dot`).
 `tests/test_packaging.py` guards against re-adding it.
+
+**Follow-up (ITL-1216):** The `graphviz` package, `matplotlib` and the old renderer that
+used them (`show_graph()`) were removed too, and no workflow installs the `graphviz` apt
+package any more; the pipeline draws itself with `diagram()`.

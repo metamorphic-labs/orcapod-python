@@ -53,7 +53,6 @@ from orcapod.invocation import (
     InvocationHashConfig,
 )
 from orcapod.system_constants import (
-    OLD_TRACKING_DB_SCHEMA_VERSIONS,
     TRACKING_DB_SCHEMA_VERSION,
     constants,
 )
@@ -288,16 +287,21 @@ def _table_of_rows(
     data_tables: list[pa.Table] = []
     hashes: list[str] = []
     for tag, data in rows:
-        tag_tables.append(tag.as_table(columns={"system_tags": True}))
+        tag_table = tag.as_table(columns={"system_tags": True})
+        tag_tables.append(tag_table)
         # Only the requested auxiliary groups, so a group that is not shown cannot
         # make the rows' tables differ; the hash is that of the data, whatever is shown.
+        data_table = data.as_table(
+            columns={
+                "source": column_config.source,
+                "meta": column_config.meta,
+                "context": column_config.context,
+            }
+        )
+        # A data-tag (ITL-1023) is one column, shown once, among the tags.
         data_tables.append(
-            data.as_table(
-                columns={
-                    "source": column_config.source,
-                    "meta": column_config.meta,
-                    "context": column_config.context,
-                }
+            data_table.drop_columns(
+                [c for c in data_table.column_names if c in tag_table.column_names]
             )
         )
         hashes.append(data.content_hash().to_string())
@@ -355,6 +359,45 @@ def _table_of_rows(
 # ---------------------------------------------------------------------------
 # Shared row execution helper
 # ---------------------------------------------------------------------------
+
+
+def _side_effect_arguments(
+    fn: Callable[..., Any], tag: TagProtocol, data: DataProtocol
+) -> dict[str, Any]:
+    """Return a row's data as keyword arguments for a side-effect function.
+
+    The column of a data-tag (a name that is a tag and a data column,
+    ITL-1023) is passed only to a function that takes it as a keyword: a parameter
+    of that name that accepts a keyword (not ``*args``, not positional-only), or
+    ``**kwargs``. It is a tag first, and a function written for the row's data does
+    not expect it. Every other data column is passed as before.
+
+    Args:
+        fn: The side-effect function.
+        tag: The row's tag.
+        data: The row's data.
+
+    Returns:
+        The keyword arguments.
+    """
+    import inspect
+
+    values = data.as_dict()
+    data_tags = set(tag.keys()) & set(values)
+    if not data_tags:
+        return values
+    parameters = inspect.signature(fn).parameters
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+        return values
+    # Only a parameter that accepts a keyword receives a data-tag by name: never
+    # ``*args``, nor a positional-only one (Copilot on PR #342).
+    keywords = {
+        name
+        for name, p in parameters.items()
+        if p.kind
+        in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    }
+    return {k: v for k, v in values.items() if k not in data_tags or k in keywords}
 
 
 def _execute_side_effect_row(
@@ -441,7 +484,7 @@ def _execute_side_effect_row(
     )
 
     # 5. Call user function.
-    data_dict = data.as_dict()
+    data_dict = _side_effect_arguments(fn, tag, data)
     if ctx_arg_name in data_dict:
         raise ValueError(
             f"ctx_arg_name {ctx_arg_name!r} collides with a data column of the same name. "
@@ -1104,10 +1147,6 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
         current = self._pod.data_context_key
         found = find_stale_tables(
             self._pipeline_database,
-            tuple(
-                self._table_path[:-1] + (layout,)
-                for layout in OLD_TRACKING_DB_SCHEMA_VERSIONS
-            ),
             current=None if self._current_log_checked else (self._table_path, current),
             # ("side_effects", <pod name>): the part of the path that holds no hash.
             name_path=self.node_uri,

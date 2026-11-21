@@ -327,12 +327,12 @@ class TestSourceId:
             Schema({"sex": str | None}),
         )
         assert self._identity(source) == (
-            "semantic_v1:742aca7f6359844b4999e5bce29fda0769dca57e737d585e9ab4020c6dc6147c",
+            "semantic_v1:8159a5e1e45fb8bc11b3d3b9a4593d38d424373d40fb2dff82b763bbfb56c19d",
             self._M1,
             f"subject::{self._M1}::sex",
         )
         assert source.pipeline_hash().to_string() == (
-            "semantic_v1:657ec561c0408591d01265e8e3a4e70223d1301634f8c3fc4edced2be6f34948"
+            "semantic_v1:1c8a42718a1ee6baf6fa39c26c653922ff82824b946752a2bfbeff020a785c54"
         )
         row_hash = source.as_table(columns={"content_hash": True}).column(
             "_content_hash"
@@ -351,12 +351,12 @@ class TestSourceId:
             "edi-sample-a", "subject", source_id="subject", tag_only_columns=True
         )
         assert self._identity(source) == (
-            "semantic_v1:6f4e8a26863d5efe7ccdc6d0859624960c9a6c6e36a0ca94ce62e48b68149dcc",
+            "semantic_v1:6a5a8b911d12be63c9cb9173e5444ef8df0ccd0c84da310440151c66f515b8ed",
             self._M1,
             f"subject::{self._M1}::sex",
         )
         assert source.pipeline_hash().to_string() == (
-            "semantic_v1:762a06a391948ba159c51df90475d609d745b9bf054e2b040f42495513b5498a"
+            "semantic_v1:8a1694053997388337fecf33b28b7324bc9256185b151ee900b4ff15c6254d6e"
         )
 
 
@@ -510,21 +510,25 @@ class TestNonNullableColumns:
         with pytest.raises(ValueError, match="float \\| None"):
             halve.pod(SelectDataColumns(["weight"])(source))
 
+    @pytest.mark.parametrize("tag_only", [True, False], ids=["plain", "data-tag"])
     def test_join_of_recorded_and_unrecorded_keys_gives_the_recorded_type(
-        self, strict_root
+        self, strict_root, tag_only
     ):
         """A T key joined with a T | None key is accepted and comes out T (ITL-829).
 
-        A null key matches nothing, so no joined row can hold a null there.
+        A null key matches nothing, so no joined row can hold a null there. A
+        data-tag key (ITL-1023) is ``T`` in its data role too.
         """
-        unit = SpiralDBTableSource(_PROJECT, "unit", tag_only_columns=True)
+        unit = SpiralDBTableSource(_PROJECT, "unit", tag_only_columns=tag_only)
         unrecorded = SpiralDBTableSource(
-            _PROJECT, "session_unrecorded", tag_only_columns=True
+            _PROJECT, "session_unrecorded", tag_only_columns=tag_only
         )
         assert unrecorded.output_schema()[0]["subject_id"] == str | None
         joined = Join()(unit, unrecorded)
-        tag_schema, _ = joined.output_schema()
+        tag_schema, data_schema = joined.output_schema()
         assert tag_schema["subject_id"] is str
+        if not tag_only:
+            assert data_schema["subject_id"] is str
         assert not joined.as_table().schema.field("subject_id").nullable
 
     def test_plain_typed_pod_runs_through_join_and_save_load(

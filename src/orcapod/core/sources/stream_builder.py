@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, cast
 from orcapod.core.sources.source_ids import hash_source_id
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.errors import RowIdentifierError
+from orcapod.logical_types.identifier import LogicalTypeIdentifierError
 from orcapod.system_constants import constants
 from orcapod.types import ContentHash
 from orcapod.utils import arrow_utils, schema_utils
@@ -260,6 +261,41 @@ def row_identifiers(table: pa.Table, record_id_columns: Sequence[str]) -> list[s
     return identifiers
 
 
+def require_hash_in_key_order_usable(
+    hash_in_key_order: bool, *, source_id: str | None, key_columns: Sequence[str]
+) -> None:
+    """Refuse ``hash_in_key_order=True`` where it would mean nothing (ITL-1272).
+
+    It orders the rows of the table a default source id is hashed from, so it needs
+    key columns (there is no key order without them) and no given ``source_id``: the
+    table hash is still computed then, but it does not determine a given source id and
+    enters no identity, so the argument would change nothing. Whole-argument checks,
+    made before the table is read.
+
+    Args:
+        hash_in_key_order: The argument as given.
+        source_id: The given source id, or ``None``.
+        key_columns: The resolved key columns, in key order; empty for the position.
+
+    Raises:
+        ValueError: If ``hash_in_key_order`` is true with a ``source_id`` or with no
+            key columns.
+    """
+    if not hash_in_key_order:
+        return
+    if source_id is not None:
+        raise ValueError(
+            "hash_in_key_order=True orders the rows hashed into a default source id, "
+            f"but a source_id ({source_id!r}) is given, which the table hash does not "
+            "determine; pass one or the other"
+        )
+    if not key_columns:
+        raise ValueError(
+            "hash_in_key_order=True needs key columns: name them in "
+            "record_id_columns (rows identified by position have no key order)"
+        )
+
+
 def _unhashable_columns(
     hasher: ArrowHasherProtocol, table: pa.Table
 ) -> list[tuple[str, pa.DataType]]:
@@ -286,6 +322,38 @@ def _unhashable_columns(
     return failing
 
 
+def _unhashable_table_error(
+    hasher: ArrowHasherProtocol, table: pa.Table, exc: ValueError
+) -> ValueError | None:
+    """Return the error for a table the Arrow hasher refused, naming every column.
+
+    The hasher (starfix) raises ``ValueError`` for a type it does not hash, at the
+    table or at its schema, and names the first such column only.
+
+    Args:
+        hasher: The data context's Arrow hasher.
+        table: The table whose hash, or whose schema's hash, failed.
+        exc: The hasher's error.
+
+    Returns:
+        A ``ValueError`` naming every column the hasher refuses with its type, or
+        ``None`` when no single column is refused, or when ``exc`` is a logical type
+        identifier this installation cannot read, which names its column already
+        (the caller re-raises ``exc``).
+    """
+    if isinstance(exc, LogicalTypeIdentifierError):
+        return None
+    unhashable = _unhashable_columns(hasher, table)
+    if not unhashable:
+        return None
+    described = ", ".join(f"{name!r} of type {kind}" for name, kind in unhashable)
+    noun = "column" if len(unhashable) == 1 else "columns"
+    return ValueError(
+        f"cannot hash {noun} {described}: the Arrow hasher refused "
+        f"({exc}). Drop or convert before building the source."
+    )
+
+
 @dataclass(frozen=True)
 class SourceStreamResult:
     """Artifacts produced by ``SourceStreamBuilder.build()``."""
@@ -296,6 +364,7 @@ class SourceStreamResult:
     source_id: str
     tag_columns: tuple[str, ...]
     system_tag_columns: tuple[str, ...]
+    data_tags: tuple[str, ...] = ()
 
 
 class SourceStreamBuilder:
@@ -318,6 +387,9 @@ class SourceStreamBuilder:
         record_id_columns: str | Collection[str] | None = (),
         system_tag_columns: Collection[str] = (),
         source_kind: str | None = None,
+        data_tags: Collection[str] = (),
+        *,
+        hash_in_key_order: bool = False,
     ) -> SourceStreamResult:
         """Run the full enrichment pipeline.
 
@@ -333,8 +405,9 @@ class SourceStreamBuilder:
             tag_columns: Column names forming the tag for each row.
             source_id: Canonical source name. When not given, the default is
                 ``<source_kind>:<algorithm label>:<hex>`` of the table hash
-                (``hash_source_id``), which changes when rows are reordered;
-                pass an explicit value when record IDs must survive reordering.
+                (``hash_source_id``), which changes when rows are reordered
+                unless ``hash_in_key_order`` is given; pass an explicit value when
+                record IDs must survive reordering.
             record_id_columns: The key columns whose values identify a row, in key
                 order: the row identifier is their canonical JSON
                 (``key_row_identifier``), which follows the row regardless of its
@@ -344,6 +417,16 @@ class SourceStreamBuilder:
             source_kind: Kind prefix of the default source id, for example
                 ``dict``. Required when ``source_id`` is not given; not used
                 otherwise.
+            data_tags: The tag columns that are data-tags: also data columns
+                of the same name, stored once (ITL-1023). Empty (the builder's
+                default) gives plain tags, exactly as in v0.3; sources pass their
+                declared tags minus ``tag_only_columns``.
+            hash_in_key_order: Hash the table with its rows sorted by the key
+                columns, in key order (``arrow_utils.key_row_order``), so the same
+                rows in any order give one table hash and one default source id
+                (ITL-1272). The stream keeps the rows in the order given. Off by
+                default: the rows are hashed in the order given, which the user may
+                have chosen on purpose. Needs key columns and no ``source_id``.
 
         Returns:
             SourceStreamResult with enriched stream and metadata.
@@ -352,14 +435,49 @@ class SourceStreamBuilder:
             ValueError: If the table has no columns ("Table is empty"), if
                 tag_columns or a key column are not in the table, a key column's
                 type is not allowed, a key value is null or repeated, or if
-                neither ``source_id`` nor ``source_kind`` is given.
+                neither ``source_id`` nor ``source_kind`` is given, or if
+                ``hash_in_key_order`` is given with a ``source_id`` or without key
+                columns.
+            InputValidationError: If a column's type is, or contains, a
+                dictionary: dictionary-encoded columns are not currently supported
+                (ITL-1264, ITL-1277).
         """
+        # Whole-argument checks first, before the table is read.
+        key_columns = normalize_record_id_columns(record_id_columns) or ()
+        require_hash_in_key_order_usable(
+            hash_in_key_order, source_id=source_id, key_columns=key_columns
+        )
         tag_columns_tuple = tuple(tag_columns)
         system_tag_columns_tuple = tuple(system_tag_columns)
+        data_tags_tuple = tuple(c for c in tag_columns_tuple if c in data_tags)
+        if unknown := set(data_tags) - set(tag_columns_tuple):
+            raise ValueError(
+                f"data_tags {sorted(unknown)} are not in tag_columns "
+                f"{list(tag_columns_tuple)}"
+            )
+        # Tag-only columns: the tags that are not also data.
+        tag_only_tuple = tuple(c for c in tag_columns_tuple if c not in data_tags_tuple)
 
         # A tag never has a meta column's name; the meta columns are dropped next,
         # so say so here rather than report the tag as missing (ITL-1080).
         schema_utils.require_names_not_meta(tag_columns_tuple)
+
+        # Dictionary-encoded columns are not currently supported (ITL-1264,
+        # ITL-1277). The stream refuses them too; checking first reports the
+        # dictionary, not a key column error, and before anything is hashed. It runs
+        # before the system columns are dropped: a hand-built meta, source-info or
+        # system-tag column holding a dictionary is refused, not dropped silently.
+        if found := schema_utils.dictionary_columns(table.schema):
+            raise schema_utils.dictionary_columns_error(
+                found, tag_columns_tuple, data_tags_tuple, system_tag_columns_tuple
+            )
+        # Nor are columns of a type the schema hash rejects (a union, a list view, a
+        # run-end-encoded type; ITL-640): refused here first, as the stream refuses
+        # them, with the same message.
+        if found := schema_utils.schema_hash_rejected_columns(table.schema):
+            raise schema_utils.schema_hash_rejected_columns_error(
+                found, tag_columns_tuple, data_tags_tuple, system_tag_columns_tuple
+            )
 
         # 1. Drop system columns from raw input.
         table = arrow_utils.drop_system_columns(table)
@@ -380,48 +498,47 @@ class SourceStreamBuilder:
                 f"Available columns: {list(table.column_names)}"
             )
 
-        # 3. The row identifiers (validates the key columns).
-        identifiers = row_identifiers(
-            table, normalize_record_id_columns(record_id_columns) or ()
-        )
+        # 3. The row identifiers (validates the key columns: a missing, null or
+        # repeated key is refused here, before anything is hashed).
+        identifiers = row_identifiers(table, key_columns)
 
-        # 4. Compute schema hash from tag/data python schemas.
+        # 4. Compute schema hash from the tag/data Arrow schemas (ITL-640).
         # Nullable flags in the incoming table are trusted as-is — callers must
         # set them correctly before calling build().
         non_sys = arrow_utils.drop_system_columns(table)
         tag_schema = non_sys.select(list(tag_columns_tuple)).schema
-        data_schema = non_sys.drop(list(tag_columns_tuple)).schema
-        tag_python = self._data_context.type_converter.arrow_schema_to_python_schema(
-            tag_schema
-        )
-        data_python = self._data_context.type_converter.arrow_schema_to_python_schema(
-            data_schema
-        )
-        schema_hash = compute_source_schema_hash(
-            tag_python,
-            data_python,
-            self._data_context,
-            self._config,
-        )
-
-        # 5. Compute table hash for data identity.
-        hasher = self._data_context.arrow_hasher
+        data_schema = non_sys.drop(list(tag_only_tuple)).schema
         try:
-            table_hash = hasher.hash_table(table)
-        except ValueError as exc:
-            # The hasher (starfix 0.5) raises ValueError for a type it does not hash
-            # and names the first such column only; name every column it refuses.
-            unhashable = _unhashable_columns(hasher, table)
-            if not unhashable:
-                raise
-            described = ", ".join(
-                f"{name!r} of type {kind}" for name, kind in unhashable
+            schema_hash = compute_source_schema_hash(
+                tag_schema,
+                data_schema,
+                self._data_context,
+                self._config,
             )
-            noun = "column" if len(unhashable) == 1 else "columns"
-            raise ValueError(
-                f"cannot hash {noun} {described}: the Arrow hasher refused "
-                f"({exc}). Drop or convert before building the source."
-            ) from exc
+        except ValueError as exc:
+            # A type the Arrow hasher cannot hash fails here first, at its schema
+            # (ITL-640): refused as the table hash below refuses it.
+            error = _unhashable_table_error(self._data_context.arrow_hasher, table, exc)
+            if error is None:
+                raise
+            raise error from exc
+
+        # 5. Compute table hash for data identity: the rows in the order given, or,
+        # with ``hash_in_key_order``, in key order (ITL-1272). The stream keeps the
+        # rows in the order given either way.
+        hasher = self._data_context.arrow_hasher
+        hashed = (
+            arrow_utils.key_row_order(table, key_columns)
+            if hash_in_key_order
+            else table
+        )
+        try:
+            table_hash = hasher.hash_table(hashed)
+        except ValueError as exc:
+            error = _unhashable_table_error(hasher, table, exc)
+            if error is None:
+                raise
+            raise error from exc
 
         # 6. Default source_id: the source kind and the labelled table hash, at
         # full length. A source id is the source's name, so a default built from a
@@ -442,6 +559,7 @@ class SourceStreamBuilder:
             schema_hash=schema_hash,
             source_id=source_id,
             row_identifiers=identifiers,
+            data_tags=data_tags_tuple,
         )
 
         return SourceStreamResult(
@@ -451,6 +569,7 @@ class SourceStreamBuilder:
             source_id=source_id,
             tag_columns=tag_columns_tuple,
             system_tag_columns=system_tag_columns_tuple,
+            data_tags=data_tags_tuple,
         )
 
     def attach_provenance(
@@ -462,6 +581,7 @@ class SourceStreamBuilder:
         schema_hash: str,
         source_id: str,
         row_identifiers: Sequence[str],
+        data_tags: Sequence[str] = (),
     ) -> ArrowTableStream:
         """Add source-info and system-tag columns to ``table`` and wrap it as a stream.
 
@@ -481,6 +601,8 @@ class SourceStreamBuilder:
             source_id: The canonical source name.
             row_identifiers: One identifier per row, identifying the row within the
                 source.
+            data_tags: The tag columns that are also data columns (data-tags);
+                they get source info like any data column.
 
         Returns:
             The stream over the enriched table.
@@ -490,7 +612,9 @@ class SourceStreamBuilder:
             for identifier in row_identifiers
         ]
         table = arrow_utils.add_source_info(
-            table, source_info, exclude_columns=tag_columns
+            table,
+            source_info,
+            exclude_columns=[c for c in tag_columns if c not in data_tags],
         )
         table = arrow_utils.add_system_tag_columns(
             table,
@@ -503,4 +627,5 @@ class SourceStreamBuilder:
             table=table,
             tag_columns=tag_columns,
             system_tag_columns=system_tag_columns,
+            data_tags=data_tags,
         )

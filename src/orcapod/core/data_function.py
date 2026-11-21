@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import inspect
+import io
 import logging
 import re
 import sys
+import tokenize
+import types
 import uuid
 from abc import abstractmethod
 from collections.abc import Callable, Iterable, Sequence
@@ -16,12 +19,19 @@ from orcapod.config import OrcapodConfig
 from orcapod.contexts import DataContext
 from orcapod.contexts.stored import require_same_data_context
 from orcapod.core.base import TraceableBase
+from orcapod.core.data_function_types import DataFunctionTypeDeclaration, StoredColumn
 from orcapod.core.datagrams import Datagram, Data
-from orcapod.hashing.hash_utils import (
-    get_function_components,
+from orcapod.hashing.semantic_hashing.builtin_handlers import (
+    DEFAULT_VALUE_REFUSALS,
+    default_value_refused,
+    hash_default_value,
 )
 from orcapod.core.result_cache import ResultCache
-from orcapod.errors import OutputTypeError
+from orcapod.errors import (
+    NoOutputsDeclaredError,
+    OutputTypeError,
+    UnstorableDatetimeError,
+)
 from orcapod.protocols.core_protocols import DataFunctionProtocol, DataProtocol
 from orcapod.protocols.core_protocols.executor import (
     DataFunctionExecutorProtocol,
@@ -32,7 +42,7 @@ from orcapod.semantic_types.output_conformance import (
     check_conformance,
     normalize_output_numbers,
 )
-from orcapod.types import DataValue, Schema, SchemaLike
+from orcapod.types import ContentHash, DataValue, Schema, SchemaLike
 from orcapod.utils import schema_utils
 from orcapod.utils.canonical_type_names import stabilize_type_names
 from orcapod.utils.git_utils import get_git_info_for_python_object
@@ -80,7 +90,8 @@ def parse_function_outputs(
     Map raw function return values to a keyed output dict.
 
     Rules:
-        - ``output_keys = []``: return value is ignored; empty dict returned.
+        - ``output_keys = []``: empty dict returned. ``PythonDataFunction`` refuses a
+          returned value other than ``None`` before this is called (ITL-1257).
         - ``output_keys = ["result"]``: any value (including iterables) is stored as-is
           under the single key.
         - ``output_keys = ["a", "b", ...]``: ``values`` must be iterable and its length
@@ -182,20 +193,40 @@ class DataFunctionBase(TraceableBase, Generic[E]):
     def output_data_schema_hash(self) -> str:
         """Return the hash of the output data schema as a bare hex digest.
 
-        The digest is part of the function ``uri`` and so of table paths and source-info
-        tokens: a hash inside a name carries no label. It is computed lazily on first
-        access and cached for subsequent calls.
+        The schema is hashed as the Arrow schema the data context's type converter
+        gives the declared output types (the Arrow types the function's results are
+        stored with), by ``arrow_hasher.hash_schema`` (ITL-640); that labelled hash is
+        hashed by the semantic hasher, as every hash fed into another. The digest is
+        part of the function ``uri`` and so of table paths and source-info tokens: a
+        hash inside a name carries no label. It is computed lazily on first access and cached for
+        subsequent calls.
 
         Returns:
             The hex digest of the output data schema hash, without a label.
         """
         if self._output_data_schema_hash is None:
-            self._output_data_schema_hash = (
-                self.data_context.semantic_hasher.hash_object(
-                    self.output_data_schema
-                ).to_hex()
+            context = self.data_context
+            arrow_schema = schema_utils.declared_arrow_schema(
+                self.output_data_schema, context.type_converter
             )
+            # The labelled schema hash is fed into the semantic hasher as a one-schema
+            # tuple (a hash fed into a hash carries its label; a source's system-tag
+            # names hash the tag and data pair the same way), and the name holds the
+            # bare digest.
+            schema_hash = context.arrow_hasher.hash_schema(arrow_schema)
+            self._output_data_schema_hash = context.semantic_hasher.hash_object(
+                (schema_hash,)
+            ).to_hex()
         return self._output_data_schema_hash
+
+    @property
+    def declaration(self) -> DataFunctionTypeDeclaration:
+        """The declaration of this function's data function type (ITL-1259).
+
+        Looked up by ``data_function_type_id``: the type and its major. It gives the
+        revision of the result table and the columns the type stores.
+        """
+        return declaration_for(self.data_function_type_id)
 
     @property
     def uri(self) -> tuple[str, ...]:
@@ -393,11 +424,326 @@ class DataFunctionBase(TraceableBase, Generic[E]):
         ...
 
 
+FUNCTION_SIGNATURE_HASH_LABEL = "function_signature_v1"
+"""Label of the stored function signature hash (``function_signature_hash``)."""
+
+FUNCTION_CONTENT_HASH_LABEL = "function_content_v1"
+"""Label of the stored function content hash (``function_content_hash``)."""
+
+
+def function_signature_hash(
+    function: Callable[..., Any],
+    input_schema: Schema,
+    output_schema: Schema,
+    hasher: Any,
+) -> ContentHash:
+    """The hash of a function's declared interface, as a data function runs it.
+
+    One hash over two named components, built from the effective values (ITL-1256):
+
+    ``{"inputs": {<name>: {"type": <type hash>, "default": <value hash>}},
+    "outputs": [{"key": <output key>, "type": <type hash>}, ...]}``
+
+    Inputs are keyed by name and in no order (a pod binds its inputs by name); a
+    parameter without a default has no ``"default"`` entry. Outputs are in declared
+    order: the mapping of the returned positions to the output keys. Not in it: the
+    function's name and module, the parameters' kind and order, the version, the body.
+
+    Args:
+        function: The function, for its parameters' defaults.
+        input_schema: The effective input types (``input_schema=``, else annotations).
+        output_schema: The effective output types, keys in declared order.
+        hasher: The semantic hasher.
+
+    Returns:
+        The hash, labelled ``FUNCTION_SIGNATURE_HASH_LABEL``.
+
+    Raises:
+        TypeError: If the hasher refuses a parameter's default (any of
+            ``DEFAULT_VALUE_REFUSALS``: a ``TypeError`` or a ``ValueError`` such as
+            ``UnsupportedValueError``); the message names the parameter and the
+            function, and the hasher's error is its cause.
+    """
+    parameters = inspect.signature(function).parameters
+    inputs: dict[str, dict[str, ContentHash]] = {}
+    for name, python_type in input_schema.items():
+        entry = {"type": hasher.hash_object(python_type)}
+        parameter = parameters.get(name)
+        if parameter is not None and parameter.default is not inspect.Parameter.empty:
+            try:
+                entry["default"] = hash_default_value(parameter.default, hasher)
+            except DEFAULT_VALUE_REFUSALS as exc:
+                raise default_value_refused(name, function, exc) from exc
+        inputs[name] = entry
+    outputs = [
+        {"key": key, "type": hasher.hash_object(python_type)}
+        for key, python_type in output_schema.items()
+    ]
+    digest = hasher.hash_object({"inputs": inputs, "outputs": outputs}).digest
+    return ContentHash(FUNCTION_SIGNATURE_HASH_LABEL, digest)
+
+
+def function_source(function: Callable[..., Any]) -> str | None:
+    """A function's source text from its ``def`` line on, as written.
+
+    Docstring, comments and whitespace are kept; decorator lines are not. For a lambda
+    the enclosing source line (or lines) count as its source, as ``inspect`` gives them.
+
+    The ``def`` line is found by tokenizing the text as written (``_def_line_index``),
+    never by dedenting or parsing it, so what the body holds cannot move the cut.
+
+    Args:
+        function: The function.
+
+    Returns:
+        The text, or ``None`` when the source cannot be read (a function defined in a
+        plain REPL, with ``python -c`` or through ``exec``) or its ``def`` line cannot
+        be found: never a text that holds a decorator line.
+    """
+    try:
+        source = inspect.getsource(function)
+    except (OSError, TypeError):
+        return None
+    if _is_lambda(function):
+        return source
+    lines = io.StringIO(source).readlines()
+    index = _def_line_index(lines)
+    if index is None:
+        return None
+    return "".join(lines[index:])
+
+
+def _is_lambda(function: Callable[..., Any]) -> bool:
+    """Whether the function ``inspect.getsource`` reads is a lambda."""
+    code: object = getattr(inspect.unwrap(function), "__code__", None)
+    return isinstance(code, types.CodeType) and code.co_name == "<lambda>"
+
+
+_LINE_LAYOUT_TOKENS = frozenset(
+    {tokenize.NL, tokenize.COMMENT, tokenize.INDENT, tokenize.DEDENT}
+)
+_OPENING_BRACKETS = frozenset("([{")
+_CLOSING_BRACKETS = frozenset(")]}")
+
+
+def _def_line_index(lines: list[str]) -> int | None:
+    """The index in ``lines`` of the line where the function's ``def`` statement starts.
+
+    ``lines`` is the source of one function as ``inspect.getsource`` gives it: decorator
+    statements, then the ``def`` (or ``async def``) statement. The ``def`` statement is
+    the first logical line that is not a decorator, found by tokenizing the text as
+    written: a string, comment or bracket that spans lines stays inside its decorator.
+    Tokens are read lazily, up to the ``def`` line only.
+
+    Returns:
+        The index, or ``None`` when the first logical line that is not a decorator is no
+        ``def`` statement or the text cannot be tokenized.
+    """
+    remaining = iter(lines)
+    depth = 0
+    at_logical_line_start = True
+    async_row: int | None = None
+    try:
+        for token in tokenize.generate_tokens(lambda: next(remaining, "")):
+            if token.type in _LINE_LAYOUT_TOKENS:
+                continue
+            if token.type == tokenize.NEWLINE:
+                at_logical_line_start = True
+                continue
+            if async_row is not None:
+                return async_row - 1 if token.string == "def" else None
+            if at_logical_line_start and depth == 0:
+                at_logical_line_start = False
+                if token.string == "def":
+                    return token.start[0] - 1
+                if token.string == "async":
+                    async_row = token.start[0]
+                    continue
+                if token.string != "@":
+                    return None
+            if token.type == tokenize.OP:
+                if token.string in _OPENING_BRACKETS:
+                    depth += 1
+                elif token.string in _CLOSING_BRACKETS:
+                    depth -= 1
+    except (tokenize.TokenError, SyntaxError):
+        return None
+    return None
+
+
+def function_content_hash(
+    function: Callable[..., Any], hasher: Any
+) -> ContentHash | None:
+    """The hash of a function as written: ``{"source": <function_source text>}``.
+
+    Args:
+        function: The function.
+        hasher: The semantic hasher.
+
+    Returns:
+        The hash, labelled ``FUNCTION_CONTENT_HASH_LABEL``, or ``None`` when
+        ``function_source`` gives no text (the source cannot be read, or the source of a
+        function other than a lambda does not start at a ``def`` statement): the record
+        then holds no content hash rather than one that would claim a match it cannot
+        support.
+    """
+    source = function_source(function)
+    if source is None:
+        return None
+    digest = hasher.hash_object({"source": source}).digest
+    return ContentHash(FUNCTION_CONTENT_HASH_LABEL, digest)
+
+
+_TEXT = "large_string"
+_BINARY = "large_binary"
+_TEXT_MAP = "large_list<item: struct<key: large_string, value: large_string>>"
+
+
+PYTHON_FUNCTION = DataFunctionTypeDeclaration(
+    type_name="python.function",
+    major=1,
+    revision=1,
+    identity=(
+        "the function's name: its __name__, or the function_name given",
+        "the hash of the output schema: each output key with its type, in no order",
+        "v<major> of the function's own version (the part before the first dot)",
+        "the type and its major: python.function.v1",
+    ),
+    run_rules=(
+        "inputs are bound to the function's parameters by name, as keyword arguments",
+        "a parameter with a default may be left out of the inputs",
+        "the returned value is mapped to the output keys by position: one key takes "
+        + "the whole value, several keys take the items of a returned sequence",
+        "a function with no output keys (-> None or no return annotation) has no "
+        + "outputs; a returned value other than None is refused",
+        "a returned value must conform to its declared output type",
+        "variadic (*args, **kwargs) and positional-only parameters are refused",
+    ),
+    variation=(
+        StoredColumn(
+            "function_name",
+            str,
+            _TEXT,
+            True,
+            "the function's name, as in the uri",
+        ),
+        StoredColumn(
+            "function_version",
+            str,
+            _TEXT,
+            True,
+            "the full version string the function was declared with (v3.7)",
+        ),
+        StoredColumn(
+            "function_module",
+            str | None,
+            _TEXT,
+            True,
+            "the function's module (__module__)",
+        ),
+        StoredColumn(
+            "function_signature_hash",
+            bytes,
+            _BINARY,
+            True,
+            "the hash of the function's declared interface",
+            hash_label=FUNCTION_SIGNATURE_HASH_LABEL,
+            covers='{"inputs": {<name>: {"type": <type hash>, "default": <value hash, '
+            + 'only when the parameter has one>}}, "outputs": [{"key": <output key>, '
+            + '"type": <type hash>}]}: effective types (input_schema= / output_schema=, '
+            + "else the annotations); inputs keyed by name in no order, outputs in "
+            + "declared order; not the name, module, parameter kind or order, version "
+            + "or body",
+        ),
+        StoredColumn(
+            "function_content_hash",
+            bytes | None,
+            _BINARY,
+            True,
+            "the hash of the function as written (a lambda: its enclosing lines); absent "
+            + "when its source cannot be read (a plain REPL, python -c, exec) or, for a "
+            + "function other than a lambda, does not start at a def statement",
+            hash_label=FUNCTION_CONTENT_HASH_LABEL,
+            covers='{"source": <the source text from the def line on, as written: '
+            + "docstring, comments and whitespace included, decorator lines excluded; "
+            + "for a lambda the enclosing line>}",
+        ),
+        StoredColumn(
+            "git_hash",
+            str,
+            _TEXT,
+            True,
+            "the git commit of the function's file or working directory, with "
+            + "-dirty, -untracked and -<source> suffixes; unknown outside git",
+        ),
+    ),
+    execution=(
+        StoredColumn(
+            "executor_type",
+            str,
+            _TEXT,
+            True,
+            "the executor that ran the function (local, ray, none)",
+        ),
+        StoredColumn(
+            "executor_info",
+            dict[str, str],
+            _TEXT_MAP,
+            True,
+            "the executor's own settings, as text",
+        ),
+        StoredColumn(
+            "python_version",
+            str,
+            _TEXT,
+            True,
+            "the Python version that ran the function (3.12.3)",
+        ),
+        StoredColumn(
+            "extra_info",
+            dict[str, str],
+            _TEXT_MAP,
+            True,
+            "further facts about the run, as text; empty today",
+        ),
+    ),
+)
+"""The Python function type: ``python.function.v1``, record ``rev1``."""
+
+
+DECLARATIONS: dict[str, DataFunctionTypeDeclaration] = {
+    declaration.type_id: declaration for declaration in (PYTHON_FUNCTION,)
+}
+"""Every data function type this version of Orcapod knows, by type id."""
+
+
+def declaration_for(type_id: str) -> DataFunctionTypeDeclaration:
+    """The declaration of the data function type ``type_id``.
+
+    Args:
+        type_id: A type and its major, as the last part of a function's uri
+            (``python.function.v1``).
+
+    Returns:
+        The declaration this version of Orcapod has for that type.
+
+    Raises:
+        ValueError: If no data function type has that id.
+    """
+    try:
+        return DECLARATIONS[type_id]
+    except KeyError:
+        raise ValueError(
+            f"Unknown data function type {type_id!r}; this version of Orcapod knows "
+            + ", ".join(repr(known) for known in sorted(DECLARATIONS))
+        ) from None
+
+
 class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
     @property
     def data_function_type_id(self) -> str:
-        """Unique function type identifier."""
-        return "python.function.v0"
+        """The type and its major, from the type's declaration (``python.function.v1``)."""
+        return PYTHON_FUNCTION.type_id
 
     def __init__(
         self,
@@ -439,11 +785,27 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
                 f"parameters (*args / **kwargs). "
                 f"Offending parameters: {_variadic!r}."
             )
+        # A pod passes its inputs by name, so a positional-only parameter could never
+        # be given (ITL-1258).
+        _positional_only = [
+            name
+            for name, param in _sig.parameters.items()
+            if param.kind is inspect.Parameter.POSITIONAL_ONLY
+        ]
+        if _positional_only:
+            raise ValueError(
+                f"PythonDataFunction does not support functions with positional-only "
+                f"parameters: a function pod passes its inputs by name. "
+                f"Offending parameters: {_positional_only!r}; remove the '/' from the "
+                f"signature."
+            )
 
         if output_keys is None:
             output_keys = []
         if isinstance(output_keys, str):
             output_keys = [output_keys]
+        # A copy taken once: a later change to the caller's list changes nothing.
+        output_keys = tuple(output_keys)
         self._output_keys = output_keys
         if function_name is None:
             if hasattr(self._function, "__name__"):
@@ -492,16 +854,16 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
         self._git_hash = git_hash
 
         semantic_hasher = self.data_context.semantic_hasher
-        # The signature hash is the hash of the function used as a value: one
-        # structured description of the signature (module, name, each parameter's
-        # name, kind, annotation and default, return annotation), with every default
-        # hashed by the semantic hasher (ITL-953).
-        self._function_signature_hash = semantic_hasher.hash_object(
-            function
+        # The record of PYTHON_FUNCTION rev1 (ITL-1256): the declared interface and the
+        # function as written, each with its own label.
+        self._function_module: str | None = getattr(function, "__module__", None)
+        self._function_signature_hash = function_signature_hash(
+            function, self._input_schema, self._output_schema, semantic_hasher
         ).to_prefixed_digest()
-        self._function_content_hash = semantic_hasher.hash_object(
-            get_function_components(self._function)
-        ).to_prefixed_digest()
+        content_hash = function_content_hash(function, semantic_hasher)
+        self._function_content_hash: bytes | None = (
+            None if content_hash is None else content_hash.to_prefixed_digest()
+        )
 
     @property
     def canonical_function_name(self) -> str:
@@ -517,22 +879,18 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
         return {
             "function_name": self._function_name,
             "function_version": self._version,
+            "function_module": self._function_module,
             "function_signature_hash": self._function_signature_hash,
             "function_content_hash": self._function_content_hash,
             "git_hash": self._git_hash,
         }
 
     def get_function_variation_data_schema(self) -> Schema:
-        """Schema for the data returned by ``get_function_variation_data``."""
-        return Schema(
-            {
-                "function_name": str,
-                "function_version": str,
-                "function_signature_hash": bytes,
-                "function_content_hash": bytes,
-                "git_hash": str,
-            }
-        )
+        """Schema for the data returned by ``get_function_variation_data``.
+
+        Built from the type's declaration (``PYTHON_FUNCTION.variation``).
+        """
+        return Schema({c.name: c.python_type for c in PYTHON_FUNCTION.variation})
 
     def get_execution_data(self) -> dict[str, Any]:
         """Raw data defining execution context."""
@@ -566,15 +924,11 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
         }
 
     def get_execution_data_schema(self) -> Schema:
-        """Schema for the data returned by ``get_execution_data``."""
-        return Schema(
-            {
-                "executor_type": str,
-                "executor_info": dict[str, str],
-                "python_version": str,
-                "extra_info": dict[str, str],
-            }
-        )
+        """Schema for the data returned by ``get_execution_data``.
+
+        Built from the type's declaration (``PYTHON_FUNCTION.execution``).
+        """
+        return Schema({c.name: c.python_type for c in PYTHON_FUNCTION.execution})
 
     @property
     def input_data_schema(self) -> Schema:
@@ -617,9 +971,15 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
             A Data containing the parsed outputs with source info.
 
         Raises:
+            NoOutputsDeclaredError: If the function declares no outputs and returned a
+                value other than ``None``.
             OutputTypeError: If a returned value does not conform to its declared type,
                 or cannot be converted to it.
         """
+        if not self._output_keys and values is not None:
+            # No output keys declare an empty return (ITL-1257): a returned value
+            # contradicts the declaration and is refused, never dropped.
+            raise NoOutputsDeclaredError(self.canonical_function_name, values)
         output_data = parse_function_outputs(self._output_keys, values)
         output_schema = self.output_data_schema
         for key, value in output_data.items():
@@ -701,7 +1061,8 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
 
         Raises:
             OutputTypeError: If an output cannot be converted, for example an integer
-                out of range for its declared width; it names that output.
+                out of range for its declared width, a ``datetime`` without a time zone
+                or one with a part below one microsecond; it names that output.
         """
         converter = self.data_context.type_converter
         try:
@@ -715,6 +1076,18 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
                     _ = converter.python_dicts_to_arrow_table(
                         [{key: value}], python_schema={key: output_schema[key]}
                     )
+                except UnstorableDatetimeError as failure:
+                    # The datetime rule says what is wrong and how to convert,
+                    # without the value (ITL-1268); its own message names the value,
+                    # so it is not chained.
+                    raise OutputTypeError(
+                        self.canonical_function_name,
+                        key,
+                        output_schema[key],
+                        value,
+                        failure.reason,
+                        failure.hint,
+                    ) from None
                 except Exception:
                     raise OutputTypeError(
                         self.canonical_function_name,
@@ -981,6 +1354,11 @@ class DataFunctionWrapper(DataFunctionBase[E]):
         return self._data_function.data_function_type_id
 
     @property
+    def declaration(self) -> DataFunctionTypeDeclaration:
+        """The wrapped function's declaration, as its type id is the wrapped one's."""
+        return self._data_function.declaration
+
+    @property
     def canonical_function_name(self) -> str:
         return self._data_function.canonical_function_name
 
@@ -1041,7 +1419,7 @@ class DataFunctionWrapper(DataFunctionBase[E]):
             ValueError: If the ``data_function_type_id`` is not recognized.
         """
         type_id = config.get("data_function_type_id")
-        if type_id == "python.function.v0":
+        if type_id == PYTHON_FUNCTION.type_id:
             return PythonDataFunction
         raise ValueError(f"Unrecognized data_function_type_id: {type_id!r}")
 
@@ -1110,6 +1488,7 @@ class CachedDataFunction(DataFunctionWrapper):
         self._cache = ResultCache(
             result_database=result_database,
             record_path=record_path_prefix + self.uri,
+            revision=self.declaration.revision_component,
             auto_flush=True,
             # The first uri component is the function's name; no hash before it.
             name_path=record_path_prefix + self.uri[:1],

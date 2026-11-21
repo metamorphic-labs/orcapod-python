@@ -12,7 +12,17 @@ from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.contexts import DataContext
 from orcapod.core.base import TraceableBase
+from orcapod.core.data_tags import (
+    not_supported_yet,
+    data_tag_names,
+    stream_data_tags,
+)
 from orcapod.core.function_pod import FunctionPodStream
+from orcapod.core.operators.provisional import (
+    provisional_operator_name,
+    warn_provisional_operator,
+)
+from orcapod.utils.provisional import note_provisional_use, provisional_class_name
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
@@ -58,6 +68,11 @@ class StaticOutputOperatorPod(TraceableBase):
     tracked by the tracker manager.
     """
 
+    # The Linear issue that will make this operator handle data-tags, or
+    # ``None`` when it handles them (ITL-1023). An operator that declares nothing
+    # does not handle them yet: it raises instead of giving a wrong answer.
+    DATA_TAGS_ISSUE: ClassVar[str | None] = "ITL-1022"
+
     OUTPUT_SCHEMA_IS_INPUT_SCHEMA: ClassVar[bool] = False
     """Whether the output has exactly its single input's columns and Arrow types.
 
@@ -66,11 +81,77 @@ class StaticOutputOperatorPod(TraceableBase):
     predicate, so no user code runs to learn the column types (ITL-912).
     """
 
+    PROVISIONAL: ClassVar[bool] = False
+    """Whether the operator is provisional: its identity is not frozen (ITL-1266).
+
+    Set to ``True`` exactly by the operators listed in ``PROVISIONAL_OPERATORS``
+    (``core/operators/provisional.py``); constructing one issues
+    ``ProvisionalHashWarning`` once per operator per process.
+    """
+
     def __init__(
         self, tracker_manager: TrackerManagerProtocol | None = None, **kwargs
     ) -> None:
+        provisional = provisional_operator_name(type(self))
+        if provisional is not None:
+            warn_provisional_operator(provisional)
         self.tracker_manager = tracker_manager or DEFAULT_TRACKER_MANAGER
         super().__init__(**kwargs)
+
+    def _note_provisional_identity_use(self) -> None:
+        """Note a use of this operator when it is provisional; never warn.
+
+        Called where the operator's identity is read (``content_hash``,
+        ``pipeline_hash``, ``identity_structure`` of a provisional operator) and where it
+        is applied to streams (``process``, ``static_process``, a ``DynamicPodStream``'s
+        hashes, identity structures, reads and ``head``), so an operator
+        built before a recording (a module-level ``Batch(2)``) is still seen by it
+        (ITL-1279). The same note as ``RootSource._note_provisional_identity_use`` for a
+        provisional source (ITL-1314). The warning stays at construction. The note
+        enters no hash, config or path.
+        """
+        provisional = provisional_class_name(type(self))
+        if provisional is not None:
+            note_provisional_use(provisional)
+
+    def content_hash(self, hasher=None) -> ContentHash:
+        """The operator's content hash; notes the use of a provisional operator.
+
+        Args:
+            hasher: Optional semantic hasher, as for ``ContentIdentifiableBase``.
+
+        Returns:
+            The content hash, unchanged by the note.
+        """
+        self._note_provisional_identity_use()
+        return super().content_hash(hasher)
+
+    def pipeline_hash(self, hasher=None) -> ContentHash:
+        """The operator's pipeline hash; notes the use of a provisional operator.
+
+        Args:
+            hasher: Optional semantic hasher, as for ``PipelineElementBase``.
+
+        Returns:
+            The pipeline hash, unchanged by the note.
+        """
+        self._note_provisional_identity_use()
+        return super().pipeline_hash(hasher)
+
+    def check_data_tag_support(self, *streams: StreamProtocol) -> None:
+        """Raise if a data-tag reaches an operator that does not handle it yet.
+
+        Args:
+            *streams: The input streams.
+
+        Raises:
+            NotImplementedError: If ``DATA_TAGS_ISSUE`` is set and an input
+                has a data-tag.
+        """
+        if self.DATA_TAGS_ISSUE is None:
+            return
+        if any(stream_data_tags(stream) for stream in streams):
+            raise not_supported_yet(type(self).__name__, self.DATA_TAGS_ISSUE)
 
     def pipeline_identity_structure(self) -> Any:
         """Return the pipeline identity, which defaults to content identity for operators."""
@@ -167,8 +248,10 @@ class StaticOutputOperatorPod(TraceableBase):
             A ``DynamicPodStream`` wrapping the computation.
         """
         logger.debug("Invoking kernel %s on streams: %s", self, streams)
+        self._note_provisional_identity_use()
 
         # perform input stream validation
+        self.check_data_tag_support(*streams)
         self.validate_inputs(*streams)
         self.tracker_manager.record_operator_pod_invocation(
             self, upstreams=streams, label=label
@@ -220,7 +303,7 @@ class StaticOutputOperatorPod(TraceableBase):
     @staticmethod
     def _rows_to_table(
         rows: Sequence[tuple[TagProtocol, DataProtocol]],
-    ) -> tuple[pa.Table, tuple[str, ...]]:
+    ) -> tuple[pa.Table, tuple[str, ...], tuple[str, ...]]:
         """Concatenate (Tag, Data) pairs into one table, keeping per-row source info.
 
         Each row contributes its own system-tag and ``_source_*`` columns, so
@@ -234,8 +317,11 @@ class StaticOutputOperatorPod(TraceableBase):
         Args:
             rows: Non-empty sequence of (Tag, Data) pairs.
 
+        A data-tag (a name in both the tag and the data of a row) is one
+        column: it is taken from the tags, and its source info from the data.
+
         Returns:
-            The concatenated table and the user tag column names.
+            The concatenated table, the user tag column names and the data-tags.
 
         Raises:
             ValueError: If ``rows`` is empty.
@@ -245,8 +331,12 @@ class StaticOutputOperatorPod(TraceableBase):
         if not rows:
             raise ValueError("Cannot materialize an empty list of rows into a stream")
 
+        first_tag, first_data = rows[0]
+        data_tags = data_tag_names(first_tag.keys(), first_data.keys())
         tag_tables = [tag.as_table(columns={"system_tags": True}) for tag, _ in rows]
         data_tables = [data.as_table(columns={"source": True}) for _, data in rows]
+        if data_tags:
+            data_tables = [t.drop_columns(list(data_tags)) for t in data_tables]
 
         # Rows may list the same columns in a different order (cached vs
         # freshly computed), so match columns by name.
@@ -258,7 +348,7 @@ class StaticOutputOperatorPod(TraceableBase):
         )
 
         full_table = arrow_utils.hstack_tables(combined_tags, combined_data)
-        return full_table, tuple(rows[0][0].keys())
+        return full_table, tuple(first_tag.keys()), data_tags
 
     @staticmethod
     def _in_row_order(table: pa.Table, tag_keys: Sequence[str]) -> pa.Table:
@@ -328,7 +418,10 @@ class StaticOutputOperatorPod(TraceableBase):
             result.as_table(columns=ZERO_ROW_INPUT_COLUMNS), tag_keys
         )
         return ArrowTableStream(
-            table, tag_columns=tag_keys, data_context=result.data_context_key
+            table,
+            tag_columns=tag_keys,
+            data_tags=stream_data_tags(result),
+            data_context=result.data_context_key,
         )
 
     @staticmethod
@@ -405,6 +498,7 @@ class StaticOutputOperatorPod(TraceableBase):
         return StaticOutputOperatorPod._as_upstream_stream(
             StaticOutputOperatorPod._as_row_built_table(table, tag_keys),
             tag_keys,
+            stream_data_tags(upstream),
             upstream,
         )
 
@@ -440,6 +534,7 @@ class StaticOutputOperatorPod(TraceableBase):
             return ArrowTableStream(
                 normalized.empty_table(),
                 tag_columns=only.keys()[0],
+                data_tags=stream_data_tags(only),
                 data_context=only.data_context_key,
             )
         return self.static_process(*inputs)
@@ -466,10 +561,10 @@ class StaticOutputOperatorPod(TraceableBase):
         Raises:
             ValueError: If ``rows`` is empty.
         """
-        table, tag_keys = StaticOutputOperatorPod._rows_to_table(rows)
+        table, tag_keys, data_tags = StaticOutputOperatorPod._rows_to_table(rows)
         # No ``source_info`` argument: the table's own ``_source_*`` columns
         # pass through, one value per row.
-        return ArrowTableStream(table, tag_columns=tag_keys)
+        return ArrowTableStream(table, tag_columns=tag_keys, data_tags=data_tags)
 
     @staticmethod
     def _materialize_upstream(
@@ -505,11 +600,11 @@ class StaticOutputOperatorPod(TraceableBase):
         from orcapod.utils import arrow_utils
 
         if rows:
-            table, tag_keys = StaticOutputOperatorPod._rows_to_table(rows)
+            table, tag_keys, data_tags = StaticOutputOperatorPod._rows_to_table(rows)
             if zero_rows:
                 table = table.slice(0, 0)
             return StaticOutputOperatorPod._as_upstream_stream(
-                table, tag_keys, upstream
+                table, tag_keys, data_tags, upstream
             )
         typed = StaticOutputOperatorPod._zero_row_input(upstream)
         if typed is not None:
@@ -523,7 +618,7 @@ class StaticOutputOperatorPod(TraceableBase):
             StaticOutputOperatorPod._upstream_context(upstream).type_converter,
         )
         return StaticOutputOperatorPod._as_upstream_stream(
-            table, upstream.keys()[0], upstream
+            table, upstream.keys()[0], stream_data_tags(upstream), upstream
         )
 
     @staticmethod
@@ -537,7 +632,10 @@ class StaticOutputOperatorPod(TraceableBase):
 
     @staticmethod
     def _as_upstream_stream(
-        table: pa.Table, tag_keys: Sequence[str], upstream: StreamProtocol
+        table: pa.Table,
+        tag_keys: Sequence[str],
+        data_tags: Sequence[str],
+        upstream: StreamProtocol,
     ) -> StreamProtocol:
         """Wrap a table of ``upstream``'s rows (or none) as ``upstream``'s stream.
 
@@ -545,6 +643,7 @@ class StaticOutputOperatorPod(TraceableBase):
             table: User tags, system tags, data and source info, without the
                 context column.
             tag_keys: The user tag columns.
+            data_tags: The data-tags among ``tag_keys`` (ITL-1023).
             upstream: The node or stream the table stands for.
 
         Returns:
@@ -571,6 +670,7 @@ class StaticOutputOperatorPod(TraceableBase):
                 table,
                 tag_columns=tag_keys,
                 pipeline_hash=upstream.pipeline_hash(),
+                data_tags=data_tags,
                 upstreams=upstream.upstreams,
                 data_context=context,
             )
@@ -579,6 +679,7 @@ class StaticOutputOperatorPod(TraceableBase):
         return ArrowTableStream(
             table,
             tag_columns=tag_keys,
+            data_tags=data_tags,
             producer=upstream.producer,
             upstreams=upstream.upstreams,
             data_context=context,
@@ -595,7 +696,9 @@ class StaticOutputOperatorPod(TraceableBase):
         that names system-tag columns after its input's pipeline hash
         (``MergeJoin``, ``Batch``, ``GroupBy``) names them as the sync path
         does (ITL-906). Every row keeps its own source info (see
-        ``_rows_to_table``).
+        ``_rows_to_table``) and its own data context, taken from its datagrams; the
+        stream is in the first row's data context (without them, the stream would
+        fill in the default context's key).
 
         Args:
             rows: Non-empty sequence of (Tag, Data) pairs.
@@ -607,8 +710,20 @@ class StaticOutputOperatorPod(TraceableBase):
         Raises:
             ValueError: If ``rows`` is empty.
         """
-        table, tag_keys = StaticOutputOperatorPod._rows_to_table(rows)
-        return _RowsOfStream(table, tag_columns=tag_keys, pipeline_hash=pipeline_hash)
+        from orcapod.system_constants import constants
+
+        table, tag_keys, data_tags = StaticOutputOperatorPod._rows_to_table(rows)
+        table = table.append_column(
+            pa.field(constants.CONTEXT_KEY, pa.large_string(), nullable=False),
+            pa.array([data.data_context_key for _, data in rows], pa.large_string()),
+        )
+        return _RowsOfStream(
+            table,
+            tag_columns=tag_keys,
+            pipeline_hash=pipeline_hash,
+            data_tags=data_tags,
+            data_context=contexts.resolve_context(rows[0][1].data_context_key),
+        )
 
     async def async_execute(
         self,
@@ -686,12 +801,14 @@ class _RowsOfStream(ArrowTableStream):
         *,
         tag_columns: Collection[str],
         pipeline_hash: ContentHash,
+        data_tags: Collection[str] = (),
         upstreams: tuple[StreamProtocol, ...] = (),
         data_context: DataContext | None = None,
     ) -> None:
         super().__init__(
             table,
             tag_columns=tag_columns,
+            data_tags=data_tags,
             upstreams=upstreams,
             data_context=data_context,
         )
@@ -739,13 +856,42 @@ class DynamicPodStream(StreamBase):
         self._kept_states: tuple[tuple[str, object], ...] | None = None
         self._reset_generation: int = 0
 
+    def content_hash(self, hasher=None) -> ContentHash:
+        """The stream's content hash; notes the use of a provisional operator.
+
+        The hash is cached, so the note is made here rather than where the operator's
+        hash is read (ITL-1279).
+
+        Args:
+            hasher: Optional semantic hasher, as for ``ContentIdentifiableBase``.
+
+        Returns:
+            The content hash, unchanged by the note.
+        """
+        self._pod._note_provisional_identity_use()
+        return super().content_hash(hasher)
+
+    def pipeline_hash(self, hasher=None) -> ContentHash:
+        """The stream's pipeline hash; notes the use of a provisional operator.
+
+        Args:
+            hasher: Optional semantic hasher, as for ``PipelineElementBase``.
+
+        Returns:
+            The pipeline hash, unchanged by the note.
+        """
+        self._pod._note_provisional_identity_use()
+        return super().pipeline_hash(hasher)
+
     def identity_structure(self) -> Any:
+        self._pod._note_provisional_identity_use()  # a direct read is a use (ITL-1279)
         structure = (self._pod,)
         if self._upstreams:
             structure += (self._pod.argument_symmetry(self._upstreams),)
         return structure
 
     def pipeline_identity_structure(self) -> Any:
+        self._pod._note_provisional_identity_use()  # a direct read is a use (ITL-1279)
         structure = (self._pod,)
         if self._upstreams:
             structure += (self._pod.argument_symmetry(self._upstreams),)
@@ -784,6 +930,7 @@ class DynamicPodStream(StreamBase):
                 ArrowTableStream(
                     table,
                     tag_columns=upstream.keys()[0],
+                    data_tags=stream_data_tags(upstream),
                     producer=upstream.producer,
                     upstreams=upstream.upstreams,
                     data_context=StaticOutputOperatorPod._upstream_context(upstream),
@@ -873,7 +1020,11 @@ class DynamicPodStream(StreamBase):
 
     def _refresh(self) -> None:
         """Run the operator unless its kept result is current: the one computation
-        path of ``as_table``, ``iter_data`` and so ``run``."""
+        path of ``as_table``, ``iter_data`` and so ``run``.
+
+        Notes the use of a provisional operator on every read, also of a kept result
+        (ITL-1279)."""
+        self._pod._note_provisional_identity_use()
         self._update_cache_status()
 
         # recompute if cache is invalid
@@ -922,6 +1073,8 @@ class DynamicPodStream(StreamBase):
         or after an input changed, there are no rows. See ``StreamBase.head``.
         """
         check_head_size(n)
+        # A preview of a kept result is a read: it notes a provisional use (ITL-1279).
+        self._pod._note_provisional_identity_use()
         config = ColumnConfig.handle_config(columns, all_info=all_info)
         had_result = self._cached_stream is not None
         self._update_cache_status()

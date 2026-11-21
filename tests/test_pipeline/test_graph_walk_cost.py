@@ -432,25 +432,33 @@ class TestPipelineJob:
             _build_job(shape)
         _assert_linear(counter, shape)
 
+    # Saving types every node from its typed zero-row table (a saved job holds each
+    # node's own Arrow types, ITL-640), and a typed table carries the system-tag
+    # columns, whose number doubles at every join that keeps both inputs' columns; so
+    # save and load are walked at SYSTEM_TAG_STAGES, like the other system-tag walks.
+    # The query budget stays linear in the nodes and is still asserted.
+
     def test_save_is_linear(
         self, shape: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """Saving the job asks each node a bounded number of times."""
-        job = _guarded_build_job(shape, monkeypatch)
-        with _count_schema_queries(monkeypatch, _budget(shape)) as counter:
+        stages = SYSTEM_TAG_STAGES
+        job = _guarded_build_job(shape, monkeypatch, stages)
+        with _count_schema_queries(monkeypatch, _budget(shape, stages)) as counter:
             job.save(tmp_path / "job.json")
-        _assert_linear(counter, shape)
+        _assert_linear(counter, shape, stages)
 
     def test_load_is_linear(
         self, shape: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """Loading the saved job asks each node a bounded number of times."""
-        job = _guarded_build_job(shape, monkeypatch)
-        with _count_schema_queries(monkeypatch, _budget(shape)):
+        stages = SYSTEM_TAG_STAGES
+        job = _guarded_build_job(shape, monkeypatch, stages)
+        with _count_schema_queries(monkeypatch, _budget(shape, stages)):
             job.save(tmp_path / "job.json")
-        with _count_schema_queries(monkeypatch, _budget(shape)) as counter:
+        with _count_schema_queries(monkeypatch, _budget(shape, stages)) as counter:
             PipelineJob.load(tmp_path / "job.json")
-        _assert_linear(counter, shape)
+        _assert_linear(counter, shape, stages)
 
     @pytest.mark.parametrize(
         "orchestrator",

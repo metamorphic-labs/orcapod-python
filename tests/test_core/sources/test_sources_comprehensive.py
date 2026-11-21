@@ -12,9 +12,8 @@ Coverage added here:
   stripping from Polars input, source_id parameter
 - DictSource: data_schema parameter, empty-data raises, source_id, content
   hash with explicit schema
-- ListSource: tag_function_hash_mode='signature' and 'content', empty list,
-  tag function inference without expected_tag_keys, TagProtocol.as_dict() protocol,
-  identity_structure stability
+- ListSource: empty list, tag function inference without expected_tag_keys,
+  TagProtocol.as_dict() protocol, identity_structure stability
 - ArrowTableSource: table property, source_id controls provenance tokens,
   negative row index raises, duplicate record_id takes first match,
   system_tag_columns forwarded, integer record_id_column values
@@ -41,7 +40,7 @@ from orcapod.core.sources import (
     SourceRegistry,
 )
 from orcapod.protocols.core_protocols import StreamProtocol
-from orcapod.types import ContentHash, Schema
+from orcapod.types import Schema
 
 
 # ---------------------------------------------------------------------------
@@ -389,63 +388,7 @@ class TestDictSourceAdditional:
 # ---------------------------------------------------------------------------
 
 
-def _tag_fn_for_signature(element, idx):
-    """Top-level tag function so inspect.getsource works."""
-    return {"label": f"item_{idx}"}
-
-
-def _tag_fn_for_content(element, idx):
-    """Top-level tag function for content hash mode."""
-    return {"bucket": idx % 2}
-
-
 class TestListSourceAdditional:
-    def test_tag_function_hash_mode_signature(self):
-        """Two ListSources with the same tag function and 'signature' mode share hash."""
-        src1 = ListSource(
-            name="val",
-            data=[1, 2, 3],
-            tag_function=_tag_fn_for_signature,
-            expected_tag_keys=["label"],
-            tag_function_hash_mode="signature",
-        )
-        src2 = ListSource(
-            name="val",
-            data=[1, 2, 3],
-            tag_function=_tag_fn_for_signature,
-            expected_tag_keys=["label"],
-            tag_function_hash_mode="signature",
-        )
-        assert src1.content_hash() == src2.content_hash()
-
-    def test_tag_function_hash_mode_content(self):
-        """'content' mode hashes the function source code."""
-        src = ListSource(
-            name="val",
-            data=[1, 2, 3],
-            tag_function=_tag_fn_for_content,
-            expected_tag_keys=["bucket"],
-            tag_function_hash_mode="content",
-        )
-        # The identity holds the source text's hash as a ContentHash, so it enters the
-        # source's hash with its label (ITL-1154).
-        identity = src.identity_structure()
-        assert isinstance(identity[3], ContentHash)
-        assert identity[3].method == "semantic_v1"
-
-    def test_tag_function_hash_mode_name(self):
-        """'name' mode uses the qualified name of the function."""
-        src = ListSource(
-            name="val",
-            data=[1, 2, 3],
-            tag_function=_tag_fn_for_signature,
-            expected_tag_keys=["label"],
-            tag_function_hash_mode="name",
-        )
-        tag_function_hash = src._tag_function_hash
-        assert isinstance(tag_function_hash, str)
-        assert _tag_fn_for_signature.__qualname__ in tag_function_hash
-
     def test_empty_list_raises(self):
         """An empty ListSource cannot build a valid stream."""
         with pytest.raises(Exception):
@@ -486,13 +429,13 @@ class TestListSourceAdditional:
         slots = {tag["slot"] for tag, _ in pairs}
         assert slots == {0, 1, 2}
 
-    def test_identity_structure_contains_name_and_elements(self):
+    def test_identity_structure_is_that_of_every_root_source(self):
+        """Class name, Arrow schema identity, source id and key columns (ITL-1272)."""
         src = ListSource(name="item", data=["a", "b"])
         identity = src.identity_structure()
+        assert identity == RootSource.identity_structure(src)
         assert identity[0] == "ListSource"
-        assert identity[1] == "item"
-        assert "a" in identity[2]
-        assert "b" in identity[2]
+        assert identity[2:] == (src.source_id, ())
 
     def test_same_data_same_content_hash(self):
         src1 = ListSource(name="x", data=[1, 2, 3])
@@ -685,33 +628,3 @@ class TestSourceRegistryAdditional:
             self.registry.register(name, src)
         pairs = dict(self.registry.items())
         assert pairs == srcs
-
-
-def _path_tag_fn(element: Path, _idx: int) -> dict[str, Path | str]:
-    return {"label": str(element)}
-
-
-# This module uses postponed annotations, which would leave plain strings here.
-# Install live type objects, as a module without the __future__ import has.
-_path_tag_fn.__annotations__ = {
-    "element": Path,
-    "_idx": int,
-    "return": dict[str, Path | str],
-}
-
-
-class TestListSourceSignatureModePythonVersionIndependence:
-    """ITL-825: the 'signature' tag-function hash must not embed ``pathlib._local``."""
-
-    def test_signature_hash_string_matches_python_312(self):
-        src = ListSource(
-            name="val",
-            data=[1, 2, 3],
-            tag_function=_path_tag_fn,
-            expected_tag_keys=["label"],
-            tag_function_hash_mode="signature",
-        )
-        # The pre-hash string is the subject; no public accessor exposes it.
-        assert src._hash_tag_function() == (  # pyright: ignore[reportPrivateUsage]
-            "(element: pathlib.Path, _idx: int) -> dict[str, pathlib.Path | str]"
-        )

@@ -1,0 +1,248 @@
+/*
+ * The style sheet of the pipeline diagram's notebook view (ITL-1197).
+ *
+ * Embedded inline in every diagram's HTML (``PipelineDiagram.to_html``), with comments
+ * and indentation removed: a notebook output cannot fetch a package file. Every rule
+ * is scoped under ``.op-dag``. Nothing from the user is ever written into this file.
+ * It must never contain the end tag of a style or script element, nor the start of an
+ * HTML comment: the diagram refuses to embed it then (``diagram._asset``).
+ */
+
+.op-dag {
+  position: relative;
+  border: 1px solid rgba(127, 127, 127, .35);
+  border-radius: 6px;
+  padding: 6px 8px;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+/* The title line; its right padding leaves room for the zoom buttons. */
+.op-dag .op-dag-head {
+  font: 600 13px system-ui, sans-serif;
+  margin: 0 0 4px;
+  padding-right: 96px;
+}
+
+/* Wider room when the direction or collapse checkbox sits beside the buttons. */
+.op-dag.op-dag-has-collapse .op-dag-head {
+  padding-right: 190px;
+}
+
+.op-dag.op-dag-has-direction .op-dag-head {
+  padding-right: 180px;
+}
+
+.op-dag.op-dag-has-direction.op-dag-has-collapse .op-dag-head {
+  padding-right: 270px;
+}
+
+/* The separator before the "preview" tag shows only without this style sheet. */
+.op-dag .op-dag-sep {
+  display: none;
+}
+
+.op-dag .op-dag-preview {
+  font-weight: 500;
+  font-size: 11px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  padding: 0 4px;
+  margin-left: 4px;
+  opacity: .7;
+  vertical-align: 1px;
+}
+
+/* The picture: scrolls without the script; panned and zoomed by it once live. */
+.op-dag .op-dag-view {
+  overflow: auto;
+  max-height: 560px;
+}
+
+.op-dag.op-dag-live .op-dag-view {
+  position: relative;
+  overflow: hidden;
+  cursor: grab;
+  height: var(--op-dag-h, auto);
+  touch-action: none;
+}
+
+/*
+ * The cues at the edges of the view beyond which the picture goes on: a grey fade
+ * (grey reads on light and dark themes alike) with an arrow; a click moves the
+ * picture that way. Made by the script and shown only on the edges it marks.
+ */
+.op-dag .op-dag-more {
+  display: none;
+  position: absolute;
+  align-items: center;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  color: inherit;
+  font: 20px/1 system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.op-dag .op-dag-more-left,
+.op-dag .op-dag-more-right {
+  top: 0;
+  bottom: 0;
+  width: 30px;
+  padding: 0 5px;
+}
+
+.op-dag .op-dag-more-top,
+.op-dag .op-dag-more-bottom {
+  left: 0;
+  right: 0;
+  height: 24px;
+  padding: 2px 0;
+  justify-content: center;
+}
+
+.op-dag .op-dag-more-left {
+  left: 0;
+  justify-content: flex-start;
+  background: linear-gradient(to right, rgba(127, 127, 127, .4), rgba(127, 127, 127, 0));
+}
+
+.op-dag .op-dag-more-right {
+  right: 0;
+  justify-content: flex-end;
+  background: linear-gradient(to left, rgba(127, 127, 127, .4), rgba(127, 127, 127, 0));
+}
+
+.op-dag .op-dag-more-top {
+  top: 0;
+  align-items: flex-start;
+  background: linear-gradient(to bottom, rgba(127, 127, 127, .4), rgba(127, 127, 127, 0));
+}
+
+.op-dag .op-dag-more-bottom {
+  bottom: 0;
+  align-items: flex-end;
+  background: linear-gradient(to top, rgba(127, 127, 127, .4), rgba(127, 127, 127, 0));
+}
+
+.op-dag.op-dag-clip-left .op-dag-more-left,
+.op-dag.op-dag-clip-right .op-dag-more-right,
+.op-dag.op-dag-clip-top .op-dag-more-top,
+.op-dag.op-dag-clip-bottom .op-dag-more-bottom {
+  display: flex;
+}
+
+.op-dag .op-dag-node {
+  cursor: pointer;
+}
+
+.op-dag .op-dag-node:focus {
+  outline: none;
+}
+
+.op-dag .op-dag-view:focus {
+  outline: none;
+}
+
+.op-dag .op-dag-view:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: -2px;
+}
+
+/* A focused or selected node: a thicker outline. */
+.op-dag .op-dag-node:focus-visible rect:first-of-type,
+.op-dag .op-dag-node.op-dag-selected rect:first-of-type {
+  stroke-width: 3.4;
+}
+
+/* The edges of the selected node; an edge group starts with its title. */
+.op-dag .op-dag-edges g.op-dag-lit path:first-of-type {
+  stroke-opacity: 1;
+  stroke-width: 2.4;
+}
+
+/* The collapse checkbox and the zoom buttons, top right. */
+.op-dag .op-dag-tools {
+  position: absolute;
+  top: 5px;
+  right: 8px;
+  display: flex;
+  gap: 4px;
+}
+
+.op-dag .op-dag-check {
+  font: 12px system-ui, sans-serif;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  margin-right: 6px;
+  cursor: pointer;
+}
+
+.op-dag .op-dag-check input {
+  margin: 0;
+}
+
+.op-dag .op-dag-tools button {
+  font: 12px system-ui, sans-serif;
+  padding: 1px 8px;
+  border-radius: 4px;
+  border: 1px solid rgba(127, 127, 127, .5);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+/* The details of the selected node, below the picture. */
+.op-dag .op-dag-panel {
+  display: none;
+  font: 12px system-ui, sans-serif;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(127, 127, 127, .35);
+}
+
+.op-dag .op-dag-panel.op-dag-open {
+  display: block;
+}
+
+.op-dag .op-dag-panel dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 12px;
+  margin: 4px 0 0;
+}
+
+/* Undoes the float and width some notebook themes give a dt. */
+.op-dag .op-dag-panel dt {
+  opacity: .7;
+  white-space: nowrap;
+  float: none;
+  width: auto;
+  margin: 0;
+  padding: 0;
+}
+
+.op-dag .op-dag-panel dd {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap: anywhere;
+}
+
+/* The table of nodes: shown where the script does not run, hidden once it does. */
+.op-dag .op-dag-table {
+  font: 12px system-ui, sans-serif;
+  margin-top: 6px;
+}
+
+.op-dag.op-dag-live .op-dag-table {
+  display: none;
+}
+
+.op-dag .op-dag-table td,
+.op-dag .op-dag-table th {
+  text-align: left;
+  vertical-align: top;
+  padding: 1px 8px;
+}

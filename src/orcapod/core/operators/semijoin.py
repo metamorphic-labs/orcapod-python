@@ -3,11 +3,17 @@ import contextlib
 import warnings
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Collection, Sequence
-from typing import TYPE_CHECKING, Any, final
+from typing import TYPE_CHECKING, Any, ClassVar, final
 
 from orcapod.channels import ChannelClosed, ReadableChannel, WritableChannel
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
-from orcapod.core.operators.base import BinaryOperator, require_shared_arrow_type
+from orcapod.core.data_tags import stream_data_tags
+from orcapod.core.operators.arrow_keys import polars_key_frame
+from orcapod.core.operators.base import (
+    BinaryOperator,
+    require_matchable_key,
+    require_shared_arrow_type,
+)
 from orcapod.core.operators.key_nullability import reconcile_key_nullability
 from orcapod.core.operators.match_keys import frozen_scalar
 from orcapod.core.streams import ArrowTableStream
@@ -27,6 +33,10 @@ else:
     pa = LazyModule("pyarrow")
     pc = LazyModule("pyarrow.compute")
     pl = LazyModule("polars")
+
+# The row-number column of the left frame Polars matches; a tag, so a key, never
+# starts with the meta prefix ``__``.
+_LEFT_ROW = "__semi_join_left_row"
 
 
 class SemiJoin(BinaryOperator):
@@ -74,7 +84,9 @@ class SemiJoin(BinaryOperator):
         """Return the shared names that are not match keys, with each side's role.
 
         The decision is by name only: no value or type is read. Meta (``__``)
-        columns are not user columns and never count.
+        columns are not user columns and never count. A match key is never
+        reported, in either role: a data-tag (ITL-1023) is a tag and a data
+        column of one name, one column, so its data role is the key's column.
 
         Args:
             left_tag_keys: The left input's tag column names.
@@ -93,12 +105,13 @@ class SemiJoin(BinaryOperator):
         left_roles = [(name, "tag") for name in left_tag_keys] + [
             (name, "data") for name in left_data_keys
         ]
+        keys = set(left_tag_keys) & set(right_tag_keys)
         return tuple(
             (name, left_role, right_roles[name])
             for name, left_role in left_roles
             if name in right_roles
+            and name not in keys
             and not name.startswith(constants.META_PREFIX)
-            and (left_role, right_roles[name]) != ("tag", "tag")
         )
 
     def _warn_once_per_application(
@@ -174,6 +187,9 @@ class SemiJoin(BinaryOperator):
         )
         return self._match_keys(tuple(left_tag_schema), tuple(right_tag_schema))
 
+    # Data-tags (ITL-1023): handled.
+    DATA_TAGS_ISSUE: ClassVar[str | None] = None
+
     def binary_static_process(
         self, left_stream: StreamProtocol, right_stream: StreamProtocol
     ) -> StreamProtocol:
@@ -194,14 +210,16 @@ class SemiJoin(BinaryOperator):
         right_table = right_stream.as_table().select(list(common_keys))
 
         # A key must have one Arrow type on both sides (up to large layouts);
-        # otherwise Polars would silently unify, e.g., int8 with int16.
+        # otherwise Polars would silently unify, e.g., int8 with int16. And it
+        # must be a type Polars can be given (``arrow_keys``).
         for key in common_keys:
-            _ = require_shared_arrow_type(
+            key_type = require_shared_arrow_type(
                 "SemiJoin",
                 key,
                 arrow_utils.column_arrow_type(left_table.schema, key),
                 arrow_utils.column_arrow_type(right_table.schema, key),
             )
+            require_matchable_key("SemiJoin", key, key_type)
 
         # Only the right side's keys take part. A null key never matches:
         # Polars already applies that to scalar keys but treats a null struct or
@@ -212,27 +230,23 @@ class SemiJoin(BinaryOperator):
             valid = pc.and_(valid, right_keys.column(index).is_valid())
         right_keys = right_keys.filter(valid)
 
-        # Polars, unlike Arrow's hash join, accepts nested (list, struct,
-        # struct-backed logical) columns as keys and as passed-through columns,
-        # and matches a string key against a large_string one.
-        semi_joined_table = (
-            pl.DataFrame(left_table)
-            .join(
-                pl.DataFrame(right_keys),
-                on=list(common_keys),
-                how="semi",
-                maintain_order="left",
-            )
-            .to_arrow()
+        # Polars, unlike Arrow's hash join, accepts nested (list, struct) keys.
+        # It decides which left rows match from the prepared keys and the left
+        # row numbers only (``arrow_keys``, ITL-1284); the kept rows are taken
+        # from the left table, so every value and field is the input's, bit for
+        # bit, in the left input's order.
+        kept = polars_key_frame(left_table, common_keys, _LEFT_ROW).join(
+            polars_key_frame(right_keys, common_keys),
+            on=list(common_keys),
+            how="semi",
+            maintain_order="left",
         )
-        # The round-trip yields large layouts, nullable fields at every depth and
-        # Polars' own types; give every column back the left input's exact field
-        # (type, top-level and nested nullability, logical type).
-        semi_joined_table = semi_joined_table.cast(left_table.schema)
+        semi_joined_table = left_table.take(kept.get_column(_LEFT_ROW).to_arrow())
 
         return ArrowTableStream(
             semi_joined_table,
             tag_columns=tuple(left_tag_schema.keys()),
+            data_tags=stream_data_tags(left_stream),
         )
 
     def binary_output_schema(
@@ -260,6 +274,10 @@ class SemiJoin(BinaryOperator):
 
         Stores the common keys so that ``async_execute`` can use them
         to determine the correct empty-right behavior without data.
+
+        Raises:
+            InputValidationError: If a match key's types differ beyond
+                nullability.
 
         Warns:
             SemiJoinIgnoredColumnWarning: Once per operator and set of names, when
@@ -379,12 +397,13 @@ class SemiJoin(BinaryOperator):
 
                     right_tag, right_data = right_rows[0]
                     for key in common_keys:
-                        _ = require_shared_arrow_type(
+                        key_type = require_shared_arrow_type(
                             "SemiJoin",
                             key,
                             self._key_arrow_type(tag, data, key),
                             self._key_arrow_type(right_tag, right_data, key),
                         )
+                        require_matchable_key("SemiJoin", key, key_type)
 
                     # Build right-side lookup; a row with a null key never matches.
                     for rt, rp in right_rows:

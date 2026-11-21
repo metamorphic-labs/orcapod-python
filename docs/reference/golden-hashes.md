@@ -14,9 +14,29 @@ again, or writes a second copy next to the first.
 A **golden entry** is one named case and the exact value Orcapod computes for it, for
 example the `semantic` entry `value.uuid.nil`, whose value is `semantic_v1:...`. The golden
 test computes every entry again from the code on every CI run. A **data context version**
-(today `v1`, key `std:v1:default`, first shipped in Orcapod 0.3) names one generation of
-hashing. A hash change that is wanted on purpose starts a new data context version. It never
-edits a released value.
+(today `v1`, key `std:v1:default`) names one generation of hashing. A hash change that is
+wanted on purpose starts a new data context version. It never edits a released value.
+
+!!! note "v1 is open until 0.4.0"
+    Orcapod 0.3.0 first shipped `v1` and was withdrawn on 2026-11-17, before anyone used it
+    (ITL-1255). A withdrawn release freezes nothing, so no `v1` value is released today: until
+    0.4.0, a change to a `v1` value is made with the developer's approval of the exact list of
+    entries that move, each explained. 0.4.0 freezes `v1`. See
+    [Withdrawing a release](#withdrawing-a-release).
+
+!!! note "Provisional operators, sources and library value types are outside the freeze"
+    A provisional operator (`orcapod.operators.PROVISIONAL_OPERATORS`; ITL-1266, ITL-1279)
+    has an identity that no release freezes yet, and so have a provisional source
+    (`orcapod.sources.PROVISIONAL_SOURCES`: `DerivedSource` in both forms, plain from
+    `node.as_source()` and with `tags_as_data`, ITL-1331; `PollingSource`, ITL-1314) and a
+    provisional library value type (`provisional` of `contexts/logical_types.json`: NumPy
+    arrays, torch tensors, pandas and Polars frames and series; ITL-1324). The golden values
+    of every case that depends on one, its own hashes and those of every step downstream of
+    it, are in the provisional files, `data/v1/provisional/<group>.json` (a `PollingSource`
+    has none). They are computed and checked on every run like every other value, but no
+    release lists them: they can change in a later release without a new data context, with
+    the developer's approval of the exact list. So the promise on this page holds for a
+    pipeline only when it contains none of them. See [Provisional files](#provisional-files).
 
 ## The pieces at a glance
 
@@ -48,26 +68,30 @@ only at the tags and on PyPI.
 
 Three places hold the mechanism: the golden folder of the current data context, the
 `golden` section of its manifest, and the release pins. The examples below show the state
-after a hypothetical patch release 0.3.1 that added one file; digests are shortened.
+after a hypothetical patch release 0.4.1 that added one file; digests are shortened.
 
 ### Golden files: `tests/test_hashing/golden/data/v1/`
 
 ```text
 tests/test_hashing/golden/data/
   v1/
-    arrow-01.json      # the files of 0.3.0
+    arrow-01.json      # the files of 0.4.0
     datagram-01.json
     pipeline-01.json
     schema-01.json
     semantic-01.json
     torch-01.json
-    semantic-02.json   # added after 0.3.0: new semantic entries only
+    semantic-02.json   # added after 0.4.0: new semantic entries only
+    provisional/       # never frozen: see "Provisional files"
+      pipeline.json
+      semantic.json
 ```
 
 - A file is named after the group of cases it pins plus a two-digit counter:
   `<group>-NN.json`, where the group is one of `cases.GROUPS` (`semantic`, `schema`,
   `arrow`, `datagram`, `pipeline`, `torch`). Names carry no date, issue or release; that
-  information lives in the manifest. The folder holds nothing else.
+  information lives in the manifest. The folder holds nothing else but the `provisional`
+  subfolder ([Provisional files](#provisional-files)).
 - A file maps entry names to values. An entry name appears in exactly one file of the
   folder, whatever its group.
 - A file listed by a released revision is never edited. New values go into the group's next
@@ -86,14 +110,15 @@ tests/test_hashing/golden/data/
                "pipeline-01.json": "e4e4...", "schema-01.json": "315a...",
                "semantic-01.json": "187c...", "torch-01.json": "99af..."},
      "previous": null, "digest": "2bc7..."},
-    {"date": "2026-11-16", "release": "0.3.0", "added": {},
+    {"date": "2026-11-30", "release": "0.4.0", "added": {},
      "previous": "2bc7...", "digest": "d002..."},
-    {"date": "2026-11-24", "release": null,
+    {"date": "2026-12-02", "release": null,
      "added": {"semantic-02.json": "e810..."},
      "previous": "d002...", "digest": "d003..."},
-    {"date": "2026-12-01", "release": "0.3.1", "added": {},
+    {"date": "2026-12-09", "release": "0.4.1", "added": {},
      "previous": "d003...", "digest": "d004..."}
-  ]
+  ],
+  "provisional": {"pipeline.json": "c86b...", "semantic.json": "2f1d..."}
 }
 ```
 
@@ -106,18 +131,94 @@ tests/test_hashing/golden/data/
   file they list, are fixed.
 - `date` is the date the revision was last changed. It is informational: nothing can verify
   it.
+- `provisional` lists the provisional files, each with the sha256 of its bytes, outside the
+  history: no revision lists them, so no release freezes them.
 
 ### The pins: `src/orcapod/contexts/released_manifests.json`
 
 ```json
 {"v1": {"manifest": "b249...",
-        "releases": {"0.3.0": "d002...", "0.3.1": "d004..."}}}
+        "releases": {"0.4.0": "d002...", "0.4.1": "d004..."},
+        "withdrawn": {"0.3.0": {"date": "2026-11-17", "reason": "Withdrawn before ...",
+                                "manifest": "18e7...", "revision": "6cdd..."}}}}
 ```
 
 - `manifest` pins the rest of `v1.json` (the hashers, `definitions`, `libraries`,
   `previous`, `released_in`). It is `null` while the data context is open and is set once,
   at the data context's first release.
 - `releases` gains one line per library release: the digest of that release's revision.
+- `withdrawn` (optional) holds one record per withdrawn release: the date, the reason, and
+  the `manifest` pin and release revision digest (`revision`) that release shipped. A
+  withdrawn release has no `releases` line and no release revision, so it freezes nothing.
+
+### Provisional files
+
+`tests/test_hashing/golden/data/v1/provisional/<group>.json` holds the values of the cases
+that depend on a provisional operator (ITL-1266, ITL-1279), a provisional source (ITL-1331) or
+a provisional library value type (ITL-1324), one file per group and no counter: such a file is never frozen, and the generator
+rewrites it in place.
+
+- **Which entries.** A case declares the provisional features it depends on, operators and
+  sources by class name and library value types by extension name:
+  `@case("pipeline", "group_by", provisional=("GroupBy",))`,
+  `@case("schema", "derived_source_tags_as_data", provisional=("DerivedSource",))`,
+  `@case("datagram", "ndarray", provisional=("orcapod.numpy.ndarray",))`. The generator runs
+  every case while Orcapod records which provisional features it uses
+  (`orcapod.utils.provisional.recording_provisional_uses`), and refuses a case that uses
+  one without declaring it, or that declares a name that is not provisional. The golden
+  test checks that every entry is in the kind of file its case declares. An operator is
+  recorded when it is built, when its own content or pipeline hash or identity structure is
+  read, when it is applied (`process`, its call, a stream method such as `stream.group_by`,
+  `static_process`), and when a stream it produced is hashed, read or previewed (`head`); a
+  source when it is built and when its source id, content or pipeline hash or identity
+  structure is read (a `DerivedSource` also when its rows are read or previewed, and when a
+  saved one is loaded, also over a job node it cannot rebuild); a library value type when it
+  is resolved. So an operator or source built before the case, at module level, is still
+  recorded when the case reads its identity or applies it, and a step built in the case
+  downstream of it reaches it while its own hash is computed.
+- **What the guard sees, and the convention that makes it enough.** The guard sees a
+  provisional object built or read inside the case, not one hidden behind a hash computed
+  before the case: a stream, source or job node downstream of a provisional operator or
+  source that was built and hashed, or computed, before the case answers from its cached
+  hash or kept result and never reaches it, so nothing is recorded. Recording that would
+  need the dependency carried through every hash cache, which Orcapod does not do. So every
+  case builds its sources, operators, pods' inputs and jobs inside the case function, and
+  `test_golden_store.py` (`test_cases_hold_no_prebuilt_pipeline_objects`) checks that the
+  golden modules hold no module-level or cached stream, source, operator or job.
+- **A dependence the record cannot see.** A user class with a field of a provisional library
+  type (the fixture `GoldenWithArray`) embeds that type's identifier in its own identity, but
+  the identity is built once, when the class is registered, and cached: a later use of the
+  class resolves no type and records nothing. So a case whose items mix such values with
+  others is split by a predicate on the items' types (`cases.provisional_types_of`, which
+  reads field types, generic arguments and container elements), the fixtures are registered
+  before any case records its uses, and `test_golden_provisional_types.py` checks the
+  predicate against every fixture class's identity record.
+- **Split cases.** A case whose items are partly provisional is registered twice under its
+  one name, the provisional part declared, so every entry keeps its name: `semantic:value`,
+  `semantic:type`, `schema:single_field`, `arrow:extension_no_values`,
+  `pipeline:join_key_nullability` (its `merge_join.*` entries),
+  `schema:key_policy_identity` (its `derived_tags_as_data.*` entries) and
+  `pipeline:default_source_ids` (its `as_source[...]` entries).
+- **No `PollingSource` values.** No case builds a `PollingSource` (ITL-1314): its pins were
+  removed rather than kept provisional, and the tool refuses a case that builds one, declared
+  or not. Of the provisional sources only `DerivedSource` is declarable
+  (`cases.DECLARABLE_PROVISIONAL_SOURCES`).
+- **Today:** 475 entries. The `PolarsFilter` cases (`polars_filter`, `polars_filter_expr`,
+  `polars_filter_expr_job` and the `semantic` case `polars_expr`, 86 entries) moved out of
+  the frozen files with ITL-1266; the cases of the other provisional operators (229 entries)
+  and of the library value types (128 entries, with the 12 of `GoldenWithArray`) moved with
+  ITL-1279 and ITL-1324, and those of `DerivedSource` (32 entries) with ITL-1331. Every move was values unchanged, before `v1` was frozen.
+- **What holds.** Every provisional value is computed and compared on every CI run, so a
+  change nobody intended fails. An intended change needs the developer's approval of the
+  exact list of entries that move, each explained (`--remove`, then `--add`), but no new
+  data context, before or after a release. `--release` neither lists nor pins a provisional
+  file, the manifest pin leaves out `golden`, and the tag check does not compare them.
+- **Leaving the group.** When an operator (or a source) stops being provisional, at a
+  release, it leaves `PROVISIONAL_OPERATORS` (or `PROVISIONAL_SOURCES`), its `PROVISIONAL` marker and its cases' declarations go, and
+  `generate_golden_hashes.py --relocate` moves its entries, values unchanged, into the open
+  frozen file of their group. The `--release` step then freezes them.
+- **Joining the group.** Only an operator or source whose values no release lists can become
+  provisional: `--relocate` refuses to move an entry out of a file a release lists.
 
 ### Digest definitions
 
@@ -150,7 +251,12 @@ writes go through `tests/test_hashing/golden/generate_golden_hashes.py`.
    existing value, and it writes nothing when the tree already breaks a rule.
 3. The diff shows only added entries or a new file, and the edit to the open revision.
 4. `--check` computes every case and reports moved, unpinned and no longer produced entries
-   without writing anything.
+   without writing anything, and entries pinned in the wrong kind of file (a provisional
+   case in a frozen file, or the other way round).
+
+An entry of a case that declares a provisional operator goes to the provisional file of its
+group instead ([Provisional files](#provisional-files)). `--relocate` moves pinned entries
+between the frozen and the provisional files, values unchanged, as their cases declare.
 
 Before a release, a value that no release lists can change only with the developer's
 approval and a written migration assessment. `--remove <entry>` (repeatable) takes the entry
@@ -171,11 +277,50 @@ edit and the generator refuses to write over it.
    its digest into `released_manifests.json` under `releases`, and at the data context's first
    release sets `released_in` and the `manifest` pin. It refuses a version already released,
    a development or local version, and a tree that breaks a rule. Try it first on a copy with
-   `--root <dir>` (`store.copy_tree` writes one).
+   `--root <dir>` (`store.copy_tree` writes one). The same step pins the open data function
+   type snapshots (`scripts/data_function_types.py --release`, writing their sha256 and the
+   version into `src/orcapod/data_function_types/released.json`; see
+   [Data function types](data-function-types.md)).
 3. The Release workflow tags the commit it builds, which contains the release revision. From
    then on every file listed up to that revision is frozen.
 4. The tag and the PyPI wheel and sdist, which carry `v1.json` and `released_manifests.json`,
    are records of what shipped, outside the repository.
+
+An operator that stops being provisional in this release has its entries moved into a frozen
+file (`--relocate`) before the release step, so that the release freezes them.
+
+Every final version needs the release step: the release gate refuses to tag one without it.
+A pre-release (`0.4.0rc1`, `0.4.0a1`, `0.4.0b2`, `0.4.0.dev3`) freezes nothing (developer,
+November 21, 2026, ITL-1329). It carries the hashes intended to be final, the release gate
+checks that no release record at HEAD names it, and `generate_golden_hashes.py
+--release` refuses it. So the first final version of a data context freezes it: for `v1`,
+`0.4.0`, not `0.4.0rc1`. Between a candidate and the final release a golden value changes
+only for a blocking reason, with the developer's approval of the exact list of entries that
+move, and a new candidate follows. Data stored with a candidate is not guaranteed to be valid
+under the final release, and the candidate's release notes say so (the Release workflow
+writes it into the GitHub Release). What an earlier final release froze stays protected in a
+pre-release run: the tag check runs for every version, and a pre-release's own tag pins no
+release, so the tag check skips it.
+
+### Withdrawing a release
+
+A release is withdrawn only by the developer's decision, when nobody has used it. One
+release has been: 0.3.0, withdrawn on 2026-11-17 (ITL-1255), so that `v1` is frozen at 0.4.0
+instead, after the open questions that can move a golden value are settled. The developer
+withdraws the version from PyPI (yanked or deleted) and deletes its tag and GitHub Release; in
+the repository:
+
+1. The release revision is taken out of the golden history and the open revisions after it
+   are chained again (`store.withdraw_release`, which only takes the last release). The
+   golden files are not touched.
+2. Its pins move to a `withdrawn` record in `released_manifests.json`, with the date and the
+   reason. Without a release left, `released_in` and the `manifest` pin become `null`: the
+   data context is open again, and every file it listed can change by the approved-change
+   procedure (`--remove`, then `--add`).
+3. The version is never released again: `--release` and the release gate refuse it, and PyPI
+   never takes a version twice.
+4. The tag check compares the release's tag, while it exists, with the record instead of with
+   HEAD, so it passes before and after the tag is deleted.
 
 ### Starting a new data context version
 
@@ -184,9 +329,11 @@ a logical type's own identifier change. When such a change is wanted on purpose,
 a new data context version, only in a minor release (before 1.0) or a major one, never in a
 patch:
 
-1. The new manifest `v2.json` starts with `"golden": {"folder": "v2", "history": []}`, an
-   empty folder `data/v2/`, and the pin `"v2": {"manifest": null, "releases": {}}`. The
-   generator then writes `v2/<group>-01.json` from the new code.
+1. The new manifest `v2.json` starts with
+   `"golden": {"folder": "v2", "history": [], "provisional": {}}`, an empty folder
+   `data/v2/`, and the pin `"v2": {"manifest": null, "releases": {}}`. The generator then
+   writes `v2/<group>-01.json` from the new code, and `v2/provisional/<group>.json` for the
+   cases that depend on a provisional operator.
 2. The `v1` code, manifest, golden folder and pins move to `orcapod-sanctuary`, which keeps
    them computable.
 3. This repository then carries only the `v2` folder and chain.
@@ -217,6 +364,7 @@ of the whole tree is caught only by records outside it, the tags and PyPI.
 | 16 | A release tag is moved or deleted | deliberate | Tag protection, PyPI | GitHub refuses it; PyPI never accepts a second upload of a version |
 | 17 | The checks themselves are edited to pass | deliberate | Review only | nothing automatic: see the residual risks |
 | 18 | `main` is force-pushed with rewritten history | deliberate | Branch protection | outside this mechanism |
+| 19 | A release is recorded as withdrawn to free its files | deliberate | Tag check, review, PyPI | a record that does not name exactly the pins its tag shipped fails the tag check; a record that does is a visible decision in review, and the version stays on PyPI unless it was withdrawn there |
 
 ## Each component in detail
 
@@ -294,11 +442,27 @@ PyPI protect everything against a rewrite of the tree.
 `scripts/check_golden_tags.py --release-version X.Y.Z`, a step of the Release workflow's
 build job before the tag is made; tested by `tests/test_check_golden_tags.py`
 
-- **Checks:** HEAD's `released_manifests.json` pins release `X.Y.Z` of the current data
-  context, its `manifest` pin is set, and the pinned digest is the release revision of
+- **Checks:** `X.Y.Z` is not a withdrawn release; HEAD's `released_manifests.json` pins
+  release `X.Y.Z` of the current data context, its `manifest` pin is set, and the pinned digest is the release revision of
   `X.Y.Z`, which is the last revision of HEAD's golden history: a golden file added after
   the release step would ship unreleased, so such a commit is not tagged. It fails without
-  git.
+  git. For a pre-release (ITL-1329) it checks the opposite: no release record at HEAD
+  names a pre-release, in any spelling `release_version` accepts (the `releases` and
+  `withdrawn` keys of every data context in `released_manifests.json`, the current
+  manifest's `released_in`, a release revision of its golden history, a data function type
+  snapshot's `released_in`), and the version is not withdrawn in any data context; the
+  release step and the type snapshot pins are not required. A release record holding a
+  version text the gate cannot classify (`0.4.0rc1+local`, `0.4rc1`, `1!0.4.0rc1`) is
+  refused in a pre-release run and in a final run alike: it fails closed, never read as
+  final. A final run also refuses a version withdrawn in any data context. The tag check
+  skips every tag whose name is a pre-release (`v0.4.0rc1`), so such a tag protects no
+  golden file, revision, pin or snapshot; every other tag is checked as before, one whose
+  name the gate cannot classify (`v0.4.0rc1+local`) included, and the output names it.
+  `scripts/data_function_types.py --release` refuses a pre-release too, so nothing can be
+  pinned under one. Which versions are pre-releases is one rule, `release_version` in the same
+  script (PEP 440; a version that is not `X.Y.Z` with an optional pre-release, post-release
+  or development part is refused, never guessed), which the Release workflow also reads
+  (`--classify-version`) to mark the GitHub Release and to skip the Linear jobs.
 - **Protects against:** a release cut without the release step (11). The final-release
   check cannot catch it in the Release workflow, whose tests run before the tag exists,
   under a development version.
@@ -313,9 +477,13 @@ rewrote an earlier release is refused); tested by `tests/test_check_golden_tags.
   the current data context (the one manifest at HEAD): every golden file listed by the
   revisions up to that release exists in HEAD with the bytes it has at the tag; those
   revisions are unchanged in HEAD's history; and the pins of the data context at the tag (the
-  manifest pin and every `releases` line) are unchanged in HEAD.
-- **Protects against:** a full rewrite of files, chain and pins inside the tree (14, 15).
-  This is the anchor outside the tree.
+  manifest pin and every `releases` line) are unchanged in HEAD. For a tag whose release
+  HEAD records as withdrawn, it checks instead that the record's `revision` and `manifest`
+  are the release digest and manifest pin the tag shipped; once the tag is deleted there is
+  nothing to compare.
+- **Protects against:** a full rewrite of files, chain and pins inside the tree (14, 15), and
+  a withdrawn record that does not describe the release it names (19). This is the anchor
+  outside the tree.
 - **Relies on:** protected tags and history. In CI (`CI=true`) it fails, never skips, when
   git, the history (a shallow clone) or the tags are missing; outside CI it skips with a
   message. With no release tag of the current data context it passes with nothing to check.
@@ -344,20 +512,32 @@ so the bytes that are hashed are the bytes that were committed (4).
 
 `tests/test_hashing/golden/test_golden_hashes.py` and the generator
 
-- **Checks:** the folder holds only `<group>-NN.json` files of known groups, and an entry name
-  appears in only one of them (8).
+- **Checks:** the folder holds only `<group>-NN.json` files of known groups and the
+  `provisional` subfolder of `<group>.json` files, and an entry name appears in only one of
+  all of them (8).
+
+### Placement check
+
+`tests/test_hashing/golden/cases.py` (`compute_group_kinds`) and
+`tests/test_hashing/golden/test_golden_hashes.py`
+
+- **Checks:** a case that builds a provisional operator declares it; every entry of a case
+  that declares one is in a provisional file, and every other entry in a frozen file.
+- **Protects against:** a value that depends on a provisional operator frozen by a release,
+  and a frozen value moved out of the freeze without a declaration.
 
 ## Residual risks and assumptions
 
 | Risk or assumption | Why it matters | What covers it |
 | --- | --- | --- |
-| Git history and `v*` tags are protected on both repositories | The tag check trusts the tags | The `protect-release-tags` ruleset on both repositories (in place since 2026-11-15) and branch protection |
+| Git history and `v*` tags are protected on both repositories | The tag check trusts the tags | The `protect-release-tags` ruleset on both repositories (in place since 2026-11-15) and branch protection; the one exception is the tag of the withdrawn 0.3.0, deleted by the developer |
 | The checks themselves can be edited (17) | A weakened check passes | Review: changes to these tests and scripts get explicit review |
 | Golden values are computed only with the `uv.lock` versions | A user's newer pyarrow, polars or numpy could hash differently unnoticed | ITL-1151: CI against the lowest and highest allowed dependency versions |
 | A hash with no golden entry is not protected | Coverage is only as wide as `cases.py` | Add cases whenever a new stored or embedded hash appears |
 | Values on `main` after the last release are open | An unreleased commit has no guarantee | Use a released version for anything that must stay stable |
 | Optional groups skip without their package | `torch` values are unchecked where torch is missing | CI installs every extra |
 | The `date` field cannot be verified | Informational | Order and integrity come from the chain and the tags |
+| Provisional values are outside the freeze | A pipeline with a provisional operator or source (`DerivedSource`, `PollingSource`) may compute its results again after an upgrade | `ProvisionalHashWarning` when the operator or source is built or a saved job holding it is loaded; the lists in `PROVISIONAL_OPERATORS` and `PROVISIONAL_SOURCES`, on the operators and sources pages |
 
 A deliberate attacker with merge rights who also rewrites history and tags is beyond what any
 check inside the repository can stop; the PyPI artifacts remain the record of what shipped.
@@ -365,6 +545,13 @@ check inside the repository can stop; the PyPI artifacts remain the record of wh
 ## Rules
 
 - A released golden file never changes, and is never removed or renamed.
+- A value of a case that depends on a provisional operator is pinned in a provisional file,
+  never in a frozen one; no release freezes a provisional file.
+- `v1` is open until 0.4.0 (0.3.0 was withdrawn on 2026-11-17): until then, a change to a
+  `v1` value needs the developer's approval of the exact list of entries that move, each
+  explained. Never edit or regenerate a golden file to make a test pass.
+- A withdrawn release freezes nothing; its record stays under `withdrawn`, and its version is
+  never released again.
 - New golden values can be added in any release, a patch included, with
   `generate_golden_hashes.py`.
 - No exemption: any change to a released golden value, including one caused by a logical

@@ -4,7 +4,11 @@ This document is a developer-facing reference for every hash computation site in
 orcapod-python framework. For conceptual background on the two identity chains
 (`content_hash` and `pipeline_hash`), see [Identity & Hashing](../concepts/identity.md).
 Every hash listed here that Orcapod stores or embeds in a name is pinned as a golden value;
-how released values are protected is described in [Golden Hashes](golden-hashes.md).
+how released values are protected is described in [Golden Hashes](golden-hashes.md). A
+release freezes every golden value except those of the provisional operators
+(`orcapod.operators.PROVISIONAL_OPERATORS`, today `PolarsFilter`) and of every step downstream
+of one: their identity may still change in a later release (see
+[Provisional operators](../concepts/operators.md#provisional-operators)).
 
 ---
 
@@ -18,7 +22,7 @@ appended, because it is a variant of the same system tag mechanism.)
 |---|------|-----------|---------------|--------------------|
 | 1 | `content_hash()` | `SemanticAwarePythonHasher` → JSON + SHA-256 | `ContentHash` | Unique per semantic content of the object; data-inclusive |
 | 2 | `pipeline_hash()` | `SemanticAwarePythonHasher` → JSON + SHA-256 | `ContentHash` | Unique per pipeline topology + schema; data-exclusive |
-| 3 | Schema hash (system tag column naming) | `SemanticAwarePythonHasher.hash_object((tag_schema, data_schema)).to_hex(n)` | Truncated hex `str` | Unique per `(tag_schema, data_schema)` pair; embedded in system tag column names |
+| 3 | Schema hash (system tag column naming) | `SemanticAwarePythonHasher.hash_object((hash_schema(tag), hash_schema(data))).to_hex(n)` over the Arrow schemas | Truncated hex `str` | Unique per Arrow `(tag, data)` schema pair; embedded in system tag column names |
 | 4 | Default `source_id` of an in-memory source | `"<source kind>:" + StarfixArrowHasher.hash_table(table).to_string()` | `str`, `<source kind>:<algorithm label>:<hex>` | Unique per source kind and raw table content; used as the source's name when none is given |
 | 5 | Per-row `record_id` (system tag value) | the row identifier itself: `row_<n>`, or the canonical JSON of the key columns (`key_row_identifier`) | `str` (`large_string`) | Names the row within its source; stable as long as its position or its key is |
 | 6 | Join system tag suffix | `stream.pipeline_hash().to_hex(n)` + `:{idx}` appended to column name | Column name suffix | Unique per `(input topology, canonical join position)`; encodes full join lineage in column name |
@@ -27,7 +31,7 @@ appended, because it is a variant of the same system tag mechanism.)
 | 8 | `compute_pipeline_entry_id()` | `StarfixArrowHasher.hash_table(system_tags + INPUT_DATA_HASH_COL + recomputation_index)` | `bytes` (`b"method:digest"`) | Unique per `(node, tag lineage, input_data content, recomputation attempt)` |
 | 9 | Side-effect `record_id` | `StarfixArrowHasher.hash_table(system_tags + INPUT_DATA_HASH_COL + recomputation_index=0)` | `bytes` | Unique per `(tag lineage, input_data content)`; pod-version scoped via table path (`uri` + `pipeline_hash()`) |
 | 10 | `invocation_hash` | `f"{serialize(pipeline_hash_ch)}::{serialize(record_id_hash_ch)}"` | `str` | Unique per `(pod topology, tag lineage, input_data content)`; pod-version scoped via table path |
-| 11 | Output schema hash | `SemanticAwarePythonHasher.hash_object(output_data_schema).to_hex()` | `str` (bare hex digest) | Unique per output schema definition; embedded in function URI |
+| 11 | Output schema hash | `SemanticAwarePythonHasher.hash_object((hash_schema(output Arrow schema),)).to_hex()` | `str` (bare hex digest) | Unique per Arrow schema of the declared outputs; embedded in function URI |
 | 12 | `run_id` | `uuid.uuid4().hex[:16]` | 16-char hex `str` | Non-deterministic; unique per pipeline execution |
 | 13 | `snapshot_hash` | `hashlib.sha256(sorted labelled leaf content hashes joined by newline).hexdigest()[:16]` | 16-char hex `str` | Unique per `(DAG leaf topology + data state)` at run time |
 | 14 | `datagram_uuid` | `uuid7()` normalised to `stdlib uuid.UUID` | `uuid.UUID` | Unique per datagram instance; time-ordered; not a content hash |
@@ -50,7 +54,7 @@ Orcapod computes (developer, November 15, 2026; ITL-1154, revising ITL-945):
 | 4 | **A hash fed into another hash carries its label.** A nested hash in a structure is `{"__type__": "hash", "label": "<label>", "digest": "<hex>"}`; a value-hashed cell in a table is `<identifier>::<label>:<digest>`; the entry-id preimage, the operator-cache row, the pandas value hash and a directory's file entries take `b"<label>:" + digest`; the run snapshot takes `"<label>:<hex>"`. So two algorithms that happen to produce the same digest never feed the same input (a `File` whose bytes are some value's canonical JSON, and that value's `semantic_v1` hash), and renaming a label moves every hash it feeds. (This reverses ITL-945's rule 6, "a label never enters a hash computation".) |
 | 5 | A hash stored as a value in its own column or field carries its label: `"<label>:<hex>"` as text, `b"<label>:" + digest` in a binary column. |
 | 6 | A hash inside a name is the bare hex digest: path components, column names, the function `uri`, operator identity, source-node slot names, the run URI. The name's grammar fixes which algorithm produced the digest. A name that is later fed into a hash (the function `uri` in a pod's identity, system-tag column names in an entry-id table) is still a name: its digest moves whenever what it was computed from moves. |
-| 7 | **Source ids.** A source id is the source's name; a given one is used exactly as given. A default names its kind first, `<kind>:<rest>`: `<kind>:<label>:<hex>` when built from a hash (`dict:arrow_v1:<hex>`, `derived:semantic_v1:<hex>`, `tags_as_data:semantic_v1:<hex>`), `<kind>:<location>` when built from where the data lives (`csv:<path>`). A value folded by an operation is `<operation label>:<hex>` (`batch_v1:<hex>`, `group_v1:<hex>`). See "Default source ids and row identifiers". |
+| 7 | **Source ids.** A source id is the source's name; a given one is used exactly as given. A default names its kind first, `<kind>:<rest>`: `<kind>:<label>:<hex>` when built from a hash (`dict:arrow_v1:<hex>`, `derived:semantic_v1:<hex>`), `<kind>:<location>` when built from where the data lives (`csv:<path>`). A value folded by an operation is `<operation label>:<hex>` (`batch_v1:<hex>`, `group_v1:<hex>`). A `DerivedSource` with `tags_as_data` has no default and needs a `source_id` (ITL-1313). See "Default source ids and row identifiers". |
 | 8 | **Record ids.** A record id is the row identifier itself, as text: `row_<n>` (the position) or the canonical JSON of the key columns (`{"unit":"u1","time":1700000000}`). It is not a hash and holds no source id; the source id is the other system tag. A folded record id is `<operation label>:<hex>`, like a folded source id. A source-info token is `<source id>::<record id>::<column>`. A record id holds key values, which may contain `::`; a source id and a column name never do (both are refused), so a token is split at its first and its last `::` only. |
 | 9 | A random identifier (`uuid7`, `uuid4`: datagram and result ids, run ids) is not a hash and carries no label. |
 | 10 | **Handler routes.** A value handler describes its value as tagged data (`Encoded`), hashed by `semantic_v1`: `bytes` / `bytearray` as `{"__type__": "bytes", "hex": ...}`, `uuid.UUID` as `{"__type__": "uuid", "hex": ...}`. It returns a labelled hash of its own only when the identity needs a dedicated algorithm: external content (`File`, `Directory`) or a library value's canonical form (`numpy.ndarray`, torch, pandas, Polars, `pa.Table`, a Polars expression). |
@@ -71,8 +75,10 @@ The labels of v0.3:
 | Label | Names | Defined in |
 |---|---|---|
 | `semantic_v1` | the structure hash: a Python structure expanded to tagged JSON, SHA-256 of its canonical text | `SEMANTIC_HASH_LABEL`, `hashing/semantic_hashing/semantic_hasher.py` |
-| `arrow_v1` | the Arrow table and schema hash (§9) | `ARROW_HASH_LABEL`, `hashing/arrow_hashers.py` |
-| `arrow_ordered_v1` | the Arrow table hash with column and struct-field order included (§9), fed into the pandas value hash | `ARROW_ORDERED_HASH_LABEL`, `hashing/arrow_hashers.py` |
+| `arrow_v1` | the hash of an Arrow table Orcapod builds, under the float rule (`-0.0` as `0.0`, every NaN as one; §9) | `ARROW_HASH_LABEL`, `hashing/arrow_hashers.py` |
+| `arrow_strict_v1` | the same Arrow table hash by bits, without the float rule, where a value's representation is an Arrow table: a pyarrow `Table` or `RecordBatch` given as a value (§9) | `ARROW_STRICT_HASH_LABEL`, `hashing/arrow_hashers.py` |
+| `arrow_schema_v1` | the Arrow schema hash: every schema that enters an identity ("The Arrow schema hash", §8) | `ARROW_SCHEMA_HASH_LABEL`, `hashing/arrow_hashers.py` |
+| `arrow_ordered_v1` | the Arrow table hash with column and struct-field order included, by bits (§9), fed into the pandas value hash | `ARROW_ORDERED_HASH_LABEL`, `hashing/arrow_hashers.py` |
 | `directory_v1` | the directory hash: a SHA-256 Merkle tree over the entries, file leaves taken with their label | `DIRECTORY_HASH_LABEL`, `hashing/directory_hashers.py` |
 | `ndarray_v1` | the array value hash (§8) | `NumpyArrayHandler.HASH_LABEL`, `hashing/semantic_hashing/builtin_handlers.py` |
 | `pandas_dataframe_v1` | the `pandas.DataFrame` value hash (§10) | `PANDAS_DATAFRAME_HASH_LABEL`, `hashing/pandas_value_hash.py` |
@@ -81,8 +87,11 @@ The labels of v0.3:
 | `polars_expr_v1` | the Polars expression hash (§1c) | `POLARS_EXPR_HASH_LABEL`, `hashing/semantic_hashing/polars_expr.py` |
 | `polars_dataframe_v1` | the Polars DataFrame value hash (§1e) | `PolarsDataFrameHandler.HASH_LABEL`, `hashing/semantic_hashing/builtin_handlers.py` |
 | `polars_series_v1` | the Polars Series value hash (§1e) | `PolarsSeriesHandler.HASH_LABEL`, `hashing/semantic_hashing/builtin_handlers.py` |
+| `function_signature_v1` | the stored function signature hash: a function's declared interface ([Data function types](data-function-types.md)) | `FUNCTION_SIGNATURE_HASH_LABEL`, `core/data_function.py` |
+| `function_content_v1` | the stored function content hash: its source text from the `def` line on ([Data function types](data-function-types.md)) | `FUNCTION_CONTENT_HASH_LABEL`, `core/data_function.py` |
 | `batch_v1` | the folded source id and record id of `Batch` (site 6b) | `BATCH_FOLD_LABEL`, `core/operators/batch.py` |
-| `group_v1` | the folded source id and record id of `GroupBy` (site 6b) | `GROUP_BY_FOLD_LABEL`, `core/operators/group_by.py` |
+| `group_v1` | the folded source id and record id of `GroupBy` (site 6b), and the merged source-info token of a data-tag group key | `GROUP_BY_FOLD_LABEL`, `core/operators/group_by.py` |
+| `join_v1` | the merged source-info token of a key that is a data-tag on several inputs of a `Join` (site 6b) | `JOIN_FOLD_LABEL`, `core/operators/join.py` |
 | `sha256` | the file content hash: SHA-256 of the file's bytes | the file hasher's `algorithm` |
 
 Where a hash appears, and in which form:
@@ -92,7 +101,7 @@ Where a hash appears, and in which form:
 | Labelled value | `__input_data_hash`, `__output_data_hash`, `__node_content_hash`, `__pipeline_base_entry_id`, the pipeline table's record id, the side-effect log's `record_id` and `record_id_hash`, the record id (`_record_hash`) of operator-node and cached-source tables, the `_content_hash` column, the hashes in a saved job file, `InvocationContext.invocation_hash` |
 | Labelled, inside a hash input | a nested hash in a structure: `{"__type__": "hash", "label": "<label>", "digest": "<hex>"}`; a value-hashed cell in a table: `b"<extension name>;<hex of the extension metadata>::<label>:" + digest` (the logical type's whole identifier, which the hashed field also keeps as its extension name and metadata, so the type is part of the hash of a column with no value too); the input data hash in the entry-id preimage (§3); the node content hash in the operator-node record hash; the sink hashes of the run snapshot (site 13); the ordered Arrow digest in a pandas value hash (§10); a file's hash in a directory entry |
 | Bare digest in a name | the function `uri` (its second component), the path components `schema:<pipeline digest>`, `instance:<content digest>` and `node:<content digest>`, system-tag column names, the operator `uri`, the function `uri` at the start of a function output's source-info token, source-node slot names, the run URI (`<job>@<snapshot>`) |
-| Labelled hash inside a source id | every default source id built from a hash: `<source kind>:<label>:<hex>` for an in-memory source (`arrow_table:`, `dict:`, `list:`, `data_frame:`, then the labelled table hash) and a `DerivedSource` (`derived:`, then the node's labelled content hash; also what `node.as_source()` returns), defined once by `hash_source_id` in `core/sources/source_ids.py`; `tags_as_data:<label>:<hex>` of a `tags_as_data` derivation (`DerivedSource._default_source_id`); `<fold label>:<hex>` of a folded source id (`fold_system_tag_values`) |
+| Labelled hash inside a source id | every default source id built from a hash: `<source kind>:<label>:<hex>` for an in-memory source (`arrow_table:`, `dict:`, `list:`, `data_frame:`, then the labelled table hash) and a `DerivedSource` (`derived:`, then the node's labelled content hash; also what `node.as_source()` returns), defined once by `hash_source_id` in `core/sources/source_ids.py`; `<fold label>:<hex>` of a folded source id (`fold_system_tag_values`) |
 
 A function node's table in v0.3, with the values it stores:
 
@@ -112,7 +121,7 @@ rule_store = InMemoryArrowDatabase()
 rule_job = PipelineJob(name="my_pipeline", database=rule_store)
 with rule_job:
     numbers = DictSource(
-        data=[{"k": "a", "x": 1}], tag_columns=["k"], source_id="numbers"
+        data=[{"k": "a", "x": 1}], tag_columns=["k"], tag_only_columns=True, source_id="numbers"
     )
     _ = double.pod(numbers, label="double")
 rule_job.run()
@@ -120,23 +129,23 @@ rule_job.run()
 # A hash kept as a value carries its label.
 rule_node = rule_job.nodes["double"]
 print(rule_node.pipeline_hash())
-# semantic_v1:c4294cdcdc37c18c76b88f83a50a21e71293c77dc25a9104c7b8d710b0041235
+# semantic_v1:c5017a4872a8f16b99ae544571d5f0459d59cb001451bde11021825f4c2c020f
 
 # A hash inside a name is the bare digest: the function uri and the table path.
 print(double.pod.uri)
-# ('double', '32567b339b2e50ee4f435e6234441a0415db766db953431439e81cf471c94945', 'v0', 'python.function.v0')
+# ('double', 'ba1e0a0db33c4ca8ffd67ba2b02ce05a00f0fd5b9d16ab8153cc540fd67e55be', 'v0', 'python.function.v1')
 pipeline_table = next(p for p in rule_store.list_sources() if "_result" not in p)
 print("/".join(pipeline_table))
-# my_pipeline/double/32567b339b2e50ee4f435e6234441a0415db766db953431439e81cf471c94945/v0/python.function.v0/schema:c4294cdcdc37c18c76b88f83a50a21e71293c77dc25a9104c7b8d710b0041235/pdb_v2
+# my_pipeline/double/ba1e0a0db33c4ca8ffd67ba2b02ce05a00f0fd5b9d16ab8153cc540fd67e55be/v0/python.function.v1/schema:c5017a4872a8f16b99ae544571d5f0459d59cb001451bde11021825f4c2c020f/pdb_v1
 
 # Stored columns hold labelled hashes; the system-tag column name holds a bare digest.
 stored = rule_store.get_all_records(pipeline_table)
 print(ContentHash.from_prefixed_digest(stored["__input_data_hash"][0].as_py()))
 # arrow_v1:000002fcbe7eec1821a57679d34084a583d8282798563aa706ecb9c0c24382580de4df
 print(ContentHash.from_prefixed_digest(stored["__node_content_hash"][0].as_py()))
-# semantic_v1:43529fee65d63d64303db070024f9dbae24ba6f9c3e9ec0ebc12c79f5dde6ddb
+# semantic_v1:97b375d9ccdb0a11c6c90c6c0e8818c874a816b94eaea77a6949be3f7433e507
 print([name for name in stored.column_names if name.startswith("_tag_source_id")])
-# ['_tag_source_id::3bd6e739b7e15bd3402717af3bafd487d480f3b382028cb22c2250fcb6a90e64']
+# ['_tag_source_id::a6cc3f4239c696722e50039db2c30e3fbd35b07dbfe9e07fe406ca71b5035af2']
 ```
 
 The path is `<job>/<function name>/<output-schema digest>/v<major>/<wrapper kind>/schema:<pipeline digest>/<table layout>`.
@@ -165,23 +174,82 @@ category, but we should make it totally overridable"; November 16, 2026, ITL-115
 | `ListSource` | `list` | `list:arrow_v1:<hex>` of the table |
 | `DataFrameSource` | `data_frame` | `data_frame:arrow_v1:<hex>` of the table |
 | `DerivedSource` (a node's records; `node.as_source()`) | `derived` | `derived:semantic_v1:<hex>` of the node's content hash |
-| `DerivedSource` with `tags_as_data` | `tags_as_data` (an operation) | `tags_as_data:semantic_v1:<hex>` of the derivation |
+| `DerivedSource` with `tags_as_data` | `derived` (config type key only) | none: `source_id` is required (developer, November 21, 2026, ITL-1313). Its former default, a hash of the derivation, was of questionable stability: `record_id_columns=None` and `()`, one key policy, gave two ids |
 | `CSVSource` | `csv` | `csv:<file path as passed>` |
 | `DeltaTableSource` | `delta_table` | `delta_table:<path or URI of the table folder as passed>` |
 | `SQLiteTableSource` | `sqlite_table` | `sqlite_table:<db path as passed>:main.<table>` (SQLite names a table `<schema>.<table>`; the main database's schema is `main`) |
-| `PostgreSQLTableSource` | `postgresql_table` | `postgresql_table:<database>.<schema>.<table>` (the three-part name, from `current_database()` and `current_schema()`) |
+| `PostgreSQLTableSource` | `postgresql_table` | `postgresql_table:<host>:<port>/<database>.<schema>.<table>` (the server the connection reached, then the three-part name, from `current_database()` and `current_schema()`; see below) |
 | `DBTableSource` (any other connector) | `db_table` | none: `source_id` is required. The connector protocol exposes no database address, and the table name alone does not say which database the table is in (developer decision, November 16, 2026) |
 | `SpiralDBTableSource` | `spiraldb_table` | `spiraldb_table:<project>.<dataset>.<table>@<table id>` (Spiral's own table identifier, then SpiralDB's table id; `SPIRALDB_SOURCE_ID_HAS_TABLE_ID`) |
-| `PollingSource` | `polling_source` | `polling_source:semantic_v1:<hex>` of `impl.identity()` (never its `repr`) |
+| `PollingSource` | `polling_source` | `polling_source:semantic_v1:<hex>` of `impl.identity()` (never its `repr`). Provisional (ITL-1314): not frozen with data context v1, and no golden value pins it |
 | `CachedSource` | `cached` | the wrapped source's id |
 | folded source id of `Batch` / `GroupBy` (a system-tag value, not a source) | | `batch_v1:<hex>` / `group_v1:<hex>` |
+
+An in-memory default hashes the table as given, rows in the order they came in: the user may
+have put them in that order on purpose. `hash_in_key_order=True` (a keyword of
+`ArrowTableSource`, `DictSource`, `DataFrameSource` and `ListSource`; developer, November
+21, 2026, ITL-1272: "we actually should take it explicitly as a parameter rather than always
+hashing the sorted version of the data") hashes it with the rows sorted by the key columns
+instead (`arrow_utils.key_row_order`): pyarrow's `sort_indices` over the key columns in the
+order `record_id_columns` gives them, each ascending, nulls last, the rows then taken with
+`take`. The same rows in any order then give one default source id and one content hash. The
+order of the key columns is part of the content hash in every case (the key columns enter the
+root-source identity in key order); the default source id changes with it only when the two
+orders sort the table differently (keys `a = [1, 2, 3]` and `b = [10, 20, 30]` sort the table
+the same way in either order, so both orders give one default source id and two content
+hashes). No tie-break is needed: the source refuses a
+null and a repeated key before anything is hashed (`stream_builder.row_identifiers`), and
+every key type (string, integer, boolean, timestamp, date) sorts, so the order is total. It
+is the sort of the canonical row order of an identity table (below) restricted to the key
+columns, which needs neither the other columns nor a row-hash tie-break, since every key type
+is `canonically_sortable`. The argument is refused without key columns (no key order) and
+with a `source_id`, which the table hash would not determine: the builder still computes the
+table hash, but a given `source_id` is used as given and the hash enters no identity. The
+source presents its rows in the order given
+either way. A saved job keeps the resolved `source_id`, never the argument.
 
 A location default names the data where it lives, so two sources of one kind share it only
 when they read the same data. The generic `DBTableSource` knows no database, so it has no
 default and refuses to be built without a `source_id`. A location whose parts cannot be
 told apart has no default (`joined_location`): a SQLite table name holding `:`, a PostgreSQL or
-SpiralDB name holding `.`, a SpiralDB address or table id holding `@`. Such a source needs a
-`source_id`.
+SpiralDB name holding `.`, a PostgreSQL name holding `/`, a SpiralDB address or table id
+holding `@`, a PostgreSQL address holding `::` (a socket directory holding it or ending with
+`:`; `::` separates the parts of a source-info token). Such a source needs a `source_id`.
+
+A PostgreSQL default names the server the connection reached (developer, November 18, 2026,
+ITL-1267), as libpq reports it, so one database, schema and table name on two servers gives
+two ids. The host is the name or address as given, or the directory of a Unix-domain socket;
+never the address a name resolved to. A `hostaddr` given alone is the host.
+A host name is written in lower case (`DB.Example.ORG` and `db.example.org` are one id); an
+IPv6 address in brackets and in its exploded form, which holds no `::`
+(`[0000:0000:0000:0000:0000:0000:0000:0001]` for `::1`); an IPv4 address and a socket
+directory as given (a Windows one with its drive, `C:/PgSockets`, keeps its case too). The port is always the number used: a DSN without one uses the port of
+a service file, else `PGPORT`, else libpq's compiled default (normally `5432`), so a DSN that
+gives the port the connection would use anyway and one without it give one id. Two spellings of one server are two
+ids (`localhost` and `127.0.0.1`), as two spellings of one CSV path are. A DSN, a `PGHOST`
+or `PGHOSTADDR` setting or a service file that names several servers (`host=a,b`) gives no
+default: the server reached can change from one connection to the next. Neither do
+parameters that give a host beside a different `hostaddr` (`host=db.example.org
+hostaddr=192.0.2.1`; `host=127.0.0.1 hostaddr=127.0.0.1` keeps a default, as do two spellings of
+one IP address, compared by value, an IPv6 zone included: `host=0:0:0:0:0:0:0:1 hostaddr=::1`), wherever each
+comes from. libpq takes each parameter from the DSN, else a service file, else the
+environment; psycopg (3.1.17 or later, the version `orcapod[postgresql]` requires for this)
+resolves a single host name of the DSN or `PGHOST` itself, when neither
+gives a `hostaddr`, and passes the address it reached as `hostaddr`, which overrides a service
+file's. So a service file's `hostaddr` beside a host name of the DSN or `PGHOST` changes
+nothing (the connection goes to the named host, and the default stays), while beside a
+Unix-socket directory, which psycopg does not resolve, it is the address used and there is no
+default; and a service file's host beside a `PGHOST` that psycopg resolved has no default
+(libpq reports the service file's host, the connection went to the `PGHOST` address). libpq
+sends the connection to the address, so
+the host name does not name the server, and two such DSNs with one host and two addresses
+would share an id. A name that DNS, a hosts file or a tunnel sends to another server is not
+seen in the parameters: two servers reached under one name that way share a default id and
+need a `source_id`. The same holds for a name that means this machine: a socket directory
+(`/var/run/postgresql`), `localhost` or a loopback address (`127.0.0.1`, `::1`). Two
+machines that each read their own server that way get one default id for one table name
+(`postgresql_table:/var/run/postgresql:5432/d.public.t` on both), so when their rows or
+provenance are combined, give each source a distinct `source_id`. No user name, password or other connection parameter enters the id.
 
 A row's record id is its row identifier (site 5), chosen by `record_id_columns` (a column name
 or several, in key order; every source accepts it):
@@ -201,8 +269,9 @@ primary key is refused unless `record_id_columns` names a key or asks for the po
 position names a row only within its batch (ITL-1158).
 
 Name a source (`source_id`) and a key (`record_id_columns`) when its results must stay
-reusable as its data changes: a default in-memory source id is the hash of the whole table, and
-a position moves when rows are inserted or reordered.
+reusable as its data changes: a default in-memory source id is the hash of the whole table (in
+key order with `hash_in_key_order=True`), and a position moves when rows are inserted or
+reordered.
 
 ## Hash site inventory
 
@@ -228,8 +297,8 @@ test session with `-p tests.test_hashing.hash_site_trace`.
 
 | Location | What is hashed | Algorithm / label | Used as | Call sites |
 |---|---|---|---|---|
-| structure hasher | a Python value as a tagged JSON tree | SHA-256 of canonical JSON, `semantic_v1` | every `content_hash()` / `pipeline_hash()`, schema, type and function hash | `hashing/semantic_hashing/semantic_hasher.py:SemanticAwarePythonHasher._hash_to_content_hash` |
-| Arrow hasher | a table after the semantic visitor | starfix, `arrow_v1`; `hash_table_ordered`: `arrow_ordered_v1`; schema: `arrow_v1` | row data hashes, entry ids, row keys, default source ids, table values | `hashing/arrow_hashers.py:StarfixArrowHasher.hash_table`, `hashing/arrow_hashers.py:StarfixArrowHasher.hash_table_ordered`, `hashing/arrow_hashers.py:StarfixArrowHasher.hash_schema`, `hashing/arrow_hashers.py:StarfixArrowHasher._digest` |
+| structure hasher | a Python value as a tagged JSON tree | SHA-256 of canonical JSON, `semantic_v1` | every `content_hash()` / `pipeline_hash()`, type and function hash; the names built on schema hashes | `hashing/semantic_hashing/semantic_hasher.py:SemanticAwarePythonHasher._hash_to_content_hash` |
+| Arrow hasher | a table after the semantic visitor | starfix, `arrow_v1` (a table Orcapod built: float rule on); `hash_table_strict`: `arrow_strict_v1` (a pyarrow table given as a value: every bit counts); `hash_table_ordered`: `arrow_ordered_v1` (a library value's digest: every bit counts); `hash_schema`: `arrow_schema_v1` | row data hashes, entry ids, row keys, default source ids, table values; every schema in an identity | `hashing/arrow_hashers.py:StarfixArrowHasher.hash_table`, `hashing/arrow_hashers.py:StarfixArrowHasher.hash_table_strict`, `hashing/arrow_hashers.py:StarfixArrowHasher.hash_table_ordered`, `hashing/arrow_hashers.py:StarfixArrowHasher.hash_schema`, `hashing/arrow_hashers.py:StarfixArrowHasher._digest`, `hashing/starfix_digest.py:_digest_table`, `hashing/starfix_digest.py:digest_schema` |
 | file hasher | a file's bytes | the configured digest function, label = its name (`sha256` in the data context; others: ITL-1155) | `File` value hash | `hashing/hash_utils.py:hash_file`, `hashing/hash_cachers.py:SqliteHashCacher.get`, `hashing/hash_cachers.py:SqliteHashCacher.put` |
 | directory hasher | a directory tree | Merkle tree of SHA-256 entries, `directory_v1`; file leaves taken with their label | `Directory` value hash | `hashing/directory_hashers.py:BasicDirectoryHasher.hash_directory`, `hashing/directory_hashers.py:_hash_dir` |
 | array value hash | an array: element digest, then order, byte order, struct layout | SHA-256, `ndarray_v1` (the element digest is a step of the same algorithm) | `numpy.ndarray` value hash | `logical_types/numpy_type.py:array_value_digest`, `logical_types/array_format.py:array_digest_v1` |
@@ -238,7 +307,7 @@ test session with `-p tests.test_hashing.hash_site_trace`.
 | Polars value hash | descriptor, `\0`, starfix digest called directly (a step of this algorithm) | SHA-256, `polars_dataframe_v1` / `polars_series_v1` | Polars value hash | `logical_types/polars_type.py:_digest`, `logical_types/polars_type.py:_values_digest` |
 | Polars expression hash | the expression's canonical tree | SHA-256 of canonical JSON, `polars_expr_v1` | `PolarsFilter` identity | `hashing/semantic_hashing/polars_expr.py:polars_expr_content_hash` |
 | value handlers with an ignore list | wrap the value digests above | the type's label | top level, nested, Arrow cell | `logical_types/ignore_list.py:IgnoreListHandler.handle`, `logical_types/ignore_list.py:IgnoreListHandler.hash_ignoring` |
-| parse a stored hash | `"<label>:<hex>"` or `b"<label>:" + digest` | the stored label | saved jobs and pipelines, proxies, a node's saved run hash, a cached output hash | `types.py:ContentHash.from_string`, `types.py:ContentHash.from_prefixed_digest` |
+| parse a stored hash | `"<label>:<hex>"` or `b"<label>:" + digest` | the stored label | saved jobs and pipelines, proxies, a node's saved run hash, a cached output hash | `types/__init__.py:ContentHash.from_string`, `types/__init__.py:ContentHash.from_prefixed_digest` |
 | folds of `Batch` / `GroupBy` | the canonical JSON list of a group's member values, for each system tag | SHA-256 hex after the operation's label: `batch_v1` (`batch.py`), `group_v1` (`group_by.py`); one helper | folded source id and record id | `utils/arrow_utils.py:fold_system_tag_values` |
 | run snapshot | sorted labelled sink hashes | SHA-256 hex, 16 digits | the run URI `<job>@<snapshot>` (a name) | `pipeline/job.py:PipelineJob._prepare_run`, `pipeline/job.py:PipelineJob._prepare_run.<locals>.<genexpr>` |
 | user-class identity | a class's identity record | SHA-256 hex prefix | extension name `name@<fingerprint>` (a name) | `logical_types/user_class_identity.py:identity_string` |
@@ -253,14 +322,15 @@ test session with `-p tests.test_hashing.hash_site_trace`.
 | Location | Hash consumed | Into | Form | Call sites |
 |---|---|---|---|---|
 | nested hash in a structure | any nested hash: types, schemas, upstream streams, value hashes | the enclosing structure hash | `{"__type__": "hash", "label": ..., "digest": ...}` | `hashing/semantic_hashing/semantic_hasher.py:_nested_hash` |
+| schema identity | the `arrow_schema_v1` hashes of a source's or slot's Arrow tag and data schemas, or of a function's output Arrow schema | a source's content and pipeline identity, system-tag column names, the function `uri` | the `ContentHash` objects, nested | `utils/schema_utils.py:arrow_schema_identity`, `utils/schema_utils.py:compute_schema_hash`, `core/data_function.py:DataFunctionBase.output_data_schema_hash` |
 | union and generic alias arguments | argument type hashes, sorted by digest, then label (ordering only) | the type hash, via the nested form | as above | `hashing/semantic_hashing/builtin_handlers.py:_sorted_hashes`, `hashing/semantic_hashing/builtin_handlers.py:_sorted_hashes.<locals>.<lambda>` |
 | logical-type cell, scalar and container | a value-hashed cell's value hash | the Arrow table hash | `<identifier>::<label>:<digest>`; a container cell: count, then per element a marker, a u64 length and the element token | `hashing/visitors.py:SemanticHashingVisitor.visit_extension` |
 | entry-id preimage | the input row's data hash | entry ids, pipeline record id, side-effect log key | `b"<label>:" + digest` | `core/nodes/function_node.py:_build_record_id_preimage` |
 | operator-cache row | the node content hash | `_record_hash` | `b"<label>:" + digest` | `core/nodes/operator_node.py:OperatorJobNode._store_output_stream` |
+| raw-stream tie-break | the Arrow hash (`arrow_v1`) of each row of a tie group | the canonical row order of a raw stream's identity table (compared as bytes, then the table is hashed whole) | `b"<label>:" + digest` | `utils/arrow_utils.py:canonical_identity_row_order` |
 | run snapshot | sink nodes' content hashes | the snapshot | `"<label>:<hex>"` | `pipeline/job.py:PipelineJob._prepare_run.<locals>.<genexpr>` |
 | pandas value hash | the ordered Arrow digest | the pandas value hash | `b"arrow_ordered_v1:" + digest` | `hashing/pandas_value_hash.py:pandas_frame_content_hash`, `hashing/pandas_value_hash.py:pandas_series_content_hash` |
 | directory entry | a file's hash | the directory hash | `b"<label>:" + digest` | `hashing/directory_hashers.py:_hash_dir` |
-| `ListSource` tag function (content mode) | the semantic hash of the function's source text | the source's identity | the `ContentHash`, nested | `core/sources/list_source.py:ListSource._hash_tag_function` |
 | ignore-list value handlers | the pandas digest the handler wraps under its own label | the handler's `ContentHash` | its own procedure's digest | `hashing/semantic_hashing/builtin_handlers.py:PandasDataFrameHandler.digest`, `hashing/semantic_hashing/builtin_handlers.py:PandasSeriesHandler.digest` |
 
 ### Stored values (labelled)
@@ -273,7 +343,7 @@ test session with `-p tests.test_hashing.hash_site_trace`.
 | `_record_hash` of operator-cache and cached-source tables | `core/nodes/operator_node.py:OperatorJobNode._store_output_stream`, `core/sources/cached_source.py:CachedSource._live_records` |
 | side-effect log `record_id`, `record_id_hash` | `side_effects.py:_execute_side_effect_row` |
 | the `_content_hash` column | `core/streams/arrow_table_stream.py:ArrowTableStream._assemble_table.<locals>.hashes`, `core/function_pod.py:FunctionPodStream.as_table.<locals>.all_content_hashes`, `core/function_pod.py:FunctionPodStream.head.<locals>.shown_content_hashes`, `core/function_pod.py:FunctionPodStream.head.<locals>.<lambda>`, `core/nodes/function_node.py:FunctionNodeBase.as_table.<locals>.all_content_hashes`, `core/nodes/function_node.py:FunctionNodeBase._head_of_pairs.<locals>.<lambda>`, `side_effects.py:_table_of_rows` |
-| `__pf_var_function_signature_hash`, `__pf_var_function_content_hash` | `core/data_function.py:PythonDataFunction.__init__` |
+| `__pf_var_function_signature_hash`, `__pf_var_function_content_hash` | `core/data_function.py:function_signature_hash`, `core/data_function.py:function_content_hash`, `core/data_function.py:PythonDataFunction.__init__` |
 | saved pipeline and job files | `pipeline/graph.py:Pipeline.save`, `pipeline/job.py:PipelineJob.save`, `pipeline/job.py:PipelineJob.as_pipeline`, `core/sources/base.py:RootSource._identity_config` |
 | cached file hashes | `hashing/hash_cachers.py:SqliteHashCacher.put` |
 | `InvocationContext.invocation_hash` (`<label>:<hex>::<label>:<hex>`; its redesign is a side-effect follow-up) | `invocation.py:_serialize_component` |
@@ -287,9 +357,9 @@ test session with `-p tests.test_hashing.hash_site_trace`.
 | `schema:` / `instance:` / `node:` path components | `core/nodes/function_node.py:FunctionNodeBase.node_identity_path`, `core/nodes/operator_node.py:OperatorNodeBase.node_identity_path`, `side_effects.py:SideEffectJobNode.attach_databases`, `core/sources/cached_source.py:CachedSource._unversioned_cache_path` |
 | source-node slot names | `core/nodes/source_node.py:SourceNode.from_stream`, `core/nodes/source_node.py:SourceJobNode.from_stream` |
 | source system-tag column name (schema digest) | `utils/schema_utils.py:compute_schema_hash` |
-| system-tag suffixes of `Join`, `MergeJoin`, `Batch`, `GroupBy` | `core/operators/join.py:Join._compute_system_tag_suffixes`, `core/operators/join.py:Join._predict_system_tag_schema`, `core/operators/join.py:Join.static_process`, `core/operators/merge_join.py:MergeJoin._predict_system_tag_schema`, `core/operators/merge_join.py:MergeJoin.binary_static_process`, `core/operators/batch.py:Batch.unary_output_schema`, `core/operators/batch.py:Batch.unary_static_process`, `core/operators/group_by.py:GroupBy.unary_output_schema`, `core/operators/group_by.py:GroupBy.unary_static_process` |
+| system-tag suffixes of `Join`, `MergeJoin`, `Batch`, `GroupBy` | `core/operators/join.py:Join._compute_system_tag_suffixes`, `core/operators/join.py:Join._predict_system_tag_schema`, `core/operators/join.py:Join.static_process`, `core/operators/merge_join.py:MergeJoin._system_tag_suffix`, `core/operators/batch.py:Batch.unary_output_schema`, `core/operators/batch.py:Batch.unary_static_process`, `core/operators/group_by.py:GroupBy.unary_output_schema`, `core/operators/group_by.py:GroupBy.unary_static_process` |
 | a saved hash shown as a digest | `core/nodes/function_node.py:_bare_digest` |
-| source ids (`<kind>:<label>:<hex>`, rule 7) | `core/sources/source_ids.py:hash_source_id`, `core/sources/derived_source.py:DerivedSource._default_source_id` |
+| source ids (`<kind>:<label>:<hex>`, rule 7) | `core/sources/source_ids.py:hash_source_id` |
 
 A name can itself be fed into a hash (the function `uri` in a pod's identity, system-tag
 column names in an entry-id table, a source id in a source's identity and record ids). It
@@ -307,10 +377,10 @@ A record id is the row identifier (rule 8), built from row positions or key valu
 |---|---|
 | observer events (`node_hash`) | `core/nodes/function_node.py:FunctionJobNode.execute`, `core/nodes/function_node.py:FunctionJobNode.async_execute`, `core/nodes/function_node.py:FunctionJobNode._execute_load_only`, `core/nodes/function_node.py:FunctionJobNode._async_execute_load_only`, `core/nodes/function_node.py:FunctionJobNode._async_execute_cache_only`, `core/nodes/operator_node.py:OperatorJobNode.execute`, `core/nodes/operator_node.py:OperatorJobNode.async_execute`, `core/nodes/source_node.py:SourceNodeBase.execute`, `core/nodes/source_node.py:SourceNodeBase.async_execute` |
 | hooks (`pod_hash`) | `core/function_pod.py:_FunctionPodBase._build_post_run_payload` |
-| in-memory graph keys and sort keys | `pipeline/base.py:AbstractPipelineBase.compile`, `pipeline/base.py:AbstractPipelineBase.compile.<locals>.<lambda>`, `pipeline/base.py:AbstractPipelineBase._record_invocation`, `pipeline/base.py:AbstractPipelineBase.to_invocations`, `pipeline/base.py:AbstractPipelineBase.from_invocations`, `pipeline/job.py:PipelineJob.compile` |
-| canonical input order (sort by digest). Inputs with equal pipeline hashes (developer decision, November 16, 2026, ITL-1154: kept as it is): system-tag column names follow the stable pipeline-hash sort; each row's values are sorted by (source id, record id) by `sort_system_tag_values`, so the result does not depend on argument order; the operator's identity holds its inputs as a frozenset | `core/operators/join.py:Join.order_input_streams.<locals>.<lambda>`, `core/operators/merge_join.py:MergeJoin._canonical_order.<locals>.<lambda>` |
+| in-memory graph keys and sort keys | `pipeline/base.py:AbstractPipelineBase.compile`, `pipeline/base.py:AbstractPipelineBase.compile.<locals>.<lambda>`, `pipeline/base.py:AbstractPipelineBase._record_invocation`, `pipeline/base.py:AbstractPipelineBase.to_invocations`, `pipeline/base.py:AbstractPipelineBase.from_invocations`, `pipeline/job.py:PipelineJob.compile`, `pipeline/restrictions.py:sources_read` (the source identity a restriction is kept under, ITL-1218) |
+| canonical input order (sort by digest). Inputs with equal pipeline hashes (developer decision, November 16, 2026, ITL-1154: kept as it is): system-tag column names follow the stable pipeline-hash sort; each row's values are sorted by (source id, record id) by `sort_system_tag_values`, so the result does not depend on argument order; the operator's identity holds its inputs as a frozenset | `core/operators/join.py:Join.order_input_streams.<locals>.<lambda>` |
 | in-memory identity and repr | `core/base.py:ContentIdentifiableBase.__hash__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__hash__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__eq__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__repr__` |
-| comparing a stored hash with the computed one; error text | `core/nodes/operator_node.py:OperatorJobNode._read_run_records`, `core/sources/source_proxy.py:SourceProxy.bind`, `core/data_function_proxy.py:DataFunctionProxy.bind`, `pipeline/job.py:PipelineJob.bind`, `errors.py:EphemeralResultMissingError.__init__` |
+| comparing a stored hash with the computed one; comparing two schema hashes (bind, a stored read, a polled batch); error text | `core/nodes/source_node.py:SourceNodeBase._arrow_type_issue`, `core/sources/derived_source.py:DerivedSource._require_origin_types`, `core/sources/polling_source.py:PollingSource._require_declared_types`, `core/nodes/operator_node.py:OperatorJobNode._read_run_records`, `core/sources/source_proxy.py:SourceProxy.bind`, `core/data_function_proxy.py:DataFunctionProxy.bind`, `pipeline/job.py:PipelineJob.bind`, `errors.py:EphemeralResultMissingError.__init__` |
 
 ---
 
@@ -337,12 +407,12 @@ from orcapod.side_effects import SideEffectPod, InvocationContext
 
 scores = DictSource(
     [{"student": "alice", "math": 90}, {"student": "bob", "math": 75}],
-    tag_columns=["student"],
+    tag_columns=["student"], tag_only_columns=True,
     source_id="scores_v1",
 )
 attendance = DictSource(
     [{"student": "alice", "days": 180}, {"student": "bob", "days": 160}],
-    tag_columns=["student"],
+    tag_columns=["student"], tag_only_columns=True,
     source_id="attendance_v1",
 )
 
@@ -438,7 +508,7 @@ each suffix is the stream's `pipeline_hash()` (sites 1b and 6).
 
 | Site | Item | Value |
 |------|------|-------|
-| 11 | `data_function.uri` | `('grade', '6dfe7b63d41fec2df9e9fe6e7581428678c88866f4927b45dd48a44df73dfe3d', 'v0', 'python.function.v0')` |
+| 11 | `data_function.uri` | `('grade', '6dfe7b63d41fec2df9e9fe6e7581428678c88866f4927b45dd48a44df73dfe3d', 'v0', 'python.function.v1')` |
 | 11 | `output_schema_hash` (uri[1]) | `6dfe7b63d41fec2df9e9fe6e7581428678c88866f4927b45dd48a44df73dfe3d` (bare digest: it is part of a name) |
 
 #### §6 — Pipeline Run Identity
@@ -510,39 +580,105 @@ The table below shows what each class returns from `identity_structure()`.
 
 | Class | `identity_structure()` return value | Notes |
 |-------|--------------------------------------|-------|
-| `Datagram` | `self._ensure_data_table()` — the raw Arrow table | Dispatched to `ArrowTableHandler` → `StarfixArrowHasher` |
+| `Datagram` | `OrcapodTable(self._ensure_data_table())` — the raw Arrow table, marked as one Orcapod built | Dispatched to `OrcapodTableHandler` → `StarfixArrowHasher.hash_table` (the float rule, §9) |
 | `Tag` | User tag columns only (raw Arrow table) | System tag columns (`_tag::*`) excluded — they are provenance metadata, not tag content |
 | `Data` | Data columns only (raw Arrow table) | Source info columns (`_source_*`) excluded — they are provenance metadata, not data content |
 | `EmptyData` | Raises `EmptyDataAccessError` | `content_hash()` is overridden to return a stored `cached_content_hash` directly |
 | `DataFunctionBase` | `self.uri` — `(canonical_function_name, output_schema_hash, major_version, data_function_type_id)` | `output_schema_hash` is site 11; see §5 |
 | `FunctionPod` | `self.data_function` (bare object) when no ctx arg; `(self.data_function, self._ctx_arg_name)` when ctx arg present | `ctx_arg_name` is included when present so a ctx-aware pod has a distinct `content_hash` from a plain pod using the same data function |
-| `ArrowTableStream` | `(producer, argument_symmetry(upstreams))` | Falls back to `(class_name, as_table(all_info=True), tag_columns)` when no producer or producer is not a `PipelineElementProtocol` |
-| `RootSource` (`ArrowTableSource` and every other root source without its own rule) | `(class_name, (tag_schema, data_schema), source_id, key_columns)` | `source_id` is the explicit user-supplied value; when not provided it defaults to `<source kind>:<algorithm label>:<hex>` of the Arrow hash of the raw table (site 4). `key_columns` is the resolved tuple of record-id key columns in key order (`record_id_columns`, or a database or SpiralDB table's primary key), `()` for the position: two sources that differ only in how they name their rows are two sources (developer decision, November 16, 2026, ITL-1154). Data-inclusive base case of the Merkle chain. |
+| `FallThroughPod` (`pod(stream)` over data-tags) | `(plain_pod, ("fall_through_tags", sorted names))` | The data-tags that fall through are a set: sorted by name, so the order of the input's tag columns never moves the pod's hashes or its node's table paths (ITL-1246). The pod's config and a saved job's `fall_through_tags` list them sorted too |
+| `ArrowTableStream` | `(producer, argument_symmetry(upstreams))` | With no producer (a raw stream), or a producer that is not a `PipelineElementProtocol`: `(class_name, identity table in canonical row order, sorted tag columns)`, plus `("data_tags", sorted names)` when it has any. See "The identity of a raw stream" below |
+| `RootSource` (`ArrowTableSource`, `ListSource` and every other root source without its own rule) | `(class_name, (hash_schema(tag), hash_schema(data)), source_id, key_columns)`, the Arrow schemas of its rows (ITL-640) | `source_id` is the explicit user-supplied value; when not provided it defaults to `<source kind>:<algorithm label>:<hex>` of the Arrow hash of the raw table (site 4). `key_columns` is the resolved tuple of record-id key columns in key order (`record_id_columns`, or a database or SpiralDB table's primary key), `()` for the position: two sources that differ only in how they name their rows are two sources (developer decision, November 16, 2026, ITL-1154). Data-inclusive base case of the Merkle chain. A `ListSource` has no rule of its own (developer, November 21, 2026, ITL-1272): its elements and tags enter its identity only through its default source id and its Arrow schema (their types), and with a given `source_id` it is an address like every other source (other elements of the same types leave its content hash unchanged); it used to hold its elements and a hash of its tag function (and took `tag_function_hash_mode`), and with a given `source_id` its content hash did not depend on that id at all. A review of every built-in source's identity is ITL-1311 |
 | `DerivedSource` | Origin node's `content_hash` | Inherits its generating node's identity |
-| `DerivedSource` with `tags_as_data` | `(class_name, output_schema, source_id, key_columns, ("tags_as_data", sorted items))`; the default `source_id` is `tags_as_data:<label>:<hex>` of the hash of `(("DerivedSource", sorted tags_as_data items), (origin,))`, the origin entering through its `content_hash`; `record_id_columns`, when given, is appended to the parameters as `("record_id_columns", (names...))` | The rule of every root source plus the mapping, which enters the `content_hash` directly (two mappings can give one schema) and so also with an explicit `source_id`; the origin enters through the default `source_id` only, which is the content hash an operator node doing the derivation would have |
-| `ListSource` | `(class_name, name, elements, tag function hash, key_columns)` | The elements are the source's identity; `key_columns` as for every root source |
-| `PollingSource` | `(impl.identity(), tag_columns, key_columns)` | The implementer's identity; `key_columns` (always given for a polling source) as for every root source |
-| `SpiralDBTableSource` | `(class_name, output_schema, source_id, key_columns)`, then the sorted `tags_as_data` items when given | A restriction (`where`, `limit`, `asof`) chooses rows of the same table and adds nothing |
+| `DerivedSource` with `tags_as_data` | `(class_name, Arrow schema identity, source_id, key_columns, ("tags_as_data", sorted items))`; `source_id` is required (ITL-1313) | The rule of every root source plus the mapping, which enters the `content_hash` directly (two mappings can give one schema and one `source_id`); the origin enters only through the output schema, so the source is an address like every other source with a given `source_id` |
+| `PollingSource` | `(impl.identity(), sorted tag_columns, key_columns)` | The implementer's identity; the tag columns in name order, so their declared order changes nothing; `key_columns` (always given for a polling source, in key order) as for every root source. Provisional (`PROVISIONAL_SOURCES`, ITL-1314): this identity may change in a later release (ITL-1316) |
+| `SpiralDBTableSource` | `(class_name, Arrow schema identity, source_id, key_columns)`, then the sorted `tags_as_data` items when given | A restriction (`where`, `limit`, `asof`) chooses rows of the same table and adds nothing |
 | `CachedSource` | the wrapped source's identity | |
 | Operators (unary) | `(operator_class_name, upstream_stream)` | Stream reference resolved via `content_resolver` |
-| Operators (binary/N-ary) | `(operator_class_name, argument_symmetry(streams))` | `frozenset` for commutative (Join, MergeJoin); `tuple` for ordered (SemiJoin) |
+| Operators (binary/N-ary) | `(operator_class_name, argument_symmetry(streams))` | `frozenset` for commutative (Join); `tuple` for ordered (SemiJoin, MergeJoin: ITL-1281) |
 | `SelectTagColumns`, `SelectDataColumns`, `DropTagColumns`, `DropDataColumns`, `SelectColumns`, `DropColumns` | `(operator_class_name, sorted unique column names as a list, strict)` | The operators act on a set of names: a list, a tuple, a set, a single string, a repeated or a reordered name list give one hash (ITL-942) |
 | `MapTags`, `MapData`, `MapColumns` | `(operator_class_name, name_map, drop_unmapped, strict)` | An operator's identity is its full configuration, `strict` included, as for the column selection operators (ITL-1160) |
+| `AddTags` | `(operator_class_name, ((name, value), ...) in name order)` | The new tags are a set: the order they are given in never enters the identity, and the tags are placed in name order (ITL-1269) |
+
+**The identity of a raw stream (ITL-1227).** An `ArrowTableStream` built over a table, with
+no producer, is its identity table, its tag columns and its data-tags, and none of them
+enters in an order the input chose (developer, November 18, 2026: "nothing should depend on
+tag order"; November 19, 2026: "take the data, order it as we had agreed and then hash the
+entirety of the arrow table"):
+
+- The identity table holds every column group but the derived `_content_hash` column: user
+  tags, system tags, data, source info, `_context_key` and meta (`__`) columns.
+- Its rows are put in the canonical row order of an identity table (below), and the table
+  is hashed whole, once, by the Arrow table handler (`hash_table`, `arrow_v1`, which ignores
+  column order) and nested as a labelled hash. That one hash covers the schema (names, types,
+  nullability at every level, logical type identifiers), so a stream with no rows still
+  commits to its columns. A row that occurs twice counts twice.
+- The tag columns and the data-tags are sets of names: sorted tuples.
+
+So the same rows in any order, under any order of `tag_columns`, `data_tags` or system-tag
+columns, in any table layout, have one content hash; a changed, missing or duplicated row, or
+another column, is another stream. Operator results and node outputs have a producer and
+hash through it, so this applies only to raw streams. Until ITL-1227 the rows were sorted by
+the tags in tag order and the system tags in column order: a stream with nothing to sort by
+could not be hashed, and rows tied on every tag, or with a list tag, hashed in their given
+order.
+
+**The canonical row order of an identity table** (`arrow_utils.canonical_identity_row_order`;
+developer, November 19, 2026, "option 2"). It is a specification that a native
+implementation must reproduce bit for bit (the developer's parity requirement):
+
+1. **Sort keys.** The user tag columns in name order, then every other column of the table in
+   name order (names compared as Python strings), each taking part only when its type is on
+   this closed list, decided from the type and never by trying a sort
+   (`arrow_utils.canonically_sortable`): every signed and unsigned integer width; `float32`
+   and `float64`; `bool`; `string`, `large_string`, `binary`, `large_binary` and
+   `fixed_size_binary`; `date32` and `date64`; `time32` and `time64`; `timestamp` of any
+   unit and zone; `duration`; `decimal128`; the `null` type. Nothing else is a sort key:
+   no extension type (every logical type, library values included), no `float16`,
+   `decimal256`, list, fixed-size list, struct, map, union or view type, even where pyarrow
+   can sort it. With no sort key, every row is in one tie group (step 3).
+2. **The comparison** (pyarrow's `sort_indices`, ascending, `null_placement="at_end"`, one
+   key after another): integers by value; floats `-inf < ... < -0.0 = 0.0 < ... < +inf < NaN`,
+   every NaN equal to every NaN; `false < true`; strings and binaries by their bytes (UTF-8
+   for strings: code point order, no locale), a shorter prefix first; dates, times,
+   timestamps and durations by their stored integer (a timestamp's zone belongs to the column
+   and is not compared); `decimal128` by value; the `null` type, all equal. A null sorts after
+   every value of its column. `tests/test_utils/test_canonical_identity_row_order.py` fails
+   if pyarrow ever disagrees with this comparison for a type on the list.
+3. **Ties.** Rows equal in every sort key under that comparison form a tie group, ordered by
+   their own row hash: the Arrow hasher's `hash_table` of the one-row table with every
+   column, compared as the bytes of its prefixed digest (`b"arrow_v1:" + digest`). It is
+   computed for the rows of tie groups only, so a table whose sort keys tell every row apart
+   costs one sort. Rows with equal digests are equal rows, so their order cannot change the
+   table. A library value is therefore never ordered by its stored bytes: its column is no
+   sort key, and its row hash holds its value hash.
+
+The float rule of ITL-1179 (§9: `-0.0` hashes as `0.0` and every NaN as the ordinary NaN)
+applies to this table and to its row hashes, which are `hash_table` digests. Rows that differ
+only in such bits tie in step 2 and get equal row hashes in step 3, so their order is
+arbitrary; that is harmless because the final table hash ignores the same bits.
 
 **Inputs of a commutative operator are a set (kept by decision, ITL-942).** A pipeline hash
-covers the structure of the pipeline, not only its schemas. `MergeJoin()(m1, m1)`, a stream
-joined with itself, is a different pipeline from `MergeJoin()(m1, m2)` and has a different
-pipeline hash even when both inputs share one schema. Inputs are an unordered set compared by
-identity, so input order never matters, and two inputs with the same source identity (same
-class, schemas and `source_id`) count as one input: `MergeJoin()(m1, m1b)` hashes like
-`MergeJoin()(m1, m1)` when `m1b` has the `source_id` of `m1`.
+covers the structure of the pipeline, not only its schemas: a commutative operator's identity
+holds its inputs (`Join`'s) as an unordered set compared by identity, so input order never
+matters, and two inputs with the same source identity (same class, schemas and `source_id`)
+count as one input.
 
 **Inputs with equal pipeline hashes tie, and argument order never breaks the tie** (developer
 decision, November 16, 2026, ITL-1154). The system-tag column names follow the stable
 pipeline-hash sort, and each row's system-tag values at the tied positions are sorted by
-(source id, record id) (`arrow_utils.sort_system_tag_values`), so `MergeJoin()(a, b)` and
-`MergeJoin()(b, a)` over two sources of one schema give the same rows, the same column names
+(source id, record id) (`arrow_utils.sort_system_tag_values`), so `Join()(a, b)` and
+`Join()(b, a)` over two sources of one schema give the same rows, the same column names
 and the same hashes.
+
+**`MergeJoin` is ordered** (developer decision, November 19, 2026, ITL-1281). Its identity
+holds its inputs as a tuple, in argument order. So `MergeJoin()(a, b)` and `MergeJoin()(b, a)`
+have different content hashes whenever `a` and `b` are different sources. Their pipeline
+hashes differ only when the inputs' pipeline hashes differ: two inputs of one schema have
+one pipeline hash, so the ordered pair is the same either way (as for `SemiJoin`). Apart
+from the identity, each input's system-tag columns end in its argument index (`:0` for the
+first, `:1` for the second), nothing is sorted, and every merged list holds the first
+argument's value first.
 
 **Known exclusions from `identity_structure()`:**
 
@@ -560,11 +696,13 @@ The pipeline hash uses the same `SemanticAwarePythonHasher` with the **`pipeline
 
 | Class | `pipeline_identity_structure()` return value | Notes |
 |-------|----------------------------------------------|-------|
-| `RootSource` | `(tag_schema, data_schema)` | Base case — schemas only, no data content |
-| `DerivedSource` | `(tag_schema, data_schema)` | Acts as a new root in the pipeline Merkle chain |
+| `RootSource` | `(hash_schema(tag), hash_schema(data))` of its Arrow schemas | Base case — schemas only, no data content; the types of its rows, from its typed zero-row table (ITL-640) |
+| `DerivedSource` | `(hash_schema(tag), hash_schema(data))` | Acts as a new root in the pipeline Merkle chain; the Arrow types are its origin's (its typed zero-row table), so they do not change when rows are stored |
+| `SourceNode`, `SourceJobNode` | `(hash_schema(tag), hash_schema(data))` of the slot's Arrow schemas | A slot made from a stream holds that stream's Arrow types; a slot declared with Python types holds the converter's (one Arrow type per Python type) |
 | `DataFunctionBase` | `self.uri` (same as `identity_structure()`) | Function identity is already schema-only |
 | `FunctionPod` | `self.data_function` **only** (excludes `ctx_arg_name`) | A ctx-aware pod and a plain pod over the same data function share the same `pipeline_hash` value, but have different `uri` values (`ctx_arg_name` is set → `"side_effect_function"` is prepended to the URI) and therefore write to **different** DB table paths |
-| `ArrowTableStream` | `(producer, argument_symmetry(upstreams pipeline hashes))` | `pipeline_resolver` routes upstreams through `pipeline_hash()`. Falls back to `(tag_schema, data_schema)` when producer is absent or not a `PipelineElementProtocol`. |
+| `FallThroughPod` | `(plain_pod, ("fall_through_tags", sorted names))` | As its content identity: the data-tags are a set of names (ITL-1246) |
+| `ArrowTableStream` | `(producer, argument_symmetry(upstreams pipeline hashes))` | `pipeline_resolver` routes upstreams through `pipeline_hash()`. Falls back to the Arrow schema identity of the table it holds when producer is absent or not a `PipelineElementProtocol`. |
 | Operators | `(operator_class_name, argument_symmetry(upstream pipeline hashes))` | Same structure as content identity but using pipeline hashes of upstreams |
 | `SideEffectPodStream` | `(pod, argument_symmetry(upstreams))` | Same as `identity_structure()` |
 
@@ -573,6 +711,10 @@ The pipeline hash uses the same `SemanticAwarePythonHasher` with the **`pipeline
 ---
 
 ### 1c. Polars expression predicates
+
+**Provisional.** `PolarsFilter` is a provisional operator (ITL-1266): its identity, and the
+`polars_expr_v1` hashes that only it feeds, are not frozen with data context v1. Their golden
+values are in the provisional golden files ([Golden Hashes](golden-hashes.md#provisional-files)).
 
 `PolarsFilter.identity_structure()` is `("PolarsFilter", predicates, constraints)`, with
 `predicates` always a tuple. Keyword constraints hash as plain values. A `pl.Expr` predicate
@@ -628,8 +770,8 @@ definition. Consequences:
   change to the encoding of a supported construct needs a new label (`polars_expr_v2`).
 
 The canonical trees of a corpus of expressions are pinned in
-`tests/test_hashing/test_polars_expr_hashing.py`, and their hashes in the golden suite
-([Golden Hashes](golden-hashes.md)).
+`tests/test_hashing/test_polars_expr_hashing.py`, and their hashes in the provisional golden
+files ([Golden Hashes](golden-hashes.md#provisional-files)).
 
 ### 1d. Function values and parameter defaults
 
@@ -680,10 +822,13 @@ registry. Raising is the v0.3 behaviour (developer decision, November 11, 2026);
 pod parameter's default as the column value it would be, which would cover `Path`,
 `datetime`, `date` and numpy scalars, is the follow-up ITL-971.
 
-**Where the hash is used.** As the hash of a function that appears as a value, and as the
-`function_signature_hash` stored with every result row (the
-`__pf_var_function_signature_hash` column), which is this same hash of the pod's function. A
-function pod's identity does **not** use it: the pod's `uri`, its `pipeline_hash()`, its
+**Where the hash is used.** As the hash of a function that appears as a value. The
+`function_signature_hash` stored with every result row is another hash
+(`function_signature_v1`, ITL-1256): the function's declared interface, each input with its
+effective type and default by name and the outputs in declared order, without the function's
+name, module or parameter kinds (see [Data function types](data-function-types.md)). Its
+defaults are hashed the same way, so a default the hasher cannot hash fails a pod at
+construction. A function pod's identity uses neither: the pod's `uri`, its `pipeline_hash()`, its
 `content_hash()` and its table paths depend on the function's name, version and output
 schema (see [Data Function URI Hash](#5-data-function-uri-hash)), so changing a default
 moves no path.
@@ -800,7 +945,7 @@ from orcapod.sources import DictSource
 def dict_row_hash(value):
     source = DictSource(
         data=[{"k": "r", "m": value}],
-        tag_columns=["k"],
+        tag_columns=["k"], tag_only_columns=True,
         data_schema={"k": str, "m": dict[str, int]},
     )
     _, data = next(iter(source.iter_data()))
@@ -844,12 +989,15 @@ dict or set whose nested unordered containers are all already in this order is s
 byte-for-byte as before this rule existed,
 so its hash did not change.
 
-**Signed zero.** A float is hashed by its stored bytes, and `0.0` and `-0.0` have different
-bytes, so they hash differently wherever they appear: in a plain `float` column and as a
-dict key or set element alike, although Python compares them equal (`{0.0: 1} == {-0.0: 1}`).
-Orcapod does not rewrite `-0.0` to `0.0`: pod code can tell them apart (`math.copysign`,
-`repr`, division), so the finer identity can cost a recompute but never serves a wrong
-result. Within one dict or set the two compare equal, so they cannot both be present.
+**Signed zero.** In a table Orcapod builds, `-0.0` hashes as `0.0` wherever it appears: in
+a plain `float` column and as a dict key or set element alike, as Python compares them
+equal (`{0.0: 1} == {-0.0: 1}`) and Polars matches them (the float rule, §9). Orcapod does
+not rewrite `-0.0` to `0.0`: the stored value keeps its sign, and pod code can still tell
+the two apart (`math.copysign`, `repr`, division). So a row that differs from a stored one
+only in the sign of a zero (or the bits of a NaN) has the same input hash and reuses the
+stored result: a function whose result depends on the sign of zero must not rely on
+memoization to tell them apart. Within one dict or set the two compare equal, so they
+cannot both be present.
 
 **Arrow tables are hashed exactly as stored.** `StarfixArrowHasher` never sorts list
 contents. A `list<struct<key, value>>` column that arrives already in Arrow form (an
@@ -886,16 +1034,18 @@ development builds of v0.3.
 When a source is built by `SourceStreamBuilder`, four hash-related operations happen in
 sequence before the stream is returned:
 
-1. **Site 3 — Schema hash:** computed from `(tag_schema, data_schema)`; embedded in system tag column names.
-2. **Site 4 — Default `source_id`:** `<source kind>:<algorithm label>:<hex>` of the raw table hash if no explicit `source_id` is given.
+1. **Site 3 — Schema hash:** computed from the Arrow tag and data schemas of the table; embedded in system tag column names.
+2. **Site 4 — Default `source_id`:** `<source kind>:<algorithm label>:<hex>` of the raw table hash (its rows in key order with `hash_in_key_order=True`, ITL-1272) if no explicit `source_id` is given, for an in-memory source (`arrow_table`, `dict`, `list`, `data_frame`); a file or database source's default names its location instead (`csv:<path>`, `delta_table:<path>`, and so on; see "Default source ids and row identifiers").
 3. **Site 5 — Per-row `record_id`:** the row identifier (`row_<n>` or the key's canonical JSON), stored per row as text.
 4. Two system tag columns, `_tag_source_id::{schema_hash}` and `_tag_record_id::{schema_hash}`, are appended to every row.
 
-`tag_only_columns=True` (every tag plain; the default and the only value v0.3 accepts) enters
-none of these sites: a source built with it has the schema hash, `source_id`, record ids and
-saved config of the same source built without it. Every golden fixture that builds a source
-with tag columns passes `tag_only_columns=True`, so the golden values of data context `v1` pin
-plain tags, and stay pinned when v0.4 makes tags referential by default.
+`tag_only_columns` (the tags kept plain; `True` for all of them) enters these sites only
+through the schema: a data-tag is also a data column, so it is in the data schema and
+the schema hash, while the default `source_id` (the table hash of an in-memory source, or the
+location of a file or database source) and the record ids are those of the same source with
+every tag plain. Every golden fixture that builds a source with tag
+columns passes `tag_only_columns=True`, so the golden values of data context `v1` pin plain
+tags, unchanged now that tags are data-tags by default.
 
 At Join time (site 6), all existing system tag columns are **renamed** by appending a
 topology suffix, encoding the full join lineage into each column name.
@@ -906,10 +1056,10 @@ topology suffix, encoding the full join lineage into each column name.
 
 | Field | Value |
 |---|---|
-| **Inputs** | `(tag_schema, data_schema)` — Python `Schema` objects mapping column names to Python types |
-| **Algorithm** | `SemanticAwarePythonHasher.hash_object((tag_schema, data_schema)).to_hex(schema_n_char)` where `schema_n_char = OrcapodConfig.hashing.schema_n_char` |
+| **Inputs** | the Arrow tag schema and data schema (a data-tag in both) of the source's table, or of a slot |
+| **Algorithm** | `SemanticAwarePythonHasher.hash_object((hash_schema(tag), hash_schema(data))).to_hex(schema_n_char)` (`schema_utils.compute_schema_hash`), where `schema_n_char = OrcapodConfig.hashing.schema_n_char` |
 | **Output format** | Truncated hex `str` (length = `schema_n_char`; `None` = full digest) |
-| **Uniqueness guarantee** | Unique per `(tag_schema, data_schema)` pair; two sources with identical schemas produce identically-named system tag columns, enabling consistent system tag lookup across sources of the same schema |
+| **Uniqueness guarantee** | Unique per Arrow schema pair; two sources whose Arrow schemas are equal (as "The Arrow schema hash" compares them) produce identically-named system tag columns, and two that differ in any Arrow type (`int32` and `int64`) do not |
 | **Known exclusions** | No data content; no source identity; purely structural |
 
 ---
@@ -918,11 +1068,11 @@ topology suffix, encoding the full join lineage into each column name.
 
 | Field | Value |
 |---|---|
-| **Inputs** | Full raw Arrow table (all columns, before any system tag injection) |
-| **Algorithm** | `hash_source_id(<source kind>, StarfixArrowHasher.hash_table(table), hexdigits=path_n_char)` — the table hash is starfix hash format 2: the 3-byte format number `00 00 02` followed by a SHA-256 digest (`starfix` 0.5, byte-identical to the Rust crate) |
-| **Output format** | `str`: `<source kind>:<algorithm label>:<hex>`, for example `dict:arrow_v1:000002fe…`. The source kind is the class's config type key (`SOURCE_KIND`: `arrow_table`, `dict`, `list`, `data_frame`); the label is the one the hash carries. The kind and the label are never shortened; `hashing.path_n_char`, when set, shortens the hex only. The parts hold no `:`, so the id never contains the `::` that separates the parts of a source-info value |
-| **Uniqueness guarantee** | Unique per source kind and raw table content; changes if any cell value changes or the rows are reordered |
-| **Known exclusions** | Used **only** as a fallback when no explicit `source_id` is provided. A user-supplied `source_id` bypasses this computation entirely. |
+| **Inputs** | Full raw Arrow table (all columns, before any system tag injection), its rows in the order given, or sorted by the key columns in key order with `hash_in_key_order=True` (`arrow_utils.key_row_order`, ITL-1272) |
+| **Algorithm** | `hash_source_id(<source kind>, StarfixArrowHasher.hash_table(table))`, at full length — the table hash is starfix hash format 2: the 3-byte format number `00 00 02` followed by a SHA-256 digest (`starfix` 0.6.0 or newer, with the float rule, §9) |
+| **Output format** | `str`: `<source kind>:<algorithm label>:<hex>`, for example `dict:arrow_v1:000002fe…`. The source kind is the class's config type key (`SOURCE_KIND`: `arrow_table`, `dict`, `list`, `data_frame`); the label is the one the hash carries. Nothing is shortened: the hex is the full digest whatever `hashing.path_n_char` says (a default source id is a name; developer, November 16, 2026). The parts hold no `:`, so the id never contains the `::` that separates the parts of a source-info value |
+| **Uniqueness guarantee** | Unique per source kind and raw table content; changes if any cell value changes or the rows are reordered, except with `hash_in_key_order=True`, where a reorder changes nothing and a change of the key columns' order changes the id only when it sorts the table differently (it always changes the content hash, which holds the key columns in key order) |
+| **Known exclusions** | Used **only** as a fallback when no explicit `source_id` is provided. With a user-supplied `source_id` the builder still computes the table hash (it returns it as `table_hash`), but the hash enters neither the id nor the source's identity. |
 
 ---
 
@@ -989,6 +1139,16 @@ tag columns too, so those calls are as wide as the joins make them (ITL-1132).
 | **Output format** | `"<fold label>:<64 hex>"` `str` for the source id and the record id alike: **scalar**, matching the input column's type |
 | **Uniqueness guarantee** | Deterministic per ordered member set, and stable across processes (both primitives are SHA-based). `Batch` and `GroupBy` both order their members deterministically before folding, so an unchanged member set always folds to the same digest |
 | **Known exclusions** | Member order is significant; a permuted member set folds differently. This is why `GroupBy` sorts members by their non-key tag values with `record_id` as a tiebreaker rather than relying on upstream emission order |
+
+> **Merged source-info tokens (data-tags, ITL-1017).** A value merged from several
+> equal elements has one source-info token, folded by the same helper under the merging
+> operation's label: `group_v1:<hex>` for the key of a `GroupBy`, over the members' tokens
+> in member order (the procedure `group_v1` names for its system tags), and
+> `join_v1:<hex>` for a key that is a data-tag on several inputs of a `Join`, over the members'
+> tokens sorted (a missing token last), because a join meets its inputs in an order that
+> is not canonical. The token holds no `::`, so it never reads as a row's token. Source
+> info enters no content or pipeline hash; an operator node's record hash, which includes
+> the source-info columns (ITL-1019), takes a merged token as it takes any token.
 
 > **Why fold rather than list-wrap.** A many-to-one operator turns user tag and data columns
 > into `list[T]`, but system tag columns must stay scalar: `_build_record_id_preimage`
@@ -1116,10 +1276,10 @@ v0.3, `from_fn` and `side_effect_function_pod` defaulted to `"v1.0"`).
 
 | Field | Value |
 |---|---|
-| **Inputs** | `output_data_schema` — a `Schema` mapping output column names to Python types |
-| **Algorithm** | `SemanticAwarePythonHasher.hash_object(output_data_schema).to_hex()` |
+| **Inputs** | the Arrow schema the data context's type converter gives `output_data_schema` (the types the results are stored with; `T \| None` is a nullable field) |
+| **Algorithm** | `SemanticAwarePythonHasher.hash_object((hash_schema(arrow_schema),)).to_hex()`: the labelled schema hash fed into the structure hasher, as for site 3 |
 | **Output format** | `str`: the bare hex digest, 64 characters, no label (the hash is part of a name: the function `uri`, table paths and source-info tokens) |
-| **Uniqueness guarantee** | Unique per output schema definition; changing any output column name or type changes this hash and therefore the function's entire URI, `content_hash`, and `pipeline_hash` |
+| **Uniqueness guarantee** | Unique per Arrow schema of the declared outputs; changing any output column name or type (as the converter writes it: `list[int]` and `list[int \| None]` are one Arrow type today, ITL-1136) changes this hash and therefore the function's entire URI, `content_hash`, and `pipeline_hash` |
 | **Known exclusions** | Input schema not included (changing input schema alone does not change the URI); function code not included (tracked separately via `major_version`); `data_function_type_id` not included (plain string component) |
 
 ---
@@ -1440,25 +1600,134 @@ print(hasher.hash_object(torch.arange(6, dtype=torch.float32).reshape(2, 3)).to_
 
 ### The Arrow schema hash
 
-`StarfixArrowHasher.hash_schema` hashes each field under the same rule as `hash_table`. A
-logical type whose columns are hashed through a value handler (`File`, `Directory`,
-`numpy.ndarray`, torch, the pandas and Polars types, and `list` or `set` of them) is hashed
-as a `large_binary` field that carries the type's identifier; its storage type is not part of
-the hash. A logical type whose stored form is its identity (`Path`, `uuid.UUID`, dataclasses
-and other user classes) is hashed as its storage type with the identifier, because its stored
-values are what a table hash covers.
-Orcapod's own schema hash (site 3), type hash and pipeline hash do not use this method:
-they hash Python types, where a logical type contributes its identifier text only.
+Every schema that enters an identity is hashed as its Arrow schema, by one function,
+`StarfixArrowHasher.hash_schema`, labelled `arrow_schema_v1` (developer decision, November
+18, 2026, ITL-640). The places are: a source's pipeline identity (the base of every pipeline
+hash and stored path) and content identity, an input slot's identity, the system-tag column
+names (site 3) and the output schema in a function's `uri` (site 11). The tag and the data
+schema are hashed apart, so a data-tag (a column in both) is not a plain tag. Which Arrow
+schema: a source's or node's rows' types, from its typed zero-row table, never computed from
+rows (a `DerivedSource` takes its origin's, a `CachedSource` its source's); a slot made from
+a stream, that stream's; a slot or a `PollingSource` declared with Python types, the type
+converter's schema of them, one Arrow type per Python type; a declaration given as a
+`pa.Schema`, exactly that. `output_schema()` still reports Python types.
+
+| Not part of the schema hash | Part of it |
+|---|---|
+| column order and struct field order | the column names and struct field names |
+| large and non-large variants of strings, binaries and lists | integer and float width and signedness (`int32` against `int64`, `int8` against `uint8`) |
+| the name of a list's item field (`item`, `element`) | nullability at every depth: a column, a list item, a struct field |
+| dictionary encoding (a dictionary column is its value type; no stream holds one since ITL-1264, so it never reaches a source's schema hash) | timestamp unit and zone; date32 against date64; decimal precision and scale |
+| field metadata and schema metadata, except a logical type's `ARROW:extension:*` keys | `fixed_size_list` against `list`; the fields of a struct |
+| | a logical type's whole identifier: extension name and metadata (built-in version, a library type's ignore list, a user class's identity record, a native container `list[T]` / `set[T]`), and a logical type against its storage type |
+
+The schema hash is the hash of the declared schema (developer decision, November 21, 2026,
+ITL-640, option (a)). Every logical type, in whatever form it arrives, is first brought to
+one form, its **storage form**: its storage type with its identifier as the
+`ARROW:extension:name` and `ARROW:extension:metadata` field metadata, at any depth (list,
+large list and fixed-size list items, struct children, map keys and items;
+`logical_types.canonical_form.storage_form_schema`). So one logical type has one schema
+hash whether it is a live `pa.ExtensionType`, in the metadata form of a table read back from
+a store or passed through `normalize_extension_columns`, or in a process where pyarrow has
+not registered it. Nothing is looked up and no value handler rewrites a field: the identifier
+pins how the type's values are hashed, so the storage type plus the identifier is enough. This
+holds for every logical type alike, whether its values are hashed by a value handler (`File`,
+`Directory`, `numpy.ndarray`, torch, the pandas and Polars types) or as stored (`Path`,
+`uuid.UUID`, user classes, native containers).
+
+The table hash (§9) is a separate procedure: there a value-hashed type's cells become their
+value hashes in a `large_binary` column that keeps the identifier. So
+`hash_schema(table.schema)` is not the schema inside `hash_table(table)` (it was, under the
+rule before option (a), ITL-981), and nothing may rely on it.
+
+The same walker gives the form of every other place a schema is compared or saved:
+
+- the comparisons of a bind, a polled batch and a stored read (below) compare `hash_schema`
+  of one field each, so they see the storage form;
+- the saved-schema writer (`pipeline.serialization.arrow_type_texts`) writes the storage
+  form, a logical type as `extension<name;hex-metadata>` at any depth;
+- a schema declared in Arrow (a slot's `pa.Schema`, a `PollingSource` implementation's
+  `impl.schema()`) and a saved schema read back (`arrow_schema_from_texts`) take the
+  **declaration form** (`declaration_form_schema`): the storage form, except that a logical
+  type at the top of a column becomes the live type, which is what a source holds and what
+  gives the column its Python type. Arrow cannot build an empty table with an extension type
+  inside a list, struct or map, so an identifier nested in a plain container is never made
+  live: it stays in the storage form, and the slot, a source of the same table and the
+  slot made from that source have one Python schema, one Arrow schema and one pipeline
+  hash.
+
+What a schema must therefore agree on to be one identity:
+
+- **A bind** accepts a source whose Arrow types equal the slot's, as this hash compares them,
+  with one difference allowed: a non-null top-level column where the slot's column is
+  nullable (`T` into `T | None`); nullability below the top level must match. A slot
+  declared `int` means `int64`, `datetime` means `timestamp[us, tz=UTC]`: a source of another
+  width, unit or zone is refused, and the message says to declare the slot from the source
+  or with an Arrow schema (`SourceNode(name, tag_schema=pa.schema(...), data_schema=...)`).
+- **A polled batch** of a `PollingSource` whose declared schema fixed its identity must have
+  the declared Arrow types (`impl.schema()` may return a `pa.Schema`); another is refused
+  before it is committed.
+- **A stored read** of a `DerivedSource` (`node.as_source()`) must have its origin's Arrow
+  types; a store that gives a column back as another type (Delta reads a `fixed_size_list`
+  back as `large_list`, ITL-1275) is refused, naming the column and both types. A column's
+  top-level nullability is the stored rows' own.
+- **A saved job** writes each slot's Arrow types, nested nullability, units and logical type
+  identifiers included, and a load rebuilds them.
 
 ## 9. Arrow Table Hash (`arrow_v1`)
 
 Every Arrow-derived hash in the sites above (row data hashes, `record_id`s built from a
 default `source_id`, base and pipeline entry ids, operator and cached-source record hashes,
-`pa.Table` values) comes from `StarfixArrowHasher.hash_table`, which returns
-`ContentHash(method="arrow_v1", digest=D)`. `D` is 35 bytes: the starfix hash format
-number `00 00 02` followed by a SHA-256 digest, computed by `starfix` 0.5 (hash format 2) and
-byte-identical to the Rust `starfix` crate. The byte layout is specified in starfix's
-`docs/byte-layout-spec.md`.
+datagram and stream hashes) comes from `StarfixArrowHasher.hash_table`, which returns
+`ContentHash(method="arrow_v1", digest=D)` (a pyarrow table given as a value takes
+`hash_table_strict` instead, below). `D` is 35 bytes: the starfix hash format number
+`00 00 02` followed by a SHA-256 digest (hash format 2), computed by `starfix` 0.6.0 or
+newer, the Rust implementation. With the float options off it is byte-identical to the
+pure-Python starfix-python 0.5.0 that Orcapod used before (ITL-1179), except for two
+dictionary inputs starfix-python 0.5.0 got wrong, which starfix 0.6.0 documents: a
+dictionary over a sliced nested fixed-size list (0.5.0 hashed values corrupted by
+pyarrow's `take`, ITL-1223) and a dictionary whose empty dictionary has no offsets buffer
+(0.5.0 raised `TypeError`). So what changed with the move is exactly:
+
+- the hash of a table Orcapod builds that holds `-0.0` or a NaN other than the ordinary
+  one (the float rule, below), and every hash built on it;
+- the hash of a pyarrow `Table` or `RecordBatch` given as a value, and of every structure
+  that contains one: it carries the label `arrow_strict_v1` instead of `arrow_v1` (the same
+  digest bytes; the enclosing structure hash embeds the label);
+- the two dictionary inputs above.
+
+Every other hash is unchanged.
+The byte layout is specified in starfix's `docs/byte-layout-spec.md`. Every starfix call
+goes through one module, `hashing/starfix_digest.py`, which states which use gets which
+float options.
+
+**The float rule.** Orcapod hashes with starfix 0.6.0 or newer, with
+`normalize_negative_zero` and `normalize_nan` explicitly on for the Arrow tables Orcapod
+builds (streams, rows, tag and data datagrams, record-id and entry-id preimages, operator and
+cached-source record hashes, the tables behind default source ids); starfix's own default
+for both is off. So, in `float16`, `float32` and `float64` leaves at every depth (lists,
+fixed-size lists, structs, dictionaries, extension storage), `-0.0` hashes as `0.0` and
+every NaN (any sign or payload, quiet or signalling) as the ordinary NaN: `0x7e00`,
+`0x7fc00000`, `0x7ff8000000000000`. This matches how Orcapod matches float keys (Polars:
+`0.0` equals `-0.0`, NaN equals NaN), so two rows that match as keys have equal key hashes.
+Stored values are never rewritten: only the hash input is normalized. A hash with the
+options on equals the hash with them off of the same table with those values normalized.
+The options are not recorded in the digest, so they are part of the `arrow_v1` procedure,
+not a setting. Out of scope, strict as before (every bit counts): every library value
+hash (numpy and torch arrays, their own canonical bytes; pandas values, through
+`arrow_ordered_v1`; Polars values, their own starfix digest with the options off; a
+pyarrow `Table` or `RecordBatch` given as a value, `arrow_strict_v1`) and the semantic
+hasher's Python floats (function defaults, operator arguments, fields of user classes).
+A library value inside a cell is replaced by its strict value digest before the row is
+hashed, so a row normalizes only its plain float columns.
+
+**The strict table hash (`arrow_strict_v1`).** `StarfixArrowHasher.hash_table_strict` is
+the procedure of `hash_table` with both float options explicitly off: the same Arrow table
+hash by bits. It is used where a value's representation is an Arrow table: a pyarrow
+`Table` or `RecordBatch` given as a value (`ArrowTableHandler`). No logical type defines its
+value hash as an unordered Arrow table hash today; pandas uses the ordered hash and Polars
+its own digest, both strict. A table Orcapod builds enters an identity structure wrapped in
+`OrcapodTable`, which the semantic hasher sends to `hash_table`, so the two never mix.
 
 **Label.** `arrow_v1` names this procedure: the replacement of extension-typed cells by
 their value digests, then the starfix digest. It moves to `arrow_v2` only when an existing
@@ -1467,7 +1736,8 @@ table would get a different digest. Its number is not kept equal to the starfix 
 | Label | starfix | Format prefix | Orcapod |
 |---|---|---|---|
 | `arrow_v0.1` | 0.4 | `00 00 01` | up to v0.2 |
-| `arrow_v1` | 0.5 | `00 00 02` | v0.3 |
+| `arrow_v1` | 0.5 (pure Python); 0.6.0 or newer (Rust), float options on, from v0.4 | `00 00 02` | v0.3 and later |
+| `arrow_strict_v1` | 0.6.0 or newer, float options off | `00 00 02` | v0.4 and later |
 
 **What is part of the hash.** Column names, Arrow types (with large and non-large layouts of
 strings, binaries and lists hashing alike), nullability at every depth (top-level columns,
@@ -1508,11 +1778,15 @@ a null. A source whose table has such a column fails when it is constructed.
 A label names the algorithm that produced one hash. It does not say which generation of
 Orcapod's hashing a stored row belongs to. That is the **data context**: one key that changes
 whenever any existing hash value can change (the hashers, the identity definitions, the
-record-id recipes, the libraries behind them). Orcapod v0.3 writes `std:v1:default`;
-everything stored before v0.3 is the earlier generation, `std:v0.1:default`. The manifest of
+record-id recipes, the libraries behind them). This does not cover a provisional operator:
+its identity, and every hash downstream of one, can change in a later release under the same
+key ([Provisional operators](../concepts/operators.md#provisional-operators)). Orcapod v0.3
+writes `std:v1:default`; everything stored before v0.3 is the earlier generation,
+`std:v0.1:default`. The manifest of
 the current data context is `orcapod/contexts/data/v1.json`. It is frozen at the release of
-the library version that contains it and never edited afterwards, except that its `golden`
-history gains revisions as golden values are added and released
+the library version that contains it and never edited afterwards, except in its `golden`
+section: the history gains revisions as golden values are added and released, and the
+digests of the provisional files, which no release freezes, follow those files
 ([Golden Hashes](golden-hashes.md)). It names the hashers, the
 definitions that live in code, the libraries the hashes depend on and what changed from the
 previous data context. Logical types are not part of it: they are registered in
@@ -1522,11 +1796,11 @@ Every row Orcapod stores names its data context in the column `__data_context`:
 
 | Table | Layout (last path component) |
 |---|---|
-| Function-node pipeline table | `pdb_v2` |
-| Function result table | `rdb_v2` |
+| Function-node pipeline table | `pdb_v1` |
+| Function result table | `rdb_v1`, after the revision of the data function type's record (`.../python.function.v1/rev1/rdb_v1`; see [Data function types](data-function-types.md)) |
 | Operator-node cache table | `odb_v1` |
 | Cached-source table | `sdb_v1` |
-| Side-effect invocation log | `tdb_v2` |
+| Side-effect invocation log | `tdb_v1` |
 
 The layout component is always the last component of a table's path, also when a
 `CachedSource` is given an explicit `cache_path`.
@@ -1538,50 +1812,30 @@ current data context only, and every read of a whole table (a node's `as_table()
 data context out. Those rows are never changed or deleted, and a read that leaves rows out
 logs one warning per table with their number (logger `orcapod.contexts.stored`).
 
-**Tables written before v0.3** have no `__data_context` column and sit at an older layout
-(`pdb_v1`, `rdb_v1`, `tdb_v1`; operator-node and cached-source tables, and the function
-tables of Orcapod v0.1, had no layout component). Orcapod does not read them as results and never modifies them. When it finds
-one it logs one warning with the number of rows:
-
-```text
-Found 3 rows in stored table '...' written by an earlier version of Orcapod (older table
-layout, data context std:v0.1:default). They are not used and are left unchanged; they can
-be migrated later.
-```
-
-**How they are found.** The path of a table holds hashes (of the function's output schema,
-of the pipeline), and a later version of Orcapod can compute other hashes, so an older table
-is not only looked for at the path the current version computes. The beginning of a path
-holds no hash: the job, then the name of the function (`<job>/<function>/...` and
-`<job>/_result/<function>/...`; `side_effect_function/<function>` for a function pod that
-takes the invocation context; `side_effects/<pod>` for a side-effect pod). A node lists the
-tables stored under that beginning (`list_table_paths` of the database) and tells old from
-current by the last path component, the layout: `pdb_v2`, `rdb_v2`, `tdb_v2`, `odb_v1` and
-`sdb_v1` are current, every other table under the name was written before v0.3. Tables
-found this way are not read, so they are reported without a number of rows, once per node:
+**Tables of another layout.** A table whose last path component is not one of the current
+layouts above was written by another build of Orcapod. Orcapod does not read it as results
+and never modifies it. The path of a table holds hashes (of the function's output schema, of
+the pipeline), and another build can compute other hashes, so such a table is not looked for
+at a computed path. The beginning of a path holds no hash: the job, then the name of the
+function (`<job>/<function>/...` and `<job>/_result/<function>/...`;
+`side_effect_function/<function>` for a function pod that takes the invocation context;
+`side_effects/<pod>` for a side-effect pod; `<prefix>/source` for a cached source without
+an explicit `cache_path`). A node lists the tables stored under that beginning
+(`list_table_paths` of the database) and reports, once, those whose last component is not a
+current layout. They are not read, so they are reported without a number of rows:
 
 ```text
 Found 2 tables written by an earlier version of Orcapod under 'my_job/double' (older table
-layout, data context std:v0.1:default): 'my_job/double/.../pdb_v1', ... They are not used
+layout, data context std:v0.1:default): 'my_job/double/.../pdb_v2', ... They are not used
 and are left unchanged; they can be migrated later. Tables of another function or node with
 the same name are included.
 ```
 
-Operator caches and cached sources have no name in their path that survives a change of
-hashes. A job run lists the tables under the job's name once and reports one total of the
-older tables that no function or side-effect node of the job reports itself: operator
-caches, cached sources stored under the job, and tables of nodes the job no longer has.
-
-```text
-Store 'my_job' holds 2 more tables written by an earlier version of Orcapod (operator
-caches, cached sources, or nodes not in this job): '...'. They are not used and are left
-unchanged; they can be migrated later.
-```
-
-Two consequences of finding tables by name: a table of another function or pod with the
-same name in the same job, and a table of another node of the same function, count as well.
-A store that cannot list its tables (`TableListingNotSupportedError`) is not searched this
-way; tables at the path the current version computes are still found.
+A table of another function or pod with the same name in the same job, and a table of
+another node of the same function, count as well. A store that cannot list its tables
+(`TableListingNotSupportedError`) is not searched. Stores of the versions before 0.4 are not
+looked for otherwise: nobody has one, and their layouts had the names the first release uses
+again (ITL-1259).
 
 Nodes that perform side effects are the exception. A completion is looked up by its key, so
 completions stored under another data context would not be found and every side effect would
@@ -1589,8 +1843,8 @@ be performed again. There are two kinds: a side-effect pod (`@side_effect_pod`, 
 `@tap_pod`), whose completions are in its invocation log, and a function pod that takes the
 invocation context (`@function_pod(ctx_arg=...)`), whose completions are in its pipeline and
 result tables. Either raises `SideEffectLogDataContextError`, naming the tables, before
-doing anything when it finds a table at an older layout anywhere under its name, or
-completions of another data context in its current tables. Because every older table under
+doing anything when it finds a table of another layout anywhere under its name, or
+completions of another data context in its current tables. Because every such table under
 the name counts, an unrelated pod of the same name in the same job raises the error too;
 the error names every table so that you can tell. When the database cannot list its tables,
 the node logs one warning saying that it could not look for older completions, and
@@ -1601,10 +1855,9 @@ raises `InputValidationError` naming both keys before anything is written. This 
 nodes, caches and cached sources used directly; inside a `PipelineJob` every input is wrapped
 in a source node of the default data context, so the refusal is not reached there. (What
 should eventually happen instead is tracked in ITL-951.) `std:v0.1:default` itself is not shipped
-with v0.3 and does not resolve; a pipeline or job file saved by v0.2 loads under the current
-data context with a warning when its schema types are supported. Saved files with name-only
-logical extension types are rejected: current saved schema text requires the full logical
-type identifier. See [Saving and loading a job](../concepts/function-pods.md#saving-and-loading-a-job).
+with v0.3 and does not resolve. A pipeline or job file loads only at the current file format
+(`0.4.0`); a file saved by an earlier release is refused, and saved schema text always holds
+the full logical type identifier. See [Saving and loading a job](../concepts/function-pods.md#saving-and-loading-a-job).
 
 `stored_data_contexts(database, record_path)` reads a stored table and counts its rows by
 data context. A table without the column reports all its rows under `std:v0.1:default`.
@@ -1624,14 +1877,14 @@ def double_for_contexts(x: int) -> int:
 context_store = InMemoryArrowDatabase()
 context_job = PipelineJob(name="contexts_demo", database=context_store)
 with context_job:
-    rows = DictSource(data=[{"k": "a", "x": 1}, {"k": "b", "x": 2}], tag_columns=["k"])
+    rows = DictSource(data=[{"k": "a", "x": 1}, {"k": "b", "x": 2}], tag_columns=["k"], tag_only_columns=True)
     _ = double_for_contexts.pod(rows, label="dbl")
 context_job.run()
 
 for path in sorted(context_store.list_sources()):
     print(path[-1], stored_data_contexts(context_store, path))
-# rdb_v2 {'std:v1:default': 2}
-# pdb_v2 {'std:v1:default': 2}
+# rdb_v1 {'std:v1:default': 2}
+# pdb_v1 {'std:v1:default': 2}
 ```
 
 ```python
