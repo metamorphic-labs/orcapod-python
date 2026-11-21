@@ -293,10 +293,16 @@ the stream's results: each row is computed once and every read yields the same r
 feeds the stream. An upstream finishing its first computation during the read is not a change;
 a `clear_cache()` upstream between the reads is, and the next read starts again.
 
-The display marks the tag columns, which come first: in a notebook their headers are bold
-(in an accent colour), a vertical rule separates them from the data columns and a line under
-the header says "bold = tag"; as text, each tag column's name starts with `*` ("* = tag").
-Only the display is marked: the view's table and `as_table()` keep the plain names.
+The display marks each column's role, with the tag columns first, in tag order. In a
+notebook the marks compose: a tag's header is bold (in an accent colour), a data column's is
+underlined, and a [data-tag](data-tags.md), a tag that is also data, has both; a vertical
+rule separates the tags from the data columns, and a line under the header names each mark
+shown ("bold = tag; underlined = data; bold underlined = data-tag (a tag that is also
+data)"). A data-tag is one column, shown once, among the tags. When `columns` asks for the hidden
+column groups, system tags are marked as tags, and the source-info, context,
+content-hash and meta (`__`) columns are left unmarked. As text, a plain tag's name starts with `*` ("* = tag") and a data-tag's
+with `+` ("+ = data-tag (tag and data)"); a data column's is unmarked. Only the display is
+marked: the view's table and `as_table()` keep the plain names.
 
 In the preview, large cells are summarised (an array as `ndarray float64 (2, 3)`, bytes as
 `bytes (300 B)`, long text and long lists shortened); `head().table` keeps the full values.
