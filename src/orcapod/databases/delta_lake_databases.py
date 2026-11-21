@@ -1426,21 +1426,23 @@ class DeltaTableDatabase:
         Checked before anything is buffered (ITL-1334), against what the table holds
         for each column: the stored table (a column's record, else its stored type and
         field metadata) and a batch pending for it. A column's field metadata (beside
-        its record) and its whole nested field tree must be the held ones
-        (``appended_field_change``, ``_added_field_change``): an append may evolve a struct (fields added, omitted or
-        reordered: ``_conformed_to_stored``), but not add a non-nullable field (the
-        stored rows have no value for it, and Delta then cannot read the table), not
-        add a struct field inside a map (Delta's merge cannot), and not change a nested
-        field's name, nullability or metadata, or a map's ``keys_sorted``: the table
-        holds one type per column, so either side's rows would read back with the
-        other's. A column's own nullability and type are left to the append check.
+        its record) and its nested field tree must be the held ones
+        (``appended_field_change``, ``_added_field_change``): an append may evolve a
+        struct (fields added, omitted or reordered: ``_conformed_to_stored``), but not
+        add a non-nullable field (the stored rows have no value for it, and Delta then
+        cannot read the table), not add a struct field inside a map (Delta's merge
+        cannot), and not change a nested field's name or metadata, or a map's
+        ``keys_sorted``: the table holds one type per column, so either side's rows
+        would read back with the other's. Nullability, of the column and of a nested
+        field, is not checked here: the append check and Delta decide it, and whether a
+        change is refused belongs to the nullability audit (ITL-842); the merged record
+        marks a nested field nullable when either side is (``merged_type``). A
+        column's type is left to the append check. A stored table that cannot be
+        loaded is left to the flush, which reports it (``OrcapodDatabaseReadError``).
 
         Args:
             record_path: The table the rows are for.
             schema: The schema of the rows about to be added.
-
-        A stored table that cannot be loaded is left to the flush, which reports it
-        (``OrcapodDatabaseReadError``).
 
         Raises:
             InputValidationError: For the first such column, naming it and the path.
