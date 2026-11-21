@@ -789,14 +789,15 @@ def schema_source_stream_builder() -> dict[str, Any]:
 
     builder = SourceStreamBuilder(_ctx(), DEFAULT_CONFIG)
     out: dict[str, Any] = {}
-    for variant, kwargs in {
+    variants: dict[str, dict[str, Any]] = {
         "default_source_id": {"source_kind": "arrow_table"},
         "named_source_id": {"source_id": "golden_source"},
         "record_id_column": {
             "source_id": "golden_source",
             "record_id_columns": "subject",
         },
-    }.items():
+    }
+    for variant, kwargs in variants.items():
         result = builder.build(_builder_table(), tag_columns=["subject"], **kwargs)
         out[f"{variant}.schema_hash"] = result.schema_hash
         out[f"{variant}.table_hash"] = result.table_hash.to_string()

@@ -2143,6 +2143,48 @@ def canonical_identity_row_order(
     return table.take(pa.array(order, pa.int64()))
 
 
+def key_row_order(table: "pa.Table", key_columns: Sequence[str]) -> "pa.Table":
+    """Return ``table`` with its rows in key order: ``hash_in_key_order`` (ITL-1272).
+
+    Developer decision, November 21, 2026: an in-memory source built with
+    ``hash_in_key_order=True`` hashes its table, for its default source id, with the
+    rows in this order, so the same rows in any order give one default. The order is
+    pyarrow's ``sort_indices`` over ``key_columns`` in the order given (the key order
+    is the explicit ``record_id_columns`` argument, part of the identity), each
+    ascending, nulls last; the rows are then taken with ``take``. It is the sort of
+    ``canonical_identity_row_order`` restricted to the key columns: every key column
+    type (string, integer, boolean, timestamp, date) is ``canonically_sortable``, and
+    no tie-break is needed, because a keyed source refuses a null and a repeated key
+    before it is hashed (``stream_builder.row_identifiers``), so the order is total.
+
+    Args:
+        table: The source's rows, already validated as keyed by ``key_columns``.
+        key_columns: The key columns, in key order; at least one.
+
+    Returns:
+        The same rows and columns, in key order.
+
+    Raises:
+        ValueError: If ``key_columns`` is empty or names a column whose type is not
+            ``canonically_sortable``.
+    """
+    import pyarrow.compute as pc
+
+    if not key_columns:
+        raise ValueError("key_row_order needs at least one key column")
+    unsortable = [
+        c for c in key_columns if not canonically_sortable(table.schema.field(c).type)
+    ]
+    if unsortable:
+        raise ValueError(f"key columns {unsortable} have no canonical order")
+    indices = pc.sort_indices(
+        table,
+        sort_keys=[(c, "ascending") for c in key_columns],
+        null_placement="at_end",
+    )
+    return table.take(indices)
+
+
 def sort_by_tag_columns(table: "pa.Table", tag_keys: tuple[str, ...]) -> "pa.Table":
     """Return ``table`` with its rows in tag order: the sort every presentation uses.
 
