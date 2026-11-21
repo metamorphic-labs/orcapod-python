@@ -254,7 +254,7 @@ Recursively sorting list tags, as `sort_by_tag_columns` does with Polars, would 
 that pin.
 
 **F4. The presentation sort follows tag column order.** `arrow_utils.sort_by_tag_columns`
-backs `as_table(sort_by_tags=True)`, `head()`, the preview and `StreamView.sort_by_tags`.
+backs `as_table(columns={"sort_by_tags": True})`, `head()`, the preview and `StreamView.sort_by_tags`.
 It orders rows by the tags in tag order, then the system tags in column order. Which rows
 `head(n)` shows and their order therefore depend on tag order. It is not a hash.
 Recommended: name order (the same canonical rule) in a separate issue, or an explicit

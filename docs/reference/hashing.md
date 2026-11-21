@@ -183,6 +183,29 @@ category, but we should make it totally overridable"; November 16, 2026, ITL-115
 | `CachedSource` | `cached` | the wrapped source's id |
 | folded source id of `Batch` / `GroupBy` (a system-tag value, not a source) | | `batch_v1:<hex>` / `group_v1:<hex>` |
 
+An in-memory default hashes the table as given, rows in the order they came in: the user may
+have put them in that order on purpose. `hash_in_key_order=True` (a keyword of
+`ArrowTableSource`, `DictSource`, `DataFrameSource` and `ListSource`; developer, November
+21, 2026, ITL-1272: "we actually should take it explicitly as a parameter rather than always
+hashing the sorted version of the data") hashes it with the rows sorted by the key columns
+instead (`arrow_utils.key_row_order`): pyarrow's `sort_indices` over the key columns in the
+order `record_id_columns` gives them, each ascending, nulls last, the rows then taken with
+`take`. The same rows in any order then give one default source id and one content hash. The
+order of the key columns is part of the content hash in every case (the key columns enter the
+root-source identity in key order); the default source id changes with it only when the two
+orders sort the table differently (keys `a = [1, 2, 3]` and `b = [10, 20, 30]` sort the table
+the same way in either order, so both orders give one default source id and two content
+hashes). No tie-break is needed: the source refuses a
+null and a repeated key before anything is hashed (`stream_builder.row_identifiers`), and
+every key type (string, integer, boolean, timestamp, date) sorts, so the order is total. It
+is the sort of the canonical row order of an identity table (below) restricted to the key
+columns, which needs neither the other columns nor a row-hash tie-break, since every key type
+is `canonically_sortable`. The argument is refused without key columns (no key order) and
+with a `source_id`, which the table hash would not determine: the builder still computes the
+table hash, but a given `source_id` is used as given and the hash enters no identity. The
+source presents its rows in the order given
+either way. A saved job keeps the resolved `source_id`, never the argument.
+
 A location default names the data where it lives, so two sources of one kind share it only
 when they read the same data. The generic `DBTableSource` knows no database, so it has no
 default and refuses to be built without a `source_id`. A location whose parts cannot be
@@ -244,8 +267,9 @@ primary key is refused unless `record_id_columns` names a key or asks for the po
 position names a row only within its batch (ITL-1158).
 
 Name a source (`source_id`) and a key (`record_id_columns`) when its results must stay
-reusable as its data changes: a default in-memory source id is the hash of the whole table, and
-a position moves when rows are inserted or reordered.
+reusable as its data changes: a default in-memory source id is the hash of the whole table (in
+key order with `hash_in_key_order=True`), and a position moves when rows are inserted or
+reordered.
 
 ## Hash site inventory
 
@@ -304,7 +328,6 @@ test session with `-p tests.test_hashing.hash_site_trace`.
 | run snapshot | sink nodes' content hashes | the snapshot | `"<label>:<hex>"` | `pipeline/job.py:PipelineJob._prepare_run.<locals>.<genexpr>` |
 | pandas value hash | the ordered Arrow digest | the pandas value hash | `b"arrow_ordered_v1:" + digest` | `hashing/pandas_value_hash.py:pandas_frame_content_hash`, `hashing/pandas_value_hash.py:pandas_series_content_hash` |
 | directory entry | a file's hash | the directory hash | `b"<label>:" + digest` | `hashing/directory_hashers.py:_hash_dir` |
-| `ListSource` tag function (content mode) | the semantic hash of the function's source text | the source's identity | the `ContentHash`, nested | `core/sources/list_source.py:ListSource._hash_tag_function` |
 | ignore-list value handlers | the pandas digest the handler wraps under its own label | the handler's `ContentHash` | its own procedure's digest | `hashing/semantic_hashing/builtin_handlers.py:PandasDataFrameHandler.digest`, `hashing/semantic_hashing/builtin_handlers.py:PandasSeriesHandler.digest` |
 
 ### Stored values (labelled)
@@ -331,7 +354,7 @@ test session with `-p tests.test_hashing.hash_site_trace`.
 | `schema:` / `instance:` / `node:` path components | `core/nodes/function_node.py:FunctionNodeBase.node_identity_path`, `core/nodes/operator_node.py:OperatorNodeBase.node_identity_path`, `side_effects.py:SideEffectJobNode.attach_databases`, `core/sources/cached_source.py:CachedSource._unversioned_cache_path` |
 | source-node slot names | `core/nodes/source_node.py:SourceNode.from_stream`, `core/nodes/source_node.py:SourceJobNode.from_stream` |
 | source system-tag column name (schema digest) | `utils/schema_utils.py:compute_schema_hash` |
-| system-tag suffixes of `Join`, `MergeJoin`, `Batch`, `GroupBy` | `core/operators/join.py:Join._compute_system_tag_suffixes`, `core/operators/join.py:Join._predict_system_tag_schema`, `core/operators/join.py:Join.static_process`, `core/operators/merge_join.py:MergeJoin._predict_system_tag_schema`, `core/operators/merge_join.py:MergeJoin.binary_static_process`, `core/operators/batch.py:Batch.unary_output_schema`, `core/operators/batch.py:Batch.unary_static_process`, `core/operators/group_by.py:GroupBy.unary_output_schema`, `core/operators/group_by.py:GroupBy.unary_static_process` |
+| system-tag suffixes of `Join`, `MergeJoin`, `Batch`, `GroupBy` | `core/operators/join.py:Join._compute_system_tag_suffixes`, `core/operators/join.py:Join._predict_system_tag_schema`, `core/operators/join.py:Join.static_process`, `core/operators/merge_join.py:MergeJoin._system_tag_suffix`, `core/operators/batch.py:Batch.unary_output_schema`, `core/operators/batch.py:Batch.unary_static_process`, `core/operators/group_by.py:GroupBy.unary_output_schema`, `core/operators/group_by.py:GroupBy.unary_static_process` |
 | a saved hash shown as a digest | `core/nodes/function_node.py:_bare_digest` |
 | source ids (`<kind>:<label>:<hex>`, rule 7) | `core/sources/source_ids.py:hash_source_id` |
 
@@ -352,7 +375,7 @@ A record id is the row identifier (rule 8), built from row positions or key valu
 | observer events (`node_hash`) | `core/nodes/function_node.py:FunctionJobNode.execute`, `core/nodes/function_node.py:FunctionJobNode.async_execute`, `core/nodes/function_node.py:FunctionJobNode._execute_load_only`, `core/nodes/function_node.py:FunctionJobNode._async_execute_load_only`, `core/nodes/function_node.py:FunctionJobNode._async_execute_cache_only`, `core/nodes/operator_node.py:OperatorJobNode.execute`, `core/nodes/operator_node.py:OperatorJobNode.async_execute`, `core/nodes/source_node.py:SourceNodeBase.execute`, `core/nodes/source_node.py:SourceNodeBase.async_execute` |
 | hooks (`pod_hash`) | `core/function_pod.py:_FunctionPodBase._build_post_run_payload` |
 | in-memory graph keys and sort keys | `pipeline/base.py:AbstractPipelineBase.compile`, `pipeline/base.py:AbstractPipelineBase.compile.<locals>.<lambda>`, `pipeline/base.py:AbstractPipelineBase._record_invocation`, `pipeline/base.py:AbstractPipelineBase.to_invocations`, `pipeline/base.py:AbstractPipelineBase.from_invocations`, `pipeline/job.py:PipelineJob.compile`, `pipeline/restrictions.py:sources_read` (the source identity a restriction is kept under, ITL-1218) |
-| canonical input order (sort by digest). Inputs with equal pipeline hashes (developer decision, November 16, 2026, ITL-1154: kept as it is): system-tag column names follow the stable pipeline-hash sort; each row's values are sorted by (source id, record id) by `sort_system_tag_values`, so the result does not depend on argument order; the operator's identity holds its inputs as a frozenset | `core/operators/join.py:Join.order_input_streams.<locals>.<lambda>`, `core/operators/merge_join.py:MergeJoin._canonical_order.<locals>.<lambda>` |
+| canonical input order (sort by digest). Inputs with equal pipeline hashes (developer decision, November 16, 2026, ITL-1154: kept as it is): system-tag column names follow the stable pipeline-hash sort; each row's values are sorted by (source id, record id) by `sort_system_tag_values`, so the result does not depend on argument order; the operator's identity holds its inputs as a frozenset | `core/operators/join.py:Join.order_input_streams.<locals>.<lambda>` |
 | in-memory identity and repr | `core/base.py:ContentIdentifiableBase.__hash__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__hash__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__eq__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__repr__` |
 | comparing a stored hash with the computed one; error text | `core/nodes/operator_node.py:OperatorJobNode._read_run_records`, `core/sources/source_proxy.py:SourceProxy.bind`, `core/data_function_proxy.py:DataFunctionProxy.bind`, `pipeline/job.py:PipelineJob.bind`, `errors.py:EphemeralResultMissingError.__init__` |
 
@@ -562,15 +585,14 @@ The table below shows what each class returns from `identity_structure()`.
 | `FunctionPod` | `self.data_function` (bare object) when no ctx arg; `(self.data_function, self._ctx_arg_name)` when ctx arg present | `ctx_arg_name` is included when present so a ctx-aware pod has a distinct `content_hash` from a plain pod using the same data function |
 | `FallThroughPod` (`pod(stream)` over data-tags) | `(plain_pod, ("fall_through_tags", sorted names))` | The data-tags that fall through are a set: sorted by name, so the order of the input's tag columns never moves the pod's hashes or its node's table paths (ITL-1246). The pod's config and a saved job's `fall_through_tags` list them sorted too |
 | `ArrowTableStream` | `(producer, argument_symmetry(upstreams))` | With no producer (a raw stream), or a producer that is not a `PipelineElementProtocol`: `(class_name, identity table in canonical row order, sorted tag columns)`, plus `("data_tags", sorted names)` when it has any. See "The identity of a raw stream" below |
-| `RootSource` (`ArrowTableSource` and every other root source without its own rule) | `(class_name, (tag_schema, data_schema), source_id, key_columns)` | `source_id` is the explicit user-supplied value; when not provided it defaults to `<source kind>:<algorithm label>:<hex>` of the Arrow hash of the raw table (site 4). `key_columns` is the resolved tuple of record-id key columns in key order (`record_id_columns`, or a database or SpiralDB table's primary key), `()` for the position: two sources that differ only in how they name their rows are two sources (developer decision, November 16, 2026, ITL-1154). Data-inclusive base case of the Merkle chain. |
+| `RootSource` (`ArrowTableSource`, `ListSource` and every other root source without its own rule) | `(class_name, (tag_schema, data_schema), source_id, key_columns)` | `source_id` is the explicit user-supplied value; when not provided it defaults to `<source kind>:<algorithm label>:<hex>` of the Arrow hash of the raw table (site 4). `key_columns` is the resolved tuple of record-id key columns in key order (`record_id_columns`, or a database or SpiralDB table's primary key), `()` for the position: two sources that differ only in how they name their rows are two sources (developer decision, November 16, 2026, ITL-1154). Data-inclusive base case of the Merkle chain. A `ListSource` has no rule of its own (developer, November 21, 2026, ITL-1272): its elements and tags enter its identity only through its default source id and its output schema (their types), and with a given `source_id` it is an address like every other source (other elements of the same types leave its content hash unchanged); it used to hold its elements and a hash of its tag function (and took `tag_function_hash_mode`), and with a given `source_id` its content hash did not depend on that id at all. A review of every built-in source's identity is ITL-1311 |
 | `DerivedSource` | Origin node's `content_hash` | Inherits its generating node's identity |
 | `DerivedSource` with `tags_as_data` | `(class_name, output_schema, source_id, key_columns, ("tags_as_data", sorted items))`; `source_id` is required (ITL-1313) | The rule of every root source plus the mapping, which enters the `content_hash` directly (two mappings can give one schema and one `source_id`); the origin enters only through the output schema, so the source is an address like every other source with a given `source_id` |
-| `ListSource` | `(class_name, name, elements, tag function hash, key_columns)` | The elements are the source's identity; `key_columns` as for every root source |
-| `PollingSource` | `(impl.identity(), sorted tag_columns, key_columns)` | The implementer's identity; the tag columns in name order, so their declared order changes nothing; `key_columns` (always given for a polling source, in key order) as for every root source Provisional (`PROVISIONAL_SOURCES`, ITL-1314): this identity may change in a later release (ITL-1316) |
+| `PollingSource` | `(impl.identity(), sorted tag_columns, key_columns)` | The implementer's identity; the tag columns in name order, so their declared order changes nothing; `key_columns` (always given for a polling source, in key order) as for every root source. Provisional (`PROVISIONAL_SOURCES`, ITL-1314): this identity may change in a later release (ITL-1316) |
 | `SpiralDBTableSource` | `(class_name, output_schema, source_id, key_columns)`, then the sorted `tags_as_data` items when given | A restriction (`where`, `limit`, `asof`) chooses rows of the same table and adds nothing |
 | `CachedSource` | the wrapped source's identity | |
 | Operators (unary) | `(operator_class_name, upstream_stream)` | Stream reference resolved via `content_resolver` |
-| Operators (binary/N-ary) | `(operator_class_name, argument_symmetry(streams))` | `frozenset` for commutative (Join, MergeJoin); `tuple` for ordered (SemiJoin) |
+| Operators (binary/N-ary) | `(operator_class_name, argument_symmetry(streams))` | `frozenset` for commutative (Join); `tuple` for ordered (SemiJoin, MergeJoin: ITL-1281) |
 | `SelectTagColumns`, `SelectDataColumns`, `DropTagColumns`, `DropDataColumns`, `SelectColumns`, `DropColumns` | `(operator_class_name, sorted unique column names as a list, strict)` | The operators act on a set of names: a list, a tuple, a set, a single string, a repeated or a reordered name list give one hash (ITL-942) |
 | `MapTags`, `MapData`, `MapColumns` | `(operator_class_name, name_map, drop_unmapped, strict)` | An operator's identity is its full configuration, `strict` included, as for the column selection operators (ITL-1160) |
 | `AddTags` | `(operator_class_name, ((name, value), ...) in name order)` | The new tags are a set: the order they are given in never enters the identity, and the tags are placed in name order (ITL-1269) |
@@ -634,19 +656,26 @@ get equal row hashes in step 3, so their order is arbitrary; that is harmless be
 final table hash ignores the same bits.
 
 **Inputs of a commutative operator are a set (kept by decision, ITL-942).** A pipeline hash
-covers the structure of the pipeline, not only its schemas. `MergeJoin()(m1, m1)`, a stream
-joined with itself, is a different pipeline from `MergeJoin()(m1, m2)` and has a different
-pipeline hash even when both inputs share one schema. Inputs are an unordered set compared by
-identity, so input order never matters, and two inputs with the same source identity (same
-class, schemas and `source_id`) count as one input: `MergeJoin()(m1, m1b)` hashes like
-`MergeJoin()(m1, m1)` when `m1b` has the `source_id` of `m1`.
+covers the structure of the pipeline, not only its schemas: a commutative operator's identity
+holds its inputs (`Join`'s) as an unordered set compared by identity, so input order never
+matters, and two inputs with the same source identity (same class, schemas and `source_id`)
+count as one input.
 
 **Inputs with equal pipeline hashes tie, and argument order never breaks the tie** (developer
 decision, November 16, 2026, ITL-1154). The system-tag column names follow the stable
 pipeline-hash sort, and each row's system-tag values at the tied positions are sorted by
-(source id, record id) (`arrow_utils.sort_system_tag_values`), so `MergeJoin()(a, b)` and
-`MergeJoin()(b, a)` over two sources of one schema give the same rows, the same column names
+(source id, record id) (`arrow_utils.sort_system_tag_values`), so `Join()(a, b)` and
+`Join()(b, a)` over two sources of one schema give the same rows, the same column names
 and the same hashes.
+
+**`MergeJoin` is ordered** (developer decision, November 19, 2026, ITL-1281). Its identity
+holds its inputs as a tuple, in argument order. So `MergeJoin()(a, b)` and `MergeJoin()(b, a)`
+have different content hashes whenever `a` and `b` are different sources. Their pipeline
+hashes differ only when the inputs' pipeline hashes differ: two inputs of one schema have
+one pipeline hash, so the ordered pair is the same either way (as for `SemiJoin`). Apart
+from the identity, each input's system-tag columns end in its argument index (`:0` for the
+first, `:1` for the second), nothing is sorted, and every merged list holds the first
+argument's value first.
 
 **Known exclusions from `identity_structure()`:**
 
@@ -999,7 +1028,7 @@ When a source is built by `SourceStreamBuilder`, four hash-related operations ha
 sequence before the stream is returned:
 
 1. **Site 3 — Schema hash:** computed from `(tag_schema, data_schema)`; embedded in system tag column names.
-2. **Site 4 — Default `source_id`:** `<source kind>:<algorithm label>:<hex>` of the raw table hash if no explicit `source_id` is given, for an in-memory source (`arrow_table`, `dict`, `list`, `data_frame`); a file or database source's default names its location instead (`csv:<path>`, `delta_table:<path>`, and so on; see "Default source ids and row identifiers").
+2. **Site 4 — Default `source_id`:** `<source kind>:<algorithm label>:<hex>` of the raw table hash (its rows in key order with `hash_in_key_order=True`, ITL-1272) if no explicit `source_id` is given, for an in-memory source (`arrow_table`, `dict`, `list`, `data_frame`); a file or database source's default names its location instead (`csv:<path>`, `delta_table:<path>`, and so on; see "Default source ids and row identifiers").
 3. **Site 5 — Per-row `record_id`:** the row identifier (`row_<n>` or the key's canonical JSON), stored per row as text.
 4. Two system tag columns, `_tag_source_id::{schema_hash}` and `_tag_record_id::{schema_hash}`, are appended to every row.
 
@@ -1032,11 +1061,11 @@ topology suffix, encoding the full join lineage into each column name.
 
 | Field | Value |
 |---|---|
-| **Inputs** | Full raw Arrow table (all columns, before any system tag injection) |
-| **Algorithm** | `hash_source_id(<source kind>, StarfixArrowHasher.hash_table(table), hexdigits=path_n_char)` — the table hash is starfix hash format 2: the 3-byte format number `00 00 02` followed by a SHA-256 digest (`starfix` 0.5, byte-identical to the Rust crate) |
-| **Output format** | `str`: `<source kind>:<algorithm label>:<hex>`, for example `dict:arrow_v1:000002fe…`. The source kind is the class's config type key (`SOURCE_KIND`: `arrow_table`, `dict`, `list`, `data_frame`); the label is the one the hash carries. The kind and the label are never shortened; `hashing.path_n_char`, when set, shortens the hex only. The parts hold no `:`, so the id never contains the `::` that separates the parts of a source-info value |
-| **Uniqueness guarantee** | Unique per source kind and raw table content; changes if any cell value changes or the rows are reordered |
-| **Known exclusions** | Used **only** as a fallback when no explicit `source_id` is provided. A user-supplied `source_id` bypasses this computation entirely. |
+| **Inputs** | Full raw Arrow table (all columns, before any system tag injection), its rows in the order given, or sorted by the key columns in key order with `hash_in_key_order=True` (`arrow_utils.key_row_order`, ITL-1272) |
+| **Algorithm** | `hash_source_id(<source kind>, StarfixArrowHasher.hash_table(table))`, at full length — the table hash is starfix hash format 2: the 3-byte format number `00 00 02` followed by a SHA-256 digest (`starfix` 0.5, byte-identical to the Rust crate) |
+| **Output format** | `str`: `<source kind>:<algorithm label>:<hex>`, for example `dict:arrow_v1:000002fe…`. The source kind is the class's config type key (`SOURCE_KIND`: `arrow_table`, `dict`, `list`, `data_frame`); the label is the one the hash carries. Nothing is shortened: the hex is the full digest whatever `hashing.path_n_char` says (a default source id is a name; developer, November 16, 2026). The parts hold no `:`, so the id never contains the `::` that separates the parts of a source-info value |
+| **Uniqueness guarantee** | Unique per source kind and raw table content; changes if any cell value changes or the rows are reordered, except with `hash_in_key_order=True`, where a reorder changes nothing and a change of the key columns' order changes the id only when it sorts the table differently (it always changes the content hash, which holds the key columns in key order) |
+| **Known exclusions** | Used **only** as a fallback when no explicit `source_id` is provided. With a user-supplied `source_id` the builder still computes the table hash (it returns it as `table_hash`), but the hash enters neither the id nor the source's identity. |
 
 ---
 

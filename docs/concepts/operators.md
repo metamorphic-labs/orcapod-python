@@ -97,10 +97,10 @@ reconciled this way.
 
 A plain tag and a data column never share a name across inputs: if one input has `x` as a plain tag column and another has it as a data column only, `Join` (and `MergeJoin`) raises `InputValidationError` when the graph is built; rename one with `map_tags` or `map_data`. A data-tag is the exception: it is one column in both roles, and `Join` merges a key that is a data-tag on its inputs (or plain on one and a data-tag on another) into a data-tag with one data column (see [Data-tags](data-tags.md)).
 
-Column order follows each operator's argument symmetry: commutative operators (`Join`,
-`MergeJoin`) list tag and data columns by first appearance across their inputs in canonical
-pipeline-hash order, so `Join()(a, b)` and `Join()(b, a)` have the same columns in the same
-order, while ordered operators such as `SemiJoin` keep operand order; either way, address
+Column order follows each operator's argument symmetry: a commutative operator (`Join`)
+lists tag and data columns by first appearance across its inputs in canonical pipeline-hash
+order, so `Join()(a, b)` and `Join()(b, a)` have the same columns in the same order, while
+ordered operators such as `SemiJoin` and `MergeJoin` keep operand order; either way, address
 columns by name rather than by position.
 
 ```python
@@ -133,9 +133,15 @@ print(joined.as_table().to_pandas())
 
 ### MergeJoin
 
-Binary join that handles colliding data columns by merging their values into sorted
-`list[T]`. Both inputs must have the same type for any colliding data columns. MergeJoin
-is **commutative** -- the order of the two input streams does not affect the result.
+Binary join that handles colliding data columns by merging their values into `list[T]`.
+Both inputs must have the same type for any colliding data columns. Each merged list holds
+the first input's value, then the second input's: MergeJoin is **ordered, not commutative**
+(ITL-1281). Nothing is sorted, so the lists of a row are parallel: element 0 of every merged
+column (and of its source-info list) comes from the first input's row, element 1 from the
+second's. Any value merges, a struct, a logical type or a null included, and every value is
+kept exactly as the input holds it. (A data column of the Arrow `null` type keeps that type
+in the result's table; read as rows, or on the async path, it is typed `large_string`, as
+every row reads a `null` column: ITL-1319.)
 
 ```python
 from orcapod.sources import DictSource
@@ -143,24 +149,35 @@ from orcapod.operators import MergeJoin
 
 scale_a = DictSource(
     data=[
-        {"subject_id": "mouse_01", "weight": 25.3},
-        {"subject_id": "mouse_02", "weight": 22.1},
+        {"subject_id": "mouse_01", "weight": 25.3, "length": 8.1},
+        {"subject_id": "mouse_02", "weight": 22.1, "length": 7.6},
     ],
     tag_columns=["subject_id"], tag_only_columns=True,
 )
 scale_b = DictSource(
     data=[
-        {"subject_id": "mouse_01", "weight": 24.9},
-        {"subject_id": "mouse_02", "weight": 22.6},
+        {"subject_id": "mouse_01", "weight": 24.9, "length": 8.4},
+        {"subject_id": "mouse_02", "weight": 22.6, "length": 7.2},
     ],
     tag_columns=["subject_id"], tag_only_columns=True,
 )
 
+def by_subject(stream):
+    return sorted(stream, key=lambda row: row[0].as_dict()["subject_id"])
+
 merged = MergeJoin()(scale_a, scale_b)
-for tag, data in merged:
+for tag, data in by_subject(merged):
     print(tag.as_dict(), "->", data.as_dict())
-# {'subject_id': 'mouse_01'} -> {'weight': [24.9, 25.3]}
-# {'subject_id': 'mouse_02'} -> {'weight': [22.1, 22.6]}
+# {'subject_id': 'mouse_01'} -> {'weight': [25.3, 24.9], 'length': [8.1, 8.4]}
+# {'subject_id': 'mouse_02'} -> {'weight': [22.1, 22.6], 'length': [7.6, 7.2]}
+
+swapped = MergeJoin()(scale_b, scale_a)
+for tag, data in by_subject(swapped):
+    print(tag.as_dict(), "->", data.as_dict())
+# {'subject_id': 'mouse_01'} -> {'weight': [24.9, 25.3], 'length': [8.4, 8.1]}
+# {'subject_id': 'mouse_02'} -> {'weight': [22.6, 22.1], 'length': [7.2, 7.6]}
+print(merged.content_hash() == swapped.content_hash())
+# False
 ```
 
 Passing the same two streams to `Join` instead raises `InputValidationError`, because both
@@ -883,6 +900,9 @@ silent widening; convert explicitly.
   where the sync path returns an empty stream with typed columns the async path emits
   nothing. An operator node that received no rows still reads back the sync path's columns
   and Arrow types: its operator applied to its inputs' zero-row tables (ITL-858, ITL-912).
+  A second limit: a data column of the Arrow `null` type (or a list of it) is typed
+  `large_string` in a row, so the async path, which carries rows, types it so too
+  (ITL-1319).
 
 ```python
 import pyarrow as pa

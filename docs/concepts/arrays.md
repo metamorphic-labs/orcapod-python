@@ -252,8 +252,8 @@ for tag, data in kept:
 ```
 
 A stored array costs at least 128 bytes of `.npy` header. The stored bytes are NumPy's and
-may differ between NumPy versions; nothing in Orcapod depends on them. Where an operator has
-to order arrays (`MergeJoin` sorts the values it merges), it orders them by their value hash.
+may differ between NumPy versions; nothing in Orcapod depends on them. No operator orders
+arrays by their values: `MergeJoin` keeps its inputs' arrays in argument order.
 
 ## How an array is hashed
 

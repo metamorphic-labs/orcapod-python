@@ -68,9 +68,17 @@ class ArrowTableSource(RootSource):
     ``SideEffectPod``.  No result is paired with the wrong row, because every
     key includes the row's own data hash.  ``source_id`` must be stable too:
     when omitted it defaults to ``arrow_table:<algorithm label>:<hex>`` of the
-    table hash, which changes with row order.
+    table hash, which changes with row order unless ``hash_in_key_order`` is
+    given (below).
     Whenever row order can vary between runs, pass an explicit ``source_id``
     and set ``record_id_columns`` to a column that is unique per row.
+
+    ``hash_in_key_order`` (keyword-only, ITL-1272): when the source has key columns and
+    no ``source_id``, hash its table for the default source id with the rows sorted by
+    the key columns, in key order, so the same rows in any order give one default
+    source id and one content hash. The rows are presented in the order given either
+    way. Off by default: the rows are hashed in the order given. Refused with a
+    ``source_id`` or without key columns.
 
     Data-tags (ITL-1023): every declared tag column is a data-tag by default,
     also a data column of the same name. ``tag_only_columns`` (keyword-only) names the
@@ -91,6 +99,7 @@ class ArrowTableSource(RootSource):
         infer_nullable: bool = False,
         *,
         tag_only_columns: TagOnlyColumns = (),
+        hash_in_key_order: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -113,6 +122,7 @@ class ArrowTableSource(RootSource):
             source_kind=self.SOURCE_KIND,
             record_id_columns=normalize_record_id_columns(record_id_columns) or (),
             system_tag_columns=system_tag_columns,
+            hash_in_key_order=hash_in_key_order,
         )
 
         self._stream = result.stream

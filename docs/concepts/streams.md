@@ -112,6 +112,16 @@ only what is readily available, never compute, poll or deliver a row (they read 
 code (a function, a predicate, a side effect) and never write to a database. `run()` computes
 (see "Computing a stream outside a job" below).
 
+Tag order is ascending by the tag columns, in the stream's tag order. Rows with equal tags
+are ordered by their system tags (their source ids and record ids) by a read that has them:
+`as_table(columns={"sort_by_tags": True})`, `head(n, columns={"sort_by_tags": True})` and
+the preview. `head().sort_by_tags()` and a view's `sort_by_tags()` have no system tags, so
+they keep such rows in the order the view holds them (see "Computing a stream outside a job" below).
+A null goes last, and so does a null inside a list or a struct: a list tag is ordered
+element by element (a shorter list first when it is the start of a longer one), a struct
+field by field. Sorting moves whole rows and never changes a value: every value shown is
+the stream's own, whatever its Arrow type.
+
 With no rows to show, a head still has the columns and Arrow types the rows would have. To
 learn them it applies each operator to empty (zero-row) tables, which processes no data: a
 chain of N operators applies up to N operators to empty tables (about 60 ms for 20). A filter
@@ -237,7 +247,7 @@ What each kind of object shows:
 sorting included, and applies it to the rows it has before taking the first `n`. The default
 does not sort, as `as_table()` does not, so `head()` shows rows in the order the stream
 holds them. The notebook preview asks for the sorted head, so it shows the same rows
-whatever order they were computed in. With `sort_by_tags=True`, or `all_info=True`, rows are
+whatever order they were computed in. With `columns={"sort_by_tags": True}`, or `all_info=True`, rows are
 sorted by tag first (nulls last; rows with equal tags are ordered by their system tags):
 
 ```python
@@ -283,10 +293,16 @@ the stream's results: each row is computed once and every read yields the same r
 feeds the stream. An upstream finishing its first computation during the read is not a change;
 a `clear_cache()` upstream between the reads is, and the next read starts again.
 
-The display marks the tag columns, which come first: in a notebook their headers are bold
-(in an accent colour), a vertical rule separates them from the data columns and a line under
-the header says "bold = tag"; as text, each tag column's name starts with `*` ("* = tag").
-Only the display is marked: the view's table and `as_table()` keep the plain names.
+The display marks each column's role, with the tag columns first, in tag order. In a
+notebook the marks compose: a tag's header is bold (in an accent colour), a data column's is
+underlined, and a [data-tag](data-tags.md), a tag that is also data, has both; a vertical
+rule separates the tags from the data columns, and a line under the header names each mark
+shown ("bold = tag; underlined = data; bold underlined = data-tag (a tag that is also
+data)"). A data-tag is one column, shown once, among the tags. When `columns` asks for the hidden
+column groups, system tags are marked as tags, and the source-info, context,
+content-hash and meta (`__`) columns are left unmarked. As text, a plain tag's name starts with `*` ("* = tag") and a data-tag's
+with `+` ("+ = data-tag (tag and data)"); a data column's is unmarked. Only the display is
+marked: the view's table and `as_table()` keep the plain names.
 
 In the preview, large cells are summarised (an array as `ndarray float64 (2, 3)`, bytes as
 `bytes (300 B)`, long text and long lists shortened); `head().table` keeps the full values.

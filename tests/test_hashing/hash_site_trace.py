@@ -259,7 +259,6 @@ def run_scenario() -> None:
     warnings.filterwarnings("ignore")
     import orcapod as op
     from orcapod.contexts import get_default_context
-    from orcapod.core.sources.list_source import ListSource
     from tests.test_hashing.golden import cases
 
     _ = cases.compute_all()
@@ -268,19 +267,6 @@ def run_scenario() -> None:
         root = _Path(tmp)
         (root / "a.txt").write_text("alpha")
         _ = hasher.hash_object([op.Directory(root), op.File(root / "a.txt")])
-    _ = ListSource(
-        name="item",
-        data=[1, 2],
-        tag_function=_scenario_tag,
-        expected_tag_keys=["index"],
-        tag_function_hash_mode="content",
-    ).content_hash()
-
-
-def _scenario_tag(element: int, index: int) -> dict[str, int]:
-    """Tag function of the scenario's ``ListSource``."""
-    del element
-    return {"index": index}
 
 
 def pytest_configure(config: pytest.Config) -> None:

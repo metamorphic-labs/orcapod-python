@@ -14,7 +14,7 @@ For each Arrow type T, a source with tags ``k`` (T) and ``n`` (int64) and data `
   summary's computed / reused counts, and ``k`` as presented;
 * ``load_only``: another new job, ``run(load_only=True)``;
 * ``in_memory``: the same graph without a job (``FunctionPodStream``), no database;
-* ``head_sorted``: ``as_table(sort_by_tags=True)`` of the source (``sort_by_tag_columns``
+* ``head_sorted``: ``as_table(columns={"sort_by_tags": True})`` of the source (``sort_by_tag_columns``
   falls back to Polars for types Arrow cannot sort).
 
 Each value is compared with the input exactly (temporal values as integers, floats as

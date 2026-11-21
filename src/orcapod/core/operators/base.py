@@ -90,7 +90,7 @@ def require_matchable_key(operator: str, name: str, arrow_type: pa.DataType) -> 
         raise InputValidationError(
             f"{operator} cannot match rows on the tag {name!r}: its type "
             + f"{arrow_type} holds {part}, which has no rule for comparing values "
-            + "(a map, an interval, a union or a list view has none). Match on "
+            + "(a map, an interval, a union, a list view or a dictionary has none). Match on "
             + "other tags: drop this one from one input "
             + f"(stream.drop_tag_columns([{name!r}]))."
         )

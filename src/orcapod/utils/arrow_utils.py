@@ -1526,27 +1526,6 @@ def aggregated_list_type(
     return pa.large_list(normalize_to_large_types(element_type, keep_null=True))
 
 
-def list_array(values: Sequence[Any], list_type: pa.DataType) -> pa.Array[Any]:
-    """Build a list array of exactly ``list_type`` from Python values.
-
-    The type never depends on ``values``, so an empty array has the same type
-    as a non-empty one. An extension ``list_type`` is built over its storage
-    type and then wrapped.
-
-    Args:
-        values: One Python list per row, holding storage values for an
-            extension element.
-        list_type: The target type, normally from ``aggregated_list_type``.
-
-    Returns:
-        The list array.
-    """
-    if isinstance(list_type, pa.BaseExtensionType):
-        storage = pa.array(values, type=list_type.storage_type)
-        return pa.ExtensionArray.from_storage(list_type, storage)
-    return pa.array(values, type=list_type)
-
-
 def restore_column_types(
     table: pa.Table, reference_types: Mapping[str, pa.DataType]
 ) -> pa.Table:
@@ -1576,74 +1555,6 @@ def restore_column_types(
     return restored.replace_schema_metadata(table.schema.metadata)
 
 
-def build_aggregated_table(
-    rows: "Sequence[Mapping[str, Any]]",
-    input_schema: "pa.Schema",
-    member_columns: "Collection[str]",
-    type_converter: Any,
-) -> "pa.Table":
-    """Build a many->one operator's output table, list-wrapping member columns.
-
-    Columns named in ``member_columns`` become list-valued, one element per
-    group member; every other column keeps its input field unchanged (that is
-    how scalar group keys and folded system tags pass through).
-
-    Logical element types are preserved. Arrow cannot embed an extension type
-    inside a list value field, so ``pa.list_(extension_type)`` raises
-    ``ArrowNotImplementedError`` (see ``docs/dev/design_issues/`` ET1/ET2). For such a
-    column the list is built over the element's *storage* type and then wrapped
-    in the outer ``list[<element>]`` extension type supplied by
-    ``ListLogicalType``. A pod annotated ``-> Path`` therefore groups into
-    ``list[orcapod.path]`` rather than losing the type or failing.
-
-    Args:
-        rows: One mapping per output row, values already aggregated into lists
-            for every member column.
-        input_schema: Schema of the operator's input table, used to derive
-            element types and to pass non-member fields through unchanged.
-        member_columns: Names of the columns to list-wrap.
-        type_converter: The stream's type converter, used to resolve an
-            extension type's Python element type and the matching outer list
-            extension type.
-
-    Returns:
-        The aggregated ``pa.Table``.
-    """
-    member_columns = set(member_columns)
-    fields: list[pa.Field] = []
-    # Extension columns are built as plain storage lists, then re-wrapped.
-    extension_overrides: dict[str, Any] = {}
-
-    for field in input_schema:
-        if field.name not in member_columns:
-            fields.append(field)
-            continue
-        list_type = aggregated_list_type(field.type, type_converter, column=field.name)
-        if isinstance(list_type, pa.BaseExtensionType):
-            extension_overrides[field.name] = list_type
-            fields.append(pa.field(field.name, list_type.storage_type, nullable=False))
-        else:
-            fields.append(pa.field(field.name, list_type, nullable=False))
-
-    table = pa.Table.from_pylist(list(rows), schema=pa.schema(fields))
-
-    for name, list_type in extension_overrides.items():
-        index = table.schema.get_field_index(name)
-        storage = table.column(name)
-        wrapped = pa.chunked_array(
-            [
-                pa.ExtensionArray.from_storage(list_type, chunk)
-                for chunk in storage.chunks
-            ],
-            type=list_type,
-        )
-        table = table.set_column(
-            index, pa.field(name, list_type, nullable=False), wrapped
-        )
-
-    return table
-
-
 def aggregated_list_array(
     values: "pa.Array[Any] | pa.ChunkedArray[Any]",
     offsets: "pa.Int64Array",
@@ -1651,13 +1562,16 @@ def aggregated_list_array(
 ) -> pa.Array[Any]:
     """Build a list column of exactly ``list_type`` from member values and offsets.
 
-    The array-based sibling of ``build_aggregated_table``: the members of row ``i``
-    are ``values[offsets[i]:offsets[i + 1]]``, so the values are never read as Python
-    values and keep every bit (a ``time64[ns]`` value its nanoseconds, a ``date64``
-    its time of day, a float32 signaling NaN its bits; ITL-1250, ITL-1248). The
-    caller puts the values in member order (``take``) and gives ``list_type`` from
-    ``aggregated_list_type``; for a logical element the list is built over the
-    element's storage and wrapped, as ``build_aggregated_table`` does.
+    The one way an operator builds a list column (``Batch``, ``GroupBy``,
+    ``MergeJoin``): the members of row ``i`` are ``values[offsets[i]:offsets[i + 1]]``,
+    so the values are never read as Python values and keep every bit (a
+    ``time64[ns]`` value its nanoseconds, a ``date64`` its time of day, a float32
+    signaling NaN its bits; ITL-1250, ITL-1248, ITL-1281). The caller puts the values
+    in member order (``take``, or a slice of consecutive rows) and gives ``list_type``
+    from ``aggregated_list_type``. Arrow cannot embed an extension type inside a list
+    value field, so for a logical element the list is built over the element's
+    storage and wrapped in the logical list type. The type never depends on the
+    values: a zero-row column has the type of a populated one.
 
     Args:
         values: Every member's value, group after group, in the input column's type.
@@ -2143,11 +2057,53 @@ def canonical_identity_row_order(
     return table.take(pa.array(order, pa.int64()))
 
 
+def key_row_order(table: "pa.Table", key_columns: Sequence[str]) -> "pa.Table":
+    """Return ``table`` with its rows in key order: ``hash_in_key_order`` (ITL-1272).
+
+    Developer decision, November 21, 2026: an in-memory source built with
+    ``hash_in_key_order=True`` hashes its table, for its default source id, with the
+    rows in this order, so the same rows in any order give one default. The order is
+    pyarrow's ``sort_indices`` over ``key_columns`` in the order given (the key order
+    is the explicit ``record_id_columns`` argument, part of the identity), each
+    ascending, nulls last; the rows are then taken with ``take``. It is the sort of
+    ``canonical_identity_row_order`` restricted to the key columns: every key column
+    type (string, integer, boolean, timestamp, date) is ``canonically_sortable``, and
+    no tie-break is needed, because a keyed source refuses a null and a repeated key
+    before it is hashed (``stream_builder.row_identifiers``), so the order is total.
+
+    Args:
+        table: The source's rows, already validated as keyed by ``key_columns``.
+        key_columns: The key columns, in key order; at least one.
+
+    Returns:
+        The same rows and columns, in key order.
+
+    Raises:
+        ValueError: If ``key_columns`` is empty or names a column whose type is not
+            ``canonically_sortable``.
+    """
+    import pyarrow.compute as pc
+
+    if not key_columns:
+        raise ValueError("key_row_order needs at least one key column")
+    unsortable = [
+        c for c in key_columns if not canonically_sortable(table.schema.field(c).type)
+    ]
+    if unsortable:
+        raise ValueError(f"key columns {unsortable} have no canonical order")
+    indices = pc.sort_indices(
+        table,
+        sort_keys=[(c, "ascending") for c in key_columns],
+        null_placement="at_end",
+    )
+    return table.take(indices)
+
+
 def sort_by_tag_columns(table: "pa.Table", tag_keys: tuple[str, ...]) -> "pa.Table":
     """Return ``table`` with its rows in tag order: the sort every presentation uses.
 
-    This is the order of ``as_table(sort_by_tags=True)``, ``head`` and the notebook
-    preview. It is not a hash input: a stream's identity does not depend on row order
+    This is the order of ``as_table(columns={"sort_by_tags": True})``, ``head`` and the
+    notebook preview. It is not a hash input: a stream's identity does not depend on row order
     (``ArrowTableStream._identity_table``: rows ordered by their own hash).
 
     The rows are ordered ascending by the tag columns ``tag_keys``, nulls last. Rows with
@@ -2156,7 +2112,9 @@ def sort_by_tag_columns(table: "pa.Table", tag_keys: tuple[str, ...]) -> "pa.Tab
     result does not depend on the order the rows arrived in whenever the table has system
     tags. A table with neither is returned as it is. A caller that must keep the order of
     a stream with no regular tag column does not call this for it. A tag type Arrow cannot
-    order (a list) is ordered with Polars, nulls last.
+    order (a list, or a struct holding one) is ordered with Polars over the prepared keys
+    only, nulls last at every depth, inside a list or a struct too, as Arrow orders a
+    struct (``_tag_order_by_polars``); the rows are taken from ``table``.
 
     Whole rows move together: a column added to ``table`` before the sort (a content hash)
     stays with its row. Column types and nullability are those of ``table``. Sort before
@@ -2178,14 +2136,53 @@ def sort_by_tag_columns(table: "pa.Table", tag_keys: tuple[str, ...]) -> "pa.Tab
     try:
         return table.sort_by([(key, "ascending") for key in keys])
     except (pa.ArrowNotImplementedError, pa.ArrowTypeError):
-        import polars as pl
+        return table.take(_tag_order_by_polars(table, keys))
 
-        sorted_table = (
-            pl.DataFrame(table)
-            .sort(by=keys, descending=False, nulls_last=True, maintain_order=True)
-            .to_arrow()
-        )
-        return restore_schema_nullability(sorted_table, table.schema)
+
+def _tag_order_by_polars(table: "pa.Table", keys: list[str]) -> "pa.Array[Any]":
+    """Return the row numbers of ``table`` in tag order, ordered with Polars.
+
+    For a tag Arrow cannot order (a list, or a struct holding one). Polars sees only the key
+    columns, prepared (``arrow_keys.polars_key_frame``: a ``date64`` as its integer, a
+    ``decimal256`` as its limbs, ...), and the row numbers; the caller takes the rows
+    from ``table``, so every value is the table's own (ITL-1295). The order is
+    ``arrow_keys.sort_key``: ascending, nulls last, inside a list or a struct too; rows
+    equal on every key keep their order.
+
+    Args:
+        table: The table to order.
+        keys: The columns to order by, in priority.
+
+    Returns:
+        The row numbers, as an ``int64`` array.
+
+    Raises:
+        TypeError: When a key's type holds a part with no order (a map, an interval, a
+            union, a list view, a dictionary), naming the column.
+    """
+    from orcapod.core.operators import arrow_keys
+
+    for key in keys:
+        arrow_type = table.schema.field(key).type
+        part = arrow_keys.part_without_rule(arrow_type, structs=True)
+        if part is not None:
+            raise TypeError(
+                f"cannot order rows by the tag {key!r}: its type {arrow_type} holds "
+                + f"{part}, which has no order (a map, an interval, a union, a list "
+                + "view or a dictionary has none)"
+            )
+    names = [f"key{index}" for index in range(len(keys))]
+    # Frame names of the frame's own: no key can clash with the row-number column.
+    frame = arrow_keys.polars_key_frame(
+        table.select(keys).rename_columns(names), names, "row"
+    )
+    ordered = frame.sort(
+        [arrow_keys.sort_key(name, frame.schema[name]) for name in names],
+        descending=False,
+        nulls_last=True,
+        maintain_order=True,
+    )
+    return ordered.get_column("row").to_arrow()
 
 
 if __name__ == "__main__":

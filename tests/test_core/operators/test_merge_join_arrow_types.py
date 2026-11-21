@@ -44,6 +44,8 @@ from orcapod.utils.arrow_utils import (
     shared_arrow_type,
 )
 
+from .several_items import async_rows
+
 SCHEMA_CONFIGS: tuple[dict[str, bool], ...] = ({}, {"system_tags": True})
 STRUCT = pa.struct([("a", pa.int8()), ("b", pa.string())])
 LARGE_STRUCT = pa.struct([("a", pa.int8()), ("b", pa.large_string())])
@@ -159,7 +161,8 @@ def _pair(
     """Build two streams sharing tag ``probe`` and colliding data column ``x``.
 
     Each row of the left stream holds ``values[0]`` and each row of the right
-    stream ``values[1]``, so every merged row is ``values`` in sorted order.
+    stream ``values[1]``, so every merged row is ``values``: the left value first
+    (``MergeJoin`` is ordered, ITL-1281).
     """
     if right_rows is None:
         right_rows = left_rows
@@ -292,7 +295,8 @@ class TestMergedColumnType:
         if left_rows and right_rows:
             merged = table.column("x").combine_chunks()
             assert isinstance(merged, pa.ExtensionArray)
-            assert merged.storage.to_pylist() == [["/a", "/b"]] * 2
+            # Argument order, not sorted (ITL-1281): the left "/b" first.
+            assert merged.storage.to_pylist() == [["/b", "/a"]] * 2
         _assert_matches_prediction(op, result, left, right)
 
     @pytest.mark.parametrize(("left_rows", "right_rows"), ROW_SHAPES[1:])
@@ -317,15 +321,19 @@ class TestMergedColumnType:
         assert len(table) == 0
         _assert_matches_prediction(op, result, left, right)
 
-    @pytest.mark.xfail(
-        raises=TypeError,
-        strict=True,
-        reason="ITL-839: MergeJoin sorts merged values as Python objects, and "
-        "dicts do not order; pre-existing on main.",
-    )
-    def test_struct_element_with_rows(self) -> None:
-        """Non-empty struct columns cannot be merged yet (ITL-839)."""
-        MergeJoin().static_process(*_pair(STRUCT, STRUCT, STRUCT_VALUES, 2))
+    @pytest.mark.parametrize("order", ["LR", "RL"])
+    def test_struct_element_with_rows(self, order: str) -> None:
+        """Struct columns merge, in argument order (ITL-839, resolved by ITL-1281):
+        nothing is compared."""
+        left, right = _pair(STRUCT, STRUCT, STRUCT_VALUES, 2)
+        first, second = _ordered(left, right, order)
+        op = MergeJoin()
+        result = op.static_process(first, second)
+        table = result.as_table(columns={"source": True})
+        assert _merged_types(table) == (pa.large_list(LARGE_STRUCT), SOURCE_LIST)
+        in_order = STRUCT_VALUES if order == "LR" else STRUCT_VALUES[::-1]
+        assert table.column("x").to_pylist() == [in_order] * 2
+        _assert_matches_prediction(op, result, first, second)
 
 
 def _ordered(
@@ -412,7 +420,9 @@ class TestDisagreeingInputs:
         result = op.static_process(first, second)
         table = result.as_table(columns={"source": True})
         assert _merged_types(table) == (pa.large_list(expected), SOURCE_LIST)
-        assert table.column("x").to_pylist() == [values] * rows
+        # Argument order: the first argument's value first (ITL-1281).
+        in_order = values if order == "LR" else values[::-1]
+        assert table.column("x").to_pylist() == [in_order] * rows
         _assert_matches_prediction(op, result, first, second)
 
     @pytest.mark.parametrize(
@@ -660,19 +670,16 @@ class TestPassThroughColumns:
     def test_null_typed_columns_stay_null(self, rows: int) -> None:
         """``null`` is a type, not a layout: pass-through and merged columns keep it.
 
-        With rows only the pass-through column is checked: merging non-empty
-        null values hits the unorderable-values bug (ITL-839).
+        Null values merge like any value (ITL-1281): nothing is compared.
         """
         keys = pa.array(list(range(rows)), pa.int64())
         nulls = pa.array([None] * rows, pa.null())
-        left_columns: dict[str, pa.Array[Any]] = {"k": keys, "z": nulls}
+        left_columns: dict[str, pa.Array[Any]] = {"k": keys, "z": nulls, "x": nulls}
         right_columns: dict[str, pa.Array[Any]] = {
             "k": keys,
             "y": pa.array([1] * rows, pa.int8()),
+            "x": nulls,
         }
-        if not rows:
-            left_columns["x"] = nulls
-            right_columns["x"] = nulls
         left, right = (
             ArrowTableStream(
                 pa.Table.from_arrays(list(columns.values()), names=list(columns)),
@@ -684,33 +691,63 @@ class TestPassThroughColumns:
         result = op.static_process(left, right)
         table = result.as_table()
         assert table.schema.field("z").type == pa.null()
-        if not rows:
-            assert table.schema.field("x").type == pa.large_list(pa.null())
+        assert table.schema.field("x").type == pa.large_list(pa.null())
+        assert table.column("x").to_pylist() == [[None, None]] * rows
         assert len(table) == rows
         _assert_matches_prediction(op, result, left, right)
 
-    def test_merge_join_merged_values_and_sources_stay_sorted(self) -> None:
-        """Merged values are sorted per row and their source tokens follow them."""
-        left, right = _sources(2)
+    @pytest.mark.parametrize("order", ["LR", "RL"])
+    def test_merge_join_merged_values_and_sources_are_in_argument_order(
+        self, order: str
+    ) -> None:
+        """Merged values and their source tokens are in argument order (ITL-1281)."""
+        left, right = _ordered(*_sources(2), order)
         table = MergeJoin().static_process(left, right).as_table(all_info=True)
         rows = table.sort_by("probe").to_pylist()
-        assert [row["x"] for row in rows] == [[1, 3], [0, 2]]
-        left_tokens = left.as_table(all_info=True).column("_source_x").to_pylist()
-        right_tokens = right.as_table(all_info=True).column("_source_x").to_pylist()
+        left_x = left.as_table().sort_by("probe").column("x").to_pylist()
+        right_x = right.as_table().sort_by("probe").column("x").to_pylist()
+        assert [row["x"] for row in rows] == [list(p) for p in zip(left_x, right_x)]
+        left_tokens = (
+            left.as_table(all_info=True)
+            .sort_by("probe")
+            .column("_source_x")
+            .to_pylist()
+        )
+        right_tokens = (
+            right.as_table(all_info=True)
+            .sort_by("probe")
+            .column("_source_x")
+            .to_pylist()
+        )
         assert [row["_source_x"] for row in rows] == [
-            [left_tokens[0], right_tokens[0]],
-            [right_tokens[1], left_tokens[1]],
+            list(p) for p in zip(left_tokens, right_tokens)
         ]
 
-    def test_types_are_commutative(self) -> None:
-        """Every column has the same type whichever input comes first."""
+    def test_types_do_not_depend_on_argument_order(self) -> None:
+        """Every user, source-info and system-tag column has the same type whichever
+        input comes first; the system-tag names differ only in their positions."""
         left, right = _sources(2)
         op = MergeJoin()
         forward = op.static_process(left, right).as_table(all_info=True)
         backward = op.static_process(right, left).as_table(all_info=True)
-        assert {f.name: f.type for f in forward.schema} == {
-            f.name: f.type for f in backward.schema
-        }
+
+        def types(table: pa.Table) -> dict[str, pa.DataType]:
+            return {
+                f.name: f.type
+                for f in table.schema
+                if not f.name.startswith(constants.SYSTEM_TAG_PREFIX)
+            }
+
+        assert types(forward) == types(backward)
+        assert sorted(
+            str(f.type)
+            for f in forward.schema
+            if f.name.startswith(constants.SYSTEM_TAG_PREFIX)
+        ) == sorted(
+            str(f.type)
+            for f in backward.schema
+            if f.name.startswith(constants.SYSTEM_TAG_PREFIX)
+        )
 
     def test_polars_filter_emits_normalized_input_types(self) -> None:
         """Filtering gives every column its large-normalized input type."""
@@ -908,3 +945,80 @@ class TestContentHashes:
         assert [tag for tag, _ in _row_hashes(result)] == [
             tag for tag, _ in _row_hashes(widened)
         ]
+
+
+# ── null-typed data on the row and async paths (ITL-1319) ─────────────────────
+
+NULL_TYPED: dict[str, tuple[pa.DataType, list[Any]]] = {
+    "null": (pa.null(), [None, None, None]),
+    "large_list<null>": (pa.large_list(pa.null()), [[None], [], None]),
+}
+ITL_1319 = pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="ITL-1319: a datagram normalizes a null-typed column to large_string (Data's "
+    + "null convention, Datagram._init_from_table without keep_null), so the row and "
+    + "async results type a null-typed merged column as large_list<large_string>",
+)
+
+
+def _null_typed_inputs(name: str) -> tuple[ArrowTableStream, ArrowTableStream]:
+    """Two raw streams (a source refuses a null-typed column): tags ``k`` and ``n``,
+    data ``x`` and ``y`` of the null type, the same rows on both sides."""
+    arrow_type, values = NULL_TYPED[name]
+
+    def side() -> ArrowTableStream:
+        return ArrowTableStream(
+            pa.table(
+                {
+                    "k": pa.array([1, 2, 3], pa.int64()),
+                    "n": pa.array([1, 1, 1], pa.int64()),
+                    "x": pa.array(values, arrow_type),
+                    "y": pa.array(values, arrow_type),
+                }
+            ),
+            tag_columns=["k", "n"],
+        )
+
+    return side(), side()
+
+
+def _row_tables(rows: list[Any]) -> dict[int, pa.Table]:
+    return {int(tag.as_dict()["k"]): data.as_table() for tag, data in rows}
+
+
+@pytest.mark.parametrize("name", list(NULL_TYPED))
+def test_null_typed_merged_columns_keep_their_values_on_every_path(name: str) -> None:
+    """The table path keeps the null type; every path keeps the values and nesting."""
+    arrow_type, values = NULL_TYPED[name]
+    left, right = _null_typed_inputs(name)
+    table = MergeJoin().static_process(left, right).as_table().sort_by("k")
+    for column in ("x", "y"):
+        assert table.schema.field(column).type == pa.large_list(arrow_type)
+        assert table.column(column).to_pylist() == [[v, v] for v in values]
+    for rows in (
+        list(MergeJoin()(left, right).iter_data()),
+        async_rows(MergeJoin(), left, right),
+    ):
+        for k, row in _row_tables(rows).items():
+            for column in ("x", "y"):
+                assert row.column(column).to_pylist() == [[values[k - 1]] * 2]
+
+
+@ITL_1319
+@pytest.mark.parametrize("path", ["datagram", "async"])
+@pytest.mark.parametrize("name", list(NULL_TYPED))
+def test_null_typed_merged_columns_keep_their_type_on_the_row_paths(
+    name: str, path: str
+) -> None:
+    """The row (datagram) and async results type ``x`` and ``y`` as the table does."""
+    left, right = _null_typed_inputs(name)
+    table = MergeJoin().static_process(left, right).as_table()
+    rows = (
+        list(MergeJoin()(left, right).iter_data())
+        if path == "datagram"
+        else async_rows(MergeJoin(), left, right)
+    )
+    for row in _row_tables(rows).values():
+        for column in ("x", "y"):
+            assert row.schema.field(column).type == table.schema.field(column).type

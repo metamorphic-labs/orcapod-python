@@ -1231,8 +1231,12 @@ class _JoinedRecords(NamedTuple):
             was not found in either database (cross-session miss). Empty dict
             when no ephemeral misses occurred.
         empty_taginfo_rows: Mapping from ``base_entry_id`` bytes to the raw
-            taginfo row dict for each entry in ``empty_data_tokens``. Used
-            by ``_load_cached_entries`` to reconstruct the tag for each token.
+            taginfo row dict for each entry in ``empty_data_tokens``: its
+            bookkeeping columns (the recomputation index) are read from it.
+        empty_taginfo_tables: Mapping from ``base_entry_id`` bytes to the same
+            taginfo row as a one-row Arrow table, with its stored Arrow types.
+            ``_load_cached_entries`` builds the tag of each token from it, never
+            from Python values (ITL-1298).
         data_tags: The data-tags the pipeline table marks (ITL-1019),
             checked against the node's pod when it has one.
     """
@@ -1241,6 +1245,7 @@ class _JoinedRecords(NamedTuple):
     taginfo_columns: tuple[str, ...]
     empty_data_tokens: dict[bytes, EmptyData]
     empty_taginfo_rows: dict[bytes, dict]
+    empty_taginfo_tables: dict[bytes, pa.Table]
     data_tags: tuple[str, ...]
 
 
@@ -3454,6 +3459,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         ephemeral_df = pl.DataFrame()
         empty_data_tokens: dict[bytes, EmptyData] = {}
         empty_taginfo_rows: dict[bytes, dict] = {}
+        empty_taginfo_tables: dict[bytes, pa.Table] = {}
 
         if ephemeral_taginfo_df.height > 0:
             eph_frame: pl.DataFrame | None = None
@@ -3489,10 +3495,12 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 # No ephemeral database or empty database — all ephemeral rows are misses.
                 unmatched_df = ephemeral_taginfo_df
             # The rows themselves are read from the pipeline table, not from Polars.
-            unmatched_rows = taginfo.take(
+            # Each is kept as its one-row Arrow table too: its tag is built from
+            # that, with the stored types (ITL-1298).
+            unmatched_table = taginfo.take(
                 unmatched_df.get_column(_TAGINFO_ROW).to_arrow()
-            ).to_pylist()
-            for row in unmatched_rows:
+            )
+            for index, row in enumerate(unmatched_table.to_pylist()):
                 base_eid = row[_PIPELINE_BASE_ENTRY_ID_COL]
                 previous = empty_taginfo_rows.get(base_eid)
                 if (
@@ -3525,6 +3533,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                     data_context=self.data_context,
                 )
                 empty_taginfo_rows[base_eid] = row
+                empty_taginfo_tables[base_eid] = unmatched_table.slice(index, 1)
 
         # ------------------------------------------------------------------
         # Keep both databases' rows until latest-recomputation selection. Persistent
@@ -3544,6 +3553,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 taginfo_columns=taginfo_columns,
                 empty_data_tokens=empty_data_tokens,
                 empty_taginfo_rows=empty_taginfo_rows,
+                empty_taginfo_tables=empty_taginfo_tables,
                 data_tags=data_tags,
             )
 
@@ -3582,6 +3592,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             taginfo_columns=taginfo_columns,
             empty_data_tokens=empty_data_tokens,
             empty_taginfo_rows=empty_taginfo_rows,
+            empty_taginfo_tables=empty_taginfo_tables,
             data_tags=data_tags,
         )
 
@@ -3763,14 +3774,23 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             if base_eid in loaded:
                 # A matched result at least as recent as the missing one wins.
                 continue
-            raw_row = fetched.empty_taginfo_rows[base_eid]
-            tag_data = {k: v for k, v in raw_row.items() if k in tag_keys}
-            system_tags = {
-                k: v
-                for k, v in raw_row.items()
-                if k.startswith(constants.SYSTEM_TAG_PREFIX)
-            }
-            tag = Tag(tag_data, system_tags=system_tags, data_context=self.data_context)
+            # The stored row with its stored Arrow types, never Python values: a
+            # type inferred again (int8 as int64) would give the tag another hash,
+            # and a struct tag could not be read at all (ITL-1298). The columns
+            # keep the stored row's order, tags and system tags. The storage-only
+            # data-tag mark is dropped, as for a stored row read into a stream.
+            row_table = without_tag_kind_marks(fetched.empty_taginfo_tables[base_eid])
+            tag = Tag(
+                row_table.select(
+                    [
+                        name
+                        for name in row_table.column_names
+                        if name in tag_keys
+                        or name.startswith(constants.SYSTEM_TAG_PREFIX)
+                    ]
+                ),
+                data_context=self.data_context,
+            )
             loaded[base_eid] = (tag, empty_data)
 
         return loaded
