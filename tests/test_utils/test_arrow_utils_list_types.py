@@ -13,8 +13,8 @@ import pytest
 
 from orcapod.contexts import get_default_type_converter
 from orcapod.utils.arrow_utils import (
+    aggregated_list_array,
     aggregated_list_type,
-    list_array,
     restore_column_types,
 )
 
@@ -95,35 +95,44 @@ class TestAggregatedListType:
             aggregated_list_type(pa.uuid(), converter, column="ids")
 
 
-class TestListArray:
-    """``list_array`` builds an array of exactly the requested list type."""
+class TestAggregatedListArray:
+    """``aggregated_list_array`` builds an array of exactly the requested list type
+    from member values and offsets (ITL-1281)."""
 
     @pytest.mark.parametrize(
         ("element_type", "values"),
         PRIMITIVE_ELEMENTS,
         ids=[str(t) for t, _ in PRIMITIVE_ELEMENTS],
     )
-    @pytest.mark.parametrize("rows", [0, 1])
+    @pytest.mark.parametrize("rows", [0, 1, 2])
     def test_type_is_independent_of_values(
         self, element_type: pa.DataType, values: list[object], rows: int
     ) -> None:
         """Empty and non-empty arrays carry the same, non-inferred type."""
         list_type = pa.large_list(element_type)
-        array = list_array([values] * rows, list_type)
+        members = pa.array(values * rows, element_type)
+        offsets = pa.array([i * len(values) for i in range(rows + 1)], pa.int64())
+        array = aggregated_list_array(members, offsets, list_type)
         assert array.type == list_type
         assert len(array) == rows
         assert array.to_pylist() == [values] * rows
 
-    @pytest.mark.parametrize("rows", [0, 1])
+    @pytest.mark.parametrize("rows", [0, 1, 2])
     def test_extension_list_type_wraps_storage(self, rows: int) -> None:
         """An extension list type is built over its storage and then wrapped."""
         converter = get_default_type_converter()
         list_type = converter.python_type_to_arrow_type(list[Path])
+        element_type = converter.python_type_to_arrow_type(Path)
         assert isinstance(list_type, pa.ExtensionType)
-        storage_values = [["/a", "/b"]] * rows
-        array = list_array(storage_values, list_type)
+        assert isinstance(element_type, pa.ExtensionType)
+        storage = pa.array(["/a", "/b"] * rows, element_type.storage_type)
+        members = pa.ExtensionArray.from_storage(element_type, storage)
+        offsets = pa.array([2 * i for i in range(rows + 1)], pa.int64())
+        array = aggregated_list_array(members, offsets, list_type)
         assert array.type == list_type
         assert len(array) == rows
+        assert isinstance(array, pa.ExtensionArray)
+        assert array.storage.to_pylist() == [["/a", "/b"]] * rows
 
 
 class TestRestoreColumnTypes:

@@ -35,7 +35,6 @@ from orcapod.contexts import get_default_context
 from orcapod.core.nodes.operator_node import OperatorJobNode
 from orcapod.core.sources import CachedSource
 from orcapod.core.sources.derived_source import DerivedSource
-from orcapod.core.sources.list_source import ListSource
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.hashing import directory_hashers, pandas_value_hash
@@ -519,31 +518,6 @@ class TestRenamingALabelMovesEveryHashItFeeds:
         after = snapshot()
         assert BARE_SHA256.fullmatch(before.ljust(64, "0"))
         assert after != before
-
-    def test_list_source_tag_function_hash_carries_its_label(
-        self, request: pytest.FixtureRequest
-    ) -> None:
-        """A ``ListSource`` hashing its tag function's source text embeds that hash."""
-
-        def content_hash() -> bytes:
-            source = ListSource(
-                name="item",
-                data=[1, 2],
-                tag_function=_label_rule_tag,
-                expected_tag_keys=["index"],
-                tag_function_hash_mode="content",
-            )
-            return source.content_hash().digest
-
-        before = content_hash()
-        _ = request.getfixturevalue("renamed_labels")
-        assert content_hash() != before
-
-
-def _label_rule_tag(element: int, index: int) -> dict[str, int]:
-    """Tag function of the ``ListSource`` test: the element's position."""
-    del element
-    return {"index": index}
 
 
 # ---------------------------------------------------------------------------

@@ -225,17 +225,20 @@ def _two_tags() -> DictSource:
 
 
 def test_html_display_marks_exactly_the_tag_columns() -> None:
-    """Tag headers are bold; a rule follows the last tag column on every row."""
+    """Tag headers are bold, data headers underlined (ITL-1304); a rule follows the
+    last tag column on every row."""
     rows = _cells(_two_tags().run())
     header = rows[0]
     assert [name for name, _ in header] == ["a", "b", "x", "y"]
     bold = [name for name, style in header if "font-weight:bold" in style]
     assert bold == ["a", "b"]
+    underlined = [name for name, style in header if "underline" in style]
+    assert underlined == ["x", "y"]
     for row in rows:
         ruled = [i for i, (_, style) in enumerate(row) if "border-right" in style]
         assert ruled == [1]
     html_text = _two_tags().run()._repr_html_()
-    assert "<small>bold = tag</small>" in html_text
+    assert "<small>bold = tag; underlined = data</small>" in html_text
 
 
 def test_html_display_of_odd_names_is_safe() -> None:
@@ -250,16 +253,23 @@ def test_html_display_of_odd_names_is_safe() -> None:
     assert "<b" not in html_text.replace("<br", "")
     header = _cells(source.run())[0]
     assert [name for name, _ in header] == ["a<b", "c&d", "*e"]
-    assert [bool(style) for _, style in header] == [True, False, False]
+    assert ["bold" in style for _, style in header] == [True, False, False]
+    assert ["underline" in style for _, style in header] == [False, True, True]
 
 
-def test_a_view_without_tags_has_no_rule_and_no_legend() -> None:
-    """With no tag column, no header is styled and no legend is shown."""
-    view = ArrowTableStream(pa.table({"x": [3, 1, 2]})).run()
+def test_a_view_without_tags_has_no_rule_and_no_tag_legend() -> None:
+    """With no tag column, no rule is drawn, the data headers are underlined and the
+    legend names the data mark only; the text form has no legend."""
+    view = ArrowTableStream(pa.table({"x": [3, 1, 2], "z": [1, 2, 3]})).run()
     html_text = view._repr_html_()
+    assert "<small>underlined = data</small>" in html_text
     assert "bold = tag" not in html_text
-    assert "style=" not in html_text.split("</style>", 1)[1]
+    assert "border-right" not in html_text
+    assert [style for _, style in _cells(view)[0]] == [
+        "font-weight:normal;text-decoration:underline"
+    ] * 2
     assert "* = tag" not in str(view)
+    assert str(view).split("\n")[1].startswith("shape:")
 
 
 def test_text_display_stars_the_tag_columns() -> None:

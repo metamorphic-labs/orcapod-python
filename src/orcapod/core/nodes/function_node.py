@@ -350,8 +350,13 @@ def run_job_node(
         refuse_unloadable_inputs,
         run_with_dependencies,
     )
+    from orcapod.pipeline.restrictions import refuse_restriction_conflicts
     from orcapod.pipeline.run_summary import warn_row_failures
 
+    # A source read under two restrictions, or a caching operator over a restricted
+    # source, is refused before any source is checked and before anything is
+    # computed or written (ITL-1218).
+    refuse_restriction_conflicts([node])
     # Every source feeding the run first takes in any new data (ITL-1102).
     unchecked = check_sources([node])
     if node.holds_current_run(load_only=load_only):
@@ -1226,8 +1231,12 @@ class _JoinedRecords(NamedTuple):
             was not found in either database (cross-session miss). Empty dict
             when no ephemeral misses occurred.
         empty_taginfo_rows: Mapping from ``base_entry_id`` bytes to the raw
-            taginfo row dict for each entry in ``empty_data_tokens``. Used
-            by ``_load_cached_entries`` to reconstruct the tag for each token.
+            taginfo row dict for each entry in ``empty_data_tokens``: its
+            bookkeeping columns (the recomputation index) are read from it.
+        empty_taginfo_tables: Mapping from ``base_entry_id`` bytes to the same
+            taginfo row as a one-row Arrow table, with its stored Arrow types.
+            ``_load_cached_entries`` builds the tag of each token from it, never
+            from Python values (ITL-1298).
         data_tags: The data-tags the pipeline table marks (ITL-1019),
             checked against the node's pod when it has one.
     """
@@ -1236,7 +1245,102 @@ class _JoinedRecords(NamedTuple):
     taginfo_columns: tuple[str, ...]
     empty_data_tokens: dict[bytes, EmptyData]
     empty_taginfo_rows: dict[bytes, dict]
+    empty_taginfo_tables: dict[bytes, pa.Table]
     data_tags: tuple[str, ...]
+
+
+# ``_fetch_joined_records`` decides which stored rows belong together with Polars,
+# and takes every column of its result from the stored Arrow tables (ITL-1295):
+# Polars changed some types on the way through (a ``date64`` value came back at
+# midnight) and panicked on others (``decimal256``). Polars sees only the
+# bookkeeping columns below and a row number per table; the row-number columns are
+# meta-prefixed, so no stored column has their names.
+_TAGINFO_ROW = "__fetch_taginfo_row"
+_RESULT_ROW = "__fetch_result_row"
+_EPHEMERAL_RESULT_ROW = "__fetch_ephemeral_result_row"
+
+# The pipeline-table columns the fetch filters, joins and reads entries by.
+_TAGINFO_MATCH_COLUMNS = (
+    constants.NODE_CONTENT_HASH_COL,
+    constants.IS_EPHEMERAL_COL,
+    constants.DATA_RECORD_ID,
+    _PIPELINE_BASE_ENTRY_ID_COL,
+    _PIPELINE_RECOMPUTATION_INDEX_COL,
+)
+
+
+def _row_frame(table: "pa.Table", columns: Sequence[str], row: str) -> "pl.DataFrame":
+    """Return a Polars frame of some of a table's columns and its row numbers.
+
+    Args:
+        table: A stored table.
+        columns: The columns to include; those the table lacks are left out.
+        row: The name of the row-number column (``int64``).
+
+    Returns:
+        The frame: the present ``columns``, in their order, then ``row``.
+    """
+    names = [name for name in columns if name in table.column_names]
+    arrays = [table.column(name) for name in names]
+    arrays.append(pa.chunked_array([pa.array(range(table.num_rows), pa.int64())]))
+    return cast(
+        "pl.DataFrame", pl.from_arrow(pa.Table.from_arrays(arrays, names=[*names, row]))
+    )
+
+
+def _joined_from_stored(
+    matched: "pl.DataFrame",
+    taginfo: "pa.Table",
+    parts: Sequence[tuple[str, "pa.Table"]],
+) -> "pa.Table":
+    """Build the joined records from the stored tables, by the rows Polars matched.
+
+    The layout is the one Polars' join and diagonal concatenation gave: every
+    pipeline-table column, then each result column other than the record id (a name
+    the pipeline table also has takes the suffix ``_right``), in order of first
+    appearance across ``parts``; a column a part lacks is null in that part's rows.
+
+    Args:
+        matched: The matched rows, in output order: a ``_TAGINFO_ROW`` column and,
+            per part, its row-number column (null in the other parts' rows). The
+            rows of each part are contiguous, in the order of ``parts``.
+        taginfo: The stored pipeline table.
+        parts: Per result table, in concatenation order: its row-number column in
+            ``matched`` and the table.
+
+    Returns:
+        The joined table, every value taken from the stored tables.
+    """
+    taginfo_rows = matched.get_column(_TAGINFO_ROW).to_arrow()
+    names = list(taginfo.column_names)
+    columns: list[Any] = [taginfo.column(name).take(taginfo_rows) for name in names]
+    # Output name -> stored column name, per part.
+    result_names: dict[str, str] = {}
+    for _, results in parts:
+        for name in results.column_names:
+            if name == constants.DATA_RECORD_ID:
+                continue
+            out = f"{name}_right" if name in taginfo.column_names else name
+            result_names.setdefault(out, name)
+    part_rows = []
+    for row_column, _ in parts:
+        rows = matched.get_column(row_column)
+        part_rows.append(rows.drop_nulls().to_arrow())
+    for out, name in result_names.items():
+        chunks: list[Any] = []
+        arrow_type = next(
+            results.schema.field(name).type
+            for _, results in parts
+            if name in results.column_names
+        )
+        for (_, results), rows in zip(parts, part_rows):
+            if name in results.column_names:
+                chunks.extend(results.column(name).take(rows).chunks)
+            else:
+                chunks.append(pa.nulls(len(rows), arrow_type))
+        names.append(out)
+        columns.append(pa.chunked_array(chunks, type=arrow_type))
+    return pa.Table.from_arrays(columns, names=names)
 
 
 class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
@@ -3273,7 +3377,8 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         data_tags = self._stored_data_tags(taginfo_schema)
 
         is_ephemeral_col = constants.IS_EPHEMERAL_COL
-        taginfo_df = pl.DataFrame(taginfo)
+        # Polars sees only the bookkeeping columns and row numbers (ITL-1295).
+        taginfo_df = _row_frame(taginfo, _TAGINFO_MATCH_COLUMNS, _TAGINFO_ROW)
 
         # Per-node isolation: when sharing a pipeline table in pipeline_hash scope,
         # filter to rows written by this node to prevent cross-node contamination.
@@ -3299,6 +3404,8 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         # Persistent join
         # ------------------------------------------------------------------
         results_schema = None
+        results: pa.Table | None = None
+        eph_results: pa.Table | None = None
         persistent_df = pl.DataFrame()
         if persistent_taginfo_df.height > 0:
             results = self._cached_function_pod.result_database.get_all_records(
@@ -3323,7 +3430,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             else:
                 results_schema = results.schema
                 full_persistent_df = persistent_taginfo_df.join(
-                    pl.DataFrame(results),
+                    _row_frame(results, (constants.DATA_RECORD_ID,), _RESULT_ROW),
                     on=constants.DATA_RECORD_ID,
                     how="inner",
                 )
@@ -3344,9 +3451,10 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         ephemeral_df = pl.DataFrame()
         empty_data_tokens: dict[bytes, EmptyData] = {}
         empty_taginfo_rows: dict[bytes, dict] = {}
+        empty_taginfo_tables: dict[bytes, pa.Table] = {}
 
         if ephemeral_taginfo_df.height > 0:
-            eph_results = None
+            eph_frame: pl.DataFrame | None = None
             if self._ephemeral_cached_pod is not None:
                 eph_results = (
                     self._ephemeral_cached_pod.result_database.get_all_records(
@@ -3360,24 +3468,31 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 )
                 if results_schema is None:
                     results_schema = eph_results.schema
+                eph_frame = _row_frame(
+                    eph_results, (constants.DATA_RECORD_ID,), _EPHEMERAL_RESULT_ROW
+                )
                 ephemeral_df = ephemeral_taginfo_df.join(
-                    pl.DataFrame(eph_results),
+                    eph_frame,
                     on=constants.DATA_RECORD_ID,
                     how="inner",
                 )
 
             # Emit EmptyData tokens for unmatched ephemeral rows
             # (cross-session miss: ephemeral data is gone).
-            if eph_results is not None:
+            if eph_frame is not None:
                 unmatched_df = ephemeral_taginfo_df.join(
-                    pl.DataFrame(eph_results),
-                    on=constants.DATA_RECORD_ID,
-                    how="anti",
+                    eph_frame, on=constants.DATA_RECORD_ID, how="anti"
                 )
             else:
                 # No ephemeral database or empty database — all ephemeral rows are misses.
                 unmatched_df = ephemeral_taginfo_df
-            for row in unmatched_df.iter_rows(named=True):
+            # The rows themselves are read from the pipeline table, not from Polars.
+            # Each is kept as its one-row Arrow table too: its tag is built from
+            # that, with the stored types (ITL-1298).
+            unmatched_table = taginfo.take(
+                unmatched_df.get_column(_TAGINFO_ROW).to_arrow()
+            )
+            for index, row in enumerate(unmatched_table.to_pylist()):
                 base_eid = row[_PIPELINE_BASE_ENTRY_ID_COL]
                 previous = empty_taginfo_rows.get(base_eid)
                 if (
@@ -3410,6 +3525,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                     data_context=self.data_context,
                 )
                 empty_taginfo_rows[base_eid] = row
+                empty_taginfo_tables[base_eid] = unmatched_table.slice(index, 1)
 
         # ------------------------------------------------------------------
         # Keep both databases' rows until latest-recomputation selection. Persistent
@@ -3429,6 +3545,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 taginfo_columns=taginfo_columns,
                 empty_data_tokens=empty_data_tokens,
                 empty_taginfo_rows=empty_taginfo_rows,
+                empty_taginfo_tables=empty_taginfo_tables,
                 data_tags=data_tags,
             )
 
@@ -3438,10 +3555,17 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 pl.col(_PIPELINE_BASE_ENTRY_ID_COL).is_in(base_entry_ids)
             )
 
-        joined = merged_df.to_arrow()
-        # Polars drops field metadata and nullable flags: restore them from the
-        # pipeline table in every case (its data-tag marker included), and from
-        # the result table when one was read.
+        # Every column comes from the stored tables, by the rows Polars matched; the
+        # ephemeral rows come first, as concatenated above.
+        parts: list[tuple[str, pa.Table]] = []
+        if ephemeral_df.height > 0:
+            parts.append((_EPHEMERAL_RESULT_ROW, cast("pa.Table", eph_results)))
+        if persistent_df.height > 0:
+            parts.append((_RESULT_ROW, cast("pa.Table", results)))
+        joined = _joined_from_stored(merged_df, taginfo, parts)
+        # The table is built from arrays, with no field flags: restore them from the
+        # pipeline table in every case (its data-tag marker included), and from the
+        # result table when one was read.
         joined = arrow_utils.restore_schema_nullability(
             joined,
             *(
@@ -3460,6 +3584,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             taginfo_columns=taginfo_columns,
             empty_data_tokens=empty_data_tokens,
             empty_taginfo_rows=empty_taginfo_rows,
+            empty_taginfo_tables=empty_taginfo_tables,
             data_tags=data_tags,
         )
 
@@ -3641,14 +3766,23 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             if base_eid in loaded:
                 # A matched result at least as recent as the missing one wins.
                 continue
-            raw_row = fetched.empty_taginfo_rows[base_eid]
-            tag_data = {k: v for k, v in raw_row.items() if k in tag_keys}
-            system_tags = {
-                k: v
-                for k, v in raw_row.items()
-                if k.startswith(constants.SYSTEM_TAG_PREFIX)
-            }
-            tag = Tag(tag_data, system_tags=system_tags, data_context=self.data_context)
+            # The stored row with its stored Arrow types, never Python values: a
+            # type inferred again (int8 as int64) would give the tag another hash,
+            # and a struct tag could not be read at all (ITL-1298). The columns
+            # keep the stored row's order, tags and system tags. The storage-only
+            # data-tag mark is dropped, as for a stored row read into a stream.
+            row_table = without_tag_kind_marks(fetched.empty_taginfo_tables[base_eid])
+            tag = Tag(
+                row_table.select(
+                    [
+                        name
+                        for name in row_table.column_names
+                        if name in tag_keys
+                        or name.startswith(constants.SYSTEM_TAG_PREFIX)
+                    ]
+                ),
+                data_context=self.data_context,
+            )
             loaded[base_eid] = (tag, empty_data)
 
         return loaded
@@ -3866,6 +4000,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         from dataclasses import replace
 
         from orcapod.pipeline.node_run import commit_run
+        from orcapod.pipeline.restrictions import restrictions_in_force
         from orcapod.pipeline.run_summary import RunCountingObserver, RunSummary
         from orcapod.utils.database_errors import flush_best_effort
 
@@ -3902,6 +4037,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             load_only=load_only,
             target=self.label,
             unchecked_sources=unchecked_sources,
+            restricted_sources=restrictions_in_force([self]),
         )
 
     def _incomplete_inputs(self) -> list[str]:

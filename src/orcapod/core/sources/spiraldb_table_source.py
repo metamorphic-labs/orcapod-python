@@ -20,6 +20,9 @@ Example::
         "my-project-123456", "spike_event", where={"unit_id": 106}
     )
 
+    # The same restriction added to a built source: a new source, same identity
+    source = SpiralDBTableSource("my-project-123456", "spike_event").where(unit_id=106)
+
     # The spike time is a key column (a tag); also offer it as data
     source = SpiralDBTableSource(
         "my-project-123456", "spike_event", tags_as_data={"timestamp": "spike_time_us"}
@@ -34,8 +37,10 @@ Example::
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import datetime
+import math
 from collections.abc import AsyncIterator, Collection, Generator, Iterator, Mapping
 from contextlib import contextmanager
 from typing import Any, ClassVar, NamedTuple, TYPE_CHECKING
@@ -46,6 +51,7 @@ from orcapod.core.sources.base import RootSource, saved_tag_only_columns
 from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
 from orcapod.core.sources.source_ids import joined_location, location_source_id
 from orcapod.core.sources.derived_source import validate_tags_as_data
+from orcapod.utils.datetime_utils import instant_microseconds, is_aware
 from orcapod.core.sources.stream_builder import (
     SourceStreamBuilder,
     key_column_type_allowed,
@@ -57,7 +63,7 @@ from orcapod.core.streams.base import check_head_size
 from orcapod.core.streams.view import ViewStatus, StreamView
 from orcapod.databases.spiraldb_connector import SpiralDBConnector
 from orcapod.errors import InputValidationError, RowIdentifierError, SourceTooLargeError
-from orcapod.types import ColumnConfig
+from orcapod.types import ColumnConfig, Condition
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
 from orcapod.utils.schema_utils import _normalize_column_list
@@ -77,41 +83,6 @@ DEFAULT_MAX_ROWS = 100_000
 DEFAULT_BATCH_ROWS = 8_192
 # The most rows a notebook display of the source reads.
 PREVIEW_ROWS = 10
-
-# How a datetime, date or bytes value of ``where`` is written in a saved config.
-_DATETIME_KEY = "datetime"
-_DATE_KEY = "date"
-_BYTES_KEY = "bytes"
-
-
-def _locationto_config(where: Mapping[str, object]) -> dict[str, Any]:
-    """Return ``where`` with its date, datetime and bytes values in a JSON form."""
-    out: dict[str, Any] = {}
-    for column, value in where.items():
-        if isinstance(value, datetime.datetime):
-            out[column] = {_DATETIME_KEY: value.isoformat()}
-        elif isinstance(value, datetime.date):
-            out[column] = {_DATE_KEY: value.isoformat()}
-        elif isinstance(value, bytes):
-            out[column] = {_BYTES_KEY: value.hex()}
-        else:
-            out[column] = value
-    return out
-
-
-def _locationfrom_config(saved: Mapping[str, Any]) -> dict[str, object]:
-    """Return the ``where`` mapping that ``_locationto_config`` wrote."""
-    out: dict[str, object] = {}
-    for column, value in saved.items():
-        if isinstance(value, dict) and set(value) == {_DATETIME_KEY}:
-            out[column] = datetime.datetime.fromisoformat(value[_DATETIME_KEY])
-        elif isinstance(value, dict) and set(value) == {_DATE_KEY}:
-            out[column] = datetime.date.fromisoformat(value[_DATE_KEY])
-        elif isinstance(value, dict) and set(value) == {_BYTES_KEY}:
-            out[column] = bytes.fromhex(value[_BYTES_KEY])
-        else:
-            out[column] = value
-    return out
 
 
 def _is_positive_int(value: object) -> bool:
@@ -156,6 +127,127 @@ def _schema_difference(found: "pa.Schema", expected: "pa.Schema") -> str:
         f"the table has schema metadata {found.metadata} but the source was built "
         f"with {expected.metadata}"
     )
+
+
+def _condition_value_type(arrow_type: "pa.DataType") -> type | None:
+    """Return the Python type a ``where`` value must have for a column of ``arrow_type``.
+
+    ``None`` for a column type that equality conditions do not support (lists,
+    structs, decimals, logical types and the rest).
+    """
+    if pa.types.is_boolean(arrow_type):
+        return bool
+    if pa.types.is_integer(arrow_type):
+        return int
+    if pa.types.is_floating(arrow_type):
+        return float
+    if pa.types.is_string(arrow_type) or pa.types.is_large_string(arrow_type):
+        return str
+    if (
+        pa.types.is_binary(arrow_type)
+        or pa.types.is_large_binary(arrow_type)
+        or pa.types.is_fixed_size_binary(arrow_type)
+    ):
+        return bytes
+    if pa.types.is_timestamp(arrow_type):
+        return datetime.datetime
+    if pa.types.is_date(arrow_type):
+        return datetime.date
+    return None
+
+
+def _checked_conditions(
+    conditions: Mapping[str, object], schema: "pa.Schema"
+) -> dict[str, object]:
+    """Check ``where`` conditions against the table's columns; convert nothing.
+
+    Orcapod is type strict: a value must be exactly of the Python type of its column
+    (``bool`` is not taken for an integer column, ``int`` not for a float column, a
+    NumPy scalar or a date string not for anything), within what the column's Arrow
+    type holds, and a time zone column takes an aware ``datetime``, any other
+    timestamp column a naive one.
+
+    Args:
+        conditions: Column name to value.
+        schema: The table's columns (system columns removed).
+
+    Returns:
+        The conditions, in the given order.
+
+    Raises:
+        ValueError: If a column is not in the table.
+        TypeError: If a value is not of its column's type, does not fit it, or the
+            column's type has no equality condition.
+    """
+    unknown = [c for c in conditions if c not in schema.names]
+    if unknown:
+        raise ValueError(
+            f"where names columns that the table does not have: {unknown}. "
+            f"Columns: {schema.names}"
+        )
+    for column, value in conditions.items():
+        arrow_type = schema.field(column).type
+        expected = _condition_value_type(arrow_type)
+        if expected is None:
+            raise TypeError(
+                f"where: column {column!r} holds {arrow_type}, which an equality "
+                "condition does not support; restrict on another column"
+            )
+        if type(value) is not expected:
+            raise TypeError(
+                f"where: column {column!r} holds {arrow_type} ({expected.__name__}), "
+                f"but the value {value!r} is a {type(value).__name__}; convert it "
+                f"explicitly to {expected.__name__} (a NumPy scalar with .item(), a "
+                "date or time string with date.fromisoformat or "
+                "datetime.fromisoformat): Orcapod converts no value"
+            )
+        if isinstance(value, datetime.datetime):
+            zoned = getattr(arrow_type, "tz", None) is not None
+            if zoned != is_aware(value):
+                raise TypeError(
+                    f"where: column {column!r} holds {arrow_type}, so the value must "
+                    f"be {'an aware' if zoned else 'a naive'} datetime; got {value!r}"
+                )
+        if isinstance(value, float):
+            # Rounding to the column's precision is how a float column stores any
+            # value, so it is not refused; a finite value beyond its range is.
+            stored = pa.scalar(value, type=arrow_type).as_py()
+            if math.isfinite(value) and not math.isfinite(stored):
+                raise TypeError(
+                    f"where: column {column!r} holds {arrow_type}, whose range does "
+                    f"not reach {value!r}"
+                )
+        else:
+            try:
+                exact = _same_stored_value(
+                    pa.scalar(value, type=arrow_type).as_py(), value
+                )
+            except (pa.ArrowInvalid, OverflowError) as exc:
+                raise TypeError(
+                    f"where: column {column!r} holds {arrow_type}, which cannot hold "
+                    f"{value!r}: {exc}"
+                ) from exc
+            if not exact:
+                raise TypeError(
+                    f"where: column {column!r} holds {arrow_type}, which cannot hold "
+                    f"{value!r} exactly"
+                )
+    return dict(conditions)
+
+
+def _same_stored_value(stored: object, value: object) -> bool:
+    """Return whether the column's form of a condition value is the value itself.
+
+    An aware datetime is compared by instant (its own offset, ``fold`` included):
+    the column hands it back in its own zone object, and Python's ``==`` never
+    equals two zones' values in a daylight-saving overlap.
+    """
+    if isinstance(stored, datetime.datetime) and isinstance(value, datetime.datetime):
+        stored_instant = instant_microseconds(stored)
+        value_instant = instant_microseconds(value)
+        if stored_instant is not None and value_instant is not None:
+            return stored_instant == value_instant
+    return stored == value
 
 
 SPIRALDB_SOURCE_ID_HAS_TABLE_ID = True
@@ -248,8 +340,10 @@ class SpiralDBTableSource(RootSource):
             single column name. If ``None`` (default), the table's primary-key
             (key-schema) columns are used.
         system_tag_columns: Additional system-level tag columns.
-        where: Column name to value. Only rows in which every named column equals its
-            value are read; SpiralDB applies this before any row is transferred.
+        where: Column name to value, or a ``Condition`` (``orcapod.types``). Only
+            rows in which every named column equals its value are read; SpiralDB
+            applies this before any row is transferred. Each value must be exactly of
+            its column's Python type (see ``where()``, the same mechanism).
         limit: Read at most this many rows: the first in key order (after ``where``).
         asof: Read the table as of this version (microseconds, as SpiralDB's
             transaction timestamps). If ``None`` (default), the version the table has
@@ -276,8 +370,10 @@ class SpiralDBTableSource(RootSource):
 
     Raises:
         ValueError: If the table is not found, has no key schema, a tag column or a
-            ``where`` column is not in the table, or ``limit``, ``max_rows`` or
-            ``batch_rows`` is not a positive integer.
+            ``where`` column is not in the table, a ``where`` value is ``None``, or
+            ``limit``, ``max_rows`` or ``batch_rows`` is not a positive integer.
+        TypeError: If a ``where`` value is not exactly of its column's Python type or
+            does not fit its Arrow type.
         InputValidationError: If ``tags_as_data`` names a column that is not a tag
             column or not a key column, or a new name that is already a column, is
             given twice, or is reserved for system columns.
@@ -299,7 +395,7 @@ class SpiralDBTableSource(RootSource):
         dataset: str = "default",
         tag_columns: str | Collection[str] | None = None,
         system_tag_columns: Collection[str] = (),
-        where: Mapping[str, object] | None = None,
+        where: "Mapping[str, object] | Condition | None" = None,
         limit: int | None = None,
         asof: int | None = None,
         max_rows: int | None = DEFAULT_MAX_ROWS,
@@ -326,6 +422,8 @@ class SpiralDBTableSource(RootSource):
                 raise ValueError(
                     f"{name} must be a positive integer or None, got {value!r}"
                 )
+        # What needs no table (the values' types, None) is checked before connecting.
+        requested = Condition.of(where) if where else Condition()
         if not _is_positive_int(batch_rows):
             raise ValueError(
                 f"batch_rows must be a positive integer, got {batch_rows!r}"
@@ -338,7 +436,7 @@ class SpiralDBTableSource(RootSource):
         self._dataset = dataset
         self._table_name = table_name
         self._overrides = overrides
-        self._where: dict[str, object] = dict(where) if where else {}
+        self._condition = Condition()
         self._limit = limit
         self._max_rows = max_rows
         self._batch_rows = batch_rows
@@ -377,12 +475,6 @@ class SpiralDBTableSource(RootSource):
             if tag_columns is None
             else _normalize_column_list(tag_columns)
         )
-        unknown = [c for c in self._where if c not in schema.names]
-        if unknown:
-            raise ValueError(
-                f"{location}: where names columns that table {table_name!r} does not "
-                f"have: {unknown}. Columns: {schema.names}"
-            )
         key_problems = [
             f"{c!r} is not a column"
             if c not in schema.names
@@ -421,6 +513,11 @@ class SpiralDBTableSource(RootSource):
         self._table_schema: pa.Schema = arrow_utils.drop_system_columns(
             schema.empty_table()
         ).schema
+        if requested:
+            try:
+                self._apply_restriction(requested)
+            except (ValueError, TypeError) as exc:
+                raise type(exc)(f"{location}, table {table_name!r}: {exc}") from exc
         if self._tags_as_data:
             try:
                 self._check_tags_as_data(template.stream.keys())
@@ -491,6 +588,130 @@ class SpiralDBTableSource(RootSource):
     def table_id(self) -> str:
         """SpiralDB's own id of the table this source reads."""
         return self._table_id
+
+    # -------------------------------------------------------------------------
+    # Restriction (ITL-1218)
+    # -------------------------------------------------------------------------
+
+    def where(
+        self,
+        mapping: "Mapping[str, object] | Condition | None" = None,
+        /,
+        **columns: object,
+    ) -> "SpiralDBTableSource":
+        """Return a new source on the same table that reads only the matching rows.
+
+        A restriction, not an operator: it chooses which of the table's rows flow and
+        changes nothing else. The new source has this source's content hash, pipeline
+        hash, source id, schema and system-tag columns, and every row it reads is the
+        row this source reads, record id included; it adds no step to a pipeline. A
+        pipeline that must select rows as part of what it computes uses an operator
+        (``SemiJoin``, ``PolarsFilter``) instead. SpiralDB applies the conditions in
+        the scan, as for the ``where=`` argument: the two are one mechanism, and the
+        conditions are added to any the source already has. Everything else is carried
+        over (the pinned table version, ``limit``, ``max_rows``, tags, data-tags,
+        ``tags_as_data``, key columns, source id, label, data context). With a
+        ``limit``, the new source reads the first ``limit`` rows that match.
+
+        Each condition is sent to SpiralDB as ``column == value``, and which rows it
+        selects is SpiralDB's own equality, not Orcapod's. For a float column that
+        means: whether a NaN value selects the NaN rows, and whether ``0.0`` selects
+        the ``-0.0`` rows, is decided by SpiralDB; under the usual floating-point rule
+        a NaN equals nothing, so such a condition may select no row. To select rows by
+        such values as Orcapod matches them, filter inside the pipeline.
+
+        A convenience: the arguments are given to ``Condition.of``, which builds the
+        ``Condition`` (``orcapod.types``); the source checks it against its table and
+        adds it to the condition it has (``Condition.combined``). A ``Condition``
+        built beforehand is accepted as it is. The source's ``limit`` is its own and
+        is not changed.
+
+        This source is not changed. ``where`` is a copy of the source with the
+        restriction applied to the copy in place; a later version offers those two
+        steps (``copy()`` and ``apply_restriction``) on their own.
+
+        Args:
+            mapping: Column name to value, or a ``Condition``. Positional only, so
+                every column name can also be given as a keyword.
+            **columns: Column name to value, added to ``mapping``.
+
+        Returns:
+            The restricted source; its modified time is the moment it was made.
+
+        Raises:
+            ValueError: If no condition is given, a column is not in the table, a
+                value is ``None``, a column is given in the mapping and as a keyword
+                with different values, or a column is already restricted to another
+                value.
+            TypeError: If a value is not exactly of its column's Python type or does
+                not fit the column's Arrow type: nothing is converted (a NumPy scalar,
+                a date given as a string), or the column's type takes no equality
+                condition.
+        """
+        condition = Condition.of(mapping, **columns)
+        restricted = self._copy()
+        try:
+            restricted._apply_restriction(condition)
+        except (ValueError, TypeError) as exc:
+            raise type(exc)(f"SpiralDB table {self._qualified!r}: {exc}") from exc
+        return restricted
+
+    def _copy(self) -> "SpiralDBTableSource":
+        """Return a new source object on the same table, sharing no mutable state.
+
+        The future ``copy()`` (ITL-1219). No metadata is read again, so the copy
+        reads the version this source pinned. Shared, because immutable: the table
+        location, table id, schema and zero-row template stream, the stream builder,
+        the data context and config, the condition (immutable) and limit, the tuples of
+        tag, data-tag and key columns and the pinned version. Copied: the
+        ``tags_as_data`` and ``overrides`` mappings. Reset: the content and pipeline
+        hash caches (they are recomputed, equal, on first use). The modified time is
+        carried over; ``_apply_restriction`` moves it. A SpiralDB source holds no row
+        it read, so there is nothing else to reset.
+        """
+        duplicate = copy.copy(self)
+        duplicate._tags_as_data = dict(self._tags_as_data)
+        duplicate._overrides = (
+            None if self._overrides is None else dict(self._overrides)
+        )
+        duplicate._content_hash_cache = {}
+        duplicate._pipeline_hash_cache = {}
+        return duplicate
+
+    def _apply_restriction(self, condition: Condition) -> None:
+        """Add ``condition`` to the condition this source reads under, in place.
+
+        The future ``apply_restriction`` (ITL-1219), used by the constructor's
+        ``where=`` and by ``where()``. The condition is checked against the table's
+        columns, then combined with the one in force (``Condition.combined``). The
+        modified time moves: other rows flow from now on. Nothing cached from a read
+        needs resetting (the source holds no row it read), and the identity is
+        unchanged, so the hash caches stay valid.
+
+        Args:
+            condition: The condition to add.
+
+        Raises:
+            ValueError: If a column is not in the table, or a column is already
+                restricted to another value.
+            TypeError: If a value is not of its column's type or does not fit it.
+        """
+        _checked_conditions(condition.equalities, self._table_schema)
+        self._condition = self._condition.combined(condition)
+        self._update_modified_time()
+
+    @property
+    def condition(self) -> Condition:
+        """The row conditions this source reads under (``where`` and ``where=``
+        combined), applied by SpiralDB in the scan: the empty ``Condition`` when it
+        reads every row. Part of no identity (``_restriction_identity``)."""
+        return self._condition
+
+    @property
+    def row_limit(self) -> int | None:
+        """The most rows this source reads (``limit=``), or ``None`` for no limit.
+        Part of no identity (``_restriction_identity``)."""
+        return self._limit
 
     def _restriction_identity(self) -> None:
         """Return what ``where``, ``limit`` and ``asof`` add to the source's identity.
@@ -657,7 +878,7 @@ class SpiralDBTableSource(RootSource):
         with self._connector() as connector:
             if (
                 max_rows is not None
-                and not self._where
+                and not self._condition
                 and (limit is None or limit > max_rows)
             ):
                 # Nothing but limit bounds the read, and the limit does not keep it
@@ -679,7 +900,7 @@ class SpiralDBTableSource(RootSource):
             identifiers: set[str] = set()
             for batch in connector.scan_batches(
                 self._table_name,
-                where=self._where or None,
+                where=dict(self._condition.equalities) or None,
                 limit=limit,
                 asof=self._asof,
             ):
@@ -800,17 +1021,18 @@ class SpiralDBTableSource(RootSource):
         if not self._preview_reads_rows:
             schema_only = self._stream.as_table(columns=columns, all_info=all_info)
             return _Head(schema_only, False, self.row_count_estimate, True)
-        head_limit = n if self._limit is None else min(n, self._limit)
+        limit = self._limit
+        head_limit = n if limit is None else min(n, limit)
         rows = self._whole_table(
             self._read_batches(limit=head_limit, max_rows=None),
             columns=columns,
             all_info=all_info,
         )
-        if rows.num_rows < head_limit or head_limit == self._limit:
+        if rows.num_rows < head_limit or head_limit == limit:
             return _Head(rows, True, rows.num_rows, False)
         recorded = self.row_count_estimate
-        if self._limit is not None and not self._where:
-            recorded = min(self._limit, recorded)
+        if limit is not None and not self._condition:
+            recorded = min(limit, recorded)
         return _Head(rows, True, recorded, True)
 
     def _head_note(self, head: "_Head", sorted_by_tags: bool = False) -> str:
@@ -825,8 +1047,8 @@ class SpiralDBTableSource(RootSource):
         if not head.total_is_estimate:
             all_rows = f"all {shown:,} row{'' if shown == 1 else 's'}"
             return f"{all_rows}, sorted by tags" if sorted_by_tags else all_rows
-        if self._where:
-            condition = ", ".join(f"{c}={v!r}" for c, v in self._where.items())
+        if self._condition:
+            condition = self._condition.text()
             read = (
                 f"{shown:,} matching rows read, sorted by tags"
                 if sorted_by_tags
@@ -918,7 +1140,7 @@ class SpiralDBTableSource(RootSource):
             "tag_columns": list(self._tag_columns),
             **self._tag_only_config(),
             "system_tag_columns": list(self._system_tag_columns),
-            "where": _locationto_config(self._where),
+            "where": self._condition.to_config(),
             "limit": self._limit,
             "asof": self._given_asof,
             "max_rows": self._max_rows,
@@ -955,7 +1177,7 @@ class SpiralDBTableSource(RootSource):
             tag_columns=config.get("tag_columns"),
             tag_only_columns=saved_tag_only_columns(config),
             system_tag_columns=config.get("system_tag_columns", ()),
-            where=_locationfrom_config(config.get("where") or {}),
+            where=Condition.from_config(config.get("where") or {}),
             limit=config.get("limit"),
             asof=config.get("asof"),
             max_rows=config.get("max_rows", DEFAULT_MAX_ROWS),

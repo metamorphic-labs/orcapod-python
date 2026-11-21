@@ -7,6 +7,8 @@ throughout the OrcaPod framework, including:
     - ``Schema`` -- an immutable, hashable mapping of field names to Python types.
     - ``ContentHash`` -- a content-addressable hash pairing a method name with
       a raw digest, with convenience conversions to hex, int, UUID, and base64.
+    - ``Condition`` -- the row conditions of a restriction, defined in
+      ``orcapod.types.condition``.
 """
 
 from __future__ import annotations
@@ -20,6 +22,11 @@ from datetime import date, datetime
 from enum import Enum
 from types import UnionType
 from typing import TYPE_CHECKING, Any, Generic, Self, TypeAlias, TypeVar
+
+from typing_extensions import override
+
+# Re-exported: ``Condition`` is defined in its own module (ITL-1218).
+from orcapod.types.condition import Condition as Condition
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -38,7 +45,7 @@ DataType: TypeAlias = type | UnionType  # | type[Union]
 field within a ``Schema``."""
 
 # TODO: accomodate other Path-like objects
-PathLike: TypeAlias = str | os.PathLike
+PathLike: TypeAlias = str | os.PathLike[str]
 """Convenience alias for any filesystem-path-like object (``str`` or
 ``os.PathLike``)."""
 
@@ -112,15 +119,19 @@ class Schema(Mapping[str, DataType]):
 
     # ==================== Mapping interface ====================
 
+    @override
     def __getitem__(self, key: str) -> DataType:
         return self._data[key]
 
+    @override
     def __iter__(self) -> Iterator[str]:
         return iter(self._data)
 
+    @override
     def __len__(self) -> int:
         return len(self._data)
 
+    @override
     def __repr__(self) -> str:
         def _fmt(t: DataType) -> str:
             """Return a clean, copy-pasteable name for a DataType value.
@@ -141,6 +152,7 @@ class Schema(Mapping[str, DataType]):
 
     # ==================== Value semantics ====================
 
+    @override
     def __eq__(self, other: object) -> bool:
         if isinstance(other, Schema):
             return self._data == other._data and self._optional == other._optional
@@ -168,7 +180,7 @@ class Schema(Mapping[str, DataType]):
 
     # ==================== Schema operations ====================
 
-    def merge(self, other: Mapping[str, type]) -> Schema:
+    def merge(self, other: SchemaLike) -> Schema:
         """Return a new Schema that is the union of ``self`` and ``other``.
 
         Args:
@@ -188,7 +200,7 @@ class Schema(Mapping[str, DataType]):
             {**self._data, **other}, optional_fields=self._optional | other_optional
         )
 
-    def __add__(self, other: object) -> Self:
+    def __add__(self, other: object) -> Schema:
         """Concatenate two schemas, delegating to ``merge()``.
 
         Args:
@@ -677,6 +689,7 @@ class ContentHash:
         digest = data[colon_idx + 1 :]
         return cls(method=method, digest=digest)
 
+    @override
     def __str__(self) -> str:
         return self.to_string()
 

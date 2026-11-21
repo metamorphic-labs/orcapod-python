@@ -1,9 +1,9 @@
 # Data-tags
 
-!!! warning "Integration branch (ITL-1023)"
-    Data-tags are the first slice of Orcapod v0.4, on an integration branch. The
-    identities (content and pipeline hashes) of streams with data-tags are **not
-    frozen yet** and may change before the release. Streams whose tags are all plain
+!!! note "Settled identities (ITL-1246)"
+    Data-tags are the first slice of Orcapod v0.4. The identities (content and pipeline
+    hashes) of streams with data-tags are settled (developer, November 18, 2026) and are
+    frozen with data context v1 at the 0.4.0 release. Streams whose tags are all plain
     (`tag_only_columns`) keep their v0.3 identities exactly.
 
 A tag is either **plain** (it carries its own value, as every tag did in v0.3) or
@@ -37,8 +37,30 @@ not a declared tag is an error. A source built with all its tags plain is exactl
 source v0.3 built: same columns, same hashes.
 
 The column is stored once: `as_table()` shows it once, and every row's tag and data hold
-the same value. The notebook preview shows it once, among the tags, marked as a tag
-([Working in notebooks](notebooks.md#a-stream-at-the-end-of-a-cell)).
+the same value. The preview shows it once, among the tags, marked as a data-tag. In a
+notebook the marks compose: a tag's header is bold in an accent colour, a data column's is
+underlined, and a data-tag's has both. As text a data-tag's name starts with `+` (a plain
+tag's with `*`; a data column's is unmarked). The legend line names the marks shown
+([Working in notebooks](notebooks.md#a-stream-at-the-end-of-a-cell)). Only the display is
+marked: the view's table and `as_table()` keep the plain names.
+
+```python
+mixed = op.sources.DictSource(
+    rows, tag_columns=["unit", "time"], tag_only_columns=["time"], source_id="spikes"
+)
+print(mixed.head())
+# DictSource[spikes] — all 2 rows
+# * = tag; + = data-tag (tag and data)
+# shape: (2, 3)
+# ┌───────┬───────┬──────┐
+# │ +unit ┆ *time ┆ amp  │
+# │ ---   ┆ ---   ┆ ---  │
+# │ i64   ┆ i64   ┆ f64  │
+# ╞═══════╪═══════╪══════╡
+# │ 1     ┆ 10    ┆ 0.5  │
+# │ 2     ┆ 20    ┆ 0.25 │
+# └───────┴───────┴──────┘
+```
 
 Data-tags come first among the data columns, in tag order, then the other data columns in
 their table order. Every stream, operator result and row follows this order, whatever the
@@ -78,6 +100,27 @@ print(plain.keys())
 A function output named like a tag is an error when the pipeline is built. A function
 that does not read a data-tag column keeps its result identity: retagging a source
 does not make it compute again.
+
+The data-tags that fall through are a **set of names**: the pod's identity holds them
+sorted by name. The order of the input's tag columns never changes the pod's content or
+pipeline hash, nor the table paths of its node in a job. The output lists the data-tags
+first, in the input's own tag order: column order is presentation only. Below, the same
+spikes are given with `time` before `unit`, a different tag order and table layout:
+
+```python
+by_time = op.sources.DictSource(
+    [{"time": r["time"], "unit": r["unit"], "amp": r["amp"]} for r in rows],
+    tag_columns=["time", "unit"],
+    source_id="spikes",
+)
+scaled_by_time = scale.pod(by_time)
+print(scaled_by_time.keys())
+# (('time', 'unit'), ('time', 'unit', 'scaled'))
+print(scaled_by_time.content_hash() == scaled.content_hash())
+# True
+print(scaled_by_time.pipeline_hash() == scaled.pipeline_hash())
+# True
+```
 
 ## Moving a column between roles
 
@@ -182,7 +225,7 @@ your own classes and logical types (`Path`, `UUID`, arrays) are refused.
 | Filters, `DropNulls`, `SemiJoin`, `Pick`, `Index` | Keep the data-tag. |
 | `AddTags` / `add_tags` | Keeps every data-tag; the new tags, constants, are plain tags. A new tag named like any column, a data-tag included, is refused. |
 | `Batch` | Keeps every tag, list-valued, as for plain tags: `x` becomes the same list in both roles and stays a data-tag. Its source info is one token per member, like any data column: nothing is merged. |
-| `MergeJoin` | Follows `Join`. A data-tag in both inputs: **one** scalar data-tag column `x`, not a two-element list (the join equated the values), with one merged token as its source info, the same fold as `Join`'s (below). A data-tag in one input, and a plain tag or no column of that name in the other: `x` stays a data-tag with its own source info. A data-only column `x` in the other input is refused. A key that is `T` in one input and `T \| None` in the other is `T` in both roles. Every other colliding data column is merged into a sorted list, as before. |
+| `MergeJoin` | Follows `Join`. A data-tag in both inputs: **one** scalar data-tag column `x`, not a two-element list (the join equated the values), with one merged token as its source info, the same fold as `Join`'s (below). A data-tag in one input, and a plain tag or no column of that name in the other: `x` stays a data-tag with its own source info. A data-only column `x` in the other input is refused. A key that is `T` in one input and `T \| None` in the other is `T` in both roles. Every other colliding data column is merged into a list in argument order: the first input's value, then the second's (ITL-1281). |
 
 ```python
 units = op.sources.DictSource(
@@ -195,8 +238,9 @@ print(joined.keys())
 # (('unit', 'time'), ('unit', 'time', 'area', 'amp'))
 ```
 
-`MergeJoin` merges every other colliding data column into a sorted list, and keeps each
-data-tag both inputs share as one column:
+`MergeJoin` merges every other colliding data column into a list in argument order (the
+first input's value, then the second's), and keeps each data-tag both inputs share as one
+column:
 
 ```python
 more = op.sources.DictSource(
@@ -211,7 +255,7 @@ print(merged.keys())
 for tag, data in sorted(merged.iter_data(), key=lambda row: row[0]["time"]):
     print(tag["time"], data["time"], data["amp"])
 # 10 10 [0.5, 0.75]
-# 20 20 [0.125, 0.25]
+# 20 20 [0.25, 0.125]
 ```
 
 ```python

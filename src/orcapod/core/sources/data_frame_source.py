@@ -34,6 +34,13 @@ class DataFrameSource(RootSource):
     Data-tags (ITL-1023): every declared tag column is a data-tag by default,
     also a data column of the same name. ``tag_only_columns`` (keyword-only) names the
     tags kept plain (tag only, not data, as in v0.3); ``True`` keeps all of them plain.
+
+    ``hash_in_key_order`` (keyword-only, ITL-1272): when the source has key columns and
+    no ``source_id``, hash its table for the default source id with the rows sorted by
+    the key columns, in key order, so the same rows in any order give one default
+    source id and one content hash. The rows are presented in the order given either
+    way. Off by default: the rows are hashed in the order given. Refused with a
+    ``source_id`` or without key columns.
     """
 
     TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = True
@@ -51,6 +58,7 @@ class DataFrameSource(RootSource):
         *,
         tag_only_columns: TagOnlyColumns = (),
         record_id_columns: str | Collection[str] | None = None,
+        hash_in_key_order: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(source_id=source_id, **kwargs)
@@ -95,6 +103,7 @@ class DataFrameSource(RootSource):
             source_id=self._source_id,
             source_kind=self.SOURCE_KIND,
             record_id_columns=self._key_columns,
+            hash_in_key_order=hash_in_key_order,
             system_tag_columns=system_tag_columns,
         )
 

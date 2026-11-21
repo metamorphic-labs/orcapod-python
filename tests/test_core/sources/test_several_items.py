@@ -16,8 +16,10 @@ chains"):
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import json
+from typing import Any
 
 import pyarrow as pa
 import pytest
@@ -41,6 +43,7 @@ from ..operators.several_items import (
     Arrangement,
     fingerprint,
     make_source,
+    ordered_rows_fingerprint,
     presentation,
 )
 
@@ -171,17 +174,22 @@ def test_record_id_columns_as_a_set_is_refused() -> None:
 
 
 @pytest.mark.parametrize("role", ROLES)
-def test_tags_as_data_order_is_the_order_of_the_new_columns_only(role: str) -> None:
+def test_tags_as_data_columns_are_placed_in_the_order_of_their_new_names(
+    role: str,
+) -> None:
+    # The mapping names a set: the new columns follow in the order of their new names,
+    # whatever the order of the mapping or of the tags (ITL-1271). "c1" names t3's copy,
+    # so name order differs from tag order.
     source = make_source(MAIN, Arrangement(MAIN.tags, TAGS_FIRST, role))
-    forward = DerivedSource(source, tags_as_data={"t1": "c1", "t3": "c3"})
-    backward = DerivedSource(source, tags_as_data={"t3": "c3", "t1": "c1"})
+    forward = DerivedSource(source, tags_as_data={"t1": "c3", "t3": "c1"})
+    backward = DerivedSource(source, tags_as_data={"t3": "c1", "t1": "c3"})
     assert presentation(forward)[1][-2:] == ("c1", "c3")
-    assert presentation(backward)[1][-2:] == ("c3", "c1")
+    assert presentation(backward) == presentation(forward)
     assert forward.source_id == backward.source_id
     assert fingerprint(forward) == fingerprint(backward)
     # Each new column holds its own tag's values.
     for tag, data in forward.iter_data():
-        assert (data["c1"], data["c3"]) == (tag["t1"], tag["t3"])
+        assert (data["c3"], data["c1"]) == (tag["t1"], tag["t3"])
 
 
 @pytest.mark.parametrize("role", ROLES)
@@ -209,6 +217,16 @@ def test_a_cached_source_reads_back_every_role_and_arrangement(
             assert fingerprint(again) == fingerprint(cached)
 
 
+def _async_rows(stream: Any) -> list[Any]:
+    async def collect() -> list[Any]:
+        return [row async for row in stream.async_iter_data()]
+
+    return asyncio.run(collect())
+
+
+@pytest.mark.parametrize(
+    "tag_columns", [["t1", "t2"], ["t2", "t1"]], ids=["t1-t2", "t2-t1"]
+)
 @pytest.mark.parametrize(
     "data_schema",
     [
@@ -219,9 +237,14 @@ def test_a_cached_source_reads_back_every_role_and_arrangement(
 )
 @pytest.mark.parametrize("role", ROLES)
 def test_a_schema_in_another_field_order_gives_the_same_source(
-    data_schema: dict[str, type], role: str
+    data_schema: dict[str, type], role: str, tag_columns: list[str]
 ) -> None:
-    """A ``DictSource`` schema with several fields, in the rows' order or another."""
+    """A ``DictSource`` schema with several fields, in the rows' order or another.
+
+    Neither the schema's field order nor the tag order changes the source (rows, hashes,
+    column names); the tags are presented in the order given, and the async rows are
+    the sync rows.
+    """
     rows = [
         {"t1": "a", "t2": 1, "d1": 10, "d3": "x"},
         {"t1": "b", "t2": 2, "d1": 20, "d3": "y"},
@@ -229,7 +252,7 @@ def test_a_schema_in_another_field_order_gives_the_same_source(
     tag_only = {PLAIN: True, DATA_TAGS: [], MIXED: ["t2"]}[role]
     source = DictSource(
         rows,
-        tag_columns=["t1", "t2"],
+        tag_columns=tag_columns,
         source_id="d",
         data_schema=data_schema,
         tag_only_columns=tag_only,
@@ -242,4 +265,7 @@ def test_a_schema_in_another_field_order_gives_the_same_source(
         tag_only_columns=tag_only,
     )
     assert fingerprint(source) == fingerprint(reference)
-    assert presentation(source)[0] == ("t1", "t2")
+    assert presentation(source)[0] == tuple(tag_columns)
+    assert ordered_rows_fingerprint(_async_rows(source)) == ordered_rows_fingerprint(
+        list(source.iter_data())
+    )

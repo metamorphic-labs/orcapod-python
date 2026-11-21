@@ -14,12 +14,14 @@ What is asserted:
 * **Order of a set argument.** Column names to select, drop or narrow, and the entries
   of a rename mapping, name a set: their order changes nothing, not even the column
   order of the result, nor the operator's identity.
-* **Order of the inputs of a commutative operator** (``Join``, ``MergeJoin``) changes
-  nothing, with two, three and four inputs.
+* **Order of the inputs of a commutative operator** (``Join``) changes nothing, with
+  two, three and four inputs. ``MergeJoin`` is ordered (ITL-1281): its argument order is
+  tested as an input that counts.
 
 ``GroupBy`` is not here: its arrangement and ``by`` order are tested by ITL-1226
-(``test_group_by_member_order.py``). The order of ``AddTags``'s names is the order of
-the new tags and part of its identity, and is tested as such below.
+(``test_group_by_member_order.py``). The order of ``AddTags``'s names is neither the
+order of the new tags nor part of its identity (ITL-1269: they are held in name order),
+and is tested as such below.
 """
 
 from __future__ import annotations
@@ -657,8 +659,8 @@ def test_join_of_four_inputs_matches_on_every_shared_tag() -> None:
 
 
 # MergeJoin: two inputs with the same columns; every data column collides. The rows
-# of ``MAIN`` without a null (``NON_NULL_ROWS``), and other values in every data column,
-# so no merged pair ties: a tie is ITL-1241, a null ITL-1243.
+# of ``MAIN`` without a null (``NON_NULL_ROWS``), and other values in every data column.
+# MergeJoin is ordered (ITL-1281): its lists are in argument order, so nothing ties.
 NON_NULL_ROWS = [0, 2, 3, 4]
 MAIN_OTHER = Spec(
     source_id="s2",
@@ -674,69 +676,107 @@ MAIN_OTHER = Spec(
 )
 
 
-@pytest.mark.parametrize("role", ROLES)
-def test_merge_join_result_does_not_depend_on_the_order_of_its_inputs(
-    role: str,
-) -> None:
-    """Three colliding data columns: either input order, any tag order and layout.
+def _merged_lists(
+    stream: StreamProtocol, column: str, *, reverse: bool = False
+) -> list[tuple[str, Any, Any]]:
+    """Each row's (tags, list of ``column``, its source-info list), sorted by tags;
+    with ``reverse``, both lists reversed."""
+    out: list[tuple[str, Any, Any]] = []
+    for tag, data in stream.iter_data():
+        values = data[column]
+        tokens = data.source_info()[column]
+        assert isinstance(values, list) and isinstance(tokens, list)
+        if reverse:
+            values, tokens = values[::-1], tokens[::-1]
+        out.append((repr(sorted(tag.as_dict().items())), values, tokens))
+    return sorted(out, key=repr)
 
-    Swapping the inputs changes nothing, not even the column order. Another tag order
-    or layout of the inputs changes only the column order.
+
+@pytest.mark.parametrize("role", ROLES)
+def test_merge_join_result_follows_argument_order_only(role: str) -> None:
+    """Three colliding data columns: any tag order and layout give one result per
+    argument order; the two argument orders are two operations (ITL-1281).
+
+    Another tag order or layout of the inputs changes only the column order. Swapping
+    the inputs reverses every merged list and its source info, and changes the
+    content and pipeline hashes.
     """
-    results: dict[str, dict[str, object]] = {}
+    results: dict[str, dict[str, dict[str, object]]] = {"ab": {}, "ba": {}}
     for order_index in range(3):
         for layout in LAYOUTS:
             left, right = _sources(
                 (MAIN, MAIN_OTHER), order_index, layout, role, rows=NON_NULL_ROWS
             )
             ab, ba = MergeJoin()(left, right), MergeJoin()(right, left)
-            assert presentation(ab) == presentation(ba)
             for label, inputs, stream in (
                 ("ab", (left, right), ab),
                 ("ba", (right, left), ba),
             ):
-                results[f"{order_index}/{layout}/{label}"] = {
+                results[label][f"{order_index}/{layout}"] = {
                     **fingerprint(stream),
                     "sync_rows": rows_fingerprint(list(stream.iter_data())),
                     "async_rows": rows_fingerprint(async_rows(MergeJoin(), *inputs)),
                 }
-    _assert_all_equal(results)
+            # Two operations: two content hashes. The inputs share one schema, so the
+            # pipeline hashes (the inputs' pipeline hashes in argument order) agree.
+            assert ab.content_hash() != ba.content_hash()
+            for column in MAIN.data:
+                assert _merged_lists(ba, column, reverse=True) == _merged_lists(
+                    ab, column
+                )
+                # And which input comes first: the first argument's, in every row.
+                for stream, first, second in ((ab, left, right), (ba, right, left)):
+                    for _, _, tokens in _merged_lists(stream, column):
+                        assert [str(t).split("::")[0] for t in tokens] == [
+                            first.source_id,
+                            second.source_id,
+                        ]
+    _assert_all_equal(results["ab"])
+    _assert_all_equal(results["ba"])
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="ITL-1241: MergeJoin orders tied values' source info by input position",
-)
 @pytest.mark.parametrize("role", ROLES)
-def test_merge_join_of_tied_values_does_not_depend_on_the_order_of_its_inputs(
-    role: str,
-) -> None:
-    """Two inputs with equal values in three colliding columns (ITL-1241)."""
+def test_merge_join_of_tied_values_keeps_argument_order(role: str) -> None:
+    """Two inputs with equal values in three colliding columns (ITL-1241, resolved
+    by ITL-1281): every list and its source info hold the first argument's first."""
     arrangement = Arrangement(MAIN.tags, TAGS_FIRST, role)
     left = make_source(MAIN, arrangement, source_id="s", rows=NON_NULL_ROWS)
     right = make_source(MAIN, arrangement, source_id="s2", rows=NON_NULL_ROWS)
-    assert fingerprint(MergeJoin()(left, right)) == fingerprint(
-        MergeJoin()(right, left)
-    )
+    for first, second in (("s", "s2"), ("s2", "s")):
+        inputs = {"s": left, "s2": right}
+        stream = MergeJoin()(inputs[first], inputs[second])
+        for _, data in stream.iter_data():
+            for column in MAIN.data:
+                tokens = data.source_info()[column]
+                assert isinstance(tokens, list)
+                assert [str(t).split("::")[0] for t in tokens] == [first, second]
+                values = data[column]
+                assert isinstance(values, list)
+                assert values[0] == values[1]
 
 
-MERGE_NULL_ISSUE = "ITL-1243"
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason=f"{MERGE_NULL_ISSUE}: MergeJoin raises TypeError on a null in a merged column",
-    raises=TypeError,
-)
 @pytest.mark.parametrize("role", ROLES)
 def test_merge_join_of_a_nullable_column_holding_nulls(role: str) -> None:
-    """``d2`` holds a null in rows 1 and 5 of ``MAIN``; the merge must not crash."""
+    """``d2`` holds nulls in both inputs: a null merges like any value, in argument
+    order (ITL-1243, resolved by ITL-1281); async equals sync."""
     arrangement = Arrangement(MAIN.tags, TAGS_FIRST, role)
     left = make_source(MAIN, arrangement)
     right = make_source(MAIN_OTHER, arrangement)
-    assert fingerprint(MergeJoin()(left, right)) == fingerprint(
-        MergeJoin()(right, left)
-    )
+    for one, other in ((left, right), (right, left)):
+        stream = MergeJoin()(one, other)
+        sync = list(stream.iter_data())
+        assert rows_fingerprint(async_rows(MergeJoin(), one, other)) == (
+            rows_fingerprint(sync)
+        )
+        nulls = 0
+        for _, data in sync:
+            d2 = data["d2"]
+            assert isinstance(d2, list) and len(d2) == 2
+            nulls += d2.count(None)
+        # Every row matches once (both inputs have the same tags).
+        assert nulls == (
+            MAIN.columns["d2"].null_count + MAIN_OTHER.columns["d2"].null_count
+        )
 
 
 @pytest.mark.parametrize("role", ROLES)

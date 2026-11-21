@@ -136,9 +136,43 @@ def hash_default_value(value: Any, hasher: "SemanticHasherProtocol") -> ContentH
         The hash of the value.
 
     Raises:
-        TypeError: If the hasher has no way to hash the value.
+        TypeError: If the hasher has no way to hash the value's type.
+        ValueError: If the hasher refuses a value of a type it knows (for example
+            ``UnsupportedValueError`` for an object-dtype NumPy array).
     """
     return hasher.hash_object(value)
+
+
+DEFAULT_VALUE_REFUSALS: tuple[type[Exception], ...] = (TypeError, ValueError)
+"""What ``hash_default_value`` raises when the hasher refuses a default value."""
+
+
+def default_value_refused(
+    parameter: str, function: Any, refusal: Exception
+) -> TypeError:
+    """The error for a parameter default the hasher refused.
+
+    A reporting helper: the caller, which knows the parameter and the function, raises
+    what it returns ``from`` the hasher's refusal.
+
+    Args:
+        parameter: The parameter's name.
+        function: The function the parameter belongs to.
+        refusal: The hasher's error, one of ``DEFAULT_VALUE_REFUSALS``.
+
+    Returns:
+        A ``TypeError`` naming the parameter and the function, with the refusal's
+        message and the remedy.
+    """
+    module = getattr(function, "__module__", None)
+    qualname = getattr(function, "__qualname__", None) or repr(function)
+    function_name = f"{module}.{qualname}" if module else qualname
+    return TypeError(
+        f"Cannot hash the default value of parameter {parameter!r} of function "
+        f"{function_name}: {refusal} A default value is part of the function's "
+        "hash: use a default the hasher can hash, or remove the default and supply "
+        "the value as an input."
+    )
 
 
 class FunctionHandler:
@@ -186,24 +220,17 @@ class FunctionHandler:
             copy whose ``"default"`` is the hash of the default value.
 
         Raises:
-            TypeError: If the default value cannot be hashed. The message names the
-                parameter and the function; the hasher's error is its cause.
+            TypeError: If the hasher refuses the default value (any of
+                ``DEFAULT_VALUE_REFUSALS``). The message names the parameter and the
+                function; the hasher's error is its cause.
         """
         default = entry.get("default")
         if not isinstance(default, ParameterDefault):
             return entry
         try:
             default_hash = hash_default_value(default.value, hasher)
-        except TypeError as exc:
-            module = getattr(func, "__module__", None)
-            qualname = getattr(func, "__qualname__", None) or repr(func)
-            function_name = f"{module}.{qualname}" if module else qualname
-            raise TypeError(
-                f"Cannot hash the default value of parameter {entry['name']!r} of "
-                f"function {function_name}: {exc} A default value is part of the "
-                "function's hash: use a default the hasher can hash, or remove the "
-                "default and supply the value as an input."
-            ) from exc
+        except DEFAULT_VALUE_REFUSALS as exc:
+            raise default_value_refused(entry["name"], func, exc) from exc
         return {**entry, "default": default_hash}
 
 

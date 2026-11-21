@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Collection
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.stream_builder import (
@@ -9,9 +9,8 @@ from orcapod.core.sources.stream_builder import (
     normalize_record_id_columns,
 )
 from orcapod.protocols.core_protocols import TagProtocol
-from orcapod.types import ContentHash, SchemaLike
+from orcapod.types import SchemaLike
 from orcapod.utils import arrow_utils
-from orcapod.utils.canonical_type_names import stabilize_type_names
 from orcapod.utils.tensor_conversions import warn_source_tensor_conversions
 
 if TYPE_CHECKING:
@@ -24,6 +23,14 @@ class ListSource(RootSource):
     Each element in the list becomes one (tag, data) pair. The element is
     stored as the data under ``name``; the tag is either the element's index
     (default) or the dict returned by ``tag_function(element, index)``.
+
+    Its identity is that of every root source (``RootSource.identity_structure``:
+    class name, output schema, ``source_id``, key columns; developer, November 21,
+    2026, ITL-1272). The elements and the tags the tag function gave enter it only
+    through the default source id, the hash of the built table, when no
+    ``source_id`` is given, and through the output schema (their types); with a
+    ``source_id``, the source is an address: other elements of the same types leave its
+    content hash unchanged.
     """
 
     @staticmethod
@@ -39,17 +46,37 @@ class ListSource(RootSource):
         data: list[Any],
         tag_function: Callable[[Any, int], dict[str, Any] | TagProtocol] | None = None,
         expected_tag_keys: Collection[str] | None = None,
-        tag_function_hash_mode: Literal["content", "signature", "name"] = "name",
         data_schema: SchemaLike | None = None,
         source_id: str | None = None,
         record_id_columns: str | Collection[str] | None = None,
+        *,
+        hash_in_key_order: bool = False,
         **kwargs: Any,
     ) -> None:
+        """Build the source from ``data``.
+
+        Args:
+            name: The data column each element is stored under.
+            data: The elements, one row each.
+            tag_function: Gives each row's tags from ``(element, index)``; by
+                default ``{"element_index": index}``.
+            expected_tag_keys: The tag column names, when they cannot be read from
+                the first row (or there is no row).
+            data_schema: The Python schema of the rows, when it must not be
+                inferred from the values.
+            source_id: The source's name; by default ``list:<label>:<hex>`` of the
+                built table's hash.
+            record_id_columns: The key columns that name a row, in key order;
+                ``None`` or ``()`` for the position.
+            hash_in_key_order: Hash the table for the default source id with its
+                rows sorted by the key columns (ITL-1272); needs key columns and no
+                ``source_id``.
+            **kwargs: Passed on to ``RootSource``.
+        """
         super().__init__(source_id=source_id, **kwargs)
 
         self.name = name
         self._elements = list(data)
-        self._tag_function_hash_mode = tag_function_hash_mode
 
         if tag_function is None:
             tag_function = self.__class__._default_tag
@@ -60,9 +87,6 @@ class ListSource(RootSource):
         self._expected_tag_keys = (
             tuple(expected_tag_keys) if expected_tag_keys is not None else None
         )
-
-        # Hash the tag function for identity purposes.
-        self._tag_function_hash = self._hash_tag_function()
 
         # Build rows: each row is tag_fields merged with {name: element}.
         rows = []
@@ -100,58 +124,13 @@ class ListSource(RootSource):
             source_id=self._source_id,
             source_kind=self.SOURCE_KIND,
             record_id_columns=self._key_columns,
+            hash_in_key_order=hash_in_key_order,
         )
 
         self._stream = result.stream
         if self._source_id is None:
             self._source_id = result.source_id
         warn_source_tensor_conversions(self._source_id, rows)
-
-    def _hash_tag_function(self) -> str | ContentHash:
-        """Produce the stable identity of the tag function.
-
-        Returns:
-            The function's qualified name (``"name"``), its signature text
-            (``"signature"``), or the semantic hash of its source text
-            (``"content"``). The hash is returned as a ``ContentHash``, never as its
-            hex text: it enters ``identity_structure``, and a hash fed into another
-            hash carries its label (ITL-1154).
-        """
-        if self._tag_function_hash_mode == "name":
-            fn = self._tag_function
-            return f"{fn.__module__}.{fn.__qualname__}"
-        elif self._tag_function_hash_mode == "signature":
-            import inspect
-
-            sig = inspect.signature(self._tag_function)
-            # Name relocated stdlib types (``pathlib._local.Path`` on Python 3.13)
-            # by their public module so the string is the same on every version.
-            return stabilize_type_names(
-                str(sig),
-                *(cast(object, p.annotation) for p in sig.parameters.values()),
-                cast(object, sig.return_annotation),
-            )
-        else:  # "content"
-            import inspect
-
-            src = inspect.getsource(self._tag_function)
-            return self.data_context.semantic_hasher.hash_object(src)
-
-    def identity_structure(self) -> Any:
-        """Return identity including class name, field name, elements, tag
-        function hash and key columns (``()`` for the position; ITL-1154).
-        """
-        try:
-            elements_repr: Any = tuple(self._elements)
-        except TypeError:
-            elements_repr = tuple(str(e) for e in self._elements)
-        return (
-            self.__class__.__name__,
-            self.name,
-            elements_repr,
-            self._tag_function_hash,
-            self._key_columns,
-        )
 
     def to_config(self, db_registry=None) -> dict[str, Any]:
         """Serialize metadata-only config (data is not serializable)."""

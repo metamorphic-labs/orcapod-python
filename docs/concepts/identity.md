@@ -178,6 +178,146 @@ print(step.pod(source).pipeline_hash() == original)
 When you change what a function computes, bump its major version (or rename it) so that
 stale results are not reused.
 
+The output schema is a set of named, typed outputs: each output key with its type, in no
+order, like every other schema. `output_keys` also says which position of the returned
+tuple each name takes, and that mapping belongs with the body. So reordering the output keys
+changes the identity only when a key's type changes. Swapping two keys of the same type
+keeps the identity, as a body edit does. When a name now receives another value (the keys
+swapped without the returned values, or the reverse), what the function computes changed:
+bump the major version. Until stored results are checked against the current function on a
+cache hit (ITL-1253), a run serves the earlier results without a warning. Swapping the keys
+and the returned values together changes nothing: each name receives the value it had. The
+function's input parameters (their names and their order) are not part of the identity
+either.
+
+```python
+@function_pod(output_keys=["total", "doubled"])
+def pair(age: int) -> tuple[int, int]:
+    return age + 1, age * 2
+
+original = pair.pod(source).pipeline_hash()
+
+@function_pod(output_keys=["doubled", "total"])  # same types: same identity
+def pair(age: int) -> tuple[int, int]:
+    return age + 1, age * 2
+
+print(pair.pod(source).pipeline_hash() == original)
+# True
+
+@function_pod(output_keys=["label", "next_age"])
+def describe(age: int) -> tuple[str, int]:
+    return f"age {age}", age + 1
+
+original = describe.pod(source).pipeline_hash()
+
+@function_pod(output_keys=["next_age", "label"])  # next_age is now a str: new identity
+def describe(age: int) -> tuple[str, int]:
+    return f"age {age}", age + 1
+
+print(describe.pod(source).pipeline_hash() == original)
+# False
+```
+
+## Order never counts, except where you give it
+
+The rule: no hash, identity, stored value or row depends on the order in which you give
+Orcapod a set of things. If an order matters, it is an explicit argument. The rule does not
+hold everywhere yet: a few cases still break it, each owned by an open issue, and they are
+listed under [What does not hold yet](#what-does-not-hold-yet) below. They are defects to be
+fixed, not exceptions. The places where an order is meant to count are the table of
+exceptions further down. By the rule, none of these changes a content hash, a pipeline
+hash, a system-tag column name, a stored table path, a stored row, a record id or a row's
+hashes:
+
+- the order of a source's `tag_columns` (plain tags and data-tags alike) and the order of
+  the columns in its table;
+- the order of the names, mapping entries or keywords of an argument that names several:
+  the columns of `select_columns`, `drop_columns`, `drop_nulls` and the other selections,
+  the entries of `map_tags`, `map_data` and `map_columns`, the constraints of
+  `polars_filter`, `tag_only_columns`, `tags_as_data`;
+- the order of the inputs of an operator that declares itself commutative (`Join`), and of
+  the inputs of a function pod (for the ordered operators, see the table of orders that
+  count below);
+- the path the rows take: the sync and the async run give the same rows.
+
+What follows your order is where the columns are placed: `keys()`, `as_table()` and a
+stored table place them after your declared `tag_columns` and your table's columns
+(data-tags first among the data columns). That placement is presentation only.
+
+```python
+from orcapod.sources import DictSource
+
+visits = [
+    {"subject": "m1", "session": 1, "score": 0.5},
+    {"subject": "m1", "session": 2, "score": None},
+    {"subject": "m2", "session": 1, "score": 0.75},
+]
+by_subject = DictSource(
+    data=visits, tag_columns=["subject", "session"], tag_only_columns=True, source_id="visits"
+)
+by_session = DictSource(
+    data=visits, tag_columns=["session", "subject"], tag_only_columns=True, source_id="visits"
+)
+print(by_subject.content_hash() == by_session.content_hash())
+# True
+print(by_subject.keys()[0], by_session.keys()[0])
+# ('subject', 'session') ('session', 'subject')
+kept = by_subject.drop_nulls(["score", "subject"])
+same = by_session.drop_nulls(["subject", "score"])
+print(kept.content_hash() == same.content_hash(), kept.as_table().num_rows)
+# True 2
+```
+
+The order counts only where it is the point of the argument:
+
+| Order that counts | Why |
+|---|---|
+| `record_id_columns` of every source (by default a database table's primary key) | A record id is the canonical JSON of the key columns in key order, so the key order is part of every record id and of the source's identity. It is the explicit argument that states the order. |
+| `member_order` of `GroupBy` (ITL-1226; not in a release yet) | The explicit order of the members inside each group's lists, the argument that replaces the input's tag order there. |
+| the inputs of an operator whose `argument_symmetry` is a tuple (`SemiJoin`, `MergeJoin`) | The inputs have roles: `SemiJoin(left, right)` keeps the rows of `left`; `MergeJoin(a, b)` lists `a`'s value first in every merged list (ITL-1281). |
+| the order of the ROWS given to a source without key columns | Its record ids are the row positions, so a reorder is a change (by decision). Row order, never column order. |
+| the order of the ROWS given to `Batch` | `Batch` groups consecutive rows: row order, never column order. |
+| the fields of a user class (`@dataclass`, `orcapod.dataclass`, pydantic) | A class is identified with its fields in declared order: reordering them declares another type. |
+| the declared `tag_columns` order and a table's data column order | Presentation only: they place the columns of `keys()`, `as_table()` and stored tables (data-tags first, ITL-1205), and enter no hash, identity or stored value. That this placement is consistent across layouts and paths is ITL-1249. |
+
+A record id names a row by its key columns in key order, so the key order is part of the
+source:
+
+```python
+keyed = DictSource(
+    data=visits,
+    tag_columns=["subject", "session"],
+    tag_only_columns=True,
+    source_id="visits",
+    record_id_columns=["subject", "session"],
+)
+rekeyed = DictSource(
+    data=visits,
+    tag_columns=["subject", "session"],
+    tag_only_columns=True,
+    source_id="visits",
+    record_id_columns=["session", "subject"],
+)
+print(keyed.content_hash() == rekeyed.content_hash())
+# False
+```
+
+### What does not hold yet
+
+`tests/test_core/test_order_invariance.py` checks the rule for every exported operator,
+source and stream kind, the function pod forms and a job. Today these cases still break it
+(the test marks each as an expected failure naming its issue); they are being fixed before
+data context v1 is frozen:
+
+- the order of `polars_filter`'s predicates is in its identity (ITL-1247, undecided);
+- a function pod over data-tags: its content and pipeline hash and its node's stored paths
+  depend on the input's tag order and table layout (ITL-1246);
+- a stream built directly from a table (`ArrowTableStream`): its content hash depends on
+  the order of its tags (ITL-1227);
+- which rows `head()` shows, sorted by tags, follows the tag order (ITL-1270);
+- where the columns are placed is not always the declared order: an operator places its
+  output tags in its input table's column order (ITL-1249, presentation only).
+
 ## Your own classes in the identity
 
 A class enters both chains through its **identity**: its kind, its name and the names and

@@ -157,7 +157,7 @@ call. `get_all_records` returns them; ask for the `meta` columns to see the deta
 records = pl.from_arrow(job.nodes["rates"].get_all_records(columns={"meta": True}))
 meta = [c for c in records.columns if c.startswith("__")]
 print(meta)
-# ['__data_id', '__input_data_hash', '__output_data_hash', '__data_context', '__computed', '__is_ephemeral', '__input_data_hash_right', '__pf_var_function_name', '__pf_var_function_version', '__pf_var_function_signature_hash', '__pf_var_function_content_hash', '__pf_var_git_hash', '__pf_exec_executor_type', '__pf_exec_executor_info', '__pf_exec_python_version', '__pf_exec_extra_info', '__pod_ts']
+# ['__data_id', '__input_data_hash', '__output_data_hash', '__data_context', '__computed', '__is_ephemeral', '__input_data_hash_right', '__pf_var_function_name', '__pf_var_function_version', '__pf_var_function_module', '__pf_var_function_signature_hash', '__pf_var_function_content_hash', '__pf_var_git_hash', '__pf_exec_executor_type', '__pf_exec_executor_info', '__pf_exec_python_version', '__pf_exec_extra_info', '__pod_ts']
 ```
 
 The ones you are most likely to want:

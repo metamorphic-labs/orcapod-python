@@ -531,6 +531,16 @@ def golden_scaled(age: int, factor: float = 2.0) -> float:
     return age * factor
 
 
+def golden_stats2(a: int, b: int) -> tuple[int, int]:
+    """Two outputs of one type: the order of the output keys is in the stored signature."""
+    return a + b, a * b
+
+
+def golden_stats3(a: int, b: int) -> tuple[int, str, float]:
+    """Three outputs of three types."""
+    return a + b, f"{a}-{b}", a / 4
+
+
 @case("semantic", "function")
 def semantic_functions() -> dict[str, Any]:
     """Pin the hash of a function used as a value and the stored signature hash.
@@ -559,6 +569,65 @@ def semantic_functions() -> dict[str, Any]:
         out[f"stored_signature.{name}"] = _bytes_text(
             variation["function_signature_hash"]
         )
+        # ITL-1256: the function as written, from its def line on.
+        out[f"stored_content.{name}"] = _bytes_text(variation["function_content_hash"])
+    out.update(_stored_record_cases())
+    return out
+
+
+def _stored_record_cases() -> dict[str, Any]:
+    """The record of python.function.v1 rev1 (ITL-1256) in more declarations.
+
+    Output keys in two orders (two and three keys), an ``input_schema=`` override, the
+    three ways of making a pod, and a function whose source cannot be read (its content
+    hash is absent: ``None``).
+    """
+    from orcapod import function_pod
+    from orcapod.core.data_function import PythonDataFunction
+    from orcapod.core.function_pod import FunctionPod
+
+    def signature(data_function: Any) -> str:
+        return _bytes_text(
+            data_function.get_function_variation_data()["function_signature_hash"]
+        )
+
+    out: dict[str, Any] = {
+        "stored_signature.stats2.forward": signature(
+            PythonDataFunction(golden_stats2, output_keys=["sum", "product"])
+        ),
+        "stored_signature.stats2.backward": signature(
+            PythonDataFunction(golden_stats2, output_keys=["product", "sum"])
+        ),
+        "stored_signature.stats3.forward": signature(
+            PythonDataFunction(golden_stats3, output_keys=["total", "label", "quarter"])
+        ),
+        "stored_signature.stats3.rotated": signature(
+            PythonDataFunction(golden_stats3, output_keys=["label", "quarter", "total"])
+        ),
+        "stored_signature.scaled.input_schema": signature(
+            PythonDataFunction(
+                golden_scaled, output_keys="scaled", input_schema={"age": float}
+            )
+        ),
+        "stored_signature.stats2.from_fn": signature(
+            FunctionPod.from_fn(
+                golden_stats2, output_keys=["sum", "product"]
+            ).data_function
+        ),
+        "stored_signature.stats2.decorator": signature(
+            function_pod(output_keys=["sum", "product"])(
+                golden_stats2
+            ).pod.data_function
+        ),
+    }
+    namespace: dict[str, Any] = {"__name__": "golden_repl"}
+    exec("def typed_in(x: int) -> int:\n    return x + 1\n", namespace)
+    without_source = PythonDataFunction(namespace["typed_in"], output_keys="y")
+    variation = without_source.get_function_variation_data()
+    out["stored_signature.without_source"] = _bytes_text(
+        variation["function_signature_hash"]
+    )
+    out["stored_content.without_source"] = variation["function_content_hash"]
     return out
 
 
@@ -720,14 +789,15 @@ def schema_source_stream_builder() -> dict[str, Any]:
 
     builder = SourceStreamBuilder(_ctx(), DEFAULT_CONFIG)
     out: dict[str, Any] = {}
-    for variant, kwargs in {
+    variants: dict[str, dict[str, Any]] = {
         "default_source_id": {"source_kind": "arrow_table"},
         "named_source_id": {"source_id": "golden_source"},
         "record_id_column": {
             "source_id": "golden_source",
             "record_id_columns": "subject",
         },
-    }.items():
+    }
+    for variant, kwargs in variants.items():
         result = builder.build(_builder_table(), tag_columns=["subject"], **kwargs)
         out[f"{variant}.schema_hash"] = result.schema_hash
         out[f"{variant}.table_hash"] = result.table_hash.to_string()
@@ -784,6 +854,129 @@ def schema_row_identifiers() -> dict[str, Any]:
             tag_only_columns=True,
         )
         out.update(_prefixed(variant, stream_summary(source)))
+    return out
+
+
+# Rows of the hash_in_key_order case: two tag columns, no single one a key, given out
+# of key order for both key orders, which sort them differently.
+KEY_ORDER_ROWS = [
+    {"subject": "s2", "trial": 1, "weight": 19.0},
+    {"subject": "s1", "trial": 2, "weight": 22.25},
+    {"subject": "s2", "trial": 2, "weight": 21.75},
+    {"subject": "s1", "trial": 1, "weight": 20.5},
+]
+# Rows whose two key columns rise together: both key orders sort them into one table.
+ALIGNED_KEY_ROWS = [
+    {"subject": "s2", "trial": 2, "weight": 22.25},
+    {"subject": "s3", "trial": 3, "weight": 19.0},
+    {"subject": "s1", "trial": 1, "weight": 20.5},
+]
+
+
+@case("schema", "hash_in_key_order")
+def schema_hash_in_key_order() -> dict[str, Any]:
+    """Pin default source ids hashed with ``hash_in_key_order`` (ITL-1272).
+
+    For each in-memory source kind, over rows given out of key order: with
+    ``hash_in_key_order=True``, both orders of the two key columns (two values), each in
+    two row orders (``given`` and ``reversed``, one value); without it, the two row
+    orders (two values). Pinned: the default source id and the content hash, and the
+    builder's table hash for the same variants.
+
+    Returns:
+        Each variant's source id, content hash and table hash.
+    """
+    from orcapod import DEFAULT_CONFIG
+    from orcapod.core.sources import (
+        ArrowTableSource,
+        DataFrameSource,
+        DictSource,
+        ListSource,
+    )
+    from orcapod.core.sources.stream_builder import SourceStreamBuilder
+
+    tags = ["subject", "trial"]
+    row_orders = {"given": KEY_ORDER_ROWS, "reversed": KEY_ORDER_ROWS[::-1]}
+    schema = pa.schema(
+        [
+            pa.field("subject", pa.large_string(), nullable=False),
+            pa.field("trial", pa.int64(), nullable=False),
+            pa.field("weight", pa.float64(), nullable=False),
+        ]
+    )
+
+    def build(kind: str, rows: list[dict[str, Any]], **kw: Any) -> Any:
+        if kind == "arrow_table":
+            return ArrowTableSource(
+                pa.Table.from_pylist(rows, schema=schema),
+                tag_columns=tags,
+                tag_only_columns=True,
+                data_context=_ctx(),
+                **kw,
+            )
+        if kind == "dict":
+            return DictSource(
+                rows, tag_columns=tags, tag_only_columns=True, data_context=_ctx(), **kw
+            )
+        if kind == "data_frame":
+            import polars as pl
+
+            return DataFrameSource(
+                pl.DataFrame(rows),
+                tag_columns=tags,
+                tag_only_columns=True,
+                data_context=_ctx(),
+                **kw,
+            )
+        by_weight = {row["weight"]: row for row in rows}
+        return ListSource(
+            "weight",
+            [row["weight"] for row in rows],
+            tag_function=lambda w, _i: {t: by_weight[w][t] for t in tags},
+            expected_tag_keys=tags,
+            data_context=_ctx(),
+            **kw,
+        )
+
+    variants: dict[str, dict[str, Any]] = {
+        "key_order.subject_trial": {
+            "record_id_columns": ["subject", "trial"],
+            "hash_in_key_order": True,
+        },
+        "key_order.trial_subject": {
+            "record_id_columns": ["trial", "subject"],
+            "hash_in_key_order": True,
+        },
+        "as_given.subject_trial": {"record_id_columns": ["subject", "trial"]},
+    }
+    out: dict[str, Any] = {}
+    for kind in ("arrow_table", "dict", "data_frame", "list"):
+        for variant, kwargs in variants.items():
+            for order, rows in row_orders.items():
+                source = build(kind, rows, **kwargs)
+                prefix = f"{kind}.{variant}.{order}"
+                out[f"{prefix}.source_id"] = source.source_id
+                out[f"{prefix}.content_hash"] = source.content_hash().to_string()
+        for key_name, key in (
+            ("subject_trial", ["subject", "trial"]),
+            ("trial_subject", ["trial", "subject"]),
+        ):
+            source = build(
+                kind, ALIGNED_KEY_ROWS, record_id_columns=key, hash_in_key_order=True
+            )
+            prefix = f"{kind}.aligned.{key_name}"
+            out[f"{prefix}.source_id"] = source.source_id
+            out[f"{prefix}.content_hash"] = source.content_hash().to_string()
+    builder = SourceStreamBuilder(_ctx(), DEFAULT_CONFIG)
+    for variant, kwargs in variants.items():
+        for order, rows in row_orders.items():
+            result = builder.build(
+                pa.Table.from_pylist(rows, schema=schema),
+                tag_columns=tags,
+                source_kind="arrow_table",
+                **kwargs,
+            )
+            out[f"builder.{variant}.{order}.table_hash"] = result.table_hash.to_string()
     return out
 
 
@@ -2514,8 +2707,8 @@ def torch_datagram() -> dict[str, Any]:
 def pipeline_tagless_producerless_stream() -> dict[str, Any]:
     """Pin the content hash of a stream with no tag column and no producer (ITL-1053).
 
-    Its identity hashes the rows sorted by their system tags, so the hash is the same
-    for rows given in any order.
+    Its identity hashes its rows in the canonical row order of an identity table
+    (ITL-1227), so the hash is the same for rows given in any order.
 
     Returns:
         The content hash for two orders of the same rows.
@@ -2548,8 +2741,9 @@ def pipeline_tagless_producerless_stream() -> dict[str, Any]:
 def pipeline_list_tag_producerless_stream() -> dict[str, Any]:
     """Pin the content hash of a stream with a list-valued tag and no producer (ITL-1053).
 
-    Arrow cannot order a list column, so the stream's identity hashes its rows in the
-    order given: the hash of the same rows in two orders differs.
+    A list column is no sort key of the canonical row order of an identity table
+    (ITL-1227): the rows' own hashes settle their order, so the same rows in two orders
+    hash the same.
 
     Returns:
         The content hash for two orders of the same rows.

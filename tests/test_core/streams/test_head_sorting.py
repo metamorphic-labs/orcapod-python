@@ -402,27 +402,29 @@ def test_a_hash_column_named_like_another_column_group_is_kept(name: str) -> Non
             assert head.table.equals(table.slice(0, 3))
 
 
-def test_the_presentation_sort_orders_a_list_tag_while_identity_keeps_stream_order() -> (
+def test_the_presentation_sort_orders_a_list_tag_and_identity_has_no_row_order() -> (
     None
 ):
-    """``as_table(sort_by_tags)`` orders list tags (Polars); the identity table does not.
+    """``as_table(sort_by_tags)`` orders list tags (Polars); the identity has no order.
 
-    The identity of a stream hashes its own table, in the order main always gave it
-    (``ArrowTableStream._identity_table``); only presentations use the new sort.
+    The identity of a raw stream hashes its table in the canonical row order
+    (``arrow_utils.canonical_identity_row_order``, ITL-1227), so the same rows in another order are
+    the same stream; only presentations sort.
     """
     from orcapod.core.streams import ArrowTableStream
 
-    table = pa.table(
-        [pa.array([[2], [1]], pa.large_list(pa.int64())), pa.array([20, 10])],
-        names=["k", "x"],
-    )
-    stream = ArrowTableStream(table, tag_columns=["k"])
-    assert stream.as_table(columns={"sort_by_tags": True}).column("x").to_pylist() == [
-        10,
-        20,
-    ]
-    identity = stream.identity_structure()[1].table  # an OrcapodTable (ITL-1179)
-    assert identity.column("x").to_pylist() == [20, 10]
+    def stream(ks: list[list[int]], xs: list[int]) -> ArrowTableStream:
+        table = pa.table(
+            [pa.array(ks, pa.large_list(pa.int64())), pa.array(xs)],
+            names=["k", "x"],
+        )
+        return ArrowTableStream(table, tag_columns=["k"])
+
+    as_given = stream([[2], [1]], [20, 10])
+    assert as_given.as_table(columns={"sort_by_tags": True}).column(
+        "x"
+    ).to_pylist() == [10, 20]
+    assert as_given.content_hash() == stream([[1], [2]], [10, 20]).content_hash()
 
 
 def test_a_hash_column_named_like_a_system_tag_does_not_reorder_tied_rows() -> None:
