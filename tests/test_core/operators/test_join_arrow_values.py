@@ -585,7 +585,6 @@ def test_a_data_column_of_a_type_with_no_rule_passes_through(
 
 PREPARED_TYPES: dict[str, Column] = {
     **{name: build([0, 1, None, 0]) for name, build in TYPES.items()},
-    "dictionary<int32, string>": pa.array(["a", "b", None, "a"]).dictionary_encode(),
     "string_view": pa.array(["a", "b", None, "a"], pa.string_view()),
     "binary_view": pa.array([b"a", b"b", None, b"a"], pa.binary_view()),
     "null": pa.array([None] * 4, pa.null()),
@@ -636,6 +635,17 @@ def test_the_rule_and_the_preparation_refuse_alike(type_name: str) -> None:
     assert part_without_rule(column.type, structs=True) is not None
     with pytest.raises(TypeError, match="no rule prepares"):
         _ = polars_ready(column)
+
+
+def test_a_dictionary_has_no_rule() -> None:
+    """No stream carries a dictionary-encoded column (ITL-1264), so the preparation
+    decodes none: the rule and the preparation refuse it alike, at the top level and
+    inside a list (ITL-1281, as ``GroupBy``'s own copy did since ITL-1264)."""
+    column = pa.array(["a", "b", None, "a"]).dictionary_encode()
+    for array in (column, _list_of(column)):
+        assert part_without_rule(array.type, structs=True) is not None
+        with pytest.raises(TypeError, match="no rule prepares"):
+            _ = polars_ready(array)
 
 
 def test_a_struct_has_a_rule_for_matching_only() -> None:

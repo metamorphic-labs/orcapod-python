@@ -52,8 +52,10 @@ ORDER_EXCEPTIONS: tuple[OrderException, ...] = (
     ),
     OrderException(
         "non_commutative_inputs",
-        "the inputs of an operator whose `argument_symmetry` is a tuple (`SemiJoin`)",
-        "The inputs have roles: `SemiJoin(left, right)` keeps the rows of `left`.",
+        "the inputs of an operator whose `argument_symmetry` is a tuple (`SemiJoin`, "
+        "`MergeJoin`)",
+        "The inputs have roles: `SemiJoin(left, right)` keeps the rows of `left`; "
+        "`MergeJoin(a, b)` lists `a`'s value first in every merged list (ITL-1281).",
     ),
     OrderException(
         "positional_rows",

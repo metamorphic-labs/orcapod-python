@@ -687,20 +687,3 @@ class LogicalNumpyArray(IgnoreListLogicalType):
             ValueError: If the bytes are not a ``.npy`` file of the stored format.
         """
         return npy_to_array(storage_value)
-
-    def storage_sort_key(self, storage_value: Any) -> tuple[Any, ...]:
-        """Ordering key for stored values, used where operators sort values.
-
-        Orders by the strict value digest of the decoded array, never by the
-        stored bytes (NumPy does not promise them across versions); ``None``
-        sorts first.
-
-        Args:
-            storage_value: Stored ``.npy`` bytes, or ``None``.
-
-        Returns:
-            A tuple that orders stored values deterministically.
-        """
-        if storage_value is None:
-            return (0,)
-        return (1, array_value_digest(npy_to_array(storage_value), frozenset()))

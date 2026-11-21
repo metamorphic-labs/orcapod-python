@@ -670,16 +670,13 @@ def test_none_returned_for_optional_ndarray_is_accepted() -> None:
 
 
 # ---------------------------------------------------------------------------
-# MergeJoin orders merged arrays by their value hash
+# MergeJoin keeps merged arrays in argument order (ITL-1281)
 # ---------------------------------------------------------------------------
 
 
-def _hash_order(arrays: list[npt.NDArray[Any]]) -> list[npt.NDArray[Any]]:
-    return sorted(arrays, key=lambda a: semantic_hash(a).digest)
-
-
-def test_merge_join_orders_arrays_by_their_value_hash() -> None:
-    """``MergeJoin`` orders merged arrays by their strict value hash, never by the stored bytes."""
+def test_merge_join_keeps_arrays_in_argument_order() -> None:
+    """``MergeJoin`` compares no arrays: the first argument's array comes first, as it
+    was given (ITL-1281)."""
     small = np.array([7.5], dtype=np.float64)
     large = np.array([107.5], dtype=np.float64)
     other = np.array([1], dtype=np.int8)
@@ -695,19 +692,21 @@ def test_merge_join_orders_arrays_by_their_value_hash() -> None:
         tag_only_columns=True,
         source_id="r",
     )
-    for pair in ((left, right), (right, left)):
+    given = {"l": {"a": large, "b": other}, "r": {"a": small, "b": small}}
+    for first, second, pair in (("l", "r", (left, right)), ("r", "l", (right, left))):
         got: dict[Any, Any] = {
             t.as_dict()["k"]: d.as_dict()["x"]
             for t, d in MergeJoin()(*pair).iter_data()
         }
-        for k, values in (("a", [large, small]), ("b", [other, small])):
-            expected = _hash_order(values)
+        for k in ("a", "b"):
+            expected = [given[first][k], given[second][k]]
             assert [x.tobytes() for x in got[k]] == [x.tobytes() for x in expected]
             assert [x.dtype for x in got[k]] == [x.dtype for x in expected]
 
 
-def test_merge_join_orders_arrays_that_differ_only_in_field_order() -> None:
-    """``MergeJoin`` orders arrays that differ only in field order the same way for either input order."""
+def test_merge_join_keeps_arrays_that_differ_only_in_field_order_as_given() -> None:
+    """Arrays that differ only in field order keep their own field order, in argument
+    order."""
     ab = np.array([(1, 2.0)], dtype=[("a", "<i4"), ("b", "<f8")])
     ba = np.array([(2.0, 1)], dtype=[("b", "<f8"), ("a", "<i4")])
     left = DictSource(
@@ -722,12 +721,8 @@ def test_merge_join_orders_arrays_that_differ_only_in_field_order() -> None:
         tag_only_columns=True,
         source_id="r",
     )
-    outs: list[Any] = [
-        next(d.as_dict()["x"] for _, d in MergeJoin()(*pair).iter_data())
-        for pair in ((left, right), (right, left))
-    ]
-    expected = _hash_order([ab, ba])
-    for got in outs:
+    for pair, expected in (((left, right), [ba, ab]), ((right, left), [ab, ba])):
+        got: Any = next(d.as_dict()["x"] for _, d in MergeJoin()(*pair).iter_data())
         assert [x.dtype.names for x in got] == [x.dtype.names for x in expected]
         for x, e in zip(got, expected, strict=True):
             assert_arrays_identical(x, e)

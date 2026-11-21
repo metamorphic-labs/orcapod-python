@@ -20,7 +20,7 @@ from orcapod.protocols.core_protocols import PodProtocol
 # - Different tag column sets (left: ["id"], right: ["id", "group"])
 #   to prove tag union and that inner join on shared tags works.
 # - Colliding "value" column has left > right for id=2 (500 > 200)
-#   and left < right for id=3 (30 < 300), forcing actual sort reordering.
+#   and left < right for id=3 (30 < 300): argument order, never a value sort.
 # - Non-overlapping ids (left has 1, right has 4) prove inner join filters.
 
 
@@ -107,9 +107,10 @@ class TestMergeJoinConformance:
         op = MergeJoin()
         assert isinstance(op, PodProtocol)
 
-    def test_is_commutative(self):
+    def test_is_ordered(self):
+        """MergeJoin is ordered, not commutative (ITL-1281)."""
         op = MergeJoin()
-        assert op.is_commutative() is True
+        assert op.is_commutative() is False
 
 
 # ===================================================================
@@ -136,18 +137,21 @@ class TestMergeJoinBasic:
         # left has ["id"], right has ["id", "group"] => union is {"id", "group"}
         assert set(tag_keys) == {"id", "group"}
 
-    def test_colliding_columns_become_sorted_lists(self, left_stream, right_stream):
-        """Colliding data columns must be sorted, not just in input order.
-        id=2: left=500, right=200 => must sort to [200, 500] (proves reordering).
-        id=3: left=30, right=300 => [30, 300]."""
+    def test_colliding_columns_become_lists_in_argument_order(
+        self, left_stream, right_stream
+    ):
+        """A merged list is [left value, right value], never sorted (ITL-1281).
+        id=2: left=500, right=200 => [500, 200]; id=3: left=30, right=300 => [30, 300]."""
         op = MergeJoin()
         result = op.static_process(left_stream, right_stream)
         rows = {r["id"]: r for r in result.as_table().to_pylist()}
-
-        # id=2: left=500 > right=200, so sorting MUST reorder to [200, 500]
-        assert rows[2]["value"] == [200, 500]
-        # id=3: left=30 < right=300, sorted stays [30, 300]
+        assert rows[2]["value"] == [500, 200]
         assert rows[3]["value"] == [30, 300]
+
+        swapped = op.static_process(right_stream, left_stream)
+        rows = {r["id"]: r for r in swapped.as_table().to_pylist()}
+        assert rows[2]["value"] == [200, 500]
+        assert rows[3]["value"] == [300, 30]
 
     def test_non_colliding_columns_stay_scalar(self, left_stream, right_stream):
         """Non-colliding data columns should remain as scalars."""
@@ -158,11 +162,10 @@ class TestMergeJoinBasic:
             assert isinstance(row["extra_left"], str)
             assert isinstance(row["extra_right"], str)
 
-    def test_values_sorted_independently_per_column(self):
-        """Each colliding column should be sorted independently.
-        col_a: left > right for id=1, left < right for id=2.
-        col_b: left < right for id=1, left > right for id=2.
-        Sorting each independently means they can't just be preserving one order."""
+    def test_lists_of_a_row_are_parallel(self):
+        """Every colliding column of a row follows the same input order (ITL-1281).
+        col_a: left > right for id=1, left < right for id=2; col_b the opposite.
+        A per-column value sort would put different inputs first in the two lists."""
         left = ArrowTableStream(
             pa.table(
                 {
@@ -185,23 +188,26 @@ class TestMergeJoinBasic:
         )
 
         op = MergeJoin()
-        result = op.static_process(left, right)
-        rows = {r["id"]: r for r in result.as_table().to_pylist()}
-
-        # id=1: col_a left=100>right=3 => [3,100], col_b left=1<right=99 => [1,99]
-        assert rows[1]["col_a"] == [3, 100]
+        rows = {
+            r["id"]: r for r in op.static_process(left, right).as_table().to_pylist()
+        }
+        assert rows[1]["col_a"] == [100, 3]
         assert rows[1]["col_b"] == [1, 99]
-
-        # id=2: col_a left=5<right=200 => [5,200], col_b left=50>right=2 => [2,50]
         assert rows[2]["col_a"] == [5, 200]
+        assert rows[2]["col_b"] == [50, 2]
+
+        rows = {
+            r["id"]: r for r in op.static_process(right, left).as_table().to_pylist()
+        }
+        assert rows[1]["col_a"] == [3, 100]
+        assert rows[1]["col_b"] == [99, 1]
+        assert rows[2]["col_a"] == [200, 5]
         assert rows[2]["col_b"] == [2, 50]
 
 
 class TestMergeJoinSourceColumns:
-    def test_source_columns_follow_data_sort_order(self, left_source, right_source):
-        """Source columns for colliding data columns should be reordered
-        to match the sort order of the corresponding data values.
-        For id=2: left=500>right=200, so right's source entry must come first."""
+    def test_source_columns_follow_argument_order(self, left_source, right_source):
+        """A merged column's source-info list is in argument order, as its values."""
         from orcapod.system_constants import constants
 
         op = MergeJoin()
@@ -209,20 +215,20 @@ class TestMergeJoinSourceColumns:
         result_table = result.as_table(columns={"source": True})
 
         source_col_name = f"{constants.SOURCE_PREFIX}value"
-        assert source_col_name in result_table.column_names
-
         rows = {r["id"]: r for r in result_table.to_pylist()}
-
-        # id=2: value=[200, 500], so source should list right's source first
-        assert isinstance(rows[2][source_col_name], list)
-        assert len(rows[2][source_col_name]) == 2
-        # The first source entry corresponds to the smaller value (200 from right)
-        assert "value" in rows[2][source_col_name][0]
-        # Verify data values are actually sorted
-        assert rows[2]["value"] == [200, 500]
-
-        # id=3: value=[30, 300], left's source first (30 is left's value)
+        left_id = left_source.source_id
+        right_id = right_source.source_id
+        # id=2 is left row 1 and right row 0; id=3 is left row 2 and right row 1.
+        assert rows[2]["value"] == [500, 200]
+        assert rows[2][source_col_name] == [
+            f"{left_id}::row_1::value",
+            f"{right_id}::row_0::value",
+        ]
         assert rows[3]["value"] == [30, 300]
+        assert rows[3][source_col_name] == [
+            f"{left_id}::row_2::value",
+            f"{right_id}::row_1::value",
+        ]
 
     def test_non_colliding_source_columns_preserved(self, left_source, right_source):
         """Source columns for non-colliding data columns should remain as scalars."""
@@ -243,15 +249,10 @@ class TestMergeJoinSourceColumns:
             assert isinstance(row[left_source_col], str)
             assert isinstance(row[right_source_col], str)
 
-    def test_source_columns_sorted_independently_per_colliding_column(self):
-        """With two colliding columns (math, reading) where sort order differs
-        per column, each source column must track its own data column's sort.
-
-        east math=95 > west math=70 but east reading=30 < west reading=92 (id=1)
-        east math=40 < west math=85 but east reading=88 > west reading=10 (id=2)
-
-        So for id=1: math sorts to [70,95] (west,east) but reading sorts to
-        [30,92] (east,west) — source columns must follow each independently."""
+    def test_source_columns_of_two_colliding_columns_are_parallel(self):
+        """With two colliding columns (math, reading) whose values run in opposite
+        orders, both lists and both source-info lists follow the argument order:
+        element 0 is always east's, element 1 west's (ITL-1281)."""
         from orcapod.system_constants import constants
 
         east = ArrowTableSource(
@@ -281,41 +282,37 @@ class TestMergeJoinSourceColumns:
             infer_nullable=True,
         )
 
-        op = MergeJoin()
-        result = op.static_process(east, west)
-        result_table = result.as_table(columns={"source": True})
-
         src_math = f"{constants.SOURCE_PREFIX}math"
         src_reading = f"{constants.SOURCE_PREFIX}reading"
-        assert src_math in result_table.column_names
-        assert src_reading in result_table.column_names
+        for first, second in (("east", "west"), ("west", "east")):
+            inputs = {"east": east, "west": west}
+            values = {
+                "east": {"math": [95, 40], "reading": [30, 88]},
+                "west": {"math": [70, 85], "reading": [92, 10]},
+            }
+            result = MergeJoin().static_process(inputs[first], inputs[second])
+            rows = {
+                r["id"]: r
+                for r in result.as_table(columns={"source": True}).to_pylist()
+            }
+            for i, key in enumerate([1, 2]):
+                for column, source_column in (
+                    ("math", src_math),
+                    ("reading", src_reading),
+                ):
+                    assert rows[key][column] == [
+                        values[first][column][i],
+                        values[second][column][i],
+                    ]
+                    assert rows[key][source_column] == [
+                        f"{first}::row_{i}::{column}",
+                        f"{second}::row_{i}::{column}",
+                    ]
 
-        rows = {r["id"]: r for r in result_table.to_pylist()}
 
-        # id=1: math=[70, 95] (west first), reading=[30, 92] (east first)
-        assert rows[1]["math"] == [70, 95]
-        assert rows[1]["reading"] == [30, 92]
-        # Source for math: west's source first (matches 70), east's source second (matches 95)
-        assert "west" in rows[1][src_math][0]
-        assert "east" in rows[1][src_math][1]
-        # Source for reading: east's source first (matches 30), west's source second (matches 92)
-        assert "east" in rows[1][src_reading][0]
-        assert "west" in rows[1][src_reading][1]
-
-        # id=2: math=[40, 85] (east first), reading=[10, 88] (west first)
-        assert rows[2]["math"] == [40, 85]
-        assert rows[2]["reading"] == [10, 88]
-        # Source for math: east first (matches 40), west second (matches 85)
-        assert "east" in rows[2][src_math][0]
-        assert "west" in rows[2][src_math][1]
-        # Source for reading: west first (matches 10), east second (matches 88)
-        assert "west" in rows[2][src_reading][0]
-        assert "east" in rows[2][src_reading][1]
-
-
-class TestMergeJoinCommutativity:
-    def test_commutative_data_output(self, left_stream, right_stream):
-        """MergeJoin(A, B) should produce the same data as MergeJoin(B, A)."""
+class TestMergeJoinArgumentOrder:
+    def test_argument_orders_give_reversed_lists(self, left_stream, right_stream):
+        """MergeJoin(A, B) and MergeJoin(B, A) hold the same pairs, reversed."""
         op = MergeJoin()
         result_lr = op.static_process(left_stream, right_stream)
         result_rl = op.static_process(right_stream, left_stream)
@@ -323,37 +320,38 @@ class TestMergeJoinCommutativity:
         rows_lr = sorted(result_lr.as_table().to_pylist(), key=lambda r: r["id"])
         rows_rl = sorted(result_rl.as_table().to_pylist(), key=lambda r: r["id"])
 
-        assert rows_lr == rows_rl
+        assert [r["value"] for r in rows_lr] == [r["value"][::-1] for r in rows_rl]
+        # Two operations, two identities (the operator's own streams, not the
+        # ``static_process`` result, carry the identity).
+        assert (
+            op(left_stream, right_stream).content_hash()
+            != op(right_stream, left_stream).content_hash()
+        )
+        assert (
+            op(left_stream, right_stream).pipeline_hash()
+            != op(right_stream, left_stream).pipeline_hash()
+        )
 
-    def test_commutative_system_tag_column_names(self, left_source, right_source):
-        """Swapping input order should produce the same system tag column names."""
+    def test_system_tag_positions_are_argument_indices(self, left_source, right_source):
+        """Each input's system-tag columns end in its argument index."""
         from orcapod.system_constants import constants
 
         op = MergeJoin()
+        n_char = op.orcapod_config.hashing.system_tag_n_char
+        for order in ((left_source, right_source), (right_source, left_source)):
+            table = op.static_process(*order).as_table(columns={"system_tags": True})
+            sys_cols = [
+                c
+                for c in table.column_names
+                if c.startswith(constants.SYSTEM_TAG_PREFIX)
+            ]
+            for index, stream in enumerate(order):
+                suffix = f"{stream.pipeline_hash().to_hex(n_char)}:{index}"
+                assert sum(c.endswith(suffix) for c in sys_cols) == 2, suffix
 
-        result_lr = op.static_process(left_source, right_source)
-        result_rl = op.static_process(right_source, left_source)
-
-        sys_cols_lr = sorted(
-            c
-            for c in result_lr.as_table(columns={"system_tags": True}).column_names
-            if c.startswith(constants.SYSTEM_TAG_PREFIX)
-        )
-        sys_cols_rl = sorted(
-            c
-            for c in result_rl.as_table(columns={"system_tags": True}).column_names
-            if c.startswith(constants.SYSTEM_TAG_PREFIX)
-        )
-
-        assert sys_cols_lr == sys_cols_rl
-
-    def test_commutative_system_tag_values_same_pipeline_hash(self):
-        """When both inputs have the same pipeline_hash, swapping inputs
-        must still produce identical system tag VALUES per row (not just
-        column names). This tests the value-sorting logic.
-
-        src_a values [300, 20] vs src_b values [100, 200]:
-        id=1: a=300>b=100, id=2: a=20<b=200 — mixed ordering."""
+    def test_system_tag_values_same_pipeline_hash_follow_argument_order(self):
+        """Two inputs with one pipeline hash: position 0 holds the first argument's
+        source and record, position 1 the second's; nothing is sorted (ITL-1281)."""
         from orcapod.system_constants import constants
 
         src_a = ArrowTableSource(
@@ -366,6 +364,7 @@ class TestMergeJoinCommutativity:
             tag_columns=["id"],
             tag_only_columns=True,
             infer_nullable=True,
+            source_id="a",
         )
         src_b = ArrowTableSource(
             pa.table(
@@ -377,42 +376,27 @@ class TestMergeJoinCommutativity:
             tag_columns=["id"],
             tag_only_columns=True,
             infer_nullable=True,
+            source_id="b",
         )
-
-        # Verify same pipeline_hash (same schema)
         assert src_a.pipeline_hash().to_hex() == src_b.pipeline_hash().to_hex()
 
         op = MergeJoin()
-        result_ab = op.static_process(src_a, src_b)
-        result_ba = op.static_process(src_b, src_a)
-
-        table_ab = result_ab.as_table(columns={"system_tags": True})
-        table_ba = result_ba.as_table(columns={"system_tags": True})
-
-        sys_cols_ab = sorted(
-            c
-            for c in table_ab.column_names
-            if c.startswith(constants.SYSTEM_TAG_PREFIX)
-        )
-        sys_cols_ba = sorted(
-            c
-            for c in table_ba.column_names
-            if c.startswith(constants.SYSTEM_TAG_PREFIX)
-        )
-
-        # Same column names
-        assert sys_cols_ab == sys_cols_ba
-
-        # Same values per row (sort rows by id for deterministic comparison)
-        rows_ab = sorted(table_ab.to_pylist(), key=lambda r: r["id"])
-        rows_ba = sorted(table_ba.to_pylist(), key=lambda r: r["id"])
-
-        for row_ab, row_ba in zip(rows_ab, rows_ba):
-            for col in sys_cols_ab:
-                assert row_ab[col] == row_ba[col], (
-                    f"System tag value mismatch for {col}: "
-                    f"{row_ab[col]!r} vs {row_ba[col]!r}"
-                )
+        for first, second in ((src_a, src_b), (src_b, src_a)):
+            table = op.static_process(first, second).as_table(
+                columns={"system_tags": True}
+            )
+            for row in table.to_pylist():
+                for name, value in row.items():
+                    if name.startswith(constants.SYSTEM_TAG_SOURCE_ID_PREFIX):
+                        expected = first if name.endswith(":0") else second
+                        assert value == expected.source_id
+                first_values = first.as_table().to_pylist()
+                second_values = second.as_table().to_pylist()
+                index = row["id"] - 1
+                assert row["value"] == [
+                    first_values[index]["value"],
+                    second_values[index]["value"],
+                ]
 
 
 class TestMergeJoinOutputSchema:
@@ -646,9 +630,8 @@ class TestMergeJoinSystemTags:
         sys_cols = self._get_system_tag_columns(result_table, constants)
         assert len(sys_cols) == 4
 
-    def test_system_tag_canonical_positions(self, left_source, right_source):
-        """System tag columns should carry canonical position indices
-        matching stable sort by pipeline_hash."""
+    def test_system_tag_positions_are_argument_indices(self, left_source, right_source):
+        """System tag columns carry each input's argument index (ITL-1281)."""
         from orcapod.config import OrcapodConfig
         from orcapod.system_constants import constants
 
@@ -664,24 +647,23 @@ class TestMergeJoinSystemTags:
             c for c in sys_cols if c.startswith(constants.SYSTEM_TAG_SOURCE_ID_PREFIX)
         ]
 
-        # Independently determine expected ordering
-        sources = [left_source, right_source]
-        sorted_sources = sorted(sources, key=lambda s: s.pipeline_hash().to_hex())
-
-        for expected_idx, expected_source in enumerate(sorted_sources):
-            field_type, schema_hash, stream_hash, index_str = (
-                self._parse_system_tag_column(sid_cols[expected_idx], constants)
+        positions = {}
+        for column in sid_cols:
+            _, _, stream_hash, index_str = self._parse_system_tag_column(
+                column, constants
             )
-            expected_stream_hash = expected_source.pipeline_hash().to_hex(n_char)
-            assert stream_hash == expected_stream_hash
-            assert index_str == str(expected_idx)
+            positions[index_str] = stream_hash
+        assert positions == {
+            "0": left_source.pipeline_hash().to_hex(n_char),
+            "1": right_source.pipeline_hash().to_hex(n_char),
+        }
 
-    def test_same_schema_inputs_distinguished_by_canonical_position(self):
-        """Two streams with identical schemas (same pipeline_hash) must still
-        produce distinct system tag columns via canonical position.
+    def test_same_schema_inputs_distinguished_by_argument_position(self):
+        """Two streams with identical schemas (same pipeline_hash) still produce
+        distinct system tag columns, by argument index.
 
-        Values have mixed ordering (a>b for id=1, a<b for id=2) to prove
-        the merge actually sorts."""
+        Values have mixed ordering (a>b for id=1, a<b for id=2): the lists stay in
+        argument order, never sorted (ITL-1281)."""
         from orcapod.system_constants import constants
 
         src_a = ArrowTableSource(
@@ -729,14 +711,12 @@ class TestMergeJoinSystemTags:
         _, _, hash_1, pos_1 = self._parse_system_tag_column(sid_cols[1], constants)
 
         assert hash_0 == hash_1  # Same pipeline hash
-        assert pos_0 != pos_1  # Different canonical positions
+        assert pos_0 != pos_1  # Different argument positions
         assert {pos_0, pos_1} == {"0", "1"}
 
-        # Verify merged values are actually sorted (proves reordering happened)
+        # The merged values are in argument order: a's first.
         rows = {r["id"]: r for r in result_table.to_pylist()}
-        # id=1: a=300>b=100 => [100, 300]
-        assert rows[1]["value"] == [100, 300]
-        # id=2: a=20<b=200 => [20, 200]
+        assert rows[1]["value"] == [300, 100]
         assert rows[2]["value"] == [20, 200]
 
     def test_different_schema_inputs_have_different_pipeline_hashes(
@@ -760,55 +740,11 @@ class TestMergeJoinSystemTags:
 
         assert hash_0 != hash_1
 
-    def test_commutative_system_tag_column_names_same_pipeline_hash(self):
-        """Swapping inputs with same pipeline_hash must produce identical
-        system tag column names. Values have mixed ordering to prove sort."""
-        from orcapod.system_constants import constants
-
-        src_a = ArrowTableSource(
-            pa.table(
-                {
-                    "id": pa.array([1, 2], type=pa.int64()),
-                    "value": pa.array([300, 20], type=pa.int64()),
-                }
-            ),
-            tag_columns=["id"],
-            tag_only_columns=True,
-            infer_nullable=True,
-        )
-        src_b = ArrowTableSource(
-            pa.table(
-                {
-                    "id": pa.array([1, 2], type=pa.int64()),
-                    "value": pa.array([100, 200], type=pa.int64()),
-                }
-            ),
-            tag_columns=["id"],
-            tag_only_columns=True,
-            infer_nullable=True,
-        )
-
-        op = MergeJoin()
-        result_ab = op.static_process(src_a, src_b)
-        result_ba = op.static_process(src_b, src_a)
-
-        sys_ab = self._get_system_tag_columns(
-            result_ab.as_table(columns={"system_tags": True}), constants
-        )
-        sys_ba = self._get_system_tag_columns(
-            result_ba.as_table(columns={"system_tags": True}), constants
-        )
-
-        assert sys_ab == sys_ba
-
-    def test_system_tag_values_sorted_for_same_pipeline_hash(self):
-        """When two streams share the same pipeline_hash, system tag VALUES
-        must be sorted per row so that position :0 always gets the
-        lexicographically smaller (source_id, record_id) tuple.
-
-        Uses source_id="zzz_source" vs "aaa_source" to ensure the
-        lexicographic order of provenance values is opposite to input order,
-        proving that sorting actually happened (not just preserved)."""
+    def test_system_tag_values_follow_argument_order_for_same_pipeline_hash(self):
+        """When two streams share the same pipeline_hash, position :0 holds the
+        first argument's (source_id, record_id) and :1 the second's, whatever their
+        lexicographic order: nothing is sorted (ITL-1281). Swapping the inputs
+        swaps the values; the column names are the same."""
         from orcapod.system_constants import constants
 
         src_a = ArrowTableSource(
@@ -839,34 +775,27 @@ class TestMergeJoinSystemTags:
         assert src_a.pipeline_hash().to_hex() == src_b.pipeline_hash().to_hex()
 
         op = MergeJoin()
-
-        result_ab = op.static_process(src_a, src_b)
-        result_ba = op.static_process(src_b, src_a)
-
-        table_ab = result_ab.as_table(columns={"system_tags": True})
-        table_ba = result_ba.as_table(columns={"system_tags": True})
+        table_ab = op.static_process(src_a, src_b).as_table(
+            columns={"system_tags": True}
+        )
+        table_ba = op.static_process(src_b, src_a).as_table(
+            columns={"system_tags": True}
+        )
 
         sys_cols = self._get_system_tag_columns(table_ab, constants)
         assert len(sys_cols) == 4  # 2 sources × 2 fields
+        assert sys_cols == self._get_system_tag_columns(table_ba, constants)
 
-        # Check source_id columns are sorted
         sid_cols = sorted(
             c for c in sys_cols if c.startswith(constants.SYSTEM_TAG_SOURCE_ID_PREFIX)
         )
-        assert len(sid_cols) == 2
-
-        # "aaa_source" < "zzz_source", so position :0 must always hold aaa_source
+        assert [c[-2:] for c in sid_cols] == [":0", ":1"]
         for row in table_ab.to_pylist():
+            assert row[sid_cols[0]] == "zzz_source"
+            assert row[sid_cols[1]] == "aaa_source"
+        for row in table_ba.to_pylist():
             assert row[sid_cols[0]] == "aaa_source"
             assert row[sid_cols[1]] == "zzz_source"
-
-        # Swapped inputs must produce identical per-row values
-        rows_ab = sorted(table_ab.to_pylist(), key=lambda r: r["id"])
-        rows_ba = sorted(table_ba.to_pylist(), key=lambda r: r["id"])
-
-        for row_ab, row_ba in zip(rows_ab, rows_ba):
-            for col in sys_cols:
-                assert row_ab[col] == row_ba[col]
 
 
 class TestMergeJoinWithListExtensionColumn:

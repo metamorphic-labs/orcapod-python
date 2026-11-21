@@ -292,7 +292,14 @@ def audit() -> None:
     results: Counter[str] = Counter()
     for type_name, values in audit_types().items():
         for label, table, keys in audit_tables(values):
-            new = arrow_utils._tag_order_by_polars(table, keys).to_pylist()  # pyright: ignore[reportPrivateUsage]
+            try:
+                new = arrow_utils._tag_order_by_polars(table, keys).to_pylist()  # pyright: ignore[reportPrivateUsage]
+            except TypeError:
+                # Since ITL-1281 the key preparation has no rule for a dictionary (no
+                # stream carries one, ITL-1264): the sort refuses such a tag.
+                results["refused (no rule)"] += 1
+                print(f"{type_name:22} {label:40} refused (no rule)")
+                continue
             outcome = compare(table, keys, new)
             results[outcome["result"]] += 1
             line = f"{type_name:22} {label:40} {outcome['result']}"

@@ -9,8 +9,7 @@ that has no rule here.
 
 Prepared for equality and order alike:
 
-* a logical type is its storage and a dictionary its values, alternately until
-  neither applies;
+* a logical type is its storage;
 * a date, time, timestamp or duration is its integer (the unit and the zone are the
   column's type, so the integers compare and order as the values do);
 * a ``float16`` becomes ``float32`` (exact; the Polars this library allows may lack
@@ -19,13 +18,15 @@ Prepared for equality and order alike:
 * a list, large list or fixed-size list becomes a large list over its prepared values;
 * a struct (matching only: ``structs=True``) a struct of its prepared children.
 
-Every other type (a map, an interval, a union, a list view, ...) has no rule:
-``part_without_rule`` names it, and the caller refuses the column, naming it.
+Every other type (a map, an interval, a union, a list view, a dictionary, ...) has no
+rule: ``part_without_rule`` names it, and the caller refuses the column, naming it. No
+stream carries a dictionary-encoded column (ITL-1264), so none reaches an operator.
 
-``Join`` and ``SemiJoin`` use this module, and so does the order every presentation
-uses (``arrow_utils.sort_by_tag_columns``, when Arrow cannot sort: a list or struct
-tag), which orders by ``sort_key``. ``GroupBy`` keeps its own copy until ITL-1281
-makes it import this one (its rule refuses structs: ``structs=False``).
+``Join``, ``SemiJoin``, ``MergeJoin`` (through ``Join``'s inner join) and ``GroupBy``
+use this module; ``GroupBy``'s rule refuses structs (``structs=False``: a struct has
+no decided order). So does the order every presentation uses
+(``arrow_utils.sort_by_tag_columns``, when Arrow cannot sort: a list or struct tag),
+which orders by ``sort_key``.
 """
 
 from __future__ import annotations
@@ -45,7 +46,7 @@ else:
     pa = LazyModule("pyarrow")
 
 
-def _is_list_kind(arrow_type: "pa.DataType") -> bool:
+def is_list_kind(arrow_type: "pa.DataType") -> bool:
     """Return whether a type is a list, a large list or a fixed-size list."""
     return (
         pa.types.is_list(arrow_type)
@@ -55,10 +56,9 @@ def _is_list_kind(arrow_type: "pa.DataType") -> bool:
 
 
 def value_type(arrow_type: "pa.DataType") -> "pa.DataType":
-    """Return the type a column's values are read as.
+    """Return the type a column's values are read as: a logical type's storage.
 
-    A logical type's storage and a dictionary's values, alternately, until neither
-    applies (at the top level; ``part_without_rule`` goes down).
+    At the top level; ``part_without_rule`` goes down.
 
     Args:
         arrow_type: The Arrow type of a column, or of a list's or struct's values.
@@ -66,13 +66,9 @@ def value_type(arrow_type: "pa.DataType") -> "pa.DataType":
     Returns:
         The type of the plain values.
     """
-    while True:
-        if isinstance(arrow_type, pa.BaseExtensionType):
-            arrow_type = arrow_type.storage_type
-        elif pa.types.is_dictionary(arrow_type):
-            arrow_type = arrow_type.value_type
-        else:
-            return arrow_type
+    while isinstance(arrow_type, pa.BaseExtensionType):
+        arrow_type = arrow_type.storage_type
+    return arrow_type
 
 
 def _is_prepared_scalar(arrow_type: "pa.DataType") -> bool:
@@ -110,7 +106,7 @@ def part_without_rule(
     The one rule for what may reach Polars, used from a schema (validation) and from
     a table (before ``polars_ready``), so nothing reaches Polars unprepared. A list
     of any kind goes down to its values, a struct (when ``structs``) to its
-    children, through logical storage and dictionary values at every depth.
+    children, through logical storage at every depth.
 
     Args:
         arrow_type: The Arrow type of a key column.
@@ -121,7 +117,7 @@ def part_without_rule(
         The first type found that has no rule, or ``None``.
     """
     plain = value_type(arrow_type)
-    if _is_list_kind(plain):
+    if is_list_kind(plain):
         lists = cast(
             "pa.LargeListType[Any] | pa.ListType[Any] | pa.FixedSizeListType[Any, Any]",
             plain,
@@ -137,29 +133,10 @@ def part_without_rule(
     return None if _is_prepared_scalar(plain) else plain
 
 
-def _without_dictionary(array: "pa.Array[Any]") -> "pa.Array[Any]":
-    """Decode a dictionary-encoded array to its values; any other array as it is.
-
-    The one place a dictionary-encoded key is decoded: the values each index points
-    at, bits as stored.
-
-    Args:
-        array: A column, or its storage.
-
-    Returns:
-        The decoded array.
-    """
-    if isinstance(array, pa.DictionaryArray):
-        return array.dictionary_decode()
-    return array
-
-
 def values_of(array: "pa.Array[Any]") -> "pa.Array[Any]":
-    """Return an array as its values are read: through logical types and dictionaries.
+    """Return an array as its values are read: a logical type's storage.
 
-    The array twin of ``value_type``: a logical type's storage and a dictionary's
-    values, alternately, until neither applies, so a dictionary over a logical type
-    (or a logical type over a dictionary) is read as its type is.
+    The array twin of ``value_type``.
 
     Args:
         array: A column, or the values of one.
@@ -167,13 +144,9 @@ def values_of(array: "pa.Array[Any]") -> "pa.Array[Any]":
     Returns:
         The array of plain values.
     """
-    while True:
-        if isinstance(array, pa.ExtensionArray):
-            array = array.storage
-        elif isinstance(array, pa.DictionaryArray):
-            array = _without_dictionary(array)
-        else:
-            return array
+    while isinstance(array, pa.ExtensionArray):
+        array = array.storage
+    return array
 
 
 def _decimal256_limbs(array: "pa.Array[Any]") -> "pa.Array[Any]":
