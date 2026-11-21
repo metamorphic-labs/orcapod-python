@@ -22,7 +22,7 @@ key or not: the changed columns are listed; the order is not compared). Each cal
 records the test file that made it.
 
 The plugin run selects every test file that sorts, heads or previews:
-``grep -rlE "sort_by_tags|\.head\(|_repr_html_|preview" tests`` (``test_*.py`` files).
+``grep -rlE "sort_by_tags|[.]head[(]|_repr_html_|preview" tests`` (``test_*.py`` files).
 """
 
 from __future__ import annotations
