@@ -13,6 +13,7 @@ from orcapod.core.data_tags import (
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource
+from orcapod.core.sources.provisional import warn_provisional_source
 from orcapod.core.sources.reload import same_rows
 from orcapod.core.sources.source_ids import hash_source_id
 from orcapod.core.sources.stream_builder import (
@@ -33,6 +34,7 @@ from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
+from orcapod.utils.provisional import provisional_class_name
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -90,6 +92,12 @@ def validate_tags_as_data(
 
 class DerivedSource(RootSource):
     """A source whose rows are derived from another source or from a job node.
+
+    Provisional in data context v1, in both forms (ITL-1331, ``PROVISIONAL_SOURCES``):
+    its source id and hashes are not frozen and may change in a later release (ITL-1317),
+    and so are those of every step downstream of it. Building one, also through
+    ``node.as_source()``, ``from_config`` or a loaded job, issues
+    ``ProvisionalHashWarning`` once per process.
 
     There are two forms.
 
@@ -179,6 +187,8 @@ class DerivedSource(RootSource):
     # The config type key (names the class a saved config is rebuilt with) and
     # the kind prefix of the plain form's default source id.
     SOURCE_KIND: ClassVar[str] = "derived"
+    PROVISIONAL = True
+    """Provisional in data context v1, both forms (ITL-1331, ``PROVISIONAL_SOURCES``)."""
 
     @staticmethod
     def _missing_source_id() -> ValueError:
@@ -291,6 +301,7 @@ class DerivedSource(RootSource):
         Returns:
             The identity structure.
         """
+        self._note_provisional_identity_use()  # a direct read is a use (ITL-1331)
         if self._tags_as_data is None:
             # Tied precisely to the specific node's data identity
             return (self._origin.content_hash(),)
@@ -361,6 +372,12 @@ class DerivedSource(RootSource):
         """
         from orcapod.pipeline.serialization import resolve_source_from_config
 
+        # Reading a saved DerivedSource is a use of a provisional source, also when its
+        # origin (a job node) cannot be rebuilt and the constructor is never reached: a
+        # loaded job warns for it as for a rebuilt one (ITL-1331).
+        provisional = provisional_class_name(cls)
+        if provisional is not None:
+            warn_provisional_source(provisional)
         cls.require_saved_source_id(config)
 
         if config.get("origin") is None:
@@ -517,6 +534,9 @@ class DerivedSource(RootSource):
         return result.stream
 
     def _get_stream(self) -> ArrowTableStream:
+        # Every read of rows notes the provisional use, also of rows kept from an
+        # earlier read (ITL-1331), as a provisional operator's stream does.
+        self._note_provisional_identity_use()
         if self._tags_as_data is not None:
             if self._cached_stream is not None:
                 return self._cached_stream
@@ -620,6 +640,8 @@ class DerivedSource(RootSource):
         its head (see ``StreamBase.head``).
         """
         check_head_size(n)
+        # A preview is a read of rows: it notes the provisional use (ITL-1331).
+        self._note_provisional_identity_use()
         config = ColumnConfig.handle_config(columns, all_info=all_info)
         origin_kind = "held" if isinstance(self._origin, RootSource) else "stored"
         if self._tags_as_data is not None and self._cached_stream is not None:

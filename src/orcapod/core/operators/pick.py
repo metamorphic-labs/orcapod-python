@@ -53,6 +53,9 @@ class Pick(UnaryOperator):
             functional output semantics.  See ITL-439.
     """
 
+    # Provisional: its identity is not frozen with data context v1 (ITL-1279).
+    PROVISIONAL: ClassVar[bool] = True
+
     # Data-tags (ITL-1023): handled.
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
@@ -83,6 +86,7 @@ class Pick(UnaryOperator):
         super().__init__(**kwargs)
 
     def identity_structure(self) -> Any:
+        self._note_provisional_identity_use()  # a direct read is a use (ITL-1279)
         # fail_on_miss intentionally excluded — it controls error behaviour,
         # not the functional transformation.
         return (self.__class__.__name__, self.column, self.key, self.out)

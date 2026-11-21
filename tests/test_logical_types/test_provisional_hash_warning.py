@@ -374,3 +374,28 @@ def test_an_undeclared_type_never_warns(tmp_path: Path) -> None:
             context.semantic_hasher.hash_object(_value(name))
             context.type_converter.python_type_to_arrow_type(PYTHON_TYPES[name])
     assert caught == []
+
+
+# ---------------------------------------------------------------------------
+# Every use is noted, not only the first (ITL-1324)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("order", [tuple(NAMES), tuple(reversed(NAMES))])
+def test_every_use_is_noted_by_extension_name_after_the_warning(
+    order: tuple[str, ...],
+) -> None:
+    """The golden hash tool records the provisional types a case uses: each use is
+    noted by the type's extension name, also after the once-per-process warning, in
+    any order of use."""
+    from orcapod.utils.provisional import recording_provisional_uses
+
+    hasher = get_default_context().semantic_hasher
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for name in order:
+            hasher.hash_object(_value(name))
+        with recording_provisional_uses() as used:
+            for name in order:
+                hasher.hash_object(_value(name))
+    assert used == set(NAMES)
