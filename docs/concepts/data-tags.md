@@ -1,9 +1,9 @@
 # Data-tags
 
-!!! warning "Integration branch (ITL-1023)"
-    Data-tags are the first slice of Orcapod v0.4, on an integration branch. The
-    identities (content and pipeline hashes) of streams with data-tags are **not
-    frozen yet** and may change before the release. Streams whose tags are all plain
+!!! note "Settled identities (ITL-1246)"
+    Data-tags are the first slice of Orcapod v0.4. The identities (content and pipeline
+    hashes) of streams with data-tags are settled (developer, November 18, 2026) and are
+    frozen with data context v1 at the 0.4.0 release. Streams whose tags are all plain
     (`tag_only_columns`) keep their v0.3 identities exactly.
 
 A tag is either **plain** (it carries its own value, as every tag did in v0.3) or
@@ -78,6 +78,27 @@ print(plain.keys())
 A function output named like a tag is an error when the pipeline is built. A function
 that does not read a data-tag column keeps its result identity: retagging a source
 does not make it compute again.
+
+The data-tags that fall through are a **set of names**: the pod's identity holds them
+sorted by name. The order of the input's tag columns never changes the pod's content or
+pipeline hash, nor the table paths of its node in a job. The output lists the data-tags
+first, in the input's own tag order: column order is presentation only. Below, the same
+spikes are given with `time` before `unit`, a different tag order and table layout:
+
+```python
+by_time = op.sources.DictSource(
+    [{"time": r["time"], "unit": r["unit"], "amp": r["amp"]} for r in rows],
+    tag_columns=["time", "unit"],
+    source_id="spikes",
+)
+scaled_by_time = scale.pod(by_time)
+print(scaled_by_time.keys())
+# (('time', 'unit'), ('time', 'unit', 'scaled'))
+print(scaled_by_time.content_hash() == scaled.content_hash())
+# True
+print(scaled_by_time.pipeline_hash() == scaled.pipeline_hash())
+# True
+```
 
 ## Moving a column between roles
 

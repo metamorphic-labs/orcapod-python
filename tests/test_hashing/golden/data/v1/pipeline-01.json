@@ -403,7 +403,6 @@
     "_tag_source_id::ac699f6aae66ff1745c42c76a3cb6cf59ba8588efc02d66e4f23de4be09ac373::ac699f6aae66ff1745c42c76a3cb6cf59ba8588efc02d66e4f23de4be09ac373:1",
     "_tag_record_id::ac699f6aae66ff1745c42c76a3cb6cf59ba8588efc02d66e4f23de4be09ac373::ac699f6aae66ff1745c42c76a3cb6cf59ba8588efc02d66e4f23de4be09ac373:1"
   ],
-  "list_tag_producerless_stream.as_given": "semantic_v1:4b99af058c91851f2998544963e3b2d6080b7078e5a29b3aaca0ec4fe172e5e2",
   "list_tag_producerless_stream.reversed": "semantic_v1:ad76e4cf890d6cf18777dfc3e1998d322a2e7079a9f5824abe1f34f42f3265da",
   "map_columns.drop_unmapped.content_hash": "semantic_v1:dbee292987b03cb1bdb3ef0fd6be097240b308d08f9eeeb91d180b2740be69cb",
   "map_columns.drop_unmapped.pipeline_hash": "semantic_v1:27ad3d292121b825fe85b28e54cfb432cecaaa53978431c9039f47df038af54f",
