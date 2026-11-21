@@ -15,7 +15,7 @@ path, and through a job that stores and reads back.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, TypeAlias
+from typing import Any, TypeAlias, cast
 
 import pyarrow as pa
 import pytest
@@ -23,6 +23,7 @@ import pytest
 from orcapod.contexts import get_default_context
 from orcapod.core.operators import Batch
 from orcapod.core.sources import ArrowTableSource
+from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.pipeline import (
     AsyncPipelineOrchestrator,
@@ -220,3 +221,76 @@ def test_a_job_stores_and_reads_back_every_value(
         {k: v for k, v in row.items() if k != "source_x"}
         for row in _batches(list(stored.iter_data()))
     ] == [{k: v for k, v in row.items() if k != "source_x"} for row in expected]
+
+
+# ── null-typed data on the row and async paths (ITL-1319) ─────────────────────
+
+NULL_TYPED: dict[str, tuple[pa.DataType, list[Any]]] = {
+    "null": (pa.null(), [None, None, None]),
+    "large_list<null>": (pa.large_list(pa.null()), [[None], [], None]),
+}
+ITL_1319 = pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="ITL-1319: a datagram normalizes a null-typed column to large_string (Data's "
+    + "null convention, Datagram._init_from_table without keep_null), so the row and "
+    + "async results type a null-typed batched column as large_list<large_string>",
+)
+
+
+def _null_typed_stream(name: str) -> ArrowTableStream:
+    """A raw stream (a source refuses a null-typed column): tags ``k`` and ``n``, data
+    ``x`` and ``y`` of the null type."""
+    arrow_type, values = NULL_TYPED[name]
+    return ArrowTableStream(
+        pa.table(
+            {
+                "k": pa.array([1, 2, 3], pa.int64()),
+                "n": pa.array([1, 1, 1], pa.int64()),
+                "x": pa.array(values, arrow_type),
+                "y": pa.array(values, arrow_type),
+            }
+        ),
+        tag_columns=["k", "n"],
+    )
+
+
+@pytest.mark.parametrize("name", list(NULL_TYPED))
+def test_null_typed_batched_columns_keep_their_values_on_every_path(name: str) -> None:
+    """The table path keeps the null type; every path keeps the values and nesting."""
+    arrow_type, values = NULL_TYPED[name]
+    stream = _null_typed_stream(name)
+    table = Batch(2).unary_static_process(stream).as_table()
+    for column in ("x", "y"):
+        assert table.schema.field(column).type == pa.large_list(arrow_type)
+        assert table.column(column).to_pylist() == [values[:2], values[2:]]
+    for rows in (list(Batch(2)(stream).iter_data()), async_rows(Batch(2), stream)):
+        # Batch keeps row order: the first batch holds rows 0 and 1, the second row 2.
+        got = [
+            [
+                cast(list[Any], data.as_table().column(column).to_pylist()[0])
+                for column in ("x", "y")
+            ]
+            for _, data in rows
+        ]
+        assert got == [[values[:2]] * 2, [values[2:]] * 2]
+
+
+@ITL_1319
+@pytest.mark.parametrize("path", ["datagram", "async"])
+@pytest.mark.parametrize("name", list(NULL_TYPED))
+def test_null_typed_batched_columns_keep_their_type_on_the_row_paths(
+    name: str, path: str
+) -> None:
+    """The row (datagram) and async results type ``x`` and ``y`` as the table does."""
+    stream = _null_typed_stream(name)
+    table = Batch(2).unary_static_process(stream).as_table()
+    rows = (
+        list(Batch(2)(stream).iter_data())
+        if path == "datagram"
+        else async_rows(Batch(2), stream)
+    )
+    for _, data in rows:
+        row = data.as_table()
+        for column in ("x", "y"):
+            assert row.schema.field(column).type == table.schema.field(column).type

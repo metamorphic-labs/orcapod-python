@@ -44,6 +44,8 @@ from orcapod.utils.arrow_utils import (
     shared_arrow_type,
 )
 
+from .several_items import async_rows
+
 SCHEMA_CONFIGS: tuple[dict[str, bool], ...] = ({}, {"system_tags": True})
 STRUCT = pa.struct([("a", pa.int8()), ("b", pa.string())])
 LARGE_STRUCT = pa.struct([("a", pa.int8()), ("b", pa.large_string())])
@@ -943,3 +945,80 @@ class TestContentHashes:
         assert [tag for tag, _ in _row_hashes(result)] == [
             tag for tag, _ in _row_hashes(widened)
         ]
+
+
+# ── null-typed data on the row and async paths (ITL-1319) ─────────────────────
+
+NULL_TYPED: dict[str, tuple[pa.DataType, list[Any]]] = {
+    "null": (pa.null(), [None, None, None]),
+    "large_list<null>": (pa.large_list(pa.null()), [[None], [], None]),
+}
+ITL_1319 = pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="ITL-1319: a datagram normalizes a null-typed column to large_string (Data's "
+    + "null convention, Datagram._init_from_table without keep_null), so the row and "
+    + "async results type a null-typed merged column as large_list<large_string>",
+)
+
+
+def _null_typed_inputs(name: str) -> tuple[ArrowTableStream, ArrowTableStream]:
+    """Two raw streams (a source refuses a null-typed column): tags ``k`` and ``n``,
+    data ``x`` and ``y`` of the null type, the same rows on both sides."""
+    arrow_type, values = NULL_TYPED[name]
+
+    def side() -> ArrowTableStream:
+        return ArrowTableStream(
+            pa.table(
+                {
+                    "k": pa.array([1, 2, 3], pa.int64()),
+                    "n": pa.array([1, 1, 1], pa.int64()),
+                    "x": pa.array(values, arrow_type),
+                    "y": pa.array(values, arrow_type),
+                }
+            ),
+            tag_columns=["k", "n"],
+        )
+
+    return side(), side()
+
+
+def _row_tables(rows: list[Any]) -> dict[int, pa.Table]:
+    return {int(tag.as_dict()["k"]): data.as_table() for tag, data in rows}
+
+
+@pytest.mark.parametrize("name", list(NULL_TYPED))
+def test_null_typed_merged_columns_keep_their_values_on_every_path(name: str) -> None:
+    """The table path keeps the null type; every path keeps the values and nesting."""
+    arrow_type, values = NULL_TYPED[name]
+    left, right = _null_typed_inputs(name)
+    table = MergeJoin().static_process(left, right).as_table().sort_by("k")
+    for column in ("x", "y"):
+        assert table.schema.field(column).type == pa.large_list(arrow_type)
+        assert table.column(column).to_pylist() == [[v, v] for v in values]
+    for rows in (
+        list(MergeJoin()(left, right).iter_data()),
+        async_rows(MergeJoin(), left, right),
+    ):
+        for k, row in _row_tables(rows).items():
+            for column in ("x", "y"):
+                assert row.column(column).to_pylist() == [[values[k - 1]] * 2]
+
+
+@ITL_1319
+@pytest.mark.parametrize("path", ["datagram", "async"])
+@pytest.mark.parametrize("name", list(NULL_TYPED))
+def test_null_typed_merged_columns_keep_their_type_on_the_row_paths(
+    name: str, path: str
+) -> None:
+    """The row (datagram) and async results type ``x`` and ``y`` as the table does."""
+    left, right = _null_typed_inputs(name)
+    table = MergeJoin().static_process(left, right).as_table()
+    rows = (
+        list(MergeJoin()(left, right).iter_data())
+        if path == "datagram"
+        else async_rows(MergeJoin(), left, right)
+    )
+    for row in _row_tables(rows).values():
+        for column in ("x", "y"):
+            assert row.schema.field(column).type == table.schema.field(column).type

@@ -119,7 +119,9 @@ class MergeJoin(BinaryOperator):
     row: element ``i`` of every merged column and of its source-info list comes
     from input ``i``, whose system-tag columns end in ``:{i}``. The lists are
     built from the inputs' Arrow arrays, so every value is the input's, bit for
-    bit, whatever its type (a struct, a logical type and a null included).
+    bit, whatever its type (a struct, a logical type and a null included). A
+    column of the Arrow ``null`` type keeps that type in this table; read as rows
+    (``Data``) or on the async path it is typed ``large_string`` (ITL-1319).
 
     For non-colliding columns, values are kept as scalars (same as regular Join).
 

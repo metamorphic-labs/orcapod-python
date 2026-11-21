@@ -1353,7 +1353,9 @@ data. The rules:
   second argument's value] on every row, and its source-info column the two tokens in the same
   order; nothing is sorted and no values are compared, so any value merges (a struct, a logical
   type, a null). The lists are built from the joined Arrow arrays
-  (arrow_utils.aggregated_list_array), so every value is the input's, bit for bit. Colliding
+  (arrow_utils.aggregated_list_array), so every value is the input's, bit for bit (a
+  null-typed column read as rows or on the async path is typed large_string, Data's
+  null convention: ITL-1319). Colliding
   columns must have identical Python types; inputs whose Arrow types still differ after
   normalization raise InputValidationError. T is the large-normalized input Arrow type.
 - Operators predict output schema (including system tag names) without computation. Verify a

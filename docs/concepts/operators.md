@@ -139,7 +139,9 @@ the first input's value, then the second input's: MergeJoin is **ordered, not co
 (ITL-1281). Nothing is sorted, so the lists of a row are parallel: element 0 of every merged
 column (and of its source-info list) comes from the first input's row, element 1 from the
 second's. Any value merges, a struct, a logical type or a null included, and every value is
-kept exactly as the input holds it.
+kept exactly as the input holds it. (A data column of the Arrow `null` type keeps that type
+in the result's table; read as rows, or on the async path, it is typed `large_string`, as
+every row reads a `null` column: ITL-1319.)
 
 ```python
 from orcapod.sources import DictSource
@@ -896,6 +898,9 @@ silent widening; convert explicitly.
   where the sync path returns an empty stream with typed columns the async path emits
   nothing. An operator node that received no rows still reads back the sync path's columns
   and Arrow types: its operator applied to its inputs' zero-row tables (ITL-858, ITL-912).
+  A second limit: a data column of the Arrow `null` type (or a list of it) is typed
+  `large_string` in a row, so the async path, which carries rows, types it so too
+  (ITL-1319).
 
 ```python
 import pyarrow as pa
