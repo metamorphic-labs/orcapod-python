@@ -195,6 +195,9 @@ the file's order. A string or binary column (`string`, `large_string`, `binary`,
 | `NA`, `null`, `N/A`, `NaN` | the text as written | null |
 | any other text | the text as written, spaces included | parsed as the type, or raises |
 
+A float column cannot take a NaN from the text `NaN`, which reads as null; an infinity can be
+spelled (`inf`, `-Infinity`).
+
 A null in a field declared non-nullable raises. Under a float type, an infinity spelled in the
 file (`inf`, `-Infinity`) is kept, a finite value is rounded to the type as usual, and a finite
 value too large for the type (`70000` under `float16`, `1e39` under `float32`) raises instead
