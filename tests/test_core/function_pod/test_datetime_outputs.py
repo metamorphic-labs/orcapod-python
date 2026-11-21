@@ -35,6 +35,7 @@ from orcapod import function_pod
 from orcapod.core.sources import ArrowTableSource, DictSource, ListSource
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import (
+    InstantOutOfRangeError,
     NaiveDatetimeError,
     NotADatetimeError,
     OutputTypeError,
@@ -720,3 +721,42 @@ def test_a_declared_source_refuses_a_datetime64_cleanly() -> None:
     assert "Value of type numpy.datetime64 is not a datetime" in str(error)
     assert 'pandas.Timestamp(value, tz="UTC")' in str(error)
     assert "2026" not in error.reason + error.hint
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        datetime(1, 1, 1, tzinfo=timezone(timedelta(microseconds=1))),
+        datetime(
+            9999,
+            12,
+            31,
+            23,
+            59,
+            59,
+            999999,
+            tzinfo=timezone(-timedelta(microseconds=1)),
+        ),
+    ],
+    ids=["year_0_in_utc", "year_10000_in_utc"],
+)
+def test_a_fractional_offset_beyond_the_years_a_datetime_holds_is_refused(
+    value: datetime,
+) -> None:
+    """An offset below one second at the ends of the range names an instant in year 0
+    or 10000 in UTC, which could not be read back: refused cleanly, by a source and as a
+    function output."""
+    with pytest.raises(InstantOutOfRangeError, match="outside the years"):
+        _ = DictSource(
+            [{"k": 1, "a": value, "b": value}],
+            tag_columns=["k"],
+            tag_only_columns=True,
+            data_schema={"k": int, "a": datetime, "b": datetime},
+        ).as_table()
+
+    @function_pod(output_keys=["a_out", "b_out"])
+    def give(a: datetime, b: datetime) -> tuple[datetime, datetime]:
+        return value, value
+
+    with pytest.raises(OutputTypeError, match="outside the years a datetime can hold"):
+        _ = give.pod(_source("us", "UTC")).as_table()

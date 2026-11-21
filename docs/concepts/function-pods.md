@@ -328,9 +328,10 @@ time zone, and a source stores it as given. What a function receives follows the
 An output declared `-> datetime` is an instant, stored as `timestamp[us, tz=UTC]` for every
 function:
 
-- An aware value in any zone is stored as its exact instant, in UTC: 09:00 in Los Angeles
-  is stored as 17:00 UTC and reads back as the same instant, also for an offset with a part
-  below one second.
+- An aware value in any zone is stored as its exact instant, in UTC: 09:00 in Los Angeles on
+  2 January (UTC-8) is stored as 17:00 UTC, and 09:00 there on 2 July (UTC-7, daylight
+  saving time) as 16:00 UTC; each reads back as the same instant, also for an offset with a
+  part below one second.
 - A naive value names no instant, so it is refused with an `OutputTypeError` that says so
   and how to attach a zone.
 - A value with a part below one microsecond (a `pandas.Timestamp` from an `ns` column with

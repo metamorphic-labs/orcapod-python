@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any, TypedDict, get_args, get_origin
 from orcapod.contexts import DataContext, resolve_context
 from orcapod.errors import (
     CanonicalOrderError,
+    InstantOutOfRangeError,
     NaiveDatetimeError,
     NotADatetimeError,
     SubMicrosecondDatetimeError,
@@ -207,6 +208,8 @@ def storable_instant(value: object, timezone_policy: str) -> datetime:
             for example).
         NaiveDatetimeError: If ``value`` has no time zone under the ``strict`` policy.
         SubMicrosecondDatetimeError: If ``value`` has a part below one microsecond.
+        InstantOutOfRangeError: If ``value``'s offset has a part below one second and
+            its instant in UTC lies outside years 1 to 9999.
     """
     if not isinstance(value, datetime):
         raise NotADatetimeError(value)
@@ -222,7 +225,11 @@ def storable_instant(value: object, timezone_policy: str) -> datetime:
         raise SubMicrosecondDatetimeError(value)
     offset = value.utcoffset()
     if offset is not None and offset.microseconds:
-        return value.astimezone(timezone.utc)
+        try:
+            return value.astimezone(timezone.utc)
+        except OverflowError:
+            # The UTC instant is in year 0 or 10000: storable by Arrow, never readable.
+            raise InstantOutOfRangeError(value) from None
     return value
 
 

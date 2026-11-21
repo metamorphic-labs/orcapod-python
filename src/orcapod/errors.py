@@ -157,6 +157,25 @@ class SubMicrosecondDatetimeError(UnstorableDatetimeError):
     )
 
 
+class InstantOutOfRangeError(UnstorableDatetimeError):
+    """A ``datetime`` whose instant in UTC lies outside the years a ``datetime`` holds.
+
+    Only a value whose UTC offset has a part below one second reaches it: such a value is
+    converted to UTC before Arrow sees it (Arrow drops that part of an offset), and near
+    year 1 or year 9999 its UTC instant falls in year 0 or year 10000. Stored, it could not
+    be read back as a ``datetime``, so it is refused.
+    """
+
+    reason = (
+        "Datetime whose UTC offset has a part below one second names an instant outside "
+        "the years a datetime can hold in UTC (1 to 9999): it could not be read back"
+    )
+    hint = (
+        "Give the value an offset of whole seconds, or a date farther from the ends of "
+        "that range"
+    )
+
+
 # UnstorableDatetimeError.__init__ calls super().__init__, which reaches
 # BaseException.__init__ through ValueError: the base initializers do run.
 class NotADatetimeError(UnstorableDatetimeError, TypeError):  # pyright: ignore[reportUnsafeMultipleInheritance]
