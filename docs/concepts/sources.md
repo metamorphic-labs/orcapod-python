@@ -818,7 +818,10 @@ order: pass `hash_in_key_order=True` (`ArrowTableSource`, `DictSource`, `DataFra
 them, so the same rows in any order give one default `source_id` and one content hash; the
 rows are still presented in the order you gave. It is off by default, because the order you
 gave may matter to you. It is refused without key columns (there is no key order) and with a
-`source_id` (nothing is hashed then).
+`source_id`: the table hash is still computed then, but it does not determine a given
+`source_id` and enters no identity, so the argument would change nothing. The order of the key
+columns is part of the content hash either way; it changes the default `source_id` only when
+the two orders sort the table differently.
 
 ```python
 from orcapod.sources import DictSource

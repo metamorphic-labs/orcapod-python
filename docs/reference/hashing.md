@@ -190,14 +190,20 @@ have put them in that order on purpose. `hash_in_key_order=True` (a keyword of
 hashing the sorted version of the data") hashes it with the rows sorted by the key columns
 instead (`arrow_utils.key_row_order`): pyarrow's `sort_indices` over the key columns in the
 order `record_id_columns` gives them, each ascending, nulls last, the rows then taken with
-`take`. The same rows in any order then give one default source id and one content hash,
-while the order of the key columns still counts. No tie-break is needed: the source refuses a
+`take`. The same rows in any order then give one default source id and one content hash. The
+order of the key columns is part of the content hash in every case (the key columns enter the
+root-source identity in key order); the default source id changes with it only when the two
+orders sort the table differently (keys `a = [1, 2, 3]` and `b = [10, 20, 30]` sort the table
+the same way in either order, so both orders give one default source id and two content
+hashes). No tie-break is needed: the source refuses a
 null and a repeated key before anything is hashed (`stream_builder.row_identifiers`), and
 every key type (string, integer, boolean, timestamp, date) sorts, so the order is total. It
 is the sort of the canonical row order of an identity table (below) restricted to the key
 columns, which needs neither the other columns nor a row-hash tie-break, since every key type
 is `canonically_sortable`. The argument is refused without key columns (no key order) and
-with a `source_id` (nothing is hashed); the source presents its rows in the order given
+with a `source_id`, which the table hash would not determine: the builder still computes the
+table hash, but a given `source_id` is used as given and the hash enters no identity. The
+source presents its rows in the order given
 either way. A saved job keeps the resolved `source_id`, never the argument.
 
 A location default names the data where it lives, so two sources of one kind share it only
@@ -1051,7 +1057,7 @@ topology suffix, encoding the full join lineage into each column name.
 | **Inputs** | Full raw Arrow table (all columns, before any system tag injection), its rows in the order given, or sorted by the key columns in key order with `hash_in_key_order=True` (`arrow_utils.key_row_order`, ITL-1272) |
 | **Algorithm** | `hash_source_id(<source kind>, StarfixArrowHasher.hash_table(table))`, at full length — the table hash is starfix hash format 2: the 3-byte format number `00 00 02` followed by a SHA-256 digest (`starfix` 0.5, byte-identical to the Rust crate) |
 | **Output format** | `str`: `<source kind>:<algorithm label>:<hex>`, for example `dict:arrow_v1:000002fe…`. The source kind is the class's config type key (`SOURCE_KIND`: `arrow_table`, `dict`, `list`, `data_frame`); the label is the one the hash carries. Nothing is shortened: the hex is the full digest whatever `hashing.path_n_char` says (a default source id is a name; developer, November 16, 2026). The parts hold no `:`, so the id never contains the `::` that separates the parts of a source-info value |
-| **Uniqueness guarantee** | Unique per source kind and raw table content; changes if any cell value changes or the rows are reordered, except with `hash_in_key_order=True`, where a reorder changes nothing and a change of the key columns' order does |
+| **Uniqueness guarantee** | Unique per source kind and raw table content; changes if any cell value changes or the rows are reordered, except with `hash_in_key_order=True`, where a reorder changes nothing and a change of the key columns' order changes the id only when it sorts the table differently (it always changes the content hash, which holds the key columns in key order) |
 | **Known exclusions** | Used **only** as a fallback when no explicit `source_id` is provided. With a user-supplied `source_id` the builder still computes the table hash (it returns it as `table_hash`), but the hash enters neither the id nor the source's identity. |
 
 ---

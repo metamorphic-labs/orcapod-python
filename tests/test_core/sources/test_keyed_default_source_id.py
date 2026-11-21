@@ -155,6 +155,7 @@ class TestHashInKeyOrder:
     def test_in_key_order_the_key_order_is_part_of_the_identity(
         self, kind: str, role: str
     ) -> None:
+        """Key orders that sort the table differently: two ids and two content hashes."""
         first, second = (
             make(
                 kind,
@@ -167,6 +168,25 @@ class TestHashInKeyOrder:
         )
         assert first.source_id != second.source_id
         assert first.content_hash() != second.content_hash()
+
+    def test_key_orders_that_sort_alike_share_the_id_not_the_content_hash(
+        self, kind: str, role: str
+    ) -> None:
+        """Both key orders sort these rows alike: one default id, two content hashes."""
+        # subject and trial rise together, so sorting by (subject, trial) and by
+        # (trial, subject) gives one table.
+        rows = [
+            {"subject": "s2", "trial": 2, "weight": 22.25, "count": 1},
+            {"subject": "s3", "trial": 3, "weight": 19.0, "count": 4},
+            {"subject": "s1", "trial": 1, "weight": 20.5, "count": 3},
+        ]
+        first, second = (
+            make(kind, rows, role, record_id_columns=key, hash_in_key_order=True)
+            for key in KEY_ORDERS
+        )
+        assert first.source_id == second.source_id
+        assert first.content_hash() != second.content_hash()
+        assert first.pipeline_hash() == second.pipeline_hash()
 
     def test_rows_already_in_key_order_hash_as_given(
         self, kind: str, role: str

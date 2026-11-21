@@ -266,8 +266,10 @@ def require_hash_in_key_order_usable(
     """Refuse ``hash_in_key_order=True`` where it would mean nothing (ITL-1272).
 
     It orders the rows of the table a default source id is hashed from, so it needs
-    key columns (there is no key order without them) and no given ``source_id``
-    (nothing is hashed then). Whole-argument checks, made before the table is read.
+    key columns (there is no key order without them) and no given ``source_id``: the
+    table hash is still computed then, but it does not determine a given source id and
+    enters no identity, so the argument would change nothing. Whole-argument checks,
+    made before the table is read.
 
     Args:
         hash_in_key_order: The argument as given.
@@ -283,8 +285,8 @@ def require_hash_in_key_order_usable(
     if source_id is not None:
         raise ValueError(
             "hash_in_key_order=True orders the rows hashed into a default source id, "
-            f"but a source_id ({source_id!r}) is given, so nothing is hashed; pass one "
-            "or the other"
+            f"but a source_id ({source_id!r}) is given, which the table hash does not "
+            "determine; pass one or the other"
         )
     if not key_columns:
         raise ValueError(
