@@ -602,8 +602,9 @@ def require_storable(database: object, schema: pa.Schema) -> None:
 
     The one check for ``ColumnCheckingDatabaseProtocol`` (ITL-1162): a job node asks
     it about each table it stores when a database is attached, before anything runs.
-    A database that states no rule (in-memory, Delta) stores every column, and
-    nothing is checked.
+    A database that states no rule (in-memory) stores every column, and nothing is
+    checked. Delta states one: the types it cannot hold even through a recorded type
+    (ITL-1334).
 
     Args:
         database: Any database object.

@@ -341,6 +341,9 @@ class SQLiteConnector:
             # column-name collisions that would arise from scanning all tables.
             # Fallback to large_string() for computed/aliased/unknown columns.
             type_lookup: dict[str, _pa.DataType] = {}
+            # A column created NOT NULL reads back non-null (ITL-1276): the stored
+            # flag, not the type alone, makes the field.
+            nullable_lookup: dict[str, bool] = {}
             table_match = _re.search(r'FROM\s+"([^"]+)"', query, _re.IGNORECASE)
             if not table_match:
                 table_match = _re.search(r"FROM\s+(\w+)", query, _re.IGNORECASE)
@@ -348,6 +351,7 @@ class SQLiteConnector:
                 queried_table = table_match.group(1)
                 for ci in self.get_column_info(queried_table):
                     type_lookup[ci.name] = ci.arrow_type
+                    nullable_lookup[ci.name] = ci.nullable
 
             # rowid is an implicit SQLite integer column; it does not appear in
             # PRAGMA table_info, so it would otherwise fall back to large_string.
@@ -358,7 +362,10 @@ class SQLiteConnector:
                 type_lookup.get(name, _pa.large_string()) for name in col_names
             ]
             schema = _pa.schema(
-                [_pa.field(name, atype) for name, atype in zip(col_names, arrow_types)]
+                [
+                    _pa.field(name, atype, nullable_lookup.get(name, True))
+                    for name, atype in zip(col_names, arrow_types)
+                ]
             )
 
             chunk = cursor.fetchmany(batch_size)

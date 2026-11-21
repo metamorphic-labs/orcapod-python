@@ -556,3 +556,35 @@ class TestValidateRecords:
         )
         with pytest.raises(ValueError, match="metadata"):
             c.validate_records(table)
+
+
+@pytest.mark.parametrize("arrow_type", [pa.int64(), pa.large_string()])
+def test_a_non_null_column_reads_back_non_null(
+    tmp_path: Path, arrow_type: pa.DataType
+) -> None:
+    """The connector creates a non-null column NOT NULL and reads the flag back with the
+    rows (ITL-1276); a nullable column stays nullable."""
+    from orcapod.databases import ConnectorArrowDatabase, SQLiteConnector
+
+    db = ConnectorArrowDatabase(SQLiteConnector(str(tmp_path / "s.db")))
+    values = [1, 2] if arrow_type == pa.int64() else ["a", "b"]
+    table = pa.Table.from_arrays(
+        [
+            pa.array([b"r1", b"r2"], pa.large_binary()),
+            pa.array(values, arrow_type),
+            pa.array([values[0], None], arrow_type),
+        ],
+        schema=pa.schema(
+            [
+                pa.field("id", pa.large_binary(), nullable=False),
+                pa.field("required", arrow_type, nullable=False),
+                pa.field("optional", arrow_type),
+            ]
+        ),
+    )
+    db.add_records(("t",), table, record_id_column="id", flush=True)
+    back = db.get_all_records(("t",), record_id_column="id")
+    assert back is not None
+    assert back.schema.field("required").nullable is False
+    assert back.schema.field("optional").nullable is True
+    assert back.sort_by("id").column("required").to_pylist() == values

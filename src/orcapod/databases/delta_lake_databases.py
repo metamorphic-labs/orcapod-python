@@ -22,12 +22,14 @@ from orcapod.errors import (
     OrcapodDatabaseReadError,
     TableListingNotSupportedError,
     TypeIdentityError,
+    UnstorableColumnError,
 )
 from orcapod.databases.delta_arrow_types import (
     first_column_out_of_stored_range,
     from_delta_layout,
     recorded_type,
     to_delta_layout,
+    written_field,
 )
 from orcapod.databases.delta_statistics import statistics_configuration
 from orcapod.databases.storage_utils import (
@@ -258,6 +260,45 @@ def _as_delta_writer_stores(schema: pa.Schema) -> pa.Schema:
     return pa.schema(
         deltalake.Schema.from_arrow(converted).to_arrow()  # pyright: ignore[reportArgumentType]  # arro3 schema; pyarrow reads it through the C data interface
     )
+
+
+def _holds_null_type(arrow_type: pa.DataType) -> bool:
+    """Whether ``arrow_type`` is or nests a ``null`` type (Delta has none; ITL-1334)."""
+    if pa.types.is_null(arrow_type):
+        return True
+    return any(
+        _holds_null_type(arrow_type.field(i).type) for i in range(arrow_type.num_fields)
+    )
+
+
+def _delta_unstorable_reason(field: "pa.Field[Any]") -> str | None:
+    """Say why Delta cannot hold a column, even through a recorded type, or ``None``.
+
+    The column as it is written (``written_field``) goes through the Delta writer's
+    own conversion and type mapping (``_as_delta_writer_stores``), so the answer
+    follows the installed ``deltalake``: a timestamp in seconds is converted, a
+    ``decimal256`` or an interval is refused.
+
+    A ``null``-typed part is left out, as the append check leaves it out: it fits a
+    column already stored with a type, and a column with no stored type yet is
+    refused by ``add_records``, which knows the stored table.
+
+    Args:
+        field: A column, as given to the database.
+
+    Returns:
+        Delta's reason (``Invalid data type for Delta Lake: Decimal256(40, 2)``), or
+        ``None`` when Delta holds the column.
+    """
+    written = written_field(field)
+    reduced = _without_null_types(written.type)
+    if reduced is None:
+        return None
+    try:
+        _ = _as_delta_writer_stores(pa.schema([written.with_type(reduced)]))
+    except Exception as exc:  # noqa: BLE001  # deltalake raises a bare Exception
+        return str(exc).removeprefix("Schema error: ")
+    return None
 
 
 def _merge_source_in_stored_layout(
@@ -1014,6 +1055,72 @@ class DeltaTableDatabase:
             flush=flush,
         )
 
+    def require_storable(self, schema: pa.Schema) -> None:
+        """Refuse a table schema with a column Delta cannot hold (ITL-1334).
+
+        Most types Delta has no column type for are kept through a recorded type
+        (``delta_arrow_types``); the rest (``decimal256``, an interval) are refused,
+        as Delta's own schema conversion decides. Called by ``add_records`` before
+        anything of the table is buffered, and by a job node when the database is
+        attached to it (``contexts/stored.require_storable``), before anything runs.
+
+        Args:
+            schema: The Arrow schema of a table this database is to hold.
+
+        Raises:
+            UnstorableColumnError: For the first column Delta cannot hold, naming the
+                column, its Arrow type and Delta's reason.
+        """
+        for field in schema:
+            reason = _delta_unstorable_reason(field)
+            if reason is not None:
+                raise UnstorableColumnError(
+                    database_kind=type(self).__name__,
+                    column=field.name,
+                    arrow_type=field.type,
+                    reason=reason,
+                )
+
+    def _refuse_untyped_null_columns(
+        self, record_path: tuple[str, ...], schema: pa.Schema
+    ) -> None:
+        """Refuse a column with ``null``-typed parts that no stored column types (ITL-1334).
+
+        Delta has no ``null`` type. A ``null``-typed value fits a column the stored
+        table (or a batch pending for it) already has with a type, and the append
+        check leaves it out; a column no stored or pending batch gives a type cannot be
+        written, so it is refused here, before anything is buffered, instead of failing
+        the flush without naming it.
+
+        Args:
+            record_path: The table the rows are for.
+            schema: The schema of the rows about to be added.
+
+        Raises:
+            UnstorableColumnError: For the first such column.
+        """
+        untyped = [f for f in schema if _holds_null_type(f.type)]
+        if not untyped:
+            return
+        typed: set[str] = set()
+        delta_table = self._get_delta_table(record_path)
+        if delta_table is not None:
+            typed.update(_stored_arrow_schema(delta_table).names)
+        pending = self._pending_batches.get(self._get_record_key(record_path))
+        if pending is not None:
+            typed.update(f.name for f in pending.schema if not _holds_null_type(f.type))
+        for field in untyped:
+            if field.name not in typed:
+                raise UnstorableColumnError(
+                    database_kind=type(self).__name__,
+                    column=field.name,
+                    arrow_type=field.type,
+                    reason=(
+                        "Delta has no null type, and no stored column gives this "
+                        "all-null column a type"
+                    ),
+                )
+
     def add_records(
         self,
         record_path: tuple[str, ...],
@@ -1058,6 +1165,10 @@ class DeltaTableDatabase:
             rename_map = {record_id_column: self.RECORD_ID_COLUMN}
             total_name_map = {k: rename_map.get(k, k) for k in records.column_names}
             records = records.rename_columns(total_name_map)
+
+        # A column Delta cannot hold is refused before anything is buffered (ITL-1334).
+        self.require_storable(records.schema)
+        self._refuse_untyped_null_columns(record_path, records.schema)
 
         # Step 2: Deduplicate within input table (keep last occurrence)
         deduplicated_table = self._deduplicate_within_table(records)

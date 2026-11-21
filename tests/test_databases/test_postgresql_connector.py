@@ -772,3 +772,32 @@ class TestPsycopgResolvesTheHost:
     def test_a_socket_directory_is_not_resolved(self) -> None:
         attempts = self._passed_to_libpq("host=/var/run/postgresql dbname=x")
         assert [attempt.get("hostaddr") for attempt in attempts] == [None]
+
+
+def test_iter_batches_reads_a_not_null_column_back_non_null() -> None:
+    """The batch schema takes each column's nullability from ``get_column_info``
+    (``is_nullable``), as its type, so a column created NOT NULL reads back non-null
+    (ITL-1276); a nullable one stays nullable. Unit level: no server."""
+    from orcapod.types import ColumnInfo
+
+    with patch("psycopg.connect") as mock_connect:
+        mock_connect.return_value = MagicMock()
+        connector = PostgreSQLConnector("postgresql://localhost/test")
+        cursor = MagicMock()
+        cursor.description = [MagicMock(), MagicMock()]
+        cursor.description[0].name = "required"
+        cursor.description[1].name = "optional"
+        cursor.fetchmany.side_effect = [[(1, None), (2, 5)], []]
+        mock_connect.return_value.cursor.return_value = cursor
+        infos = [
+            ColumnInfo(name="required", arrow_type=pa.int64(), nullable=False),
+            ColumnInfo(name="optional", arrow_type=pa.int64(), nullable=True),
+        ]
+        with patch.object(PostgreSQLConnector, "get_column_info", return_value=infos):
+            batches = list(connector.iter_batches('SELECT * FROM "t"'))
+        connector._conn = None  # skip actual close
+    assert len(batches) == 1
+    schema = batches[0].schema
+    assert schema.field("required").nullable is False
+    assert schema.field("optional").nullable is True
+    assert batches[0].column("required").to_pylist() == [1, 2]

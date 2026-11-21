@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 from orcapod.databases.spiraldb_nullability import (
     apply_nullability_record,
+    cast_changed_columns,
     check_no_nulls,
     enforce_nullability_record,
     read_nullability_record,
@@ -396,6 +397,23 @@ def _holds_zone_aware_timestamp(arrow_type: pa.DataType) -> bool:
     )
 
 
+def _holds_extension_type(arrow_type: pa.DataType) -> bool:
+    """Whether ``arrow_type`` is or nests an extension (logical) type (ITL-1334).
+
+    Args:
+        arrow_type: The column's Arrow type.
+
+    Returns:
+        ``True`` for an extension type at any depth of lists, structs and maps.
+    """
+    if isinstance(arrow_type, pa.ExtensionType):
+        return True
+    return any(
+        _holds_extension_type(arrow_type.field(i).type)
+        for i in range(arrow_type.num_fields)
+    )
+
+
 class SpiralDBConnector:
     """DBConnectorProtocol implementation backed by SpiralDB (pyspiral).
 
@@ -630,7 +648,7 @@ class SpiralDBConnector:
 
             if needs_rebuild:
                 target_schema = _pa.schema(new_fields, metadata=restored_schema_meta)
-                batch = batch.cast(target_schema)
+                batch = cast_changed_columns(batch, target_schema)
             if paths is not None:
                 with _about_table(qualified):
                     batch = enforce_nullability_record(batch, paths)
@@ -1013,7 +1031,10 @@ class SpiralDBConnector:
         and the ``__`` prefix on value (column group) columns; a key column may
         start with ``__`` (``__record_id``). It drops a timestamp's time zone, so a
         time-zone-aware timestamp column (``timestamp[us, tz=UTC]``) would read
-        back as another type and is refused.
+        back as another type and is refused. It drops Arrow field metadata, so an
+        extension (logical) type at any depth (``File``, ``Path``, ``UUID``, a user
+        class, ``set[int]``, a NumPy array) would read back as its storage type and
+        is refused (ITL-1334; keeping it is a follow-up).
 
         Args:
             name: The column's name.
@@ -1036,6 +1057,11 @@ class SpiralDBConnector:
             return (
                 "SpiralDB drops the time zone of a timestamp nested in it, so it "
                 "reads back as another type"
+            )
+        if _holds_extension_type(arrow_type):
+            return (
+                "SpiralDB drops Arrow field metadata, so a logical (extension) type "
+                "reads back as its storage type"
             )
         return None
 
