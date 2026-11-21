@@ -96,7 +96,7 @@ argument order and input order:
 | the same | layout | ITL-1249 |
 | `AddTags` column placement | keyword order | ITL-1269 (landed in PR 457: new tags placed in name order) |
 | `DerivedSource(tags_as_data=...)` column placement of the new data columns | mapping order | **fixed here**: copies in the order of their new names (no hash moves) |
-| rows `head(n)` / `as_table(sort_by_tags=True)` / preview show | tag order; for joins and pods also layout | ITL-1270 (and ITL-1249 for layout) |
+| rows `head(n)` / `as_table(columns={"sort_by_tags": True})` / preview show | tag order; for joins and pods also layout | ITL-1270 (and ITL-1249 for layout) |
 | stored column order of `pdb_v1` and `odb_v1` | tag order and layout | presentation: a Delta store written by two tag orders reads back by name (checked: two runs, one path, all rows) |
 | saved job file: a bound source's `tag_columns`, a `Join` node's input order | as declared | presentation: the file records the declaration; a load rebuilds the same hashes |
 
