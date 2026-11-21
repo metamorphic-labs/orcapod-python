@@ -185,18 +185,24 @@ afterwards: `007` under a string type stays `"007"`, `1e3` stays `"1e3"`, and `1
 `decimal128(10, 3)` is exactly `1.005`. A cell that is not a value of its declared type (`1.0`
 under an integer, a date and time under `date32`, `1.005` under two decimal places) raises
 `ValueError`, naming the column and the file. The schema names every column of the file, in
-the file's order. What reads as null:
+the file's order. A string or binary column (`string`, `large_string`, `binary`,
+`large_binary`, `fixed_size_binary`) holds a cell's text as written; what reads as null:
 
-| Cell in the file | Under `string` / `large_string` | Under any other type |
+| Cell in the file | Under a string or binary type | Under any other type |
 |---|---|---|
 | empty: `a,,b` | null | null |
-| quoted empty: `a,"",b` | `""` | null |
+| quoted empty: `a,"",b` | `""` (`b""`) | null |
 | `NA`, `null`, `N/A`, `NaN` | the text as written | null |
 | any other text | the text as written, spaces included | parsed as the type, or raises |
 
-A null in a field declared non-nullable raises. `float16` and `decimal256` (which pyarrow's
-CSV reader does not parse) are read as text and converted with a checked conversion; a list,
-struct or other nested type cannot be read from a CSV cell and raises.
+A null in a field declared non-nullable raises. Under a float type, an infinity spelled in the
+file (`inf`, `-Infinity`) is kept, a finite value is rounded to the type as usual, and a finite
+value too large for the type (`70000` under `float16`, `1e39` under `float32`) raises instead
+of becoming an infinity. `float16` and `decimal256` (which pyarrow's CSV reader does not
+parse) are read as text and converted with a checked conversion. A type the reader cannot
+parse at all (`decimal32`, `string_view`, an interval) and a list, struct or other nested type
+raise, naming the column. The file is read once into memory and parsed from that copy, so a
+file replaced while it is read cannot mix two versions.
 
 The schema is part of the source's configuration: `to_config()` saves it, field by field
 (Arrow type text, nested fields included, and which fields may be null), and `from_config()`

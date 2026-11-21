@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import functools
+import math
 import os
 import re
 from collections.abc import Collection
@@ -26,6 +28,58 @@ else:
     pa = LazyModule("pyarrow")
 
 
+_INFINITY = re.compile(r"\s*[+-]?inf(inity)?\s*", re.IGNORECASE)
+"""The texts pyarrow's CSV reader reads as an infinity: ``inf`` or ``infinity``, any
+case, with an optional sign and surrounding spaces."""
+
+
+def _storage_type(declared: pa.DataType) -> pa.DataType:
+    """Return a type's storage type: itself, or a logical type's storage."""
+    while isinstance(declared, pa.ExtensionType):
+        declared = declared.storage_type
+    return declared
+
+
+def _is_text_like(declared: pa.DataType) -> bool:
+    """Return whether a column of ``declared`` type follows the text null rule (option C).
+
+    The one place that decides the class: a column stored as a string or binary type
+    (``string``, ``large_string``, ``binary``, ``large_binary``,
+    ``fixed_size_binary``, or a logical type stored as one of them) holds a cell's
+    text as written, so only an unquoted empty field is null. Every other column
+    reads pyarrow's null markers as null.
+    """
+    storage = _storage_type(declared)
+    return (
+        pa.types.is_string(storage)
+        or pa.types.is_large_string(storage)
+        or pa.types.is_binary(storage)
+        or pa.types.is_large_binary(storage)
+        or pa.types.is_fixed_size_binary(storage)
+    )
+
+
+def _read_as_text(declared: pa.DataType) -> bool:
+    """Return whether a declared type is read as text and cast (the reader cannot parse it)."""
+    storage = _storage_type(declared)
+    return pa.types.is_float16(storage) or pa.types.is_decimal256(storage)
+
+
+@functools.cache
+def _reader_parses(arrow_type: pa.DataType) -> bool:
+    """Return whether pyarrow's CSV reader parses ``arrow_type`` (asked of the reader)."""
+    import pyarrow.csv as pa_csv
+
+    try:
+        pa_csv.read_csv(
+            pa.BufferReader(b"v\n"),  # pyright: ignore[reportArgumentType]  # pyarrow reads a NativeFile; its stubs name only paths and IO
+            convert_options=pa_csv.ConvertOptions(column_types={"v": arrow_type}),
+        )
+    except pa.ArrowNotImplementedError:
+        return False
+    return True
+
+
 def _reader_type(declared: pa.DataType) -> pa.DataType:
     """Return the type the CSV reader parses a declared column's text as (ITL-1322).
 
@@ -36,47 +90,72 @@ def _reader_type(declared: pa.DataType) -> pa.DataType:
 
     Raises:
         ValueError: If no CSV cell can hold a value of the type (a list, struct, map,
-            union or other nested type).
+            union or other nested type), or the reader cannot parse it (for example
+            ``decimal32``, ``string_view``, an interval).
     """
-    if isinstance(declared, pa.ExtensionType):
-        return _reader_type(declared.storage_type)
-    if pa.types.is_float16(declared) or pa.types.is_decimal256(declared):
+    storage = _storage_type(declared)
+    if _read_as_text(storage):
         return pa.large_string()
-    if pa.types.is_nested(declared) or pa.types.is_run_end_encoded(declared):
+    if pa.types.is_nested(storage) or pa.types.is_run_end_encoded(storage):
         raise ValueError(f"a CSV cell is text, and {declared} cannot be read from it")
-    return declared
+    if not _reader_parses(storage):
+        raise ValueError(f"pyarrow's CSV reader cannot read {declared} from text")
+    return storage
 
 
-def _is_text(storage_type: pa.DataType) -> bool:
-    """Return whether a column stored as ``storage_type`` is a string column (option C)."""
-    return pa.types.is_string(storage_type) or pa.types.is_large_string(storage_type)
+def _refuse_overflow(values: pa.ChunkedArray[Any], texts: pa.ChunkedArray[Any]) -> None:
+    """Raise if a finite text was read as an infinity (it does not fit the float type).
+
+    An infinity is kept only where the text spells one (``_INFINITY``); ordinary
+    rounding of a finite value is not checked.
+
+    Raises:
+        ValueError: Naming the first text that overflows.
+    """
+    import pyarrow.compute as pc
+
+    if not pc.any(pc.fill_null(pc.is_inf(values), pa.scalar(False))).as_py():
+        return
+    for value, text in zip(values.to_pylist(), texts.to_pylist()):
+        if value is not None and math.isinf(value):
+            if text is None or not _INFINITY.fullmatch(text):
+                raise ValueError(
+                    f"the text {text!r} does not fit {values.type}: a finite value "
+                    "read as an infinity is refused"
+                )
 
 
 def _read_declared(path: str, schema: pa.Schema) -> pa.Table:
     """Read a CSV file with every column parsed as ``schema`` declares it (ITL-1322).
 
     The text of each cell is parsed as its column's declared type; nothing is
-    inferred and then cast. Nulls (developer decision, option C):
+    inferred and then cast. Nulls (developer decision, option C; the class is decided
+    by ``_is_text_like``):
 
-    - A string column (declared ``string`` or ``large_string``, or a logical type
-      stored as one): only an unquoted empty field is null. A quoted empty field is
-      ``""``, and every other text (``NA``, ``null``, spaces) is kept as written.
+    - A text-like column (string or binary, of any width, or a logical type stored
+      as one): only an unquoted empty field is null. A quoted empty field is empty,
+      and every other text (``NA``, ``null``, spaces) is kept as written.
     - Any other column: pyarrow's null markers (an empty field, ``NA``, ``null``,
       ``N/A``, ``NaN`` and the rest of ``ConvertOptions().null_values``) are null.
 
-    pyarrow's null list applies to a whole read, so a file with both kinds of columns
-    is read twice, with the same read and parse options: every column with the
-    second rule, then the string columns with the first. A type the reader cannot
-    parse (``float16``, ``decimal256``) is read as text and cast with a checked cast,
-    its null markers null. The table is then given ``schema`` exactly (field flags
-    and metadata; a null in a non-nullable field raises).
+    The file is read once into memory (decompressed as the reader would from its
+    name) and every parse reads that one snapshot, so a file replaced meanwhile
+    cannot mix two versions. pyarrow's null list applies to a whole parse, so a file
+    with both classes of columns is parsed twice with one set of read and parse
+    options, the text-like columns the second time, and the row counts are compared.
+    A float column holding an infinity is parsed as text too, and a finite text read
+    as an infinity (a value too large for the type) raises. A type the reader cannot
+    parse (``float16``, ``decimal256``) is read as text and cast with a checked
+    cast, its null markers null. The table is then given ``schema`` exactly (field
+    flags and metadata; a null in a non-nullable field raises).
 
     Raises:
         ValueError: If the file's columns are not the schema's fields in order, a
-            declared type cannot be read from text (the note names the column), the
-            two reads disagree on the number of rows, a cell is not a value of its
-            column's type (pyarrow names the column by its position in the file), or
-            a non-nullable field holds a null.
+            declared type cannot be read from text, a value overflows its float
+            type (the note names the column), the parses disagree on the number of
+            rows, a cell is not a value of its column's type (pyarrow names the
+            column by its position in the file), or a non-nullable field holds a
+            null.
     """
     import pyarrow.compute as pc
     import pyarrow.csv as pa_csv
@@ -88,63 +167,86 @@ def _read_declared(path: str, schema: pa.Schema) -> pa.Table:
         except ValueError as exc:
             exc.add_note(f"column {field.name!r}")
             raise
-    # By the declared (storage) type: a float16 read as text is not a string column.
-    text_columns = [f.name for f in schema if _is_text(_storage_type(f.type))]
-    # One set of read and parse options for both reads, so their rows align.
+    text_like = [f.name for f in schema if _is_text_like(f.type)]
+    # One snapshot of the file, and one set of read and parse options, for every parse.
+    with pa.input_stream(path) as stream:
+        data = stream.read()
     read_options = pa_csv.ReadOptions()
     parse_options = pa_csv.ParseOptions()
     # pyarrow's default null markers, which the reader applies to other columns.
     markers: list[str] = list(pa_csv.ConvertOptions().null_values or ())
 
-    def read(convert_options: pa_csv.ConvertOptions) -> pa.Table:
+    def parse(convert_options: pa_csv.ConvertOptions) -> pa.Table:
         return pa_csv.read_csv(
-            path,
+            pa.BufferReader(data),  # pyright: ignore[reportArgumentType]  # pyarrow reads a NativeFile; its stubs name only paths and IO
             read_options=read_options,
             parse_options=parse_options,
             convert_options=convert_options,
         )
 
-    def text_options(include: list[str]) -> pa_csv.ConvertOptions:
+    def as_text(columns: list[str], include: list[str]) -> pa_csv.ConvertOptions:
         return pa_csv.ConvertOptions(
-            column_types={name: reader_types[name] for name in text_columns},
+            column_types={
+                name: reader_types[name] if name in text_like else pa.large_string()
+                for name in columns
+            },
             include_columns=include,
             null_values=[""],
             strings_can_be_null=True,
             quoted_strings_can_be_null=False,
         )
 
-    if len(text_columns) == len(reader_types):
-        table = read(text_options([]))  # string columns only: one read
+    if len(text_like) == len(reader_types):
+        table = parse(as_text(text_like, []))  # text-like columns only: one parse
     else:
-        table = read(pa_csv.ConvertOptions(column_types=reader_types))
+        table = parse(pa_csv.ConvertOptions(column_types=reader_types))
     if table.column_names != schema.names:
         raise ValueError(
             f"the file's columns {table.column_names} are not the schema's fields "
             f"{schema.names}: a schema names every column of the file, in order"
         )
-    if text_columns and len(text_columns) < len(reader_types):
-        texts = read(text_options(text_columns))
+    # Floats the reader parsed, holding an infinity: their text tells an infinity
+    # spelled in the file from a finite value too large for the type.
+    infinite = [
+        f.name
+        for f in schema
+        if pa.types.is_floating(reader_types[f.name])
+        and pc.any(
+            pc.fill_null(pc.is_inf(table.column(f.name)), pa.scalar(False))
+        ).as_py()
+    ]
+    second = (text_like if len(text_like) < len(reader_types) else []) + infinite
+    if second:
+        texts = parse(as_text(second, second))
         if texts.num_rows != table.num_rows:
             raise ValueError(
-                f"the string columns read {texts.num_rows} rows and the file "
-                f"{table.num_rows}: the two reads of the file disagree"
+                f"the second parse of the file read {texts.num_rows} rows and the "
+                f"first {table.num_rows}: the two parses disagree"
             )
-        for name in text_columns:
-            table = table.set_column(
-                table.column_names.index(name), name, texts.column(name)
-            )
+        for name in second:
+            if name in text_like:
+                table = table.set_column(
+                    table.column_names.index(name), name, texts.column(name)
+                )
+            else:
+                try:
+                    _refuse_overflow(table.column(name), texts.column(name))
+                except ValueError as exc:
+                    exc.add_note(f"column {name!r}")
+                    raise
     for field in schema:
-        if not pa.types.is_large_string(reader_types[field.name]) or _is_text(
-            _storage_type(field.type)
-        ):
+        if not _read_as_text(field.type):
             continue
-        # A type the reader cannot parse (float16, decimal256), read as text.
-        text = table.column(field.name)
+        # A type the reader cannot parse (float16, decimal256), read as text: its
+        # markers are null, and surrounding spaces go as the reader drops them.
+        text = pc.utf8_trim_whitespace(table.column(field.name))
         is_marker = pc.is_in(text, value_set=pa.array(markers, pa.large_string()))
         text = pc.if_else(is_marker, pa.scalar(None, text.type), text)
         try:
-            value = pc.cast(text, field.type, safe=True)
-        except pa.ArrowInvalid as exc:
+            value = pc.cast(text, _storage_type(field.type), safe=True)
+            if pa.types.is_floating(value.type):
+                _refuse_overflow(value, text)
+        except (pa.ArrowInvalid, ValueError) as exc:
             exc.add_note(f"column {field.name!r}")
             raise
         table = table.set_column(
@@ -152,13 +254,6 @@ def _read_declared(path: str, schema: pa.Schema) -> pa.Table:
         )
     # A null in a non-nullable field raises here, naming the field.
     return table.cast(schema)
-
-
-def _storage_type(declared: pa.DataType) -> pa.DataType:
-    """Return a type's storage type: itself, or a logical type's storage."""
-    while isinstance(declared, pa.ExtensionType):
-        declared = declared.storage_type
-    return declared
 
 
 def _file_state(path: str) -> tuple[int, int]:

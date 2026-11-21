@@ -9,12 +9,16 @@ pyarrow's null markers are null.
 
 from __future__ import annotations
 
+import gzip
 import json
+import os
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import pyarrow as pa
+import pyarrow.csv as pa_csv
 import pytest
 
 import orcapod as op
@@ -326,3 +330,228 @@ def test_sync_and_async_runs_see_the_declared_values(
         results.append(sorted(rows, key=lambda r: r["row"]))
     assert results[0] == results[1]
     assert [r["tagged"] for r in results[0]] == ["<007>", None, "<>"]
+
+
+# ---------------------------------------------------------------------------
+# Independent review of PR 467 (second round)
+# ---------------------------------------------------------------------------
+
+
+def _replace_after_first_parse(path: str, replacement: str) -> Any:
+    """Wrap the real CSV reader: after its first call, replace the file atomically."""
+    real = pa_csv.read_csv
+    calls: list[int] = []
+
+    def wrapper(*args: Any, **kwargs: Any) -> pa.Table:
+        result = real(*args, **kwargs)
+        calls.append(1)
+        if len(calls) == 1:
+            new = Path(path).with_suffix(".new")
+            new.write_text(replacement)
+            os.replace(new, path)
+        return result
+
+    return wrapper, calls
+
+
+def test_the_parses_read_one_snapshot_of_the_file(tmp_path: Path) -> None:
+    # A text column and a number column: two parses. Replacing the file between
+    # them (same row count, rows reordered) must not combine the two versions.
+    path = _csv(tmp_path, "id,label\n1,A\n2,B\n")
+    schema = pa.schema(
+        [pa.field("id", pa.int64(), nullable=False), pa.field("label", pa.string())]
+    )
+    wrapper, calls = _replace_after_first_parse(path, "id,label\n2,B\n1,A\n")
+    with mock.patch("pyarrow.csv.read_csv", wrapper):
+        source = CSVSource(
+            path,
+            schema=schema,
+            tag_columns=["id"],
+            record_id_columns=["id"],
+            tag_only_columns=True,
+        )
+    assert len(calls) == 2
+    assert sorted((r["id"], r["label"]) for r in _rows(source)) == [(1, "A"), (2, "B")]
+
+
+def test_parses_that_disagree_on_the_rows_raise(tmp_path: Path) -> None:
+    # A defence kept beside the snapshot: a second parse with other rows is refused.
+    path = _csv(tmp_path, "id,label\n1,A\n2,B\n")
+    schema = pa.schema(
+        [pa.field("id", pa.int64(), nullable=False), pa.field("label", pa.string())]
+    )
+    real = pa_csv.read_csv
+    calls: list[int] = []
+
+    def short_second_parse(*args: Any, **kwargs: Any) -> pa.Table:
+        calls.append(1)
+        table = real(*args, **kwargs)
+        return table.slice(0, 1) if len(calls) == 2 else table
+
+    with mock.patch("pyarrow.csv.read_csv", short_second_parse):
+        with pytest.raises(ValueError, match="the two parses disagree"):
+            CSVSource(path, schema=schema, tag_columns=["id"], tag_only_columns=True)
+
+
+def test_a_compressed_file_is_read_as_declared(tmp_path: Path) -> None:
+    path = tmp_path / "declared.csv.gz"
+    with gzip.open(path, "wt") as f:
+        f.write("k,code\n1,007\n")
+    schema = pa.schema(
+        [pa.field("k", pa.int64(), nullable=False), pa.field("code", pa.string())]
+    )
+    source = CSVSource(
+        str(path), schema=schema, tag_columns=["k"], tag_only_columns=True
+    )
+    assert _rows(source) == [{"k": 1, "code": "007"}]
+
+
+# (declared float type, a finite text too large for it, a finite text that rounds)
+_FLOATS = [
+    (pa.float16(), "70000", "65504"),
+    (pa.float32(), "1e39", "16777217"),
+    (pa.float64(), "1e400", "1e308"),
+]
+FLOATS = pytest.mark.parametrize(
+    ("declared", "too_large", "fits"), _FLOATS, ids=["float16", "float32", "float64"]
+)
+NULLABLE = pytest.mark.parametrize("nullable", [True, False], ids=["null", "not-null"])
+_SPELLED = ["inf", "-inf", "+INF", "Infinity", "-Infinity", " inf "]
+
+
+@FLOATS
+@NULLABLE
+def test_a_spelled_infinity_is_kept_and_a_finite_value_rounds(
+    tmp_path: Path, declared: pa.DataType, too_large: str, fits: str, nullable: bool
+) -> None:
+    body = "".join(f"{i},{s},{fits}\n" for i, s in enumerate(_SPELLED))
+    schema = pa.schema(
+        [
+            pa.field("k", pa.int64(), nullable=False),
+            pa.field("a", declared, nullable=nullable),
+            pa.field("b", declared, nullable=nullable),
+        ]
+    )
+    source = CSVSource(
+        _csv(tmp_path, "k,a,b\n" + body),
+        schema=schema,
+        tag_columns=["k"],
+        tag_only_columns=True,
+    )
+    rows = _rows(source)
+    assert [r["a"] for r in rows] == [
+        float("-inf") if s.strip().startswith("-") else float("inf") for s in _SPELLED
+    ]
+    expected = pa.array([float(fits)], declared)[0].as_py()  # ordinary rounding
+    assert {r["b"] for r in rows} == {expected}
+
+
+@FLOATS
+@NULLABLE
+@pytest.mark.parametrize("sign", ["", "-"], ids=["positive", "negative"])
+def test_a_finite_value_too_large_for_its_float_type_raises(
+    tmp_path: Path,
+    declared: pa.DataType,
+    too_large: str,
+    fits: str,
+    nullable: bool,
+    sign: str,
+) -> None:
+    schema = pa.schema(
+        [
+            pa.field("k", pa.int64(), nullable=False),
+            pa.field("a", declared, nullable=nullable),
+            pa.field("b", declared, nullable=nullable),
+        ]
+    )
+    path = _csv(tmp_path, f"k,a,b\n1,inf,{fits}\n2,{fits},{sign}{too_large}\n")
+    with pytest.raises(ValueError, match="does not fit") as info:
+        CSVSource(path, schema=schema, tag_columns=["k"], tag_only_columns=True)
+    notes = info.value.__notes__
+    assert "column 'b'" in notes, notes
+    assert any(path in note for note in notes), notes
+
+
+@pytest.mark.parametrize("declared", [pa.binary(), pa.large_binary()])
+def test_in_a_binary_column_only_an_unquoted_empty_field_is_null(
+    tmp_path: Path, declared: pa.DataType
+) -> None:
+    body = "".join(f"{i},{cell}\n" for i, (cell, _) in enumerate(_STRING_CELLS))
+    schema = pa.schema(
+        [pa.field("k", pa.int64(), nullable=False), pa.field("s", declared)]
+    )
+    source = CSVSource(
+        _csv(tmp_path, "k,s\n" + body),
+        schema=schema,
+        tag_columns=["k"],
+        tag_only_columns=True,
+    )
+    assert [r["s"] for r in _rows(source)] == [
+        None if value is None else value.encode() for _, value in _STRING_CELLS
+    ]
+
+
+@pytest.mark.parametrize("declared", [pa.binary(), pa.large_binary()])
+def test_a_non_nullable_binary_column_accepts_text_but_no_empty_field(
+    tmp_path: Path, declared: pa.DataType
+) -> None:
+    texts = [cell for cell, value in _STRING_CELLS if value is not None]
+    body = "".join(f"{i},{cell}\n" for i, cell in enumerate(texts))
+    schema = pa.schema(
+        [
+            pa.field("k", pa.int64(), nullable=False),
+            pa.field("s", declared, nullable=False),
+        ]
+    )
+    source = CSVSource(
+        _csv(tmp_path, "k,s\n" + body),
+        schema=schema,
+        tag_columns=["k"],
+        tag_only_columns=True,
+    )
+    assert None not in [r["s"] for r in _rows(source)]
+    with pytest.raises(ValueError, match="'s'"):
+        CSVSource(
+            _csv(tmp_path, "k,s\n" + body + "99,\n"),
+            schema=schema,
+            tag_columns=["k"],
+            tag_only_columns=True,
+        )
+
+
+def test_a_fixed_size_binary_column_follows_the_text_rule(tmp_path: Path) -> None:
+    schema = pa.schema(
+        [pa.field("k", pa.int64(), nullable=False), pa.field("s", pa.binary(3))]
+    )
+    source = CSVSource(
+        _csv(tmp_path, "k,s\n1,\n2,NaN\n3,abc\n"),
+        schema=schema,
+        tag_columns=["k"],
+        tag_only_columns=True,
+    )
+    assert [r["s"] for r in _rows(source)] == [None, b"NaN", b"abc"]
+    # A quoted empty field is the empty value, which is not three bytes long.
+    with pytest.raises(ValueError):
+        CSVSource(
+            _csv(tmp_path, 'k,s\n1,""\n'),
+            schema=schema,
+            tag_columns=["k"],
+            tag_only_columns=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "declared",
+    [pa.decimal32(6, 2), pa.decimal64(10, 2), pa.string_view(), pa.binary_view()],
+    ids=str,
+)
+def test_a_scalar_type_the_reader_cannot_parse_is_refused_naming_the_column(
+    tmp_path: Path, declared: pa.DataType
+) -> None:
+    path = _csv(tmp_path, "k,v\n1,1\n")
+    schema = pa.schema([pa.field("k", pa.int64()), pa.field("v", declared)])
+    with pytest.raises(ValueError, match="cannot read") as info:
+        CSVSource(path, schema=schema, tag_columns=["k"], tag_only_columns=True)
+    notes = info.value.__notes__
+    assert "column 'v'" in notes, notes
+    assert any(path in note for note in notes), notes
