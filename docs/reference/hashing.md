@@ -1613,7 +1613,7 @@ converter's schema of them, one Arrow type per Python type; a declaration given 
 | column order and struct field order | the column names and struct field names |
 | large and non-large variants of strings, binaries and lists | integer and float width and signedness (`int32` against `int64`, `int8` against `uint8`) |
 | the name of a list's item field (`item`, `element`) | nullability at every depth: a column, a list item, a struct field |
-| dictionary encoding (a dictionary column is its value type) | timestamp unit and zone; date32 against date64; decimal precision and scale |
+| dictionary encoding (a dictionary column is its value type; no stream holds one since ITL-1264, so it never reaches a source's schema hash) | timestamp unit and zone; date32 against date64; decimal precision and scale |
 | field metadata and schema metadata, except a logical type's `ARROW:extension:*` keys | `fixed_size_list` against `list`; the fields of a struct |
 | | a logical type's whole identifier: extension name and metadata (built-in version, a library type's ignore list, a user class's identity record, a native container `list[T]` / `set[T]`), and a logical type against its storage type |
 

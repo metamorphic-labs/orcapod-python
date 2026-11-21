@@ -106,10 +106,6 @@ SAME = {
         pa.array(["a", "b"], pa.string()),
         pa.array(["a", "b"], pa.large_string()),
     ),
-    "dictionary/large_string": (
-        pa.array(["a", "b"], pa.string()).dictionary_encode(),
-        pa.array(["a", "b"], pa.large_string()),
-    ),
     "list/large_list, item named item/element": (
         pa.array([[1], [2]], pa.list_(pa.field("item", pa.int64()))),
         pa.array([[1], [2]], pa.large_list(pa.field("element", pa.int64()))),

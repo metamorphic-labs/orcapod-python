@@ -1713,10 +1713,13 @@ class SourceJobNode(SourceNodeBase):
         match stream:
             case SourceJobNode():
                 # Case 1: copy — preserve bound_source, do NOT wrap the SJN itself.
+                # The copy states the slot's Arrow schemas from the start: its bound
+                # source is validated against them as it is constructed (ITL-640).
                 node = cls(
                     name=name if name is not None else stream.name,
                     tag_schema=stream.tag_schema,
                     data_schema=stream.data_schema,
+                    arrow_schemas=stream._given_arrow_schemas,  # pyright: ignore[reportPrivateUsage]  # one slot copied into another
                     bound_source=stream.bound_source,
                 )
                 node._take_saved_state_of(stream)
@@ -1727,6 +1730,7 @@ class SourceJobNode(SourceNodeBase):
                     name=name if name is not None else stream.name,
                     tag_schema=stream.tag_schema,
                     data_schema=stream.data_schema,
+                    arrow_schemas=stream._given_arrow_schemas,  # pyright: ignore[reportPrivateUsage]  # one slot copied into another
                     bound_source=None,
                 )
                 node._take_saved_state_of(stream)
