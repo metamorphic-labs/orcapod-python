@@ -18,6 +18,8 @@ from orcapod.logical_types.identifier import (
 )
 
 if TYPE_CHECKING:
+    import pyarrow as pa
+
     from orcapod.protocols.database_protocols import DatabaseRegistryProtocol
 
 logger = logging.getLogger(__name__)
@@ -917,6 +919,154 @@ def deserialize_output_schema(
     )
 
 
+def serialize_arrow_schema(
+    schema: pa.Schema, type_converter: Any | None = None
+) -> dict[str, Any]:
+    """Return the saved form of an Arrow schema, exactly as given.
+
+    ``{"columns": {...}, "nullable": [...]}``: each field's Arrow type text, in field
+    order (the text of `serialize_schema`, which carries nested field names and their
+    nullability), and the names of the nullable top-level fields, which the type text
+    cannot say (the record of `serialize_nullability`). The types are kept as given,
+    not normalized to their large variants. `deserialize_arrow_schema` reads it back.
+
+    Args:
+        schema: The Arrow schema to save.
+        type_converter: The converter that restores a logical type, used to check the
+            saved form. If omitted, the default data context's converter.
+
+    Returns:
+        The entry, ready for JSON.
+
+    Raises:
+        ValueError: If the saved form would not restore ``schema`` exactly (equal
+            with its metadata compared): a repeated field name, field or schema
+            metadata, or a type the type text cannot restore. The message names the
+            field.
+    """
+    names = [field.name for field in schema]
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    if repeated:
+        raise ValueError(
+            f"The schema repeats the field names {repeated}; it cannot be saved."
+        )
+    entry: dict[str, Any] = {
+        "columns": {field.name: _serialize_arrow_type(field.type) for field in schema},
+        "nullable": [field.name for field in schema if field.nullable],
+    }
+    try:
+        restored = deserialize_arrow_schema(entry, type_converter)
+    except ValueError as exc:
+        raise ValueError(f"The schema cannot be saved: {exc}") from exc
+    for field, restored_field in zip(schema, restored):
+        if not restored_field.equals(field, check_metadata=True):
+            raise ValueError(
+                f"Field {field.name!r} ({field.type}, nullable={field.nullable}"
+                f"{', with metadata' if field.metadata else ''}) cannot be saved "
+                f"exactly: it reads back as {restored_field.type}, "
+                f"nullable={restored_field.nullable}. Field metadata and types the "
+                "saved Arrow type text cannot restore are not saved."
+            )
+    if not restored.equals(schema, check_metadata=True):
+        raise ValueError(
+            "The schema's own metadata cannot be saved: build the schema without it."
+        )
+    return entry
+
+
+_SAVED_ARROW_SCHEMA_KEYS = ("columns", "nullable")
+
+
+def _saved_arrow_schema_parts(entry: object) -> tuple[dict[str, str], list[str]]:
+    """Return the columns and nullable names of a saved schema entry, checked.
+
+    Only the shape `serialize_arrow_schema` writes is read; anything else is refused,
+    never interpreted (a ``null`` entry, a string where a list belongs).
+
+    Raises:
+        ValueError: Naming what is wrong with the entry.
+    """
+    if not isinstance(entry, dict):
+        raise ValueError(
+            "the saved schema must be an object with 'columns' and 'nullable', "
+            f"not {type(entry).__name__} {entry!r}"
+        )
+    fields = cast("dict[str, object]", entry)
+    missing = [key for key in _SAVED_ARROW_SCHEMA_KEYS if key not in fields]
+    unknown = sorted(str(key) for key in fields if key not in _SAVED_ARROW_SCHEMA_KEYS)
+    if missing or unknown:
+        raise ValueError(
+            "the saved schema holds exactly 'columns' and 'nullable'"
+            + (f"; missing {missing}" if missing else "")
+            + (f"; unknown keys {unknown}" if unknown else "")
+        )
+    columns = fields["columns"]
+    if not isinstance(columns, dict) or not columns:
+        raise ValueError(
+            "the saved schema's 'columns' must be a non-empty object of column names "
+            f"to type text, not {columns!r}"
+        )
+    for name, type_text in cast("dict[object, object]", columns).items():
+        if not isinstance(name, str) or not isinstance(type_text, str):
+            raise ValueError(
+                f"the saved schema's column {name!r} must name its type as text, not "
+                f"{type_text!r}"
+            )
+    nullable = fields["nullable"]
+    if not isinstance(nullable, list) or not all(
+        isinstance(name, str) for name in cast("list[object]", nullable)
+    ):
+        raise ValueError(
+            "the saved schema's 'nullable' must be a list of column names, not "
+            f"{nullable!r}"
+        )
+    names = cast("list[str]", nullable)
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    if repeated:
+        raise ValueError(f"the saved schema's 'nullable' repeats {repeated}")
+    _check_nullable_names(columns, names)
+    return cast("dict[str, str]", columns), names
+
+
+def deserialize_arrow_schema(
+    entry: object, type_converter: Any | None = None
+) -> pa.Schema:
+    """Restore an Arrow schema saved by `serialize_arrow_schema`.
+
+    Args:
+        entry: The saved ``{"columns": {...}, "nullable": [...]}`` entry.
+        type_converter: The converter that restores a logical type. If omitted, the
+            default data context's converter.
+
+    Returns:
+        The schema, with its fields in the saved order.
+
+    Raises:
+        ValueError: If the entry is not of the saved shape (an object with exactly
+            ``columns``, a non-empty object of column names to type text, and
+            ``nullable``, a list of distinct column names), or a saved type cannot
+            be parsed. The message says what is wrong, naming the column.
+    """
+    import pyarrow as pa
+
+    columns, nullable = _saved_arrow_schema_parts(entry)
+    fields = []
+    for name, type_str in columns.items():
+        try:
+            arrow_type = parse_arrow_type_string(type_str, type_converter)
+        except LogicalTypeIdentifierError as exc:
+            raise exc.for_column(name) from exc
+        except SavedSchemaVersionError as exc:
+            raise SavedSchemaVersionError(f"Column {name!r}: {exc}") from exc
+        except ValueError as exc:
+            raise ValueError(
+                f"Column {name!r} has the saved type {type_str!r}, which cannot be "
+                "restored."
+            ) from exc
+        fields.append(pa.field(name, arrow_type, nullable=name in nullable))
+    return pa.schema(fields)
+
+
 def parse_arrow_type_string(type_str: str, type_converter: Any | None = None) -> Any:
     """Parse an Arrow type string into a ``pa.DataType``.
 
@@ -1000,6 +1150,7 @@ def parse_arrow_type_string(type_str: str, type_converter: Any | None = None) ->
         raise ValueError(f"Unknown Arrow type: {type_str!r}")
 
     # Nested types — parse the outer type and recurse
+    _require_balanced_delimiters(type_str)
     bracket_pos = type_str.index("<")
     outer = type_str[:bracket_pos].strip()
     inner = type_str[bracket_pos + 1 : -1].strip()  # strip < and >
@@ -1034,6 +1185,29 @@ def parse_arrow_type_string(type_str: str, type_converter: Any | None = None) ->
         return pa.map_(key_type, value_type, False)
 
     raise ValueError(f"Unknown nested Arrow type: {type_str!r}")
+
+
+def _require_balanced_delimiters(type_str: str) -> None:
+    """Raise unless a nested type's ``<`` and ``>`` balance and its first ``<`` closes last.
+
+    ``list<item: int64X`` or ``list<item: int64>x`` is not a type: the parser must not
+    drop or ignore a character to read one.
+
+    Raises:
+        ValueError: If the delimiters do not balance, or text follows the closing ``>``.
+    """
+    depth = 0
+    for position, char in enumerate(type_str):
+        if char == "<":
+            depth += 1
+        elif char == ">":
+            depth -= 1
+            if depth < 0 or (depth == 0 and position != len(type_str) - 1):
+                break
+    else:
+        if depth == 0 and type_str.endswith(">"):
+            return
+    raise ValueError(f"Unbalanced '<' and '>' in the Arrow type text {type_str!r}")
 
 
 def _native_container_storage(
@@ -1424,6 +1598,32 @@ def check_saved_output_schema_is_plain(
 # The fields of a source config that hold a nested source config: a cached source's
 # inner source and a derived source's origin.
 NESTED_SOURCE_CONFIG_KEYS = ("inner_source", "origin")
+
+
+def check_saved_source_config(config: dict[str, Any]) -> None:
+    """Refuse a saved source config whose own entries are malformed.
+
+    Each source class that reads entries of its own from a saved config may declare
+    ``check_saved_config(config)``, which raises ``ValueError`` on an entry it would
+    have to interpret (a ``CSVSource``'s ``schema``, ITL-1315). It is called here for
+    the config and for every source config nested in it, so ``PipelineJob.load``
+    refuses such a file instead of loading it with the source unbound.
+
+    Args:
+        config: A saved source config.
+
+    Raises:
+        ValueError: If the config or a config nested in it is malformed.
+    """
+    _ensure_registries()
+    for key in NESTED_SOURCE_CONFIG_KEYS:
+        nested = config.get(key)
+        if isinstance(nested, dict):
+            check_saved_source_config(cast("dict[str, Any]", nested))
+    cls = SOURCE_REGISTRY.get(config.get("source_type"))  # pyright: ignore[reportArgumentType]  # any saved value
+    check = getattr(cls, "check_saved_config", None)
+    if check is not None:
+        check(config)
 
 
 def source_config_at_version(config: dict[str, Any], version: str) -> dict[str, Any]:

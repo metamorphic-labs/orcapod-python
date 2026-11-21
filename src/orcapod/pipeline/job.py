@@ -14,6 +14,7 @@ from orcapod.core.nodes import JobNode
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.nodes.operator_node import OperatorJobNode
 from orcapod.core.nodes.source_node import SourceJobNode
+from orcapod.core.sources.derived_source import DerivedSource
 from orcapod.core.streams.base import StreamBase
 from orcapod.side_effects import SideEffectJobNode, SideEffectNode
 from orcapod.core.tracker import AutoRegisteringContextBasedTracker
@@ -1440,7 +1441,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             path: File path to write JSON output to.
 
         Raises:
-            ValueError: If no compiled pipeline exists.
+            ValueError: If no compiled pipeline exists, or a source cannot save its
+                configuration exactly (a ``CSVSource`` whose explicit schema holds
+                Arrow metadata); nothing is written then.
         """
         import json as _json
         import os
@@ -1474,7 +1477,17 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         sources_block: dict[str, Any] = {}
         for spec_name, source in self._sources.items():
             if hasattr(source, "to_config"):
-                sources_block[spec_name] = source.to_config()
+                try:
+                    # ``hasattr`` checked it: every source declares it.
+                    sources_block[spec_name] = cast(
+                        "cp.SourceProtocol", source
+                    ).to_config()
+                except ValueError as exc:
+                    # A source that cannot save its configuration exactly refuses
+                    # (a CSVSource's explicit schema with Arrow metadata, ITL-1315):
+                    # nothing is written.
+                    exc.add_note(f"Saving the job's source {spec_name!r}")
+                    raise
             else:
                 sources_block[spec_name] = {"source_type": "unknown"}
 
@@ -1593,6 +1606,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         from orcapod.pipeline.graph import Pipeline
         from orcapod.pipeline.serialization import (
             SUPPORTED_JOB_FORMAT_VERSIONS,
+            check_saved_source_config,
             check_source_config_binding,
             resolve_source_from_config,
             source_config_at_version,
@@ -1639,11 +1653,19 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             # is the file's error, not a source that could not be rebuilt.
             try:
                 src_config = source_config_at_version(src_config, version)
+                # A tags_as_data source saved without its required source id is an
+                # invalid file, refused here; the best-effort rebuild below would
+                # leave the slot unbound instead (ITL-1313).
+                DerivedSource.require_saved_source_id(src_config)
                 if spec_name in slots:
                     slot = slots[spec_name]
                     check_source_config_binding(
                         src_config, slot.tag_schema.keys(), slot.data_schema.keys()
                     )
+                # A malformed entry of a source's own (a CSVSource's saved schema,
+                # ITL-1315) is the file's error: refused here, where the best-effort
+                # rebuild below would leave the slot unbound.
+                check_saved_source_config(src_config)
             except ValueError as exc:
                 raise ValueError(f"{path}: source {spec_name!r}: {exc}") from exc
             try:

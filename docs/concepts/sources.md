@@ -35,7 +35,8 @@ hashing) and produces the final immutable stream.
 
 `orcapod.sources` also provides database-backed sources (`SQLiteTableSource`,
 `PostgreSQLTableSource`, `SpiralDBTableSource`) and `PollingSource` for data that arrives over
-time; see the [API reference](../api/sources.md). Their default `source_id` names the table
+time (provisional in this release, see [Provisional sources](#provisional-sources)); see the
+[API reference](../api/sources.md). Their default `source_id` names the table
 where it lives (`sqlite_table:<db path>:main.<table>`,
 `postgresql_table:<host>:<port>/<database>.<schema>.<table>`, with the server the connection
 reached; the
@@ -171,6 +172,89 @@ A data frame kept whole as a value in a cell (a pandas or polars `DataFrame` hol
 categorical column) is not a dictionary column: it is a library value, stored and hashed as one
 (see [Arrays and other library values](arrays.md)), and is accepted. Supporting
 dictionary-encoded columns themselves is future work (ITL-1277).
+
+### A CSV file's types: `schema=`
+
+A CSV file holds text only, so `CSVSource` infers each column's type from the file, and
+infers it again on every read: a column of whole numbers is `int64`, and it may be null only
+if the file has an empty cell in it. Pass an Arrow `schema=` to choose the types instead: its
+fields name the file's columns in the file's order, each with its type, width and
+nullability. The source then has exactly those types (in their large variants, as above).
+
+Each cell's text is read as its column's declared type, never as an inferred type converted
+afterwards: `007` under a string type stays `"007"`, `1e3` stays `"1e3"`, and `1.005` under
+`decimal128(10, 3)` is exactly `1.005`. A cell that is not a value of its declared type (`1.0`
+under an integer, a date and time under `date32`, `1.005` under two decimal places) raises
+`ValueError`, naming the column and the file. The schema names every column of the file, in
+the file's order. A string or binary column (`string`, `large_string`, `binary`,
+`large_binary`, `fixed_size_binary`) holds a cell's text as written; what reads as null:
+
+| Cell in the file | Under a string or binary type | Under any other type |
+|---|---|---|
+| empty: `a,,b` | null | null |
+| quoted empty: `a,"",b` | `""` (`b""`) | null |
+| `NA`, `null`, `N/A`, `NaN` | the text as written | null |
+| any other text | the text as written, spaces included | parsed as the type, or raises |
+
+A float column cannot take a NaN from the text `NaN`, which reads as null; an infinity can be
+spelled (`inf`, `-Infinity`).
+
+A null in a field declared non-nullable raises. Under a float type, an infinity spelled in the
+file (`inf`, `-Infinity`) is kept, a finite value is rounded to the type as usual, and a finite
+value too large for the type (`70000` under `float16`, `1e39` under `float32`) raises instead
+of becoming an infinity. `float16` and `decimal256` (which pyarrow's CSV reader does not
+parse) are read as text and converted with a checked conversion. A type the reader cannot
+parse at all (`decimal32`, `string_view`, an interval) and a list, struct or other nested type
+raise, naming the column. The file is read once into memory and parsed from that copy, so a
+file replaced while it is read cannot mix two versions.
+
+The schema is part of the source's configuration: `to_config()` saves it, field by field
+(Arrow type text, nested fields included, and which fields may be null), and `from_config()`
+and a saved job (`PipelineJob.save` / `PipelineJob.load`) read the file with it again, so the
+reloaded source has the same schema, content hash and pipeline hash as the one you built. A
+source built without `schema=` saves no schema and infers again when it is reloaded. Only
+a missing entry means that: a saved entry that is not what `to_config()` writes (`null`, a
+string where the list of nullable fields belongs, an unknown key) raises `ValueError`, and
+`PipelineJob.load` refuses the file.
+
+```python
+import json
+import tempfile
+from pathlib import Path
+
+import pyarrow as pa
+
+from orcapod.sources import CSVSource
+
+csv_dir = Path(tempfile.mkdtemp())
+(csv_dir / "trials.csv").write_text("session,trial,response\ns1,1,0.4\ns1,2,0.7\n")
+trial_schema = pa.schema(
+    [
+        pa.field("session", pa.string(), nullable=False),
+        pa.field("trial", pa.int16(), nullable=False),
+        pa.field("response", pa.float32()),  # nullable: a later file may lack a value
+    ]
+)
+trials = CSVSource(
+    str(csv_dir / "trials.csv"),
+    tag_columns=["session", "trial"],
+    tag_only_columns=True,
+    schema=trial_schema,
+)
+print(trials.to_config()["schema"])
+# {'columns': {'session': 'string', 'trial': 'int16', 'response': 'float'}, 'nullable': ['response']}
+reloaded = CSVSource.from_config(json.loads(json.dumps(trials.to_config())))
+print(reloaded.output_schema())
+# (Schema({'session': str, 'trial': int}), Schema({'response': float | None}))
+print(reloaded.content_hash() == trials.content_hash())
+# True
+```
+
+Arrow metadata cannot be saved. A schema whose fields (at any depth) or whose schema itself
+carry Arrow metadata is accepted by the constructor, and the source's table keeps it, but
+`to_config()` and so `PipelineJob.save` raise `ValueError` naming the field, and the job file
+is not written: build the schema without the metadata to save the source, or do not save it.
+A source never saves a schema it would read back differently.
 
 ### SpiralDB tables
 
@@ -648,7 +732,9 @@ experiments = DictSource(
 )
 
 with_start = DerivedSource(
-    experiments, tags_as_data={"session_start": "session_start_value"}
+    experiments,
+    tags_as_data={"session_start": "session_start_value"},
+    source_id="experiments_with_start",
 )
 
 tag_keys, data_keys = with_start.keys()
@@ -686,10 +772,11 @@ before. Things to know:
   (`job.nodes["bmi"].as_source(tags_as_data=...)`).
 - It is a **new source**, not a step in the origin's pipeline: `upstreams` is empty, and it
   has provenance columns of its own, like the result of handing the same rows to
-  `ArrowTableSource`. Use it in place of the origin. Its default `source_id` is
-  `tags_as_data:` followed by a labelled hash built from the origin's identity and the mapping, so
-  it changes when either changes; pass `source_id=` to choose a name. The mapping is part of the
-  source's `content_hash` either way, so two mappings never share one.
+  `ArrowTableSource`. Use it in place of the origin. It needs a `source_id`: there is no
+  default, and building one without it raises `ValueError` before the origin is read
+  (ITL-1313); `as_source(tags_as_data=..., source_id=...)` takes it too. The source is
+  identified by that name and the mapping, like any named source: the mapping is part of its
+  `content_hash`, so two mappings never share one.
 - A saved job reloads a derived source whenever its origin can be reloaded (a CSV file, a
   Delta table, a database table). Over an in-memory source it is saved but not reloaded, like
   the in-memory source itself.
@@ -698,12 +785,31 @@ before. Things to know:
 print(with_start.upstreams)
 # ()
 print(with_start.source_id)
-# tags_as_data:...:...
+# experiments_with_start
 ```
 
 Only a source can do this. An operator rearranges rows and columns, and every data value it
 emits was already a data value of its input; turning a tag value into a data value creates
 new data, which is what a source is for.
+
+### Provisional sources
+
+Data context v1 freezes the hashes of Orcapod at the 0.4.0 release. A provisional source is
+outside that freeze: its default `source_id` and its content hash are still being decided
+(ITL-1316), so a later release may change them, and with them the system tags, stored paths
+and record ids of its rows and of every step downstream of it, which then compute their
+results again (nothing stored is lost or wrong). It works as any source does otherwise.
+
+```python
+from orcapod.sources import PROVISIONAL_SOURCES
+
+print(sorted(PROVISIONAL_SOURCES))
+# ['PollingSource']
+```
+
+Building one, directly or from a saved config, issues `orcapod.errors.ProvisionalHashWarning`
+once per process; filter its class to silence it, as for
+[provisional operators](operators.md#provisional-operators).
 
 ## What a source does at a run
 

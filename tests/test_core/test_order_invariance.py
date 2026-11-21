@@ -715,7 +715,9 @@ def _cached_source(role: str, order: int, layout: str, _tmp: Path) -> Any:
 
 def _derived_source(role: str, order: int, layout: str, _tmp: Path) -> Any:
     return DerivedSource(
-        source(MAIN, role, order, layout), tags_as_data={"t1": "x1", "t3": "x3"}
+        source(MAIN, role, order, layout),
+        tags_as_data={"t1": "x1", "t3": "x3"},
+        source_id="with_tags_as_data",
     )
 
 
@@ -868,7 +870,9 @@ def test_the_order_of_tags_as_data_items_changes_nothing(role: str) -> None:
     items = (("t1", "z1"), ("t2", "y2"), ("t3", "x3"))
     results = {}
     for order in itertools.permutations(items):
-        derived = DerivedSource(origin, tags_as_data=dict(order))
+        derived = DerivedSource(
+            origin, tags_as_data=dict(order), source_id="with_tags_as_data"
+        )
         results[repr(order)] = {
             **identity(derived),
             "source_id": derived.source_id,

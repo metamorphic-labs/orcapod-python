@@ -612,6 +612,11 @@ class ProvisionalHashWarning(UserWarning):
     downstream of it, which are then computed again. The warning is issued once per
     operator per process, when the operator is constructed.
 
+    A provisional source (``orcapod.sources.PROVISIONAL_SOURCES``, ITL-1314; today
+    ``PollingSource``) has a default source id and a content hash that are not frozen
+    with data context v1. The warning is issued once per source kind per process, when
+    the source is constructed (also from a saved config).
+
     To silence it, call ``warnings.filterwarnings("ignore",
     category=ProvisionalHashWarning)`` after importing Orcapod. Python's ``-W`` option
     and ``PYTHONWARNINGS`` cannot name this class: they are read before installed

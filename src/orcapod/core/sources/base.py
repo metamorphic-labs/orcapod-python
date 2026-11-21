@@ -8,13 +8,16 @@ from orcapod.core.streams.base import StreamBase, typed_zero_row_table
 from orcapod.system_constants import constants
 from orcapod.core.streams.view import StreamView
 from orcapod.protocols.core_protocols import StreamProtocol
-from orcapod.types import ColumnConfig, Condition, Schema
+from orcapod.types import ColumnConfig, Condition, ContentHash, Schema
+from orcapod.core.sources.provisional import warn_provisional_source
+from orcapod.utils.provisional import note_provisional_use, provisional_class_name
 
 if TYPE_CHECKING:
     import pyarrow as pa
 
     from orcapod.core.sources.cached_source import CachedSource
     from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
+    from orcapod.protocols.hashing_protocols import SemanticHasherProtocol
 
 
 def saved_tag_only_columns(config: dict[str, Any]) -> bool | list[str]:
@@ -77,6 +80,15 @@ class RootSource(StreamBase):
     # (ITL-1019): from format 0.3.0 on such a config always holds it.
     TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = False
 
+    PROVISIONAL: ClassVar[bool] = False
+    """Whether the source is provisional: its identity is not frozen (ITL-1314).
+
+    Set to ``True`` exactly by the sources listed in ``PROVISIONAL_SOURCES``
+    (``core/sources/provisional.py``); constructing one issues
+    ``ProvisionalHashWarning`` once per source kind per process. It enters no hash,
+    identifier, config or stored path.
+    """
+
     def __init__(
         self,
         source_id: str | None = None,
@@ -84,6 +96,10 @@ class RootSource(StreamBase):
         data_context: str | contexts.DataContext | None = None,
         config: OrcapodConfig | None = None,
     ) -> None:
+        # A provisional source warns once per process at construction (ITL-1314).
+        provisional = provisional_class_name(type(self))
+        if provisional is not None:
+            warn_provisional_source(provisional)
         super().__init__(
             label=label,
             data_context=data_context,
@@ -111,11 +127,50 @@ class RootSource(StreamBase):
     # Source identity
     # -------------------------------------------------------------------------
 
+    def _note_provisional_identity_use(self) -> None:
+        """Record a use of this source's identity if it is provisional (ITL-1314).
+
+        The warning is issued at construction only; the use is recorded wherever the
+        identity is read (``source_id``, ``content_hash``, ``pipeline_hash``), so the
+        golden tool refuses a case that reads a provisional source built before the
+        case ran. The record enters no hash.
+        """
+        provisional = provisional_class_name(type(self))
+        if provisional is not None:
+            note_provisional_use(provisional)
+
+    def content_hash(self, hasher: SemanticHasherProtocol | None = None) -> ContentHash:
+        """Return the content hash, recording a provisional source's use (ITL-1314).
+
+        Args:
+            hasher: The semantic hasher, as for ``ContentIdentifiableBase.content_hash``.
+
+        Returns:
+            The content hash, unchanged by the record.
+        """
+        self._note_provisional_identity_use()
+        return super().content_hash(hasher)
+
+    def pipeline_hash(
+        self, hasher: SemanticHasherProtocol | None = None
+    ) -> ContentHash:
+        """Return the pipeline hash, recording a provisional source's use (ITL-1314).
+
+        Args:
+            hasher: The semantic hasher, as for ``PipelineElementBase.pipeline_hash``.
+
+        Returns:
+            The pipeline hash, unchanged by the record.
+        """
+        self._note_provisional_identity_use()
+        return super().pipeline_hash(hasher)
+
     @property
     def source_id(self) -> str:
         """Canonical name for this source used in the registry and provenance
         strings. If not set, raises ``ValueError``.
         """
+        self._note_provisional_identity_use()
         if self._source_id is None:
             raise ValueError("source_id is not set")
         return self._source_id
