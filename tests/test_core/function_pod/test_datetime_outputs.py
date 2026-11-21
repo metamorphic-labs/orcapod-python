@@ -25,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -35,6 +36,7 @@ from orcapod.core.sources import ArrowTableSource, DictSource, ListSource
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import (
     NaiveDatetimeError,
+    NotADatetimeError,
     OutputTypeError,
     RowFailuresWarning,
     SubMicrosecondDatetimeError,
@@ -468,6 +470,7 @@ def test_coerce_utc_reads_a_naive_value_as_utc_and_still_refuses_nanoseconds() -
     [
         NaiveDatetimeError(datetime(2026, 1, 2)),
         SubMicrosecondDatetimeError(pd.Timestamp("2023-11-14 22:13:20.123456789")),
+        NotADatetimeError(np.datetime64("2026-01-02T03:04:05", "us")),
     ],
 )
 def test_the_errors_pickle_and_keep_reason_and_hint(
@@ -669,3 +672,51 @@ def test_a_data_frame_source_over_plain_values_follows_the_rule(
             tag_only_columns=True,
             source_id="plain",
         ).as_table()
+
+
+# ---------------------------------------------------------------------------
+# A value that is not a datetime (numpy.datetime64), on each path
+# ---------------------------------------------------------------------------
+
+DATETIME64 = np.datetime64("2026-01-02T03:04:05.123456", "us")
+# Rows a source takes: the value is the refusal under test, so not a DataValue.
+DATETIME64_ROWS: list[dict[str, Any]] = [{"k": 1, "a": DATETIME64, "b": DATETIME64}]
+
+
+def test_a_function_returning_a_datetime64_fails_conformance() -> None:
+    """A function output ``-> datetime`` given a ``numpy.datetime64`` is refused by the
+    output check, before storage: it is not a ``datetime``."""
+
+    @function_pod(output_keys=["a_out", "b_out"])
+    def give(a: datetime, b: datetime) -> tuple[datetime, datetime]:
+        return DATETIME64, DATETIME64  # pyright: ignore[reportReturnType]  # the refusal under test
+
+    with pytest.raises(OutputTypeError, match="returned numpy.datetime64"):
+        _ = give.pod(_source("us", "UTC")).as_table()
+
+
+def test_an_inferred_source_refuses_a_datetime64_by_its_class() -> None:
+    """A source inferring its types finds no type for ``numpy.datetime64``."""
+    with pytest.raises(TypeError, match="numpy.datetime64"):
+        _ = DictSource(
+            DATETIME64_ROWS,
+            tag_columns=["k"],
+            tag_only_columns=True,
+        ).as_table()
+
+
+def test_a_declared_source_refuses_a_datetime64_cleanly() -> None:
+    """A source declared ``datetime`` refuses a ``numpy.datetime64`` with
+    ``NotADatetimeError`` (a ``TypeError``), naming its type and how to convert it."""
+    with pytest.raises(NotADatetimeError) as caught:
+        _ = DictSource(
+            DATETIME64_ROWS,
+            tag_columns=["k"],
+            tag_only_columns=True,
+            data_schema={"k": int, "a": datetime, "b": datetime},
+        ).as_table()
+    error = caught.value
+    assert isinstance(error, TypeError) and isinstance(error, ValueError)
+    assert "Value of type numpy.datetime64 is not a datetime" in str(error)
+    assert 'pandas.Timestamp(value, tz="UTC")' in str(error)
+    assert "2026" not in error.reason + error.hint

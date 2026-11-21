@@ -26,6 +26,7 @@ from orcapod.contexts import DataContext, resolve_context
 from orcapod.errors import (
     CanonicalOrderError,
     NaiveDatetimeError,
+    NotADatetimeError,
     SubMicrosecondDatetimeError,
     UnsupportedValueError,
 )
@@ -172,7 +173,7 @@ def _is_optional_type(python_type: DataType) -> bool:
     return False
 
 
-def storable_instant(value: datetime, timezone_policy: str) -> datetime:
+def storable_instant(value: object, timezone_policy: str) -> datetime:
     """Return ``value`` as a ``datetime`` column holds it, or refuse it (ITL-1268).
 
     The one rule for the type converter's conversion of a Python ``datetime`` (or a
@@ -202,9 +203,13 @@ def storable_instant(value: datetime, timezone_policy: str) -> datetime:
         or the same instant in UTC when its offset has a part below one second.
 
     Raises:
+        NotADatetimeError: If ``value`` is not a ``datetime`` (a ``numpy.datetime64``,
+            for example).
         NaiveDatetimeError: If ``value`` has no time zone under the ``strict`` policy.
         SubMicrosecondDatetimeError: If ``value`` has a part below one microsecond.
     """
+    if not isinstance(value, datetime):
+        raise NotADatetimeError(value)
     if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
         if timezone_policy == "strict":
             raise NaiveDatetimeError(value)

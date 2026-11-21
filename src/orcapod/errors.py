@@ -157,6 +157,36 @@ class SubMicrosecondDatetimeError(UnstorableDatetimeError):
     )
 
 
+# UnstorableDatetimeError.__init__ calls super().__init__, which reaches
+# BaseException.__init__ through ValueError: the base initializers do run.
+class NotADatetimeError(UnstorableDatetimeError, TypeError):  # pyright: ignore[reportUnsafeMultipleInheritance]
+    """A value that is not a ``datetime`` where a ``datetime`` is declared.
+
+    For example a ``numpy.datetime64`` in a source column declared ``datetime``: a
+    ``datetime`` column holds an instant, which only a timezone-aware ``datetime`` (or a
+    subclass, such as a ``pandas.Timestamp``) names. It is a ``TypeError`` (a value of the
+    wrong type) and, like every ``UnstorableDatetimeError``, a ``ValueError``. Its
+    ``reason`` names the value's type, never the value.
+    """
+
+    hint = (
+        "Convert it to a timezone-aware datetime first, e.g. "
+        'pandas.Timestamp(value, tz="UTC") for a numpy.datetime64 that holds a UTC time'
+    )
+
+    def __init__(self, value: object) -> None:
+        """Create the error for ``value``.
+
+        Args:
+            value: The value that is not a ``datetime``.
+        """
+        self.reason = (
+            f"Value of type {type_text(type(value))} is not a datetime: a datetime is "
+            "stored as an instant, which only a timezone-aware datetime names"
+        )
+        super().__init__(value)
+
+
 class UnstorableColumnError(ValueError):
     """A database cannot store a column of a table it is asked to hold (ITL-1162).
 
