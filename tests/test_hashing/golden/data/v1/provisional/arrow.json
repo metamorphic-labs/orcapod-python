@@ -1,0 +1,12 @@
+{
+  "extension_no_values.all_null.dataframe": "arrow_v1:0000025185ba76517a22a9427612c3fa5e49a3cd5c800c71cff83fb474c8a39dd78516",
+  "extension_no_values.all_null.ndarray": "arrow_v1:0000023e4d6199067f84c55c41d5fa5796bd57ed8157e09cf79c9452d2812b6363ae44",
+  "extension_no_values.all_null.series": "arrow_v1:0000025699fe402adca996592df2b00e11d2993ee3c59bb45e849c9928d322e129a951",
+  "extension_no_values.zero_rows.dataframe": "arrow_v1:000002bc85ae91fb30f91afb81787c6bd3fa21fb793064c9f00ed33d361d2d19ac2c9b",
+  "extension_no_values.zero_rows.ndarray": "arrow_v1:0000022380492b0ec32f02eaf62e1fb8baa08f23fbeda5a5df32792dbaa7ba5c22d1d9",
+  "extension_no_values.zero_rows.series": "arrow_v1:0000029bedd709e27087807701315dbcca9215a4fc2a118d2f9175d7e5cc6036f2d2ba",
+  "polars_extension_no_values.all_null.dataframe": "arrow_v1:000002002479ebedc867c8831d99eaf4821e9c4e8c4679726ab7a7f1b37946ddc5d6f3",
+  "polars_extension_no_values.all_null.series": "arrow_v1:00000240b2c2cd8596cff8213da703e3dbbe903cbb32466a21ee6286e6d425f0207b9c",
+  "polars_extension_no_values.zero_rows.dataframe": "arrow_v1:000002311e399e27347b47d6644b886184956bbaeea9f077ecbb658ddaa90abb7bb723",
+  "polars_extension_no_values.zero_rows.series": "arrow_v1:000002f609a54331f5b3bfab74b2220c34dbc708a42c768f79fd2487b0f2e966b41935"
+}
