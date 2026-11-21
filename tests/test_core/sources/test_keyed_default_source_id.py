@@ -552,3 +552,27 @@ class TestJobNodeOverAKeyOrderedSource:
         )
         assert first.node_identity_path == second.node_identity_path
         assert first.content_hash() != second.content_hash()
+
+
+def test_build_takes_hash_in_key_order_by_keyword_only() -> None:
+    """``SourceStreamBuilder.build`` refuses ``hash_in_key_order`` given by position."""
+    from orcapod import DEFAULT_CONFIG
+    from orcapod.contexts import get_default_context
+    from orcapod.core.sources.stream_builder import SourceStreamBuilder
+
+    builder = SourceStreamBuilder(get_default_context(), DEFAULT_CONFIG)
+    table = pa.Table.from_pylist(ROWS, schema=SCHEMA)
+    positional: Any = builder.build  # the signature refuses this; call it untyped
+    with pytest.raises(TypeError):
+        positional(table, TAGS, None, TAGS, (), "arrow_table", (), True)
+    result = builder.build(
+        table,
+        TAGS,
+        None,
+        TAGS,
+        (),
+        "arrow_table",
+        (),
+        hash_in_key_order=True,
+    )
+    assert result.source_id.startswith("arrow_table:")

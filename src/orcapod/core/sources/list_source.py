@@ -28,7 +28,9 @@ class ListSource(RootSource):
     class name, output schema, ``source_id``, key columns; developer, November 21,
     2026, ITL-1272). The elements and the tags the tag function gave enter it only
     through the default source id, the hash of the built table, when no
-    ``source_id`` is given; with one, the source is an address.
+    ``source_id`` is given, and through the output schema (their types); with a
+    ``source_id``, the source is an address: other elements of the same types leave its
+    content hash unchanged.
     """
 
     @staticmethod

@@ -856,9 +856,10 @@ print(len({s.source_id for s in as_given}))
 ```
 
 A source given a `source_id` is an address: its content hash is built from its class, schema,
-`source_id` and key columns, never from its rows. This holds for `ListSource` too (developer,
+`source_id` and key columns, never from its rows, so changing the rows changes it only when the
+schema changes (a column of another type). This holds for `ListSource` too (developer,
 November 21, 2026, ITL-1272): its elements and its tag function enter its identity only through
-its default `source_id`.
+its default `source_id` and its output schema.
 
 These columns are hidden by default. You can reveal them using `ColumnConfig`:
 

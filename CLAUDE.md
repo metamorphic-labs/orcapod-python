@@ -874,8 +874,8 @@ Every pipeline element has two parallel hashes:
    (`<source kind>:<algorithm label>:<hex>` of the table hash, used when none is given; the rows
    in the order given, or sorted by the key columns with `hash_in_key_order=True`, ITL-1272). A
    `ListSource` has no rule of its own (developer, November 21, 2026, ITL-1272): its elements
-   and tag function enter only through that default, and with a given `source_id` it is an
-   address like every other source (the review of every source's identity is ITL-1311). A downstream stream or node hashes its
+   and tag function enter only through that default and its output schema (their types), and
+   with a given `source_id` it is an address like every other source (the review of every source's identity is ITL-1311). A downstream stream or node hashes its
    pod's identity plus its upstreams' content hashes; a function pod's identity is its uri,
    not its body. The uri holds the hash of the output schema, a set of named, typed outputs
    in no order (developer, November 17, 2026, ITL-1244): reordering `output_keys` changes it

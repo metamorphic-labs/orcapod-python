@@ -355,6 +355,7 @@ class SourceStreamBuilder:
         system_tag_columns: Collection[str] = (),
         source_kind: str | None = None,
         data_tags: Collection[str] = (),
+        *,
         hash_in_key_order: bool = False,
     ) -> SourceStreamResult:
         """Run the full enrichment pipeline.
