@@ -422,11 +422,14 @@ print(Condition.of(day=day, started=started, recorded=recorded))
   to its `Condition`, `RunSummary.limits` the slot of each source read with a `limit=` to the
   limit, and `RunSummary.restricted_source_ids` every such slot to its source id; the
   summary shows them (`spikes (spikes): where unit_id=106, limit 3`). A saved job records them in
-  the source's config, and a loaded job reads with them. Binding does not compare
-  restrictions: a restricted source fits the slot of the unrestricted one. A slot keeps one
-  entry: a slot bound to a stream over two restricted tables (a `semi_join` of two restricted
-  sources) reports one condition and one limit, those of the first table found (a known
-  limit, ITL-1293), although every check reads both.
+  the source's config, and a loaded job reads with them. A slot's new restriction need
+  not match its previous one: a restricted source fits the slot of the unrestricted one, and
+  `bind` does not compare the two. But a bind after which two slots would read one source
+  identity under different restrictions is refused before any binding is replaced (one
+  restriction per table, above). A slot keeps one entry: a slot bound to a stream over two
+  restricted tables (a `semi_join` of two restricted sources) reports one condition and one
+  limit, those of the first table found (a known limit, ITL-1293), although every check reads
+  both.
 - **No cache over a restriction.** `CachedSource` (and `source.cached(...)`) refuses a
   restricted source with `ValueError`, naming the restriction: a cache keeps the table's rows
   under the table's identity, which a restriction is not part of, so a restricted read would

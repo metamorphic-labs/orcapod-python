@@ -1906,14 +1906,56 @@ class TestOperatorCacheEntryPoints:
         assert asyncio.run(run()) == []
         assert self._stored_files(folder) == []
 
+    @staticmethod
+    def _keyed(rows: Any) -> list[tuple[tuple[str, int], float, int]]:
+        """Both tags and two data columns of each row, in key order."""
+        return sorted(
+            ((tag["subject_id"], tag["timestamp"]), data["a"], data["channel"])
+            for tag, data in rows
+        )
+
     @pytest.mark.parametrize("mode", _CACHING, ids=lambda m: m.name)
     def test_execute_over_unrestricted_streams_still_caches(
         self, project, tmp_path, mode
     ):
-        node = self._logged_node(DeltaTableDatabase(tmp_path / "s"), CacheMode.LOG)
-        events = _source(source_id="events", tag_only_columns=True)
-        rows = node.execute(events)
-        assert sorted(tag["timestamp"] for tag, _ in rows) == [1, 2, 3, 4, 5]
+        """LOG stores what ``execute`` returns; REPLAY returns that log, not a recompute.
+
+        The REPLAY node is handed a stream over another table (other rows, same
+        columns): a recompute would return its rows and scan it.
+        """
+        store = DeltaTableDatabase(tmp_path / "s")
+        node = self._logged_node(store, CacheMode.LOG)
+        expected = [
+            (("m1", 1), 1.5, 1),
+            (("m1", 2), 2.5, 0),
+            (("m1", 3), 3.5, 1),
+            (("m2", 4), 4.5, 0),
+            (("m2", 5), 5.5, 1),
+        ]
+
+        logged = node.execute(_source(source_id="events", tag_only_columns=True))
+
+        assert self._keyed(logged) == expected
+        stored = node.as_source().as_table().to_pylist()
+        assert self._keyed(((row, row) for row in stored)) == expected
+
+        if mode is CacheMode.REPLAY:
+            project.create_table("default.other", key_schema=_KEYS).write(
+                _rows(["m3", "m3"], [6, 7])
+            )
+            other = SpiralDBTableSource(
+                _PROJECT, "other", source_id="events", tag_only_columns=True
+            )
+            assert sorted(_timestamps(other)) == [6, 7]
+            node.attach_databases(
+                pipeline_database=store.at("events"), cache_mode=CacheMode.REPLAY
+            )
+            scans = len(fake_pyspiral.scan_log)
+
+            replayed = node.execute(other)
+
+            assert self._keyed(replayed) == expected
+            assert len(fake_pyspiral.scan_log) == scans
 
 
 def _proxy_for(source: SpiralDBTableSource) -> Any:

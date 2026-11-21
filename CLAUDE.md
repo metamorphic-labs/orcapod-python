@@ -1311,8 +1311,10 @@ data. The rules:
   `pipeline/restrictions.py`, typed, never probing a private attribute.
   `RunSummary` records each restricted source by slot: `conditions` (slot to `Condition`),
   `limits` (slot to limit), `restricted_source_ids` (every such slot), filled by one walk;
-  the saved job keeps `where` and `limit` in the source config, bind never compares them, and a job run over a restricted
-  source feeding `GroupBy`, `Batch` or `MergeJoin` issues one `RestrictedAggregationWarning`.
+  the saved job keeps `where` and `limit` in the source config. A slot's new restriction need not
+  match its previous one (bind does not compare the two), but `bind` refuses, before replacing
+  any binding, a bind after which two slots would read one source identity under different
+  restrictions (below). A job run over a restricted source feeding `GroupBy`, `Batch` or `MergeJoin` issues one `RestrictedAggregationWarning`.
   A pipeline keeps one restriction (or none) per source identity (a restriction leaves the
   identity unchanged), so one table restricted two ways (or with and without a restriction) in
   one pipeline is refused (`restrictions.require_one_restriction`, over the sources the streams
