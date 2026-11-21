@@ -16,8 +16,12 @@ context, it checks in HEAD:
 A pre-release (``0.4.0rc1``, ``0.4.0a1``, ``0.4.0b2``, ``0.4.0.dev3``) freezes nothing
 (developer, November 21, 2026, ITL-1329): it carries the hashes intended to be final, and
 only a final release runs the golden release step. ``--release-version`` of a pre-release
-therefore checks that HEAD does NOT record it as a release; its tag pins no release, so the
-tag check skips it. ``release_version`` is the one rule that tells the two apart.
+therefore checks that no release record at HEAD names a pre-release, in any spelling
+``release_version`` accepts, and that the version is withdrawn in no data context. A release
+record holding a version text the gate cannot classify is refused in every run, a final
+one included (fail closed). The tag check skips a tag whose name is a pre-release; a tag it
+cannot classify is checked as before. ``release_version`` is the one rule that tells a
+pre-release from a final release.
 
 A withdrawn release is not compared with HEAD (ITL-1255): when HEAD's
 ``released_manifests.json`` records release ``X.Y.Z`` under ``withdrawn`` of the current data
@@ -52,7 +56,7 @@ import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONTEXTS = PurePosixPath("src/orcapod/contexts")
@@ -479,21 +483,23 @@ def check_release(repo: Path, release: str) -> list[str]:
     step = (
         f"run generate_golden_hashes.py --release {release} in the release pull request"
     )
+    # A release record nobody can classify never ships, whatever is released (ITL-1329).
+    unclassified = unclassifiable_records(repo)
     pins = _show_json(repo, "HEAD", PINS)
     pin = pins.get(version) if isinstance(pins, dict) else None
     releases = pin.get("releases") if isinstance(pin, dict) else None
     if not isinstance(pin, dict) or not isinstance(releases, dict):
-        return [f"HEAD has no pin of data context {version}: {step}"]
-    if release in _head_withdrawn(repo, version):
-        return [
-            f"release {release} of data context {version} was withdrawn and is never "
-            "released again: a package index never takes a version twice"
-        ]
+        return [f"HEAD has no pin of data context {version}: {step}", *unclassified]
+    # Withdrawn in any data context, in any spelling the gate accepts.
+    withdrawn = _withdrawn_problems(repo, release)
+    if withdrawn:
+        return [*withdrawn, *unclassified]
     if release not in releases:
         return [
-            f"HEAD does not record release {release} of data context {version}: {step}"
+            f"HEAD does not record release {release} of data context {version}: {step}",
+            *unclassified,
         ]
-    problems: list[str] = []
+    problems: list[str] = [*unclassified]
     if pin.get("manifest") is None:
         problems.append(f"the manifest of data context {version} is not pinned: {step}")
     manifest = _show_json(repo, "HEAD", CONTEXTS / "data" / f"{version}.json")
@@ -526,13 +532,12 @@ def check_pre_release(repo: Path, release: str) -> list[str]:
 
     A pre-release carries the hashes intended to be final but freezes nothing: only a
     final release runs the golden release step (developer, November 21, 2026, ITL-1329).
-    So no release record at HEAD names a pre-release, in any spelling. The release
-    records at HEAD are: the ``releases`` pins of every data context in
-    ``released_manifests.json``; the current data context manifest's ``released_in`` and
-    the ``release`` of each revision of its golden history; and the ``released_in`` of
-    each data function type snapshot pin. Nor may ``release`` be withdrawn
-    (a package index never takes a version twice). Unpinned data function type snapshots
-    are allowed: the final release step pins them. What earlier final releases froze is
+    So no release record at HEAD (``_release_records``) names a pre-release, in any
+    spelling ``release_version`` accepts, a withdrawn record included: a pre-release has
+    no release record of any kind. A record whose version text the gate cannot classify
+    is refused too (fail closed). Nor may ``release`` be withdrawn in any data context (a
+    package index never takes a version twice). Unpinned data function type snapshots are
+    allowed: the final release step pins them. What earlier final releases froze is
     checked by the tag check, which the Release workflow runs for a pre-release too.
 
     Args:
@@ -543,76 +548,188 @@ def check_pre_release(repo: Path, release: str) -> list[str]:
         One sentence per problem; empty when HEAD does not record the pre-release.
     """
     version = _current_version(repo)
-    pins = _show_json(repo, "HEAD", PINS)
-    recorded = [
-        (context, str(name))
-        for context, context_pin in sorted(
-            pins.items() if isinstance(pins, dict) else []
-        )
-        if isinstance(context_pin, dict)
-        and isinstance(context_pin.get("releases"), dict)
-        for name in sorted(context_pin["releases"])
-    ]
-    manifest = _show_json(repo, "HEAD", CONTEXTS / "data" / f"{version}.json")
-    released_in = manifest.get("released_in") if isinstance(manifest, dict) else None
-    golden = manifest.get("golden") if isinstance(manifest, dict) else None
-    history = golden.get("history") if isinstance(golden, dict) else None
-    revisions = [
-        str(revision["release"])
-        for revision in (history if isinstance(history, list) else [])
-        if isinstance(revision, dict) and revision.get("release") is not None
-    ]
-    snapshot_pins = _show_json(repo, "HEAD", TYPE_SNAPSHOTS / "released.json")
-    snapshot_releases = {
-        relative: str(snapshot_pin["released_in"])
-        for relative, snapshot_pin in (
-            snapshot_pins.items() if isinstance(snapshot_pins, dict) else []
-        )
-        if isinstance(snapshot_pin, dict)
-        and snapshot_pin.get("released_in") is not None
-    }
     step = (
         "a pre-release never runs the golden release step (only a final release "
         "freezes a data context); revert the release step's commit"
     )
     problems: list[str] = []
-    for context, name in recorded:
-        if _is_pre_release(name):
-            problems.append(
-                f"HEAD records pre-release {name} as a release of data context "
-                f"{context}: {step}"
-            )
-    if released_in is not None and _is_pre_release(str(released_in)):
-        problems.append(
-            f"the manifest of data context {version} at HEAD names pre-release "
-            f"{released_in} as the release that froze it (released_in): {step}"
-        )
-    for name in revisions:
-        if _is_pre_release(name):
-            problems.append(
-                f"the golden history of data context {version} at HEAD has a release "
-                f"revision of pre-release {name}: {step}"
-            )
-    for relative, name in sorted(snapshot_releases.items()):
-        if _is_pre_release(name):
-            problems.append(
-                f"data function type snapshot {relative} is pinned as released in "
-                f"pre-release {name}: a pre-release pins no snapshot; revert the pin"
-            )
-    if any(_same_version(name, release) for name in _head_withdrawn(repo, version)):
-        problems.append(
-            f"release {release} of data context {version} was withdrawn and is never "
-            "released again: a package index never takes a version twice"
-        )
+    for record in _release_records(repo, version):
+        kind = _version_kind(record.text)
+        if kind is None:
+            problems.append(_unclassifiable(record))
+        elif kind:
+            problems.append(_pre_release_record(record, step))
+    problems.extend(_withdrawn_problems(repo, release))
     return problems
 
 
-def _is_pre_release(name: str) -> bool:
-    """Whether a recorded version name is a pre-release, in any spelling."""
+class _ReleaseRecord(NamedTuple):
+    """A version text a release record at HEAD holds.
+
+    ``kind`` names the field: ``releases`` or ``withdrawn`` (``owner`` is the data
+    context in ``released_manifests.json``), ``released_in`` or ``history`` (``owner`` is
+    the data context of the manifest), or ``snapshot`` (``owner`` is the snapshot's path
+    in ``released.json``).
+    """
+
+    kind: str
+    owner: str
+    text: str
+
+
+def _release_records(repo: Path, version: str) -> list[_ReleaseRecord]:
+    """Every version text a release record at HEAD holds (ITL-1329).
+
+    The release records are: the ``releases`` and ``withdrawn`` keys of every data
+    context in ``released_manifests.json``; the current data context manifest's
+    ``released_in`` and the ``release`` of each revision of its golden history; and the
+    ``released_in`` of each data function type snapshot pin.
+
+    Args:
+        repo: Repository root.
+        version: The current data context.
+
+    Returns:
+        One record per version text, in a fixed order.
+    """
+    records: list[_ReleaseRecord] = []
+    pins = _show_json(repo, "HEAD", PINS)
+    for context, context_pin in sorted(pins.items() if isinstance(pins, dict) else []):
+        if not isinstance(context_pin, dict):
+            continue
+        for kind in ("releases", "withdrawn"):
+            names = context_pin.get(kind)
+            if isinstance(names, dict):
+                records.extend(
+                    _ReleaseRecord(kind, str(context), str(name))
+                    for name in sorted(names)
+                )
+    manifest = _show_json(repo, "HEAD", CONTEXTS / "data" / f"{version}.json")
+    if isinstance(manifest, dict):
+        if manifest.get("released_in") is not None:
+            records.append(
+                _ReleaseRecord("released_in", version, str(manifest["released_in"]))
+            )
+        golden = manifest.get("golden")
+        history = golden.get("history") if isinstance(golden, dict) else None
+        records.extend(
+            _ReleaseRecord("history", version, str(revision["release"]))
+            for revision in (history if isinstance(history, list) else [])
+            if isinstance(revision, dict) and revision.get("release") is not None
+        )
+    snapshot_pins = _show_json(repo, "HEAD", TYPE_SNAPSHOTS / "released.json")
+    for relative, snapshot_pin in sorted(
+        snapshot_pins.items() if isinstance(snapshot_pins, dict) else []
+    ):
+        if (
+            isinstance(snapshot_pin, dict)
+            and snapshot_pin.get("released_in") is not None
+        ):
+            records.append(
+                _ReleaseRecord(
+                    "snapshot", str(relative), str(snapshot_pin["released_in"])
+                )
+            )
+    return records
+
+
+def _field(record: _ReleaseRecord) -> str:
+    """The field of a release record, as an error names it."""
+    if record.kind in ("releases", "withdrawn"):
+        return f"{PINS.name} {record.owner}.{record.kind}"
+    if record.kind == "released_in":
+        return f"the manifest of data context {record.owner} (released_in)"
+    if record.kind == "history":
+        return f"the golden history of data context {record.owner}"
+    return f"{TYPE_SNAPSHOTS.name}/released.json {record.owner}.released_in"
+
+
+def _unclassifiable(record: _ReleaseRecord) -> str:
+    """The problem of a release record whose version text the gate cannot classify."""
+    return (
+        f"release record {_field(record)} holds a version this gate cannot classify: "
+        f"{record.text!r}; a release record names X.Y.Z, optionally with a pre-release, "
+        "post-release or development part (fail closed: correct the record)"
+    )
+
+
+def _pre_release_record(record: _ReleaseRecord, step: str) -> str:
+    """The problem of a release record that names a pre-release."""
+    name = record.text
+    if record.kind == "releases":
+        return (
+            f"HEAD records pre-release {name} as a release of data context "
+            f"{record.owner}: {step}"
+        )
+    if record.kind == "withdrawn":
+        return (
+            f"HEAD records pre-release {name} as withdrawn in data context "
+            f"{record.owner}: a pre-release has no release record of any kind"
+        )
+    if record.kind == "released_in":
+        return (
+            f"the manifest of data context {record.owner} at HEAD names pre-release "
+            f"{name} as the release that froze it (released_in): {step}"
+        )
+    if record.kind == "history":
+        return (
+            f"the golden history of data context {record.owner} at HEAD has a release "
+            f"revision of pre-release {name}: {step}"
+        )
+    return (
+        f"data function type snapshot {record.owner} is pinned as released in "
+        f"pre-release {name}: a pre-release pins no snapshot; revert the pin"
+    )
+
+
+def _withdrawn_problems(repo: Path, release: str) -> list[str]:
+    """``release`` withdrawn in any data context, in any spelling the gate accepts."""
+    pins = _show_json(repo, "HEAD", PINS)
+    return [
+        f"release {release} of data context {context} was withdrawn and is never "
+        "released again: a package index never takes a version twice"
+        for context, context_pin in sorted(
+            pins.items() if isinstance(pins, dict) else []
+        )
+        if isinstance(context_pin, dict)
+        and isinstance(context_pin.get("withdrawn"), dict)
+        and any(_same_version(name, release) for name in context_pin["withdrawn"])
+    ]
+
+
+def unclassifiable_records(repo: Path) -> list[str]:
+    """The release records at HEAD whose version text the gate cannot classify.
+
+    A final release run refuses them too (fail closed): a record nobody can classify
+    never ships, whatever is released.
+
+    Args:
+        repo: Repository root.
+
+    Returns:
+        One problem per such record.
+    """
+    version = _current_version(repo)
+    return [
+        _unclassifiable(record)
+        for record in _release_records(repo, version)
+        if _version_kind(record.text) is None
+    ]
+
+
+def _version_kind(name: str) -> bool | None:
+    """``True`` for a pre-release, ``False`` for a final version, ``None`` when the
+    gate cannot classify the text (``release_version`` refuses it)."""
     try:
         return release_version(name)[1]
     except ValueError:
-        return False
+        return None
+
+
+def _is_pre_release(name: str) -> bool:
+    """Whether a version name is a pre-release; ``False`` when it cannot be classified,
+    so a caller that must fail closed uses ``_version_kind``."""
+    return _version_kind(name) is True
 
 
 def is_pre_release_tag(tag: str) -> bool:
@@ -748,6 +865,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"{tag}: a pre-release, which freezes nothing; not compared with HEAD"
             )
             continue
+        if tag.startswith("v") and _version_kind(tag) is None:
+            # Never skipped: a tag the gate cannot classify is checked as before.
+            print(f"{tag}: names no version this gate can classify; checked as before")
         # The data function type snapshots do not belong to a data context.
         problems.extend(check_type_snapshots(args.repo, tag))
         found = check_tag(args.repo, tag, version)

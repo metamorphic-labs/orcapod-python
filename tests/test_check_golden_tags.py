@@ -1119,3 +1119,130 @@ def test_a_pre_release_in_another_data_context_s_releases_is_refused(
     result = _gate(repo, "0.4.0rc1")
     assert result.returncode == 1
     assert "pre-release 0.2.0b1 as a release of data context v0" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Fail closed, and withdrawal in every data context (second Codex review of PR 470)
+# ---------------------------------------------------------------------------
+
+# PEP 440 pre-releases the gate's parser does not accept: a local part, a release of two
+# numbers, an epoch.
+UNCLASSIFIABLE = ["0.4.0rc1+local", "0.4rc1", "1!0.4.0rc1"]
+RECORD_FIELDS = ["releases", "withdrawn", "released_in", "history", "snapshot"]
+
+
+def _withdrawn_record() -> dict[str, str]:
+    return {
+        "date": "2026-11-21",
+        "reason": "test",
+        "revision": "2" * 64,
+        "manifest": "3" * 64,
+    }
+
+
+def _record(repo: Path, field: str, text: str) -> None:
+    """Write ``text`` into one release record field at HEAD, and commit."""
+    if field in ("releases", "withdrawn"):
+        pins = store.read_json(store.pins_path(repo))
+        value: Any = "5" * 64 if field == "releases" else _withdrawn_record()
+        pins[VERSION].setdefault(field, {})[text] = value
+        store.write_json(store.pins_path(repo), pins)
+    elif field == "released_in":
+        _set_released_in(repo, text)
+    elif field == "history":
+        path = store.manifest_path(repo, VERSION)
+        manifest = store.read_json(path)
+        history = manifest["golden"]["history"]
+        history.append(
+            {
+                "date": "2026-11-21",
+                "release": text,
+                "added": {},
+                "previous": history[-1]["digest"],
+                "digest": "6" * 64,
+            }
+        )
+        store.write_json(path, manifest)
+    else:
+        _ = _pin_snapshot(repo, text, '{"value": 1}\n')
+    _commit(repo, f"a release record {field} holding {text}")
+
+
+@pytest.mark.parametrize("text", UNCLASSIFIABLE)
+@pytest.mark.parametrize("field", RECORD_FIELDS)
+@pytest.mark.parametrize("requested", ["0.4.0rc1", "0.3.0"], ids=["candidate", "final"])
+def test_a_release_record_the_gate_cannot_classify_is_refused(
+    repo: Path, field: str, text: str, requested: str
+) -> None:
+    """A version text the parser cannot classify, in any release record field, fails
+    closed in a candidate run and in a final run: it is never read as final."""
+    _record(repo, field, text)
+    result = _gate(repo, requested)
+    assert result.returncode == 1
+    assert f"holds a version this gate cannot classify: {text!r}" in result.stderr
+
+
+def test_a_tag_the_gate_cannot_classify_is_checked_as_before(repo: Path) -> None:
+    """A tag ``v`` + text the parser cannot classify is never skipped: a snapshot pinned
+    at it stays protected, and the output names the tag."""
+    _ = _pin_snapshot(repo, "0.3.0", '{"value": 1}\n')
+    _commit(repo, "a snapshot pinned in 0.3.0")
+    _git(repo, "tag", "v0.4.0rc1+local")
+    first = _check(repo, ci=True)
+    assert first.returncode == 0, first.stderr
+    assert "v0.4.0rc1+local: names no version this gate can classify" in first.stdout
+    _ = _pin_snapshot(repo, None, '{"value": 2}\n')
+    _commit(repo, "the snapshot changes")
+    result = _check(repo, ci=True)
+    assert result.returncode == 1
+    assert "v0.4.0rc1+local: data function type snapshot" in result.stderr
+
+
+@pytest.mark.parametrize("spelling", ["0.4.0rc1", "0.4.0-rc.1"])
+def test_a_candidate_withdrawn_in_another_data_context_is_refused(
+    repo: Path, spelling: str
+) -> None:
+    """The reviewer's first reproduction: the requested candidate withdrawn under
+    another data context is never released again."""
+    pins = store.read_json(store.pins_path(repo))
+    pins["v0"] = {"manifest": None, "releases": {}, "withdrawn": {}}
+    store.write_json(store.pins_path(repo), pins)
+    _commit(repo, "another data context")
+    assert _gate(repo, "0.4.0rc1").returncode == 0
+    pins["v0"]["withdrawn"][spelling] = _withdrawn_record()
+    store.write_json(store.pins_path(repo), pins)
+    _commit(repo, "the candidate withdrawn under another context")
+    result = _gate(repo, "0.4.0rc1")
+    assert result.returncode == 1
+    assert "release 0.4.0rc1 of data context v0 was withdrawn" in result.stderr
+
+
+def test_a_final_withdrawn_in_another_data_context_is_refused(repo: Path) -> None:
+    """A final version withdrawn under another data context is refused too."""
+    assert _gate(repo, "0.3.0").returncode == 0
+    pins = store.read_json(store.pins_path(repo))
+    pins["v0"] = {
+        "manifest": None,
+        "releases": {},
+        "withdrawn": {"0.3.0": _withdrawn_record()},
+    }
+    store.write_json(store.pins_path(repo), pins)
+    _commit(repo, "0.3.0 withdrawn under another context")
+    result = _gate(repo, "0.3.0")
+    assert result.returncode == 1
+    assert "release 0.3.0 of data context v0 was withdrawn" in result.stderr
+
+
+def test_any_withdrawn_pre_release_is_refused(repo: Path) -> None:
+    """The reviewer's second reproduction: a pre-release has no release record of any
+    kind, so an unrelated withdrawn pre-release is refused like one in ``releases``."""
+    pins = store.read_json(store.pins_path(repo))
+    pins[VERSION].setdefault("withdrawn", {})["0.3.1b1"] = _withdrawn_record()
+    store.write_json(store.pins_path(repo), pins)
+    _commit(repo, "an unrelated withdrawn pre-release")
+    result = _gate(repo, "0.4.0rc1")
+    assert result.returncode == 1
+    assert (
+        f"HEAD records pre-release 0.3.1b1 as withdrawn in data context {VERSION}"
+        in (result.stderr)
+    )

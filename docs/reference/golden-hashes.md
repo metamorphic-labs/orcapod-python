@@ -405,12 +405,17 @@ build job before the tag is made; tested by `tests/test_check_golden_tags.py`
   `X.Y.Z`, which is the last revision of HEAD's golden history: a golden file added after
   the release step would ship unreleased, so such a commit is not tagged. It fails without
   git. For a pre-release (ITL-1329) it checks the opposite: no release record at HEAD
-  names a pre-release, in any spelling (the `releases` pins of every data context in
-  `released_manifests.json`, the current manifest's `released_in`, a release revision of its
-  golden history, a data function type snapshot's `released_in`), and the version is not
-  withdrawn; the release step and the type snapshot pins are not required. The tag check
+  names a pre-release, in any spelling `release_version` accepts (the `releases` and
+  `withdrawn` keys of every data context in `released_manifests.json`, the current
+  manifest's `released_in`, a release revision of its golden history, a data function type
+  snapshot's `released_in`), and the version is not withdrawn in any data context; the
+  release step and the type snapshot pins are not required. A release record holding a
+  version text the gate cannot classify (`0.4.0rc1+local`, `0.4rc1`, `1!0.4.0rc1`) is
+  refused in a pre-release run and in a final run alike: it fails closed, never read as
+  final. A final run also refuses a version withdrawn in any data context. The tag check
   skips every tag whose name is a pre-release (`v0.4.0rc1`), so such a tag protects no
-  golden file, revision, pin or snapshot; every other tag is checked as before.
+  golden file, revision, pin or snapshot; every other tag is checked as before, one whose
+  name the gate cannot classify (`v0.4.0rc1+local`) included, and the output names it.
   `scripts/data_function_types.py --release` refuses a pre-release too, so nothing can be
   pinned under one. Which versions are pre-releases is one rule, `release_version` in the same
   script (PEP 440; a version that is not `X.Y.Z` with an optional pre-release, post-release
