@@ -332,8 +332,23 @@ class OperatorNodeBase(StreamBase):
     def upstreams(self) -> tuple[StreamProtocol, ...]:
         return self._input_streams
 
+    @property
+    def cache_mode(self) -> CacheMode:
+        """How the node caches its output: ``CacheMode.OFF`` for a node outside a
+        job, which keeps no cache."""
+        return CacheMode.OFF
+
     @upstreams.setter
     def upstreams(self, value: tuple[StreamProtocol, ...]) -> None:
+        """Replace the node's inputs.
+
+        Raises:
+            ValueError: If the node caches (``LOG`` or ``REPLAY``) and a source
+                feeding ``value`` is restricted (ITL-1218); nothing changes.
+        """
+        from orcapod.pipeline.restrictions import refuse_restricted_operator_cache
+
+        refuse_restricted_operator_cache(self, self.cache_mode, streams=value)
         self._input_streams = value
         self._forget_output_schema()
 
@@ -765,7 +780,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
 
         # DB persistence state (initially None; set via __init__ params or attach_databases)
         self._pipeline_database: ArrowDatabaseProtocol | None = None
-        self._cache_mode = CacheMode.OFF
+        self._cache_mode: CacheMode = CacheMode.OFF
 
         # True for a node rebuilt by ``from_descriptor`` (a job loaded by
         # ``PipelineJob.load``): its output was computed by an earlier run.
@@ -778,6 +793,12 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             )
         # A node that has not run in this process holds nothing and is stale (ITL-1095).
         self._set_modified_time(None)
+
+    @property
+    def cache_mode(self) -> CacheMode:
+        """How the node caches its output (``OFF``, ``LOG`` or ``REPLAY``): set by
+        ``attach_databases``, ``CacheMode.OFF`` until then."""
+        return self._cache_mode
 
     # ------------------------------------------------------------------
     # as_node — return the lightweight OperatorNode equivalent
@@ -874,7 +895,14 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
                 mode stores or replays them (``LOG`` or ``REPLAY``), and the database
                 cannot keep the marker that states them (ITL-1019). Nothing is
                 attached or written.
+            ValueError: If the cache mode is ``LOG`` or ``REPLAY`` and a source
+                feeding the node is restricted (a condition or a limit, ITL-1218):
+                the cache is kept under the node's identity, which a restriction is
+                not part of. Nothing is attached.
         """
+        from orcapod.pipeline.restrictions import refuse_restricted_operator_cache
+
+        refuse_restricted_operator_cache(self, cache_mode)
         if cache_mode != CacheMode.OFF:
             # A stored table states its data-tags; refuse a database that
             # cannot, before anything runs or is written (ITL-1019).
@@ -1609,12 +1637,19 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
 
         Returns:
             Materialized list of (tag, data) pairs.
+
+        Raises:
+            ValueError: If the node caches (``LOG`` or ``REPLAY``) and a source
+                feeding ``input_streams`` is restricted (ITL-1218); nothing is
+                read, computed or written.
         """
+        from orcapod.pipeline.restrictions import refuse_restricted_operator_cache
         from orcapod.pipeline.observer import NoOpObserver
 
         # A loaded node runs only in a load-only run, with its rebuilt operator.
         if self._loaded and (not load_only or self._operator is None):
             raise self._cannot_compute_error()
+        refuse_restricted_operator_cache(self, self._cache_mode, streams=input_streams)
 
         node_label = self.label
         node_hash = self.content_hash().to_string()
@@ -1748,6 +1783,8 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         Raises:
             RuntimeError: If the node was loaded by ``PipelineJob.load`` and
                 ``load_only`` is false.
+            ValueError: If this node or one it depends on caches (``LOG`` or
+                ``REPLAY``) over a restricted source (ITL-1218); nothing has run.
         """
         from orcapod.pipeline.node_run import (
             check_sources,
@@ -1755,10 +1792,15 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             refuse_unloadable_inputs,
             run_with_dependencies,
         )
+        from orcapod.pipeline.restrictions import refuse_restriction_conflicts
         from orcapod.pipeline.run_summary import warn_row_failures
 
         if self._loaded and not load_only:
             raise self._cannot_compute_error()
+        # A source read under two restrictions, or a caching operator over a restricted
+        # source, is refused before any source is checked and before anything is
+        # computed or written (ITL-1218).
+        refuse_restriction_conflicts([self])
         # Every source feeding the run first takes in any new data (ITL-1102).
         unchecked = check_sources([self])
         if self.holds_current_run(load_only=load_only):
@@ -2095,13 +2137,24 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             output: Writable channel for output (tag, data) pairs.
             observer: Optional execution observer for hooks.
             load_only: As for ``execute``: a ``LOG`` node stores nothing (ITL-1095).
+
+        Raises:
+            ValueError: If the node caches (``LOG`` or ``REPLAY``) and a source
+                feeding its ``upstreams`` (which the channels carry) is restricted
+                (ITL-1218); the output is closed, nothing read or written.
         """
+        from orcapod.pipeline.restrictions import refuse_restricted_operator_cache
         from orcapod.pipeline.observer import NoOpObserver
 
         # A loaded node runs only in a load-only run, with its rebuilt operator.
         if self._loaded and (not load_only or self._operator is None):
             await output.close()
             raise self._cannot_compute_error()
+        try:
+            refuse_restricted_operator_cache(self, self._cache_mode)
+        except ValueError:
+            await output.close()
+            raise
 
         obs = observer if observer is not None else NoOpObserver()
         node_label = self.label

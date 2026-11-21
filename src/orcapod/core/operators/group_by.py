@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
-import math
-from collections.abc import Collection, Sequence, Set
+from collections.abc import Collection, Mapping, Sequence, Set
 from typing import Any, ClassVar, TYPE_CHECKING, cast, get_origin
 
+from orcapod.core.operators.arrow_keys import (
+    is_list_kind,
+    part_without_rule,
+    polars_ready,
+    value_type,
+    values_of,
+)
 from orcapod.core.operators.base import UnaryOperator
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.streams import ArrowTableStream
+from orcapod.core.streams.base import typed_zero_row_table
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.system_constants import constants
@@ -18,131 +25,115 @@ from orcapod.utils.lazy_module import LazyModule
 from orcapod.utils.schema_utils import column_names
 
 if TYPE_CHECKING:
+    import numpy as np
+    import polars as pl
     import pyarrow as pa
 else:
+    np = LazyModule("numpy")
+    pl = LazyModule("polars")
     pa = LazyModule("pyarrow")
 
 
-def _null_last_key(value: Any) -> tuple[Any, ...]:
-    """Build an order key that sorts NaN after every number and nulls last, at any depth.
-
-    The leading integer keeps a NaN and a null comparable against a real value of
-    any type.  A NaN never compares with ``<``, so without its own place a sort that
-    meets one keeps the input's row order; here every NaN ties every other NaN and
-    the next sort column (the record id) breaks the tie (ITL-1226), as Arrow and
-    Polars order a NaN.  A list is keyed element by element, so a list-valued tag
-    that holds a NaN or a null (a list-typed tag column of a source) still compares.
-
-    Args:
-        value: A tag or system-tag value: a scalar, ``None``, or a list of
-            these nested to any depth.
-
-    Returns:
-        A tuple that orders values ascending, NaN after every number and nulls
-        after everything.
-    """
-    if value is None:
-        return (2,)
-    if isinstance(value, float) and math.isnan(value):
-        return (1,)
-    if isinstance(value, list):
-        return (0, tuple(_null_last_key(v) for v in value))
-    return (0, value)
+# GroupBy decides which rows form a group, and in what order, with Polars, and builds
+# its output from the input's Arrow arrays (ITL-1250): no value passes through Python,
+# so two keys are one group only when Polars finds them equal (all NaN equal, 0.0 equal
+# to -0.0, ITL-1234 and ITL-1251), and every emitted value is one a member holds, bit
+# for bit. Only the row numbers and the group sizes come back from Polars.
 
 
-# The grouping form of a NaN key value: one shared object, so every row whose key
-# is NaN falls into one group (ITL-1234), as the joins match a NaN key
-# (``match_keys``).  ``0.0`` and ``-0.0`` already fall into one group: they are equal.
-_NAN_KEY = object()
+def _sort_key(name: str, dtype: object) -> "pl.Expr":
+    """Return the sort key of one frame column: nulls last at every depth.
 
-
-def _grouping_key(key: tuple[Any, ...]) -> tuple[Any, ...]:
-    """Return a group key in the form that groups rows: every NaN as one value.
+    The sort puts a null scalar last (``nulls_last``), but Polars puts a null INSIDE
+    a list first, so a list is sorted through ``(is_null, value)`` pairs at every
+    depth, element by element: a shorter list first when it is a prefix, a NaN after
+    every number and before null, as for a scalar (ITL-1226). Polars ties ``0.0`` with
+    ``-0.0`` and every NaN with every NaN.
 
     Args:
-        key: The values of the ``by`` columns of one row, in the order of ``by``.
+        name: The column's name in the sort frame.
+        dtype: Its Polars type.
 
     Returns:
-        The key with each NaN replaced by one shared object.
+        The expression to sort by.
     """
-    return tuple(
-        _NAN_KEY if isinstance(value, float) and math.isnan(value) else value
-        for value in key
-    )
+
+    # ``object``: a Polars data type is an instance or a class (``PolarsDataType``,
+    # which Polars keeps private).
+    def null_last(expr: "pl.Expr", inner: object) -> "pl.Expr":
+        if isinstance(inner, pl.List):
+            value = expr.list.eval(null_last(pl.element(), inner.inner))
+        else:
+            value = expr
+        return pl.struct(expr.is_null().alias("null"), value.alias("value"))
+
+    if isinstance(dtype, pl.List):
+        return null_last(pl.col(name), dtype)
+    return pl.col(name)
 
 
-def _float_storage(arrow_type: "pa.DataType") -> "pa.DataType | None":
-    """Return the float type a column is stored as, or ``None`` when it is not a float.
+def _float_bits(array: "pa.Array[Any]") -> "pa.Array[Any] | None":
+    """Return a float key's bit patterns, or ``None`` when the key is not a float.
 
-    A logical (extension) type over float storage, such as a temperature stored as
-    ``float64``, is stored as that float, and a dictionary-encoded column as the
-    float type of its values.
+    A logical type stored as a float is a float key, read through its storage.
 
     Args:
-        arrow_type: The Arrow type of a key column.
+        array: A key column's values as stored (``arrow_keys.values_of``).
 
     Returns:
-        The ``float16``, ``float32`` or ``float64`` type of the column's storage, or
-        ``None``.
+        The unsigned integers of the column's own width, or ``None``.
     """
-    storage = (
-        arrow_type.storage_type
-        if isinstance(arrow_type, pa.ExtensionType)
-        else arrow_type
-    )
-    if pa.types.is_dictionary(storage):
-        storage = storage.value_type
-    return storage if pa.types.is_floating(storage) else None
+    if not pa.types.is_floating(array.type):
+        return None
+    unsigned = {16: pa.uint16, 32: pa.uint32, 64: pa.uint64}[array.type.bit_width]()
+    return array.view(unsigned)
 
 
-def _emitted_key_row(column: "pa.ChunkedArray[Any]", indices: Sequence[int]) -> int:
-    """Return the input row whose value of one key column a group emits.
+def _refuse_unorderable_tags(
+    by: Collection[str], tag_types: Mapping[str, "pa.DataType"]
+) -> None:
+    """Refuse a user tag ``GroupBy`` cannot key a group or order members by.
 
-    The members of a group hold equal key values, but equal floats may differ in
-    their bits: ``0.0`` and ``-0.0``, and NaN with another sign or payload (equal
-    floats of any other value have the same bits).  The hashes of the emitted row
-    read the bits, so for a zero or NaN key the group emits the member value with
-    the smallest bit pattern at the column's own width (ITL-1234), chosen per key
-    column.  That is ``0.0`` over ``-0.0``, a positive NaN over a negative one, and
-    the NaN with the smallest payload; a signaling NaN has smaller bits than the
-    canonical quiet NaN, so it is the one emitted when a member holds it.  A group
-    whose members agree emits their value.  Neither the row order nor
-    ``member_order`` decides it, and the caller takes the value from the Arrow
-    column, so its bits are kept exactly.
+    A key must be a scalar value groups are ordered by, and every non-key tag orders
+    the members, so a type with no order (``arrow_keys.part_without_rule``: a struct or a map,
+    such as a user class or a ``dict``, an interval, a union) can be neither
+    (developer, November 19, 2026: refuse rather than decide an order). A key that
+    is a list of any kind is refused too. The refusal depends on the schema only,
+    never on whether two members happen to tie.
 
     Args:
-        column: A key column of the input table.
-        indices: The rows of one group, at least one, all with equal keys.
+        by: The group keys.
+        tag_types: The Arrow type of each user tag of the input.
 
-    Returns:
-        The row, one of ``indices``, whose value the group emits for this column.
+    Raises:
+        InputValidationError: Naming the first such tag and its type.
     """
-    first = indices[0]
-    storage_type = _float_storage(column.type)
-    if len(indices) == 1 or storage_type is None:
-        return first
-    # Only a zero or NaN key can differ in bits among equal values, so the first
-    # member's value decides whether the group is gathered at all.
-    scalar = column[first]
-    if isinstance(scalar, pa.ExtensionScalar):
-        # A null extension scalar has no storage scalar.
-        storage = scalar.value
-        value = None if storage is None else cast(float | None, storage.as_py())
-    else:
-        value = cast(float | None, scalar.as_py())
-    if value is None or (value != 0.0 and not math.isnan(value)):
-        return first
-    members = column.take(pa.array(indices, pa.int64())).combine_chunks()
-    if isinstance(members, pa.ExtensionArray):
-        members = members.storage
-    if isinstance(members, pa.DictionaryArray):
-        # The values each member's index points at, bits as stored.
-        members = members.dictionary_decode()
-    # The unsigned integer of the float's width, to read its bits; no value of the
-    # group is null, since a null key equals no float.
-    unsigned = {16: pa.uint16, 32: pa.uint32, 64: pa.uint64}[storage_type.bit_width]()
-    bits = cast(list[int], members.view(unsigned).to_pylist())
-    return indices[min(range(len(indices)), key=bits.__getitem__)]
+    for name, arrow_type in tag_types.items():
+        if name in by and is_list_kind(value_type(arrow_type)):
+            raise InputValidationError(
+                f"GroupBy: {[name]} are list-valued tag columns and cannot be "
+                + f"grouping keys. Column types: {{{name!r}: {arrow_type}}}. A "
+                + "list-valued tag usually means the stream came from `Batch`; "
+                + "group before batching rather than after."
+            )
+        part = part_without_rule(arrow_type, structs=False)
+        if part is None:
+            continue
+        if name in by:
+            raise InputValidationError(
+                f"GroupBy: the key {name!r} has type {arrow_type}, and GroupBy has no "
+                + f"order for {part} (a struct or a map, such as a user class or a "
+                + "dict, or another type without an order): a group key must be a "
+                + "scalar value with an order. Group by other tags."
+            )
+        raise InputValidationError(
+            f"GroupBy: the tag {name!r} has type {arrow_type}, and GroupBy has no "
+            + f"order for {part} (a struct or a map, such as a user class or a dict, "
+            + "or another type without an order): GroupBy orders a group's members "
+            + "by every tag that is not a key. GroupBy drops that tag anyway: drop it "
+            + "before grouping, with stream.select_tag_columns([...]) naming the "
+            + "tags to keep."
+        )
 
 
 GROUP_BY_FOLD_LABEL = "group_v1"
@@ -275,7 +266,12 @@ class GroupBy(UnaryOperator):
     Rows with equal keys form one group, as the joins match keys, except that all
     rows with a null key form one group too.  So do all rows with a NaN key, and
     ``0.0`` equals ``-0.0`` (ITL-1234).  A NaN key sorts after every number and
-    before null.  A float key that the members hold with different bits is
+    before null.  Keys are compared and ordered as Arrow values, with Polars, never
+    as Python values (ITL-1250): ``time64[ns]`` keys of 1 ns and 2 ns are two
+    groups.  Every emitted key and every list element is taken from the input's
+    Arrow columns, so the lists hold the members' values bit for bit.  A tag whose
+    type has no order (a struct or a map, such as a user class or a ``dict``, an
+    interval) can be neither a key nor a non-key tag of the input.  A float key that the members hold with different bits is
     emitted, per key column, as the one with the smallest bit pattern at the
     column's own width (``0.0`` over ``-0.0``, a positive NaN over a negative
     one, a signaling NaN over the canonical quiet NaN), taken from the input's
@@ -385,7 +381,10 @@ class GroupBy(UnaryOperator):
         Raises:
             InputValidationError: If any name in ``by`` is not a tag column, or
                 names a list-valued tag column; or a name in ``member_order`` is
-                not a tag column.
+                not a tag column; or a key is a list of any kind, or a user tag's
+                type has no order (``arrow_keys.part_without_rule``: a struct, a map, an
+                interval...); checked here when the stream knows its Arrow types
+                without rows, otherwise when it is grouped.
         """
         tag_columns, data_columns = stream.keys()
         missing = [c for c in self.by if c not in tag_columns]
@@ -396,10 +395,7 @@ class GroupBy(UnaryOperator):
                 f"(Data columns cannot be grouping keys: {list(data_columns)})"
             )
 
-        # A list-valued tag -- what `Batch` produces -- is unhashable, so it
-        # cannot key a group.  Check the schema rather than hashing a value so
-        # the error names the operator and column instead of surfacing a bare
-        # `TypeError: unhashable type: 'list'` from the grouping loop.
+        # A list-valued tag -- what `Batch` produces -- cannot key a group.
         tag_types, _ = stream.output_schema()
         non_scalar = {
             c: tag_types.get(c) for c in self.by if get_origin(tag_types.get(c)) is list
@@ -410,6 +406,16 @@ class GroupBy(UnaryOperator):
                 f"cannot be grouping keys. Column types: {non_scalar}. "
                 "A list-valued tag usually means the stream came from `Batch`; "
                 "group before batching rather than after."
+            )
+
+        # Every tag needs an order (a fixed-size list key is list-valued too), from
+        # the Arrow types, when the stream knows them without rows; a stream that
+        # does not (a function pod's) is checked when it is grouped.
+        zero_rows = typed_zero_row_table(stream)
+        if zero_rows is not None:
+            _refuse_unorderable_tags(
+                self.by,
+                {c: zero_rows.schema.field(c).type for c in tag_columns},
             )
 
         # The members are ordered by tags only, never by a data value.
@@ -440,9 +446,17 @@ class GroupBy(UnaryOperator):
         Returns:
             A stream with one row per distinct group-key tuple, whose tag
             columns are the group keys, scalar, in the input's tag order.
+
+        Raises:
+            InputValidationError: If a key is a list of any kind, or a user tag's
+                type has no order (``arrow_keys.part_without_rule``).
         """
         table = stream.as_table(columns={"source": True, "system_tags": True})
         tag_columns, _ = stream.keys()
+        # The async path reaches here without ``validate_unary_input``.
+        _refuse_unorderable_tags(
+            self.by, {c: table.schema.field(c).type for c in tag_columns}
+        )
 
         system_tag_columns = tuple(
             c for c in table.column_names if c.startswith(constants.SYSTEM_TAG_PREFIX)
@@ -499,96 +513,114 @@ class GroupBy(UnaryOperator):
                 sorted(c for c in system_tag_columns if c.startswith(prefix))
             )
 
-        # Every NaN key is one value here (ITL-1234), so the rows whose key is NaN
-        # form one group, as the joins match them.
-        rows = table.to_pylist()
-        groups: dict[tuple[Any, ...], list[int]] = {}
-        for index, row in enumerate(rows):
-            key = _grouping_key(tuple(row[c] for c in self.by))
-            groups.setdefault(key, []).append(index)
-        # For each group, the row whose value each key column emits.
-        keyed_groups: list[tuple[tuple[int, ...], list[dict[str, Any]]]] = [
-            (
-                tuple(_emitted_key_row(table.column(c), indices) for c in self.by),
-                [rows[i] for i in indices],
-            )
-            for indices in groups.values()
-        ]
-
-        grouped_rows: list[dict[str, Any]] = []
-        # Emit groups in key order rather than first-appearance order, so a
-        # reordered input produces a byte-identical output table.  The keys are in
-        # name order (``by`` is sorted); a NaN key sorts after every number and
-        # before null, as a member's tag does.
-        key_rows: list[tuple[int, ...]] = []
-        for group_key_rows, members in sorted(
-            keyed_groups,
-            key=lambda km: tuple(
-                _null_last_key(rows[r][c]) for r, c in zip(km[0], self.by)
-            ),
+        # Polars decides which rows form a group and in what order, in one stable
+        # sort; the output is built from the input's Arrow arrays (ITL-1250). The
+        # sort frame has synthetic names, so no user column name can collide: the
+        # row number, the keys in name order (``by`` is sorted), then the columns
+        # that order the members.
+        frame_columns: dict[str, pa.Array[Any]] = {
+            "row": pa.array(np.arange(table.num_rows, dtype=np.int64), pa.int64())
+        }
+        key_names = [f"key{i}" for i in range(len(self.by))]
+        order_names = [f"order{i}" for i in range(len(sort_columns))]
+        for name, c in zip(
+            [*key_names, *order_names], [*self.by, *sort_columns], strict=True
         ):
-            key_rows.append(group_key_rows)
-            key = tuple(rows[r][c] for r, c in zip(group_key_rows, self.by))
-            if sort_columns:
-                members.sort(
-                    key=lambda r: tuple(_null_last_key(r[c]) for c in sort_columns)
+            frame_columns[name] = polars_ready(table.column(c).combine_chunks())
+        # The bits of each float key, to emit the member value with the smallest.
+        key_storage = {c: values_of(table.column(c).combine_chunks()) for c in self.by}
+        bit_names: dict[str, str] = {}
+        for i, c in enumerate(self.by):
+            bits = _float_bits(key_storage[c])
+            if bits is not None:
+                bit_names[c] = f"bits{i}"
+                frame_columns[f"bits{i}"] = bits
+
+        frame = cast(
+            "pl.DataFrame",
+            pl.from_arrow(
+                pa.Table.from_arrays(
+                    list(frame_columns.values()), names=list(frame_columns)
                 )
-
-            grouped_rows.append(
-                {
-                    **dict(zip(self.by, key)),
-                    **{c: [m[c] for m in members] for c in member_columns},
-                    **{
-                        c: arrow_utils.fold_system_tag_values(
-                            [m[c] for m in members], label=GROUP_BY_FOLD_LABEL
-                        )
-                        for c in key_source_columns
-                    },
-                    **{
-                        c: arrow_utils.fold_system_tag_values(
-                            [m[c] for m in members], label=GROUP_BY_FOLD_LABEL
-                        )
-                        for c in system_tag_columns
-                    },
-                }
-            )
-
-        # The schema handed over must not name the dropped columns: the builder
-        # emits every column of it, and would bring them back as nulls.
-        grouped_table = arrow_utils.build_aggregated_table(
-            grouped_rows,
-            table.drop_columns(list(dropped_columns)).schema,
-            member_columns,
-            stream.data_context.type_converter,
+            ),
+        )
+        # Keys first, so the groups come out in key order: a NaN key after every
+        # number and before null, null last (``nulls_last``); rows that tie on every
+        # column keep the input's order.
+        frame = frame.sort(
+            [_sort_key(name, frame.schema[name]) for name in key_names + order_names],
+            nulls_last=True,
+            maintain_order=True,
+        )
+        # Group boundaries by Polars' own equality: every NaN equals every NaN and
+        # 0.0 equals -0.0, as the joins match keys (ITL-1234, ITL-1251).
+        frame = frame.with_columns(pl.struct(key_names).rle_id().alias("group"))
+        groups = frame.group_by("group", maintain_order=True).agg(
+            pl.len().alias("size"),
+            pl.col("row").first().alias("first"),
+            # A float key: the member value with the smallest bit pattern at the
+            # column's own width (ITL-1234), never one chosen by the row order or by
+            # ``member_order``; a null key through a null index.
+            *(
+                pl.when(pl.col(bits).is_null().all())
+                .then(None)
+                .otherwise(pl.col("row").sort_by(bits).first())
+                .alias(bits)
+                for bits in bit_names.values()
+            ),
+        )
+        order = frame["row"].to_arrow()
+        offsets = cast(
+            "pa.Int64Array",
+            pa.array(
+                np.concatenate([[0], np.cumsum(groups["size"].to_numpy())]),
+                pa.int64(),
+            ),
         )
 
-        # A float key column (a float, a logical type stored as one, or a dictionary
-        # over floats) holds the chosen member's value as the input's Arrow column
-        # has it, never through Python: a conversion can change a float's bits (a
-        # float32 signaling NaN comes back quiet).  Every other key keeps the value rebuilt from Python,
-        # as before: its members may differ in Arrow although equal in Python (two
-        # time64[ns] values within one microsecond read as one ``datetime.time``),
-        # and taking one member's would make the key depend on the row order.
-        # Grouping such keys by their exact value is ITL-1250.
-        for position, c in enumerate(self.by):
-            if _float_storage(table.column(c).type) is None:
-                continue
-            # A null key is taken through a null index, so it is a null at the top
-            # level whichever member came first: a dictionary column can hold a null
-            # as a null index or as an index to a null entry, and only the first is
-            # a null to a reader of validity (``DropNulls``).
-            chosen = pa.array(
+        def emitted(c: str) -> pa.Array[Any]:
+            # Every member of a group holds the same key value except a float's
+            # bits, so a non-float key is the first member's.
+            rows = groups[bit_names.get(c, "first")].to_arrow().cast(pa.int64())
+            return table.column(c).take(rows).combine_chunks()
+
+        def folded(c: str) -> pa.Array[Any]:
+            # The members' text values in member order, folded per group; text loses
+            # nothing in Python.
+            values = cast(list[Any], table.column(c).take(order).to_pylist())
+            bounds = cast(list[int], offsets.to_pylist())
+            return pa.array(
                 [
-                    None if rows[r[position]][c] is None else r[position]
-                    for r in key_rows
+                    arrow_utils.fold_system_tag_values(
+                        values[start:end], label=GROUP_BY_FOLD_LABEL
+                    )
+                    for start, end in zip(bounds[:-1], bounds[1:])
                 ],
-                pa.int64(),
+                table.schema.field(c).type,
             )
-            grouped_table = grouped_table.set_column(
-                grouped_table.schema.get_field_index(c),
-                grouped_table.schema.field(c),
-                table.column(c).take(chosen),
-            )
+
+        # Every stream has a data context; StreamProtocol does not declare it.
+        type_converter = stream.data_context.type_converter  # pyright: ignore[reportAttributeAccessIssue]
+        fields: list[pa.Field[Any]] = []
+        arrays: list[pa.Array[Any]] = []
+        # The input's columns in its order, without the dropped tags: a key and a
+        # folded column keep their field, a member column becomes a list.
+        for field in table.drop_columns(list(dropped_columns)).schema:
+            c = field.name
+            if c in member_columns:
+                list_type = arrow_utils.aggregated_list_type(
+                    field.type, type_converter, column=c
+                )
+                fields.append(pa.field(c, list_type, nullable=False))
+                arrays.append(
+                    arrow_utils.aggregated_list_array(
+                        table.column(c).take(order), offsets, list_type
+                    )
+                )
+            else:
+                fields.append(field)
+                arrays.append(emitted(c) if c in self.by else folded(c))
+        grouped_table = pa.Table.from_arrays(arrays, schema=pa.schema(fields))
 
         n_char = self.orcapod_config.hashing.system_tag_n_char
         grouped_table = arrow_utils.append_to_system_tags(

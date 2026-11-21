@@ -1,6 +1,6 @@
 {
-  "add_tags.every_type.content_hash": "semantic_v1:1d29df8a1a36187ca0239f5d747acb924c73a8487c9263d094286113abc82e7d",
-  "add_tags.every_type.pipeline_hash": "semantic_v1:4bf3958b20db82ad7fb1a3ef1b32937565799f69f0d95b3c86b1dca78dc3a3e3",
+  "add_tags.every_type.content_hash": "semantic_v1:3ad41cfd204171984d104e117092ffecbb0e758b673f4c9aa329c93ec38763b4",
+  "add_tags.every_type.pipeline_hash": "semantic_v1:b10ad59c44d364fe81c6f70ba974281be6e12c5dc9e4d58d08292feb319a6b72",
   "add_tags.every_type.row[{\"cohort\":\"A\",\"k\":\"r1\",\"ok\":true,\"raw\":\"01\",\"run\":3,\"site\":\"a\",\"w\":1.5}]._tag_record_id::a4a91ac74561d231cff4ab05fdb7e199d259e8765f3af954e23d2c152b564b4f": "row_0",
   "add_tags.every_type.row[{\"cohort\":\"A\",\"k\":\"r1\",\"ok\":true,\"raw\":\"01\",\"run\":3,\"site\":\"a\",\"w\":1.5}]._tag_source_id::a4a91ac74561d231cff4ab05fdb7e199d259e8765f3af954e23d2c152b564b4f": "golden_nullable",
   "add_tags.every_type.row[{\"cohort\":\"A\",\"k\":\"r1\",\"ok\":true,\"raw\":\"01\",\"run\":3,\"site\":\"a\",\"w\":1.5}].data_hash": "arrow_v1:0000025c8400b7856fb3a703d4468712ba835fc942a04e99380e7c7285477bf385c1aa",
@@ -35,9 +35,10 @@
     "_tag_source_id::a4a91ac74561d231cff4ab05fdb7e199d259e8765f3af954e23d2c152b564b4f",
     "_tag_record_id::a4a91ac74561d231cff4ab05fdb7e199d259e8765f3af954e23d2c152b564b4f"
   ],
-  "add_tags.operator[every_type].content_hash": "semantic_v1:6facb9a731655e8e6a695bbb96bb7902f6b212562f7df2b5207508ff3ab9e03e",
-  "add_tags.operator[every_type].pipeline_hash": "semantic_v1:6facb9a731655e8e6a695bbb96bb7902f6b212562f7df2b5207508ff3ab9e03e",
+  "add_tags.operator[every_type].content_hash": "semantic_v1:91fce7b9bb879c3d92cd6423e4368f42ebf667cf89af73af107ac1a88a814c30",
+  "add_tags.operator[every_type].pipeline_hash": "semantic_v1:91fce7b9bb879c3d92cd6423e4368f42ebf667cf89af73af107ac1a88a814c30",
   "default_source_ids.as_source[function_node].source_id": "derived:semantic_v1:6ada754d8fc4292450d3fb8813f05878b8aabbd52da3615519c80c7418bc0b4e",
+  "default_source_ids.list.content_hash": "semantic_v1:9d892efaf950490f157554b14c2f32c8194dcb92e6fa21d29e6f86b0d3e64801",
   "drop_nulls_job.node[ratio].content_hash": "semantic_v1:09afbbcc0d89147e8bcc05227431ac2a674febbcea331f584bee55927c85e447",
   "drop_nulls_job.node[ratio].pipeline_hash": "semantic_v1:cf4f9b8dff56193f509a551e7f201a165dd011ec388f9e5c827bb14d82d58376",
   "drop_nulls_job.table[golden_drop_null_job/_result/golden_ratio/21e6485805726eb7ceed63ef6b677f0b6b11d2eaf48bd9fc44c1dccdf718aa1d/v0/python.function.v1/rev1/rdb_v1].input_data_hashes": [
@@ -210,8 +211,27 @@
     "golden_job/_result/golden_adjust/a2fa1ad227c2c0b24315bf0bfca5b3f5473e1f044a6d48cfcf3b78977510a560/v0/python.function.v1/rev1/rdb_v1",
     "golden_job/golden_adjust/a2fa1ad227c2c0b24315bf0bfca5b3f5473e1f044a6d48cfcf3b78977510a560/v0/python.function.v1/schema:f8f3638bf17df15345b70be956e0779e01c9905db088daa02dfec441d7de441d/pdb_v1"
   ],
+  "join_key_nullability.merge_join.content_hash": "semantic_v1:ca01105efb1de0b081ec687fe7f4037a99d482dbb484291390ba81e4ee9e8349",
+  "join_key_nullability.merge_join.pipeline_hash": "semantic_v1:45985a1174c1a3ecedfbe4621be2a18b89b130bac8c6c709dbd9aa649ea95ec7",
+  "join_key_nullability.merge_join.row[{\"subject\":\"s1\"}]._tag_record_id::d8f6f3824cdd5ed5f1795c5a050b727f3e05354c78d68a1aaff4056a9b66771e::d8f6f3824cdd5ed5f1795c5a050b727f3e05354c78d68a1aaff4056a9b66771e:1": "row_0",
+  "join_key_nullability.merge_join.row[{\"subject\":\"s1\"}]._tag_record_id::fddb365c4147114d8cfc5dcbd611e037b0f7f2729238cd29ade9a66578acad87::fddb365c4147114d8cfc5dcbd611e037b0f7f2729238cd29ade9a66578acad87:0": "row_0",
+  "join_key_nullability.merge_join.row[{\"subject\":\"s1\"}]._tag_source_id::d8f6f3824cdd5ed5f1795c5a050b727f3e05354c78d68a1aaff4056a9b66771e::d8f6f3824cdd5ed5f1795c5a050b727f3e05354c78d68a1aaff4056a9b66771e:1": "golden_plain_key",
+  "join_key_nullability.merge_join.row[{\"subject\":\"s1\"}]._tag_source_id::fddb365c4147114d8cfc5dcbd611e037b0f7f2729238cd29ade9a66578acad87::fddb365c4147114d8cfc5dcbd611e037b0f7f2729238cd29ade9a66578acad87:0": "golden_nullable_key",
+  "join_key_nullability.merge_join.row[{\"subject\":\"s3\"}]._tag_record_id::d8f6f3824cdd5ed5f1795c5a050b727f3e05354c78d68a1aaff4056a9b66771e::d8f6f3824cdd5ed5f1795c5a050b727f3e05354c78d68a1aaff4056a9b66771e:1": "row_2",
+  "join_key_nullability.merge_join.row[{\"subject\":\"s3\"}]._tag_record_id::fddb365c4147114d8cfc5dcbd611e037b0f7f2729238cd29ade9a66578acad87::fddb365c4147114d8cfc5dcbd611e037b0f7f2729238cd29ade9a66578acad87:0": "row_2",
+  "join_key_nullability.merge_join.row[{\"subject\":\"s3\"}]._tag_source_id::d8f6f3824cdd5ed5f1795c5a050b727f3e05354c78d68a1aaff4056a9b66771e::d8f6f3824cdd5ed5f1795c5a050b727f3e05354c78d68a1aaff4056a9b66771e:1": "golden_plain_key",
+  "join_key_nullability.merge_join.row[{\"subject\":\"s3\"}]._tag_source_id::fddb365c4147114d8cfc5dcbd611e037b0f7f2729238cd29ade9a66578acad87::fddb365c4147114d8cfc5dcbd611e037b0f7f2729238cd29ade9a66578acad87:0": "golden_nullable_key",
+  "join_key_nullability.merge_join.system_tag_columns": [
+    "_tag_source_id::fddb365c4147114d8cfc5dcbd611e037b0f7f2729238cd29ade9a66578acad87::fddb365c4147114d8cfc5dcbd611e037b0f7f2729238cd29ade9a66578acad87:0",
+    "_tag_record_id::fddb365c4147114d8cfc5dcbd611e037b0f7f2729238cd29ade9a66578acad87::fddb365c4147114d8cfc5dcbd611e037b0f7f2729238cd29ade9a66578acad87:0",
+    "_tag_source_id::d8f6f3824cdd5ed5f1795c5a050b727f3e05354c78d68a1aaff4056a9b66771e::d8f6f3824cdd5ed5f1795c5a050b727f3e05354c78d68a1aaff4056a9b66771e:1",
+    "_tag_record_id::d8f6f3824cdd5ed5f1795c5a050b727f3e05354c78d68a1aaff4056a9b66771e::d8f6f3824cdd5ed5f1795c5a050b727f3e05354c78d68a1aaff4056a9b66771e:1"
+  ],
   "join_pod.pod.content_hash": "semantic_v1:6ada754d8fc4292450d3fb8813f05878b8aabbd52da3615519c80c7418bc0b4e",
   "join_pod.pod.pipeline_hash": "semantic_v1:f8f3638bf17df15345b70be956e0779e01c9905db088daa02dfec441d7de441d",
+  "list_tag_producerless_stream.as_given": "semantic_v1:ad76e4cf890d6cf18777dfc3e1998d322a2e7079a9f5824abe1f34f42f3265da",
+  "merge_join.content_hash": "semantic_v1:ae8410f9b8cb0940988ec66d428c05984b92c2f78c28e0dcc75d5cd1fa073e2e",
+  "merge_join.pipeline_hash": "semantic_v1:5f20d36ecb37199b4abde20444a5b857610d89df8d6dad3af3fad3d0848a0f3f",
   "pod.content_hash": "semantic_v1:9b6de7be825efc4495abaa60baf14e0bc5dbd034f68751b95546308e1266a93a",
   "pod.pipeline_hash": "semantic_v1:a7f19352f4abe281d50ffdd8d5574b04ea494f5e9da8daef30e189c3fc0ac693",
   "pod_default_version.decorator.uri": [

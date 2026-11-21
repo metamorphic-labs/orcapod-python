@@ -1,9 +1,10 @@
 """Column order produced by Join and MergeJoin.
 
-Both operators are commutative (``argument_symmetry`` returns a ``frozenset``), so
-their column order must not depend on the order of the operands: tag and data
-columns are listed by first appearance across the inputs taken in canonical
-``pipeline_hash`` order. The order must also not depend on ``PYTHONHASHSEED``:
+``Join`` is commutative (``argument_symmetry`` returns a ``frozenset``), so its
+column order must not depend on the order of the operands: tag and data columns
+are listed by first appearance across the inputs taken in canonical
+``pipeline_hash`` order. ``MergeJoin`` is ordered (ITL-1281): its columns follow
+operand order. The order must also not depend on ``PYTHONHASHSEED``:
 both operators used to build ``tag_columns`` from a ``set``, and rows loaded
 from a ``FunctionJobNode`` cache use the compile-time order, so a buffer mixing
 cached and freshly computed rows could not be concatenated (ITL-817).
@@ -134,8 +135,14 @@ def descriptions(request: pytest.FixtureRequest) -> dict[int, Description]:
 def test_operand_order_does_not_change_columns(
     descriptions: dict[int, Description],
 ) -> None:
-    """``op(a, b)`` and ``op(b, a)`` agree on every column order and on the rows."""
+    """``op(a, b)`` and ``op(b, a)`` agree on every column order and on the rows for
+    the commutative ``Join``; ``MergeJoin`` is ordered and lists the first operand's
+    columns first (ITL-1281)."""
     for seed, result in descriptions.items():
+        if result["ab"]["keys"] == [["probe", "method"], ["x", "y", "z"]]:
+            # MergeJoin: each order lists its first operand's columns first.
+            assert result["ba"]["keys"] == [["method", "probe"], ["x", "z", "y"]]
+            continue
         for field, value in result["ab"].items():
             assert result["ba"][field] == value, f"PYTHONHASHSEED={seed} {field}"
 
@@ -216,6 +223,6 @@ def test_async_matches_sync_column_order(case: str) -> None:
     operator = spec.make_operator()
     a = _source(spec.a_columns, "probe", "a")
     b = _source(spec.b_columns, "method", "b")
-    expected = [list(keys) for keys in operator.process(a, b).keys()]
     for first, second in ((a, b), (b, a)):
+        expected = [list(keys) for keys in operator.process(first, second).keys()]
         assert asyncio.run(_async_first_row(operator, first, second)) == expected

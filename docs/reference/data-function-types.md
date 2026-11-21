@@ -99,8 +99,9 @@ Each result row holds these columns about the function (`__pf_var_` prefix):
 |---|---|---|---|---|
 | `function_name` | `str` | `large_string` | yes | the function's name, as in the uri |
 | `function_version` | `str` | `large_string` | yes | the full version string the function was declared with (`v3.7`) |
-| `function_signature_hash` | `bytes` | `large_binary` | yes | the hash of the function used as a value |
-| `function_content_hash` | `bytes` | `large_binary` | yes | the hash of the function's code |
+| `function_module` | `str \| None` | `large_string` | yes | the function's module (`__module__`) |
+| `function_signature_hash` | `bytes` | `large_binary` | yes | the hash of the function's declared interface |
+| `function_content_hash` | `bytes \| None` | `large_binary` | yes | the hash of the function as written (a lambda: its enclosing lines); absent when its source cannot be read (a plain REPL, `python -c`, `exec`) or, for a function other than a lambda, does not start at a `def` statement |
 | `git_hash` | `str` | `large_string` | yes | the git commit of the function's file or working directory, with `-dirty`, `-untracked` and `-<source>` suffixes; `unknown` outside git |
 
 and these about how it was computed (`__pf_exec_` prefix):
@@ -116,8 +117,8 @@ The two hashes, each stored as `<label>:` followed by its digest:
 
 | Column | Label | What it covers |
 |---|---|---|
-| `function_signature_hash` | `semantic_v1` | the function's module and name, each parameter's name, kind, annotation and default (the default's own hash), and the return annotation ([Hashing](hashing.md#1d-function-values-and-parameter-defaults)) |
-| `function_content_hash` | `semantic_v1` | the function's name and module, its source text as written (decorator lines, docstring, comments and whitespace included), its annotations sorted by name, and its code properties (argument counts, number of locals, argument names) |
+| `function_signature_hash` | `function_signature_v1` | `{"inputs": {<name>: {"type": <type hash>, "default": <value hash>}}, "outputs": [{"key": <output key>, "type": <type hash>}]}`: the effective types (`input_schema=` / `output_schema=`, else the annotations); inputs keyed by name in no order, a `default` only for a parameter that has one; outputs in declared order (one key is a one-element list, none an empty one). Not in it: the function's name and module (their own columns), the parameters' kind and order, the version, the body |
+| `function_content_hash` | `function_content_v1` | `{"source": <text>}`: the source text from the `def` line on, as written (docstring, comments and whitespace included; decorator lines excluded); for a lambda, the enclosing lines `inspect` gives, always present when they can be read. The `def` line is found by tokenizing the text as written, so nothing in the body moves the cut. Absent (null) when the source cannot be read, or when the source of a function other than a lambda does not start at a `def` statement: never a text with a decorator line |
 
 Results are reused by the function's identity (its uri) and the input data hash alone;
 these columns record what produced each row and are not compared on a cache hit.
@@ -141,7 +142,7 @@ stored = types_store.get_all_records(next(p for p in types_store.list_sources() 
 print([name for name in stored.column_names if not name.startswith("__pf_")])
 # ['__input_data_hash', 'total', 'label', '_source_total', '_source_label', '__pod_ts', '__data_context']
 print([name for name in stored.column_names if name.startswith("__pf_var_")])
-# ['__pf_var_function_name', '__pf_var_function_version', '__pf_var_function_signature_hash', '__pf_var_function_content_hash', '__pf_var_git_hash']
+# ['__pf_var_function_name', '__pf_var_function_version', '__pf_var_function_module', '__pf_var_function_signature_hash', '__pf_var_function_content_hash', '__pf_var_git_hash']
 ```
 
 ## Where it is declared, and how a released declaration is kept

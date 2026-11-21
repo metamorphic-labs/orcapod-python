@@ -419,8 +419,15 @@ class PollingSource(RootSource, Generic[T]):
         Delegates to ``impl.identity()`` so that the implementer fully
         controls what makes two ``PollingSource`` instances distinct; the key
         columns (``record_id_columns``) follow, as for every root source (ITL-1154).
+        The tag columns name a set: they enter in name order, so the order they are
+        declared in changes no hash (ITL-1271). The key columns keep their order: it
+        is the explicit order of the record id.
         """
-        return (self._impl.identity(), self._tag_columns, self._key_columns)
+        return (
+            self._impl.identity(),
+            tuple(sorted(self._tag_columns)),
+            self._key_columns,
+        )
 
     # -------------------------------------------------------------------------
     # Sync stream delegation

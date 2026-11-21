@@ -448,8 +448,7 @@ Developer, November 12, 2026 (ITL-981); see `docs/concepts/arrays.md` and
   (`orcapod.numpy.ndarray`). The leading type text of a value hash is the extension name.
 - `numpy.ndarray`: one `.npy` file per cell (`numpy.lib.format`, format 3.0,
   `allow_pickle=False` on write and read; never raise `max_header_size`). Options:
-  `memory_order`, `byte_order`, `struct_layout`. Where stored arrays must be ordered, order
-  them by value hash (`storage_sort_key`), never by stored bytes.
+  `memory_order`, `byte_order`, `struct_layout`. No operator orders stored arrays (ITL-1281).
 - Library value types are provisional until the library value type audit, after 0.4.0rc1
   (developer, November 13, 2026, ITL-1068; moved past 0.4.0rc1 on November 17, 2026): their
   extension names are listed in `provisional` of `contexts/logical_types.json`, and using
@@ -558,7 +557,8 @@ algorithm produced it.**
 - A label names the algorithm that produced a digest (the whole procedure: canonical form,
   preparation, encoding, digest function) and nothing else. Format `<algorithm>_v<N>`,
   integer `N`: `semantic_v1`, `arrow_v1`, `arrow_ordered_v1`, `directory_v1`, `ndarray_v1`,
-  `polars_expr_v1`, `batch_v1`, `group_v1`. The file content hash keeps `sha256`, the only
+  `polars_expr_v1`, `batch_v1`, `group_v1`, `function_signature_v1`, `function_content_v1`.
+  The file content hash keeps `sha256`, the only
   exception. A logical type's implementer picks its label.
 - Change a label only when its algorithm would give an existing input a different digest.
 - Define each label in exactly one place, as a constant beside its algorithm. Never write a
@@ -631,13 +631,33 @@ operator. The shared family of such inputs is `tests/test_core/operators/several
 the inventory is `docs/dev/specs/itl-1236-several-item-test-audit.md`. The docs show the
 several-item form of such an argument, not only the one-item form.
 
+**Order never counts, except where you give it** (developer, November 18, 2026, ITL-1271):
+no operator result and no stream depends on the order of the tags or columns fed into it
+(declared `tag_columns`, table layout, which tags are data-tags), on the order of the items
+of an argument that names a set (names, mapping entries, keywords, predicates), or on the
+order of the inputs of a commutative operator or a function pod. "If any operations COULD
+vary output by tag order, then explicit ordering of tags to be used should be an explicit
+input into the function/operator." Nothing that enters a hash, an identity, a stored path or
+a stored value may follow such an order: hold a set of names sorted (or as a dict), and
+place columns by an explicit argument or by name. The places where order is meant to count
+are listed once, `ORDER_EXCEPTIONS` in `tests/test_core/order_rules.py`, each with its
+reason, and rendered in `docs/concepts/identity.md` ("Order never counts, except where you
+give it"); add one only with the developer's decision. Column placement following the
+declared order is presentation only. `tests/test_core/test_order_invariance.py` checks every
+exported operator, source and stream kind, the function pod forms and a job: a new operator
+or stream kind fails there until it has a case; a case owned by an open issue is
+`xfail(strict=True, raises=AssertionError)` naming it (`KNOWN_VIOLATIONS`, exactly the
+issues the marks name), on the comparison only, removed when the issue lands. The
+audit is `docs/dev/specs/itl-1271-order-invariance-audit.md`.
+
 ---
 
 ## Project layout
 
 ```
 src/orcapod/
-├── types.py                    # Schema, ColumnConfig, ContentHash
+├── types/                      # Schema, ColumnConfig, ContentHash (__init__.py);
+│                               # Condition (condition.py)
 ├── system_constants.py         # Column prefixes and separators
 ├── errors.py                   # InputValidationError, DuplicateTagError
 ├── config.py                   # Config dataclass
@@ -670,7 +690,7 @@ src/orcapod/
 │   └── operators/
 │       ├── base.py             # UnaryOperator, BinaryOperator, NonZeroInputOperator
 │       ├── join.py             # Join (N-ary inner join, commutative)
-│       ├── merge_join.py       # MergeJoin (binary, colliding cols → sorted list[T])
+│       ├── merge_join.py       # MergeJoin (binary, ordered; colliding cols → [first, second])
 │       ├── semijoin.py         # SemiJoin (binary, non-commutative)
 │       ├── batch.py            # Batch (group rows by count, types become list[T])
 │       ├── group_by.py         # GroupBy (many→one reduction keyed on tag values)
@@ -792,10 +812,13 @@ no input tag name may appear among the data columns.
 **An operator may add a tag, never data** (developer, November 16, 2026, ITL-1196): "synthesizing
 a tag is fine — that's not a value. Operator may never add data." `AddTags`
 (`stream.add_tags(cohort="A", run=3)`) adds tags holding one constant value on every row, after
-the input's tags; data columns, source info and system tags pass through unchanged. A value is
-exactly a `bool`, `int`, `float`, `str` or `bytes` (Arrow `bool`, `int64`, `double`,
-`large_string`, `large_binary`, non-nullable); anything else (`None`, `Decimal`, `datetime`,
-`date`, a subclass) is refused. Its identity is the names and values in order. A function form
+the input's tags, in name order; data columns, source info and system tags pass through
+unchanged. A value is exactly a `bool`, `int`, `float`, `str` or `bytes` (Arrow `bool`, `int64`,
+`double`, `large_string`, `large_binary`, non-nullable); anything else (`None`, `Decimal`,
+`datetime`, `date`, a subclass) is refused. The new tags are a set (developer, November 18,
+2026, ITL-1269: "I absolutely agree to make it entry order independent"): the operator holds
+them in name order, and its identity is the names and values in name order, so the order of the
+keywords never changes a hash, a stored path or a column name. A function form
 (new tags computed from a row's tags and data) is future work, not designed yet.
 
 Two operators reduce row count many→one. `Batch` groups consecutive rows by count; `GroupBy`
@@ -848,9 +871,19 @@ Every pipeline element has two parallel hashes:
    sources that differ only in how they name their rows are two sources, with one pipeline
    hash and one source id (developer, November 16, 2026, ITL-1154). Row content enters only where a source puts it into its own
    identity: the default `source_id` of the in-memory sources
-   (`<source kind>:<algorithm label>:<hex>` of the table hash, used when none is given) and the elements of a `ListSource`. A downstream stream or node hashes its
+   (`<source kind>:<algorithm label>:<hex>` of the table hash, used when none is given; the rows
+   in the order given, or sorted by the key columns with `hash_in_key_order=True`, ITL-1272). A
+   `ListSource` has no rule of its own (developer, November 21, 2026, ITL-1272): its elements
+   and tag function enter only through that default and its output schema (their types), and
+   with a given `source_id` it is an address like every other source (the review of every source's identity is ITL-1311). A downstream stream or node hashes its
    pod's identity plus its upstreams' content hashes; a function pod's identity is its uri,
-   not its body. Only a datagram (one row's tags or data) has a `content_hash()` that is a
+   not its body. The uri holds the hash of the output schema, a set of named, typed outputs
+   in no order (developer, November 17, 2026, ITL-1244): reordering `output_keys` changes it
+   only when a key's type changes; when a name now receives another value (same-typed keys
+   reordered without the returned values, or the reverse), what the function computes
+   changed, like a body edit, and it needs a MAJOR version bump (`v0.0` to `v1.0`: the uri
+   holds only the major, so a minor bump serves the earlier order's stored values) while
+   there is no check on a cache hit (ITL-1253); reordering both together changes nothing. The input parameters (names and order) are in no part of the uri. Only a datagram (one row's tags or data) has a `content_hash()` that is a
    digest of its values; that row hash, not the node's content hash, is what results are
    memoized by. The node's content hash tells apart, inside a shared table, the rows of
    pipelines bound to different sources (`__node_content_hash`).
@@ -864,6 +897,24 @@ its upstreams, forming a Merkle chain.
 
 The pipeline hash uses a **resolver pattern** — `PipelineElementProtocol` objects route through
 `pipeline_hash()`, other `ContentIdentifiable` objects route through `content_hash()`.
+
+**No identity follows column order** (developer, November 18, 2026, ITL-1246, ITL-1227): "it
+shouldn't depend on tag order -- generally nothing should depend on tag order". A list of tag
+or data-tag names enters an identity as a set of sorted names (`FallThroughPod`'s
+`fall_through_tags`, also in its config and a saved job; a raw stream's tag columns and
+data-tags). A raw `ArrowTableStream` (no producer) hashes its whole identity
+table once (every column group but `_content_hash`; `hash_table` covers the schema, so a stream
+with no rows still commits to its columns) with its rows in the canonical row order of an
+identity table (`arrow_utils.canonical_identity_row_order`, developer, November 19, 2026,
+"option 2"; the specification is in `docs/reference/hashing.md`): a pyarrow value sort, ascending
+and nulls last, over the user tags in name order then every other column in name order, each
+only when its type is on the closed list `arrow_utils.canonically_sortable` (decided from the
+type, never by trying a sort; no extension, list, struct, `float16` or `decimal256`), and rows
+still tied ordered by their own one-row `hash_table` digest (prefixed bytes), computed for tie
+groups only. Outputs still list the
+data-tags first in the input's tag order: column order is presentation. An operation whose
+result could depend on a column order takes that order as an explicit argument that is part
+of its identity (GroupBy's `member_order`), never the input's column order.
 
 ### Column naming conventions
 
@@ -974,7 +1025,8 @@ current data context are the current entries.
    through unchanged.
 2. **Name-extending** — multi-input ops (join, merge join). Each input's system tag column
    name gets `::{pipeline_hash}:{canonical_position}` appended. Commutative operators
-   canonically order inputs by `pipeline_hash` and sort system tag values per row.
+   canonically order inputs by `pipeline_hash` and sort system tag values per row. `MergeJoin`
+   is ordered (ITL-1281): the position is the argument index and nothing is sorted.
 3. **Reducing** — many→one ops (`Batch`, `GroupBy`). Data columns become `list[T]`; `Batch`
    makes every user tag `list[T]` and keeps it a tag, while `GroupBy` keeps its scalar keys and
    drops every other user tag (ITL-1070). No tag ever moves to the data group. Source-info
@@ -992,10 +1044,10 @@ current data context are the current entries.
 
 ### Schema types and ColumnConfig
 
-`Schema` (`types.py`) — immutable `Mapping[str, DataType]` with `optional_fields` support.
+`Schema` (`types/__init__.py`) — immutable `Mapping[str, DataType]` with `optional_fields` support.
 `output_schema()` always returns `(tag_schema, data_schema)` as a tuple of Schemas.
 
-`ColumnConfig` (`types.py`) — frozen dataclass controlling which column groups are included.
+`ColumnConfig` (`types/__init__.py`) — frozen dataclass controlling which column groups are included.
 Fields: `meta`, `context`, `source`, `system_tags`, `content_hash`, `sort_by_tags`.
 Normalize via `ColumnConfig.handle_config(columns, all_info)` at the top of `output_schema()`
 and `as_table()` methods. `all_info=True` sets everything to True.
@@ -1066,6 +1118,21 @@ polars, torch) keeps its library's own distinction. `list_view` and `large_list_
 supported: a source refuses them (the Arrow hasher cannot hash them) and a raw `ArrowTableStream`
 holds them as given (ITL-1129).
 
+Dictionary-encoded columns are refused, tags and data alike (developer, November 18, 2026,
+ITL-1264: "Say it is not currently supported in orcapod. We MAY support but not immediately in
+the plan"; November 19, 2026, ITL-1277: "safe default, though could be inconvenient, is to
+reject working with it"). Every column of a stream (tag, data-tag, data, and Orcapod's own
+system-tag, source-info, context and meta columns, which only a hand-built table could encode)
+whose Arrow type is, or contains, a dictionary (list, list-view or fixed-size list item, struct
+child, map key or item, run-end-encoded values, extension storage) raises `InputValidationError` naming each such
+column with its role, its type and its decoded type (`arrow_utils.decode_dictionaries`), then
+the pyarrow and polars ways to decode. One rule, `schema_utils.dictionary_columns` with
+`schema_utils.dictionary_columns_error`, applied by `ArrowTableStream.__init__` (every source
+and operator result) and first by `SourceStreamBuilder.build` (before the key columns and the
+hash); never check it elsewhere. A library value in a cell (a pandas or polars data frame with
+a categorical column) is an extension column, not a dictionary, and is accepted. Supporting
+dictionary columns later is ITL-1277.
+
 Respect the Arrow types the inputs already have, normalized to their large variants (developer,
 November 10, 2026: large and non-large variants hash identically, so always normalize to large
 for consistency). Infer an Arrow type from Python values only when no Arrow type is known, and
@@ -1123,15 +1190,17 @@ data. The rules:
   (`arrow_utils.normalize_to_large_types`: `string` to `large_string`, `binary` to `large_binary`, `list`
   to `large_list`, recursively). Width, nullability and logical (extension) types are never
   changed; `int8` stays `int8`, and `null` stays `null` (operators and the type converter pass
-  `keep_null=True`; only `Data` maps `null` to `large_string`, the function's default). An
-  operator that round-trips through Polars casts its columns back
-  to the normalized input types (`arrow_utils.restore_column_types`, or
-  `restore_schema_nullability` when nullability is restored too).
+  `keep_null=True`; only `Data` maps `null` to `large_string`, the function's default).
+  `PolarsFilter` is the one operator that still round-trips its columns through Polars; it
+  casts them back to the normalized input types (`arrow_utils.restore_column_types` and
+  `restore_schema_nullability`). Every other operator takes its values from the input's Arrow
+  arrays (`take`, a slice, list offsets; `Join`, `SemiJoin`, `MergeJoin` and `GroupBy` give
+  Polars only prepared keys and row numbers), so its values are the input's, bit for bit.
   This holds for every operator, also one that passes its rows through unchanged (select,
   map, a no-op filter, `Join`, `SemiJoin`), on a plain stream as inside a job: its result
   is an `ArrowTableStream` (ITL-1122).
 - List columns built by `Batch`, `GroupBy` and `MergeJoin` are typed by
-  `arrow_utils.aggregated_list_type` (directly or through `build_aggregated_table`):
+  `arrow_utils.aggregated_list_type`:
   `large_list<normalized T>`, or for a logical `T` the logical list type from the type converter
   (it raises, naming the column, if the converter has none; never strip the element to its
   storage type). Source-info list columns are `large_list` of the incoming source-info type:
@@ -1140,6 +1209,11 @@ data. The rules:
   `large_list<large_list<large_string>>`, ITL-849). An already list-valued data column
   likewise becomes a list of its incoming list type; never flatten it. Zero-row and
   non-empty results have the same types.
+- Lists built by an operator are parallel by origin row (developer, November 19, 2026,
+  ITL-1281): element `i` of every list of an output row (each data and tag list and its
+  source-info list) comes from the same input row. A member order is decided once per output
+  row (`Batch`: the input's row order; `GroupBy`: its member order; `MergeJoin`: argument
+  order) and every list follows it; never sort one list column on its own values.
 - When two inputs give the same column different Arrow types, normalize both: equal proceeds,
   anything else raises `InputValidationError` naming the column and both types — no widening,
   promotion or picking a side. The rule is `arrow_utils.shared_arrow_type`, which takes only the
@@ -1198,10 +1272,18 @@ data. The rules:
   `delta_table`, `sqlite_table`, `postgresql_table`, `db_table`, `spiraldb_table`,
   `polling_source`, `cached`), or names the operation that derives the source
   (`tags_as_data`). A default built from a hash is `<kind>:<algorithm label>:<hex>`, built
-  only by `core/sources/source_ids.hash_source_id`; one built from where the data lives is
+  only by `core/sources/source_ids.hash_source_id` (an in-memory source hashes its table as
+  given; `hash_in_key_order=True`, refused without key columns or with a `source_id`, hashes
+  it sorted by the key columns in key order, `arrow_utils.key_row_order`, an Arrow sort after
+  the keys are validated, rows presented as given; developer, November 21, 2026, ITL-1272);
+  one built from where the data lives is
   `<kind>:<location>`, built only by `location_source_id`: `csv:<path as passed>`,
   `delta_table:<path or URI as passed>`, `sqlite_table:<db path as passed>:main.<table>`,
-  `postgresql_table:<database>.<schema>.<table>`,
+  `postgresql_table:<host>:<port>/<database>.<schema>.<table>` (the server the connection
+  reached, as libpq reports it: a host name lower-cased, an IPv6 address bracketed and
+  exploded, a socket directory as given, the port always a number; parameters naming several
+  servers, or a host beside a `hostaddr` that is not that address, give no default;
+  developer, November 18, 2026, ITL-1267),
   `spiraldb_table:<project>.<dataset>.<table>@<table id>` (developer, November 16, 2026); a
   location whose parts hold their separator has no default (`source_ids.joined_location`). A
   `DBTableSource` used directly (a generic connector, no database address) has no default:
@@ -1263,6 +1345,67 @@ data. The rules:
   only after the read succeeded. Without key columns a row's record id is its position: a
   change of row order is a change; with one, only content counts
   (`reload.same_rows(..., ordered=)`, decided by the caller; in doubt, order counts).
+- A restriction is not an operator (developer, November 17, 2026, ITL-1218). It is attached
+  to a source, chooses which of its rows flow, and changes no row, schema, DAG node or
+  identity: `content_hash`, `pipeline_hash`, `source_id`, schema, system-tag column names and
+  every row's record id equal the unrestricted source's (a positional record id is never
+  renumbered). Selecting rows as part of what a pipeline computes is an operator
+  (`SemiJoin`, `PolarsFilter`). The conditions are one public class, `orcapod.types.Condition`
+  (defined in `types/condition.py`; developer, November 18, 2026): row conditions only, no limit, no source, in no hash; a
+  future in-pipeline filter operator is to take the same class (its identity then: ITL-1265).
+  Its factory `Condition.of(mapping=None, /, **columns)` takes `where()`'s arguments and does
+  every check that needs no table (`None`, a value not exactly `bool`/`int`/`float`/`str`/
+  `bytes`/`datetime`/`date`, mapping against keyword); `combined` adds two and refuses a
+  contradiction; equality is by value, order-free, exact types, floats as Orcapod matches them
+  (0.0 equals -0.0, NaN equals NaN), an aware datetime by its instant (`fold` counts, zones do
+  not; never Python's `==`, which ignores `fold` within one tzinfo), with a consistent hash.
+  That equality decides whether two restrictions are one, never which rows a source returns:
+  a condition is pushed down as `column == value` and the table system's equality decides
+  (developer, November 19, 2026: a NaN, an infinity or a signed zero is accepted, pushed down
+  and documented, never filtered on the client or refused; a NaN or infinite value is saved
+  as `{"float": "nan" | "inf" | "-inf"}`); `text()`/`str`, and
+  `to_config`/`from_config` (the saved `where` mapping). Internally terms (column, operator,
+  value), equality only today; the public surface names no operator. Never add a second
+  restriction class: a limit stays the source's own (`limit=`). Today only
+  `SpiralDBTableSource.where(mapping=None, /, **columns)` exists: `Condition.of`, then the
+  source checks it against its table (unknown column, the column's exact Python type and
+  Arrow range, no conversion) and combines it with `where=`'s, applied by SpiralDB in the
+  scan. `where()` is `_copy()` then `_apply_restriction()` in place on the copy, the future
+  public `copy()` and `apply_restriction()`; other source kinds and `limit()` are ITL-1219.
+  A source states its restriction through two read-only members of `SourceProtocol`,
+  `condition` (the empty `Condition` when it reads every row) and `row_limit` (`None`
+  for none): `RootSource` answers the defaults, `SpiralDBTableSource` its own, and a
+  source over another (`CachedSource`, `SourceProxy`) answers for itself only
+  (developer, November 20, 2026: `StreamProtocol` gets them when restrictions reach
+  general streams, ITL-1219). Every rule that reads them is in one module,
+  `pipeline/restrictions.py`, typed, never probing a private attribute.
+  `RunSummary` records each restricted source by slot: `conditions` (slot to `Condition`),
+  `limits` (slot to limit), `restricted_source_ids` (every such slot), filled by one walk;
+  the saved job keeps `where` and `limit` in the source config. A slot's new restriction need not
+  match its previous one (bind does not compare the two), but `bind` refuses, before replacing
+  any binding, a bind after which two slots would read one source identity under different
+  restrictions (below). A job run over a restricted source feeding `GroupBy`, `Batch` or `MergeJoin` issues one `RestrictedAggregationWarning`.
+  A pipeline keeps one restriction (or none) per source identity (a restriction leaves the
+  identity unchanged), so one table restricted two ways (or with and without a restriction) in
+  one pipeline is refused (`restrictions.require_one_restriction`, over the sources the streams
+  read now, `sources_read`; nothing is remembered between checks, since a rebound slot changes
+  what they read) at capture, at compile, by `bind` before it binds and at the start of every
+  run (`refuse_restriction_conflicts`), whatever streams lead there: projections, operator
+  chains, streams built before the capture. A bind's walk matches the job's own slots by object
+  (`Rebinding`), never by name. `RunSummary` keeps one condition and one limit per slot (ITL-1293). Every restriction walk goes through a slot's bound source,
+  a `SourceProxy`'s delegate and a `CachedSource`'s source (`_streams_beneath`); a
+  `DerivedSource` is a root. A `CachedSource`
+  over a restricted source is refused at construction (a cache is kept under the table's
+  identity; developer, November 18, 2026), and so is an operator job node that caches (`LOG` or
+  `REPLAY`) over a restricted source (developer, November 19, 2026: its cache is kept under the
+  node's identity): `restrictions.refuse_restricted_operator_cache(s)`, called where the cache mode
+  is attached, by `bind` before it binds, before a job distributes its databases, by the
+  `upstreams` setter, by `execute` (on the streams it is handed) and `async_execute`, and at
+  the start of `job.run()`, `run_async()` and a job node's `run()`, before any source is
+  checked or anything computed or written; a new way to run or rewire a caching operator node
+  calls it too (it reads the node's public `cache_mode`). `CacheMode.OFF` and function nodes
+  are not concerned. The refusal is for now: how an operator node logs and replays is to be
+  redesigned to load its cache and then apply the restriction (`TODO(ITL-1219)`).
 - Empty data → `ArrowTableSource` raises `ValueError("Table is empty")`.
 - A side-effect job node delivers only when it runs (developer, November 13, 2026, ITL-1091):
   `job.run()`, `node.run()` (state-driven, ITL-1095: a node holding a current run delivers
@@ -1278,10 +1421,32 @@ data. The rules:
 - `DerivedSource` over a job node with nothing stored → presents zero rows with the origin's columns
   (no computed records; no error), in the plain form and with `tags_as_data`.
 - Join requires non-overlapping data columns; raises `InputValidationError` on collision.
-- MergeJoin requires colliding data columns to have identical Python types; merges into sorted
-  `large_list<T>` with source columns reordered to match, where `T` is the large-normalized input
-  Arrow type; inputs whose Arrow types still differ after normalization raise
-  `InputValidationError`. Non-empty struct columns cannot be merged yet (ITL-839).
+- `Join` and `SemiJoin` give Polars only their key columns and row numbers (ITL-1284): Polars
+  decides which rows match, and every output column is taken from the input tables by row
+  number (`take`), so every value is the input's, bit for bit (they used to carry every column
+  through Polars: a `date64` off midnight came back at midnight, a `decimal256` made Polars
+  panic). Keys are prepared in one place, `core/operators/arrow_keys.py` (`polars_ready`: a
+  logical type as its storage, a temporal value as its integer, `float16`
+  as `float32`, a view as its large variant, `decimal256` as four 64-bit limbs, through lists,
+  fixed-size lists and structs; `part_without_rule` says what may reach Polars). A key whose
+  type has no rule (a map, an interval, a union, a list view) is refused with
+  `InputValidationError` naming the column (`base.require_matchable_key`) on both paths,
+  before rows are matched (never at validation, which would derive every input's zero-row
+  table on each graph build). `MergeJoin` matches through the same inner join
+  (`join._inner_join`), and `GroupBy` imports the same preparation (ITL-1281), its rule
+  refusing structs (`part_without_rule(..., structs=False)`).
+- `MergeJoin` is ordered, not commutative (developer, November 19, 2026, ITL-1281):
+  `MergeJoin()(a, b)` and `MergeJoin()(b, a)` are two operations with two identities
+  (`argument_symmetry` is a tuple), and each input's system-tag columns end in its argument
+  index. A colliding data column becomes `large_list<T>` holding `[first argument's value,
+  second argument's value]` on every row, and its source-info column the two tokens in the same
+  order; nothing is sorted and no values are compared, so any value merges (a struct, a logical
+  type, a null). The lists are built from the joined Arrow arrays
+  (`arrow_utils.aggregated_list_array`), so every value is the input's, bit for bit (a
+  `null`-typed column read as rows or on the async path is typed `large_string`, `Data`'s
+  null convention: ITL-1319). Colliding
+  columns must have identical Python types; inputs whose Arrow types still differ after
+  normalization raise `InputValidationError`. `T` is the large-normalized input Arrow type.
 - Operators predict their output schema (including system tag column names) without
   performing the actual computation. Verify a prediction against
   `unary_static_process(stream).output_schema(...)`, **not** against `process(...)` (which
@@ -1330,8 +1495,7 @@ data. The rules:
   dropped tags still order the members, so the data lists are as before. Their values are not
   carried: a step that needs them makes the column data before grouping (at the source, or
   `DerivedSource(tags_as_data=...)`). A list-valued tag of the input (a list-typed source tag)
-  can still order members, so the member sort key (`_null_last_key`) is
-  recursive and sorts nulls last at every depth. A grouped stream grouped again on a coarser key
+  can still order members, element by element, nulls last at every depth. A grouped stream grouped again on a coarser key
   orders its members by the first grouping's keys outside the coarser key, then by record id. An opt-in mode that keeps non-key tags is ITL-1071.
 - GroupBy never depends on how its input's columns are arranged (developer, November 17,
   2026, ITL-1226). Members are ordered by the non-key tags in name order (each ascending,
@@ -1345,23 +1509,49 @@ data. The rules:
   record ids, folds, source-info tokens and hashes; only the output's column order follows
   the input, as presentation. `TagBy`'s identity is its sorted names, and its new tags are
   placed in name order.
-- `GroupBy` groups keys as the joins match them, except null (developer, November 17, 2026,
-  ITL-1234): all rows with a null key form one group, and so do all rows with a NaN key (the
-  grouping key holds every NaN as one object, `_grouping_key`); `0.0` equals `-0.0`. A NaN key
-  sorts after every number and before null, as in the member order (`_null_last_key`, which
-  also sorts a NaN tag after every number). The hashes read a float's bits, so a group emits,
-  for each float key column, its members' value with the smallest bit pattern at the column's
-  own width, float16, float32 or float64 (`_emitted_key_row`: `0.0` over `-0.0`, a positive NaN
-  over a negative one; a signaling NaN has smaller bits than the canonical quiet NaN, so it
-  wins), taken from the input's Arrow column, never through Python (a float32 signaling NaN
-  comes back quiet from Python): always a value a member holds, never the first row's, never
-  chosen by `member_order`. Bits are read only for a group whose key is zero or NaN. A logical
-  type stored as a float, or a dictionary-encoded float, is a float key, read through its
-  storage or its values (`_float_storage`). Every
-  other key is rebuilt from its Python value, as before: equal Python values that differ in
-  Arrow (`time64[ns]` within a microsecond) are one group with one rebuilt key; grouping by
-  the exact value is ITL-1250. The stance on `0.0`/`-0.0` and NaN for the whole library
-  (match by value, as Polars does; show the smallest bit pattern; rewrite nothing) is ITL-1251.
+- `GroupBy` groups keys by their Arrow value, as the joins match them, except null (developer,
+  November 17, 2026, ITL-1234; November 19, 2026, ITL-1250): all rows with a null key form one
+  group, and so do all rows with a NaN key; `0.0` equals `-0.0`. It decides which rows group
+  and in what order with Polars, never through Python values: one stable sort of a frame of
+  the keys (name order), the member-order tags, the record-id and source-id columns
+  (`nulls_last`; Polars ties `0.0` with `-0.0` and every NaN, and puts NaN after every number
+  and before null), group boundaries by Polars' equality (`rle_id`). Keys that differ below
+  Python's precision (`time64[ns]` within a microsecond, `date64` on one day) are separate
+  groups. A list-valued tag sorts through `(is_null, value)` pairs at every depth (`_sort_key`:
+  Polars puts a null inside a list first). The sort frame only sees prepared columns
+  (`arrow_keys.polars_ready`: a logical type as its storage, a temporal value as its integer, `float16` as `float32`, a view as
+  its large variant, `decimal256` as four 64-bit limbs, which Polars cannot read (it panics,
+  which no caller can catch), every list kind, fixed-size lists included, as a large list
+  over its prepared values). What may reach it is one rule, `arrow_keys.part_without_rule(..., structs=False)` (an integer,
+  float, decimal, boolean, string, binary, date, time, timestamp, duration or null, through
+  logical storage and lists of every kind at every depth; no dictionary, since no stream
+  carries one, ITL-1264), checked from
+  the schema at validation and from the table when grouping (the async path skips
+  validation); anything else is refused, never passed through. The output is built from the input's Arrow table: `take()` in the
+  sorted order and list arrays from group offsets (`arrow_utils.aggregated_list_array`, the
+  one way an operator builds a list), so every key and list element is a value
+  a member holds, bit for bit (`time64[ns]` keeps its nanoseconds, a float32 signaling NaN
+  its bits; ITL-1248 for `GroupBy`). The hashes read a float's bits, so a group emits, for
+  each float key column (a logical type stored as a float included), its members' value with the smallest bit pattern at the column's own width
+  (`0.0` over `-0.0`, a positive NaN over a negative one; a signaling NaN has smaller bits
+  than the canonical quiet NaN, so it wins): never the first row's, never chosen by
+  `member_order`. Every other key is the group's first member's (equal values are identical).
+  Only the system-tag and key source-info folds read Python values, which are text. A user tag
+  whose type has no order (a struct or a map, such as a user class or a `dict[K, V]`, an
+  interval, a union, a list view) is refused (`InputValidationError`,
+  `_refuse_unorderable_tags`), as a key and as a non-key tag (which orders the members): a
+  struct has no decided order (developer, November 19, 2026), so drop it before grouping. A
+  key that is a list of any kind (a fixed-size list included) is refused as list-valued. `Batch` and `MergeJoin` build their lists from Arrow
+  arrays too (ITL-1281). The stance on `0.0`/`-0.0` and NaN for the whole library (match by value, as
+  Polars does; show the smallest bit pattern; rewrite nothing) is ITL-1251.
+- The presentation order (`arrow_utils.sort_by_tag_columns`: `as_table(columns={"sort_by_tags": True})`,
+  `head().sort_by_tags()`, the preview) is ascending by the tags, then the system tags, nulls
+  last at every depth: a null list element or struct field after the values beside it, as
+  `GroupBy` orders a list and Arrow a struct (ITL-1295). Arrow sorts when it can; for a list
+  tag (or a struct holding one) Polars orders the prepared keys only
+  (`arrow_keys.polars_key_frame`, `arrow_keys.sort_key`) and the rows are taken from the
+  table, so no value passes through Polars. A tag type with no rule (a map, an interval, a
+  union, a list view) raises `TypeError` naming the column.
 - `Data` source-info values may be `str`, `None`, or `list[...]`, nested to any depth; the
   Arrow and Python types are derived from the value, with `None` mapping to `large_string`.
   That rule has one definition, `arrow_utils.source_info_arrow_type`, and applies only to
@@ -1370,12 +1560,13 @@ data. The rules:
   many→one operator must emit a list for **every** row of a list-valued column — mixing a bare
   `None` into some rows makes per-row `as_table()` schemas diverge and `pa.concat_tables` fail
   on the barrier path.
-- Aggregating operators (`Batch`, `GroupBy`) must build list-valued columns via
-  `arrow_utils.build_aggregated_table`, never `pa.list_(field.type)`. The helper types every list
-  column with `aggregated_list_type`: `large_list` of the large-normalized element, or, because
-  Arrow cannot embed an extension type inside a list value field, the logical list type
+- Operators that build lists (`Batch`, `GroupBy`, `MergeJoin`) build every list-valued column
+  with `arrow_utils.aggregated_list_array` (member values in member order, lists from offsets),
+  never from Python values and never `pa.list_(field.type)`. Its type comes from
+  `aggregated_list_type`: `large_list` of the large-normalized element, or, because Arrow
+  cannot embed an extension type inside a list value field, the logical list type
   (`list[<element>]` from `ListLogicalType`) for a logical element such as a pod annotated
-  `-> Path`; it builds that list over the element's storage and wraps it.
+  `-> Path`; the list is built over the element's storage and wrapped.
 - Never build an identity or hash input from a type's raw `__module__`, or from
   `repr`/`str`/`inspect.formatannotation` of a type, without going through
   `utils/canonical_type_names.py` (`canonical_module_name`, `canonical_type_name`,

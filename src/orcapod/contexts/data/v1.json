@@ -230,27 +230,27 @@
         "folder": "v1",
         "history": [
             {
-                "date": "2026-11-18",
+                "date": "2026-11-20",
                 "release": null,
                 "added": {
                     "arrow-01.json": "c66fa55619178f2631d04232555cd58059813e97e9ecd2b9de9e63699e60c964",
                     "datagram-01.json": "598d4a2851819d76ba674e189222e61733ca1861ca82a59e990a8ee5e1b0a7b3",
-                    "pipeline-01.json": "538958d92057f903d72d5c9e9b35fad23f40078638f4f2291865a536fb643035",
-                    "schema-01.json": "79aa2a068e0724891cf43ee528ce8f569e65f08864faa5e34773bfc69ac9576e",
-                    "semantic-01.json": "45840a7406d232a7686e55805aabe5953594409b447ed175fdff791c49a3f947",
+                    "pipeline-01.json": "86098fcf6f982fccc61ee862fc1219d5270c453ffd9b3a9730883c36f086c2e1",
+                    "schema-01.json": "885efd01435126d4a5deed2764f470dfa7bcc83460d4dc24e7e88a347f01eb8f",
+                    "semantic-01.json": "973a97cd3d74f558910b5854dce773fe5aa38a4df96be88ef10e5e6504ffe73d",
                     "torch-01.json": "af2e8b68d66dffaa37e1d0ad75acd42f595d65b9fae00ddcde81bf9e13a265c8"
                 },
                 "previous": null,
-                "digest": "28731f440e29a6004d4cfc9318909a10013abcf9488975e15d4864e9544e73c9"
+                "digest": "0939af5caefe76114c76d42b826d7731c7de66dd80d89bfb9032f3da4d75b9a4"
             },
             {
-                "date": "2026-11-18",
+                "date": "2026-11-20",
                 "release": null,
                 "added": {
-                    "pipeline-02.json": "e5fbe9dd43df61554209ec5261a9c1bdd8059ec6d0d0959f882d1c42170bbb6b"
+                    "pipeline-02.json": "61dff22a05ff342eb5163d2f364ace10690a03d3a86976dc388de49af26f8707"
                 },
-                "previous": "28731f440e29a6004d4cfc9318909a10013abcf9488975e15d4864e9544e73c9",
-                "digest": "0aeb96ad884544d3d8e9374834a3520041fe693b1c0aa2edacacff17a07ab146"
+                "previous": "0939af5caefe76114c76d42b826d7731c7de66dd80d89bfb9032f3da4d75b9a4",
+                "digest": "5d93b81218fe0d889c4f89da2a944b58dda640227a3f3edd6655a020ba35504f"
             }
         ],
         "provisional": {

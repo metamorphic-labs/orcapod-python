@@ -90,13 +90,17 @@ class AddTags(UnaryOperator):
     through unchanged, and no data column is added. System tags keep their names
     and values (name-preserving), so record ids are unchanged.
 
-    The new tags follow the input's tags, in the order given. A value's exact
+    The new tags are a set: whatever the order they are given in, the operator holds
+    them in name order (developer, November 18, 2026, ITL-1269), places them after the
+    input's tags in name order, and lists them that way in its identity and config, so
+    the order of the keywords never changes a hash, a stored path or a column name
+    downstream. A value's exact
     Python type is the tag's type, mapped to Arrow by the data context's type
     converter: ``bool`` to ``bool``, ``int`` to ``int64``, ``float`` to
     ``double``, ``str`` to ``large_string``, ``bytes`` to ``large_binary``. Every
     new tag is non-nullable.
 
-    The operator's identity is its tags, names and values in order, so two
+    The operator's identity is its tags, names and values in name order, so two
     different values are two operators with two stored paths.
 
     Data-tags (ITL-1023): the input's data-tags stay data-tags, one column in
@@ -129,8 +133,9 @@ class AddTags(UnaryOperator):
         schema_utils.require_names_not_meta(list(tags))
         schema_utils.require_names_not_system(list(tags))
         schema_utils.require_names_without_separator(list(tags))
+        # In name order: the order the tags are given in is not kept (ITL-1269).
         self._tags: dict[str, TagConstant] = {}
-        for name, value in tags.items():
+        for name, value in sorted(tags.items(), key=lambda item: item[0]):
             try:
                 self._tags[name] = _checked_value(value)
             except (TypeError, ValueError) as error:
@@ -142,7 +147,7 @@ class AddTags(UnaryOperator):
 
     @property
     def tags(self) -> Mapping[str, TagConstant]:
-        """The new tags, names mapped to values, in order; read-only.
+        """The new tags, names mapped to values, in name order; read-only.
 
         Read-only so the identity, the saved config and the cached constants
         can never disagree.
@@ -212,7 +217,7 @@ class AddTags(UnaryOperator):
             num_rows: The number of rows.
 
         Returns:
-            A table of the new tag columns, in the order given.
+            A table of the new tag columns, in name order.
         """
         cached = self._one_row.get(id(converter))
         if cached is None or cached[0] is not converter:

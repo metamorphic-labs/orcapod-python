@@ -30,6 +30,12 @@ from orcapod.pipeline.node_run import (
     clear_run_rows,
     plan_run,
 )
+from orcapod.pipeline.restrictions import (
+    refuse_restricted_operator_caches,
+    refuse_restriction_conflicts,
+    restrictions_in_force,
+    warn_restricted_aggregation,
+)
 from orcapod.pipeline.run_summary import (
     RunCountingObserver,
     RunSummary,
@@ -38,7 +44,7 @@ from orcapod.pipeline.run_summary import (
 )
 from orcapod.protocols import core_protocols as cp
 from orcapod.databases.utils import as_table_committing
-from orcapod.types import CacheMode, NodeConfig
+from orcapod.types import NodeConfig
 from orcapod.utils.database_errors import flush_best_effort
 
 if TYPE_CHECKING:
@@ -413,7 +419,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         Raises:
             SourceSpecMismatchError: If any source's columns differ from its slot's
                 declared names, roles or types.
-            ValueError: If a source key has no matching ``SourceJobNode`` slot.
+            ValueError: If a source key has no matching ``SourceJobNode`` slot, or an
+                operator node that caches (``LOG`` or ``REPLAY``) would read a
+                restricted source, one this bind binds or one already bound
+                (ITL-1218); the job is left as it was.
             UnstorableColumnError: If *database* cannot store a table of a node
                 (ITL-1162); the job is left as it was.
         """
@@ -439,7 +448,20 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     node.validate(sources[node.name])
 
         # A database that cannot store a node's tables is refused before anything
-        # changes too (ITL-1162).
+        # changes too (ITL-1162), and so is a caching operator over a restricted
+        # source, one this bind binds or one already bound (ITL-1218): a bind of a
+        # database alone would otherwise set it and fail while distributing it.
+        # The slots this bind changes are the job's own, matched by object: a source
+        # being bound may itself be a slot of another job with the same name.
+        to_bind = sources or {}
+        rebinding = [
+            (node, to_bind[node.name])
+            for node in (self._persistent_node_map or {}).values()
+            if isinstance(node, SourceJobNode) and node.name in to_bind
+        ]
+        refuse_restriction_conflicts(
+            (self._persistent_node_map or {}).values(), rebinding=rebinding
+        )
         if database_changed and database is not None:
             self._require_storable_tables(database)
 
@@ -497,8 +519,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             if isinstance(node, FunctionJobNode):
                 node.require_storable_tables(pipeline_db, result_db)
             elif isinstance(node, OperatorJobNode):
-                op_cache_mode = getattr(node, "_cache_mode", None) or CacheMode.OFF
-                node.require_storable_tables(pipeline_db, op_cache_mode)
+                node.require_storable_tables(pipeline_db, node.cache_mode)
             elif isinstance(node, SideEffectJobNode):
                 node.require_storable_tables(pipeline_db)
 
@@ -518,7 +539,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             )
 
         # Every node is checked before any is attached, so a refused database
-        # leaves every node as it was (ITL-1162).
+        # leaves every node as it was (ITL-1162), and so is a caching operator over
+        # a restricted source (ITL-1218).
+        refuse_restricted_operator_caches((self._persistent_node_map or {}).values())
         self._require_storable_tables(self._database)
         pipeline_db = self._database.at(*self._name)
         result_db = pipeline_db.at("_result")
@@ -530,10 +553,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     result_database=result_db,
                 )
             elif isinstance(node, OperatorJobNode):
-                op_cache_mode = getattr(node, "_cache_mode", None) or CacheMode.OFF
                 node.attach_databases(
                     pipeline_database=pipeline_db,
-                    cache_mode=op_cache_mode,
+                    cache_mode=node.cache_mode,
                 )
             elif isinstance(node, SideEffectJobNode):
                 node.attach_databases(pipeline_database=pipeline_db)
@@ -1240,9 +1262,15 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         pipeline_db = self._database.at(*self._name)
         result_db = pipeline_db.at("_result")
 
+        # A source read under two restrictions, or a caching operator over a restricted
+        # source, is refused before any source is checked and before anything is
+        # computed or written (ITL-1218).
+        refuse_restriction_conflicts(exec_dag.nodes())
         # Every source first takes in any new data, moving its modified time, before
         # the state rule judges any node (ITL-1102).
         unchecked = check_sources(exec_dag.nodes())
+        # A restricted source under an aggregation is allowed, and said (ITL-1218).
+        warn_restricted_aggregation(exec_dag)
         # The state rule (ITL-1095): a node that holds a current run is not run again.
         plan = plan_run(exec_dag, load_only=load_only)
         # A database that commits a table by itself at batch_size: commit what it already
@@ -1384,6 +1412,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             load_only=load_only,
             unchecked_sources=unchecked_sources,
             ran_nothing=not plan.to_run,
+            restricted_sources=restrictions_in_force(prepared.exec_dag.nodes()),
         )
         return self._last_run
 

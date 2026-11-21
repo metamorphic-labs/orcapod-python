@@ -362,6 +362,7 @@ class TestGetFunctionVariationData:
         assert set(data.keys()) == {
             "function_name",
             "function_version",
+            "function_module",
             "function_signature_hash",
             "function_content_hash",
             "git_hash",
@@ -860,7 +861,8 @@ class TestVariationHashSchema:
     def test_variation_schema_has_bytes_types(self, add_pf):
         schema = add_pf.get_function_variation_data_schema()
         assert schema["function_signature_hash"] is bytes
-        assert schema["function_content_hash"] is bytes
+        # Absent when the function's source cannot be read (ITL-1256).
+        assert schema["function_content_hash"] == bytes | None
 
     def test_variation_hash_decodes_to_content_hash(self, add_pf):
         """Both variation hash bytes round-trip through ContentHash.from_prefixed_digest."""

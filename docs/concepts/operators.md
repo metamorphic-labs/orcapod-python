@@ -73,12 +73,20 @@ Takes one or more streams. Used for `Join`, which performs an N-ary inner join.
 N-ary inner join on shared tag columns. Requires that input streams have non-overlapping
 data columns (raises `InputValidationError` on collision). Join is **commutative** -- the
 order of input streams does not affect the result. Like every operator, Join drops its
-inputs' meta (`__`-prefixed) columns, so they never collide. Rows match on equality of every shared tag column, whatever
-its type (lists and structs compare element by element). A row with a null in any shared tag
+inputs' meta (`__`-prefixed) columns, so they never collide. Rows match on equality of every shared tag column
+(lists and structs compare element by element). A row with a null in any shared tag
 column matches nothing, a null list or struct included, and rows with null on both sides do
 not match each other (the SQL convention for nulls; `MergeJoin` and `SemiJoin` follow it too, on the sync and the async path, while `GroupBy` is the exception by design and puts null keys in one group); a null *inside* a list or struct is an ordinary element that equals
 another null, an empty list is not a null, and NaN equals NaN. The async path gives the same
 rows.
+
+`Join` and `SemiJoin` keep every value exactly: each output column is taken from the inputs
+as it is, bit for bit (a `time64[ns]` keeps its nanoseconds, a `date64` its time of day, a
+`decimal256` its 76 digits), and a data column of any Arrow type passes through. A shared tag
+column must be a type they can compare: an integer, float, decimal, boolean, string, binary,
+date, time, timestamp or duration, a logical type stored as one, or a list or struct of
+those. A key that holds a map, an interval or a union is refused with `InputValidationError`
+naming the column; drop it from one input (`drop_tag_columns`) to join on the other tags.
 
 Because a null key matches nothing, a shared tag column may differ between the inputs in
 nullability alone: `T` in one input and `T | None` in another is accepted by `Join`, `MergeJoin`
@@ -89,10 +97,10 @@ reconciled this way.
 
 A plain tag and a data column never share a name across inputs: if one input has `x` as a plain tag column and another has it as a data column only, `Join` (and `MergeJoin`) raises `InputValidationError` when the graph is built; rename one with `map_tags` or `map_data`. A data-tag is the exception: it is one column in both roles, and `Join` merges a key that is a data-tag on its inputs (or plain on one and a data-tag on another) into a data-tag with one data column (see [Data-tags](data-tags.md)).
 
-Column order follows each operator's argument symmetry: commutative operators (`Join`,
-`MergeJoin`) list tag and data columns by first appearance across their inputs in canonical
-pipeline-hash order, so `Join()(a, b)` and `Join()(b, a)` have the same columns in the same
-order, while ordered operators such as `SemiJoin` keep operand order; either way, address
+Column order follows each operator's argument symmetry: a commutative operator (`Join`)
+lists tag and data columns by first appearance across its inputs in canonical pipeline-hash
+order, so `Join()(a, b)` and `Join()(b, a)` have the same columns in the same order, while
+ordered operators such as `SemiJoin` and `MergeJoin` keep operand order; either way, address
 columns by name rather than by position.
 
 ```python
@@ -125,9 +133,15 @@ print(joined.as_table().to_pandas())
 
 ### MergeJoin
 
-Binary join that handles colliding data columns by merging their values into sorted
-`list[T]`. Both inputs must have the same type for any colliding data columns. MergeJoin
-is **commutative** -- the order of the two input streams does not affect the result.
+Binary join that handles colliding data columns by merging their values into `list[T]`.
+Both inputs must have the same type for any colliding data columns. Each merged list holds
+the first input's value, then the second input's: MergeJoin is **ordered, not commutative**
+(ITL-1281). Nothing is sorted, so the lists of a row are parallel: element 0 of every merged
+column (and of its source-info list) comes from the first input's row, element 1 from the
+second's. Any value merges, a struct, a logical type or a null included, and every value is
+kept exactly as the input holds it. (A data column of the Arrow `null` type keeps that type
+in the result's table; read as rows, or on the async path, it is typed `large_string`, as
+every row reads a `null` column: ITL-1319.)
 
 ```python
 from orcapod.sources import DictSource
@@ -135,24 +149,35 @@ from orcapod.operators import MergeJoin
 
 scale_a = DictSource(
     data=[
-        {"subject_id": "mouse_01", "weight": 25.3},
-        {"subject_id": "mouse_02", "weight": 22.1},
+        {"subject_id": "mouse_01", "weight": 25.3, "length": 8.1},
+        {"subject_id": "mouse_02", "weight": 22.1, "length": 7.6},
     ],
     tag_columns=["subject_id"], tag_only_columns=True,
 )
 scale_b = DictSource(
     data=[
-        {"subject_id": "mouse_01", "weight": 24.9},
-        {"subject_id": "mouse_02", "weight": 22.6},
+        {"subject_id": "mouse_01", "weight": 24.9, "length": 8.4},
+        {"subject_id": "mouse_02", "weight": 22.6, "length": 7.2},
     ],
     tag_columns=["subject_id"], tag_only_columns=True,
 )
 
+def by_subject(stream):
+    return sorted(stream, key=lambda row: row[0].as_dict()["subject_id"])
+
 merged = MergeJoin()(scale_a, scale_b)
-for tag, data in merged:
+for tag, data in by_subject(merged):
     print(tag.as_dict(), "->", data.as_dict())
-# {'subject_id': 'mouse_01'} -> {'weight': [24.9, 25.3]}
-# {'subject_id': 'mouse_02'} -> {'weight': [22.1, 22.6]}
+# {'subject_id': 'mouse_01'} -> {'weight': [25.3, 24.9], 'length': [8.1, 8.4]}
+# {'subject_id': 'mouse_02'} -> {'weight': [22.1, 22.6], 'length': [7.6, 7.2]}
+
+swapped = MergeJoin()(scale_b, scale_a)
+for tag, data in by_subject(swapped):
+    print(tag.as_dict(), "->", data.as_dict())
+# {'subject_id': 'mouse_01'} -> {'weight': [24.9, 25.3], 'length': [8.4, 8.1]}
+# {'subject_id': 'mouse_02'} -> {'weight': [22.6, 22.1], 'length': [7.2, 7.6]}
+print(merged.content_hash() == swapped.content_hash())
+# False
 ```
 
 Passing the same two streams to `Join` instead raises `InputValidationError`, because both
@@ -316,17 +341,24 @@ cache keys:
 - **Groups** are emitted sorted by their keys, taken in name order. The order of the names
   in `by` is not part of the operator: `GroupBy(by=["a", "b"])` and `GroupBy(by=["b", "a"])`
   are one operator.
-- **Keys** group as the joins match them, except for null: rows with equal keys form one
-  group, all rows with a null key form one group, and so do all rows with a NaN key (NaN
-  equals NaN here; `0.0` equals `-0.0`). A NaN key sorts after every number and before null.
+- **Keys** group by their Arrow value, as the joins match them, except for null: rows with
+  equal keys form one group, all rows with a null key form one group, and so do all rows
+  with a NaN key (NaN equals NaN here; `0.0` equals `-0.0`). A NaN key sorts after every
+  number and before null. `GroupBy` compares and orders values with Polars, never as Python
+  values, so keys that differ only below what Python keeps are two groups: `time64[ns]`
+  values of 1 ns and 2 ns, or two `date64` values on one day.
   When the members of a group hold a float key with different bits (`0.0` and `-0.0`, or NaN
   with another sign or payload), the group emits the one with the smallest bit pattern at
   the column's own width (`float16`, `float32` or `float64`; a logical type stored as a
-  float is read through its storage, a dictionary-encoded float through its values), for
+  float is read through its storage), for
   each key column: `0.0` over `-0.0`, and a positive NaN over a negative one. A signaling
   NaN has smaller bits than the canonical quiet NaN, so when a member holds one, it is the
   key emitted. The emitted key is always a value a member holds, bit for bit, and neither
   the order of the rows nor `member_order` decides it.
+- **Values are kept exactly.** Every emitted key and every element of a data list is taken
+  from the input's Arrow columns, so a list holds its members' values bit for bit: a
+  `time64[ns]` value keeps its nanoseconds, a `date64` value its time of day, a float its
+  bits (a signaling NaN stays signaling).
 - **No arrangement of the input's columns changes the result.** The order of its tags, the
   order of its data columns and the layout of its table leave every value, record id and
   hash of the output unchanged. The output lists its columns as the input does (the keys in
@@ -368,6 +400,14 @@ Every name in `by` must be a **scalar tag column** of the input. `GroupBy` raise
 `InputValidationError` for an unknown column, a data column, or a list-valued tag column --
 the last usually means the stream came from `Batch`, so group *before* batching rather than
 after.
+
+A tag whose type has no order can be neither a key nor a non-key tag of the input, because
+every non-key tag orders the members: a struct or a map (a user class, a `dict[K, V]`), an
+interval, a union. `GroupBy` raises `InputValidationError` for it, from the schema alone. A
+key that is a list of any kind, a fixed-size list included, is refused as list-valued. Since
+`GroupBy` drops a non-key tag anyway, drop it before grouping, with `select_tag_columns`
+naming the tags to keep. A list-valued non-key tag orders the members element by element,
+nulls last at every depth.
 
 Streams also expose this as a fluent method. A single column may be given as a string, as
 for every operator that takes column names (a string is one name, never its characters):
@@ -723,8 +763,17 @@ for tag, data in labelled:
 # {'subject_id': 'mouse_02', 'session': 2, 'cohort': 'A', 'run': 3} -> {'age': 8, 'weight': 22.1}
 ```
 
-The new tags follow the input's tags, in the order given. Data columns, their source info and
-the system tags are unchanged. A value's type is the tag's type, with no inference: a `bool`
+The new tags follow the input's tags, in name order: they are a set, and the order they are
+given in is not kept. `add_tags(run=3, cohort="A")` is the same operator, with the same hashes
+and the same columns:
+
+```python
+reordered = sessions.add_tags(run=3, cohort="A")
+print(reordered.keys())  # (('subject_id', 'session', 'cohort', 'run'), ('age', 'weight'))
+print(reordered.content_hash() == labelled.content_hash())  # True
+```
+
+Data columns, their source info and the system tags are unchanged. A value's type is the tag's type, with no inference: a `bool`
 becomes Arrow `bool`, an `int` `int64`, a `float` `double`, a `str` `large_string` and a `bytes`
 `large_binary`, and every new tag is non-nullable:
 
@@ -745,8 +794,9 @@ except InputValidationError as error:
 # add_tags: cannot add a tag with an existing column's name: 'age' is a data column
 ```
 
-The names and values, in order, are the operator's identity, so two different values are two
-operators, with different hashes and stored tables.
+The names and values, in name order, are the operator's identity, so two different values are
+two operators, with different hashes and stored tables, while two orders of the same tags are
+one operator.
 
 On a stream with [data-tags](data-tags.md), the data-tags stay data-tags and the new tags are
 plain: a constant tag is never a data value.
@@ -849,6 +899,9 @@ silent widening; convert explicitly.
   where the sync path returns an empty stream with typed columns the async path emits
   nothing. An operator node that received no rows still reads back the sync path's columns
   and Arrow types: its operator applied to its inputs' zero-row tables (ITL-858, ITL-912).
+  A second limit: a data column of the Arrow `null` type (or a list of it) is typed
+  `large_string` in a row, so the async path, which carries rows, types it so too
+  (ITL-1319).
 
 ```python
 import pyarrow as pa

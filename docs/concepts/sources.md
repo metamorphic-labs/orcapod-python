@@ -36,9 +36,17 @@ hashing) and produces the final immutable stream.
 `orcapod.sources` also provides database-backed sources (`SQLiteTableSource`,
 `PostgreSQLTableSource`, `SpiralDBTableSource`) and `PollingSource` for data that arrives over
 time; see the [API reference](../api/sources.md). Their default `source_id` names the table
-where it lives (`sqlite_table:<db path>:main.<table>`). `DBTableSource`, the base they share,
-can also be used directly over any connector; a connector gives no address of its database,
-so it then has no default and needs a `source_id`.
+where it lives (`sqlite_table:<db path>:main.<table>`,
+`postgresql_table:<host>:<port>/<database>.<schema>.<table>`, with the server the connection
+reached; the
+[hashing reference](../reference/hashing.md#default-source-ids-and-row-identifiers) has
+every form). A PostgreSQL DSN that names several servers (`host=a,b`), or gives a host
+beside a different `hostaddr` (`host=db.example.org hostaddr=192.0.2.1`; with
+`host=127.0.0.1 hostaddr=127.0.0.1` the default stays), has no default; the same holds when
+`PGHOST`, `PGHOSTADDR` or a service file gives either value. Give such a source a
+`source_id`. `DBTableSource`, the base they share, can also be used directly
+over any connector; a connector gives no address of its database, so it then has no default
+and needs a `source_id`.
 
 Two construction rules apply to every source and are the most common first errors:
 
@@ -85,6 +93,84 @@ a data frame, a CSV file or a database table. A `string` column you give comes b
 logical types are kept, and the two variants hash identically, so no hash depends on which
 one you gave. The Arrow `list_view` and `large_list_view` types are not supported: a source
 refuses a column of either type.
+
+Dictionary-encoded columns are not currently supported in Orcapod, tags and data alike. A
+column whose Arrow type is a `dictionary`, or holds one inside it (a list of dictionary values,
+a struct with a dictionary field), is refused with `InputValidationError` when the source or
+stream is built. The message names every such column with its role (tag, data-tag or data), its
+type and the type it decodes to, then says how to decode it. Such columns come from an Arrow
+table of your own, a pandas `Categorical` of strings, or a polars `Categorical` or `Enum`; CSV
+files, Delta tables, database tables and Python values never give one. If keeping the encoding
+is not important, decode the column before building the source:
+
+```python
+import pyarrow as pa
+
+from orcapod.errors import InputValidationError
+from orcapod.sources import ArrowTableSource
+
+coded = pa.table(
+    {
+        "session": pa.array(["s1", "s2", "s1"]).dictionary_encode(),
+        "trial": [1, 1, 2],
+        "response": pa.array([0.4, 0.7, 0.5]).dictionary_encode(),
+    }
+)
+try:
+    ArrowTableSource(coded, tag_columns=["session", "trial"], tag_only_columns=True)
+except InputValidationError as exc:
+    print("\n".join(str(exc).splitlines()[:3]))
+# dictionary-encoded columns are not currently supported in Orcapod:
+#   - tag column 'session' has type dictionary<values=string, indices=int32, ordered=0> (decoded: string)
+#   - data column 'response' has type dictionary<values=double, indices=int32, ordered=0> (decoded: double)
+
+decoded = coded
+for name in ("session", "response"):
+    field = decoded.schema.field(name)
+    value_type = field.type.value_type
+    # The field keeps its name, nullability and metadata; set_column returns a new table.
+    decoded = decoded.set_column(
+        decoded.schema.get_field_index(name),
+        field.with_type(value_type),
+        decoded[name].cast(value_type),
+    )
+source = ArrowTableSource(decoded, tag_columns=["session", "trial"], tag_only_columns=True)
+print(source.as_table().schema.field("session").type)
+# large_string
+```
+
+With polars, `pl.col("session").cast(pl.String)` decodes a `Categorical` or `Enum` column.
+With pandas, `astype` with the categories' dtype decodes a `Categorical` of strings. Both
+return a new frame or column: keep it before building the source.
+
+```python
+import pandas as pd
+import polars as pl
+
+from orcapod.sources import DataFrameSource
+
+frame = pl.DataFrame({"session": ["s1", "s2", "s1"], "trial": [1, 1, 2]}).with_columns(
+    pl.col("session").cast(pl.Categorical())
+)
+frame = frame.with_columns(pl.col("session").cast(pl.String))
+print(DataFrameSource(frame, tag_columns=["session"], tag_only_columns=True).keys())
+# (('session',), ('trial',))
+
+table = pd.DataFrame({"session": ["s1", "s2", "s1"], "trial": [1, 1, 2]})
+table["session"] = table["session"].astype("category")
+table["session"] = table["session"].astype(table["session"].cat.categories.dtype)
+print(DataFrameSource(table, tag_columns=["session"], tag_only_columns=True).keys())
+# (('session',), ('trial',))
+```
+
+A pandas `Categorical` of integers that holds a missing value cannot be cast to an integer
+dtype this way (fill or drop the missing values first). A pandas `Categorical` of integers
+reaches the source as plain integers, so it needs no decoding.
+
+A data frame kept whole as a value in a cell (a pandas or polars `DataFrame` holding a
+categorical column) is not a dictionary column: it is a library value, stored and hashed as one
+(see [Arrays and other library values](arrays.md)), and is accepted. Supporting
+dictionary-encoded columns themselves is future work (ITL-1277).
 
 ### SpiralDB tables
 
@@ -176,7 +262,9 @@ print(first.row_count_estimate)  # rows in the whole table, without reading any
 ```
 
 - `limit=n` reads the first `n` rows in key order.
-- `where={column: value, ...}` reads the rows in which every named column equals its value.
+- `where={column: value, ...}` reads the rows in which every named column equals its value
+  (`source.where(...)` adds conditions to a built source; see
+  [Restricting a source versus filtering in the pipeline](#restricting-a-source-versus-filtering-in-the-pipeline)).
 - `asof=` reads the table as of an earlier version, and keeps reading it. Without it, a
   source reads the version the table had when the source was built, in every read, until a
   run finds a newer one (see [What a source does at a run](#what-a-source-does-at-a-run)):
@@ -213,6 +301,156 @@ consequence: with a shared store, reading a job node's stored records back
 (`get_all_records()`, `node.as_source()`) returns every row that any job with the same
 pipeline has read from that table, not only the rows of the latest restriction. The rows
 sent downstream during a run are only the rows that run read.
+
+#### Restricting a source versus filtering in the pipeline
+
+`source.where(column=value, ...)` returns a new source on the same table that reads only the
+rows in which every named column equals its value. Several conditions can be given in one
+call, as keywords or as a mapping, or across chained calls:
+`events.where(unit_id=106, session_index=2)` and
+`events.where(unit_id=106).where(session_index=2)` are the same restriction, reading the
+same rows. The conditions are a `Condition` (`orcapod.types`): `where(...)` builds one with
+`Condition.of(...)`, which takes the same arguments, and a `Condition` built beforehand can be
+given instead (`events.where(Condition.of(unit_id=106, session_index=2))`). A source
+restricted by a condition, a `limit=`, or both is **restricted**. Every source states its
+restriction through two read-only properties: `condition` (the empty `Condition` when it
+reads every row) and `row_limit` (`None` without a limit). A restriction is not an
+operator:
+
+- An operator (`SemiJoin`, `PolarsFilter`) is a step of the pipeline. It is a node of the
+  graph and part of the pipeline's identity: a pipeline with a filter computes something
+  else than one without, and its nodes have other hashes and other stored tables.
+- A restriction is attached to the source. It chooses which of the source's rows flow and
+  changes nothing else: the restricted source has the same `source_id`, `content_hash`,
+  `pipeline_hash`, schema and system-tag columns as the unrestricted one, and every row it
+  reads is a row of the table with every column, record ID included, as the unrestricted
+  source reads it. With `limit=`, the conditions apply before the limit, so a restricted read
+  with a limit is not a part of an unrestricted read with the same limit; each matching row
+  still keeps its record ID. It adds no node, so a job bound to a restricted source is the
+  same job, run over fewer rows.
+
+Use a restriction to work on part of a table (one subject, one session) with the pipeline you
+will later run on all of it: results computed under the restriction are stored under the same
+identities and reused by the full run. Use an operator when selecting rows is part of what
+the pipeline computes. Restrict on tag (key) columns where you can; a condition on a data
+column is allowed.
+
+<!-- docs-test: skip -->
+```python
+events = SpiralDBTableSource("my-project-123456", "spike_event", source_id="spikes")
+one_unit = events.where(unit_id=106)  # or events.where({"unit_id": 106})
+one_session = one_unit.where(session_index=2)  # conditions add up
+same_session = events.where(unit_id=106, session_index=2)  # both in one call
+print(one_session.condition)
+# unit_id=106, session_index=2
+print(one_session.row_limit)
+# None
+
+assert same_session.to_config() == one_session.to_config()
+assert one_unit.content_hash() == events.content_hash()
+job.bind(sources={"spikes": one_unit})  # the slot the unrestricted source fills
+summary = job.run()
+print(summary.conditions)
+# {'spikes': Condition.of({'unit_id': 106})}
+print(summary.restricted_source_ids)
+# {'spikes': 'spikes'}
+```
+
+(This sample needs a SpiralDB project, so it is not run with the documentation; `job` is a
+job built over `events`, whose slot is named by the source id.)
+
+A date or a time written as text is converted explicitly, with the function of its column's
+type: `date.fromisoformat` for a date column, `datetime.fromisoformat` for a timestamp
+column, with an offset (an aware value) for a column with a time zone.
+
+```python
+import datetime as dt
+
+from orcapod.types import Condition
+
+day = dt.date.fromisoformat("2026-11-20")  # a date column
+started = dt.datetime.fromisoformat("2026-11-20T09:30:00")  # a timestamp, no zone
+recorded = dt.datetime.fromisoformat("2026-11-20T09:30:00+00:00")  # a zoned timestamp
+print(Condition.of(day=day, started=started, recorded=recorded))
+# day=datetime.date(2026, 11, 20), started=datetime.datetime(2026, 11, 20, 9, 30), recorded=datetime.datetime(2026, 11, 20, 9, 30, tzinfo=datetime.timezone.utc)
+```
+
+- **One mechanism.** `where()` adds to the conditions given with `where=` (a mapping or a
+  `Condition`) when the source was built (`Condition.combined`), and SpiralDB applies them
+  in the scan. A column already restricted to another value
+  is refused, as is a column the table does not have, `None` (a null equals nothing) and
+  `where()` with no condition. Everything else of the source is carried over: the pinned
+  table version, `limit`, `max_rows`, the tags and data-tags, `tags_as_data`, the key
+  columns, the source id and the label. The original source is not changed.
+- **No conversion.** A value must be exactly of its column's Python type: an `int` for an
+  integer column (not `True`, not `1.0`, not a NumPy scalar: use `.item()`), a `float` for a
+  float column, a `datetime.date` for a date column and a `datetime.datetime` for a timestamp
+  column (not a string; see below), and it must fit the column's Arrow type. A timestamp
+  column with a time zone takes an aware `datetime`, one without a zone a naive `datetime`.
+  Anything else raises `TypeError`, naming the column and both types. Columns of other types
+  (lists, structs) take no condition.
+- **The table system's equality.** Each condition is sent to SpiralDB as `column == value`,
+  and which rows it selects is SpiralDB's own equality, not Orcapod's. For a float column,
+  whether a NaN value selects the NaN rows and whether `0.0` selects the `-0.0` rows is
+  decided by SpiralDB; under the usual floating-point rule a NaN equals nothing, so such a
+  condition may select no row. To select rows by such values as Orcapod matches them, filter
+  inside the pipeline (`PolarsFilter`). A NaN or infinite value is saved as
+  `{"float": "nan"}`, `{"float": "inf"}` or `{"float": "-inf"}`, since JSON has no such number.
+- **One restriction per table in a pipeline.** A restricted source has the unrestricted
+  source's identity, so a pipeline holds one restriction (or none) per source: building a
+  pipeline in which one table is read with two different restrictions (or with and without
+  one) raises `ValueError` instead of silently reading one of them, whatever streams lead to
+  the table: different column selections or operator chains, streams built before the
+  pipeline, a `CachedSource` or a `SourceProxy` bound to it. It is checked from what each
+  stream reads at that moment: when the pipeline is built, when it is compiled, by `bind`
+  before it binds (a slot bound to a stream over a table another slot reads) and when a run
+  starts. Use one restriction per pipeline, or build separate pipelines.
+- **With `limit=`.** A source built with `limit=n` reads the first `n` rows that match, in
+  key order: the conditions are applied first.
+- **Conditions as values.** Two conditions are equal when they require the same columns to
+  equal the same values, in any order. Values of different types differ (`1`, `True` and
+  `1.0`); floats compare as Orcapod matches them (`0.0` equals `-0.0`, NaN equals NaN); an
+  aware `datetime` is its instant, so one instant written in two zones is one value, and the
+  two 01:30 of a daylight-saving overlap (`fold`) are two. This equality decides whether two
+  restrictions are one restriction (for the one-restriction rule above); it does not decide
+  which rows a source returns.
+  `str(condition)` (or `condition.text()`) reads `unit_id=106, session_index=2`, and
+  `condition.equalities` maps each column to its value. A `Condition` has a Python hash,
+  consistent with that equality, so it can be a dictionary key or a set member; it never
+  enters an Orcapod source or pipeline hash.
+- **Recorded.** `RunSummary.conditions` maps the slot of each source read under a condition
+  to its `Condition`, `RunSummary.limits` the slot of each source read with a `limit=` to the
+  limit, and `RunSummary.restricted_source_ids` every such slot to its source id; the
+  summary shows them (`spikes (spikes): where unit_id=106, limit 3`). A saved job records them in
+  the source's config, and a loaded job reads with them. A slot's new restriction need
+  not match its previous one: a restricted source fits the slot of the unrestricted one, and
+  `bind` does not compare the two. But a bind after which two slots would read one source
+  identity under different restrictions is refused before any binding is replaced (one
+  restriction per table, above). A slot keeps one entry: a slot bound to a stream over two
+  restricted tables (a `semi_join` of two restricted sources) reports one condition and one
+  limit, those of the first table found (a known limit, ITL-1293), although every check reads
+  both.
+- **No cache over a restriction.** `CachedSource` (and `source.cached(...)`) refuses a
+  restricted source with `ValueError`, naming the restriction: a cache keeps the table's rows
+  under the table's identity, which a restriction is not part of, so a restricted read would
+  be read back as the whole table by every cache of it. Cache the unrestricted source, or read
+  without a cache. For the same reason an operator node that caches (`CacheMode.LOG` or
+  `CacheMode.REPLAY`) is refused when a source feeding it is restricted: its cache is kept
+  under the node's identity, so a log written from a restricted read would be replayed for
+  another restriction or none. The `ValueError` names the node and each restriction, and is
+  raised when both are known, before anything is read or written: when the cache mode is set
+  over a restricted source, when `bind` binds a restricted source under a caching node, or
+  else when a run starts. Use `CacheMode.OFF` there, or read the unrestricted source. A
+  function node stores its results row by row and is not concerned.
+- **Under an aggregation.** A `GroupBy`, `Batch` or `MergeJoin` below a restricted source
+  builds its groups from the rows the restriction lets through. That is allowed (each
+  aggregated row lists its members), and a job run issues one
+  `RestrictedAggregationWarning` naming the source and the step.
+- **Stored rows stay.** A run over a restricted source deletes nothing: a job node shows the
+  rows of its current run, and `node.as_source()` shows everything stored for it.
+
+`where()` is a copy of the source with the restriction applied to the copy; a later version
+offers the two steps on their own, and restrictions on other kinds of source.
 
 **Running again.** A run first checks the source: when the table has a newer version (rows
 added since the source was built or last checked), the source reads that version from then
@@ -437,6 +675,9 @@ before. Things to know:
 - The mapping is `{tag column: new data column}`. The new name must not already be a column
   and must not start with `_`; a wrong name raises `InputValidationError` when the source is
   built.
+- The copies follow the origin's data columns, in the order of their new names. The mapping
+  names a set of copies: the order you give it in changes neither the columns, their order,
+  nor any hash.
 - The copy has exactly the tag's type, including whether it may be null. If the tag may be
   null, annotate the function parameter as optional (`datetime | None`).
 - The copy equals the tag when the source is read. After that it is ordinary data: a function
@@ -571,6 +812,55 @@ order or content can vary between runs, pass an explicit, stable `source_id` **a
 key columns that are unique per row; this avoids both the duplicate entries and the repeated
 deliveries.
 
+An in-memory source with key columns and no `source_id` can instead hash its rows in key
+order: pass `hash_in_key_order=True` (`ArrowTableSource`, `DictSource`, `DataFrameSource`,
+`ListSource`; ITL-1272). The table is hashed sorted by the key columns, in the order you list
+them, so the same rows in any order give one default `source_id` and one content hash; the
+rows are still presented in the order you gave. It is off by default, because the order you
+gave may matter to you. It is refused without key columns (there is no key order) and with a
+`source_id`: the table hash is still computed then, but it does not determine a given
+`source_id` and enters no identity, so the argument would change nothing. The order of the key
+columns is part of the content hash either way; it changes the default `source_id` only when
+the two orders sort the table differently.
+
+```python
+from orcapod.sources import DictSource
+
+rows = [
+    {"subject": "s1", "trial": 1, "weight": 20.5, "count": 3},
+    {"subject": "s1", "trial": 2, "weight": 22.25, "count": 1},
+    {"subject": "s2", "trial": 1, "weight": 19.0, "count": 4},
+]
+orders = (rows, rows[::-1], [rows[1], rows[2], rows[0]])
+keyed = [
+    DictSource(order, tag_columns=["subject", "trial"],
+               record_id_columns=["subject", "trial"], hash_in_key_order=True)
+    for order in orders
+]
+print(len({s.source_id for s in keyed}), len({s.content_hash() for s in keyed}))
+# 1 1
+print(keyed[1].as_table().column("weight").to_pylist())
+# [19.0, 22.25, 20.5]
+other_key_order = DictSource(rows, tag_columns=["subject", "trial"],
+                             record_id_columns=["trial", "subject"],
+                             hash_in_key_order=True)
+print(other_key_order.source_id == keyed[0].source_id)
+# False
+as_given = [
+    DictSource(order, tag_columns=["subject", "trial"],
+               record_id_columns=["subject", "trial"])
+    for order in orders
+]
+print(len({s.source_id for s in as_given}))
+# 3
+```
+
+A source given a `source_id` is an address: its content hash is built from its class, schema,
+`source_id` and key columns, never from its rows, so changing the rows changes it only when the
+schema changes (a column of another type). This holds for `ListSource` too (developer,
+November 21, 2026, ITL-1272): its elements and its tag function enter its identity only through
+its default `source_id` and its output schema.
+
 These columns are hidden by default. You can reveal them using `ColumnConfig`:
 
 ```python
@@ -601,7 +891,7 @@ print(table.column_names)
 ```
 
 Pass `source_id` to give the source a readable name in these provenance tokens. Without it,
-Orcapod derives an id from the source's content hash.
+Orcapod derives an id from a hash of the source's table, as described above.
 
 ## Code example
 

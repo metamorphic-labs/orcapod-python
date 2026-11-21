@@ -676,7 +676,9 @@ class StreamBase(TraceableBase):
         "A"})``), or keyword arguments (``add_tags(cohort="A", run=3)``), not both. A
         tag named ``label``, or a name that is not a Python identifier, is given
         through the dict. Each new tag holds the same value on every row and follows
-        the existing tags, in the order given. A value is a ``bool``, ``int``,
+        the existing tags, in name order: the new tags are a set, and the order they are
+        given in is not kept (ITL-1269), so ``add_tags(run=3, cohort="A")`` places
+        ``cohort`` before ``run``. A value is a ``bool``, ``int``,
         ``float``, ``str`` or ``bytes``, and its type is the tag's type. Data
         columns, their values and their source info are unchanged.
 
