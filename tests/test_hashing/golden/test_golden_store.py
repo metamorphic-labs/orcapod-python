@@ -1230,6 +1230,123 @@ def test_a_case_declaring_a_prebuilt_provisional_operator_is_provisional(
     assert provisional == frozenset(values)
 
 
+class _GoldenStubPolling:
+    """A polling implementation that is never polled (ITL-1314 refusal test)."""
+
+    def identity(self) -> Any:
+        return ("_GoldenStubPolling",)
+
+    def to_config(self) -> None:
+        return None
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any]) -> _GoldenStubPolling:
+        return cls()
+
+    def schema(self) -> Any:
+        from orcapod.types import Schema
+
+        return Schema({"id": str, "value": int})
+
+    async def poll(self, cursor: Any = None) -> bool:
+        return False
+
+    async def fetch(self, cursor: Any = None) -> Any:
+        raise NotImplementedError
+
+    async def close(self) -> None:
+        return None
+
+
+def _building_polling_sources(*source_ids: str) -> Any:
+    """A case function that builds a PollingSource per id and pins their names."""
+
+    def fn() -> dict[str, Any]:
+        from orcapod.core.sources import PollingSource
+
+        built = [
+            PollingSource(
+                _GoldenStubPolling(),
+                tag_columns="id",
+                record_id_columns="id",
+                source_id=source_id,
+            )
+            for source_id in source_ids
+        ]
+        return {"value": [source.source_id for source in built]}
+
+    return fn
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
+@pytest.mark.parametrize("source_ids", [("one",), ("one", "two")])
+def test_a_case_building_a_polling_source_is_refused(
+    monkeypatch: pytest.MonkeyPatch, source_ids: tuple[str, ...]
+) -> None:
+    """A provisional source is never pinned, and a case cannot declare it (ITL-1314)."""
+    monkeypatch.setitem(
+        cases._CASES,
+        "semantic",
+        [("polling", _building_polling_sources(*source_ids), ())],
+    )
+    with pytest.raises(
+        ValueError, match=re.escape("uses the provisional ['PollingSource']")
+    ):
+        _ = cases.compute_group_kinds("semantic")
+    monkeypatch.setitem(
+        cases._CASES,
+        "semantic",
+        [("polling", _building_polling_sources(*source_ids), ("PollingSource",))],
+    )
+    with pytest.raises(ValueError, match=re.escape("declares ['PollingSource']")):
+        _ = cases.compute_group_kinds("semantic")
+
+
+def _reading_built_polling_sources(read: str, *source_ids: str) -> Any:
+    """A case function over PollingSources built BEFORE the case runs (a fixture).
+
+    The sources are built (and, for the hashes, hashed once) outside any recording, so
+    only the reads inside the case can record the provisional use.
+    """
+    from orcapod.core.sources import PollingSource
+
+    built = [
+        PollingSource(
+            _GoldenStubPolling(),
+            tag_columns="id",
+            record_id_columns="id",
+            source_id=source_id,
+        )
+        for source_id in source_ids
+    ]
+    for source in built:  # cached before the case runs
+        _ = source.content_hash(), source.pipeline_hash()
+
+    def fn() -> dict[str, Any]:
+        if read == "source_id":
+            return {"value": [source.source_id for source in built]}
+        if read == "content_hash":
+            return {"value": [source.content_hash().to_string() for source in built]}
+        return {"value": [source.pipeline_hash().to_string() for source in built]}
+
+    return fn
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
+@pytest.mark.parametrize("read", ["source_id", "content_hash", "pipeline_hash"])
+@pytest.mark.parametrize("source_ids", [("one",), ("one", "two")])
+def test_a_case_reading_a_polling_source_built_before_it_is_refused(
+    monkeypatch: pytest.MonkeyPatch, read: str, source_ids: tuple[str, ...]
+) -> None:
+    """Reading a provisional source's identity records its use, cached or not (ITL-1314)."""
+    case = _reading_built_polling_sources(read, *source_ids)
+    monkeypatch.setitem(cases._CASES, "semantic", [("polling", case, ())])
+    with pytest.raises(
+        ValueError, match=re.escape("uses the provisional ['PollingSource']")
+    ):
+        _ = cases.compute_group_kinds("semantic")
+
+
 def test_a_case_declaring_an_unknown_provisional_name_is_refused(
     monkeypatch: pytest.MonkeyPatch, two_provisional: None
 ) -> None:

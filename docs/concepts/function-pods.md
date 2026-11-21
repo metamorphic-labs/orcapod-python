@@ -648,7 +648,8 @@ A node is stale, and runs, when:
 - `clear_cache()` was called on it, or on any job node above it;
 - a job node above it ran again;
 - its source was bound again (`job.bind(sources=...)`), or the bound source's own modified
-  time moved (a `CachedSource` that read new rows, a `PollingSource` that found new rows).
+  time moved (a `CachedSource` that read new rows, a `PollingSource` that found new rows;
+  `PollingSource` is provisional, see [Provisional sources](sources.md#provisional-sources)).
 
 Staleness comes from modified times only, so every run first asks each source feeding it,
 once, whether its data changed (`check_for_new_data()`, ITL-1102): `job.run()`,

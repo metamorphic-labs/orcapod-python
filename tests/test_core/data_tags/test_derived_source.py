@@ -236,7 +236,10 @@ def test_a_derived_source_checks_the_records_it_reads_itself(
 def test_tags_as_data_over_a_data_tag_node(orchestrator: Orchestrator) -> None:
     job = _function_job(InMemoryArrowDatabase(), orchestrator)
     node = job.nodes["double"]
-    source = node.as_source(tags_as_data={"time": "start", "unit": "unit_copy"})
+    source = node.as_source(
+        tags_as_data={"time": "start", "unit": "unit_copy"},
+        source_id="with_tags_as_data",
+    )
     # The data-tag keeps its binding; each copy is a new plain data column.
     assert source.keys() == (("unit", "time"), ("unit", "y", "start", "unit_copy"))
     table = source.as_table(all_info=True)
@@ -251,7 +254,9 @@ def test_tags_as_data_over_a_data_tag_node(orchestrator: Orchestrator) -> None:
 
 
 def test_tags_as_data_over_a_data_tag_source() -> None:
-    source = DerivedSource(_source(), tags_as_data={"time": "start"})
+    source = DerivedSource(
+        _source(), tags_as_data={"time": "start"}, source_id="with_tags_as_data"
+    )
     assert source.keys() == (("unit", "time"), ("unit", "amp", "start"))
     assert source.as_table().column_names.count("unit") == 1
 

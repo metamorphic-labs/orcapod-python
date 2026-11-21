@@ -35,7 +35,8 @@ hashing) and produces the final immutable stream.
 
 `orcapod.sources` also provides database-backed sources (`SQLiteTableSource`,
 `PostgreSQLTableSource`, `SpiralDBTableSource`) and `PollingSource` for data that arrives over
-time; see the [API reference](../api/sources.md). Their default `source_id` names the table
+time (provisional in this release, see [Provisional sources](#provisional-sources)); see the
+[API reference](../api/sources.md). Their default `source_id` names the table
 where it lives (`sqlite_table:<db path>:main.<table>`,
 `postgresql_table:<host>:<port>/<database>.<schema>.<table>`, with the server the connection
 reached; the
@@ -648,7 +649,9 @@ experiments = DictSource(
 )
 
 with_start = DerivedSource(
-    experiments, tags_as_data={"session_start": "session_start_value"}
+    experiments,
+    tags_as_data={"session_start": "session_start_value"},
+    source_id="experiments_with_start",
 )
 
 tag_keys, data_keys = with_start.keys()
@@ -686,10 +689,11 @@ before. Things to know:
   (`job.nodes["bmi"].as_source(tags_as_data=...)`).
 - It is a **new source**, not a step in the origin's pipeline: `upstreams` is empty, and it
   has provenance columns of its own, like the result of handing the same rows to
-  `ArrowTableSource`. Use it in place of the origin. Its default `source_id` is
-  `tags_as_data:` followed by a labelled hash built from the origin's identity and the mapping, so
-  it changes when either changes; pass `source_id=` to choose a name. The mapping is part of the
-  source's `content_hash` either way, so two mappings never share one.
+  `ArrowTableSource`. Use it in place of the origin. It needs a `source_id`: there is no
+  default, and building one without it raises `ValueError` before the origin is read
+  (ITL-1313); `as_source(tags_as_data=..., source_id=...)` takes it too. The source is
+  identified by that name and the mapping, like any named source: the mapping is part of its
+  `content_hash`, so two mappings never share one.
 - A saved job reloads a derived source whenever its origin can be reloaded (a CSV file, a
   Delta table, a database table). Over an in-memory source it is saved but not reloaded, like
   the in-memory source itself.
@@ -698,12 +702,31 @@ before. Things to know:
 print(with_start.upstreams)
 # ()
 print(with_start.source_id)
-# tags_as_data:...:...
+# experiments_with_start
 ```
 
 Only a source can do this. An operator rearranges rows and columns, and every data value it
 emits was already a data value of its input; turning a tag value into a data value creates
 new data, which is what a source is for.
+
+### Provisional sources
+
+Data context v1 freezes the hashes of Orcapod at the 0.4.0 release. A provisional source is
+outside that freeze: its default `source_id` and its content hash are still being decided
+(ITL-1316), so a later release may change them, and with them the system tags, stored paths
+and record ids of its rows and of every step downstream of it, which then compute their
+results again (nothing stored is lost or wrong). It works as any source does otherwise.
+
+```python
+from orcapod.sources import PROVISIONAL_SOURCES
+
+print(sorted(PROVISIONAL_SOURCES))
+# ['PollingSource']
+```
+
+Building one, directly or from a saved config, issues `orcapod.errors.ProvisionalHashWarning`
+once per process; filter its class to silence it, as for
+[provisional operators](operators.md#provisional-operators).
 
 ## What a source does at a run
 

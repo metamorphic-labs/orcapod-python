@@ -314,7 +314,9 @@ The output schema follows three rules:
 ```python
 from orcapod.sources import DerivedSource
 
-with_probe = DerivedSource(source, tags_as_data={"probe": "probe_name"})
+with_probe = DerivedSource(
+    source, tags_as_data={"probe": "probe_name"}, source_id="spikes_with_probe"
+)
 by_subject = GroupBy(by=["subject_id"])(with_probe)
 print(by_subject.keys())
 # (('subject_id',), ('spike_count', 'probe_name'))

@@ -14,6 +14,7 @@ from orcapod.core.nodes import JobNode
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.nodes.operator_node import OperatorJobNode
 from orcapod.core.nodes.source_node import SourceJobNode
+from orcapod.core.sources.derived_source import DerivedSource
 from orcapod.core.streams.base import StreamBase
 from orcapod.side_effects import SideEffectJobNode, SideEffectNode
 from orcapod.core.tracker import AutoRegisteringContextBasedTracker
@@ -1639,6 +1640,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             # is the file's error, not a source that could not be rebuilt.
             try:
                 src_config = source_config_at_version(src_config, version)
+                # A tags_as_data source saved without its required source id is an
+                # invalid file, refused here; the best-effort rebuild below would
+                # leave the slot unbound instead (ITL-1313).
+                DerivedSource.require_saved_source_id(src_config)
                 if spec_name in slots:
                     slot = slots[spec_name]
                     check_source_config_binding(
