@@ -334,6 +334,9 @@ class MapTags(UnaryOperator):
         tag_only: Rename data-tags in the tag role only.
     """
 
+    # Provisional: its identity is not frozen with data context v1 (ITL-1279).
+    PROVISIONAL: ClassVar[bool] = True
+
     # Data-tags (ITL-1023): handled.
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
@@ -618,6 +621,9 @@ class MapColumns(UnaryOperator):
             by a column that is not renamed, two columns get the same new name,
             or (with ``drop_unmapped``) no data column would remain.
     """
+
+    # Provisional: its identity is not frozen with data context v1 (ITL-1279).
+    PROVISIONAL: ClassVar[bool] = True
 
     def __init__(
         self,

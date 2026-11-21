@@ -11,6 +11,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+import pandas as pd
 import pytest
 
 from orcapod.contexts import get_default_context
@@ -791,9 +793,25 @@ def _freeze_provisional(root: Path, group: str, frozen_file: str) -> dict[str, A
     return entries
 
 
-def _without_declarations(group: str) -> list[tuple[str, Any, tuple[str, ...]]]:
-    """The cases of a group as if no provisional operator were left in it."""
-    return [(name, fn, ()) for name, fn, _ in cases._CASES[group]]
+def _without_declaration(
+    group: str, feature: str = "PolarsFilter"
+) -> list[tuple[str, Any, tuple[str, ...]]]:
+    """The cases of a group as if ``feature`` had left the provisional group: no case
+    declares it any more; every other declaration stays (ITL-1324: a group holds
+    provisional library value types too)."""
+    return [
+        (name, fn, tuple(n for n in declared if n != feature))
+        for name, fn, declared in cases._CASES[group]
+    ]
+
+
+def _declaring(group: str, feature: str) -> set[str]:
+    """The case names of a group that declare ``feature`` and nothing else."""
+    return {
+        name
+        for name, _, declared in cases._CASES[group]
+        if tuple(declared) == (feature,)
+    }
 
 
 def test_the_repository_pins_provisional_entries_outside_the_history() -> None:
@@ -845,15 +863,20 @@ def test_relocate_refuses_a_provisional_entry_in_a_released_file(tree: Path) -> 
 def test_relocate_freezes_the_entries_of_an_operator_that_left_the_group(
     tree: Path, monkeypatch: pytest.MonkeyPatch, released: bool
 ) -> None:
-    """Graduation: the entries go to the open frozen file, the provisional file goes."""
-    entries = store.read_json(_provisional(tree) / "semantic.json")
+    """Graduation: the entries of the feature that left go to the open frozen file; the
+    provisional file keeps the entries of every other provisional feature."""
+    graduating = _declaring("semantic", "PolarsFilter")
+    provisional = store.read_json(_provisional(tree) / "semantic.json")
+    entries = {k: v for k, v in provisional.items() if k.split(".")[0] in graduating}
+    staying = {k: v for k, v in provisional.items() if k not in entries}
+    assert entries and staying
     if released:
         main(["--root", str(tree), "--release", "0.3.0"])
     newest = store.read_json(_folder(tree) / NEWEST_SEMANTIC)
-    monkeypatch.setitem(cases._CASES, "semantic", _without_declarations("semantic"))
+    monkeypatch.setitem(cases._CASES, "semantic", _without_declaration("semantic"))
     main(["--root", str(tree), "--relocate", "--group", "semantic"])
-    assert not (_provisional(tree) / "semantic.json").exists()
-    assert "semantic.json" not in _listing(tree)
+    assert store.read_json(_provisional(tree) / "semantic.json") == staying
+    assert "semantic.json" in _listing(tree)
     if released:
         assert store.read_json(_folder(tree) / NEWEST_SEMANTIC) == newest
         assert store.read_json(_folder(tree) / NEXT_SEMANTIC) == entries
@@ -879,8 +902,13 @@ def test_check_reports_a_provisional_entry_in_a_frozen_file(tree: Path) -> None:
 def test_check_reports_an_entry_in_the_provisional_file_whose_case_is_not(
     tree: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    entry = sorted(store.read_json(_provisional(tree) / "semantic.json"))[0]
-    monkeypatch.setitem(cases._CASES, "semantic", _without_declarations("semantic"))
+    graduating = _declaring("semantic", "PolarsFilter")
+    entry = sorted(
+        k
+        for k in store.read_json(_provisional(tree) / "semantic.json")
+        if k.split(".")[0] in graduating
+    )[0]
+    monkeypatch.setitem(cases._CASES, "semantic", _without_declaration("semantic"))
     with pytest.raises(
         SystemExit,
         match=re.escape(f"semantic:{entry} is pinned in the provisional file"),
@@ -896,7 +924,14 @@ def test_add_writes_provisional_entries_to_their_provisional_files(
     original = _everything(tree)
     for name in ("semantic.json", "pipeline.json"):
         (_provisional(tree) / name).unlink()
-    _set_listing(tree, {})
+    _set_listing(
+        tree,
+        {
+            k: v
+            for k, v in _listing(tree).items()
+            if k not in ("semantic.json", "pipeline.json")
+        },
+    )
     args = ["--root", str(tree)]
     for group in order:
         args += ["--group", group]
@@ -934,6 +969,9 @@ def test_removing_every_entry_of_a_provisional_file_removes_it(tree: Path) -> No
 
 
 def test_an_unlisted_provisional_file_is_reported(tree: Path) -> None:
+    listing = dict(_listing(tree))
+    listing.pop("schema.json", None)
+    _set_listing(tree, listing)
     _write(_provisional(tree), "schema.json", {"x.y": "z"})
     assert any(
         "golden.provisional does not list it" in p
@@ -1067,17 +1105,110 @@ def test_a_case_declaring_an_unknown_provisional_name_is_refused(
         _ = cases.compute_group_kinds("semantic")
 
 
-def test_the_repository_cases_declare_exactly_the_polars_filter_cases() -> None:
-    """The cases that depend on PolarsFilter, measured for ITL-1266, and no other."""
+def test_the_repository_cases_declare_exactly_the_measured_cases() -> None:
+    """The cases that depend on a provisional operator or library value type, measured
+    for ITL-1266, ITL-1279 and ITL-1324 (docs/dev/scripts/itl_1279/measure_relocation.py),
+    and no other. A split case is listed once: its provisional part."""
     declared = {
         (group, name): names
         for group, registered in cases._CASES.items()
         for name, _, names in registered
         if names
     }
+    numpy_pandas = cases.NUMPY_PANDAS_TYPES
+    polars = cases.POLARS_TYPES
+    torch = (cases.TORCH_TENSOR,)
     assert declared == {
         ("semantic", "polars_expr"): ("PolarsFilter",),
+        ("semantic", "value"): numpy_pandas,
+        ("semantic", "type"): numpy_pandas,
+        ("semantic", "polars_value"): polars,
+        ("semantic", "polars_type"): polars,
+        ("schema", "single_field"): numpy_pandas,
+        ("schema", "polars_single_field"): polars,
+        ("arrow", "extension_no_values"): numpy_pandas,
+        ("arrow", "polars_extension_no_values"): polars,
+        ("datagram", "ndarray"): (cases.NUMPY_NDARRAY,),
+        ("datagram", "dataframe"): (cases.PANDAS_DATAFRAME,),
+        ("datagram", "structural_with_array"): (cases.NUMPY_NDARRAY,),
+        ("datagram", "polars_data_hash"): polars,
+        ("datagram", "polars_dataframe"): (cases.POLARS_DATAFRAME,),
+        ("datagram", "polars_series"): (cases.POLARS_SERIES,),
         ("pipeline", "polars_filter"): ("PolarsFilter",),
         ("pipeline", "polars_filter_expr"): ("PolarsFilter",),
         ("pipeline", "polars_filter_expr_job"): ("PolarsFilter",),
+        ("pipeline", "merge_join"): ("MergeJoin",),
+        ("pipeline", "join_key_nullability"): ("MergeJoin",),
+        ("pipeline", "batch"): ("Batch",),
+        ("pipeline", "group_by"): ("GroupBy",),
+        ("pipeline", "index_pick"): ("Index", "Pick"),
+        ("pipeline", "map_columns"): ("MapColumns",),
+        ("pipeline", "add_tags"): ("AddTags",),
+        ("pipeline", "group_by_arrangement"): ("GroupBy",),
+        ("pipeline", "group_by_nan_keys"): ("GroupBy",),
+        ("torch", "value"): torch,
+        ("torch", "type"): torch,
+        ("torch", "single_field"): torch,
+        ("torch", "datagram"): torch,
     }
+
+
+def test_the_provisional_library_value_types_are_declarable() -> None:
+    """The names a case may declare include each provisional library value type
+    (ITL-1324), by extension name, beside the provisional operators."""
+    names = cases.declarable_provisional_names()
+    assert {
+        cases.NUMPY_NDARRAY,
+        cases.PANDAS_DATAFRAME,
+        cases.PANDAS_SERIES,
+        cases.POLARS_DATAFRAME,
+        cases.POLARS_SERIES,
+        cases.TORCH_TENSOR,
+    } <= names
+    assert {"PolarsFilter", "GroupBy", "MergeJoin"} <= names
+
+
+def _hashing(*values: Any) -> Any:
+    def fn() -> dict[str, Any]:
+        hasher = cases._ctx().semantic_hasher  # pyright: ignore[reportPrivateUsage]
+        return {
+            f"v{i}": hasher.hash_object(v).to_string() for i, v in enumerate(values)
+        }
+
+    return fn
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
+@pytest.mark.parametrize(
+    ("values", "missing"),
+    [
+        ((np.arange(3), pd.Series([1.0])), [cases.NUMPY_NDARRAY, cases.PANDAS_SERIES]),
+        ((pd.Series([1.0]), np.arange(3)), [cases.NUMPY_NDARRAY, cases.PANDAS_SERIES]),
+        ((1, np.arange(3)), [cases.NUMPY_NDARRAY]),
+    ],
+)
+def test_a_case_hashing_an_undeclared_library_value_type_is_refused(
+    monkeypatch: pytest.MonkeyPatch, values: tuple[Any, ...], missing: list[str]
+) -> None:
+    """A direct use of a provisional library value type is recorded on every use, in
+    any order, so a frozen case that hashes one without declaring it is refused."""
+    monkeypatch.setitem(cases._CASES, "semantic", [("lib", _hashing(*values), ())])
+    with pytest.raises(ValueError, match=re.escape(f"uses the provisional {missing}")):
+        _ = cases.compute_group_kinds("semantic")
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
+def test_a_case_declaring_the_library_value_types_it_hashes_is_provisional(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(
+        cases._CASES,
+        "semantic",
+        [
+            ("lib", _hashing(pd.Series([1.0]), np.arange(3)), cases.NUMPY_PANDAS_TYPES),
+            ("plain", _hashing(1, "a"), ()),
+        ],
+    )
+    values, provisional = cases.compute_group_kinds("semantic")
+    assert set(values) == {"lib.v0", "lib.v1", "plain.v0", "plain.v1"}
+    assert provisional == frozenset({"lib.v0", "lib.v1"})

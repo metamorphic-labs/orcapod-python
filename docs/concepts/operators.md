@@ -836,14 +836,36 @@ The provisional operators are listed in one place:
 from orcapod.operators import PROVISIONAL_OPERATORS
 
 print(sorted(PROVISIONAL_OPERATORS))
-# ['PolarsFilter']
+# ['AddTags', 'Batch', 'GroupBy', 'Index', 'MapColumns', 'MapTags', 'MergeJoin', 'Pick', 'PolarsFilter', 'TagBy']
 ```
 
-Each name maps to the issue that decides the operator's identity (`PolarsFilter`: whether
-the order of its predicates belongs to it). Building a provisional operator, directly or
-through a stream method such as `polars_filter`, issues `orcapod.errors.ProvisionalHashWarning`
-once per operator per process. To silence it once you have taken note, filter its class after
-importing Orcapod:
+They are the operators whose identity choice is not yet obvious and solid (developer,
+November 19, 2026). Each name maps to the issue that decides its identity or output:
+
+| Operator | What is still open |
+|---|---|
+| `GroupBy`, `Batch` | their output for a data-tag and its data column (ITL-1017) |
+| `MergeJoin` | its rules for data-tags (ITL-1018); it became ordered in this release |
+| `MapTags` | its rename rules for data-tags (ITL-1018) |
+| `MapColumns` | its behaviour with data-tags (ITL-1022) |
+| `Pick`, `Index` | the policy for a miss, which changes the output (ITL-439) |
+| `PolarsFilter` | whether the order of its predicates belongs to its identity (ITL-1247) |
+| `TagBy`, `AddTags` | days old, their identities just changed (ITL-1279) |
+
+Every other operator is frozen with data context v1: `Join`, `SemiJoin`, `MapData`, the
+column selections (`SelectTagColumns`, `SelectDataColumns`, `DropTagColumns`,
+`DropDataColumns`, `SelectColumns`, `DropColumns`) and `DropNulls`.
+
+What you get with a provisional operator: the same results as with any other operator, a
+warning, and, should a later release change the operator's identity, a recomputation of its
+steps (and of every step downstream) instead of reuse; nothing stored is lost or wrong.
+Building one, directly, through a stream method such as `group_by` or `polars_filter`, or by
+loading a saved job that holds one, issues `orcapod.errors.ProvisionalHashWarning` once per
+operator per process. It reads, for example, `GroupBy is provisional: its identity is not
+frozen with data context v1 and may change in a later release. ...` and points to this
+section. A notebook shows it once, below the first cell that builds the operator; it is a
+warning, not an error, and the cell runs. To silence it once you have taken note, filter its
+class after importing Orcapod:
 
 ```python
 import warnings
@@ -853,9 +875,11 @@ from orcapod.errors import ProvisionalHashWarning
 warnings.filterwarnings("ignore", category=ProvisionalHashWarning)
 ```
 
-An operator leaves the group at a release: from that release on its identity is frozen like
-every other operator's. Its golden values then move into the frozen golden files (see
-[Golden hashes](../reference/golden-hashes.md#provisional-files)).
+An operator leaves the group (its identity is decided) at a release, or before one: from then
+on its identity is frozen like every other operator's, and its golden values move into the
+frozen golden files (see [Golden hashes](../reference/golden-hashes.md#provisional-files)). An
+operator can join the group only while no release has frozen its values: a frozen identity
+never becomes provisional again.
 
 ## Arrow types of operator outputs
 

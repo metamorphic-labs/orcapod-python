@@ -28,9 +28,32 @@ from orcapod.utils.warning_utils import outside_orcapod_stacklevel
 
 PROVISIONAL_OPERATORS: Mapping[str, str] = MappingProxyType(
     {
+        # Developer, November 19, 2026 (ITL-1279): "anything whose identity choice isn't
+        # obvious and feels solid should be put into provisional first". Each names the
+        # issue that decides its identity or output; the reasons per operator are in
+        # docs/dev/specs/itl-1271-order-invariance-audit.md.
         # Whether the order of its predicates is part of its identity (ITL-1247), and
         # whether a general Filter over a Condition supersedes it (ITL-1265).
         "PolarsFilter": "ITL-1247",
+        # Its output for a data-tag and its data column (ITL-1017); a mode keeping the
+        # non-key tags (ITL-1071).
+        "GroupBy": "ITL-1017",
+        # Its output for a data-tag and its data column (ITL-1017).
+        "Batch": "ITL-1017",
+        # Its rules for data-tags (ITL-1018); it became ordered in ITL-1281.
+        "MergeJoin": "ITL-1018",
+        # Its rename rules for data-tags (ITL-1018); arguments under two weeks old.
+        "MapTags": "ITL-1018",
+        # Its behaviour with data-tags (ITL-1022); two days old.
+        "MapColumns": "ITL-1022",
+        # The policy for a miss changes its output (ITL-439).
+        "Pick": "ITL-439",
+        # As Pick (ITL-439), plus a stored source-info token known wrong (ITL-866).
+        "Index": "ITL-439",
+        # Days old, its identity just changed (ITL-1226); no issue decides more yet.
+        "TagBy": "ITL-1279",
+        # Days old, its identity just changed (ITL-1269); a function form is future.
+        "AddTags": "ITL-1279",
     }
 )
 """The provisional operators: class name to the issue that decides its identity."""

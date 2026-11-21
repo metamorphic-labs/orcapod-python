@@ -453,7 +453,9 @@ Developer, November 12, 2026 (ITL-981); see `docs/concepts/arrays.md` and
   (developer, November 13, 2026, ITL-1068; moved past 0.4.0rc1 on November 17, 2026): their
   extension names are listed in `provisional` of `contexts/logical_types.json`, and using
   one issues `ProvisionalHashWarning` once per type
-  per process. A new library value type must be added to that list. The list never enters a
+  per process. A new library value type must be added to that list. Its golden entries live in the
+  provisional golden files (ITL-1324), and so do those of a user class with a field of such a
+  type, whose identity embeds the type's identifier. The list never enters a
   hash, identifier or stored path.
 
 ## User classes: exact and structural
@@ -509,9 +511,16 @@ Orcapod stores or embeds in a name is pinned in the golden folder of the current
   the release step for every version. A withdrawn version is never released again.
 - Provisional operators are outside the freeze (developer, November 18, 2026, ITL-1266):
   `orcapod.operators.PROVISIONAL_OPERATORS` (`core/operators/provisional.py`) is the one
-  list (name to the issue deciding its identity; today `PolarsFilter`), and each listed class
-  sets `PROVISIONAL = True` (a test checks they agree). Building one issues
-  `ProvisionalHashWarning` once per operator per process. A golden case that depends on one
+  list (name to the issue deciding its identity), and each listed class sets
+  `PROVISIONAL = True` (a test checks they agree, and that every exported operator is either
+  provisional or frozen). The list (developer, November 19, 2026, ITL-1279: "anything whose
+  identity choice isn't obvious and feels solid should be put into provisional first"):
+  `PolarsFilter`, `GroupBy`, `TagBy`, `AddTags`, `MergeJoin`, `MapTags`, `MapColumns`,
+  `Pick`, `Index`, `Batch`. Frozen: `Join`, `SemiJoin`, `MapData`, the Select/Drop column
+  operators, `DropNulls`. An operator joins the group only while no release has frozen its
+  values, and leaves it when its identity is decided (before or at a release), never the other
+  way after a release. Building one (directly, through a stream method, or by loading a saved
+  job) issues `ProvisionalHashWarning` once per operator per process. A golden case that depends on one
   declares it (`@case(..., provisional=("PolarsFilter",))`; `compute_group_kinds` refuses a
   case that builds an undeclared one); its entries live in
   `data/<folder>/provisional/<group>.json`, listed in `golden.provisional` of the manifest,
@@ -520,7 +529,12 @@ Orcapod stores or embeds in a name is pinned in the golden folder of the current
   context. `generate_golden_hashes.py --relocate` moves entries, values unchanged, between
   frozen and provisional files; an operator leaving the group has its entries relocated into
   a frozen file before the release step. Never put a value that depends on a provisional
-  operator in a frozen file.
+  operator in a frozen file. The provisional library value types are outside the freeze the
+  same way (ITL-1324): a case declares one by extension name
+  (`provisional=("orcapod.numpy.ndarray",)`), and each use of one is noted for the refusal.
+  The refusal sees a direct use only: a user class with a field of such a type embeds its
+  identifier in an identity built once and cached, so golden items are split by
+  `cases.provisional_types_of` (checked against every fixture class's identity record).
 - The unit of immutability is the golden file. The manifest's `golden.history`
   (`src/orcapod/contexts/data/<version>.json`) lists every file with the sha256 of its bytes;
   a release appends a revision with `added: {}`, pinned in

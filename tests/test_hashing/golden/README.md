@@ -14,9 +14,15 @@ In short:
 - A file listed by a released revision never changes. New values go into new files, in any
   release. A change to a released value needs a new data context version.
 - `data/<folder>/provisional/<group>.json` holds the values of the cases that depend on a
-  provisional operator (`orcapod.operators.PROVISIONAL_OPERATORS`; ITL-1266). A case
-  declares them (`@case(..., provisional=("PolarsFilter",))`); a case that builds one without
-  declaring it is refused. The manifest lists these files in `golden.provisional`, outside
+  provisional operator (`orcapod.operators.PROVISIONAL_OPERATORS`; ITL-1266, ITL-1279) or a
+  provisional library value type (`provisional` of `contexts/logical_types.json`, by
+  extension name; ITL-1324). A case declares them (`@case(..., provisional=("GroupBy",))`,
+  `provisional=("orcapod.numpy.ndarray",)`); a case that uses one without declaring it is
+  refused. The refusal sees a DIRECT use (an operator built, a library type resolved); it
+  cannot see a dependence behind a user class's identity, built once at registration and
+  cached (a class with an `np.ndarray` field). Such items are split out by
+  `cases.provisional_types_of`, which `test_golden_provisional_types.py` checks against every
+  fixture class's identity record. The manifest lists these files in `golden.provisional`, outside
   the history: no release freezes them. `--relocate` moves entries, values unchanged,
   between the frozen and the provisional files as their cases declare.
 - Data context v1 is open until 0.4.0: 0.3.0 was withdrawn on 2026-11-17 (ITL-1255). Its

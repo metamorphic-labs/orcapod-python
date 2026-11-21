@@ -319,6 +319,9 @@ class GroupBy(UnaryOperator):
         NotImplementedError: If ``member_order`` is a function.
     """
 
+    # Provisional: its identity is not frozen with data context v1 (ITL-1279).
+    PROVISIONAL: ClassVar[bool] = True
+
     # Data-tags (ITL-1023): handled.
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 

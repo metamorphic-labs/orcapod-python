@@ -24,15 +24,17 @@ wanted on purpose starts a new data context version. It never edits a released v
     entries that move, each explained. 0.4.0 freezes `v1`. See
     [Withdrawing a release](#withdrawing-a-release).
 
-!!! note "Provisional operators are outside the freeze"
-    A provisional operator (`orcapod.operators.PROVISIONAL_OPERATORS`, today only
-    `PolarsFilter`) has an identity that no release freezes yet (ITL-1266). The golden values
-    of every case that depends on one, its own hashes and those of every step downstream of
-    it, are in the provisional files, `data/v1/provisional/<group>.json`. They are computed
-    and checked on every run like every other value, but no release lists them: they can
-    change in a later release without a new data context, with the developer's approval of
-    the exact list. So the promise on this page holds for a pipeline only when it contains
-    no provisional operator. See [Provisional files](#provisional-files).
+!!! note "Provisional operators and library value types are outside the freeze"
+    A provisional operator (`orcapod.operators.PROVISIONAL_OPERATORS`; ITL-1266, ITL-1279)
+    has an identity that no release freezes yet, and so has a provisional library value type
+    (`provisional` of `contexts/logical_types.json`: NumPy arrays, torch tensors, pandas and
+    Polars frames and series; ITL-1324). The golden values of every case that depends on one,
+    its own hashes and those of every step downstream of it, are in the provisional files,
+    `data/v1/provisional/<group>.json`. They are computed and checked on every run like every
+    other value, but no release lists them: they can change in a later release without a new
+    data context, with the developer's approval of the exact list. So the promise on this page
+    holds for a pipeline only when it contains neither. See
+    [Provisional files](#provisional-files).
 
 ## The pieces at a glance
 
@@ -150,22 +152,38 @@ tests/test_hashing/golden/data/
 ### Provisional files
 
 `tests/test_hashing/golden/data/v1/provisional/<group>.json` holds the values of the cases
-that depend on a provisional operator (ITL-1266), one file per group and no counter: such a
-file is never frozen, and the generator rewrites it in place.
+that depend on a provisional operator (ITL-1266, ITL-1279) or a provisional library value type
+(ITL-1324), one file per group and no counter: such a file is never frozen, and the generator
+rewrites it in place.
 
-- **Which entries.** A case declares the provisional operators it depends on:
-  `@case("pipeline", "polars_filter", provisional=("PolarsFilter",))`. The generator runs
-  every case while Orcapod records which provisional operators it builds
-  (`orcapod.utils.provisional.recording_provisional_uses`), and refuses a case that builds
-  one without declaring it, or that declares a name `PROVISIONAL_OPERATORS` does not hold.
-  The golden test checks that every entry is in the kind of file its case declares. So a
-  value that depends on a provisional operator cannot be pinned in a frozen file: neither
-  through a stream method that builds it (`stream.polars_filter`) nor in a step downstream
-  of it.
-- **Today:** the `pipeline` cases `polars_filter`, `polars_filter_expr` and
-  `polars_filter_expr_job`, and the `semantic` case `polars_expr`: the `polars_expr_v1`
-  hashes, which only `PolarsFilter`'s identity feeds in the library. The 86 entries moved
-  out of `pipeline-01.json` and `semantic-01.json`, values unchanged, before `v1` was frozen.
+- **Which entries.** A case declares the provisional features it depends on, operators by
+  class name and library value types by extension name:
+  `@case("pipeline", "group_by", provisional=("GroupBy",))`,
+  `@case("datagram", "ndarray", provisional=("orcapod.numpy.ndarray",))`. The generator runs
+  every case while Orcapod records which provisional features it uses
+  (`orcapod.utils.provisional.recording_provisional_uses`: an operator when it is built, a
+  library value type when it is resolved), and refuses a case that uses one without
+  declaring it, or that declares a name that is not provisional. The golden test checks
+  that every entry is in the kind of file its case declares. So a value that depends
+  directly on a provisional feature cannot be pinned in a frozen file: neither through a
+  stream method that builds an operator (`stream.group_by`) nor in a step downstream of it.
+- **A dependence the record cannot see.** A user class with a field of a provisional library
+  type (the fixture `GoldenWithArray`) embeds that type's identifier in its own identity, but
+  the identity is built once, when the class is registered, and cached: a later use of the
+  class resolves no type and records nothing. So a case whose items mix such values with
+  others is split by a predicate on the items' types (`cases.provisional_types_of`, which
+  reads field types, generic arguments and container elements), the fixtures are registered
+  before any case records its uses, and `test_golden_provisional_types.py` checks the
+  predicate against every fixture class's identity record.
+- **Split cases.** A case whose items are partly provisional is registered twice under its
+  one name, the provisional part declared, so every entry keeps its name: `semantic:value`,
+  `semantic:type`, `schema:single_field`, `arrow:extension_no_values` and
+  `pipeline:join_key_nullability` (its `merge_join.*` entries).
+- **Today:** 443 entries. The `PolarsFilter` cases (`polars_filter`, `polars_filter_expr`,
+  `polars_filter_expr_job` and the `semantic` case `polars_expr`, 86 entries) moved out of
+  the frozen files with ITL-1266; the cases of the other provisional operators (229 entries)
+  and of the library value types (128 entries, with the 12 of `GoldenWithArray`) moved with
+  ITL-1279 and ITL-1324. Every move was values unchanged, before `v1` was frozen.
 - **What holds.** Every provisional value is computed and compared on every CI run, so a
   change nobody intended fails. An intended change needs the developer's approval of the
   exact list of entries that move, each explained (`--remove`, then `--add`), but no new

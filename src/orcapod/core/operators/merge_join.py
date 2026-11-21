@@ -157,6 +157,9 @@ class MergeJoin(BinaryOperator):
     merged into a list in argument order, as for plain inputs.
     """
 
+    # Provisional: its identity is not frozen with data context v1 (ITL-1279).
+    PROVISIONAL: ClassVar[bool] = True
+
     # Data-tags (ITL-1023) are handled (ITL-1194).
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 

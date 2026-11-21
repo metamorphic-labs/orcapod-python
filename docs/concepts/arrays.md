@@ -54,6 +54,11 @@ process, on whichever use comes first: a value hashed, a source column of the ty
 pod with a parameter or output of the type, or stored results of the type read back. It names
 the type, for example `orcapod.numpy.ndarray`.
 
+A user class with a field of one of these types is provisional too: its identity holds the
+identifier of each field's type, so if the audit changes the array type's identifier, the
+class's own identity, and every hash it feeds, changes with it. Registering such a class, or
+storing its values, issues the same warning (for the field's type).
+
 In practice nothing needs to change. Use these types as described on this page. If the audit
 changes how one of them is hashed, a result Orcapod computed earlier from such a value gets a
 different identity, so the release that carries the change computes it again instead of reusing
