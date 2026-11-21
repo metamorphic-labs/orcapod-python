@@ -131,12 +131,21 @@ def _identity(pod: Any) -> tuple[Any, ...]:
 
 @pytest.mark.parametrize(("kind", "n"), list(FUNCTIONS), ids=lambda v: str(v))
 def test_the_uri_holds_the_hash_of_the_output_schema(kind: str, n: int) -> None:
-    hasher = get_default_context().semantic_hasher
+    """The uri's output component: the Arrow schema of the declared outputs (ITL-640).
+
+    Its ``arrow_schema_v1`` hash, fed to the semantic hasher as a one-schema tuple
+    (a hash fed into a hash keeps its label), as the bare digest of a name.
+    """
+    context = get_default_context()
     for keys in _orders(n):
         pod = FunctionPod.from_fn(FUNCTIONS[(kind, n)], output_keys=list(keys))
         schema = pod.data_function.output_data_schema
         assert tuple(schema) == keys
-        assert pod.uri[1] == hasher.hash_object(schema).to_hex()
+        arrow_schema = context.type_converter.python_schema_to_arrow_schema(schema)
+        schema_hash = context.arrow_hasher.hash_schema(arrow_schema)
+        assert (
+            pod.uri[1] == context.semantic_hasher.hash_object((schema_hash,)).to_hex()
+        )
 
 
 @pytest.mark.parametrize("n", [2, 3])

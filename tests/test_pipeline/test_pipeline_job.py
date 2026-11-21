@@ -657,7 +657,7 @@ class TestPipelineJobSerialization:
         path = tmp_path / "completed.json"
         job.save(str(path))
         data = json.loads(path.read_text())
-        assert data["orcapod_pipeline_job_version"] == "0.3.0"
+        assert data["orcapod_pipeline_job_version"] == "0.4.0"
 
     def test_save_stamps_orcapod_version(self, store, tmp_path):
         src_a, src_b = _make_two_sources()
@@ -669,10 +669,10 @@ class TestPipelineJobSerialization:
         data = json.loads(path.read_text())
         assert data["orcapod_version"] == orcapod.__version__
         assert data["pipeline"]["orcapod_version"] == orcapod.__version__
-        assert data["orcapod_pipeline_job_version"] == "0.3.0"
-        assert data["pipeline"]["orcapod_pipeline_version"] == "0.3.0"
+        assert data["orcapod_pipeline_job_version"] == "0.4.0"
+        assert data["pipeline"]["orcapod_pipeline_version"] == "0.4.0"
 
-    def test_format_0_3_0_roundtrip_keeps_stamp_and_nodes(self, store, tmp_path):
+    def test_format_0_4_0_roundtrip_keeps_stamp_and_nodes(self, store, tmp_path):
         src_a, src_b = _make_two_sources()
         job = PipelineJob(database=store)
         with job:
@@ -684,7 +684,7 @@ class TestPipelineJobSerialization:
         resaved = tmp_path / "resaved.json"
         loaded.save(str(resaved))
         data = json.loads(resaved.read_text())
-        assert data["orcapod_pipeline_job_version"] == "0.3.0"
+        assert data["orcapod_pipeline_job_version"] == "0.4.0"
         assert data["orcapod_version"] == orcapod.__version__
 
     def test_format_0_1_0_fixture_loads_unchanged(self):
@@ -758,7 +758,7 @@ class TestPipelineJobSerialization:
         loaded = PipelineJob.load(str(path), database=store)
         assert loaded.database is store
 
-    @pytest.mark.parametrize("version", ["9.9.9", "0.4.0", ""])
+    @pytest.mark.parametrize("version", ["9.9.9", "0.5.0", ""])
     def test_unknown_job_format_version_is_rejected(self, store, tmp_path, version):
         src_a, src_b = _make_two_sources()
         job = PipelineJob(database=store)

@@ -352,6 +352,40 @@ class OperatorNodeBase(StreamBase):
         self._input_streams = value
         self._forget_output_schema()
 
+    @property
+    def arrow_schemas(self) -> "tuple[pa.Schema, pa.Schema] | None":
+        """A read-only loaded node's tag and data Arrow schemas, as saved (ITL-640).
+
+        A node whose operator cannot be rebuilt (``Index``, ``Pick``, ITL-1326) cannot
+        type its zero-row table, but its saved ``output_schema`` text holds the Arrow
+        types its rows have; ``typed_arrow_schemas`` takes them from here, as a loaded
+        function node takes its saved output types. ``None`` for a node with an
+        operator, which derives its types, and for a saved text that cannot be
+        restored.
+        """
+        if self._operator is not None or not self._stored_schema:
+            return None
+        from orcapod.pipeline.serialization import arrow_schema_from_texts
+
+        saved = self._stored_schema
+        nullable = saved.get("nullable")
+        converter = self.data_context.type_converter
+        try:
+            return (
+                arrow_schema_from_texts(
+                    saved.get("tag", {}),
+                    converter,
+                    None if nullable is None else nullable.get("tag", []),
+                ),
+                arrow_schema_from_texts(
+                    saved.get("data", {}),
+                    converter,
+                    None if nullable is None else nullable.get("data", []),
+                ),
+            )
+        except (ValueError, TypeError):
+            return None
+
     def keys(
         self,
         *,
@@ -481,10 +515,43 @@ class OperatorNodeBase(StreamBase):
                 to detach. Ignored by operator nodes in v1.
         """
 
+    # ---------------------------------------------------------------------------
+    # OperatorNode — thin blueprint (no DB)
+    # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# OperatorNode — thin blueprint (no DB)
-# ---------------------------------------------------------------------------
+    def _typed_zero_row_table(self) -> "pa.Table | None":
+        """This node's zero-row table: its operator applied to zero-row inputs.
+
+        The sync path's rule (ITL-912): each input is the upstream's zero-row table
+        (``StaticOutputOperatorPod._zero_row_input``), and the operator's result over
+        those is this node's table with no rows, with the Arrow types, nullability,
+        system-tag and source-info columns its rows have. No row is computed or read,
+        no function is called and nothing is stored, and a result the node holds is
+        not consulted: the types follow from the inputs' types alone.
+
+        Returns:
+            The zero-row table with system tags and source info, or ``None`` when the
+            node has no operator or an input cannot say its Arrow types without rows
+            (see ``typed_zero_row_table``).
+        """
+        if self._operator is None:
+            return None
+        inputs: list[StreamProtocol] = []
+        for upstream in self._input_streams:
+            zero_rows = StaticOutputOperatorPod._zero_row_input(upstream)
+            if zero_rows is None:
+                return None
+            inputs.append(zero_rows)
+        # zero_row_result calls static_process, not process: an invocation recorded by
+        # a tracker would add a step to whatever pipeline is being built while this
+        # table is read.
+        operator = cast(StaticOutputOperatorPod, self._operator)
+        result = operator.zero_row_result(*inputs)
+        # In the column order of the node's rows; an operator's own table may order
+        # them otherwise (a join lists its data before its system tags).
+        return StaticOutputOperatorPod._in_row_order(
+            result.as_table(columns=ZERO_ROW_INPUT_COLUMNS), result.keys()[0]
+        )
 
 
 class OperatorNode(OperatorNodeBase):
@@ -1450,40 +1517,6 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         if order == names:
             return records
         return records.select(order)
-
-    def _typed_zero_row_table(self) -> "pa.Table | None":
-        """This node's zero-row table: its operator applied to zero-row inputs.
-
-        The sync path's rule (ITL-912): each input is the upstream's zero-row table
-        (``StaticOutputOperatorPod._zero_row_input``), and the operator's result over
-        those is this node's table with no rows, with the Arrow types, nullability,
-        system-tag and source-info columns its rows have. No row is computed or read,
-        no function is called and nothing is stored, and a result the node holds is
-        not consulted: the types follow from the inputs' types alone.
-
-        Returns:
-            The zero-row table with system tags and source info, or ``None`` when the
-            node has no operator or an input cannot say its Arrow types without rows
-            (see ``typed_zero_row_table``).
-        """
-        if self._operator is None:
-            return None
-        inputs: list[StreamProtocol] = []
-        for upstream in self._input_streams:
-            zero_rows = StaticOutputOperatorPod._zero_row_input(upstream)
-            if zero_rows is None:
-                return None
-            inputs.append(zero_rows)
-        # zero_row_result calls static_process, not process: an invocation recorded by
-        # a tracker would add a step to whatever pipeline is being built while this
-        # table is read.
-        operator = cast(StaticOutputOperatorPod, self._operator)
-        result = operator.zero_row_result(*inputs)
-        # In the column order of the node's rows; an operator's own table may order
-        # them otherwise (a join lists its data before its system tags).
-        return StaticOutputOperatorPod._in_row_order(
-            result.as_table(columns=ZERO_ROW_INPUT_COLUMNS), result.keys()[0]
-        )
 
     def _make_empty_table(self) -> "pa.Table":
         """Build the zero-row table this node reads as when it holds no rows.

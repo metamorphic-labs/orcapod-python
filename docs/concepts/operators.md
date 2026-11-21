@@ -915,7 +915,8 @@ silent widening; convert explicitly.
   `large_string`), the join proceeds. Otherwise (for example `int16` and `int32`, or two
   timestamp units) it raises `InputValidationError` naming the column and both types; cast
   one input explicitly. Because `output_schema()` reports Python types, this is detected when
-  the join runs, not when the pipeline is built.
+  the join runs, not when the pipeline is built. Two such inputs already have different
+  pipeline hashes, since a schema enters every hash as its Arrow schema.
 - **Sync and async execution agree.** An operator run asynchronously (`async_execute`, as in
   an async pipeline) yields rows with the same Arrow types, column order, system tags and
   content hashes as the same operator run synchronously, whether its inputs are sources or

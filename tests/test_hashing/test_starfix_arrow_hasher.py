@@ -26,7 +26,11 @@ from __future__ import annotations
 
 import pyarrow as pa
 
-from orcapod.hashing.arrow_hashers import ARROW_HASH_LABEL, StarfixArrowHasher
+from orcapod.hashing.arrow_hashers import (
+    ARROW_HASH_LABEL,
+    ARROW_SCHEMA_HASH_LABEL,
+    StarfixArrowHasher,
+)
 from orcapod.hashing.versioned_hashers import (
     get_versioned_semantic_arrow_hasher,
 )
@@ -64,10 +68,11 @@ class TestHashSchema:
         h = _make_hasher().hash_schema(schema)
         assert isinstance(h, ContentHash)
 
-    def test_method_is_hasher_id(self):
+    def test_method_is_the_schema_label(self):
+        """A schema hash is its own procedure, with its own label (ITL-640)."""
         schema = pa.schema([pa.field("x", pa.int32())])
         h = _make_hasher().hash_schema(schema)
-        assert h.method == HASHER_ID
+        assert h.method == ARROW_SCHEMA_HASH_LABEL == "arrow_schema_v1"
 
     def test_digest_length(self):
         schema = pa.schema([pa.field("x", pa.int32())])
@@ -581,7 +586,19 @@ class TestHashTableOrdered:
 
 
 class TestSchemaHashFieldRule:
-    """``hash_schema`` hashes a field under the same rule as ``hash_table`` (ITL-981)."""
+    """``hash_schema`` hashes a logical type as its storage type plus its identifier.
+
+    The rule changed (developer, November 21, 2026, ITL-640, option (a)). Before, a
+    schema hash took each field as ``hash_table`` hashes it (ITL-981): a type whose
+    values a value handler hashes (``File``, ``numpy.ndarray``) was a ``large_binary``
+    field whatever its storage. That made the schema hash depend on which value
+    handlers the process had registered, and gave a ``File`` field read back in the
+    metadata (IPC) form a hash other than the live ``File``: one logical type, two
+    schema identities. Now every extension type, live or in metadata form, is its
+    storage type with its identifier as field metadata, for every logical type alike;
+    the identifier pins how the values are hashed. ``hash_table`` is unchanged, so
+    ``hash_schema(t.schema)`` is no longer the schema inside ``hash_table(t)``.
+    """
 
     @staticmethod
     def _identified(storage: pa.DataType, extension: pa.ExtensionType) -> pa.Schema:
@@ -599,8 +616,10 @@ class TestSchemaHashFieldRule:
             ]
         )
 
-    def test_value_hashed_type_does_not_depend_on_its_storage_type(self):
-        """A type hashed by a value handler is a ``large_binary`` field with its identifier."""
+    def test_every_logical_type_is_its_storage_type_and_identifier(self):
+        """Value-hashed or not, a live type hashes as its storage plus identifier."""
+        from pathlib import Path
+
         import numpy as np
 
         import orcapod as op
@@ -609,32 +628,57 @@ class TestSchemaHashFieldRule:
         context = get_default_context()
         hasher = context.arrow_hasher
         assert isinstance(hasher, StarfixArrowHasher)
-        for python_type in (op.File, np.ndarray):
+        for python_type in (op.File, op.Directory, np.ndarray, Path):
             extension = context.type_converter.python_type_to_arrow_type(python_type)
             assert isinstance(extension, pa.ExtensionType)
-            schema_hash = hasher.hash_schema(pa.schema([pa.field("c", extension)]))
-            assert schema_hash == hasher.hash_schema(
-                self._identified(pa.large_binary(), extension)
-            )
-        # ``File`` is stored as a string; that storage type is not in its schema hash.
-        file_type = context.type_converter.python_type_to_arrow_type(op.File)
-        assert isinstance(file_type, pa.ExtensionType)
-        assert file_type.storage_type == pa.large_string()
-        assert hasher.hash_schema(
-            pa.schema([pa.field("c", file_type)])
-        ) != hasher.hash_schema(self._identified(pa.large_string(), file_type))
+            assert hasher.hash_schema(
+                pa.schema([pa.field("c", extension)])
+            ) == hasher.hash_schema(self._identified(extension.storage_type, extension))
 
-    def test_type_without_value_handler_keeps_its_storage_type(self):
-        """A type whose stored values are hashed keeps its storage type in the schema hash."""
-        from pathlib import Path
-
+    def test_the_storage_type_is_part_of_it(self):
+        """``File`` is stored as a string: as ``large_binary`` it would be another schema."""
+        import orcapod as op
         from orcapod.contexts import get_default_context
 
         context = get_default_context()
         hasher = context.arrow_hasher
         assert isinstance(hasher, StarfixArrowHasher)
-        extension = context.type_converter.python_type_to_arrow_type(Path)
-        assert isinstance(extension, pa.ExtensionType)
+        file_type = context.type_converter.python_type_to_arrow_type(op.File)
+        assert isinstance(file_type, pa.ExtensionType)
+        assert file_type.storage_type == pa.large_string()
         assert hasher.hash_schema(
-            pa.schema([pa.field("c", extension)])
-        ) == hasher.hash_schema(self._identified(extension.storage_type, extension))
+            pa.schema([pa.field("c", file_type)])
+        ) != hasher.hash_schema(self._identified(pa.large_binary(), file_type))
+
+    def test_the_table_hash_still_hashes_values(self):
+        """``hash_table`` keeps its own rule: a ``File`` column is hashed by content."""
+        import tempfile
+        from pathlib import Path
+
+        import orcapod as op
+        from orcapod.contexts import get_default_context
+        from orcapod.utils.arrow_utils import normalize_extension_columns
+
+        context = get_default_context()
+        hasher = context.arrow_hasher
+        assert isinstance(hasher, StarfixArrowHasher)
+        with tempfile.TemporaryDirectory() as tmp:
+            first, second = Path(tmp, "a.txt"), Path(tmp, "b.txt")
+            first.write_text("same")
+            second.write_text("same")
+            tables = [
+                context.type_converter.python_dicts_to_arrow_table(
+                    [{"c": op.File(path)}], python_schema={"c": op.File}
+                )
+                for path in (first, second)
+            ]
+            stored = [
+                normalize_extension_columns(table).cast(
+                    pa.schema([pa.field("c", pa.large_string())])
+                )
+                for table in tables
+            ]
+            # Two paths, one content: one table hash, as before this change.
+            assert hasher.hash_table(tables[0]) == hasher.hash_table(tables[1])
+            # As plain strings the paths differ, and so do the hashes.
+            assert hasher.hash_table(stored[0]) != hasher.hash_table(stored[1])

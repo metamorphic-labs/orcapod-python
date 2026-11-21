@@ -30,6 +30,16 @@ from orcapod.sources import CSVSource
 
 FIXTURE = Path(__file__).parent / "fixtures" / "saved_job_37716c76"
 
+# ITL-640: a schema enters every identity as its Arrow schema, so the source rebuilt from
+# the saved config has new hashes; the file still records the v0.3 ones, and is kept as
+# written. A loaded job node keeps the hashes its file records.
+ITL_640_SOURCE_CONTENT_HASH = (
+    "semantic_v1:25e0999f8caf2da241bbf323ed6f57c1bf887599b2ce532b41ccd26fae511940"
+)
+ITL_640_SOURCE_PIPELINE_HASH = (
+    "semantic_v1:9459172b64f73cc62576f35684a068844ad07c73b6506111892112f65d39d007"
+)
+
 
 @pytest.fixture
 def saved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
@@ -40,9 +50,9 @@ def saved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 
 def test_format_versions() -> None:
-    assert PIPELINE_FORMAT_VERSION == PIPELINE_JOB_FORMAT_VERSION == "0.3.0"
-    assert {"0.1.0", "0.2.0", "0.3.0"} == SUPPORTED_FORMAT_VERSIONS
-    assert {"0.1.0", "0.2.0", "0.3.0"} == SUPPORTED_JOB_FORMAT_VERSIONS
+    assert PIPELINE_FORMAT_VERSION == PIPELINE_JOB_FORMAT_VERSION == "0.4.0"
+    assert {"0.1.0", "0.2.0", "0.3.0", "0.4.0"} == SUPPORTED_FORMAT_VERSIONS
+    assert {"0.1.0", "0.2.0", "0.3.0", "0.4.0"} == SUPPORTED_JOB_FORMAT_VERSIONS
 
 
 def test_a_v03_job_loads_with_unchanged_hashes(saved: dict[str, Any]) -> None:
@@ -57,9 +67,11 @@ def test_a_v03_job_loads_with_unchanged_hashes(saved: dict[str, Any]) -> None:
     job_hashes = saved["run"]["node_job_content_hashes"]
     assert job.nodes["older"].content_hash().to_string() == job_hashes["older"]
     assert job.nodes["older"].pipeline_hash().to_string() == older["pipeline_hash"]
-    # The source is rebuilt from its saved binding: its hashes are the saved ones.
+    # The source is rebuilt from its saved binding: its content hash is the rebuilt
+    # source's (moved by ITL-640), the slot's pipeline hash the saved one.
     binding = saved["bindings"]["sources"]["subjects"]
-    assert job.nodes["subjects"].content_hash().to_string() == binding["content_hash"]
+    content = job.nodes["subjects"].content_hash().to_string()
+    assert content == ITL_640_SOURCE_CONTENT_HASH != binding["content_hash"]
     assert job.nodes["subjects"].pipeline_hash().to_string() == binding["pipeline_hash"]
     # The source keeps its tag plain, as v0.3 built it.
     assert job.nodes["subjects"].keys() == (("subject",), ("age",))
@@ -77,5 +89,8 @@ def test_a_v03_source_config_rebuilds_the_v03_source(saved: dict[str, Any]) -> N
     assert upgraded["tag_only_columns"] is True
     source = CSVSource.from_config(upgraded)
     assert source.keys() == (("subject",), ("age",))
-    assert source.content_hash().to_string() == config["content_hash"]
-    assert source.pipeline_hash().to_string() == config["pipeline_hash"]
+    content, pipeline = source.content_hash(), source.pipeline_hash()
+    assert content.to_string() == ITL_640_SOURCE_CONTENT_HASH != config["content_hash"]
+    assert (
+        pipeline.to_string() == ITL_640_SOURCE_PIPELINE_HASH != config["pipeline_hash"]
+    )

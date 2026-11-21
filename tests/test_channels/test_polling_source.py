@@ -1137,7 +1137,12 @@ class TestPollingSourceSchemaValidation:
             polling_config=PollingConfig(interval=1.0),
         )
 
-        with pytest.raises(SchemaInconsistencyError, match="tag schema incompatible"):
+        # The batch is refused on its Arrow types, before commit (ITL-640).
+        with pytest.raises(
+            SchemaInconsistencyError,
+            match="fetched column 'id' has the Arrow type int64, but the source "
+            "declares large_string",
+        ):
             list(src.iter_data())
 
     def test_declared_data_schema_type_mismatch_raises(self):
@@ -1154,7 +1159,12 @@ class TestPollingSourceSchemaValidation:
             polling_config=PollingConfig(interval=1.0),
         )
 
-        with pytest.raises(SchemaInconsistencyError, match="data schema incompatible"):
+        # The batch is refused on its Arrow types, before commit (ITL-640).
+        with pytest.raises(
+            SchemaInconsistencyError,
+            match="fetched column 'val' has the Arrow type int64, but the source "
+            "declares large_string",
+        ):
             list(src.iter_data())
 
     def test_declared_schema_missing_data_column_raises(self):

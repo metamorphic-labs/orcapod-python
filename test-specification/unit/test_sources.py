@@ -127,16 +127,22 @@ class TestArrowTableSourceSchema:
     """ArrowTableSource schema and identity behaviors."""
 
     def test_pipeline_identity_structure_returns_schemas(self):
-        """pipeline_identity_structure returns (tag_schema, data_schema)."""
+        """pipeline_identity_structure is the hashes of the Arrow tag and data schemas.
+
+        A schema enters an identity as its Arrow schema (ITL-640): each half is the
+        ``arrow_schema_v1`` hash of the source's Arrow tag or data schema.
+        """
         source = ArrowTableSource(
             _simple_table(), tag_columns=["name"], infer_nullable=True
         )
         result = source.pipeline_identity_structure()
         assert isinstance(result, tuple)
         assert len(result) == 2
-        tag_schema, data_schema = result
-        assert isinstance(tag_schema, Schema)
-        assert isinstance(data_schema, Schema)
+        tag_hash, data_hash = result
+        assert tag_hash.method == data_hash.method == "arrow_schema_v1"
+        arrow_tag, arrow_data = source.arrow_schemas
+        assert tag_hash == source.data_context.arrow_hasher.hash_schema(arrow_tag)
+        assert data_hash == source.data_context.arrow_hasher.hash_schema(arrow_data)
 
     def test_output_schema_returns_schemas(self):
         source = ArrowTableSource(
@@ -401,6 +407,12 @@ class TestDerivedSource:
             Schema({"data_col": int}),
         )
         mock_origin.keys.return_value = (("tag_col",), ("data_col",))
+        # An origin states the Arrow types of its rows (ITL-640): the source takes
+        # them, so its identity does not change when the origin stores rows.
+        mock_origin.arrow_schemas = (
+            pa.schema([pa.field("tag_col", pa.large_string(), nullable=False)]),
+            pa.schema([pa.field("data_col", pa.int64(), nullable=False)]),
+        )
         mock_origin.get_all_records.return_value = records
         return mock_origin
 

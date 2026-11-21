@@ -23,7 +23,12 @@ from orcapod.core.base import TraceableBase
 from orcapod.core.datagrams import Data, Tag
 from orcapod.core.operators.drop_nulls import _without_none  # pyright: ignore[reportPrivateUsage]  # DropNulls' rule for removing None from a type, shared, never copied
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
-from orcapod.core.streams.base import schema_requires_io, typed_zero_row_table
+from orcapod.core.streams.base import (
+    ZERO_ROW_INPUT_COLUMNS,
+    schema_requires_io,
+    typed_arrow_schemas,
+    typed_zero_row_table,
+)
 from orcapod.core.streams.view import (
     ViewStatus,
     StreamView,
@@ -34,6 +39,7 @@ from orcapod.core.streams.base import (
     check_head_size,
 )
 from orcapod.errors import SourceSpecMismatchError, UnboundSourceError
+from orcapod.logical_types.canonical_form import declaration_form_schema
 from orcapod.logical_types.user_class_identity import equivalent_hints
 from orcapod.system_constants import constants
 from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
@@ -41,7 +47,11 @@ from orcapod.types import ColumnConfig, ContentHash, Schema
 from orcapod.utils import arrow_utils
 from orcapod.utils.arrow_utils import system_tag_column_names
 from orcapod.utils.lazy_module import LazyModule
-from orcapod.utils.schema_utils import compute_source_schema_hash
+from orcapod.utils.schema_utils import (
+    arrow_schema_identity,
+    compute_source_schema_hash,
+    declared_arrow_schema,
+)
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -110,6 +120,11 @@ def _is_narrower(declared: Any, given: Any) -> bool:
         given: The bound source's Python type of that column.
     """
     return declared != given and equivalent_hints(_without_none(declared), given)
+
+
+def _arrow_field_text(field: "pa.Field[Any]") -> str:
+    """The Arrow type of ``field`` with its top-level nullability, for a message."""
+    return f"{field.type}{'' if field.nullable else ' not null'}"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -336,6 +351,85 @@ def _data_tag_role_hint(
     return None
 
 
+def _columns_without_arrow_type(
+    tag_schema: Mapping[str, Any], data_schema: Mapping[str, Any], converter: Any
+) -> list[tuple[str, Any]]:
+    """The declared columns whose Python type has no Arrow type (ITL-640).
+
+    A slot's identity is its Arrow schema, so every column a slot declares in Python
+    needs the Arrow type the data context's converter gives it. A column whose saved
+    type is still text (a class this process has not registered, ITL-1138) is left out.
+
+    Args:
+        tag_schema: The declared tag schema.
+        data_schema: The declared data schema.
+        converter: The data context's type converter.
+
+    Returns:
+        ``(column, declared type)`` for every column the converter cannot map, tag
+        columns first, each group in declared order.
+    """
+    missing: list[tuple[str, Any]] = []
+    seen: set[str] = set()
+    for schema in (tag_schema, data_schema):
+        for name, python_type in schema.items():
+            if name in seen or isinstance(python_type, str):
+                continue
+            seen.add(name)
+            try:
+                declared_arrow_schema({name: python_type}, converter)
+            except (ValueError, TypeError):
+                missing.append((name, python_type))
+    return missing
+
+
+def _no_arrow_type_error(slot: str, missing: list[tuple[str, Any]]) -> ValueError:
+    """The error for a slot declaring columns that have no Arrow type (ITL-640).
+
+    Args:
+        slot: The slot's name, which the error reports.
+        missing: ``(column, declared type)`` of each such column
+            (``_columns_without_arrow_type``).
+
+    Returns:
+        The ``ValueError`` naming the slot, each column and its declared type.
+    """
+    described = ", ".join(f"{column!r} is declared {kind}" for column, kind in missing)
+    verb = "has" if len(missing) == 1 else "have"
+    return ValueError(
+        f"slot {slot!r}: {described}, which {verb} no Arrow type. A slot's types "
+        "need an Arrow type: its identity is its Arrow schema (ITL-640). Declare "
+        "the column with a type Orcapod stores, or declare the slot with a "
+        "pa.Schema or from a stream."
+    )
+
+
+def _require_stream_arrow_types(stream: Any, slot: str) -> None:
+    """Refuse a slot made from a stream whose declared columns have no Arrow type.
+
+    A stream that types its zero-row table gives the slot its Arrow types; one that
+    cannot (``typed_zero_row_table`` is ``None``) gives the converter's types of its
+    Python schema, which must exist, as for a slot declared in Python (ITL-640).
+
+    Args:
+        stream: The stream the slot is made from.
+        slot: The slot's name, which the error reports.
+
+    Raises:
+        ValueError: If a declared column of ``stream`` has no Arrow type.
+    """
+    if isinstance(getattr(stream, "arrow_schemas", None), tuple):
+        return
+    if typed_zero_row_table(stream) is not None:
+        return
+    tag_schema, data_schema = stream.output_schema()
+    missing = _columns_without_arrow_type(
+        tag_schema, data_schema, stream.data_context.type_converter
+    )
+    if missing:
+        raise _no_arrow_type_error(slot, missing)
+
+
 class SourceNodeBase(TraceableBase, ABC):
     """Abstract base for SourceNode and SourceJobNode.
 
@@ -347,11 +441,16 @@ class SourceNodeBase(TraceableBase, ABC):
     Args:
         name: The input-slot name used as the key in
             ``PipelineJob.bind(sources={name: source})``.
-        tag_schema: Mapping of tag column names to Python types.
-        data_schema: Mapping of data column names to Python types.
+        tag_schema: Mapping of tag column names to Python types, or a ``pa.Schema``
+            (then ``data_schema`` is one too): the slot holds exactly those Arrow
+            types.
+        data_schema: Mapping of data column names to Python types, or a ``pa.Schema``.
         data_context: Optional data context override.
         label: Optional display label override.
         config: Optional config override.
+        arrow_schemas: The Arrow tag and data schemas of the slot's columns, when
+            known (a slot made from a stream takes its stream's). ``None`` converts
+            the declared Python types with the data context's type converter.
     """
 
     node_type = "source"
@@ -359,21 +458,57 @@ class SourceNodeBase(TraceableBase, ABC):
     def __init__(
         self,
         name: str,
-        tag_schema: Schema,
-        data_schema: Schema,
+        tag_schema: "Schema | pa.Schema",
+        data_schema: "Schema | pa.Schema",
         data_context: str | contexts.DataContext | None = None,
         label: str | None = None,
         config: OrcapodConfig | None = None,
+        arrow_schemas: "tuple[pa.Schema, pa.Schema] | None" = None,
     ) -> None:
         super().__init__(label=label, data_context=data_context, config=config)
+        if isinstance(tag_schema, pa.Schema) or isinstance(data_schema, pa.Schema):
+            # A slot declared in Arrow holds exactly those types (ITL-640).
+            if not (
+                isinstance(tag_schema, pa.Schema) and isinstance(data_schema, pa.Schema)
+            ):
+                raise TypeError(
+                    "declare both tag_schema and data_schema as pa.Schema, or both "
+                    "as Python schemas"
+                )
+            if arrow_schemas is not None:
+                raise ValueError(
+                    "arrow_schemas is given by tag_schema and data_schema already"
+                )
+            converter = self.data_context.type_converter
+            # Logical types in one form first: a field declared with its identifier
+            # in ARROW:extension:* metadata is that logical type (ITL-640).
+            tag_schema = declaration_form_schema(tag_schema, converter)
+            data_schema = declaration_form_schema(data_schema, converter)
+            arrow_schemas = (tag_schema, data_schema)
+            tag_schema = Schema(converter.arrow_schema_to_python_schema(tag_schema))
+            data_schema = Schema(converter.arrow_schema_to_python_schema(data_schema))
         self._name = name
         self._tag_schema = tag_schema
         self._data_schema = data_schema
+        # The Arrow types of the slot's columns, which its identity is built from
+        # (ITL-640): those of the stream it was made from, or the conversion of the
+        # declared Python types (``arrow_schemas``).
+        self._given_arrow_schemas = arrow_schemas
         # A slot rebuilt from a saved job keeps the saved hashes, and the columns whose
         # saved type could not be restored at load (ITL-1138); see ``_keep_saved``.
         self._saved_pipeline_hash: ContentHash | None = None
         self._saved_content_hash: ContentHash | None = None
         self._pending_types: dict[str, _PendingType] = {}
+        # The saved Arrow type texts of a loaded slot whose Arrow types could not be
+        # rebuilt at load (a column's class not registered yet): kept whole, so the
+        # pair is rebuilt from them, never from Python types (ITL-640).
+        self._saved_arrow_texts: dict[str, Any] | None = None
+        if arrow_schemas is None:
+            missing = _columns_without_arrow_type(
+                tag_schema, data_schema, self.data_context.type_converter
+            )
+            if missing:
+                raise _no_arrow_type_error(name, missing)
 
     # ------------------------------------------------------------------
     # Rebuilt from a saved job
@@ -407,6 +542,14 @@ class SourceNodeBase(TraceableBase, ABC):
             self._saved_pipeline_hash = ContentHash.from_string(pipeline_hash)
         if content_hash is not None:
             self._saved_content_hash = ContentHash.from_string(content_hash)
+        if self._given_arrow_schemas is None:
+            # The Arrow pair could not be rebuilt at load: keep every column's saved
+            # text, the precise ones too (an int32 must not become int64 later).
+            self._saved_arrow_texts = {
+                "tag": dict(saved_types.get("tag", {})),
+                "data": dict(saved_types.get("data", {})),
+                "nullable": None if nullable is None else dict(nullable),
+            }
         for role, schema in (("tag", self._tag_schema), ("data", self._data_schema)):
             for name, value in schema.items():
                 text = saved_types.get(role, {}).get(name)
@@ -420,14 +563,19 @@ class SourceNodeBase(TraceableBase, ABC):
     def _take_saved_state_of(self, other: "SourceNodeBase") -> None:
         """Keep the saved state of *other*, a slot of the same schema.
 
-        The pending types and the saved pipeline hash, which does not depend on the
-        slot's name, are always kept. The saved content hash covers the name too, so
-        it is kept only when this slot has *other*'s name.
+        The one way a copy of a slot takes it (``from_stream`` over a slot,
+        ``from_slot``, ``as_node``, ...), so no copy drops a piece: the given Arrow
+        schemas, the pending types, the saved Arrow type texts of an unresolved slot
+        (ITL-640) and the saved pipeline hash, which does not depend on the slot's
+        name, are always kept. The saved content hash covers the name too, so it is
+        kept only when this slot has *other*'s name.
         """
         self._saved_pipeline_hash = other._saved_pipeline_hash
+        self._given_arrow_schemas = other._given_arrow_schemas
         if self._name == other._name:
             self._saved_content_hash = other._saved_content_hash
         self._pending_types = dict(other._pending_types)
+        self._saved_arrow_texts = other._saved_arrow_texts
 
     def _pending_nullable_columns(self) -> dict[str, list[str]]:
         """The pending columns the saved job records as nullable, by role.
@@ -440,6 +588,71 @@ class SourceNodeBase(TraceableBase, ABC):
             if pending.nullable:
                 names[pending.role].append(name)
         return names
+
+    def _is_unresolved(self) -> bool:
+        """Whether this loaded slot's Arrow types cannot be rebuilt yet (ITL-640).
+
+        A slot loaded with a column whose class is not registered: its saved Arrow
+        texts are kept (``_saved_arrow_texts``) until they can be read.
+        """
+        if self._given_arrow_schemas is None and self._saved_arrow_texts is not None:
+            self._rebuild_saved_arrow_schemas()
+        return self._given_arrow_schemas is None and (
+            bool(self._pending_types) or self._saved_arrow_texts is not None
+        )
+
+    def _saved_type_texts(self) -> dict[str, Any] | None:
+        """The saved Arrow type texts of an unresolved slot, as a saved file holds them.
+
+        ``{"tag": {...}, "data": {...}, "nullable": {...}}`` (``nullable`` only when
+        the file recorded it), for a job saved again while the slot is unresolved: its
+        columns keep their saved Arrow types, never a conversion of their Python types
+        (an ``int32`` column stays ``int32``; CodeRabbit on PR 454). ``None`` when the
+        slot is resolved or kept no texts.
+        """
+        texts = self._saved_arrow_texts
+        if texts is None or not self._is_unresolved():
+            return None
+        saved: dict[str, Any] = {
+            "tag": dict(texts["tag"]),
+            "data": dict(texts["data"]),
+        }
+        if texts["nullable"] is not None:
+            saved["nullable"] = {
+                role: list(names) for role, names in texts["nullable"].items()
+            }
+        return saved
+
+    def _rebuild_saved_arrow_schemas(self) -> None:
+        """Rebuild the slot's Arrow pair from its saved texts, once all can be read.
+
+        Every column's saved Arrow type, not a conversion of its Python type: a column
+        saved as ``int32`` stays ``int32`` (ITL-640; CodeRabbit on PR 454). A text that
+        still cannot be read leaves the pair unbuilt, and the slot unresolved.
+        """
+        texts = self._saved_arrow_texts
+        if texts is None or self._given_arrow_schemas is not None:
+            return
+        from orcapod.pipeline.serialization import arrow_schema_from_texts
+
+        converter = self.data_context.type_converter
+        nullable = texts["nullable"]
+        try:
+            self._given_arrow_schemas = (
+                arrow_schema_from_texts(
+                    texts["tag"],
+                    converter,
+                    None if nullable is None else nullable["tag"],
+                ),
+                arrow_schema_from_texts(
+                    texts["data"],
+                    converter,
+                    None if nullable is None else nullable["data"],
+                ),
+            )
+        except (ValueError, TypeError, KeyError):
+            return
+        self._saved_arrow_texts = None
 
     def _restore_pending_types(self) -> dict[str, str]:
         """Restore the pending columns whose type this process can now restore.
@@ -477,6 +690,8 @@ class SourceNodeBase(TraceableBase, ABC):
                 schemas["data"], optional_fields=self._data_schema.optional_fields
             )
             self._pending_types = still_pending
+            if not still_pending:
+                self._rebuild_saved_arrow_schemas()
             # The system-tag names come from the schema hash, now of the restored types.
             with contextlib.suppress(AttributeError):  # not computed yet
                 del self._schema_hash_str
@@ -517,17 +732,72 @@ class SourceNodeBase(TraceableBase, ABC):
     # Identity
     # ------------------------------------------------------------------
 
+    @property
+    def arrow_schemas(self) -> "tuple[pa.Schema, pa.Schema]":
+        """The Arrow tag and data schemas of the slot's columns (ITL-640).
+
+        A slot made from a stream holds the Arrow types of that stream's rows; a slot
+        declared with Python types holds the data context's conversion of them. The
+        slot's identity, and so every pipeline hash and stored path below it, is built
+        from these schemas, and a bound source must have them.
+        """
+        if self._given_arrow_schemas is not None:
+            return self._given_arrow_schemas
+        if self._saved_arrow_texts is not None:
+            # A loaded slot whose saved Arrow types cannot be rebuilt yet is
+            # unresolved: its types are the saved ones, never converter defaults.
+            self._rebuild_saved_arrow_schemas()
+            if self._given_arrow_schemas is not None:
+                return self._given_arrow_schemas
+            raise ValueError(self._unresolved_message())
+        converter = self.data_context.type_converter
+        return (
+            declared_arrow_schema(self._tag_schema, converter),
+            declared_arrow_schema(self._data_schema, converter),
+        )
+
+    def _unresolved_message(self) -> str:
+        """The error of a loaded slot whose saved Arrow types cannot be rebuilt yet."""
+        pending = sorted(self._pending_types) or sorted(
+            {
+                **(self._saved_arrow_texts or {}).get("tag", {}),
+                **(self._saved_arrow_texts or {}).get("data", {}),
+            }
+        )
+        return (
+            f"SourceNode {self._name!r} was loaded with columns {pending} whose saved "
+            "types this process cannot read yet (a user class not registered): its "
+            "Arrow types are the saved ones and cannot be rebuilt until the class is "
+            "registered; bind a source of that class or define a function pod that "
+            "uses it first."
+        )
+
+    def _schema_identity(self) -> Any:
+        """The hashes of the slot's Arrow schemas: ``schema_utils.arrow_schema_identity``.
+
+        A slot rebuilt from a saved job with a column whose class this process has not
+        registered (ITL-1138) has no Arrow type for it yet: until the class is
+        registered, the saved type text stands in, as the saved hashes do.
+        """
+        if self._given_arrow_schemas is None and (
+            self._pending_types or self._saved_arrow_texts is not None
+        ):
+            self._rebuild_saved_arrow_schemas()
+            if self._given_arrow_schemas is None:
+                return (self._tag_schema, self._data_schema)
+        return arrow_schema_identity(*self.arrow_schemas, self.data_context)
+
     def identity_structure(self) -> Any:
-        """Return the content identity: ``("source_node", name, tag_schema, data_schema)``."""
-        return ("source_node", self._name, self._tag_schema, self._data_schema)
+        """Return the content identity: ``("source_node", name, schema identity)``."""
+        return ("source_node", self._name, self._schema_identity())
 
     def pipeline_identity_structure(self) -> Any:
-        """Return the pipeline identity: ``(tag_schema, data_schema)`` (name-independent).
+        """Return the pipeline identity: the slot's Arrow schema identity (name-independent).
 
-        Sources with identical schemas share the same DB table paths regardless
-        of name.
+        Sources with equal Arrow schemas share the same DB table paths regardless
+        of name; sources whose Arrow types differ do not (ITL-640).
         """
-        return (self._tag_schema, self._data_schema)
+        return self._schema_identity()
 
     # ------------------------------------------------------------------
     # Properties
@@ -571,9 +841,21 @@ class SourceNodeBase(TraceableBase, ABC):
         Returns:
             Hex string schema hash.
         """
+        if self._given_arrow_schemas is None and (
+            self._pending_types or self._saved_arrow_texts is not None
+        ):
+            self._rebuild_saved_arrow_schemas()
+        if self._given_arrow_schemas is None and (
+            self._pending_types or self._saved_arrow_texts is not None
+        ):
+            # The saved type text stands in until the class is registered (ITL-1138).
+            return self.data_context.semantic_hasher.hash_object(
+                (self._tag_schema, self._data_schema)
+            ).to_hex(char_count=self.orcapod_config.hashing.schema_n_char)
+        tag_schema, data_schema = self.arrow_schemas
         return compute_source_schema_hash(
-            self._tag_schema,
-            self._data_schema,
+            tag_schema,
+            data_schema,
             self.data_context,
             self.orcapod_config,
         )
@@ -720,7 +1002,26 @@ class SourceNodeBase(TraceableBase, ABC):
                 "source of that class (building one registers it) or define a function "
                 "pod that uses it before binding"
             )
+        if not unrestored and self._saved_arrow_texts is not None:
+            # Every column restored, but the saved Arrow types still cannot be rebuilt:
+            # the slot is unresolved, never checked against substituted types.
+            self._rebuild_saved_arrow_schemas()
+            if self._given_arrow_schemas is None:
+                issues.append(self._unresolved_message())
         narrower: set[str] = set()
+        # The Arrow types of the slot's and the source's columns, read once (ITL-640);
+        # a slot with a column it cannot restore has no Arrow schema to compare.
+        compare_arrow = not unrestored and not (
+            self._given_arrow_schemas is None and self._saved_arrow_texts is not None
+        )
+        source_arrow: dict[str, pa.Schema] = (
+            dict(zip(("tag", "data"), typed_arrow_schemas(source)))
+            if compare_arrow
+            else {}
+        )
+        slot_arrow: dict[str, pa.Schema] = (
+            dict(zip(("tag", "data"), self.arrow_schemas)) if compare_arrow else {}
+        )
         for role, declared, given in (
             ("tag", self._tag_schema, source_tag),
             ("data", self._data_schema, source_data),
@@ -734,9 +1035,11 @@ class SourceNodeBase(TraceableBase, ABC):
             for name in declared.keys():
                 if name in unrestored:
                     continue
-                if name not in given or equivalent_hints(given[name], declared[name]):
+                if name not in given:
                     continue
-                if _is_narrower(declared[name], given[name]):
+                if equivalent_hints(given[name], declared[name]):
+                    pass
+                elif _is_narrower(declared[name], given[name]):
                     narrower.add(name)
                 else:
                     issues.append(
@@ -744,6 +1047,14 @@ class SourceNodeBase(TraceableBase, ABC):
                         f"{_type_text(declared[name])} but the source has "
                         f"{_type_text(given[name])}"
                     )
+                    continue
+                if not compare_arrow:
+                    continue
+                arrow_issue = self._arrow_type_issue(
+                    role, name, slot_arrow[role], source_arrow[role]
+                )
+                if arrow_issue is not None:
+                    issues.append(arrow_issue)
 
         # A name whose roles differ only because one side holds it as a data-tag
         # (a tag and a data column of one name) is refused like any role difference
@@ -786,6 +1097,58 @@ class SourceNodeBase(TraceableBase, ABC):
                 + "; ".join(issues)
             )
         return source_tag, source_data, frozenset(narrower)
+
+    def _arrow_type_issue(
+        self,
+        role: str,
+        name: str,
+        slot_schema: "pa.Schema",
+        source_schema: "pa.Schema",
+    ) -> str | None:
+        """Compare one column's Arrow type in the slot and in *source* (ITL-640).
+
+        The slot's identity is built from its Arrow schemas, so a source fits only
+        with the same Arrow type, as ``hash_schema`` compares it (column order, large
+        and non-large variants, list item names, dictionary encoding and field
+        metadata aside), at every depth; the one difference accepted is a non-null
+        column where the slot's column is nullable (``T`` into ``T | None``). Nested
+        nullability must match exactly.
+
+        Args:
+            role: ``"tag"`` or ``"data"``.
+            name: The column name.
+            slot_schema: The slot's Arrow schema of that role.
+            source_schema: The source's Arrow schema of that role.
+
+        Returns:
+            The issue text, or ``None`` when the types agree.
+        """
+        if name not in slot_schema.names or name not in source_schema.names:
+            return None
+        declared = slot_schema.field(name)
+        given = source_schema.field(name)
+        if declared.nullable and not given.nullable:
+            given = given.with_nullable(True)
+        hasher = self.data_context.arrow_hasher
+        if hasher.hash_schema(pa.schema([declared])) == hasher.hash_schema(
+            pa.schema([given])
+        ):
+            return None
+        issue = (
+            f"{role} column {name!r} has the Arrow type {_arrow_field_text(declared)} "
+            f"in the slot but {_arrow_field_text(source_schema.field(name))} in the "
+            "source"
+        )
+        if self._given_arrow_schemas is None:
+            python_type = (self._tag_schema if role == "tag" else self._data_schema)[
+                name
+            ]
+            issue += (
+                f" (declared {_type_text(python_type)} means "
+                f"{_arrow_field_text(declared)}; declare the slot from the source or "
+                "with an Arrow schema)"
+            )
+        return issue
 
     def as_table(
         self,
@@ -951,6 +1314,31 @@ class SourceNodeBase(TraceableBase, ABC):
             f"data_schema={dict(self._data_schema)!r})"
         )
 
+    def _declared_zero_row_table(self) -> "pa.Table | None":
+        """A slot's zero-row table, typed by the slot's own Arrow schemas.
+
+        A slot made from a stream, or rebuilt from a saved job, holds the Arrow types
+        of its columns (ITL-640): its rows will have them, since a bind accepts only a
+        source of those types. A slot declared with Python types only, or one with a
+        column whose class is not registered, answers ``None`` (the declared Python
+        schema stands in, ITL-1089).
+        """
+        if self._given_arrow_schemas is None or self._pending_types:
+            return None
+        tag_schema, data_schema = self.output_schema(columns=ZERO_ROW_INPUT_COLUMNS)
+        own = {field.name: field for schema in self.arrow_schemas for field in schema}
+        fields = []
+        for name, python_type in {**tag_schema, **data_schema}.items():
+            if name in own:
+                fields.append(own[name])
+            else:
+                fields.append(
+                    declared_arrow_schema(
+                        {name: python_type}, self.data_context.type_converter
+                    ).field(name)
+                )
+        return pa.Table.from_batches([], schema=pa.schema(fields))
+
 
 class SourceNode(SourceNodeBase):
     """Schema-only input-slot declaration for ``Pipeline`` recording.
@@ -972,6 +1360,16 @@ class SourceNode(SourceNodeBase):
         ``identity_structure()`` returns ``("SourceSpec", name, tag_schema, data_schema)``
         — identical to the old ``SourceSpec`` — so existing DB paths remain valid.
     """
+
+    def _typed_zero_row_table(self) -> "pa.Table | None":
+        """The slot's zero-row table from its own Arrow schemas (ITL-640).
+
+        A slot made from a stream or rebuilt from a saved job types its zero-row table
+        from the Arrow types it holds, so the nodes over it type theirs too (a saved
+        job writes those types); a slot declared with Python types only answers
+        ``None``. See ``_declared_zero_row_table``.
+        """
+        return self._declared_zero_row_table()
 
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         """Raise ``UnboundSourceError`` — ``SourceNode`` carries no data.
@@ -1025,17 +1423,22 @@ class SourceNode(SourceNodeBase):
                 slot_name = stream.source_id
             else:
                 slot_name = f"{stream.label}:{stream.content_hash().to_hex()}"
+        if not isinstance(stream, SourceNodeBase):
+            _require_stream_arrow_types(stream, slot_name)
         node = cls(
             name=slot_name,
             tag_schema=tag_schema,
             data_schema=data_schema,
+            arrow_schemas=(
+                stream._given_arrow_schemas  # pyright: ignore[reportPrivateUsage]  # one slot copied into another
+                if isinstance(stream, SourceNodeBase)
+                else typed_arrow_schemas(stream)
+            ),
         )
         if isinstance(stream, SourceNodeBase):
-            # A loaded job's slot keeps its pending types and its saved pipeline hash,
-            # which does not depend on the name (ITL-1138); its saved content hash
-            # covers the name, and the new slot has another name.
-            node._pending_types = dict(stream._pending_types)
-            node._saved_pipeline_hash = stream._saved_pipeline_hash
+            # A loaded job's slot keeps all its saved state (ITL-1138, ITL-640),
+            # through the one method every copy of a slot uses.
+            node._take_saved_state_of(stream)
         return node
 
 
@@ -1081,6 +1484,7 @@ class SourceJobNode(SourceNodeBase):
         data_schema: Schema | None = None,
         bound_source: StreamProtocol | None = None,
         data_context: str | contexts.DataContext | None = None,
+        arrow_schemas: "tuple[pa.Schema, pa.Schema] | None" = None,
     ) -> None:
         if tag_schema is None or data_schema is None:
             if bound_source is None:
@@ -1089,6 +1493,21 @@ class SourceJobNode(SourceNodeBase):
                     "or a bound_source to derive schemas from."
                 )
             derived_tag, derived_data = bound_source.output_schema()
+            if arrow_schemas is None:
+                # Each role's Arrow schema from where that role comes from: an omitted
+                # role takes the source's, a declared one its declaration's (one Arrow
+                # type per Python type), so a declared role is never replaced by the
+                # source's types (CodeRabbit on PR 454).
+                source_tag, source_data = typed_arrow_schemas(bound_source)
+                converter = contexts.resolve_context(data_context).type_converter
+                arrow_schemas = (
+                    source_tag
+                    if tag_schema is None
+                    else declared_arrow_schema(tag_schema, converter),
+                    source_data
+                    if data_schema is None
+                    else declared_arrow_schema(data_schema, converter),
+                )
             if tag_schema is None:
                 tag_schema = derived_tag
             if data_schema is None:
@@ -1098,6 +1517,7 @@ class SourceJobNode(SourceNodeBase):
             tag_schema=tag_schema,
             data_schema=data_schema,
             data_context=data_context,
+            arrow_schemas=arrow_schemas,
         )
         self._bound_source: StreamProtocol | None = None
         self._declared_form: _DeclaredForm | None = None
@@ -1336,6 +1756,8 @@ class SourceJobNode(SourceNodeBase):
         table (ITL-1112, ITL-912). ``None`` when unbound or when the source cannot type
         its rows without rows. See ``typed_zero_row_table``.
         """
+        if self._bound_source is None:
+            return self._declared_zero_row_table()
         table = typed_zero_row_table(self._bound_source)
         if table is None or self._declared_form is None:
             return table
@@ -1528,10 +1950,13 @@ class SourceJobNode(SourceNodeBase):
         match stream:
             case SourceJobNode():
                 # Case 1: copy — preserve bound_source, do NOT wrap the SJN itself.
+                # The copy states the slot's Arrow schemas from the start: its bound
+                # source is validated against them as it is constructed (ITL-640).
                 node = cls(
                     name=name if name is not None else stream.name,
                     tag_schema=stream.tag_schema,
                     data_schema=stream.data_schema,
+                    arrow_schemas=stream._given_arrow_schemas,  # pyright: ignore[reportPrivateUsage]  # one slot copied into another
                     bound_source=stream.bound_source,
                 )
                 node._take_saved_state_of(stream)
@@ -1542,6 +1967,7 @@ class SourceJobNode(SourceNodeBase):
                     name=name if name is not None else stream.name,
                     tag_schema=stream.tag_schema,
                     data_schema=stream.data_schema,
+                    arrow_schemas=stream._given_arrow_schemas,  # pyright: ignore[reportPrivateUsage]  # one slot copied into another
                     bound_source=None,
                 )
                 node._take_saved_state_of(stream)
@@ -1564,10 +1990,12 @@ class SourceJobNode(SourceNodeBase):
                         slot_name = stream.source_id
                     else:
                         slot_name = f"{stream.label}:{stream.content_hash().to_hex()}"
+                _require_stream_arrow_types(stream, slot_name)
                 return cls(
                     name=slot_name,
                     tag_schema=tag_schema,
                     data_schema=data_schema,
+                    arrow_schemas=typed_arrow_schemas(stream),
                     bound_source=stream,
                 )
 
@@ -1592,6 +2020,7 @@ class SourceJobNode(SourceNodeBase):
             name=slot.name,
             tag_schema=slot.tag_schema,
             data_schema=slot.data_schema,
+            arrow_schemas=slot._given_arrow_schemas,  # pyright: ignore[reportPrivateUsage]  # one slot copied into another
         )
         node._take_saved_state_of(slot)
         if bound_source is not None:
@@ -1608,6 +2037,7 @@ class SourceJobNode(SourceNodeBase):
             name=self._name,
             tag_schema=self._tag_schema,
             data_schema=self._data_schema,
+            arrow_schemas=self._given_arrow_schemas,
         )
         node._take_saved_state_of(self)
         return node

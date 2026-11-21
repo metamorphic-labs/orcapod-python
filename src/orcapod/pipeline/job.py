@@ -1609,6 +1609,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             check_saved_source_config,
             check_source_config_binding,
             resolve_source_from_config,
+            job_type_texts_at_version,
             source_config_at_version,
         )
 
@@ -1622,6 +1623,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 f"Unsupported PipelineJob format version {version!r}. "
                 f"Supported: {sorted(SUPPORTED_JOB_FORMAT_VERSIONS)}"
             )
+        # Type texts of an earlier format in the 0.4.0 grammar (ITL-640). The embedded
+        # pipeline carries its own version and is rewritten by ``Pipeline.load``.
+        data = job_type_texts_at_version(data, version)
 
         # Reconstruct pipeline from embedded blueprint data
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as tmp:

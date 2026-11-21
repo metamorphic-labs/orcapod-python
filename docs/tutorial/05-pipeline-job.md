@@ -133,14 +133,14 @@ reads from:
 print(job.diagram())
 # Job 'workshop': 9 nodes
 #   sessions (source · CSVSource · bound)
-#   SelectDataColumns_2 (operator · current) <- sessions
+#   SelectDataColumns_1 (operator · current) <- sessions
 #   units (source · CSVSource · bound)
 #   SelectDataColumns_3 (operator · current) <- units
-#   Join (operator · current) <- SelectDataColumns_2, SelectDataColumns_3
+#   Join (operator · current) <- SelectDataColumns_1, SelectDataColumns_3
 #   rates (function pod · firing_rate · current) <- Join
 #   GroupBy (operator · current) <- rates
-#   SelectDataColumns_1 (operator · current) <- GroupBy
-#   session_means (function pod · mean_rate · current) <- SelectDataColumns_1
+#   SelectDataColumns_2 (operator · current) <- GroupBy
+#   session_means (function pod · mean_rate · current) <- SelectDataColumns_2
 ```
 
 The `Join` is there because `firing_rate` was given two streams: the pod joins them for you.

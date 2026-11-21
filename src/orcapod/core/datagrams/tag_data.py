@@ -402,6 +402,7 @@ class Data(Datagram):
         python_schema: Schema,
         data_context: contexts.DataContext,
         meta_python_schema: Schema | None = None,
+        output_arrow_schema: "pa.Schema | None" = None,
     ) -> pa.Table:
         """The table a function's output rows give, with no row.
 
@@ -421,6 +422,9 @@ class Data(Datagram):
             data_context: The data context the rows are typed in.
             meta_python_schema: The meta columns every output row carries (a
                 cached pod's ``__computed`` flag), if any.
+            output_arrow_schema: The Arrow types of the output columns when they are
+                known apart from ``python_schema`` (a loaded node's saved types,
+                ITL-640); ``None`` converts ``python_schema``.
 
         Returns:
             A zero-row table: data columns, ``_context_key``, meta columns,
@@ -429,7 +433,11 @@ class Data(Datagram):
         import pyarrow as _pa
 
         fields = list(
-            data_context.type_converter.python_schema_to_arrow_schema(python_schema)
+            output_arrow_schema
+            if output_arrow_schema is not None
+            else data_context.type_converter.python_schema_to_arrow_schema(
+                python_schema
+            )
         )
         fields.append(context_key_field())
         if meta_python_schema:

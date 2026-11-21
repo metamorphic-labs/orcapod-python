@@ -43,13 +43,15 @@ result is returned without recomputation.
 
 The pipeline hash captures the pipeline's **structure** -- schemas, function identities, and
 how elements are connected -- but deliberately ignores source identity. Two pipeline elements
-with identical schemas and the same computational graph have the same pipeline hash, even if
-they are fed by completely different sources.
+with identical Arrow schemas and the same computational graph have the same pipeline hash,
+even if they are fed by completely different sources.
 
 **Used for:** database scoping. Pipeline hash determines the database table path where results
 are stored. This means that two pipeline nodes with the same function, the same input schema
 and the same upstream steps share the same database table -- regardless of which source
-produced the data.
+produced the data. "The same input schema" means the same Arrow schema: a source whose `x`
+column is `int32` and one whose `x` is `int64` both read as `int` in `output_schema()`, but
+they are two schemas, with two pipeline hashes and two tables.
 This is a powerful feature: it means that running the same function on new data automatically
 benefits from results already cached for previous data with the same schema.
 
@@ -72,8 +74,43 @@ print(source_a.pipeline_hash() == source_b.pipeline_hash())
 - The content hashes differ -- different source identity
 - The pipeline hashes are equal -- same schema and structure
 
-If both sources feed into the same function in a `PipelineJob`, the nodes share a database
-table (same pipeline hash), but each row is stored and retrieved by its content hash.
+If `source_a` and `source_b` feed into the same function in a `PipelineJob`, the nodes share
+a database table (same pipeline hash), but each row is stored and retrieved by its content
+hash.
+
+The schema in a hash is the Arrow schema, not the Python one. Two sources whose column holds
+the same numbers as `int32` in one and `int64` in the other have different pipeline hashes:
+
+```python
+import pyarrow as pa
+
+from orcapod.sources import ArrowTableSource
+
+
+def source_of(int_type):
+    table = pa.table(
+        {
+            "subject": pa.array(["s1", "s2"], pa.large_string()),
+            "session": pa.array([1, 2], int_type),
+            "x": pa.array([0.5, 1.5]),
+            "y": pa.array([2, 3], int_type),
+        }
+    )
+    return ArrowTableSource(
+        table, tag_columns=["subject", "session"], tag_only_columns=True
+    )
+
+
+narrow, wide = source_of(pa.int32()), source_of(pa.int64())
+print(narrow.output_schema() == wide.output_schema())
+# True
+print(narrow.pipeline_hash() == wide.pipeline_hash())
+# False
+```
+
+What the schema hash ignores (column order, large and non-large variants, a list's item
+field name, dictionary encoding, field metadata) and what it tells apart is listed in the
+[hashing reference](../reference/hashing.md#the-arrow-schema-hash).
 
 ## The Merkle chain
 
@@ -82,8 +119,11 @@ identity plus the pipeline hashes of all its upstream elements.
 
 ### Base case: sources
 
-A `RootSource`'s pipeline identity is simply its `(tag_schema, data_schema)`. Sources with
-the same column names and types have the same pipeline hash, regardless of their data.
+A `RootSource`'s pipeline identity is the hash of its Arrow tag schema and Arrow data schema:
+the types its rows have. Sources with the same column names and Arrow types have the same
+pipeline hash, regardless of their data; an input slot declared with Python types stands for
+one Arrow type per Python type (`int` is `int64`, `datetime` is `timestamp[us, tz=UTC]`), and
+a slot can also be declared with Arrow schemas.
 
 ### Recursive case: downstream elements
 
@@ -131,8 +171,8 @@ a different `source_id`.
 ### DB path scoping
 
 The pipeline hash determines the database table path. Two nodes that apply the same function
-to sources with the same schema, through the same upstream steps, will write to and read from
-the same table. This is intentional: it maximizes cache reuse across pipeline runs. A
+to sources with the same Arrow schema, through the same upstream steps, will write to and read
+from the same table; sources that differ in any Arrow type write to two tables. This is intentional: it maximizes cache reuse across pipeline runs. A
 schema-preserving step added upstream (a filter, say) changes the pipeline hash and so the
 table. This is the default `table_scope="pipeline_hash"` of a node; a node built with
 `table_scope="content_hash"` also adds its content hash to the path, giving each source its

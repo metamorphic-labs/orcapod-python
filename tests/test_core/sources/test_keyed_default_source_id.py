@@ -423,12 +423,10 @@ class TestListSourceIdentity:
     def test_the_identity_is_that_of_every_root_source(self) -> None:
         for key, resolved in ((TAGS, tuple(TAGS)), (None, ())):
             source = make("list", ROWS, record_id_columns=key, source_id="given")
-            assert source.identity_structure() == (
-                "ListSource",
-                source.output_schema(),
-                "given",
-                resolved,
-            )
+            identity = source.identity_structure()
+            assert identity == RootSource.identity_structure(source)
+            assert identity[0] == "ListSource"
+            assert identity[2:] == ("given", resolved)
 
     def test_with_a_source_id_the_elements_do_not_count(self) -> None:
         hashes = {
