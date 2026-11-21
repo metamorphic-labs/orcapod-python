@@ -751,7 +751,7 @@ def assert_requested_columns(
         ]
         assert not missing, f"no source-info columns {missing}"
     if require_sorted and (all_info or columns.get("sort_by_tags")):
-        # List-valued tags (Batch) too: they are sorted with Polars, nulls last.
+        # List-valued tags (Batch) too: nulls last, inside a list too.
         assert_sorted_by_tags(table, layout.tag_keys)
     if (all_info or columns.get("system_tags")) and not layout.no_system_tags:
         pairs = [
@@ -841,31 +841,27 @@ def rows_table(pairs: Iterable[tuple[Any, Any]]) -> pa.Table:
 
 
 def _null_last(value: Any) -> tuple[Any, ...]:
-    """A sort key: ascending, a null cell after every value.
+    """A sort key: ascending, a null after every value, at every depth.
 
-    A list cell (``Batch``'s tags, sorted with Polars) is ordered element by element, a
-    shorter prefix first; inside a list a null element comes before every value, as
-    Polars orders it (only the null cell itself goes last).
+    A list cell (``Batch``'s tags) is ordered element by element, a shorter prefix
+    first, and a struct cell field by field; a null element or field comes after every
+    value, as a null cell does (ITL-1295: as ``GroupBy`` orders a list, Arrow a struct).
     """
     if value is None:
         return (1,)
-    return (0, _in_list(value) if isinstance(value, list) else value)
-
-
-def _in_list(value: list[Any]) -> tuple[Any, ...]:
-    """The Polars order of a list's elements: a null element before every value."""
-    return tuple(
-        (0,) if v is None else (1, _in_list(v) if isinstance(v, list) else v)
-        for v in value
-    )
+    if isinstance(value, list):
+        return (0, tuple(_null_last(v) for v in value))
+    if isinstance(value, dict):
+        return (0, tuple(_null_last(v) for v in value.values()))
+    return (0, value)
 
 
 def assert_sorted_by_tags(table: pa.Table, tag_keys: Sequence[str]) -> None:
     """Assert the rows of ``table`` are in the presentation order ``sort_by_tags`` asks.
 
-    The order of ``as_table(sort_by_tags=True)`` and ``head`` (#354,
+    The order of ``as_table(columns={"sort_by_tags": True})`` and ``head`` (#354,
     ``arrow_utils.sort_by_tag_columns``): ascending by ``tag_keys``, a null cell last (a
-    list-valued tag is ordered with Polars: element by element, a null element first),
+    list-valued tag element by element, a null element last too),
     then by the system tag columns the table has, in column order. Rows equal on all of these keep their
     input order, which the table does not show, so they may come in any order.
     """
