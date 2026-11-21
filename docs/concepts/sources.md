@@ -35,7 +35,8 @@ hashing) and produces the final immutable stream.
 
 `orcapod.sources` also provides database-backed sources (`SQLiteTableSource`,
 `PostgreSQLTableSource`, `SpiralDBTableSource`) and `PollingSource` for data that arrives over
-time; see the [API reference](../api/sources.md). Their default `source_id` names the table
+time (provisional in this release, see [Provisional sources](#provisional-sources)); see the
+[API reference](../api/sources.md). Their default `source_id` names the table
 where it lives (`sqlite_table:<db path>:main.<table>`,
 `postgresql_table:<host>:<port>/<database>.<schema>.<table>`, with the server the connection
 reached; the
@@ -707,6 +708,25 @@ print(with_start.source_id)
 Only a source can do this. An operator rearranges rows and columns, and every data value it
 emits was already a data value of its input; turning a tag value into a data value creates
 new data, which is what a source is for.
+
+### Provisional sources
+
+Data context v1 freezes the hashes of Orcapod at the 0.4.0 release. A provisional source is
+outside that freeze: its default `source_id` and its content hash are still being decided
+(ITL-1316), so a later release may change them, and with them the system tags, stored paths
+and record ids of its rows and of every step downstream of it, which then compute their
+results again (nothing stored is lost or wrong). It works as any source does otherwise.
+
+```python
+from orcapod.sources import PROVISIONAL_SOURCES
+
+print(sorted(PROVISIONAL_SOURCES))
+# ['PollingSource']
+```
+
+Building one, directly or from a saved config, issues `orcapod.errors.ProvisionalHashWarning`
+once per process; filter its class to silence it, as for
+[provisional operators](operators.md#provisional-operators).
 
 ## What a source does at a run
 

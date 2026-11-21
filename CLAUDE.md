@@ -522,6 +522,17 @@ Orcapod stores or embeds in a name is pinned in the golden folder of the current
   frozen and provisional files; an operator leaving the group has its entries relocated into
   a frozen file before the release step. Never put a value that depends on a provisional
   operator in a frozen file.
+- Provisional sources are outside the freeze too (developer, November 21, 2026, ITL-1314:
+  "make polling source provisional"): `orcapod.sources.PROVISIONAL_SOURCES`
+  (`core/sources/provisional.py`) is the one list (today `PollingSource`, its identity
+  decided by ITL-1316), each listed class sets `PROVISIONAL = True` (declared on
+  `RootSource`, which warns when one is constructed, also through `from_config`), and building
+  one issues `ProvisionalHashWarning` once per source kind per process. The warning and the
+  use record are one helper, `utils/provisional.warn_provisional_use` (operators use it
+  too). Unlike a provisional operator, a provisional source is never pinned, in no golden
+  file: only operators can be declared by a golden case, so `compute_group_kinds` refuses a
+  case that builds one. The mark never enters a hash, an identifier, a config or a stored
+  path.
 - The unit of immutability is the golden file. The manifest's `golden.history`
   (`src/orcapod/contexts/data/<version>.json`) lists every file with the sha256 of its bytes;
   a release appends a revision with `added: {}`, pinned in

@@ -179,7 +179,7 @@ category, but we should make it totally overridable"; November 16, 2026, ITL-115
 | `PostgreSQLTableSource` | `postgresql_table` | `postgresql_table:<host>:<port>/<database>.<schema>.<table>` (the server the connection reached, then the three-part name, from `current_database()` and `current_schema()`; see below) |
 | `DBTableSource` (any other connector) | `db_table` | none: `source_id` is required. The connector protocol exposes no database address, and the table name alone does not say which database the table is in (developer decision, November 16, 2026) |
 | `SpiralDBTableSource` | `spiraldb_table` | `spiraldb_table:<project>.<dataset>.<table>@<table id>` (Spiral's own table identifier, then SpiralDB's table id; `SPIRALDB_SOURCE_ID_HAS_TABLE_ID`) |
-| `PollingSource` | `polling_source` | `polling_source:semantic_v1:<hex>` of `impl.identity()` (never its `repr`) |
+| `PollingSource` | `polling_source` | `polling_source:semantic_v1:<hex>` of `impl.identity()` (never its `repr`). Provisional (ITL-1314): not frozen with data context v1, and no golden value pins it |
 | `CachedSource` | `cached` | the wrapped source's id |
 | folded source id of `Batch` / `GroupBy` (a system-tag value, not a source) | | `batch_v1:<hex>` / `group_v1:<hex>` |
 
@@ -566,7 +566,7 @@ The table below shows what each class returns from `identity_structure()`.
 | `DerivedSource` | Origin node's `content_hash` | Inherits its generating node's identity |
 | `DerivedSource` with `tags_as_data` | `(class_name, output_schema, source_id, key_columns, ("tags_as_data", sorted items))`; `source_id` is required (ITL-1313) | The rule of every root source plus the mapping, which enters the `content_hash` directly (two mappings can give one schema and one `source_id`); the origin enters only through the output schema, so the source is an address like every other source with a given `source_id` |
 | `ListSource` | `(class_name, name, elements, tag function hash, key_columns)` | The elements are the source's identity; `key_columns` as for every root source |
-| `PollingSource` | `(impl.identity(), sorted tag_columns, key_columns)` | The implementer's identity; the tag columns in name order, so their declared order changes nothing; `key_columns` (always given for a polling source, in key order) as for every root source |
+| `PollingSource` | `(impl.identity(), sorted tag_columns, key_columns)` | The implementer's identity; the tag columns in name order, so their declared order changes nothing; `key_columns` (always given for a polling source, in key order) as for every root source Provisional (`PROVISIONAL_SOURCES`, ITL-1314): this identity may change in a later release (ITL-1316) |
 | `SpiralDBTableSource` | `(class_name, output_schema, source_id, key_columns)`, then the sorted `tags_as_data` items when given | A restriction (`where`, `limit`, `asof`) chooses rows of the same table and adds nothing |
 | `CachedSource` | the wrapped source's identity | |
 | Operators (unary) | `(operator_class_name, upstream_stream)` | Stream reference resolved via `content_resolver` |

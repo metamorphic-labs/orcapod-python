@@ -856,35 +856,6 @@ def schema_row_identifiers() -> dict[str, Any]:
     return out
 
 
-class GoldenPollingImpl:
-    """A polling source implementation whose identity is fixed (default source id).
-
-    Only ``identity`` is used by the golden case; the source is never polled.
-    """
-
-    def identity(self) -> Any:
-        return ("golden_polling", 1)
-
-    def to_config(self) -> dict[str, Any] | None:
-        return None
-
-    @classmethod
-    def from_config(cls, config: dict[str, Any]) -> GoldenPollingImpl:
-        raise NotImplementedError
-
-    def schema(self) -> Any:
-        return None
-
-    async def poll(self, cursor: Any = None) -> bool:
-        return False
-
-    async def fetch(self, cursor: Any = None) -> Any:
-        raise NotImplementedError
-
-    async def close(self) -> None:
-        return None
-
-
 @case("schema", "location_default_source_ids")
 def schema_location_default_source_ids() -> dict[str, Any]:
     """Pin the default source id of every source built from a location (ITL-1154).
@@ -893,8 +864,8 @@ def schema_location_default_source_ids() -> dict[str, Any]:
     temporary directory (``rows.csv``, a Delta folder ``golden_delta``, a SQLite table
     ``golden_trials``), so no value depends on the machine. Pinned: the default
     ``<kind>:<location>`` and the stream summary (record ids are ``row_<n>``, and the
-    primary key's JSON for SQLite). The polling source's default is the semantic hash of its
-    implementation's identity.
+    primary key's JSON for SQLite). A ``PollingSource`` is provisional (ITL-1314): no
+    golden case builds one.
 
     Returns:
         Each source's default source id and stream summary.
@@ -908,7 +879,6 @@ def schema_location_default_source_ids() -> dict[str, Any]:
     from orcapod.core.sources import (
         CSVSource,
         DeltaTableSource,
-        PollingSource,
         SQLiteTableSource,
     )
 
@@ -947,10 +917,6 @@ def schema_location_default_source_ids() -> dict[str, Any]:
                 out.update(_prefixed(kind, stream_summary(source)))
         finally:
             os.chdir(previous)
-    polling = PollingSource(
-        GoldenPollingImpl(), tag_columns="subject", record_id_columns="subject"
-    )
-    out["polling_source.source_id"] = polling.source_id
     return out
 
 
@@ -996,8 +962,8 @@ def schema_key_policy_identity() -> dict[str, Any]:
     A root source's identity holds its resolved key columns (``()`` for the
     position), so two sources with one ``source_id`` and schema that name their rows
     differently have different content hashes and the same pipeline hash. Pinned per
-    source kind, for two key policies each: the content hash, and the pipeline hash
-    where the source has a schema without polling.
+    source kind, for two key policies each: the content hash and the pipeline hash. A
+    ``PollingSource`` is provisional (ITL-1314): no golden case builds one.
 
     Returns:
         Each variant's content hash and pipeline hash.
@@ -1009,17 +975,15 @@ def schema_key_policy_identity() -> dict[str, Any]:
         ArrowTableSource,
         DerivedSource,
         ListSource,
-        PollingSource,
         SQLiteTableSource,
     )
 
     table = _builder_table()
     out: dict[str, Any] = {}
 
-    def pin(variant: str, source: Any, *, pipeline: bool = True) -> None:
+    def pin(variant: str, source: Any) -> None:
         out[f"{variant}.content_hash"] = source.content_hash().to_string()
-        if pipeline:
-            out[f"{variant}.pipeline_hash"] = source.pipeline_hash().to_string()
+        out[f"{variant}.pipeline_hash"] = source.pipeline_hash().to_string()
 
     for variant, key in {"position": None, "key": "subject"}.items():
         arrow = ArrowTableSource(
@@ -1047,17 +1011,6 @@ def schema_key_policy_identity() -> dict[str, Any]:
             data_context=_ctx(),
         )
         pin(f"list.{variant}", listed)
-    for variant, key in {
-        "subject": "subject",
-        "subject_count": ["subject", "count"],
-    }.items():
-        polling = PollingSource(
-            GoldenPollingImpl(),
-            tag_columns="subject",
-            record_id_columns=key,
-            source_id="golden_keys_polling",
-        )
-        pin(f"polling_source.{variant}", polling, pipeline=False)
     with tempfile.TemporaryDirectory() as tmp:
         path = f"{tmp}/golden.sqlite"
         with contextlib.closing(sqlite3.connect(path)) as conn, conn:

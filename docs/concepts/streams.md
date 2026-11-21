@@ -214,7 +214,7 @@ What `run()` does on each kind of object:
 |---|---|
 | An in-memory source (`DictSource`, `ArrowTableSource`, ...), a Delta or SQL table source | nothing to compute: a view of the rows it holds |
 | A `SpiralDBTableSource` | reads the whole table into memory (`head()` is the bounded read); every call reads again |
-| A `PollingSource` | polls, as `as_table()` does |
+| A `PollingSource` (provisional, see [Provisional sources](sources.md#provisional-sources)) | polls, as `as_table()` does |
 | A `CachedSource` | reads its cache and writes the wrapped source's new rows to it |
 | A function pod's or operator's output stream | computes what is not computed yet |
 | A job node | runs the node as a job run would, after every job node it depends on that holds no current run (each once), commits, and returns the view of that run's rows; a node that holds a current run (completed in this process and not stale) runs nothing. `run(load_only=True)` loads stored results only. `as_table()` of a job node only reads |

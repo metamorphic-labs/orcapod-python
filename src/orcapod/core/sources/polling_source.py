@@ -166,6 +166,10 @@ _STREAM_COMBINE_COLUMNS = ColumnConfig(system_tags=True, source=True, context=Tr
 class PollingSource(RootSource, Generic[T]):
     """A root source that continuously emits data via a polling loop.
 
+    Provisional in data context v1 (ITL-1314, ``PROVISIONAL_SOURCES``): its default
+    source id and its content hash are not frozen and may change in a later release
+    (ITL-1316). Building one issues ``ProvisionalHashWarning`` once per process.
+
     Wraps a ``DynamicSourceProtocol`` implementation. Under async execution
     (``async_iter_data``), the framework polls the impl on a fixed interval
     and yields new rows as they arrive. Under sync execution (``iter_data``),
@@ -270,6 +274,8 @@ class PollingSource(RootSource, Generic[T]):
 
     SOURCE_KIND: ClassVar[str] = "polling_source"
     """Config type key and default source-id kind of this source (one vocabulary)."""
+    PROVISIONAL = True
+    """Provisional in data context v1 (ITL-1314, ``PROVISIONAL_SOURCES``)."""
 
     def __init__(
         self,
