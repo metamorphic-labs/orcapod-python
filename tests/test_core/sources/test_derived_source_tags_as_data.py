@@ -15,6 +15,7 @@ import itertools
 import sqlite3
 from contextlib import closing
 from pathlib import Path
+from typing import Any
 
 import pyarrow as pa
 import pytest
@@ -1060,3 +1061,101 @@ class TestRequiredSourceIdConfig:
         monkeypatch.setattr(serialization, "resolve_source_from_config", refuse)
         with pytest.raises(ValueError, match="needs a source_id"):
             DerivedSource.from_config(config)
+
+
+@function_pod(output_keys="m")
+def probe_id_length(probe_copy: str) -> int:
+    """Return the length of the copied probe id."""
+    return len(probe_copy)
+
+
+def _two_copies_job(db_path: str) -> PipelineJob:
+    """A job over two tags_as_data sources of one table, ``copies_a`` and ``copies_b``."""
+    job = PipelineJob(name="two_copies", database=InMemoryArrowDatabase())
+    with job:
+        by_name = DerivedSource(
+            SQLiteTableSource(db_path, "probe", tag_only_columns=True),
+            tags_as_data={"name": "name_copy"},
+            source_id="copies_a",
+        )
+        by_probe = DerivedSource(
+            SQLiteTableSource(db_path, "probe", tag_only_columns=True),
+            tags_as_data={"probe_id": "probe_copy"},
+            source_id="copies_b",
+        )
+        name_length.pod(by_name.select_data_columns(["name_copy"]), label="len")
+        probe_id_length.pod(by_probe.select_data_columns(["probe_copy"]), label="plen")
+    return job
+
+
+def _saved(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
+    import json
+
+    job = _two_copies_job(_make_probe_db(tmp_path / "edi.db"))
+    path = tmp_path / "job.json"
+    job.save(path)
+    return path, json.loads(path.read_text())
+
+
+def _write(path: Path, data: dict[str, Any]) -> None:
+    import json
+
+    path.write_text(json.dumps(data))
+
+
+class TestLoadRefusesASavedTagsAsDataSourceWithoutASourceId:
+    """An invalid saved config is refused by ``PipelineJob.load`` (ITL-1313)."""
+
+    @pytest.mark.parametrize("how", ["absent", "null"])
+    @pytest.mark.parametrize(
+        "broken", [("copies_a",), ("copies_b",), ("copies_a", "copies_b")]
+    )
+    def test_refused_at_load(self, tmp_path, how, broken):
+        path, data = _saved(tmp_path)
+        sources = data["bindings"]["sources"]
+        assert set(sources) == {"copies_a", "copies_b"}
+        for name in broken:
+            if how == "absent":
+                del sources[name]["source_id"]
+            else:
+                sources[name]["source_id"] = None
+        _write(path, data)
+        with pytest.raises(ValueError, match="needs a source_id") as raised:
+            PipelineJob.load(path, database=InMemoryArrowDatabase())
+        assert str(path) in str(raised.value)
+
+    def test_refused_in_a_derived_origin(self, tmp_path):
+        """A tags_as_data origin of a saved derived source is checked too."""
+        db_path = _make_probe_db(tmp_path / "edi.db")
+        job = PipelineJob(name="nested", database=InMemoryArrowDatabase())
+        with job:
+            inner = DerivedSource(
+                SQLiteTableSource(db_path, "probe", tag_only_columns=True),
+                tags_as_data={"name": "name_copy"},
+                source_id="inner",
+            )
+            outer = DerivedSource(
+                inner, tags_as_data={"probe_id": "probe_copy"}, source_id="outer"
+            )
+            name_length.pod(outer.select_data_columns(["name_copy"]), label="len")
+        path = tmp_path / "job.json"
+        job.save(path)
+        import json
+
+        data = json.loads(path.read_text())
+        data["bindings"]["sources"]["outer"]["origin"]["source_id"] = None
+        _write(path, data)
+        with pytest.raises(ValueError, match="needs a source_id"):
+            PipelineJob.load(path, database=InMemoryArrowDatabase())
+
+    def test_control_both_ids_present_loads_bound(self, tmp_path):
+        path, _ = _saved(tmp_path)
+        loaded = PipelineJob.load(path, database=InMemoryArrowDatabase())
+        assert loaded.unbound_sources == []
+        assert set(loaded.sources) == {"copies_a", "copies_b"}
+
+    def test_control_an_unavailable_source_still_loads_unbound(self, tmp_path):
+        path, _ = _saved(tmp_path)
+        (tmp_path / "edi.db").unlink()
+        loaded = PipelineJob.load(path, database=InMemoryArrowDatabase())
+        assert sorted(loaded.unbound_sources) == ["copies_a", "copies_b"]
