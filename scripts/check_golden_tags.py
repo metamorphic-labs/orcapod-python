@@ -526,9 +526,11 @@ def check_pre_release(repo: Path, release: str) -> list[str]:
 
     A pre-release carries the hashes intended to be final but freezes nothing: only a
     final release runs the golden release step (developer, November 21, 2026, ITL-1329).
-    So no release record at HEAD names a pre-release, in any spelling: not the current
-    data context's ``releases`` pins, not a release revision of its golden history, not
-    a data function type snapshot pin (``released_in``). Nor may ``release`` be withdrawn
+    So no release record at HEAD names a pre-release, in any spelling. The release
+    records at HEAD are: the ``releases`` pins of every data context in
+    ``released_manifests.json``; the current data context manifest's ``released_in`` and
+    the ``release`` of each revision of its golden history; and the ``released_in`` of
+    each data function type snapshot pin. Nor may ``release`` be withdrawn
     (a package index never takes a version twice). Unpinned data function type snapshots
     are allowed: the final release step pins them. What earlier final releases froze is
     checked by the tag check, which the Release workflow runs for a pre-release too.
@@ -542,10 +544,17 @@ def check_pre_release(repo: Path, release: str) -> list[str]:
     """
     version = _current_version(repo)
     pins = _show_json(repo, "HEAD", PINS)
-    pin = pins.get(version) if isinstance(pins, dict) else None
-    releases = pin.get("releases") if isinstance(pin, dict) else None
-    recorded = sorted(releases) if isinstance(releases, dict) else []
+    recorded = [
+        (context, str(name))
+        for context, context_pin in sorted(
+            pins.items() if isinstance(pins, dict) else []
+        )
+        if isinstance(context_pin, dict)
+        and isinstance(context_pin.get("releases"), dict)
+        for name in sorted(context_pin["releases"])
+    ]
     manifest = _show_json(repo, "HEAD", CONTEXTS / "data" / f"{version}.json")
+    released_in = manifest.get("released_in") if isinstance(manifest, dict) else None
     golden = manifest.get("golden") if isinstance(manifest, dict) else None
     history = golden.get("history") if isinstance(golden, dict) else None
     revisions = [
@@ -567,12 +576,17 @@ def check_pre_release(repo: Path, release: str) -> list[str]:
         "freezes a data context); revert the release step's commit"
     )
     problems: list[str] = []
-    for name in recorded:
+    for context, name in recorded:
         if _is_pre_release(name):
             problems.append(
                 f"HEAD records pre-release {name} as a release of data context "
-                f"{version}: {step}"
+                f"{context}: {step}"
             )
+    if released_in is not None and _is_pre_release(str(released_in)):
+        problems.append(
+            f"the manifest of data context {version} at HEAD names pre-release "
+            f"{released_in} as the release that froze it (released_in): {step}"
+        )
     for name in revisions:
         if _is_pre_release(name):
             problems.append(

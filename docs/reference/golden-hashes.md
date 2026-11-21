@@ -405,7 +405,8 @@ build job before the tag is made; tested by `tests/test_check_golden_tags.py`
   `X.Y.Z`, which is the last revision of HEAD's golden history: a golden file added after
   the release step would ship unreleased, so such a commit is not tagged. It fails without
   git. For a pre-release (ITL-1329) it checks the opposite: no release record at HEAD
-  names a pre-release, in any spelling (the `releases` pins, a release revision of the
+  names a pre-release, in any spelling (the `releases` pins of every data context in
+  `released_manifests.json`, the current manifest's `released_in`, a release revision of its
   golden history, a data function type snapshot's `released_in`), and the version is not
   withdrawn; the release step and the type snapshot pins are not required. The tag check
   skips every tag whose name is a pre-release (`v0.4.0rc1`), so such a tag protects no

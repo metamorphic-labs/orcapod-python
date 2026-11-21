@@ -1070,3 +1070,52 @@ def test_classify_refuses_a_raw_input_that_is_not_the_normal_form(version: str) 
     result = _classify(version)
     assert result.returncode == 1
     assert result.stdout == ""
+
+
+def _set_released_in(repo: Path, value: str | None) -> None:
+    path = store.manifest_path(repo, VERSION)
+    manifest = store.read_json(path)
+    manifest["released_in"] = value
+    store.write_json(path, manifest)
+
+
+@pytest.mark.parametrize("spelling", ["0.4.0rc1", "0.4.0-rc.1"])
+def test_a_pre_release_in_the_manifest_released_in_only_is_refused(
+    repo: Path, spelling: str
+) -> None:
+    """The manifest's own ``released_in`` is a release record: a pre-release there,
+    with no other record, is refused (CodeRabbit, #470)."""
+    _set_released_in(repo, spelling)
+    _commit(repo, "released_in names a candidate")
+    result = _gate(repo, "0.4.0rc1")
+    assert result.returncode == 1
+    assert f"names pre-release {spelling} as the release that froze it" in result.stderr
+
+
+@pytest.mark.parametrize("value", ["0.3.1.post1", None])
+def test_a_final_or_null_manifest_released_in_passes(
+    repo: Path, value: str | None
+) -> None:
+    """A final version or null in ``released_in`` is no pre-release record: the
+    candidate gate passes (the fixture's own 0.3.0 passes in every other test)."""
+    manifest = store.read_json(store.manifest_path(repo, VERSION))
+    assert manifest["released_in"] == "0.3.0"
+    assert _gate(repo, "0.4.0rc1").returncode == 0
+    _set_released_in(repo, value)
+    _commit(repo, "released_in final or null")
+    result = _gate(repo, "0.4.0rc1")
+    assert result.returncode == 0, result.stderr
+
+
+def test_a_pre_release_in_another_data_context_s_releases_is_refused(
+    repo: Path,
+) -> None:
+    """Every data context's ``releases`` pins are release records, not only the
+    current one's."""
+    pins = store.read_json(store.pins_path(repo))
+    pins["v0"] = {"manifest": None, "releases": {"0.2.0b1": "4" * 64}}
+    store.write_json(store.pins_path(repo), pins)
+    _commit(repo, "another context records a candidate")
+    result = _gate(repo, "0.4.0rc1")
+    assert result.returncode == 1
+    assert "pre-release 0.2.0b1 as a release of data context v0" in result.stderr

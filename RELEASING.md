@@ -341,8 +341,9 @@ neither `X.Y.Z` (or `X.Y.Z.postN`) nor such a pre-release is refused, never gues
 A pre-release goes through the same Release workflow, with four differences (ITL-1329):
 
 - It freezes nothing: the build job requires that no release record at HEAD names a
-  pre-release (no `releases` pin, no release revision in the golden history, no data
-  function type snapshot pinned as released in one; so no golden release step, and
+  pre-release (no `releases` pin of any data context, no `released_in` of the data context
+  manifest, no release revision in the golden history, no data function type snapshot
+  pinned as released in one; so no golden release step, and
   `data_function_types.py --release` refuses a pre-release too), and it allows data
   function type snapshots that are not pinned yet. The tag check still runs, so what
   earlier final releases froze stays protected; it skips every pre-release tag, which
