@@ -425,14 +425,14 @@ def test_nanoseconds_cannot_be_appended_to_a_table_written_before_the_fix(
         pa.table({"__record_id": pa.array([b"a"], pa.large_binary()), "c": column}),
     )
     store = DeltaTableDatabase(tmp_path)
-    store.add_records(
-        ("t",),
-        pa.table({"id": pa.array([b"b"], pa.large_binary()), "c": column}),
-        record_id_column="id",
-    )
-
+    # Refused when added, before anything is queued (ITL-1334).
     with pytest.raises(InputValidationError, match="'c'"):
-        store.flush()
+        store.add_records(
+            ("t",),
+            pa.table({"id": pa.array([b"b"], pa.large_binary()), "c": column}),
+            record_id_column="id",
+        )
+    store.flush()
 
 
 @pytest.mark.parametrize(
@@ -456,14 +456,14 @@ def test_an_append_of_another_type_is_refused(
         record_id_column="id",
         flush=True,
     )
-    store.add_records(
-        ("t",),
-        pa.table({"id": pa.array([b"b"], pa.large_binary()), "c": incoming}),
-        record_id_column="id",
-    )
-
+    # Refused when added, before anything is queued (ITL-1334).
     with pytest.raises(InputValidationError, match="'c'"):
-        store.flush()
+        store.add_records(
+            ("t",),
+            pa.table({"id": pa.array([b"b"], pa.large_binary()), "c": incoming}),
+            record_id_column="id",
+        )
+    store.flush()
 
 
 def test_unsigned_rows_append_to_a_signed_column_without_a_recorded_type(
@@ -517,19 +517,19 @@ def test_an_unsigned_value_beyond_an_unrecorded_signed_column_is_refused(
         ),
     )
     store = DeltaTableDatabase(tmp_path)
-    store.add_records(
-        ("t",),
-        pa.table(
-            {
-                "id": pa.array([b"b"], pa.large_binary()),
-                "c": pa.array([3_000_000_000], pa.uint32()),
-            }
-        ),
-        record_id_column="id",
-    )
-
+    # Refused when added, before anything is queued (ITL-1334).
     with pytest.raises(InputValidationError, match="'c'"):
-        store.flush()
+        store.add_records(
+            ("t",),
+            pa.table(
+                {
+                    "id": pa.array([b"b"], pa.large_binary()),
+                    "c": pa.array([3_000_000_000], pa.uint32()),
+                }
+            ),
+            record_id_column="id",
+        )
+    store.flush()
     read = DeltaTableDatabase(tmp_path).get_all_records(("t",))
     assert read is not None
     assert read.column("c").to_pylist() == [1]
@@ -661,3 +661,31 @@ def test_a_new_all_null_column_is_refused_naming_it(
     )
     with pytest.raises(UnstorableColumnError, match="'n'"):
         db.add_records(("t",), table, record_id_column="id")
+
+
+@pytest.mark.parametrize(
+    "arrow_type",
+    [pa.decimal256(40, 2), pa.struct([]), pa.large_list(pa.int64())],
+    ids=["decimal256", "empty struct", "large_list"],
+)
+def test_a_refusal_suggests_only_the_database_that_keeps_every_type(
+    arrow_type: pa.DataType,
+) -> None:
+    """A refusal never suggests a database that refuses the same column (CodeRabbit
+    on PR 471): it names the in-memory database, which keeps every type, and the page
+    that says what each other database keeps."""
+    from orcapod.errors import UnstorableColumnError
+
+    message = str(
+        UnstorableColumnError(
+            database_kind="ConnectorArrowDatabase",
+            column="x",
+            arrow_type=arrow_type,
+            reason="r",
+        )
+    )
+    assert message.endswith(
+        "Use an InMemoryArrowDatabase instead; docs/reference/database-types.md "
+        "lists what each database keeps."
+    )
+    assert "DeltaTableDatabase" not in message

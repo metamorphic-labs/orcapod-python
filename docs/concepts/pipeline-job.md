@@ -186,7 +186,7 @@ try:
         compute_bmi.pod(mice(cohort_a), label="bmi")
 except UnstorableColumnError as exc:
     print(exc)
-# node 'bmi': a SQLiteConnector database cannot store column '__pf_exec_executor_info' of Arrow type large_list<...>: SQLite has no column type for it. Use an InMemoryArrowDatabase or a DeltaTableDatabase instead.
+# node 'bmi': a SQLiteConnector database cannot store column '__pf_exec_executor_info' of Arrow type large_list<...>: SQLite has no column type for it. Use an InMemoryArrowDatabase instead; docs/reference/database-types.md lists what each database keeps.
 ```
 
 ## What a re-run computes

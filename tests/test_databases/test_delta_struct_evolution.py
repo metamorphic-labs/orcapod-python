@@ -152,7 +152,9 @@ def test_omitting_a_non_nullable_stored_field_is_refused(
         record_id_column="id",
         flush=True,
     )
-    with pytest.raises(InputValidationError, match="'x'.*'b'.*non-nullable"):
+    with pytest.raises(
+        InputValidationError, match=r"'x': x\.b is stored as non-nullable"
+    ):
         db.add_records(
             PATH,
             _rows([b"2"], x=([{"a": 3}], _struct(("a", I64)))),

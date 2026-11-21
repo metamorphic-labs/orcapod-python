@@ -406,7 +406,8 @@ def _holds_extension_type(arrow_type: pa.DataType) -> bool:
     Returns:
         ``True`` for an extension type at any depth of lists, structs and maps.
     """
-    if isinstance(arrow_type, pa.ExtensionType):
+    # BaseExtensionType: Python-defined types and Arrow's canonical ones (uuid, json).
+    if isinstance(arrow_type, pa.BaseExtensionType):
         return True
     return any(
         _holds_extension_type(arrow_type.field(i).type)
@@ -415,10 +416,11 @@ def _holds_extension_type(arrow_type: pa.DataType) -> bool:
 
 
 def _holds_map_field_metadata(arrow_type: pa.DataType) -> bool:
-    """Whether ``arrow_type`` is or nests a map whose key or item field has metadata.
+    """Whether ``arrow_type`` is or nests a map with field metadata at any depth below
+    it: on its key or item field, or on a field inside them.
 
-    The connector's metadata record (``_serialize_field_meta_tree``) does not cover a
-    map's key and item fields, so such metadata would read back dropped (ITL-1334).
+    The connector's metadata record (``_serialize_field_meta_tree``) does not descend
+    into a map, so such metadata would read back dropped (ITL-1334).
 
     Args:
         arrow_type: The column's Arrow type.
@@ -426,12 +428,22 @@ def _holds_map_field_metadata(arrow_type: pa.DataType) -> bool:
     Returns:
         ``True`` for such a map at any depth of lists, structs and maps.
     """
-    if pa.types.is_map(arrow_type) and (
-        arrow_type.key_field.metadata or arrow_type.item_field.metadata
-    ):
-        return True
+    if pa.types.is_map(arrow_type):
+        return any(
+            field.metadata or _holds_nested_field_metadata(field.type)
+            for field in (arrow_type.key_field, arrow_type.item_field)
+        )
     return any(
         _holds_map_field_metadata(arrow_type.field(i).type)
+        for i in range(arrow_type.num_fields)
+    )
+
+
+def _holds_nested_field_metadata(arrow_type: pa.DataType) -> bool:
+    """Whether a field nested in ``arrow_type``, at any depth, has metadata."""
+    return any(
+        arrow_type.field(i).metadata
+        or _holds_nested_field_metadata(arrow_type.field(i).type)
         for i in range(arrow_type.num_fields)
     )
 
@@ -1093,8 +1105,8 @@ class SpiralDBConnector:
             )
         if _holds_map_field_metadata(arrow_type):
             return (
-                "the connector does not keep the field metadata of a map's key and "
-                "item, so it would read back without it"
+                "the connector does not keep field metadata below a map (on its key "
+                "or item, or inside them), so it would read back without it"
             )
         return None
 

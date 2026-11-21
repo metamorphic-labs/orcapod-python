@@ -148,10 +148,24 @@ _TS = [
     dt.datetime(2026, 1, 2),
     dt.datetime(2026, 3, 4),
 ]
-_TSZ = [t.replace(tzinfo=dt.timezone.utc) for t in _TS]
 _DATES = [dt.date(2026, 1, 1), dt.date(2026, 1, 2), dt.date(1999, 12, 31)]
 _TIMES = [dt.time(1, 2, 3), dt.time(4, 5, 6), dt.time(23, 59, 59)]
 _DURATIONS = [dt.timedelta(seconds=1), dt.timedelta(seconds=2), dt.timedelta(days=1)]
+_PER_SECOND = {"s": 1, "ms": 1_000, "us": 1_000_000, "ns": 1_000_000_000}
+
+
+def _ticks(unit: str, seconds: list[int]) -> list[int]:
+    """``seconds`` as integer ticks of ``unit``, each off the whole second by a
+    different number of ticks (the last ``unit`` digit included), so a conversion
+    that loses precision (nanoseconds to microseconds) changes a value."""
+    per_second = _PER_SECOND[unit]
+    offsets = [0, 0, 0] if unit == "s" else [1, per_second // 3 + 7, per_second - 1]
+    return [s * per_second + o for s, o in zip(seconds, offsets)]
+
+
+_TS_SECONDS = [int(t.replace(tzinfo=dt.timezone.utc).timestamp()) for t in _TS]
+_TIME_SECONDS = [t.hour * 3600 + t.minute * 60 + t.second for t in _TIMES]
+_DURATION_SECONDS = [int(d.total_seconds()) for d in _DURATIONS]
 
 
 def _files(root: Path) -> list[Any]:
@@ -258,19 +272,23 @@ ROWS: tuple[Row, ...] = (
     Row("null", "null", _plain(pa.null(), [None, None, None])),
     Row("date32", "temporal", _plain(pa.date32(), _DATES)),
     Row("date64", "temporal", _plain(pa.date64(), _DATES)),
-    Row("time32[s]", "temporal", _plain(pa.time32("s"), _TIMES)),
-    Row("time32[ms]", "temporal", _plain(pa.time32("ms"), _TIMES)),
-    Row("time64[us]", "temporal", _plain(pa.time64("us"), _TIMES)),
-    Row("time64[ns]", "temporal", _plain(pa.time64("ns"), _TIMES)),
+    Row("time32[s]", "temporal", _plain(pa.time32("s"), _ticks("s", _TIME_SECONDS))),
+    Row("time32[ms]", "temporal", _plain(pa.time32("ms"), _ticks("ms", _TIME_SECONDS))),
+    Row("time64[us]", "temporal", _plain(pa.time64("us"), _ticks("us", _TIME_SECONDS))),
+    Row("time64[ns]", "temporal", _plain(pa.time64("ns"), _ticks("ns", _TIME_SECONDS))),
     *(
-        Row(f"timestamp[{u}]", "temporal", _plain(pa.timestamp(u), _TS))
+        Row(
+            f"timestamp[{u}]",
+            "temporal",
+            _plain(pa.timestamp(u), _ticks(u, _TS_SECONDS)),
+        )
         for u in ("s", "ms", "us", "ns")
     ),
     *(
         Row(
             f"timestamp[{u}, tz=UTC]",
             "temporal",
-            _plain(pa.timestamp(u, tz="UTC"), _TSZ),
+            _plain(pa.timestamp(u, tz="UTC"), _ticks(u, _TS_SECONDS)),
         )
         for u in ("s", "ms", "us", "ns")
     ),
@@ -278,12 +296,16 @@ ROWS: tuple[Row, ...] = (
         Row(
             f"timestamp[{u}, tz=Europe/Berlin]",
             "temporal",
-            _plain(pa.timestamp(u, tz="Europe/Berlin"), _TSZ),
+            _plain(pa.timestamp(u, tz="Europe/Berlin"), _ticks(u, _TS_SECONDS)),
         )
         for u in ("s", "ms", "us", "ns")
     ),
     *(
-        Row(f"duration[{u}]", "temporal", _plain(pa.duration(u), _DURATIONS))
+        Row(
+            f"duration[{u}]",
+            "temporal",
+            _plain(pa.duration(u), _ticks(u, _DURATION_SECONDS)),
+        )
         for u in ("s", "ms", "us", "ns")
     ),
     Row("string", "string and binary", _plain(pa.string(), ["a", "bc", ""])),
@@ -349,6 +371,16 @@ ROWS: tuple[Row, ...] = (
             ),
             [{"a": 1, "b": "x"}, {"a": None, "b": "y"}, {"a": 3, "b": ""}],
         ),
+    ),
+    Row(
+        "struct<> (no fields)",
+        "struct and map",
+        _plain(pa.struct([]), [{}, {}, {}]),
+    ),
+    Row(
+        "uuid (Arrow's canonical extension type)",
+        "struct and map",
+        _plain(pa.uuid(), [uuid.UUID(int=i + 1).bytes for i in range(3)]),
     ),
     Row(
         "struct<f: fixed_size_list<int64>[2]>",
@@ -426,6 +458,17 @@ ROWS: tuple[Row, ...] = (
                 pa.field("value", pa.int64()),
             ),
             [[("a", 1), ("b", 2)], [], [("c", None)]],
+        ),
+    ),
+    Row(
+        "map<string, struct<a: int64 {unit: m}>> (metadata inside the item)",
+        "names and metadata",
+        _plain(
+            pa.map_(
+                pa.string(),
+                pa.struct([pa.field("a", pa.int64(), metadata={"unit": "m"})]),
+            ),
+            [[("a", {"a": 1})], [], [("c", {"a": None})]],
         ),
     ),
     Row(
@@ -613,11 +656,11 @@ def _names_a_column(error: BaseException) -> bool:
     return any(f"'{c}'" in text or f'"{c}"' in text for c in ("x", "y"))
 
 
-def _expected_field(field: "pa.Field[Any]") -> "pa.Field[Any]":
+def expected_field(field: "pa.Field[Any]") -> "pa.Field[Any]":
     return field.with_type(normalize_to_large_types(field.type, keep_null=True))
 
 
-def _field_difference(a: "pa.Field[Any]", b: "pa.Field[Any]", path: str) -> str | None:
+def field_difference(a: "pa.Field[Any]", b: "pa.Field[Any]", path: str) -> str | None:
     """The first difference between two fields, at any depth, or ``None``.
 
     Everything that makes a field counts: its name, nullability and metadata, and its
@@ -661,8 +704,8 @@ def _type_difference(a: Any, b: Any, path: str) -> str | None:
     if t.is_map(a):
         if a.keys_sorted != b.keys_sorted:
             return f"{path}: keys_sorted {a.keys_sorted} -> {b.keys_sorted}"
-        return _field_difference(a.key_field, b.key_field, f"{path}.key") or (
-            _field_difference(a.item_field, b.item_field, f"{path}.item")
+        return field_difference(a.key_field, b.key_field, f"{path}.key") or (
+            field_difference(a.item_field, b.item_field, f"{path}.item")
         )
     if t.is_fixed_size_list(a) and a.list_size != b.list_size:
         return f"{path}: list size {a.list_size} -> {b.list_size}"
@@ -670,13 +713,13 @@ def _type_difference(a: Any, b: Any, path: str) -> str | None:
         if a.num_fields != b.num_fields:
             return f"{path}: {a} -> {b}"
         for i in range(a.num_fields):
-            found = _field_difference(
+            found = field_difference(
                 a.field(i), b.field(i), f"{path}.{a.field(i).name}"
             )
             if found:
                 return found
         return None
-    return _field_difference(a.value_field, b.value_field, f"{path}[]")
+    return field_difference(a.value_field, b.value_field, f"{path}[]")
 
 
 def _lengths(array: Any) -> list[int]:
@@ -745,10 +788,12 @@ def _with_changed_metadata(field: "pa.Field[Any]") -> "pa.Field[Any]":
 def _nested_changed(arrow_type: Any) -> Any:
     """``arrow_type`` with its first nested field's metadata changed, or ``None``."""
     t = pa.types
-    if isinstance(arrow_type, pa.ExtensionType):
+    if isinstance(arrow_type, pa.BaseExtensionType):
         return None
     if t.is_struct(arrow_type):
         fields = list(arrow_type)
+        if not fields:
+            return None
         return pa.struct([_with_changed_metadata(fields[0]), *fields[1:]])
     if t.is_map(arrow_type):
         return pa.map_(  # pyright: ignore[reportCallIssue]  # pyarrow takes key/item fields
@@ -884,10 +929,10 @@ def measure(row: Row, database: str, root: Path) -> Cell:
         got = back.schema.field(name)
         # The type written, or its large variant (every Orcapod table is large).
         want = exact
-        difference = _field_difference(exact, got, name)
+        difference = field_difference(exact, got, name)
         if difference is not None:
-            want = _expected_field(exact)
-            if _field_difference(want, got, name) is not None:
+            want = expected_field(exact)
+            if field_difference(want, got, name) is not None:
                 problems.append(difference)
                 continue
         expected = written.column(name)

@@ -178,6 +178,8 @@ as nullable afterwards, as Delta stores it.
 | Type | in-memory | Delta | SQLite | PostgreSQL | SpiralDB |
 |---|---|---|---|---|---|
 | `struct<a: int32, b: string not null>` | kept | kept | refused | refused | refused |
+| `struct<> (no fields)` | kept | refused | refused | refused | refused |
+| `uuid (Arrow's canonical extension type)` | kept | refused | refused | refused | refused |
 | `struct<f: fixed_size_list<int64>[2]>` | kept | kept (recorded type) | refused | refused | refused |
 | `map<string, int64>` | kept | kept (recorded type) | refused | refused | kept |
 
@@ -191,6 +193,7 @@ as nullable afterwards, as Delta stores it.
 | `map<k: string, v: int64>, keys sorted` | kept | refused | refused | refused | refused |
 | `map<string, int64 {unit: m}> (item metadata)` | kept | kept (recorded type) | refused | refused | refused |
 | `map<string {unit: m}, int64> (key metadata)` | kept | kept (recorded type) | refused | refused | refused |
+| `map<string, struct<a: int64 {unit: m}>> (metadata inside the item)` | kept | kept (recorded type) | refused | refused | refused |
 | `int64 {unit: s} (field metadata)` | kept | kept | refused | refused | kept |
 
 ## Nullability

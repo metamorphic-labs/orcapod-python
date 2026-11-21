@@ -263,6 +263,10 @@ class TestFlushRaisesStoreErrorsThemselves:
     ):
         """The ``OrcapodDatabaseReadError`` is raised and the refused batch is noted on it."""
         other = ("results", "u")
+        db = DeltaTableDatabase(base_path=base)
+        # Queued first, while nothing is stored at ``other``; then another writer
+        # stores x as int64 there, so the flush refuses these rows (ITL-1334).
+        db.add_records(other, rows([b"b"], pa.array([2.0])), record_id_column="rid")
         stored.add_records(
             other,
             rows([b"a"], pa.array([1], pa.int64())),
@@ -270,9 +274,6 @@ class TestFlushRaisesStoreErrorsThemselves:
             flush=True,
         )
         unsupported_reader_feature(base)
-        db = DeltaTableDatabase(base_path=base)
-        # Queued first: refused at flush, because x is stored as int64.
-        db.add_records(other, rows([b"b"], pa.array([2.0])), record_id_column="rid")
         # Queued second: its table's log cannot be loaded.
         db.add_records(
             PATH, rows([b"c"], pa.array([3], pa.int64())), record_id_column="rid"
@@ -288,7 +289,10 @@ class TestFlushRaisesStoreErrorsThemselves:
         assert len(notes) == 1
         assert "results/u" in notes[0]
         assert "InputValidationError" in notes[0]
-        # Both failed batches stay queued, so the next flush fails the same way.
+        # The batch the stored table refuses leaves the queue (every later flush
+        # would refuse it too); the one whose table cannot be read stays queued, so
+        # the next flush fails the same way (ITL-1334).
+        assert db._pending_batches.keys() == {"results/t"}  # pyright: ignore[reportPrivateUsage]
         with pytest.raises(OrcapodDatabaseReadError):
             db.flush()
 

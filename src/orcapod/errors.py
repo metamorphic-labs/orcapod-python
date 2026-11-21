@@ -277,16 +277,13 @@ class UnstorableColumnError(ValueError):
 
     def __str__(self) -> str:
         node = f"node {self.node_label!r}: " if self.node_label is not None else ""
-        # Delta refuses only what no database but the in-memory one keeps (ITL-1334).
-        instead = (
-            "an InMemoryArrowDatabase"
-            if self.database_kind == "DeltaTableDatabase"
-            else "an InMemoryArrowDatabase or a DeltaTableDatabase"
-        )
         return (
             f"{node}a {self.database_kind} database cannot store column "
             f"{self.column!r} of Arrow type {self.arrow_type}: {self.reason}. "
-            f"Use {instead} instead."
+            # The in-memory database keeps every type; which others keep this one is
+            # on the generated page (ITL-1334), so no hint names one that refuses it.
+            "Use an InMemoryArrowDatabase instead; docs/reference/database-types.md "
+            "lists what each database keeps."
         )
 
 

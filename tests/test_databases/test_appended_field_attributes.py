@@ -19,7 +19,12 @@ import pyarrow as pa
 import pytest
 
 from orcapod.errors import InputValidationError, UnstorableColumnError
-from tests.test_databases.type_matrix import map_of_fields, open_database
+from tests.test_databases.type_matrix import (
+    expected_field,
+    field_difference,
+    map_of_fields,
+    open_database,
+)
 
 PATH = ("t",)
 I64 = pa.int64()
@@ -138,15 +143,24 @@ def test_an_append_with_other_field_attributes_is_refused(
         back = db.get_all_records(PATH, record_id_column="id")
         assert _values(back) == _values(first)
         assert back is not None
-        assert back.schema.field("x").equals(
-            first.schema.field("x").with_type(back.schema.field("x").type),
-            check_metadata=True,
-        )
+        _assert_kept_field(first, back)
     if database == "Delta":
         with open_database(database, tmp_path) as fresh:
-            assert _values(fresh.get_all_records(PATH, record_id_column="id")) == (
-                _values(first)
-            )
+            again = fresh.get_all_records(PATH, record_id_column="id")
+            assert _values(again) == _values(first)
+            assert again is not None
+            _assert_kept_field(first, again)
+
+
+def _assert_kept_field(written: pa.Table, back: pa.Table) -> None:
+    """``x`` reads back as written (every nested name, nullability and metadata, a
+    map's ``keys_sorted``), or as its large variant, compared field by field."""
+    exact = written.schema.field("x")
+    got = back.schema.field("x")
+    assert (
+        field_difference(exact, got, "x") is None
+        or field_difference(expected_field(exact), got, "x") is None
+    ), field_difference(expected_field(exact), got, "x")
 
 
 @pytest.mark.parametrize("database", DATABASES)

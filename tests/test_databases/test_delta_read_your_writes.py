@@ -17,7 +17,11 @@ import pyarrow as pa
 import pytest
 
 from orcapod.databases import DeltaTableDatabase
-from orcapod.errors import OrcapodDatabaseReadError, UnstorableColumnError
+from orcapod.errors import (
+    InputValidationError,
+    OrcapodDatabaseReadError,
+    UnstorableColumnError,
+)
 
 PATH = ("table",)
 SCOPE = "scope"
@@ -403,30 +407,48 @@ def test_read_before_flush_matches_read_after_flush_across_schema_change(
     assert before.to_pylist() == after.to_pylist()
 
 
+@pytest.mark.parametrize("method", list(READS_AC))
+def test_read_of_stored_and_pending_rows_with_different_types_raises(
+    tmp_path: Path, method: str
+) -> None:
+    """A column whose stored and pending types differ is never widened: the read raises.
+
+    Delta stores both timestamp units as microseconds, so the add accepts the rows.
+    """
+    db = DeltaTableDatabase(tmp_path)
+    db.add_records(PATH, _table("a", pa.array([1], pa.timestamp("us"))), flush=True)
+    db.add_records(PATH, _table("c", pa.array([3], pa.timestamp("ms"))))
+
+    with pytest.raises(pa.ArrowTypeError, match="Field x has incompatible types"):
+        _ = READS_AC[method](db)
+
+
 @pytest.mark.parametrize(
     ("stored_x", "pending_x"),
     [
         (pa.array([1], pa.int64()), pa.array([3], pa.int32())),
         (pa.array([1], pa.int64()), pa.array(["t"], pa.large_string())),
-        (pa.array([1], pa.timestamp("us")), pa.array([3], pa.timestamp("ms"))),
         (
             pa.array([1], pa.decimal128(10, 2)),
             pa.array([3], pa.decimal128(12, 2)),
         ),
     ],
-    ids=["int64_vs_int32", "int64_vs_string", "timestamp_unit", "decimal_precision"],
+    ids=["int64_vs_int32", "int64_vs_string", "decimal_precision"],
 )
 @pytest.mark.parametrize("method", list(READS_AC))
-def test_read_of_stored_and_pending_rows_with_different_types_raises(
+def test_rows_of_another_type_than_the_stored_column_are_refused_when_added(
     tmp_path: Path, method: str, stored_x: pa.Array[Any], pending_x: pa.Array[Any]
 ) -> None:
-    """A column whose stored and pending types differ is never widened: the read raises."""
+    """They used to be queued, make reads raise and fail the flush; now nothing is
+    queued, and the read gives the stored rows as stored (ITL-1334)."""
     db = DeltaTableDatabase(tmp_path)
     db.add_records(PATH, _table("a", stored_x), flush=True)
-    db.add_records(PATH, _table("c", pending_x))
+    with pytest.raises(InputValidationError, match="'x': it is stored as"):
+        db.add_records(PATH, _table("c", pending_x))
 
-    with pytest.raises(pa.ArrowTypeError, match="Field x has incompatible types"):
-        _ = READS_AC[method](db)
+    back = READS_AC[method](db)
+    assert back is not None and back.num_rows == 1
+    assert back.schema.field("x").type == stored_x.type
 
 
 def test_a_new_null_typed_column_is_refused_before_it_is_pending(
