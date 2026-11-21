@@ -1121,6 +1121,17 @@ then through the data context's type converter — never call `pa.array(values)`
 inference widens `int8` to `int64`, `float32` to `double`, and takes decimal precision from the
 data. The rules:
 
+- **An explicit CSV schema is read as declared** (developer, November 21, 2026, ITL-1322):
+  `CSVSource(schema=...)` parses each cell's text as its column's declared type
+  (`csv_source._read_declared`), never infers a type and casts afterwards: `007` under a string
+  type stays `"007"`, and a cell that is not a value of its type raises naming the column. The
+  schema names every column of the file, in order. Nulls (option C; the class is decided once,
+  `_is_text_like`): in a text-like column (string or binary of any width, or a logical type
+  stored as one) only an unquoted empty field is null (a quoted `""` is empty, `NA` is text); in
+  any other column pyarrow's null markers are null. A finite value too large for its float type
+  raises; a spelled infinity is kept. `float16` and `decimal256` are read as text and cast with a
+  checked cast; a type the reader cannot parse, and a nested type, are refused naming the
+  column. Every parse reads one in-memory snapshot of the file.
 - **The Arrow schema is never computed** (developer, November 13, 2026, ITL-912): "Generally
   Orcapod should never have to compute anything to get the arrow schema, all function pods and
   operator pods can deterministically derive the output stream schema from the input stream
