@@ -110,3 +110,24 @@ union comparison of every pinned entry against `origin/main` differs in these tw
 The `arrow.float_rule` case adds 84 pins (no value changed): for 0.0, -0.0 and four NaN
 patterns, a column of each width, a list, a struct, a dictionary, and a source's tag and
 data hashes. Every `-0` pin equals its `0` twin and every NaN pin equals the `nan` one.
+
+## The final round: frozen and provisional golden files
+
+Since ITL-1266 the golden folder has two kinds of file: frozen files (`<group>-NN.json`)
+and provisional files (`provisional/<group>.json`, the entries of cases that depend on a
+provisional operator, source or library value type). The two approved `group_by_nan_keys`
+entries are provisional (GroupBy is). The final round reads both kinds:
+
+- `golden_with_options.py off|on <args>` runs `generate_golden_hashes.py --check` or
+  `--stdout` with the own-table float options forced off or on, under the installed starfix
+  (0.5.0 through `_starfix_compat.py`). Step A: `off --check` (nothing moved) and
+  `off --stdout --allow-errors` under 0.5.0 and 0.6.0 (byte-identical). Step B:
+  `on --check` (the two approved entries move; the 84 `arrow.float_rule` values are not
+  pinned yet).
+- `float_rule_golden_proof.py` marks each differing entry with the kind of file its case
+  pins it in.
+- After `--remove` of the two entries and the generator, `golden_union_compare.py <base>`
+  compares every pin of the base revision with the working tree over both kinds of file
+  (`store.load_folder`, which refuses an entry pinned twice). It passes only when exactly the
+  `--approved` entries changed, nothing was removed, every addition starts with an
+  `--added-prefix` and is in a frozen file, and no entry changed its kind of file.

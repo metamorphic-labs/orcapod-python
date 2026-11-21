@@ -5,8 +5,10 @@ as shipped (on), and with them switched off (starfix's default, which is what th
 main computes, since the routing of datagram and stream tables to ``hash_table`` gives the
 same digests and labels as the semantic ``ArrowTableHandler`` did). Prints every value
 that differs outside the ``arrow.float_rule`` case (which pins the rule itself, so its
--0.0 and NaN entries differ by design). Expected: the two approved entries of
-``pipeline:group_by_nan_keys``.
+-0.0 and NaN entries differ by design), each marked with the kind of golden file its case
+pins it in: frozen, or provisional (a case that depends on a provisional operator, source or
+library value type, ITL-1266; ``cases.compute_group_kinds`` says which). Expected: the two
+approved entries of ``pipeline:group_by_nan_keys``, provisional since GroupBy is.
 
 Usage::
 
@@ -38,14 +40,29 @@ def _flatten(value: Any, prefix: str) -> dict[str, str]:
     return {prefix: json.dumps(value, sort_keys=True)}
 
 
+def _compute() -> tuple[dict[str, str], set[str]]:
+    """Every computed golden value, flattened, and the names of the provisional ones."""
+    values: dict[str, Any] = {}
+    provisional: set[str] = set()
+    for group in cases.available_groups():
+        live, kinds = cases.compute_group_kinds(group)
+        values[group] = live
+        provisional |= {f"{group}.{entry}" for entry in kinds}
+    return _flatten(values, ""), provisional
+
+
+def _is_provisional(key: str, provisional: set[str]) -> bool:
+    return any(key == name or key.startswith(f"{name}.") for name in provisional)
+
+
 def main() -> int:
-    on = _flatten(cases.compute_all(), "")
+    on, provisional = _compute()
     shipped = starfix_digest.ORCAPOD_TABLE_FLOAT_OPTIONS
     starfix_digest.ORCAPOD_TABLE_FLOAT_OPTIONS = starfix_digest.FloatOptions(
         normalize_negative_zero=False, normalize_nan=False
     )
     try:
-        off = _flatten(cases.compute_all(), "")
+        off, _ = _compute()
     finally:
         starfix_digest.ORCAPOD_TABLE_FLOAT_OPTIONS = shipped
     assert set(on) == set(off)
@@ -58,7 +75,8 @@ def main() -> int:
         "float rule on:"
     )
     for key in differ:
-        print(f"  {key}\n    off: {off[key]}\n    on:  {on[key]}")
+        kind = "provisional" if _is_provisional(key, provisional) else "frozen"
+        print(f"  {key} [{kind}]\n    off: {off[key]}\n    on:  {on[key]}")
     return 0
 
 
