@@ -39,7 +39,7 @@ from orcapod.contexts import get_default_context
 from orcapod.core.nodes.source_node import SourceNode
 from orcapod.core.operators import Index, MapData, Pick
 from orcapod.core.sources import ArrowTableSource, PollingSource
-from orcapod.core.streams.base import typed_arrow_schemas
+from orcapod.core.streams.base import typed_arrow_schemas, typed_zero_row_table
 
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import SourceSpecMismatchError
@@ -415,10 +415,14 @@ def _nested_containers(child: pa.Field[Any]) -> dict[str, tuple[pa.DataType, Any
         ),
         "large_list": (pa.large_list(child), [["/a", "/b"], ["/c"]]),
         "fixed_size_list": (pa.list_(child, 2), [["/a", "/b"], ["/c", "/d"]]),
-        # The saved map text names neither the item field nor its nullability: the
-        # item is in pyarrow's default shape, ``value``, nullable.
+        # The item keeps its own name and nullability (non-null here) through a
+        # save and load (Codex review 3 of PR 454).
         "map value": (
-            pa.map_(key, child.with_name("value").with_nullable(True)),  # pyright: ignore[reportArgumentType]  # pyarrow takes fields; the stubs name only types
+            pa.map_(key, child),  # pyright: ignore[reportArgumentType]  # pyarrow takes fields; the stubs name only types
+            [[("u", "/a")], [("u", "/b"), ("v", "/c")]],
+        ),
+        "map value, keys sorted": (
+            pa.map_(key, child, True),  # pyright: ignore[reportArgumentType, reportCallIssue]  # as above
             [[("u", "/a")], [("u", "/b"), ("v", "/c")]],
         ),
     }
@@ -482,7 +486,9 @@ def _data_schema(schema: pa.Schema) -> pa.Schema:
 
 
 @pytest.mark.parametrize("identifier", list(NESTED_IDENTIFIERS))
-@pytest.mark.parametrize("container", [*SOURCE_CONTAINERS, "map value"])
+@pytest.mark.parametrize(
+    "container", [*SOURCE_CONTAINERS, "map value", "map value, keys sorted"]
+)
 @pytest.mark.parametrize("live", [False, True], ids=["storage child", "live child"])
 def test_an_arrow_declared_slot_with_a_nested_identifier_works(
     container: str, identifier: str, live: bool
@@ -623,3 +629,126 @@ def _without_identifiers(arrow_type: pa.DataType) -> pa.DataType:
             arrow_type.item_field.remove_metadata(),  # pyright: ignore[reportArgumentType]  # as above
         )
     return arrow_type
+
+
+# ── 6. every container text the writer produces reads back exactly ─────────────
+
+
+def _identified(name: str, python_type: Any) -> pa.Field[Any]:
+    return pa.field(name, pa.large_string(), nullable=False).with_metadata(
+        _identifier_metadata(python_type)
+    )
+
+
+_KEY = pa.field("key", pa.large_string(), nullable=False)
+_NON_NULL_INT8 = pa.field("value", pa.int8(), nullable=False)
+
+CONTAINER_TEXTS: dict[str, pa.DataType] = {
+    "list, nullable item": pa.list_(pa.field("item", pa.int8())),
+    "list, non-null item named e": pa.list_(pa.field("e", pa.int8(), nullable=False)),
+    "large_list, non-null item": pa.large_list(
+        pa.field("item", pa.int8(), nullable=False)
+    ),
+    "fixed_size_list, non-null item": pa.list_(
+        pa.field("item", pa.int8(), nullable=False), 2
+    ),
+    "struct, nullable and non-null children": pa.struct(
+        [pa.field("a", pa.int8()), pa.field("b", pa.int16(), nullable=False)]
+    ),
+    "map, nullable value": pa.map_(pa.large_string(), pa.int8()),
+    "map, non-null value": pa.map_(_KEY, _NON_NULL_INT8),  # pyright: ignore[reportArgumentType]  # pyarrow takes fields; the stubs name only types
+    "map, keys sorted": pa.map_(_KEY, _NON_NULL_INT8, True),  # pyright: ignore[reportArgumentType, reportCallIssue]  # as above
+    "map, key and value renamed": pa.map_(
+        pa.field("k", pa.large_string(), nullable=False),  # pyright: ignore[reportArgumentType]  # as above
+        pa.field("v", pa.int8()),  # pyright: ignore[reportArgumentType]  # as above
+    ),
+    "map, non-null Path value": pa.map_(_KEY, _identified("p", Path)),  # pyright: ignore[reportArgumentType]  # as above
+    "map, keys sorted, non-null File value": pa.map_(
+        _KEY,  # pyright: ignore[reportArgumentType]  # as above
+        _identified("f", op.File),  # pyright: ignore[reportArgumentType]  # as above
+        True,  # pyright: ignore[reportCallIssue]  # as above
+    ),
+    "map inside a list": pa.large_list(
+        pa.field("item", pa.map_(_KEY, _NON_NULL_INT8), nullable=False)  # pyright: ignore[reportArgumentType]  # as above
+    ),
+    "list inside a map value": pa.map_(
+        _KEY,  # pyright: ignore[reportArgumentType]  # as above
+        pa.field(  # pyright: ignore[reportArgumentType]  # as above
+            "value",
+            pa.large_list(pa.field("item", pa.int8(), nullable=False)),
+            nullable=False,
+        ),
+    ),
+    "struct with a File child in a map value": pa.map_(
+        _KEY,  # pyright: ignore[reportArgumentType]  # as above
+        pa.field(  # pyright: ignore[reportArgumentType]  # as above
+            "value",
+            pa.struct([_identified("f", op.File), pa.field("q", pa.int8())]),
+            nullable=False,
+        ),
+    ),
+}
+
+
+@pytest.mark.parametrize("label", list(CONTAINER_TEXTS))
+def test_a_container_text_reads_back_exactly(label: str) -> None:
+    """Names, nullability, identifiers and ``keys_sorted`` all survive the text."""
+    schema = pa.schema(
+        [
+            pa.field("c", CONTAINER_TEXTS[label], nullable=False),
+            pa.field("d", CONTAINER_TEXTS[label]),
+        ]
+    )
+    restored = arrow_schema_from_texts(arrow_type_texts(schema), _converter(), ["d"])
+    for name in ("c", "d"):
+        assert restored.field(name).equals(schema.field(name), check_metadata=True)
+    assert _hasher().hash_schema(restored) == _hasher().hash_schema(schema)
+
+
+def test_a_bare_map_text_of_an_earlier_file_still_reads() -> None:
+    """``map<K, V>`` (written before the fields were kept) reads as Arrow's default."""
+    restored = arrow_schema_from_texts(
+        {"c": "map<large_string, int8>", "d": "map<large_string, int8, keys_sorted>"},
+        _converter(),
+        [],
+    )
+    assert restored.field("c").type == pa.map_(pa.large_string(), pa.int8())
+    assert restored.field("d").type == pa.map_(pa.large_string(), pa.int8(), True)
+
+
+@pytest.mark.parametrize("identifier", list(NESTED_IDENTIFIERS))
+@pytest.mark.parametrize("container", ["map value", "map value, keys sorted"])
+def test_a_slot_with_two_map_columns_saves_and_loads_exactly(
+    container: str, identifier: str, tmp_path: Path
+) -> None:
+    """The reviewer's end-to-end case: a non-null map value keeps its identity."""
+    tags, data, _ = _nested(container, identifier)
+    slot = SourceNode(name="src", tag_schema=tags, data_schema=data)
+    pipeline = Pipeline(name="maps")
+    with pipeline:
+        MapData({"x": "z"})(slot, label="renamed")
+    path = tmp_path / "pipeline.json"
+    pipeline.save(path)
+    loaded = Pipeline.load(path)
+    loaded_slot = loaded.nodes["src"]
+    original_types, loaded_types = (
+        typed_arrow_schemas(slot),
+        typed_arrow_schemas(loaded_slot),
+    )
+    for before, after in zip(original_types, loaded_types):
+        assert after.equals(before, check_metadata=True)
+        assert _hasher().hash_schema(after) == _hasher().hash_schema(before)
+    item = loaded_types[1].field("x").type.item_field
+    assert not item.nullable and item.name == "p"
+    # A fresh slot over the loaded types: the same identity and system-tag names.
+    fresh = SourceNode(
+        name="src", tag_schema=loaded_types[0], data_schema=loaded_types[1]
+    )
+    assert fresh.pipeline_hash() == slot.pipeline_hash()
+    fresh_table, slot_table = typed_zero_row_table(fresh), typed_zero_row_table(slot)
+    assert fresh_table is not None and slot_table is not None
+    assert fresh_table.column_names == slot_table.column_names
+    assert (
+        loaded.nodes["renamed"].pipeline_hash()
+        == pipeline.nodes["renamed"].pipeline_hash()
+    )

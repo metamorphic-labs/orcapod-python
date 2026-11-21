@@ -664,6 +664,17 @@ def _serialize_field_type(field: Any) -> str:
     return _serialize_arrow_type(field.type)
 
 
+def _serialize_nested_field(field: Any) -> str:
+    """Render a nested field exactly: ``<name>: <type>``, then `` not null`` if it is.
+
+    The one text of a list, large list or fixed-size list item, a struct child and a
+    map's key and item field, so each keeps its name, nullability and logical
+    identifier through a save and load.
+    """
+    nullable = "" if field.nullable else " not null"
+    return f"{field.name}: {_serialize_field_type(field)}{nullable}"
+
+
 def _serialize_arrow_type(arrow_type: Any) -> str:
     """Render a schema type, preserving complete logical identifiers at every depth."""
     import pyarrow as pa
@@ -671,34 +682,28 @@ def _serialize_arrow_type(arrow_type: Any) -> str:
     if isinstance(arrow_type, pa.ExtensionType):
         return f"extension<{arrow_type_identifier(arrow_type).text}>"
     if pa.types.is_list(arrow_type) or pa.types.is_large_list(arrow_type):
-        field = arrow_type.value_field
-        child = _serialize_field_type(field)
-        nullable = "" if field.nullable else " not null"
         outer = "large_list" if pa.types.is_large_list(arrow_type) else "list"
-        return f"{outer}<{field.name}: {child}{nullable}>"
+        return f"{outer}<{_serialize_nested_field(arrow_type.value_field)}>"
     if pa.types.is_fixed_size_list(arrow_type):
-        field = arrow_type.value_field
-        nullable = "" if field.nullable else " not null"
         return (
-            f"fixed_size_list<{field.name}: {_serialize_field_type(field)}"
-            f"{nullable}>[{arrow_type.list_size}]"
+            f"fixed_size_list<{_serialize_nested_field(arrow_type.value_field)}>"
+            f"[{arrow_type.list_size}]"
         )
     if pa.types.is_struct(arrow_type):
-        fields = [
-            f"{field.name}: {_serialize_field_type(field)}"
-            + ("" if field.nullable else " not null")
-            for field in arrow_type
-        ]
+        fields = [_serialize_nested_field(field) for field in arrow_type]
         return "struct<" + ", ".join(fields) + ">"
     if pa.types.is_dictionary(arrow_type):
         # Dictionary encoding is a layout, not part of a schema's identity (ITL-640):
         # the saved type is the value type.
         return _serialize_arrow_type(arrow_type.value_type)
     if pa.types.is_map(arrow_type):
+        # The key and the item as whole fields (ITL-640, Codex review 3 of PR 454):
+        # the bare ``map<K, V>`` of earlier files lost the item's name and its
+        # nullability, which are part of the schema's identity.
         ordered = ", keys_sorted" if arrow_type.keys_sorted else ""
         return (
-            f"map<{_serialize_field_type(arrow_type.key_field)}, "
-            f"{_serialize_field_type(arrow_type.item_field)}{ordered}>"
+            f"map<{_serialize_nested_field(arrow_type.key_field)}, "
+            f"{_serialize_nested_field(arrow_type.item_field)}{ordered}>"
         )
     return str(arrow_type)
 
@@ -1314,15 +1319,26 @@ def parse_arrow_type_string(type_str: str, type_converter: Any | None = None) ->
         return pa.struct(pa_fields)
 
     if outer == "map":
-        # "map<large_string, int64>" — split on first top-level comma
+        # "map<key: large_string not null, value: int64 not null, keys_sorted>": the
+        # key and item fields whole. A file written before keeps the bare
+        # "map<large_string, int64>", read as Arrow's default fields (a non-null
+        # "key", a nullable "value").
         parts = _split_top_level(inner, ",")
         keys_sorted = len(parts) == 3 and parts[-1].strip() == "keys_sorted"
         if keys_sorted:
             parts = parts[:-1]
         if len(parts) != 2:
             raise ValueError(f"Cannot parse map type: {type_str!r}")
-        key_type = parse_arrow_type_string(parts[0].strip(), type_converter)
-        value_type = parse_arrow_type_string(parts[1].strip(), type_converter)
+        key_text, item_text = (part.strip() for part in parts)
+        named = [_names_a_field(text) for text in (key_text, item_text)]
+        if named == [True, True]:
+            key = _parse_arrow_field(key_text, type_converter)
+            item = _parse_arrow_field(item_text, type_converter)
+            return pa.map_(key, item, keys_sorted)  # pyright: ignore[reportCallIssue, reportArgumentType]  # pyarrow takes fields for both; the stubs only types
+        if named != [False, False]:
+            raise ValueError(f"Cannot parse map type: {type_str!r}")
+        key_type = parse_arrow_type_string(key_text, type_converter)
+        value_type = parse_arrow_type_string(item_text, type_converter)
         if keys_sorted:
             return pa.map_(key_type, value_type, True)
         return pa.map_(key_type, value_type, False)
@@ -1454,6 +1470,19 @@ def _parse_arrow_field(text: str, type_converter: Any | None) -> Any:
         parse_arrow_type_string(type_text, type_converter),
         nullable=nullable,
     )
+
+
+def _names_a_field(text: str) -> bool:
+    """Return True if ``text`` is ``<name>: <type>``, not a bare type.
+
+    A bare type holds a ``:`` only inside its brackets (``list<item: int64>``), so
+    the text names a field exactly when a ``:`` comes before any bracket.
+    """
+    colon = text.find(":")
+    if colon == -1:
+        return False
+    brackets = [position for position in map(text.find, "<[(") if position != -1]
+    return not brackets or colon < min(brackets)
 
 
 def _parse_parameterized_type(type_str: str) -> Any | None:
