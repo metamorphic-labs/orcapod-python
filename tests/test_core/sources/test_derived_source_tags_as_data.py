@@ -23,6 +23,7 @@ import pytest
 from orcapod import PipelineJob, function_pod
 from orcapod.core.sources import DerivedSource, RootSource
 from orcapod.databases import InMemoryArrowDatabase
+from orcapod.utils.schema_utils import arrow_schema_identity
 from orcapod.errors import InputValidationError
 from orcapod.operators import Join
 from orcapod.pipeline import AsyncPipelineOrchestrator
@@ -447,9 +448,17 @@ class TestIdentity:
         )
         # identity_structure is the non-public entry point this test is about: the
         # structure is the root source rule followed by the sorted mapping items.
+        # The schema enters as the hashes of its Arrow tag and data schemas (ITL-640).
+        tag_schema, data_schema = derived.output_schema()
+        arrow_tag, arrow_data = derived.as_table().schema, derived.as_table().schema
+        schema_identity = arrow_schema_identity(
+            pa.schema([arrow_tag.field(name) for name in tag_schema]),
+            pa.schema([arrow_data.field(name) for name in data_schema]),
+            derived.data_context,
+        )
         assert derived.identity_structure() == (
             "DerivedSource",
-            derived.output_schema(),
+            schema_identity,
             derived.source_id,
             (),  # the key columns: none, rows are named by position (ITL-1154)
             ("tags_as_data", tuple(sorted(COPY.items()))),

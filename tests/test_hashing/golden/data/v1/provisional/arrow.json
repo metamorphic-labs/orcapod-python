@@ -8,5 +8,15 @@
   "polars_extension_no_values.all_null.dataframe": "arrow_v1:000002002479ebedc867c8831d99eaf4821e9c4e8c4679726ab7a7f1b37946ddc5d6f3",
   "polars_extension_no_values.all_null.series": "arrow_v1:00000240b2c2cd8596cff8213da703e3dbbe903cbb32466a21ee6286e6d425f0207b9c",
   "polars_extension_no_values.zero_rows.dataframe": "arrow_v1:000002311e399e27347b47d6644b886184956bbaeea9f077ecbb658ddaa90abb7bb723",
-  "polars_extension_no_values.zero_rows.series": "arrow_v1:000002f609a54331f5b3bfab74b2220c34dbc708a42c768f79fd2487b0f2e966b41935"
+  "polars_extension_no_values.zero_rows.series": "arrow_v1:000002f609a54331f5b3bfab74b2220c34dbc708a42c768f79fd2487b0f2e966b41935",
+  "schema_storage_form_library.numpy.ndarray.live": "arrow_schema_v1:00000215f9b53699c279e54f472cc3579d11c925a046fe8c4f805cb55dc995c9b7abee",
+  "schema_storage_form_library.numpy.ndarray.storage": "arrow_schema_v1:00000215f9b53699c279e54f472cc3579d11c925a046fe8c4f805cb55dc995c9b7abee",
+  "schema_storage_form_library.pandas.DataFrame.live": "arrow_schema_v1:00000231f4350563f380a645429bd7c3083802edc952ac2abaceef5c898eadf6c75615",
+  "schema_storage_form_library.pandas.DataFrame.storage": "arrow_schema_v1:00000231f4350563f380a645429bd7c3083802edc952ac2abaceef5c898eadf6c75615",
+  "schema_storage_form_library.pandas.Series.live": "arrow_schema_v1:00000255bde696fd2a4e17f1e296bb084964d4ebe926e99162945306d123457a7d7ef4",
+  "schema_storage_form_library.pandas.Series.storage": "arrow_schema_v1:00000255bde696fd2a4e17f1e296bb084964d4ebe926e99162945306d123457a7d7ef4",
+  "schema_storage_form_library.polars.DataFrame.live": "arrow_schema_v1:0000023ec04982fd00027d5591941da78bfd29412c4327216e6184064c061e7dc97f4c",
+  "schema_storage_form_library.polars.DataFrame.storage": "arrow_schema_v1:0000023ec04982fd00027d5591941da78bfd29412c4327216e6184064c061e7dc97f4c",
+  "schema_storage_form_library.polars.Series.live": "arrow_schema_v1:00000285b7aadcd95c25c38537a700154279f47a8d3c975de22009cf666acfb0462add",
+  "schema_storage_form_library.polars.Series.storage": "arrow_schema_v1:00000285b7aadcd95c25c38537a700154279f47a8d3c975de22009cf666acfb0462add"
 }

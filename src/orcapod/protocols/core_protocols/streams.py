@@ -335,6 +335,20 @@ class StreamWithOperationsProtocol(StreamProtocol, Protocol):
         """
         ...
 
+    def rejoin(
+        self, *other_streams: "StreamProtocol", label: str | None = None
+    ) -> "StreamProtocol":
+        """Put this stream back together with other branches of one stream (``Rejoin``).
+
+        Args:
+            *other_streams: The other branches, one or more.
+            label: The result's label.
+
+        Returns:
+            The rejoined stream.
+        """
+        ...
+
     def semi_join(
         self, other_stream: "StreamProtocol", label: str | None = None
     ) -> "StreamProtocol":

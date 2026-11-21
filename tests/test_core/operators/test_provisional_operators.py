@@ -123,6 +123,8 @@ APPROVED = {
     "Index": "ITL-439",
     "TagBy": "ITL-1290",
     "AddTags": "ITL-1290",
+    # Developer, November 21, 2026 (ITL-1336).
+    "Rejoin": "ITL-1336",
 }
 # The operators frozen with data context v1 (ITL-1279).
 FROZEN = {
@@ -372,6 +374,12 @@ BY_STREAM_METHOD: dict[str, Any] = {
     "Pick": lambda: _lists().pick("meta", "k"),
     "Index": lambda: _lists().index("values", 0),
     "MergeJoin": lambda: operators.MergeJoin()(_stream(), _other()),
+    # Two branches of one source, put back together.
+    "Rejoin": lambda: (
+        lambda branched: branched.select_data_columns(["age"]).rejoin(
+            branched.select_data_columns(["weight"])
+        )
+    )(_stream()),
 }
 
 

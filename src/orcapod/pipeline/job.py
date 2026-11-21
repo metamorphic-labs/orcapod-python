@@ -1525,11 +1525,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 node_job_content_hashes[node.label] = node.content_hash().to_string()
             elif isinstance(node, OperatorJobNode):
                 # An operator node's stored rows carry its run's content hash too
-                # (ITL-1043). A node loaded from a file without it cannot know it: its
-                # recomputed hash is not the run's, so it is left out, not guessed.
-                run_content_hash = node._run_content_hash()
-                if run_content_hash is not None:
-                    node_job_content_hashes[node.label] = run_content_hash.to_string()
+                # (ITL-1043); a loaded node has the one its file records.
+                node_job_content_hashes[node.label] = (
+                    node._run_content_hash().to_string()
+                )
             elif isinstance(node, SideEffectJobNode):
                 # Its descriptor holds the blueprint's hash; a loaded side-effect node
                 # takes the job's from here, as a function node does (ITL-1094).
@@ -1591,7 +1590,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             results.
 
         Raises:
-            ValueError: If the file's format version is unsupported, or if it was
+            ValueError: If the file's format version is not the one this Orcapod
+                writes (an earlier format is refused, never migrated), or if it was
                 saved before the database key was renamed (``bindings.store``
                 instead of ``bindings.database``) and no ``database`` is given.
                 An explicit ``database`` makes the saved block irrelevant, so
@@ -1605,23 +1605,26 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         from orcapod.core.nodes.source_node import SourceNodeBase
         from orcapod.pipeline.graph import Pipeline
         from orcapod.pipeline.serialization import (
-            SUPPORTED_JOB_FORMAT_VERSIONS,
+            PIPELINE_JOB_FORMAT_VERSION,
             check_saved_source_config,
             check_source_config_binding,
+            require_current_format,
+            require_tag_only_columns,
             resolve_source_from_config,
-            source_config_at_version,
         )
 
         path = _Path(path)
         with open(path) as f:
             data = _json.load(f)
 
-        version = data.get("orcapod_pipeline_job_version", "")
-        if version not in SUPPORTED_JOB_FORMAT_VERSIONS:
-            raise ValueError(
-                f"Unsupported PipelineJob format version {version!r}. "
-                f"Supported: {sorted(SUPPORTED_JOB_FORMAT_VERSIONS)}"
+        try:
+            require_current_format(
+                data.get("orcapod_pipeline_job_version", ""),
+                PIPELINE_JOB_FORMAT_VERSION,
             )
+        except ValueError as exc:
+            exc.add_note(f"Loading the job file {path}")
+            raise
 
         # Reconstruct pipeline from embedded blueprint data
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as tmp:
@@ -1649,10 +1652,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             data.get("bindings", {}).get("sources", {}).items()
         ):
             source_type = src_config.get("source_type")
-            # The file's version decides which tags are plain (ITL-1019): a refusal
-            # is the file's error, not a source that could not be rebuilt.
+            # Every source states its plain tags (ITL-1019): a refusal is the file's
+            # error, not a source that could not be rebuilt.
             try:
-                src_config = source_config_at_version(src_config, version)
+                require_tag_only_columns(src_config)
                 # A tags_as_data source saved without its required source id is an
                 # invalid file, refused here; the best-effort rebuild below would
                 # leave the slot unbound instead (ITL-1313).
@@ -1779,6 +1782,26 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         node_job_content_hashes: dict[str, str] = run_block.get(
             "node_job_content_hashes", {}
         )
+        # Every function, operator and side-effect node records its run's content hash
+        # (ITL-1043, ITL-1094): its stored rows carry it, and inputs rebuilt from the
+        # file cannot give it. A file without one is malformed and refused, never
+        # loaded with a guessed hash (developer, 2026-11-21: no backward compatibility
+        # for saved files).
+        # An entry that is not a hash text (null, a number) is no record either
+        # (CodeRabbit on PR 454).
+        unrecorded = sorted(
+            bp_node.label
+            for bp_node in pipeline._persistent_node_map.values()
+            if isinstance(bp_node, (_FunctionNode, _OperatorNode, SideEffectNode))
+            and not isinstance(node_job_content_hashes.get(bp_node.label), str)
+        )
+        if unrecorded:
+            raise ValueError(
+                f"{path}: saved nodes {unrecorded} have no run content hash text "
+                "(run.node_job_content_hashes); a saved job records it for every "
+                "function, operator and side-effect node. Save the job again with this "
+                "version of Orcapod."
+            )
         # The optional, advisory section (ITL-1043): a node with an entry warns when
         # its database holds another number of rows. Without it nothing is checked. The
         # ITL-904 flag (node_has_stored_records) of older files is not used: the database
@@ -1791,7 +1814,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 continue
 
             if isinstance(bp_node, _SourceNode):
-                # Keeps the loaded slot's saved hashes and pending types (ITL-1138).
+                # Keeps the loaded slot's saved hashes and saved type texts (ITL-1138).
                 sjn = SourceJobNode._from_loaded_slot(  # pyright: ignore[reportPrivateUsage]  # the loader is the one caller
                     bp_node, bound_source=sources.get(bp_node.name)
                 )

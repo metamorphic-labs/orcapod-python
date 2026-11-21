@@ -263,6 +263,7 @@ def renamed_labels() -> Iterator[dict[str, str]]:
         (directory_hashers, "DIRECTORY_HASH_LABEL"),
         (arrow_hashers, "ARROW_ORDERED_HASH_LABEL"),
         (arrow_hashers, "ARROW_STRICT_HASH_LABEL"),
+        (arrow_hashers, "ARROW_SCHEMA_HASH_LABEL"),
     ):
         if hasattr(module, name):
             saved.append((module, name, getattr(module, name)))

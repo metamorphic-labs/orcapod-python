@@ -531,7 +531,7 @@ Orcapod stores or embeds in a name is pinned in the golden folder of the current
   provisional or frozen). The list (developer, November 19, 2026, ITL-1279: "anything whose
   identity choice isn't obvious and feels solid should be put into provisional first"):
   `PolarsFilter`, `GroupBy`, `TagBy`, `AddTags`, `MergeJoin`, `MapTags`, `MapColumns`,
-  `Pick`, `Index`, `Batch`. Frozen: `Join`, `SemiJoin`, `MapData`, the Select/Drop column
+  `Pick`, `Index`, `Batch`, and `Rejoin` (ITL-1336). Frozen: `Join`, `SemiJoin`, `MapData`, the Select/Drop column
   operators, `DropNulls`. An operator joins the group only while no release has frozen its
   values, and leaves it when its identity is decided (before or at a release), never the other
   way after a release. Building one (directly, through a stream method, or by loading a saved
@@ -911,7 +911,7 @@ Every pipeline element has two parallel hashes:
    identity. For a source it is a stable address, not a digest of its rows (developer,
    November 11, 2026: "sources content hash is meant to be a stable address and is not
    necessarily going to reflect the very data content"). A root source hashes
-   (class name, output schema, source_id, key columns); given a source_id, changed, added or
+   (class name, Arrow schema identity, source_id, key columns); given a source_id, changed, added or
    reordered rows leave it unchanged. The key columns are the resolved record_id_columns in key
    order (() for the position; a database or SpiralDB table's primary key by default): two
    sources that differ only in how they name their rows are two sources, with one pipeline
@@ -934,9 +934,10 @@ Every pipeline element has two parallel hashes:
    memoized by. The node's content hash tells apart, inside a shared table, the rows of
    pipelines bound to different sources (__node_content_hash).
 2. pipeline_hash() — schema + topology only. Ignores data content. Used for DB path scoping
-   so that different sources with identical schemas share database tables.
+   so that different sources with identical Arrow schemas share database tables.
 
-Base case: RootSource.pipeline_identity_structure() returns (tag_schema, data_schema).
+Base case: RootSource.pipeline_identity_structure() returns the Arrow schema identity of
+its tag and data schemas (below, "Schemas are hashed as Arrow schemas").
 Each downstream node's pipeline hash commits to its own identity plus upstream pipeline
 hashes, forming a Merkle chain.
 
@@ -1084,6 +1085,51 @@ generation of hashing; rows of the current data context are the current entries.
   detection and automatic recomputation.
 - Source delegation — CSVSource, DictSource, etc. create an internal ArrowTableSource.
 
+### Schemas are hashed as Arrow schemas
+
+Developer, November 18, 2026 (ITL-640; option B): a schema enters every identity as its Arrow
+schema, large-normalized, hashed by the one function StarfixArrowHasher.hash_schema
+(label arrow_schema_v1, ARROW_SCHEMA_HASH_LABEL), never as Python types. The places: a
+source's pipeline and content identity and an input slot's
+(schema_utils.arrow_schema_identity: the tag and data schemas hashed apart, as nested
+ContentHash objects), the system-tag column names (compute_schema_hash, the semantic hash
+of that pair, bare hex) and the output schema in a function's uri (the converter's Arrow
+schema of the declared outputs, fed as a one-schema tuple, bare hex). output_schema() still
+reports Python types; a function's INPUT check stays at the Python level; a function's input
+types are in no schema hash.
+
+- Which Arrow schema: a source's or node's typed zero-row table (never computed from rows),
+  cached per source (RootSource.arrow_schemas); a DerivedSource takes its origin's and
+  refuses a stored read of another type (top-level nullability aside); a CachedSource its
+  source's, and refuses a cache read of another type by the same rule
+  (schema_utils.stored_type_mismatch); a slot made from a stream, that stream's (SourceNodeBase.arrow_schemas); a
+  saved job writes each slot's own Arrow types and a load rebuilds them; an unbound slot with
+  known Arrow types types its zero-row table from them; a loaded function node types its
+  zero-row output from its saved Arrow text.
+- Declared Python types mean one Arrow type each, the converter's (int is int64,
+  datetime is timestamp[us, tz=UTC]): a hand-declared slot, an unbound SourceProxy, a
+  PollingSource whose impl.schema() returns a Python Schema. A source, slot or batch of
+  another Arrow type is refused (bind: SourceSpecMismatchError; a polled batch:
+  SchemaInconsistencyError before commit), never converted. The remedy is declaring in
+  Arrow: SourceNode(name, tag_schema=pa.schema(...), data_schema=pa.schema(...)),
+  impl.schema() returning a pa.Schema. Never loosen this.
+- hash_schema ignores column order, large/non-large, list item field names, dictionary
+  encoding and field metadata other than ARROW:extension:*; it tells apart width, sign,
+  nullability at every depth, timestamp unit and zone, decimal precision, date types,
+  fixed-size against plain lists, struct fields, and a logical type's whole identifier.
+- hash_schema hashes the DECLARED schema (developer, November 21, 2026, ITL-640, option
+  (a)): every logical type, live, in metadata (IPC) form or unregistered in the process, is
+  first brought to its storage form, its storage type with its identifier as
+  ARROW:extension:* field metadata, at any depth (canonical_form.storage_form_schema,
+  applied by hash_schema itself). No value-handler rewrite, no registry lookup: the
+  identifier pins how the values are hashed. hash_table is unchanged and a separate
+  procedure; never rely on hash_schema(t.schema) being the schema inside hash_table(t).
+  The saved-schema writer writes the storage form; an Arrow declaration and a saved schema
+  read back take declaration_form_schema: a top-level logical type live, a nested one
+  (inside a plain list, struct or map) always in the storage form, never a nested live
+  extension type (Arrow cannot build an empty table of one). The tests enumerate every
+  registered logical type from the converter (test_schema_hash_storage_form.py).
+
 ### Arrow types
 
 Governing principle (developer, November 9, 2026): minimize convenient inference and hold to
@@ -1104,8 +1150,17 @@ per-operator normalization. Names, nullability (top level and nested), field met
 logical (extension) types are untouched, and large and non-large variants hash identically, so no
 hash or default source id moves. Not covered: what is inside a library value (numpy, pandas,
 polars, torch) keeps its library's own distinction. list_view and large_list_view are not
-supported: a source refuses them (the Arrow hasher cannot hash them) and a raw ArrowTableStream
-holds them as given (ITL-1129).
+supported (ITL-1129), and neither is a union (dense or sparse) or a run-end-encoded type: a
+source and a raw ArrowTableStream refuse a column whose type is or contains one when they
+are built (developer, November 21, 2026, ITL-640, for unions and list views; run-end-encoded
+by the same rule, the coordinator the same day: one rule for every type the schema hash
+rejects. A stream's identity is its Arrow schema hash, which cannot hold them; a raw stream
+used to hold them as given). One rule beside the dictionary refusal,
+schema_utils.schema_hash_rejected_columns with schema_hash_rejected_columns_error
+(InputValidationError naming each column with its role and type), applied by
+ArrowTableStream.__init__ and first by SourceStreamBuilder.build; the rejected kinds are
+one constant, SCHEMA_HASH_REJECTED_KINDS, checked by a test against starfix's public schema
+hash.
 
 Dictionary-encoded columns are refused, tags and data alike (developer, November 18, 2026,
 ITL-1264: "Say it is not currently supported in orcapod. We MAY support but not immediately in
@@ -1259,14 +1314,18 @@ data. The rules:
   columns without a reason. SourceNodeBase.validate is the one check, used by
   PipelineJob.bind, the bound_source setter (and SourceJobNode.__init__) and
   PipelineJob.load: per column the declared Python type (structural classes of one identity
-  are one type, equivalent_hints), or T where the slot declares T | None; and exactly
+  are one type, equivalent_hints), or T where the slot declares T | None, AND the slot's
+  Arrow type, compared by hash_schema, with only a top-level non-null column accepted where
+  the slot's is nullable (nested nullability exact; ITL-640); and exactly
   one source-id (str) and one record-id (str) system-tag column, no other. Anything
   else raises SourceSpecMismatchError before anything is bound. The
   source's rows are given as the declared schema at one place, _DeclaredForm (nullable
   fields over the same arrays; the system-tag column NAMES of the declared schema hash,
   taken from the source's own pair by prefix, the VALUES the source's own; as a stable
-  convenience, not a guarantee, the declared column order, source id before record id). Limits: the check compares Python types, so a difference in Arrow width only
-  (int32 against int64) is not yet refused (ITL-949). A source whose system-tag columns
+  convenience, not a guarantee, the declared column order, source id before record id). A
+  difference in Arrow width only (int32 against int64) is refused (ITL-949, resolved by
+  ITL-640); never loosen this for timestamps or widths: a declared Python type means one
+  Arrow type, and the remedy is declaring the slot from the source or in Arrow. A source whose system-tag columns
   are not exactly one source-id and one record-id column (a joined or merged stream, a raw
   stream with none) is refused by the same check (developer, November 14, 2026, ITL-1126);
   binding one properly is ITL-1127. That includes a pipeline's input: Pipeline.compile
@@ -1429,6 +1488,19 @@ data. The rules:
 - DerivedSource over a job node with nothing stored → presents zero rows with the origin's columns
   (no computed records; no error), in the plain form and with tags_as_data.
 - Join requires non-overlapping data columns; raises InputValidationError on collision.
+- `Rejoin` (provisional, developer, November 21, 2026, ITL-1336) is the operator a diamond
+  (one stream split into branches, then put back together) is expected to use; `Join` is
+  unchanged and still extends every input's system-tag names. Rejoin matches EVERY system-tag
+  column and keeps those columns unchanged (a result row has its origin row's provenance):
+  every input that states its system-tag columns states the same ones (a branch through
+  `Join`, `GroupBy` or `Batch` is refused); an input that states none is checked on its table
+  when computed. At most one row per origin row in each input (a first rule, refused naming the
+  input and the values); a null system-tag value is refused; a shared user tag, and every
+  system tag Polars matched, must agree on matched rows bit for bit (so the result never
+  follows argument order); the inputs' rows must share one data context, read from the
+  rows, which the result keeps (rows of another are refused; some operators return rows
+  in the default context, ITL-1339); data columns disjoint; N-ary and commutative; identity
+  `"Rejoin"`; async is the barrier, which rebuilds each input in its rows' data context.
 - `Join` and `SemiJoin` give Polars only their key columns and row numbers (ITL-1284): Polars
   decides which rows match, and every output column is taken from the input tables by row
   number (`take`), so every value is the input's, bit for bit (they used to carry every column

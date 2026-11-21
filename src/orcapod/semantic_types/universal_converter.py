@@ -1159,6 +1159,34 @@ class UniversalTypeConverter:
             for index in range(arrow_type.num_fields):
                 self._require_readable_members(arrow_type.field(index).type)
 
+    def registered_logical_type_names(self) -> tuple[str, ...]:
+        """The Arrow extension names of every logical type this converter knows, sorted.
+
+        The registry's ``registered_extension_names``: the registered types and the
+        ones declared for loading on first use, and a type a factory built (a native
+        container, a user class) once it has been registered; one not built yet is
+        absent.
+
+        Returns:
+            The extension names; empty without a logical type registry.
+        """
+        if self._logical_type_registry is None:
+            return ()
+        return self._logical_type_registry.registered_extension_names()
+
+    def logical_type_factory_categories(self) -> tuple[str, ...]:
+        """The categories of the logical type factories this converter knows, sorted.
+
+        The registry's ``factory_categories``: a factory builds a logical type from an
+        identifier or a Python class (a native container, a user class).
+
+        Returns:
+            The categories; empty without a logical type registry.
+        """
+        if self._logical_type_registry is None:
+            return ()
+        return self._logical_type_registry.factory_categories()
+
     def get_logical_type_by_arrow_extension_name(
         self, arrow_extension_name: str
     ) -> "LogicalTypeProtocol | None":

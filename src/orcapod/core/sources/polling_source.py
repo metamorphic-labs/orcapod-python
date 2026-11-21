@@ -22,6 +22,7 @@ from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.source_ids import hash_source_id
+from orcapod.logical_types.canonical_form import declaration_form_schema
 from orcapod.core.sources.stream_builder import (
     SourceStreamBuilder,
     normalize_record_id_columns,
@@ -48,6 +49,7 @@ from orcapod.utils.lazy_module import LazyModule
 from orcapod.utils.schema_utils import (
     _normalize_column_list,
     compute_source_schema_hash,
+    declared_arrow_schema,
 )
 
 if TYPE_CHECKING:
@@ -325,7 +327,29 @@ class PollingSource(RootSource, Generic[T]):
         # Split impl.schema() into tag/data schemas
         self._tag_schema: Schema | None = None
         self._data_schema: Schema | None = None
+        # The declared Arrow schema (ITL-640): given as a pa.Schema, or the converter's
+        # schema of the declared Python types; it fixes the source's identity.
+        self._declared_arrow: pa.Schema | None = None
         unified_schema = self._impl.schema()
+        if isinstance(unified_schema, pa.Schema):
+            # Logical types in one form first: a field declared with its identifier
+            # in ARROW:extension:* metadata is that logical type (ITL-640).
+            self._declared_arrow = declaration_form_schema(
+                pa.schema(
+                    [
+                        field.with_type(
+                            arrow_utils.normalize_to_large_types(field.type)
+                        )
+                        for field in unified_schema
+                    ]
+                ),
+                self.data_context.type_converter,
+            )
+            unified_schema = Schema(
+                self.data_context.type_converter.arrow_schema_to_python_schema(
+                    self._declared_arrow
+                )
+            )
         if unified_schema is not None:
             tag_cols_set = set(self._tag_columns)
             missing = tag_cols_set - set(unified_schema.keys())
@@ -341,6 +365,10 @@ class PollingSource(RootSource, Generic[T]):
             self._data_schema = Schema(
                 {k: v for k, v in unified_schema.items() if k not in tag_cols_set}
             )
+            if self._declared_arrow is None:
+                self._declared_arrow = declared_arrow_schema(
+                    unified_schema, self.data_context.type_converter
+                )
 
     # -------------------------------------------------------------------------
     # Schema helpers — fetch-free schema computation from declared schemas
@@ -371,14 +399,29 @@ class PollingSource(RootSource, Generic[T]):
             Hex schema-hash string, or ``None`` if ``impl.schema()`` returned
             ``None`` (schema not yet known).
         """
-        if self._tag_schema is None or self._data_schema is None:
+        declared = self._declared_arrow_pair()
+        if declared is None:
             return None
         return compute_source_schema_hash(
-            self._tag_schema,
-            self._data_schema,
-            self.data_context,
-            self.orcapod_config,
+            *declared, self.data_context, self.orcapod_config
         )
+
+    def _declared_arrow_pair(self) -> "tuple[pa.Schema, pa.Schema] | None":
+        """The declared tag and data Arrow schemas, or ``None`` with none declared."""
+        if self._declared_arrow is None:
+            return None
+        tags = set(self._tag_columns)
+        return (
+            pa.schema([f for f in self._declared_arrow if f.name in tags]),
+            pa.schema([f for f in self._declared_arrow if f.name not in tags]),
+        )
+
+    def _compute_arrow_schemas(self) -> "tuple[pa.Schema, pa.Schema]":
+        """The declared Arrow schemas, or, with none declared, the polled rows' (ITL-640)."""
+        declared = self._declared_arrow_pair()
+        if declared is not None:
+            return declared
+        return super()._compute_arrow_schemas()
 
     # -------------------------------------------------------------------------
     # Identity
@@ -573,9 +616,24 @@ class PollingSource(RootSource, Generic[T]):
             tag_schema, data_schema = self.output_schema(
                 columns=ColumnConfig(system_tags=config.system_tags)
             )
+            converter = self.data_context.type_converter
             table = arrow_utils.make_empty_table(
-                {**tag_schema, **data_schema}, self.data_context.type_converter
+                {**tag_schema, **data_schema}, converter
             )
+            if self._declared_arrow is not None:
+                # The declared columns have the declared Arrow types (ITL-640; a
+                # Python type means one Arrow type, but a pa.Schema declaration may
+                # name another, int32 for int); only the system tags are built from
+                # their Python schema.
+                declared = self._declared_arrow
+                table = pa.schema(
+                    [
+                        declared.field(name)
+                        if name in declared.names
+                        else table.schema.field(name)
+                        for name in table.column_names
+                    ]
+                ).empty_table()
             tag_columns = tuple(tag_schema.keys())
         else:
             table = pa.table({})
@@ -839,15 +897,10 @@ class PollingSource(RootSource, Generic[T]):
 
         # Establish canonical schema on first call; apply it on every call.
         if self._canonical_arrow_schema is None:
-            if self._tag_schema is not None and self._data_schema is not None:
-                # Declared-schema path: derive Arrow schema from declared Python types.
+            if self._declared_arrow is not None:
+                # Declared-schema path: the declared Arrow schema (ITL-640).
                 # T | None → nullable=True; plain T → nullable=False. No inference.
-                combined = {**dict(self._tag_schema), **dict(self._data_schema)}
-                self._canonical_arrow_schema = (
-                    self.data_context.type_converter.python_schema_to_arrow_schema(
-                        combined
-                    )
-                )
+                self._canonical_arrow_schema = self._declared_arrow
             else:
                 # Infer-once path: first non-empty batch establishes canonical nullability.
                 # Skip zero-row tables: null_count is always 0 for empty tables, so
@@ -880,6 +933,7 @@ class PollingSource(RootSource, Generic[T]):
             ]
         )
         arrow_table = arrow_table.cast(target_schema)
+        self._require_declared_types(arrow_table)
 
         builder = SourceStreamBuilder(self.data_context, self.orcapod_config)
         result = builder.build(
@@ -889,6 +943,51 @@ class PollingSource(RootSource, Generic[T]):
             record_id_columns=self._record_id_columns,
         )
         return result.stream
+
+    def _require_declared_types(self, arrow_table: pa.Table) -> None:
+        """Refuse a polled batch whose Arrow types are not the declared ones (ITL-640).
+
+        The declared schema fixed this source's identity (pipeline hash, system-tag
+        column names) when it was built, so a batch of another Arrow type (``int32``
+        where ``int`` means ``int64``, naive timestamps where ``datetime`` means
+        ``timestamp[us, tz=UTC]``) is refused, never converted, and so is a batch
+        with a column the declaration does not name: the rows' system-tag names
+        would be hashed from columns the declared identity does not have. Column
+        order, large and non-large variants and field metadata are not compared.
+
+        Raises:
+            SchemaInconsistencyError: Naming each undeclared column, or the column and
+                both types, before anything is committed.
+        """
+        if self._declared_arrow is None:
+            return
+        given = arrow_table.schema
+        undeclared = [
+            name for name in given.names if name not in self._declared_arrow.names
+        ]
+        if undeclared:
+            raise SchemaInconsistencyError(
+                f"PollingSource {self._source_id!r}: the fetched columns {undeclared} "
+                f"are not in the declared schema {self._declared_arrow.names} (its "
+                "identity was fixed by the declared schema; declare them in "
+                "impl.schema(), or fetch only the declared columns)."
+            )
+        hasher = self.data_context.arrow_hasher
+        for declared in self._declared_arrow:
+            if declared.name not in given.names:
+                continue
+            field = given.field(declared.name)
+            if hasher.hash_schema(pa.schema([field])) == hasher.hash_schema(
+                pa.schema([declared])
+            ):
+                continue
+            raise SchemaInconsistencyError(
+                f"PollingSource {self._source_id!r}: the fetched column "
+                f"{declared.name!r} has the Arrow type {field.type}, but the source "
+                f"declares {declared.type} (its identity was fixed by the declared "
+                "schema; a Python type means one Arrow type, so declare impl.schema() "
+                "with a pa.Schema of the fetched types, or fetch the declared types)."
+            )
 
     def _validate_against_declared_schemas(self, stream: ArrowTableStream) -> None:
         """Validate *stream*'s schema against the declared ``_tag_schema`` / ``_data_schema``.

@@ -193,19 +193,30 @@ class DataFunctionBase(TraceableBase, Generic[E]):
     def output_data_schema_hash(self) -> str:
         """Return the hash of the output data schema as a bare hex digest.
 
-        The digest is part of the function ``uri`` and so of table paths and source-info
-        tokens: a hash inside a name carries no label. It is computed lazily on first
-        access and cached for subsequent calls.
+        The schema is hashed as the Arrow schema the data context's type converter
+        gives the declared output types (the Arrow types the function's results are
+        stored with), by ``arrow_hasher.hash_schema`` (ITL-640); that labelled hash is
+        hashed by the semantic hasher, as every hash fed into another. The digest is
+        part of the function ``uri`` and so of table paths and source-info tokens: a
+        hash inside a name carries no label. It is computed lazily on first access and cached for
+        subsequent calls.
 
         Returns:
             The hex digest of the output data schema hash, without a label.
         """
         if self._output_data_schema_hash is None:
-            self._output_data_schema_hash = (
-                self.data_context.semantic_hasher.hash_object(
-                    self.output_data_schema
-                ).to_hex()
+            context = self.data_context
+            arrow_schema = schema_utils.declared_arrow_schema(
+                self.output_data_schema, context.type_converter
             )
+            # The labelled schema hash is fed into the semantic hasher as a one-schema
+            # tuple (a hash fed into a hash carries its label; a source's system-tag
+            # names hash the tag and data pair the same way), and the name holds the
+            # bare digest.
+            schema_hash = context.arrow_hasher.hash_schema(arrow_schema)
+            self._output_data_schema_hash = context.semantic_hasher.hash_object(
+                (schema_hash,)
+            ).to_hex()
         return self._output_data_schema_hash
 
     @property

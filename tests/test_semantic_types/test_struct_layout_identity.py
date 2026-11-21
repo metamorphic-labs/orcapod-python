@@ -51,9 +51,9 @@ def _tables() -> dict[str, pa.Table]:
 
 _FLAT_HASHES: dict[str, object] = {
     "stream_content": "e34f7e47f388b93db0403fe3e882ea4c2c7ce30cdcf7937eb928868e6aeaf93a",
-    "stream_pipeline": "0caab8d581b700f6746fcf508ba50945757be2abe7360c6e33fb87836e291b65",
-    "source_content": "a1679332b537fe2c2f0d950e71c122e2e25812a6ed8988e1d4dc36a9db9e6b48",
-    "source_pipeline": "0caab8d581b700f6746fcf508ba50945757be2abe7360c6e33fb87836e291b65",
+    "stream_pipeline": "747ee6e5014ea0a4a4da0f444f4279aa2019e47e519885a40e04b96faff3d74e",
+    "source_content": "63c596013c190818f771def09771ab2dcf923fd7536be3812bfa7368a7a53e7b",
+    "source_pipeline": "747ee6e5014ea0a4a4da0f444f4279aa2019e47e519885a40e04b96faff3d74e",
     "data_rows": [
         "000002a3b465dfc79ea3f32b39f55417f4c2372d7a3cc7ad63aef00aa9108b21b76b9c",
         "000002e540dc3b59a01d14edc26eebff96453fb1de9018c351676cef8d1f67ee3346b2",
@@ -61,15 +61,17 @@ _FLAT_HASHES: dict[str, object] = {
 }
 
 # Hashes on main (365a5f74), before the converter change; the stream content and per-row
-# data hashes re-recorded in starfix hash format 2 (arrow_v1, ITL-910).
+# data hashes re-recorded in starfix hash format 2 (arrow_v1, ITL-910). The pipeline
+# hashes and the source content hashes re-recorded for ITL-640 (a schema enters an
+# identity as its Arrow schema); the stream content and data row hashes did not move.
 MAIN_HASHES: dict[str, dict[str, object]] = {
     "small": _FLAT_HASHES,
     "large": _FLAT_HASHES,
     "nested": {
         "stream_content": "413fa479269c7957fef99caca81336f0d94c0cb240160c831e4b7b719c0a3ff1",
-        "stream_pipeline": "705efaca724d9d35569743799eeba69fe910e011c84adfe8d934961c04c61840",
-        "source_content": "0babf998742cc24277ee8adc9937f9d4dc2d53ecaf76bf4a5594d0be627132e9",
-        "source_pipeline": "705efaca724d9d35569743799eeba69fe910e011c84adfe8d934961c04c61840",
+        "stream_pipeline": "89426b05815ca2e3ec349814707b2651e9f7e1aa7157ce4775e8111323511f19",
+        "source_content": "ebf71afb9ea2a9525437d4c6a9a8355347dd0340c539c333786b2d6ae8ad1cb8",
+        "source_pipeline": "89426b05815ca2e3ec349814707b2651e9f7e1aa7157ce4775e8111323511f19",
         "data_rows": [
             "000002b734209953036fae7ee935c232f7949f4874dc22dca2af4ecfa2882e5ddaf457",
             "0000024d11adcf6077042679df69776a748d71f2818fc47042913d83fa1fbebca67ad9",
@@ -77,9 +79,9 @@ MAIN_HASHES: dict[str, dict[str, object]] = {
     },
     "list_of_struct": {
         "stream_content": "145c0f2bdd30c6ded9e29067f7d6fa7649b18712ee75cb9a6c5eb6582500075e",
-        "stream_pipeline": "f364ae4074150182fcb7b386f605b6f3b7d4d0d56b7b44d1da439f9ea0eecc83",
-        "source_content": "fdc31658092bce777befba057bd843a57382656f443efc597302d26023bc097c",
-        "source_pipeline": "f364ae4074150182fcb7b386f605b6f3b7d4d0d56b7b44d1da439f9ea0eecc83",
+        "stream_pipeline": "9a7003a144808be6f9809ae7fe15411197bf88b634c14248ff5dee1bdce0134a",
+        "source_content": "19c822dd6e78260958ea025254e50d2090e5be7fc0156c401e201ea3f9051f42",
+        "source_pipeline": "9a7003a144808be6f9809ae7fe15411197bf88b634c14248ff5dee1bdce0134a",
         "data_rows": [
             "000002c262cfe3995378fe521abbc19b8cd14f10f626b5e5b1259a20f6d4277677fb87",
             "000002188277589a87f65b49271c1a2cf461ebed48ddd2fd3cb943198f420fced6862a",

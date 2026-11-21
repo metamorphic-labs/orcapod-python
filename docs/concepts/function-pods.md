@@ -1003,17 +1003,10 @@ source was configured. `PipelineJob.load(path)` reads it back, for example in a 
 session, so that you can read the results the job stored. The file also records
 `orcapod_version`, the Orcapod release that wrote it (the same text as `orcapod.__version__`;
 a development checkout gives a development version). It is informational: loading never
-depends on it. Adding the field moved the file format version from `0.1.0` to `0.2.0`, and
-stating every tag binding (data-tags) moved it to `0.3.0`, the version written now. A
-`0.1.0` file, written by v0.2.0, and a `0.2.0` file, written by v0.3.0, still load, with every
-source tag plain as they were written, within the schema limits described below (a file with
-name-only extension type text cannot be loaded); any other version is rejected.
-A job saved before 0.4 names its functions `python.function.v0`; it loads read only (its
-blueprint, with its tables of the older layouts reported and not read), and its functions
-cannot be bound, because 0.4 runs them as `python.function.v1`
-([Data function types](../reference/data-function-types.md)): rebuild the pipeline to run it.
-The reverse does not hold: v0.2.0 cannot load a file saved by v0.3.0, because hashes differ
-between the two releases.
+depends on it. The file format version is `0.4.0`, and a load reads only that version: a
+file saved by an earlier release (format `0.1.0` to `0.3.0`) is refused, with a message
+saying so. Rebuild the pipeline from code and save it again; taking older files to the
+current format is the work of a separate migration tool, not of `load`.
 
 For example:
 
@@ -1093,26 +1086,22 @@ from that database, and no rows under that key is an empty result, not an error.
   had (a source node whose data was not saved gets its run's content hash once its source is
   bound). The file records which columns may be null (`T | None`), because the Arrow type text
   of a schema cannot say it, and the content hash of each node's run, which the stored rows
-  carry. Whether a file has these records is decided by the records themselves, not by the
-  file's format version: a file without them (format `0.1.0`, or a `0.2.0` file written
-  before they existed) still loads, but lossy: its schemas read every column as non-null,
-  and a loaded operator node cannot name its run's rows. When the database holds none under the
-  content hash the loaded job computes, its stored view (`as_source()`, `get_all_records()`)
-  raises and says why, rather than presenting stored rows as none. An empty record is
-  not a missing one: it says that no column may be null. Saving such a loaded job again does
-  not record what its file did not. Upgrading such files is left to a migration tool after
-  v0.3.
+  carry. Every saved file has these records: a file without one is malformed, and loading it
+  raises and names the missing record, rather than reading every column as non-null or
+  guessing a run's content hash. An empty record is not a missing one: it says that no column
+  may be null.
 - Sources that read files, such as `CSVSource` and `DeltaTableSource`, are rebuilt from their
   paths. In-memory sources (`DictSource`, `ListSource`, `ArrowTableSource`,
   `DataFrameSource`) keep their data only in memory, so they are not saved; loading logs
   this at INFO level. This does not affect reading the other nodes. To read such a source
   node itself, bind a source to it: `loaded.bind(sources={"mice": source})`. The source must
-  have the slot's tag and data columns with the same Python types, except that a column the
-  slot declares `T | None` may be `T` (the slot then reads it as `T | None`); `bind` refuses
-  any other (`SourceSpecMismatchError`, an `InputValidationError`). The pipeline determines
-  every node's schema: binding a source never changes a node's stored path or the schema of
-  any node's or stored table, only the values. The check compares Python types, so a
-  difference in Arrow width only (`int32` against `int64`) is not yet refused (ITL-949). A
+  have the slot's tag and data columns with the same Arrow types (the slot keeps the Arrow
+  types of the source it was saved from), except that a column the slot declares nullable
+  may be non-null (the slot then reads it as nullable); `bind` refuses any other
+  (`SourceSpecMismatchError`, an `InputValidationError`), also a difference in Arrow width
+  only (`int32` against `int64`). The pipeline determines every node's schema: binding a
+  source never changes a node's stored path or the schema of any node's or stored table,
+  only the values. A
   joined or merged stream (one pair of system-tag columns per input), or one with no
   system-tag columns, is refused too: make the join part of the pipeline, or store the joined
   stream and bind the stored source. A pipeline built directly over a raw `ArrowTableStream`
@@ -1136,11 +1125,9 @@ An unknown type is reported with its node and column, and affected operators bec
 stubs. An incompatible identifier raises `LogicalTypeIdentifierError` instead of using a stub.
 Stored data independently validates its full identifier when values are read.
 
-Older files containing name-only extension type text cannot be loaded by this reader: the
-error says the file was saved by an earlier version. Use that version to read the old file,
-and save a new job from the original pipeline under this version. Files with only supported
-primitive schema types still load; results from pre-v0.3 table layouts remain excluded as
-described below. This changes saved schema text only, not stored tables or hashes.
+Only files of format `0.4.0` load, whatever their schema types: a file of an earlier format
+is refused, as described above. Rebuild the pipeline from code and save it again under this
+version.
 
 ### A store written by an older version
 

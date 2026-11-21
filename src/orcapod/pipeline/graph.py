@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -30,33 +31,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
-
-
-def _with_pending_nullability(
-    record: dict[str, list[str]],
-    pending: dict[str, list[str]],
-    slot: "cp.StreamProtocol",
-) -> dict[str, list[str]]:
-    """Add a slot's pending nullable columns to a saved nullability record (ITL-1138).
-
-    Args:
-        record: The nullable column names per role, as ``serialize_nullability``
-            writes them.
-        pending: The slot's pending columns that its saved job records as nullable.
-        slot: The source slot, whose tag and data schemas give the column order.
-
-    Returns:
-        The record with the pending names added, in the slot's column order.
-    """
-    tag_schema, data_schema = slot.output_schema()
-    return {
-        role: [
-            name
-            for name in schema
-            if name in record.get(role, []) or name in pending[role]
-        ]
-        for role, schema in (("tag", tag_schema), ("data", data_schema))
-    }
 
 
 class Pipeline(AbstractPipelineBase[GraphNode]):
@@ -92,11 +66,10 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
     operator_node_class = OperatorNode
     side_effect_node_class = SideEffectNode
 
-    # The nodes (by hash key) of a pipeline loaded from a file whose descriptor did not
-    # record which columns may be null (ITL-1043), in the output schema and in the
-    # source config. Their schemas are lossy, so saving again must not record them.
-    _unrecorded_output_nullability: frozenset[str] = frozenset()
-    _unrecorded_source_nullability: frozenset[str] = frozenset()
+    # The saved output schema of every node of a pipeline loaded from a file (by hash
+    # key): a node whose Arrow types cannot be derived yet (below a slot whose class is
+    # not registered) is saved again from it, never from its Python types (ITL-640).
+    _loaded_output_schemas: "dict[str, dict[str, Any]]" = {}
 
     def __init__(
         self,
@@ -158,16 +131,44 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         from orcapod.pipeline.serialization import (
             FALL_THROUGH_TAGS_KEY,
             PIPELINE_FORMAT_VERSION,
-            serialize_nullability,
+            serialize_arrow_schemas,
             serialize_output_schema,
-            serialize_schema,
         )
         from orcapod.core.nodes import OperatorNode, FunctionNode
         from orcapod.core.nodes.source_node import SourceNode as SourceNodeClass
+        from orcapod.core.streams.base import shared_zero_row_memo, typed_arrow_schemas
 
+        # Every node's own Arrow types, derived in one walk: an upstream that several
+        # nodes share is typed once (ITL-640).
+        # A node whose Arrow types cannot be derived yet (a loaded slot whose class is
+        # not registered, and loaded nodes below it) is saved from the type texts it
+        # was loaded with, never from its Python types (ITL-640).
+        arrow_types: dict[str, tuple[Any, Any]] = {}
+        retained: dict[str, dict[str, Any]] = {}
+        # A slot's column types, from the one writer (``saved_type_texts``): its
+        # output_schema and its source_config are both this entry (ITL-640).
+        slot_types: dict[str, dict[str, Any]] = {}
+        with shared_zero_row_memo():
+            for key, node in self._persistent_node_map.items():
+                if isinstance(node, SourceNodeClass):
+                    try:
+                        slot_types[key] = node.saved_type_texts()
+                    except ValueError as exc:
+                        # A type text that would not read back (CodeRabbit on PR 454).
+                        exc.add_note(f"Saving the pipeline's node {node.label!r}")
+                        raise
+                    continue
+                try:
+                    arrow_types[key] = typed_arrow_schemas(node)
+                except (ValueError, TypeError):
+                    stored = getattr(node, "_stored_schema", None) or (
+                        self._loaded_output_schemas.get(key)
+                    )
+                    if not stored:
+                        raise
+                    retained[key] = stored
         nodes: dict[str, Any] = {}
         for content_hash_str, node in self._persistent_node_map.items():
-            tag_schema, data_schema = node.output_schema()
             try:
                 type_converter = node.data_context.type_converter
             except (AttributeError, TypeError):
@@ -194,14 +195,38 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
             _cfg = node.orcapod_config
             config_val = None if _cfg == _DEFAULT_CONFIG else dataclasses.asdict(_cfg)
 
+            try:
+                output_schema: dict[str, Any] = (
+                    copy.deepcopy(slot_types[content_hash_str])
+                    if content_hash_str in slot_types
+                    else serialize_arrow_schemas(
+                        *arrow_types[content_hash_str], type_converter
+                    )
+                    if content_hash_str in arrow_types
+                    else dict(retained[content_hash_str])
+                    if content_hash_str in retained
+                    # Only this branch reads the node's Python schema: a loaded node
+                    # whose saved schema names an unregistered logical type keeps
+                    # its retained texts above, and saving again never asks for a
+                    # Python type it cannot restore (CodeRabbit on PR 454).
+                    else serialize_output_schema(*node.output_schema(), type_converter)
+                )
+            except ValueError as exc:
+                # A type text that would not read back (CodeRabbit on PR 454).
+                exc.add_note(f"Saving the pipeline's node {node.label!r}")
+                raise
+
             descriptor: dict[str, Any] = {
                 "node_type": node.node_type,
                 "label": node.label,
                 "content_hash": node.content_hash().to_string(),
                 "pipeline_hash": node.pipeline_hash().to_string(),
-                "output_schema": serialize_output_schema(
-                    tag_schema, data_schema, type_converter
-                ),
+                # A node's own Arrow types are the saved authority (ITL-640): the
+                # types its rows have, from its typed zero-row table, never types
+                # re-derived from Python ones (which lose time64[ns] or a decimal's
+                # precision). A slot whose class is not registered keeps its saved
+                # text below (ITL-1138).
+                "output_schema": output_schema,
                 "node_uri": list(node.node_uri),
                 "data_context_key": data_context_key,
                 "config": config_val,
@@ -209,36 +234,29 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
 
             match node:
                 case SourceNodeClass():
+                    # The slot's column types from the one writer (ITL-640): its own
+                    # Arrow pair, or, while unresolved, the Arrow type texts it was
+                    # loaded with, every column (an int32 stays int32).
+                    saved = slot_types[content_hash_str]
                     descriptor["source_config"] = {
                         "source_type": "node",
                         "name": node.name,
-                        "tag_schema": serialize_schema(node.tag_schema, type_converter),
-                        "data_schema": serialize_schema(
-                            node.data_schema, type_converter
-                        ),
-                        "nullable": serialize_nullability(
-                            node.tag_schema, node.data_schema, type_converter
-                        ),
+                        "tag_schema": dict(saved["tag"]),
+                        "data_schema": dict(saved["data"]),
+                        "nullable": copy.deepcopy(saved["nullable"]),
                     }
                     descriptor["reconstructable"] = True
-                    # A column whose saved type is still text keeps its saved
-                    # nullability, which the text cannot give (ITL-1138).
-                    pending = node._pending_nullable_columns()  # pyright: ignore[reportPrivateUsage]  # the saver is the one caller
-                    output_nullable = descriptor["output_schema"].get("nullable")
-                    if output_nullable is not None:
-                        descriptor["output_schema"]["nullable"] = (
-                            _with_pending_nullability(output_nullable, pending, node)
-                        )
-                    source_nullable = serialize_nullability(
-                        node.tag_schema, node.data_schema, type_converter
-                    )
-                    descriptor["source_config"]["nullable"] = _with_pending_nullability(
-                        source_nullable, pending, node
-                    )
 
                 case FunctionNode():
                     if node._function_pod is not None:
                         descriptor["function_config"] = node._function_pod.to_config()
+                    elif "function_config" in node._descriptor:
+                        # A loaded read-only node (its pod not rebuilt, e.g. an output
+                        # of an unregistered class) writes its saved config back as it
+                        # is, so saving again keeps the file's entry (PR 454).
+                        descriptor["function_config"] = copy.deepcopy(
+                            node._descriptor["function_config"]
+                        )
                     descriptor["table_scope"] = node._table_scope
                     # Written for every function node, also a plain one (ITL-1019).
                     descriptor[FALL_THROUGH_TAGS_KEY] = list(node.declared_data_tags())
@@ -246,13 +264,14 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                 case OperatorNode():
                     if node._operator is not None:
                         descriptor["operator_config"] = node._operator.to_config()
+                    elif "operator_config" in node._descriptor:
+                        # A loaded read-only node writes its saved config back as it
+                        # is (PR 454).
+                        descriptor["operator_config"] = copy.deepcopy(
+                            node._descriptor["operator_config"]
+                        )
                     descriptor["table_scope"] = node._table_scope
 
-            # A node loaded from a file without the record: its nullability is unknown.
-            if content_hash_str in self._unrecorded_output_nullability:
-                del descriptor["output_schema"]["nullable"]
-            if content_hash_str in self._unrecorded_source_nullability:
-                descriptor.get("source_config", {}).pop("nullable", None)
             nodes[content_hash_str] = descriptor
 
         output: dict[str, Any] = {
@@ -283,13 +302,16 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
             A compiled ``Pipeline`` instance with SourceNode leaf nodes.
 
         Raises:
-            ValueError: If the file's format version is unsupported.
+            ValueError: If the file's format version is not the one this Orcapod
+                writes (an earlier format is refused, never migrated).
         """
         import json as _json
         from orcapod.pipeline.serialization import (
             FALL_THROUGH_TAGS_KEY,
-            SUPPORTED_FORMAT_VERSIONS,
-            check_saved_output_schema_is_plain,
+            PIPELINE_FORMAT_VERSION,
+            require_current_format,
+            require_nullability_records,
+            arrow_schema_from_texts,
             deserialize_schema,
             saved_fall_through_tags,
         )
@@ -301,12 +323,13 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         with open(path) as f:
             data = _json.load(f)
 
-        version = data.get("orcapod_pipeline_version", "")
-        if version not in SUPPORTED_FORMAT_VERSIONS:
-            raise ValueError(
-                f"Unsupported pipeline format version {version!r}. "
-                f"Supported: {sorted(SUPPORTED_FORMAT_VERSIONS)}"
+        try:
+            require_current_format(
+                data.get("orcapod_pipeline_version", ""), PIPELINE_FORMAT_VERSION
             )
+        except ValueError as exc:
+            exc.add_note(f"Loading the pipeline file {path}")
+            raise
 
         pipeline_meta = data["pipeline"]
         name = tuple(pipeline_meta["name"])
@@ -327,20 +350,6 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
             upstream_map.setdefault(down_hash, []).append(up_hash)
 
         reconstructed: dict[str, GraphNode] = {}
-        # A descriptor written before nullability was recorded (ITL-1043) restores
-        # every column as non-null: lossy. Saving the loaded pipeline keeps it
-        # unrecorded, node by node.
-        unrecorded_output_nullability = frozenset(
-            node_hash
-            for node_hash, descriptor in nodes_data.items()
-            if "nullable" not in (descriptor.get("output_schema") or {})
-        )
-        unrecorded_source_nullability = frozenset(
-            node_hash
-            for node_hash, descriptor in nodes_data.items()
-            if "source_config" in descriptor
-            and "nullable" not in descriptor["source_config"]
-        )
 
         for node_hash in topo_order:
             descriptor = nodes_data.get(node_hash)
@@ -353,13 +362,13 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                 deserialize_output_schema,
             )
 
-            # The format version decides which tags may be data-tags (ITL-1019).
+            # Every node records its nullability (ITL-1043), and every function node
+            # names its data-tags (ITL-1019).
             try:
-                check_saved_output_schema_is_plain(descriptor, version)
+                require_nullability_records(descriptor)
                 if descriptor.get("node_type") == "function":
-                    # Stated explicitly from here on, whatever the version.
                     descriptor[FALL_THROUGH_TAGS_KEY] = list(
-                        saved_fall_through_tags(descriptor, version)
+                        saved_fall_through_tags(descriptor)
                     )
             except ValueError as exc:
                 raise ValueError(
@@ -396,45 +405,54 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                     )
                     if not node_name:
                         node_name = descriptor.get("label") or "unknown"
-                    # Which columns may be null; None when the file does not say.
-                    saved_nullable: dict[str, list[str]] | None
+                    # Which columns may be null: recorded (``require_nullability_records``).
+                    saved_nullable: dict[str, list[str]]
                     if "tag_schema" in source_config and "data_schema" in source_config:
                         saved_tag = source_config["tag_schema"]
                         saved_data = source_config["data_schema"]
-                        # A source node's output schema has the same columns: its
-                        # record stands in when the source config has none.
-                        saved_nullable = source_config.get(
-                            "nullable", descriptor["output_schema"].get("nullable")
-                        )
+                        saved_nullable = source_config["nullable"]
                     else:
                         saved_tag = descriptor["output_schema"]["tag"]
                         saved_data = descriptor["output_schema"]["data"]
-                        saved_nullable = descriptor["output_schema"].get("nullable")
+                        saved_nullable = descriptor["output_schema"]["nullable"]
                     tag_schema = Schema(
                         deserialize_schema(
                             saved_tag,
                             context.type_converter,
-                            nullable=None
-                            if saved_nullable is None
-                            else saved_nullable["tag"],
+                            nullable=saved_nullable["tag"],
                         )
                     )
                     data_schema = Schema(
                         deserialize_schema(
                             saved_data,
                             context.type_converter,
-                            nullable=None
-                            if saved_nullable is None
-                            else saved_nullable["data"],
+                            nullable=saved_nullable["data"],
                         )
                     )
+                    saved_context = resolve_saved_context(
+                        descriptor.get("data_context_key")
+                    )
+                    # The slot's Arrow types, rebuilt from the saved text (ITL-640);
+                    # none while a column's class is not registered in this process.
+                    try:
+                        arrow_schemas = (
+                            arrow_schema_from_texts(
+                                saved_tag, context.type_converter, saved_nullable["tag"]
+                            ),
+                            arrow_schema_from_texts(
+                                saved_data,
+                                context.type_converter,
+                                saved_nullable["data"],
+                            ),
+                        )
+                    except (ValueError, TypeError, KeyError):
+                        arrow_schemas = None
                     node = SourceNodeClass(
                         name=node_name,
                         tag_schema=tag_schema,
                         data_schema=data_schema,
-                        data_context=resolve_saved_context(
-                            descriptor.get("data_context_key")
-                        ),
+                        data_context=saved_context,
+                        arrow_schemas=arrow_schemas,
                     )
                     # The saved hashes, and the saved type text of a column whose
                     # class this process has not registered yet (ITL-1138).
@@ -555,8 +573,11 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
 
         # Build Pipeline instance
         pipeline = cls(name=name, auto_compile=False)
-        pipeline._unrecorded_output_nullability = unrecorded_output_nullability
-        pipeline._unrecorded_source_nullability = unrecorded_source_nullability
+        pipeline._loaded_output_schemas = {
+            node_hash: descriptor["output_schema"]
+            for node_hash, descriptor in nodes_data.items()
+            if isinstance(descriptor.get("output_schema"), dict)
+        }
         pipeline._persistent_node_map = dict(reconstructed)
 
         nodes_by_label: dict[str, GraphNode] = {}
@@ -640,8 +661,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         clone._node_graph = self._node_graph
         clone._auto_compile = self._auto_compile
         clone._compiled = self._compiled
-        clone._unrecorded_output_nullability = self._unrecorded_output_nullability
-        clone._unrecorded_source_nullability = self._unrecorded_source_nullability
+        clone._loaded_output_schemas = self._loaded_output_schemas
         # Mutable per-execution state — own copy so runs don't interfere
         clone._nodes = dict(self._nodes)
         return clone

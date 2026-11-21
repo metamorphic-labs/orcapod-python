@@ -322,6 +322,33 @@ class LogicalTypeRegistry:
                 python_bases=entry.get("python_bases", []),
             )
 
+    def registered_extension_names(self) -> tuple[str, ...]:
+        """The Arrow extension names of every logical type this registry holds, sorted.
+
+        The types registered and the ones declared for loading on first use (a type
+        whose library is imported only when needed, such as ``torch.Tensor``). A type a
+        factory builds (``factory_categories``: a native container, a user class) is
+        listed only once something has built and registered it in this registry (a
+        conversion of ``list[uuid.UUID]`` registers ``list[orcapod.uuid]``); one not
+        built yet is absent. A registry built fresh from a data context's registration
+        lists its built-in types only.
+
+        Returns:
+            The extension names.
+        """
+        return tuple(sorted({*self._by_arrow_name, *self._deferred_by_arrow_name}))
+
+    def factory_categories(self) -> tuple[str, ...]:
+        """The categories of the logical type factories this registry holds, sorted.
+
+        A factory builds a logical type from an identifier or a Python class (a native
+        container ``list[T]`` / ``set[T]``, a user class).
+
+        Returns:
+            The categories.
+        """
+        return tuple(sorted(self._category_factories))
+
     def register_logical_type(self, logical_type: LogicalTypeProtocol) -> None:
         """Register *logical_type* and its PyArrow/Polars extension types.
 

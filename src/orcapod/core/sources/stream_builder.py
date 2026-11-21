@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, cast
 from orcapod.core.sources.source_ids import hash_source_id
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.errors import RowIdentifierError
+from orcapod.logical_types.identifier import LogicalTypeIdentifierError
 from orcapod.system_constants import constants
 from orcapod.types import ContentHash
 from orcapod.utils import arrow_utils, schema_utils
@@ -321,6 +322,38 @@ def _unhashable_columns(
     return failing
 
 
+def _unhashable_table_error(
+    hasher: ArrowHasherProtocol, table: pa.Table, exc: ValueError
+) -> ValueError | None:
+    """Return the error for a table the Arrow hasher refused, naming every column.
+
+    The hasher (starfix) raises ``ValueError`` for a type it does not hash, at the
+    table or at its schema, and names the first such column only.
+
+    Args:
+        hasher: The data context's Arrow hasher.
+        table: The table whose hash, or whose schema's hash, failed.
+        exc: The hasher's error.
+
+    Returns:
+        A ``ValueError`` naming every column the hasher refuses with its type, or
+        ``None`` when no single column is refused, or when ``exc`` is a logical type
+        identifier this installation cannot read, which names its column already
+        (the caller re-raises ``exc``).
+    """
+    if isinstance(exc, LogicalTypeIdentifierError):
+        return None
+    unhashable = _unhashable_columns(hasher, table)
+    if not unhashable:
+        return None
+    described = ", ".join(f"{name!r} of type {kind}" for name, kind in unhashable)
+    noun = "column" if len(unhashable) == 1 else "columns"
+    return ValueError(
+        f"cannot hash {noun} {described}: the Arrow hasher refused "
+        f"({exc}). Drop or convert before building the source."
+    )
+
+
 @dataclass(frozen=True)
 class SourceStreamResult:
     """Artifacts produced by ``SourceStreamBuilder.build()``."""
@@ -438,6 +471,13 @@ class SourceStreamBuilder:
             raise schema_utils.dictionary_columns_error(
                 found, tag_columns_tuple, data_tags_tuple, system_tag_columns_tuple
             )
+        # Nor are columns of a type the schema hash rejects (a union, a list view, a
+        # run-end-encoded type; ITL-640): refused here first, as the stream refuses
+        # them, with the same message.
+        if found := schema_utils.schema_hash_rejected_columns(table.schema):
+            raise schema_utils.schema_hash_rejected_columns_error(
+                found, tag_columns_tuple, data_tags_tuple, system_tag_columns_tuple
+            )
 
         # 1. Drop system columns from raw input.
         table = arrow_utils.drop_system_columns(table)
@@ -462,24 +502,26 @@ class SourceStreamBuilder:
         # repeated key is refused here, before anything is hashed).
         identifiers = row_identifiers(table, key_columns)
 
-        # 4. Compute schema hash from tag/data python schemas.
+        # 4. Compute schema hash from the tag/data Arrow schemas (ITL-640).
         # Nullable flags in the incoming table are trusted as-is — callers must
         # set them correctly before calling build().
         non_sys = arrow_utils.drop_system_columns(table)
         tag_schema = non_sys.select(list(tag_columns_tuple)).schema
         data_schema = non_sys.drop(list(tag_only_tuple)).schema
-        tag_python = self._data_context.type_converter.arrow_schema_to_python_schema(
-            tag_schema
-        )
-        data_python = self._data_context.type_converter.arrow_schema_to_python_schema(
-            data_schema
-        )
-        schema_hash = compute_source_schema_hash(
-            tag_python,
-            data_python,
-            self._data_context,
-            self._config,
-        )
+        try:
+            schema_hash = compute_source_schema_hash(
+                tag_schema,
+                data_schema,
+                self._data_context,
+                self._config,
+            )
+        except ValueError as exc:
+            # A type the Arrow hasher cannot hash fails here first, at its schema
+            # (ITL-640): refused as the table hash below refuses it.
+            error = _unhashable_table_error(self._data_context.arrow_hasher, table, exc)
+            if error is None:
+                raise
+            raise error from exc
 
         # 5. Compute table hash for data identity: the rows in the order given, or,
         # with ``hash_in_key_order``, in key order (ITL-1272). The stream keeps the
@@ -493,19 +535,10 @@ class SourceStreamBuilder:
         try:
             table_hash = hasher.hash_table(hashed)
         except ValueError as exc:
-            # The hasher (starfix) raises ValueError for a type it does not hash
-            # and names the first such column only; name every column it refuses.
-            unhashable = _unhashable_columns(hasher, table)
-            if not unhashable:
+            error = _unhashable_table_error(hasher, table, exc)
+            if error is None:
                 raise
-            described = ", ".join(
-                f"{name!r} of type {kind}" for name, kind in unhashable
-            )
-            noun = "column" if len(unhashable) == 1 else "columns"
-            raise ValueError(
-                f"cannot hash {noun} {described}: the Arrow hasher refused "
-                f"({exc}). Drop or convert before building the source."
-            ) from exc
+            raise error from exc
 
         # 6. Default source_id: the source kind and the labelled table hash, at
         # full length. A source id is the source's name, so a default built from a

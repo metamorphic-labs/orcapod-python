@@ -320,3 +320,42 @@ def test_a_full_key_that_is_not_the_manifests_key_does_not_resolve(name: str) ->
         _ = contexts.resolve_context(name)
     assert name in str(info.value)
     assert "std:v1:default" in str(info.value)
+
+
+class _HasherWithoutSchemaHash:
+    """An Arrow hasher that hashes tables only (ArrowHasherProtocol before ITL-640)."""
+
+    hasher_id = "custom_v1"
+
+    def hash_table(self, table: object) -> object:
+        raise NotImplementedError
+
+
+def test_a_context_refuses_an_arrow_hasher_without_hash_schema() -> None:
+    """Every schema in an identity is hashed by ``hash_schema``: checked at creation."""
+    from orcapod.contexts import get_default_context
+    from orcapod.contexts.core import ContextValidationError, DataContext
+
+    default = get_default_context()
+    with pytest.raises(
+        ContextValidationError,
+        match="_HasherWithoutSchemaHash has no hash_schema method",
+    ):
+        DataContext(
+            context_key="custom:v1",
+            version="v1",
+            description="a hasher without hash_schema",
+            type_converter=default.type_converter,
+            arrow_hasher=_HasherWithoutSchemaHash(),  # pyright: ignore[reportArgumentType]  # the class under test lacks a protocol member
+            semantic_hasher=default.semantic_hasher,
+        )
+    # The default hasher has it.
+    rebuilt = DataContext(
+        context_key=default.context_key,
+        version=default.version,
+        description=default.description,
+        type_converter=default.type_converter,
+        arrow_hasher=default.arrow_hasher,
+        semantic_hasher=default.semantic_hasher,
+    )
+    assert rebuilt.arrow_hasher is default.arrow_hasher

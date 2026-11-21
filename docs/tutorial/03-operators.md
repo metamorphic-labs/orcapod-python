@@ -48,14 +48,14 @@ and puts their data columns side by side:
 unit_info = units.join(sessions)
 
 print(unit_info.keys())
-# (('subject_id', 'session', 'probe', 'unit'), ('date', 'duration_s', 'region', 'depth_um', 'n_spikes'))
+# (('subject_id', 'session', 'probe', 'unit'), ('region', 'depth_um', 'n_spikes', 'date', 'duration_s'))
 unit_tags = ["subject_id", "session", "probe", "unit"]
 narrow = unit_info.select_data_columns(["n_spikes", "duration_s"])
 print(narrow.as_pandas_df().sort_values(unit_tags, ignore_index=True).head(3))
-#   subject_id session  probe  unit  duration_s  n_spikes
-# 0   mouse_01      s1  imec0     0        60.0       149
-# 1   mouse_01      s1  imec0     1        60.0       326
-# 2   mouse_01      s1  imec0     2        60.0       662
+#   subject_id session  probe  unit  n_spikes  duration_s
+# 0   mouse_01      s1  imec0     0       149        60.0
+# 1   mouse_01      s1  imec0     1       326        60.0
+# 2   mouse_01      s1  imec0     2       662        60.0
 ```
 
 You do not say what to join on. `units` has tags `subject_id, session, probe, unit`;
@@ -63,8 +63,8 @@ You do not say what to join on. `units` has tags `subject_id, session, probe, un
 the tags and all data columns of both. This is the step the two-stream function pod in Part 2
 did for you.
 
-The column order is chosen by Orcapod, not by the order you wrote the streams in: here the
-columns of `sessions` come first. Refer to columns by name, never by position.
+The column order is chosen by Orcapod, not by the order you wrote the streams in. Refer to
+columns by name, never by position.
 
 Four things to know:
 
@@ -80,7 +80,7 @@ Joins chain. This attaches both the session and the animal to every unit:
 ```python
 everything = units.join(sessions).join(subjects)
 print(everything.keys()[1])
-# ('sex', 'age_weeks', 'genotype', 'date', 'duration_s', 'region', 'depth_um', 'n_spikes')
+# ('region', 'depth_um', 'n_spikes', 'date', 'duration_s', 'sex', 'age_weeks', 'genotype')
 print(everything.as_table().num_rows)
 # 64
 ```
@@ -193,7 +193,7 @@ columns of `subjects` along:
 
 ```python
 print(units.join(subjects).polars_filter(genotype="knockout").keys()[1])
-# ('sex', 'age_weeks', 'genotype', 'region', 'depth_um', 'n_spikes')
+# ('region', 'depth_um', 'n_spikes', 'sex', 'age_weeks', 'genotype')
 ```
 
 ## Rename and select
@@ -272,10 +272,10 @@ side_by_side = imec0.map_data({"n_spikes": "n_imec0"}).join(
 )
 pair_tags = ["subject_id", "session", "unit"]
 print(side_by_side.as_pandas_df().sort_values(pair_tags, ignore_index=True).head(3))
-#   subject_id session  unit  n_imec0  n_imec1
-# 0   mouse_01      s1     0      149      215
-# 1   mouse_01      s1     1      326      299
-# 2   mouse_01      s1     2      662      135
+#   subject_id session  unit  n_imec1  n_imec0
+# 0   mouse_01      s1     0      215      149
+# 1   mouse_01      s1     1      299      326
+# 2   mouse_01      s1     2      135      662
 ```
 
 **`MergeJoin`**, when they are repeated measurements of the same quantity and you want them
@@ -324,11 +324,11 @@ with exactly two data columns: `n_spikes` and `age_weeks`. How many rows does it
         .select_data_columns(["n_spikes", "age_weeks"])
     )
     print(answer.as_pandas_df().sort_values(unit_tags, ignore_index=True).head(4))
-    #   subject_id session  probe  unit  age_weeks  n_spikes
-    # 0   mouse_03      s1  imec1     0         11       399
-    # 1   mouse_03      s1  imec1     1         11       483
-    # 2   mouse_03      s1  imec1     2         11       357
-    # 3   mouse_03      s1  imec1     3         11       457
+    #   subject_id session  probe  unit  n_spikes  age_weeks
+    # 0   mouse_03      s1  imec1     0       399         11
+    # 1   mouse_03      s1  imec1     1       483         11
+    # 2   mouse_03      s1  imec1     2       357         11
+    # 3   mouse_03      s1  imec1     3       457         11
     print(answer.as_table().num_rows)
     # 16
     ```

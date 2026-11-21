@@ -43,6 +43,7 @@ from orcapod.core.operators import (
     MapData,
     MapTags,
     MergeJoin,
+    Rejoin,
     Pick,
     PolarsFilter,
     SelectColumns,
@@ -441,7 +442,36 @@ class Case:
     make_sources: Callable[[], tuple[StreamProtocol, ...]]
 
 
+def _branches(
+    source: ArrowTableSource, *data: Sequence[str]
+) -> tuple[StreamProtocol, ...]:
+    """Branches of one source (ITL-1336): each keeps the source's data-tags and the named
+    data columns."""
+    tags, columns = source.keys()
+    data_tags = [name for name in columns if name in tags]
+    return tuple(source.select_data_columns([*data_tags, *names]) for names in data)
+
+
 CASES = [
+    # Rejoin: the branches of one source put back together (ITL-1336), over many narrow
+    # types, with plain tags and with data-tags, two and three inputs.
+    Case(
+        "rejoin_2",
+        Rejoin,
+        lambda: _branches(source_a(), ("i8", "s", "bn"), ("st", "p", "l8", "d", "nul")),
+    ),
+    Case(
+        "rejoin_3_data_tags",
+        Rejoin,
+        lambda: _branches(
+            source_a(with_data_tags=True), ("nul", "s"), ("i8", "p"), ("st", "l8")
+        ),
+    ),
+    Case(
+        "rejoin_two_tags",
+        Rejoin,
+        lambda: _branches(source_two(), ("a",), ()),
+    ),
     Case("join_2", Join, lambda: (source_a(), source_b())),
     Case("join_2_reversed", Join, lambda: (source_b(), source_a())),
     Case("join_3", Join, lambda: (source_a(), source_b(), source_c())),
@@ -1436,10 +1466,10 @@ PINNED_ROW_HASHES = {
     ),
 }
 PINNED_STREAM_CONTENT_HASH = (
-    "semantic_v1:1a1287b527e0b08f2bc4af1084a9da9e1e7c1177b73f757ca5c6d742dc832067"
+    "semantic_v1:9c4e6769cdf7193685ebd44a2d223454f9537d532c4b1d2601c1fd93349c8cbf"
 )
 PINNED_STREAM_PIPELINE_HASH = (
-    "semantic_v1:45e033fc620875ff4704cc3ca60aee3c5f219a664c15f482428cda95bae2588e"
+    "semantic_v1:6d8e7c5123d673755b71714a7159774d4c76bad30a6291dc8d3e6051a71dcd39"
 )
 
 
