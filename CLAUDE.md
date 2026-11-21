@@ -1499,6 +1499,14 @@ data. The rules:
   key that is a list of any kind (a fixed-size list included) is refused as list-valued. `Batch` and `MergeJoin` build their lists from Arrow
   arrays too (ITL-1281). The stance on `0.0`/`-0.0` and NaN for the whole library (match by value, as
   Polars does; show the smallest bit pattern; rewrite nothing) is ITL-1251.
+- The presentation order (`arrow_utils.sort_by_tag_columns`: `as_table(columns={"sort_by_tags": True})`,
+  `head().sort_by_tags()`, the preview) is ascending by the tags, then the system tags, nulls
+  last at every depth: a null list element or struct field after the values beside it, as
+  `GroupBy` orders a list and Arrow a struct (ITL-1295). Arrow sorts when it can; for a list
+  tag (or a struct holding one) Polars orders the prepared keys only
+  (`arrow_keys.polars_key_frame`, `arrow_keys.sort_key`) and the rows are taken from the
+  table, so no value passes through Polars. A tag type with no rule (a map, an interval, a
+  union, a list view) raises `TypeError` naming the column.
 - `Data` source-info values may be `str`, `None`, or `list[...]`, nested to any depth; the
   Arrow and Python types are derived from the value, with `None` mapping to `large_string`.
   That rule has one definition, `arrow_utils.source_info_arrow_type`, and applies only to
