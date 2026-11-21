@@ -108,7 +108,16 @@ Any Orcapod database can hold a job's results. Two are used most:
 - **`InMemoryArrowDatabase()`** keeps results for the lifetime of the Python process. Use it
   for experiments and tests.
 - **`DeltaTableDatabase("some/directory")`** writes [Delta Lake](https://delta.io/) tables
-  under a directory, and is what makes results survive between sessions.
+  under a directory, and is what makes results survive between sessions. It keeps every
+  type Orcapod uses: where Delta has no column type or would change it (an unsigned
+  integer, a nanosecond timestamp, `float16`, a fixed-size list, a list's item name), the
+  column's Arrow type is recorded and restored on read. It refuses, naming the column, the
+  few types Delta cannot hold at all (`decimal256`, an interval), a map whose key or item
+  field is not named `key` / `value`, and a new column holding only nulls with no type.
+
+No database gives a column back as another type: each keeps a type exactly or refuses it
+before anything of the table is written. [Data types per database](../reference/database-types.md)
+lists every type for every database.
 
 On disk the layout is `<directory>/<job name>/<function name>/...` for each function, plus
 `<directory>/<job name>/_result/...`. The job's `name` is the top level, so jobs with
@@ -134,11 +143,17 @@ and binary columns come back as `large_string` and `large_binary`, the types Orc
 | `SQLiteConnector` | `bool`, `int64`, `double`, `large_string`, `large_binary` |
 | `PostgreSQLConnector` | `bool`, `int32`, `int64`, `float`, `double`, `large_string`, `large_binary`, `date32`, `timestamp[us]`, `timestamp[us, tz=UTC]` |
 
-Any other type (lists, structs, dates or timestamps on SQLite, narrower integers and floats,
-logical types) is refused. PostgreSQL also refuses a column name or a table name longer than
+A non-null column is created `NOT NULL` and reads back non-null. SQLite refuses a
+`double` column holding a NaN or `-0.0`, which it would read back as NULL and `0.0`. Any
+other type (lists,
+structs, dates or timestamps on SQLite, narrower integers and floats, logical types) is
+refused. PostgreSQL also refuses a column name or a table name longer than
 63 bytes, which it would truncate (`UnstorableTableNameError` for a table). `SpiralDBConnector` stores other types as written, except a
-timestamp with a time zone (SpiralDB drops the zone), and SpiralDB reserves the `__` prefix on
-value columns (the `__record_id` key is allowed) and `.` in any column name.
+timestamp with a time zone (SpiralDB drops the zone), a logical (extension) type such as
+`File`, `Path`, `UUID`, a user class or `set[int]` (SpiralDB drops the field metadata that
+names it), and a null struct; SpiralDB reserves the `__` prefix on
+value columns (the `__record_id` key is allowed) and `.` in any column name. The full list,
+type by type, is [Data types per database](../reference/database-types.md).
 
 Orcapod's own stored tables hold such columns. A function node's result table holds
 list-valued executor columns and `__`-prefixed columns. A side-effect node's log holds a UTC

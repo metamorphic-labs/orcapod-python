@@ -63,6 +63,39 @@ COLUMNS: dict[str, pa.Array[Any]] = {
         [{"u": i, "t": _T[i].replace(microsecond=0)} for i in range(3)],
         pa.struct([("u", pa.uint16()), ("t", pa.timestamp("ms"))]),
     ),
+    # ITL-1283, ITL-1275, ITL-1334: kept through a recorded type, null rows included.
+    "float16": pa.array([0.5, None, 65504.0], pa.float16()),
+    "fixed_size_list<int64>[2]": pa.array(
+        [[1, 2], None, [3, None]], pa.list_(pa.int64(), 2)
+    ),
+    "fixed_size_list<non-null int64>[2]": pa.array(
+        [[1, 2], None, [3, 4]], pa.list_(pa.field("item", pa.int64(), False), 2)
+    ),
+    "struct<f: fixed_size_list<float16>[2]>": pa.array(
+        [{"f": [0.5, 1.5]}, {"f": None}, None],
+        pa.struct([("f", pa.list_(pa.float16(), 2))]),
+    ),
+    "map<string, fixed_size_list<int8>[2]>": pa.array(
+        [[("a", [1, 2])], None, [("b", None), ("c", [3, 4])]],
+        pa.map_(pa.string(), pa.list_(pa.int8(), 2)),
+    ),
+    "large_list<fixed_size_list<uint8>[3]>": pa.array(
+        [[[1, 2, 3]], [], [None, [4, 5, 6]]],
+        pa.large_list(pa.list_(pa.uint8(), 3)),
+    ),
+    "fixed_size_binary[3]": pa.array([b"abc", None, b"\x00\x01\x02"], pa.binary(3)),
+    "fixed_size_list<int16>[0]": pa.array([[], None, []], pa.list_(pa.int16(), 0)),
+    "map<string, int64>, keys sorted": pa.array(
+        [[("a", 1), ("b", 2)], None, []],
+        pa.map_(pa.string(), pa.int64(), keys_sorted=True),  # pyright: ignore[reportCallIssue]  # the stubs lack keys_sorted
+    ),
+    "large_list<named: int16 {unit: m}>": pa.array(
+        [[1], None, [2, None]],
+        pa.large_list(pa.field("named", pa.int16(), metadata={"unit": "m"})),
+    ),
+    "large_list<non-null int64>": pa.array(
+        [[1], [], [2, 3]], pa.large_list(pa.field("item", pa.int64(), False))
+    ),
 }
 
 
@@ -500,3 +533,131 @@ def test_an_unsigned_value_beyond_an_unrecorded_signed_column_is_refused(
     read = DeltaTableDatabase(tmp_path).get_all_records(("t",))
     assert read is not None
     assert read.column("c").to_pylist() == [1]
+
+
+# ---------------------------------------------------------------------------
+# ITL-1334: float16 values bit for bit, refused restores, refused types
+# ---------------------------------------------------------------------------
+
+
+def test_float16_special_values_round_trip_bit_for_bit(tmp_path: pathlib.Path) -> None:
+    """``float32`` holds every ``float16`` exactly: NaN, both infinities, both zeros,
+    the smallest subnormal and the largest value come back with their bits."""
+    import numpy as np
+
+    values = np.array(
+        [np.nan, np.inf, -np.inf, 0.0, -0.0, 2.0**-24, 65504.0, -65504.0],
+        dtype=np.float16,
+    )
+    # Three rows per write (the helper's ids): three writes cover the eight values.
+    for start in (0, 3, 5):
+        chunk = values[start : start + 3]
+        read = _written_and_read(tmp_path / f"w{start}", pa.array(chunk, pa.float16()))
+        assert read.schema.field("c").type == pa.float16()
+        back = read.column("c").to_numpy()
+        assert back.view(np.uint16).tolist() == chunk.view(np.uint16).tolist()
+
+
+def _recorded(stored: pa.Array[Any], original: pa.DataType) -> pa.Table:
+    """A table as read from Delta: ``stored`` under a field recording ``original``."""
+    from orcapod.databases.delta_arrow_types import ARROW_TYPE_KEY, _serialize  # pyright: ignore[reportPrivateUsage]
+
+    field = pa.field("c", stored.type, metadata={ARROW_TYPE_KEY: _serialize(original)})
+    return pa.Table.from_arrays([stored], schema=pa.schema([field]))
+
+
+@pytest.mark.parametrize(
+    ("stored", "original", "problem"),
+    [
+        (
+            pa.array([[1, 2], [3]], pa.large_list(pa.int64())),
+            pa.list_(pa.int64(), 2),
+            "does not hold 2 items",
+        ),
+        (
+            pa.array([{"f": [1, 2, 3]}], pa.struct([("f", pa.large_list(pa.int64()))])),
+            pa.struct([("f", pa.list_(pa.int64(), 2))]),
+            "does not hold 2 items",
+        ),
+        (pa.array([0.1], pa.float32()), pa.float16(), "not a float16 value"),
+        (pa.array([b"abcd"], pa.large_binary()), pa.binary(3), "widths must match"),
+    ],
+    ids=["fixed_size_list", "nested fixed_size_list", "float16", "fixed_size_binary"],
+)
+def test_stored_rows_that_are_not_the_recorded_type_are_refused_naming_the_column(
+    stored: pa.Array[Any], original: pa.DataType, problem: str
+) -> None:
+    """A restore never makes up a value: rows that cannot be what was written raise."""
+    from orcapod.databases.delta_arrow_types import from_delta_layout
+
+    with pytest.raises(ValueError, match=f"Column 'c'.*{problem}"):
+        from_delta_layout(_recorded(stored, original))
+
+
+@pytest.mark.parametrize(
+    "arrow_type",
+    [
+        pa.decimal256(40, 2),
+        pa.month_day_nano_interval(),
+        pa.struct([("d", pa.decimal256(76, 10))]),
+        pa.large_list(pa.decimal256(40, 2)),
+    ],
+    ids=["decimal256", "interval", "struct<decimal256>", "large_list<decimal256>"],
+)
+def test_a_type_delta_cannot_hold_is_refused_before_anything_is_written(
+    arrow_type: Any, tmp_path: pathlib.Path
+) -> None:
+    from orcapod.errors import UnstorableColumnError
+
+    db = DeltaTableDatabase(tmp_path)
+    table = pa.table(
+        {
+            "id": pa.array([b"a"], pa.large_binary()),
+            "ok": pa.array([1], pa.int64()),
+            "bad": pa.nulls(1, arrow_type),
+        }
+    )
+    with pytest.raises(UnstorableColumnError, match="'bad'") as caught:
+        db.add_records(("t",), table, record_id_column="id", flush=True)
+    assert caught.value.database_kind == "DeltaTableDatabase"
+    assert "Use an InMemoryArrowDatabase instead" in str(caught.value)
+    db.flush()
+    assert db.get_all_records(("t",), record_id_column="id") is None
+
+
+def test_a_job_refuses_a_column_delta_cannot_hold_before_it_runs(
+    tmp_path: pathlib.Path,
+) -> None:
+    """``require_storable`` is the job's up-front check too (ITL-1162 hook)."""
+    from orcapod.contexts.stored import require_storable
+    from orcapod.errors import UnstorableColumnError
+
+    with pytest.raises(UnstorableColumnError, match="'d'"):
+        require_storable(
+            DeltaTableDatabase(tmp_path),
+            pa.schema([("k", pa.int64()), ("d", pa.decimal256(40, 2))]),
+        )
+    require_storable(
+        DeltaTableDatabase(tmp_path),
+        pa.schema([("k", pa.uint64()), ("h", pa.float16()), ("n", pa.null())]),
+    )
+
+
+@pytest.mark.parametrize(
+    "arrow_type",
+    [pa.null(), pa.struct([("a", pa.null())]), pa.large_list(pa.null())],
+    ids=["null", "struct<null>", "large_list<null>"],
+)
+def test_a_new_all_null_column_is_refused_naming_it(
+    arrow_type: Any, tmp_path: pathlib.Path
+) -> None:
+    """Delta has no null type: a column no stored column types is refused when added,
+    instead of failing the flush without naming it (ITL-1334)."""
+    from orcapod.errors import UnstorableColumnError
+
+    db = DeltaTableDatabase(tmp_path)
+    table = pa.table(
+        {"id": pa.array([b"a"], pa.large_binary()), "n": pa.nulls(1, arrow_type)}
+    )
+    with pytest.raises(UnstorableColumnError, match="'n'"):
+        db.add_records(("t",), table, record_id_column="id")
