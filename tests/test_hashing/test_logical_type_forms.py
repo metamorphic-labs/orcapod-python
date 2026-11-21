@@ -409,6 +409,66 @@ def test_a_loaded_read_only_operator_keeps_its_arrow_types(
     assert data_schema.field("i8").type == pa.int8()
 
 
+# Narrow tag and data columns, a nullable one of each, in three arrangements: the
+# declared tag order and the table layout differ, and in one ``k`` is a data-tag.
+_NARROW_FIELDS = {
+    "id": pa.field("id", pa.int32(), nullable=False),
+    "k": pa.field("k", pa.int16()),
+    "l": pa.field(
+        "l", pa.large_list(pa.field("item", pa.int16(), nullable=False)), nullable=False
+    ),
+    "n": pa.field("n", pa.int32(), nullable=False),
+    "m": pa.field("m", pa.int16()),
+}
+_NARROW_VALUES = {
+    "id": [1, 2],
+    "k": [7, None],
+    "l": [[1, 2], [3]],
+    "n": [5, 6],
+    "m": [1, None],
+}
+_NARROW_LAYOUTS: dict[str, tuple[list[str], list[str], Any]] = {
+    "tags id, k": (["id", "k", "l", "n", "m"], ["id", "k"], True),
+    "tags k, id, reordered": (["m", "n", "l", "k", "id"], ["k", "id"], True),
+    "k a data-tag": (["id", "k", "l", "n", "m"], ["id", "k"], ["id"]),
+}
+
+
+@pytest.mark.parametrize("layout", list(_NARROW_LAYOUTS))
+def test_a_loaded_read_only_operator_has_its_saved_arrow_types_with_no_rows(
+    tmp_path: Path, layout: str
+) -> None:
+    """A loaded node without its operator (``Index``, ITL-1326) reads, before a run, as
+    the original node's zero-row table: its saved Arrow types (``int32``, ``int16``,
+    nullability, the list item), in the same column order, from ``as_table()`` and
+    from ``head()``; never the Python schema's ``int64`` (CodeRabbit on PR 454)."""
+    columns, tags, tag_only = _NARROW_LAYOUTS[layout]
+    table = pa.Table.from_pydict(
+        {name: _NARROW_VALUES[name] for name in columns},
+        schema=pa.schema([_NARROW_FIELDS[name] for name in columns]),
+    )
+    source = ArrowTableSource(
+        table, tag_columns=tags, tag_only_columns=tag_only, source_id="narrow"
+    )
+    database = InMemoryArrowDatabase()
+    job = PipelineJob(name="read_only_narrow", database=database)
+    with job:
+        Index("l", 0, "l0")(source, label="ro")
+    original = job.nodes["ro"]
+    expected = original.as_table()  # not run: its zero-row table
+    assert expected.num_rows == 0
+    path = tmp_path / "job.json"
+    job.save(path)
+    loaded = PipelineJob.load(path, database=database).nodes["ro"]
+    assert loaded._operator is None  # pyright: ignore[reportAttributeAccessIssue]  # the case under test
+    for got in (loaded.as_table(), loaded.head().table):
+        assert got.num_rows == 0
+        assert got.schema.equals(expected.schema), (got.schema, expected.schema)
+    assert expected.schema.field("n").type == pa.int32()
+    assert expected.schema.field("k").type == pa.int16()
+    assert expected.schema.field("m").nullable
+
+
 # ── 5. an identifier nested in a plain list, struct or map (Codex review 454b) ─
 #
 # Arrow cannot build an empty table with an extension type inside a list, struct or

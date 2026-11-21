@@ -1787,15 +1787,17 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # file cannot give it. A file without one is malformed and refused, never
         # loaded with a guessed hash (developer, 2026-11-21: no backward compatibility
         # for saved files).
+        # An entry that is not a hash text (null, a number) is no record either
+        # (CodeRabbit on PR 454).
         unrecorded = sorted(
             bp_node.label
             for bp_node in pipeline._persistent_node_map.values()
             if isinstance(bp_node, (_FunctionNode, _OperatorNode, SideEffectNode))
-            and bp_node.label not in node_job_content_hashes
+            and not isinstance(node_job_content_hashes.get(bp_node.label), str)
         )
         if unrecorded:
             raise ValueError(
-                f"{path}: saved nodes {unrecorded} have no run content hash "
+                f"{path}: saved nodes {unrecorded} have no run content hash text "
                 "(run.node_job_content_hashes); a saved job records it for every "
                 "function, operator and side-effect node. Save the job again with this "
                 "version of Orcapod."

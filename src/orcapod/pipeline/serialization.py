@@ -1346,7 +1346,10 @@ def parse_arrow_type_string(type_str: str, type_converter: Any | None = None) ->
         )
 
     if outer == "struct":
-        # "struct<a: int64, b: string>" — split on top-level commas
+        # "struct<a: int64, b: string>" — split on top-level commas. "struct<>" is the
+        # struct with no fields (CodeRabbit on PR 454), never one field of no text.
+        if not inner.strip():
+            return pa.struct([])
         fields = _split_struct_fields(inner)
         pa_fields = [
             _parse_arrow_field(field_str, type_converter) for field_str in fields

@@ -1805,10 +1805,9 @@ raises `InputValidationError` naming both keys before anything is written. This 
 nodes, caches and cached sources used directly; inside a `PipelineJob` every input is wrapped
 in a source node of the default data context, so the refusal is not reached there. (What
 should eventually happen instead is tracked in ITL-951.) `std:v0.1:default` itself is not shipped
-with v0.3 and does not resolve; a pipeline or job file saved by v0.2 loads under the current
-data context with a warning when its schema types are supported. Saved files with name-only
-logical extension types are rejected: current saved schema text requires the full logical
-type identifier. See [Saving and loading a job](../concepts/function-pods.md#saving-and-loading-a-job).
+with v0.3 and does not resolve. A pipeline or job file loads only at the current file format
+(`0.4.0`); a file saved by an earlier release is refused, and saved schema text always holds
+the full logical type identifier. See [Saving and loading a job](../concepts/function-pods.md#saving-and-loading-a-job).
 
 `stored_data_contexts(database, record_path)` reads a stored table and counts its rows by
 data context. A table without the column reports all its rows under `std:v0.1:default`.

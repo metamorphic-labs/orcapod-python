@@ -371,6 +371,41 @@ class OperatorNodeBase(StreamBase):
         except (ValueError, TypeError):
             return None
 
+    def _saved_zero_row_table(self) -> "pa.Table | None":
+        """A read-only loaded node's table with no rows, typed by its saved Arrow pair.
+
+        The user tag and data columns, each once (a data-tag among the tags), with the
+        Arrow types and nullability its saved ``output_schema`` records: the Arrow
+        schema is never computed (ITL-912), so a saved ``int32`` stays ``int32``
+        (CodeRabbit on PR 454). No system-tag or source-info column: the saved schema
+        does not name them. ``None`` when the node has an operator, or when
+        ``arrow_schemas`` cannot restore the saved text (a logical type this process
+        has not registered).
+        """
+        schemas = self.arrow_schemas
+        if schemas is None:
+            return None
+        tag_schema, data_schema = schemas
+        fields = [
+            *tag_schema,
+            *(f for f in data_schema if f.name not in tag_schema.names),
+        ]
+        return pa.schema(fields).empty_table()
+
+    def _zero_row_table(self, config: ColumnConfig) -> "pa.Table | None":
+        """This node's table with no rows; a read-only node's from its saved types."""
+        if self._operator is not None:
+            return super()._zero_row_table(config)
+        saved = self._saved_zero_row_table()
+        if saved is None:
+            return None
+        return ArrowTableStream(
+            saved,
+            tag_columns=self.keys()[0],
+            data_tags=stream_data_tags(self),
+            data_context=self.data_context,
+        ).as_table(columns=config)
+
     def keys(
         self,
         *,
@@ -1912,18 +1947,27 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         That zero-row table has the columns, Arrow types and nullability of the
         node's rows, system tags and source info included: it is the operator's
         result over its inputs' zero-row tables, got without computing or reading
-        a row (ITL-912). Known limitation: when an input cannot say its Arrow
-        types without rows (a ``PollingSource`` before its first poll, an unbound
-        input slot or ``SourceProxy``, a ``DerivedSource``, or a loaded node with
-        no live upstream), the table is built from the node's Python output
-        schema: an ``int8`` column reads as ``int64`` and the system-tag columns
-        are absent (ITL-1089, ITL-985).
+        a row (ITL-912). A loaded node without its operator (``Index``, ``Pick``)
+        has the Arrow types its saved ``output_schema`` records
+        (``_saved_zero_row_table``), without system-tag columns. Known limitation:
+        when an input cannot say its Arrow types without rows (a ``PollingSource``
+        before its first poll, an unbound input slot or ``SourceProxy``, a
+        ``DerivedSource``, or a loaded node with no live upstream), the table is
+        built from the node's Python output schema: an ``int8`` column reads as
+        ``int64`` and the system-tag columns are absent (ITL-1089, ITL-985).
         """
         current = self._current_output()
         if current is not None:
             return current.as_table(columns=columns, all_info=all_info)
         if self._operator is None:
-            # A node rebuilt without its operator: the columns of its saved schema.
+            # A node rebuilt without its operator: the columns and Arrow types of its
+            # saved schema (``_saved_zero_row_table``). The Python schema's conversion
+            # only when the saved text cannot be restored (an unregistered logical
+            # type), where the Python schema cannot be read either and this raises.
+            config = ColumnConfig.handle_config(columns, all_info=all_info)
+            saved = self._zero_row_table(config)
+            if saved is not None:
+                return saved
             tag_schema, data_schema = self.output_schema()
             empty = pa.Table.from_pylist(
                 [],

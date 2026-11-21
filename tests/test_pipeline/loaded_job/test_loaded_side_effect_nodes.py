@@ -288,14 +288,22 @@ def test_a_loaded_side_effect_node_keeps_the_content_hash_of_the_job_it_was_save
     assert {label: reloaded.nodes[label].content_hash() for label in live} == live
 
 
+@pytest.mark.parametrize("defect", ["missing", "null", "number"])
 def test_a_job_file_without_a_side_effect_nodes_run_hash_is_refused(
-    saved: tuple[PipelineJob, list[int], pathlib.Path], tmp_path: pathlib.Path
+    saved: tuple[PipelineJob, list[int], pathlib.Path],
+    tmp_path: pathlib.Path,
+    defect: str,
 ) -> None:
-    """Every side-effect node records its run's content hash; a file without is refused."""
+    """Every side-effect node records its run's content hash as text; a file without
+    one (removed, null, or a number) is refused."""
     _, _, path = saved
     data = json.loads(path.read_text())
+    hashes = data["run"]["node_job_content_hashes"]
     for label in SIDE_EFFECT_NODES:
-        del data["run"]["node_job_content_hashes"][label]
+        if defect == "missing":
+            del hashes[label]
+        else:
+            hashes[label] = None if defect == "null" else 7
     malformed = tmp_path / "malformed.json"
     malformed.write_text(json.dumps(data))
     with pytest.raises(ValueError, match="have no run content hash") as caught:

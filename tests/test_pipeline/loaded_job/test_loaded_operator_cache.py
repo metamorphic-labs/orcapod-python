@@ -255,15 +255,25 @@ def test_a_file_without_a_nullability_record_is_refused(
         _ = Pipeline.load(pipeline_path)
 
 
+# What a node's entry in run.node_job_content_hashes is replaced with: removed, null, or
+# a value that is not a hash text (CodeRabbit on PR 454).
+RUN_HASH_DEFECTS: dict[str, Callable[[dict[str, Any], str], None]] = {
+    "missing": lambda hashes, label: hashes.pop(label),
+    "null": lambda hashes, label: hashes.__setitem__(label, None),
+    "number": lambda hashes, label: hashes.__setitem__(label, 7),
+}
+
+
+@pytest.mark.parametrize("defect", list(RUN_HASH_DEFECTS))
 @pytest.mark.parametrize("labels", [["joined"], ["inc"], ["inc", "joined"]])
 def test_a_job_file_without_a_run_content_hash_is_refused(
-    labels: list[str], tmp_path: pathlib.Path
+    labels: list[str], defect: str, tmp_path: pathlib.Path
 ) -> None:
-    """Every function and operator node records its run's content hash."""
+    """Every function and operator node records its run's content hash as text."""
 
     def drop(data: dict[str, Any]) -> None:
         for label in labels:
-            del data["run"]["node_job_content_hashes"][label]
+            RUN_HASH_DEFECTS[defect](data["run"]["node_job_content_hashes"], label)
 
     saved = _save(_run(InMemoryArrowDatabase(), "non_null"), tmp_path, drop)
     with pytest.raises(ValueError, match="have no run content hash") as caught:

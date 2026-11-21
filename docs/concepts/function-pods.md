@@ -1125,11 +1125,9 @@ An unknown type is reported with its node and column, and affected operators bec
 stubs. An incompatible identifier raises `LogicalTypeIdentifierError` instead of using a stub.
 Stored data independently validates its full identifier when values are read.
 
-Older files containing name-only extension type text cannot be loaded by this reader: the
-error says the file was saved by an earlier version. Use that version to read the old file,
-and save a new job from the original pipeline under this version. Files with only supported
-primitive schema types still load; results from pre-v0.3 table layouts remain excluded as
-described below. This changes saved schema text only, not stored tables or hashes.
+Only files of format `0.4.0` load, whatever their schema types: a file of an earlier format
+is refused, as described above. Rebuild the pipeline from code and save it again under this
+version.
 
 ### A store written by an older version
 
