@@ -759,12 +759,12 @@ class FunctionNodeBase(StreamBase):
         """
         if self._function_pod is not None or not self._stored_schema:
             return None
-        from orcapod.pipeline.serialization import deserialize_arrow_schema
+        from orcapod.pipeline.serialization import arrow_schema_from_texts
 
         saved = self._stored_schema
         nullable = saved.get("nullable")
         try:
-            return deserialize_arrow_schema(
+            return arrow_schema_from_texts(
                 saved.get("data", {}),
                 self.data_context.type_converter,
                 None if nullable is None else nullable.get("data", []),
@@ -3305,21 +3305,28 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
 
         return joined if joined.num_rows > 0 else None
 
-    def as_source(self, tags_as_data: "Mapping[str, str] | None" = None):
+    def as_source(
+        self,
+        tags_as_data: "Mapping[str, str] | None" = None,
+        *,
+        source_id: str | None = None,
+    ):
         """Return a DerivedSource backed by the DB records of this node.
 
-        Its ``source_id`` is the ``DerivedSource`` default: without
-        ``tags_as_data``, ``derived:<algorithm label>:<hex>`` of this node's
-        content hash.
+        Without ``tags_as_data`` and ``source_id``, its ``source_id`` is the
+        ``DerivedSource`` default, ``derived:<algorithm label>:<hex>`` of this
+        node's content hash.
 
         Args:
             tags_as_data: Maps a tag column of this node to the name of a data
                 column that receives a copy of it. When given, the result is a
-                new root source with its own provenance and a ``source_id``
-                derived from this node's content hash and the mapping; see
-                ``DerivedSource``.
+                new root source with its own provenance, which needs a
+                ``source_id``; see ``DerivedSource``.
+            source_id: The source's name. Required with ``tags_as_data``, which
+                has no default (ITL-1313).
 
         Raises:
+            ValueError: If ``tags_as_data`` is given without a ``source_id``.
             RuntimeError: If no database is attached.
             InputValidationError: If ``tags_as_data`` is not valid for this
                 node's columns.
@@ -3329,11 +3336,12 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
 
         from orcapod.core.sources.derived_source import DerivedSource
 
-        # No source_id is given: the source takes the DerivedSource default
-        # (``derived:<algorithm label>:<hex>`` of this node's content hash, or the
-        # ``tags_as_data`` id when a mapping is given).
+        # Without a source_id the plain form takes the DerivedSource default
+        # (``derived:<algorithm label>:<hex>`` of this node's content hash); the
+        # ``tags_as_data`` form refuses to be built without one (ITL-1313).
         return DerivedSource(
             origin=self,
+            source_id=source_id,
             tags_as_data=tags_as_data,
             data_context=self.data_context_key,
             config=self.orcapod_config,

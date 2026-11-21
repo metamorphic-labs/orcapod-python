@@ -23,7 +23,14 @@ from datetime import date, datetime, timezone
 from typing import TYPE_CHECKING, Any, TypedDict, get_args, get_origin
 
 from orcapod.contexts import DataContext, resolve_context
-from orcapod.errors import CanonicalOrderError, UnsupportedValueError
+from orcapod.errors import (
+    CanonicalOrderError,
+    InstantOutOfRangeError,
+    NaiveDatetimeError,
+    NotADatetimeError,
+    SubMicrosecondDatetimeError,
+    UnsupportedValueError,
+)
 from orcapod.semantic_types.canonical_order import (
     sort_dict_entries,
     sort_set_elements,
@@ -165,6 +172,65 @@ def _is_optional_type(python_type: DataType) -> bool:
     if origin is typing.Literal:
         return None in get_args(python_type)
     return False
+
+
+def storable_instant(value: object, timezone_policy: str) -> datetime:
+    """Return ``value`` as a ``datetime`` column holds it, or refuse it (ITL-1268).
+
+    The one rule for the type converter's conversion of a Python ``datetime`` (or a
+    subclass, such as a ``pandas.Timestamp``) to the type ``datetime``, which the
+    converter maps to an instant at microsecond precision (``timestamp[us, tz=UTC]``).
+    It covers what the converter converts: a function's outputs at any depth, and the
+    Python values of a source that converts them through the converter (``DictSource``,
+    ``ListSource``). A ``DataFrameSource`` given a plain dict or list hands the values to
+    Polars first and is not covered (ITL-1330).
+
+    An aware value of any zone is stored as the instant it names. Arrow computes the
+    instant from the value's UTC offset but drops the part of an offset below one
+    second, so a value whose offset has such a part is handed to Arrow in UTC, computed
+    here; any other value is handed as it is, as before (Arrow's instant is then exact,
+    also for an instant just outside the years Python can hold in UTC). A naive value
+    names no instant: refused under the ``strict`` time
+    zone policy, read as UTC under ``coerce_utc``. A value with a part below one
+    microsecond is refused, never truncated.
+
+    Args:
+        value: The value to store.
+        timezone_policy: The converter's policy for naive values, ``"strict"`` or
+            ``"coerce_utc"`` (its ``datetime_timezone``).
+
+    Returns:
+        The value to hand to Arrow: ``value``, with UTC attached under ``coerce_utc``,
+        or the same instant in UTC when its offset has a part below one second.
+
+    Raises:
+        NotADatetimeError: If ``value`` is not a ``datetime`` (a ``numpy.datetime64``,
+            for example).
+        NaiveDatetimeError: If ``value`` has no time zone under the ``strict`` policy.
+        SubMicrosecondDatetimeError: If ``value`` has a part below one microsecond.
+        InstantOutOfRangeError: If ``value``'s offset has a part below one second and
+            its instant in UTC lies outside years 1 to 9999.
+    """
+    if not isinstance(value, datetime):
+        raise NotADatetimeError(value)
+    if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+        if timezone_policy == "strict":
+            raise NaiveDatetimeError(value)
+        # coerce_utc: attach UTC so the value is treated as UTC.
+        value = value.replace(tzinfo=timezone.utc)
+    # A datetime holds whole microseconds. Precision below one microsecond is a field
+    # of the value's own type (a pandas.Timestamp's nanosecond); a subclass without such
+    # a field holds none, whatever its equality says.
+    if getattr(value, "nanosecond", 0):
+        raise SubMicrosecondDatetimeError(value)
+    offset = value.utcoffset()
+    if offset is not None and offset.microseconds:
+        try:
+            return value.astimezone(timezone.utc)
+        except OverflowError:
+            # The UTC instant is in year 0 or 10000: storable by Arrow, never readable.
+            raise InstantOutOfRangeError(value) from None
+    return value
 
 
 class UniversalTypeConverter:
@@ -1796,18 +1862,7 @@ class UniversalTypeConverter:
                 # level — consistent with all other primitive converters.
                 if dt is None:
                     return None  # type: ignore[return-value]
-                _is_naive = dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None
-                if _is_naive:
-                    if _tz_policy == "strict":
-                        raise ValueError(
-                            "Naive datetime (no timezone info) is not supported "
-                            "under the current 'strict' timezone policy. "
-                            "Use a timezone-aware datetime, "
-                            f"e.g. datetime.now(timezone.utc). Got: {dt!r}"
-                        )
-                    # coerce_utc: attach UTC so the value is treated as UTC.
-                    return dt.replace(tzinfo=timezone.utc)
-                return dt
+                return storable_instant(dt, _tz_policy)
 
             return _convert_datetime
 

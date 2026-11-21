@@ -323,7 +323,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
             FALL_THROUGH_TAGS_KEY,
             SUPPORTED_FORMAT_VERSIONS,
             check_saved_output_schema_is_plain,
-            deserialize_arrow_schema,
+            arrow_schema_from_texts,
             deserialize_schema,
             saved_fall_through_tags,
         )
@@ -469,14 +469,14 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                     # none while a column's class is not registered in this process.
                     try:
                         arrow_schemas = (
-                            deserialize_arrow_schema(
+                            arrow_schema_from_texts(
                                 saved_tag,
                                 context.type_converter,
                                 None
                                 if saved_nullable is None
                                 else saved_nullable["tag"],
                             ),
-                            deserialize_arrow_schema(
+                            arrow_schema_from_texts(
                                 saved_data,
                                 context.type_converter,
                                 None

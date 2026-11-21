@@ -85,6 +85,127 @@ class UnsupportedValueError(ValueError):
     """
 
 
+class UnstorableDatetimeError(ValueError):
+    """A ``datetime`` value that a ``datetime`` column cannot hold as it is (ITL-1268).
+
+    A ``datetime`` column holds an instant, in UTC, at microsecond precision
+    (``timestamp[us, tz=UTC]``). The type converter's one rule for storing a
+    ``datetime`` (``universal_converter.storable_instant``) raises a subclass for what
+    the converter stores: a function's outputs, sync or async, at the top level or
+    inside a list, dict or class field, and the Python values of ``DictSource`` and
+    ``ListSource``. A ``DataFrameSource`` given a plain dict or list is not covered
+    (Polars converts the values first; ITL-1330). ``reason`` and
+    ``hint`` name no value, so a function's ``OutputTypeError`` shows them as they
+    are; the message adds the value.
+
+    Attributes:
+        reason: What is wrong with the value, without the value.
+        hint: How to convert the value.
+        value: The value.
+    """
+
+    reason: str = ""
+    hint: str = ""
+
+    def __init__(self, value: object) -> None:
+        """Create the error for ``value``.
+
+        Args:
+            value: The ``datetime`` (or subclass, such as a ``pandas.Timestamp``) that
+                cannot be stored.
+        """
+        self.value: object = value
+        super().__init__(f"{self.reason}. {self.hint}. Got: {value!r}")
+
+    def __reduce__(self) -> tuple[object, ...]:
+        """Pickle with the value (executors send errors across processes)."""
+        return (type(self), (self.value,))
+
+
+class NaiveDatetimeError(UnstorableDatetimeError):
+    """A ``datetime`` without a time zone, under the ``strict`` time zone policy.
+
+    A ``datetime`` column holds an instant, and a value with no time zone names none. A
+    type converter built with ``datetime_timezone="coerce_utc"`` reads such a value as
+    UTC instead.
+    """
+
+    reason = (
+        "Naive datetime (no timezone info) is not supported under the current "
+        "'strict' timezone policy: a datetime is stored as an instant, in UTC, and a "
+        "value without a time zone names no instant"
+    )
+    hint = (
+        "Use a timezone-aware datetime: attach the time zone its wall time is in, "
+        "e.g. value.replace(tzinfo=timezone.utc) when it is UTC or "
+        'value.replace(tzinfo=ZoneInfo("Europe/Berlin")) for another zone '
+        "(value.astimezone() takes this machine's local time zone)"
+    )
+
+
+class SubMicrosecondDatetimeError(UnstorableDatetimeError):
+    """A ``datetime`` with a part below one microsecond, such as a ``pandas.Timestamp``
+    with nanoseconds: storing it would drop that part, so it is refused."""
+
+    reason = (
+        "Datetime with a part below one microsecond is not supported: a datetime is "
+        "stored at microsecond precision, and storing it would drop that part"
+    )
+    hint = (
+        "Round or truncate it to whole microseconds first, "
+        'e.g. value.floor("us") or value.round("us") for a pandas.Timestamp'
+    )
+
+
+class InstantOutOfRangeError(UnstorableDatetimeError):
+    """A ``datetime`` whose instant in UTC lies outside the years a ``datetime`` holds.
+
+    Only a value whose UTC offset has a part below one second reaches it: such a value is
+    converted to UTC before Arrow sees it (Arrow drops that part of an offset), and near
+    year 1 or year 9999 its UTC instant falls in year 0 or year 10000. Stored, it could not
+    be read back as a ``datetime``, so it is refused.
+    """
+
+    reason = (
+        "Datetime whose UTC offset has a part below one second names an instant outside "
+        "the years a datetime can hold in UTC (1 to 9999): it could not be read back"
+    )
+    hint = (
+        "Give the value an offset of whole seconds, or a date farther from the ends of "
+        "that range"
+    )
+
+
+# UnstorableDatetimeError.__init__ calls super().__init__, which reaches
+# BaseException.__init__ through ValueError: the base initializers do run.
+class NotADatetimeError(UnstorableDatetimeError, TypeError):  # pyright: ignore[reportUnsafeMultipleInheritance]
+    """A value that is not a ``datetime`` where a ``datetime`` is declared.
+
+    For example a ``numpy.datetime64`` in a source column declared ``datetime``: a
+    ``datetime`` column holds an instant, which only a timezone-aware ``datetime`` (or a
+    subclass, such as a ``pandas.Timestamp``) names. It is a ``TypeError`` (a value of the
+    wrong type) and, like every ``UnstorableDatetimeError``, a ``ValueError``. Its
+    ``reason`` names the value's type, never the value.
+    """
+
+    hint = (
+        "Convert it to a timezone-aware datetime first, e.g. "
+        'pandas.Timestamp(value, tz="UTC") for a numpy.datetime64 that holds a UTC time'
+    )
+
+    def __init__(self, value: object) -> None:
+        """Create the error for ``value``.
+
+        Args:
+            value: The value that is not a ``datetime``.
+        """
+        self.reason = (
+            f"Value of type {type_text(type(value))} is not a datetime: a datetime is "
+            "stored as an instant, which only a timezone-aware datetime names"
+        )
+        super().__init__(value)
+
+
 class UnstorableColumnError(ValueError):
     """A database cannot store a column of a table it is asked to hold (ITL-1162).
 
@@ -611,6 +732,11 @@ class ProvisionalHashWarning(UserWarning):
     and with it the stored paths and record ids of its results and of every step
     downstream of it, which are then computed again. The warning is issued once per
     operator per process, when the operator is constructed.
+
+    A provisional source (``orcapod.sources.PROVISIONAL_SOURCES``, ITL-1314; today
+    ``PollingSource``) has a default source id and a content hash that are not frozen
+    with data context v1. The warning is issued once per source kind per process, when
+    the source is constructed (also from a saved config).
 
     To silence it, call ``warnings.filterwarnings("ignore",
     category=ProvisionalHashWarning)`` after importing Orcapod. Python's ``-W`` option

@@ -181,8 +181,12 @@ def test_tags_as_data_columns_are_placed_in_the_order_of_their_new_names(
     # whatever the order of the mapping or of the tags (ITL-1271). "c1" names t3's copy,
     # so name order differs from tag order.
     source = make_source(MAIN, Arrangement(MAIN.tags, TAGS_FIRST, role))
-    forward = DerivedSource(source, tags_as_data={"t1": "c3", "t3": "c1"})
-    backward = DerivedSource(source, tags_as_data={"t3": "c1", "t1": "c3"})
+    forward = DerivedSource(
+        source, tags_as_data={"t1": "c3", "t3": "c1"}, source_id="with_tags_as_data"
+    )
+    backward = DerivedSource(
+        source, tags_as_data={"t3": "c1", "t1": "c3"}, source_id="with_tags_as_data"
+    )
     assert presentation(forward)[1][-2:] == ("c1", "c3")
     assert presentation(backward) == presentation(forward)
     assert forward.source_id == backward.source_id

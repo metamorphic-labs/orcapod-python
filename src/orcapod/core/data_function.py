@@ -27,7 +27,11 @@ from orcapod.hashing.semantic_hashing.builtin_handlers import (
     hash_default_value,
 )
 from orcapod.core.result_cache import ResultCache
-from orcapod.errors import NoOutputsDeclaredError, OutputTypeError
+from orcapod.errors import (
+    NoOutputsDeclaredError,
+    OutputTypeError,
+    UnstorableDatetimeError,
+)
 from orcapod.protocols.core_protocols import DataFunctionProtocol, DataProtocol
 from orcapod.protocols.core_protocols.executor import (
     DataFunctionExecutorProtocol,
@@ -1057,7 +1061,8 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
 
         Raises:
             OutputTypeError: If an output cannot be converted, for example an integer
-                out of range for its declared width; it names that output.
+                out of range for its declared width, a ``datetime`` without a time zone
+                or one with a part below one microsecond; it names that output.
         """
         converter = self.data_context.type_converter
         try:
@@ -1071,6 +1076,18 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
                     _ = converter.python_dicts_to_arrow_table(
                         [{key: value}], python_schema={key: output_schema[key]}
                     )
+                except UnstorableDatetimeError as failure:
+                    # The datetime rule says what is wrong and how to convert,
+                    # without the value (ITL-1268); its own message names the value,
+                    # so it is not chained.
+                    raise OutputTypeError(
+                        self.canonical_function_name,
+                        key,
+                        output_schema[key],
+                        value,
+                        failure.reason,
+                        failure.hint,
+                    ) from None
                 except Exception:
                     raise OutputTypeError(
                         self.canonical_function_name,
