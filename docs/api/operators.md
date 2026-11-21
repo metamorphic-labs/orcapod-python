@@ -10,6 +10,8 @@ Operators perform structural transformations on streams without inspecting or sy
 
 ::: orcapod.core.operators.Join
 
+::: orcapod.core.operators.Rejoin
+
 ::: orcapod.core.operators.MergeJoin
 
 ::: orcapod.core.operators.SemiJoin
