@@ -466,13 +466,20 @@ class CachedSource(RootSource):
     def _read_cached_records_with_hashes(self) -> "pa.Table | None":
         """Read the cached rows written under the current data context, as stored.
 
-        Every read of the whole cache table goes through here. Rows of another data
-        context stay in the table untouched, and a cache at the older layout is not
-        read (ITL-944).
+        Every read of the cache's rows goes through here: ``get_all_records()`` and
+        the merged stream behind ``as_table()`` and every other read of this source.
+        (``_cached_record_hashes`` reads the record-hash column only, and returns no
+        row value.) Rows of another data context stay in the table untouched, and a
+        cache at the older layout is not read (ITL-944). Rows whose Arrow types are
+        not the source's are refused here (``_require_declared_types``), so no read
+        can present them.
 
         Returns:
             The cached rows with their record hash and ``__data_context`` columns, or
             ``None`` when the cache table does not exist.
+
+        Raises:
+            InputValidationError: If a cached column reads back as another Arrow type.
         """
         self._account_for_stale_tables()
         records = self._cache_database.get_all_records(
@@ -488,6 +495,7 @@ class CachedSource(RootSource):
                 self._cache_database.base_path + self.cache_path,
                 stored_rows - records.num_rows,
             )
+        self._require_declared_types(records)
         return records
 
     def _build_merged_stream(self) -> ArrowTableStream:
@@ -519,7 +527,6 @@ class CachedSource(RootSource):
             all_records = stored.drop(
                 [self.HASH_COLUMN_NAME, constants.DATA_CONTEXT_COL]
             )
-            self._require_declared_types(all_records)
 
         tag_keys = self._source.keys()[0]
         # Cached rows are this source's: give them its data context, not the default.

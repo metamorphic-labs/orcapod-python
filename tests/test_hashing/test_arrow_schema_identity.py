@@ -592,3 +592,37 @@ def test_a_cached_fixed_size_list_in_memory_is_exact(tmp_path: Path) -> None:
     for _ in range(2):
         read = _cached(table, database).as_table()
         assert read.schema.field("x").type == pa.list_(pa.int8(), 2)
+
+
+_CACHED_REFUSAL = (
+    r"the cached column 'x' reads back as large_list<.*>, but the source's "
+    r"rows have fixed_size_list<.*>\[2\]"
+)
+
+
+def test_get_all_records_refuses_a_cached_read_of_another_type(tmp_path: Path) -> None:
+    """Every read of the cache's rows is checked (fourth Codex review of PR 454):
+    ``get_all_records()`` after an ``as_table()`` refusal, and on a fresh wrapper over
+    the filled cache."""
+    table = _table(FIXED_SIZE)
+    database = _databases(tmp_path)["delta"]
+    first = _cached(table, database)
+    with pytest.raises(InputValidationError, match=_CACHED_REFUSAL):
+        first.as_table()
+    with pytest.raises(InputValidationError, match=_CACHED_REFUSAL):
+        first.get_all_records()
+    fresh = _cached(table, database)
+    with pytest.raises(InputValidationError, match=_CACHED_REFUSAL):
+        fresh.get_all_records()
+    with pytest.raises(InputValidationError, match=_CACHED_REFUSAL):
+        fresh.as_table()
+
+
+def test_get_all_records_of_a_memory_cache_keeps_the_type(tmp_path: Path) -> None:
+    table = _table(FIXED_SIZE)
+    database = _databases(tmp_path)["memory"]
+    _ = _cached(table, database).as_table()
+    for source in (_cached(table, database), _cached(table, database)):
+        records = source.get_all_records()
+        assert records is not None
+        assert records.schema.field("x").type == pa.list_(pa.int8(), 2)
