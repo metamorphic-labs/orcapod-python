@@ -6,16 +6,21 @@ repository itself.
 
 from __future__ import annotations
 
+import functools
 import json
 import re
+import warnings
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pytest
 
 from orcapod.contexts import get_default_context
+from orcapod.errors import ProvisionalHashWarning
+from orcapod.operators import Batch, MergeJoin
 from tests.test_hashing.golden import cases, store
 from tests.test_hashing.golden.generate_golden_hashes import dump, main
 
@@ -1093,6 +1098,136 @@ def test_a_case_using_an_undeclared_provisional_operator_is_refused(
     monkeypatch.setitem(cases._CASES, "semantic", [("both", _using(_B, _A), declared)])
     with pytest.raises(ValueError, match=re.escape(f"uses the provisional {missing}")):
         _ = cases.compute_group_kinds("semantic")
+
+
+def _prebuilt_inputs() -> tuple[Any, Any]:
+    """Two inputs with two tags and two data columns, colliding on ``age``."""
+    from orcapod.sources import ArrowTableSource
+
+    left = pa.table(
+        {
+            "subject": ["s1", "s2", "s3"],
+            "session": [1, 2, 1],
+            "age": [2, 4, 6],
+            "weight": [20.5, 22.25, 19.0],
+        }
+    )
+    right = pa.table(
+        {
+            "session": [2, 1],
+            "subject": ["s2", "s1"],
+            "height": [1.5, 1.25],
+            "age": [8, 7],
+        }
+    )
+    return (
+        ArrowTableSource(
+            left, tag_columns=["subject", "session"], tag_only_columns=True
+        ),
+        ArrowTableSource(
+            right, tag_columns=["session", "subject"], tag_only_columns=True
+        ),
+    )
+
+
+@functools.cache
+def _prebuilt() -> dict[str, Any]:
+    """Provisional operators and their computed, hashed streams, built once and before
+    any case is recorded, as a module-level ``op = Batch(2)`` is: the construction
+    warning (and its note) falls outside every recording, so only a note on use can
+    reveal them (ITL-1279). Built on first call, not at import, so collecting this module
+    uses up no once-per-process warning."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ProvisionalHashWarning)
+        batch, merge_join = Batch(2), MergeJoin()
+        batched, merged = batch(_prebuilt_inputs()[0]), merge_join(*_prebuilt_inputs())
+        for stream in (batched, merged):
+            _ = stream.as_table(), stream.content_hash(), stream.pipeline_hash()
+    return {
+        "batch": batch,
+        "merge_join": merge_join,
+        "batched": batched,
+        "merged": merged,
+    }
+
+
+# Each use of a prebuilt provisional operator inside a case: one unary, one binary.
+_PREBUILT_USES: dict[str, tuple[str, Any]] = {
+    "unary content hash": (
+        "Batch",
+        lambda: {"h": _prebuilt()["batch"].content_hash().to_string()},
+    ),
+    "unary pipeline hash": (
+        "Batch",
+        lambda: {"h": _prebuilt()["batch"].pipeline_hash().to_string()},
+    ),
+    "unary applied": (
+        "Batch",
+        lambda: cases.stream_summary(_prebuilt()["batch"](_prebuilt_inputs()[0])),
+    ),
+    "unary kept stream read": (
+        "Batch",
+        lambda: {"rows": _prebuilt()["batched"].as_table().num_rows},
+    ),
+    "unary kept stream hash": (
+        "Batch",
+        lambda: {"h": _prebuilt()["batched"].content_hash().to_string()},
+    ),
+    "binary content hash": (
+        "MergeJoin",
+        lambda: {"h": _prebuilt()["merge_join"].content_hash().to_string()},
+    ),
+    "binary pipeline hash": (
+        "MergeJoin",
+        lambda: {"h": _prebuilt()["merge_join"].pipeline_hash().to_string()},
+    ),
+    "binary applied": (
+        "MergeJoin",
+        lambda: cases.stream_summary(_prebuilt()["merge_join"](*_prebuilt_inputs())),
+    ),
+    "binary applied in the other order": (
+        "MergeJoin",
+        lambda: cases.stream_summary(
+            _prebuilt()["merge_join"](*reversed(_prebuilt_inputs()))
+        ),
+    ),
+    "binary kept stream read": (
+        "MergeJoin",
+        lambda: {"rows": _prebuilt()["merged"].as_table().num_rows},
+    ),
+    "binary kept stream pipeline hash": (
+        "MergeJoin",
+        lambda: {"h": _prebuilt()["merged"].pipeline_hash().to_string()},
+    ),
+}
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
+@pytest.mark.parametrize("use", sorted(_PREBUILT_USES))
+def test_a_case_using_a_prebuilt_provisional_operator_undeclared_is_refused(
+    monkeypatch: pytest.MonkeyPatch, use: str
+) -> None:
+    """An operator built before the case (at module level) is noted where its identity
+    is read and where it is applied, so an undeclared case is refused (Codex review of
+    PR 469)."""
+    name, fn = _PREBUILT_USES[use]
+    _ = _prebuilt()
+    monkeypatch.setitem(cases._CASES, "semantic", [("prebuilt", fn, ())])
+    with pytest.raises(ValueError, match=re.escape(f"uses the provisional {[name]}")):
+        _ = cases.compute_group_kinds("semantic")
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
+@pytest.mark.parametrize("use", sorted(_PREBUILT_USES))
+def test_a_case_declaring_a_prebuilt_provisional_operator_is_provisional(
+    monkeypatch: pytest.MonkeyPatch, use: str
+) -> None:
+    name, fn = _PREBUILT_USES[use]
+    _ = _prebuilt()
+    monkeypatch.setitem(cases._CASES, "semantic", [("prebuilt", fn, (name,))])
+    values, provisional = cases.compute_group_kinds("semantic")
+    assert values
+    assert provisional == frozenset(values)
 
 
 def test_a_case_declaring_an_unknown_provisional_name_is_refused(

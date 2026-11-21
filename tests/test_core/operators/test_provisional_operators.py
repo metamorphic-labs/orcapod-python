@@ -447,3 +447,84 @@ def test_a_loaded_job_warns_once_for_each_provisional_operator_it_holds(
         _ = PipelineJob.load(path, database=InMemoryArrowDatabase())
     names = [m.split(" ", 1)[0] for m in _provisional_warnings(caught)]
     assert sorted(names) == sorted(order)
+
+
+@pytest.mark.parametrize("name", ["Index", "Pick"])
+def test_a_loaded_job_holding_an_operator_kept_read_only_warns(
+    tmp_path: Any, name: str
+) -> None:
+    """Pick and Index are not rebuilt from a saved job (ITL-1326: the strict xfail
+    above), so the loader keeps them read-only; the load still warns, once, through the
+    same helper, and notes the use (Codex review of PR 469)."""
+    from orcapod import PipelineJob
+    from orcapod.databases import InMemoryArrowDatabase
+
+    steps = {
+        "Pick": lambda s: s.pick("meta", "k"),
+        "Index": lambda s: s.index("values", 0),
+    }
+    job = PipelineJob(name="read-only", database=InMemoryArrowDatabase())
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with job:
+            _ = steps[name](_lists())
+    path = tmp_path / "job.json"
+    job.save(path)
+    reset_provisional_operator_warnings()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with recording_provisional_uses() as used:
+            _ = PipelineJob.load(path, database=InMemoryArrowDatabase())
+    assert [m.split(" ", 1)[0] for m in _provisional_warnings(caught)] == [name]
+    assert used == {name}
+
+
+@pytest.mark.parametrize("name", ["Batch", "MergeJoin"])
+def test_an_operator_built_before_a_recording_is_noted_on_every_use(
+    name: str,
+) -> None:
+    """A unary and a binary provisional operator built outside the recording: reading
+    its identity, applying it, and reading or hashing a stream it already computed each
+    note the use, without warning again and without changing a hash (ITL-1279)."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        operator: Any = operators.Batch(2) if name == "Batch" else operators.MergeJoin()
+
+        def apply() -> Any:
+            if name == "Batch":
+                return operator(_stream())
+            return operator(_stream(), _other())
+
+        kept = apply()
+        _ = kept.as_table()
+        hashes = (
+            operator.content_hash(),
+            operator.pipeline_hash(),
+            kept.content_hash(),
+            kept.pipeline_hash(),
+        )
+    uses: dict[str, Any] = {
+        "operator content hash": operator.content_hash,
+        "operator pipeline hash": operator.pipeline_hash,
+        "applied": apply,
+        "applied with static_process": lambda: operator.static_process(
+            *(apply().upstreams)
+        ),
+        "kept stream read": kept.as_table,
+        "kept stream rows": lambda: list(kept.iter_data()),
+        "kept stream content hash": kept.content_hash,
+        "kept stream pipeline hash": kept.pipeline_hash,
+    }
+    for use, fn in uses.items():
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with recording_provisional_uses() as used:
+                _ = fn()
+        assert used == {name}, use
+        assert _provisional_warnings(caught) == [], use
+    assert hashes == (
+        operator.content_hash(),
+        operator.pipeline_hash(),
+        kept.content_hash(),
+        kept.pipeline_hash(),
+    )

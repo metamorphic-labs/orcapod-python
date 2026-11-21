@@ -511,7 +511,8 @@ Orcapod stores or embeds in a name is pinned in the golden folder of the current
   way after a release. Building one (directly, through a stream method, or by loading a saved
   job) issues `ProvisionalHashWarning` once per operator per process. A golden case that depends on one
   declares it (`@case(..., provisional=("PolarsFilter",))`; `compute_group_kinds` refuses a
-  case that builds an undeclared one); its entries live in
+  case that builds, hashes or applies an undeclared one, also one built before the case);
+  its entries live in
   `data/<folder>/provisional/<group>.json`, listed in `golden.provisional` of the manifest,
   outside the history, so no release freezes them. They are checked like every other value
   and change only with the developer's approval of the exact list, without a new data

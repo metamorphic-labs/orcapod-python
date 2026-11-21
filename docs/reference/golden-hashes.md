@@ -161,12 +161,19 @@ rewrites it in place.
   `@case("pipeline", "group_by", provisional=("GroupBy",))`,
   `@case("datagram", "ndarray", provisional=("orcapod.numpy.ndarray",))`. The generator runs
   every case while Orcapod records which provisional features it uses
-  (`orcapod.utils.provisional.recording_provisional_uses`: an operator when it is built, a
-  library value type when it is resolved), and refuses a case that uses one without
-  declaring it, or that declares a name that is not provisional. The golden test checks
-  that every entry is in the kind of file its case declares. So a value that depends
-  directly on a provisional feature cannot be pinned in a frozen file: neither through a
-  stream method that builds an operator (`stream.group_by`) nor in a step downstream of it.
+  (`orcapod.utils.provisional.recording_provisional_uses`), and refuses a case that uses
+  one without declaring it, or that declares a name that is not provisional. The golden
+  test checks that every entry is in the kind of file its case declares. An operator is
+  recorded when it is built, when its own content or pipeline hash is read, when it is
+  applied (`process`, its call, a stream method such as `stream.group_by`,
+  `static_process`), and when a stream it produced is hashed or read; a library value type
+  when it is resolved. So an operator built before the case, at module level, is still
+  recorded when the case reads its hash or applies it, and a step built in the case
+  downstream of it reaches it while its own hash is computed.
+- **A hash cached before the case.** A stream or job node downstream of a provisional
+  operator that was built and hashed, or computed, before the case answers from its cached
+  hash or kept result and never reaches the operator, so nothing is recorded. Cases build
+  their pipelines inside the case.
 - **A dependence the record cannot see.** A user class with a field of a provisional library
   type (the fixture `GoldenWithArray`) embeds that type's identifier in its own identity, but
   the identity is built once, when the class is registered, and cached: a later use of the
@@ -488,7 +495,7 @@ so the bytes that are hashed are the bytes that were committed (4).
 | Values on `main` after the last release are open | An unreleased commit has no guarantee | Use a released version for anything that must stay stable |
 | Optional groups skip without their package | `torch` values are unchecked where torch is missing | CI installs every extra |
 | The `date` field cannot be verified | Informational | Order and integrity come from the chain and the tags |
-| Provisional values are outside the freeze | A pipeline with a provisional operator may compute its results again after an upgrade | `ProvisionalHashWarning` when the operator is built; the list in `PROVISIONAL_OPERATORS` and on the operators page |
+| Provisional values are outside the freeze | A pipeline with a provisional operator may compute its results again after an upgrade | `ProvisionalHashWarning` when the operator is built or a saved job holding it is loaded; the list in `PROVISIONAL_OPERATORS` and on the operators page |
 
 A deliberate attacker with merge rights who also rewrites history and tags is beyond what any
 check inside the repository can stop; the PyPI artifacts remain the record of what shipped.

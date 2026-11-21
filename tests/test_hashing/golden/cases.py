@@ -226,17 +226,23 @@ def compute_group_kinds(
     """Compute every entry of one golden group, and say which entries are provisional.
 
     Each case runs while the library records the provisional features it uses
-    (``orcapod.utils.provisional.recording_provisional_uses``): a provisional operator
-    when it is built, a provisional library value type when it is resolved. A case that
-    uses one it does not declare, or declares a name ``declarable_provisional_names`` does
-    not hold, is refused, so a value that depends directly on a provisional feature can
-    never be pinned in a frozen file. The fixtures are registered first, outside every
-    record, so registering one is not a case's use.
+    (``orcapod.utils.provisional.recording_provisional_uses``). A provisional operator is
+    recorded when it is built, when its own ``content_hash`` or ``pipeline_hash`` is read,
+    when it is applied (``process``, its call, a stream method, ``static_process``), and
+    when a stream it produced is hashed or read, so also an operator built before the case
+    (at module level). A provisional library value type is recorded when it is resolved. A
+    case that uses one it does not declare, or declares a name
+    ``declarable_provisional_names`` does not hold, is refused. The fixtures are
+    registered first, outside every record, so registering one is not a case's use.
 
-    Limit: the record sees a direct use only. A user class with a field of a provisional
-    library type embeds that type's identifier in its identity, which is built once, at
-    registration, and cached; a later use of the class records nothing. Such items are
-    split out by ``provisional_types_of`` instead (``test_golden_provisional_types.py``).
+    Limits: the record sees those uses only, never a hash cached before the case.
+    A stream or node downstream of a provisional operator that was built and hashed, or
+    computed, before the case returns its cached hash or kept result without reaching the
+    operator, so it records nothing: build pipelines inside the case. A user class with a
+    field of a provisional library type embeds that type's identifier in its identity,
+    which is built once, at registration, and cached; a later use of the class records
+    nothing. Such items are split out by ``provisional_types_of`` instead
+    (``test_golden_provisional_types.py``).
 
     Args:
         group: One of ``GROUPS``.
