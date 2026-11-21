@@ -958,9 +958,8 @@ def schema_location_default_source_ids() -> dict[str, Any]:
 def schema_derived_source_tags_as_data() -> dict[str, Any]:
     """Pin a source derived from another source with a tag also offered as data (ITL-939).
 
-    Three variants: the default source id (``tags_as_data:<label>:<hex>``, the derivation
-    hash), an explicit source id, and the default source id with a ``record_id_column``
-    (which enters the derivation hash).
+    Two variants, each with its own source id, as this form requires (ITL-1313): by
+    position, and with a ``record_id_column``.
 
     Returns:
         Each variant's source id and stream summary.
@@ -976,9 +975,11 @@ def schema_derived_source_tags_as_data() -> dict[str, Any]:
     )
     out: dict[str, Any] = {}
     for variant, kwargs in {
-        "default_source_id": {},
         "named_source_id": {"source_id": "golden_derived"},
-        "record_id_column": {"record_id_columns": "subject"},
+        "record_id_column": {
+            "source_id": "golden_derived_keyed",
+            "record_id_columns": "subject",
+        },
     }.items():
         derived = DerivedSource(
             origin, tags_as_data={"subject": "subject_value"}, **kwargs

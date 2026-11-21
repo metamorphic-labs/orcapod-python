@@ -831,11 +831,13 @@ element come from a tag value, or from anywhere other than the input's data elem
 the step is not an operator: it is a derived source. So a tag's value is offered as data only
 by a source, DerivedSource(origin, tags_as_data={tag: data_name}) (ITL-939), never by an
 operator. That form is a new root: fresh provenance through SourceStreamBuilder, schema-only
-pipeline_hash, and a default source_id of the form
-tags_as_data:<algorithm label>:<hex> (the kind names the operation; the config type key stays
-derived), the labelled content hash an operator node doing the
-derivation would have (DerivedSource._default_source_id, the one place that defines it;
-the string is used as-is in system-tag values and source-info tokens). DerivedSource without tags_as_data (a job node's stored records)
+pipeline_hash, and a source_id the user must give (developer, November 21, 2026, ITL-1313:
+"simply make them throw an error if source id is not provided"): it has no default, and
+DerivedSource(..., tags_as_data=...) and node.as_source(tags_as_data=...) raise
+ValueError without one, before the origin is read; a saved config without one is refused
+too. The given string is used as-is in system-tag values and source-info tokens, and with the
+sorted mapping it is the source's identity (the origin enters only through the schema). The
+config type key stays derived. DerivedSource without tags_as_data (a job node's stored records)
 keeps its old identity; do not change it (ITL-956).
 
 ### Two identity chains
@@ -1178,8 +1180,8 @@ data. The rules:
   every source. Every default names its kind first: the class's SOURCE_KIND, which is also
   its config type key (arrow_table, dict, list, data_frame, derived, csv,
   delta_table, sqlite_table, postgresql_table, db_table, spiraldb_table,
-  polling_source, cached), or names the operation that derives the source
-  (tags_as_data). A default built from a hash is <kind>:<algorithm label>:<hex>, built
+  polling_source, cached). A DerivedSource with tags_as_data has no default: it
+  requires a source_id (ITL-1313). A default built from a hash is <kind>:<algorithm label>:<hex>, built
   only by core/sources/source_ids.hash_source_id; one built from where the data lives is
   <kind>:<location>, built only by location_source_id: csv:<path as passed>,
   delta_table:<path or URI as passed>, sqlite_table:<db path as passed>:main.<table>,

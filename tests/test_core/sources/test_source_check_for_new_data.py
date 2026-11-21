@@ -540,7 +540,9 @@ def test_cached_source_job_runs_only_the_new_rows(
 
 
 def test_derived_source_follows_its_source_origin(delta_path: Path) -> None:
-    source = DerivedSource(_delta(delta_path), tags_as_data={"k": "k_value"})
+    source = DerivedSource(
+        _delta(delta_path), tags_as_data={"k": "k_value"}, source_id="with_tags_as_data"
+    )
     assert _values(source, "k_value") == [0, 1, 2]
     assert source.check_for_new_data() is False
     deltalake.write_deltalake(str(delta_path), _rows([3]), mode="append")
@@ -668,8 +670,12 @@ def test_two_derived_sources_over_one_source_both_take_in_its_change(
     delta_path: Path,
 ) -> None:
     origin = _delta(delta_path)
-    first = DerivedSource(origin, tags_as_data={"k": "k_value"})
-    second = DerivedSource(origin, tags_as_data={"k": "k_value"})
+    first = DerivedSource(
+        origin, tags_as_data={"k": "k_value"}, source_id="with_tags_as_data"
+    )
+    second = DerivedSource(
+        origin, tags_as_data={"k": "k_value"}, source_id="with_tags_as_data"
+    )
     assert _values(first, "k_value") == _values(second, "k_value") == [0, 1, 2]
     deltalake.write_deltalake(str(delta_path), _rows([3]), mode="append")
     assert first.check_for_new_data() is True
@@ -790,7 +796,11 @@ def test_a_derived_source_that_held_no_rows_moves_when_its_origin_runs(
     csv_path: Path,
 ) -> None:
     upstream = _job(_csv(csv_path))
-    derived = DerivedSource(upstream.nodes["rowwise"], tags_as_data={"k": "k_value"})
+    derived = DerivedSource(
+        upstream.nodes["rowwise"],
+        tags_as_data={"k": "k_value"},
+        source_id="with_tags_as_data",
+    )
     downstream = PipelineJob(name="down", database=InMemoryArrowDatabase())
     with downstream:
         twice.pod(derived, label="doubled")
