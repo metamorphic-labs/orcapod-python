@@ -315,14 +315,31 @@ def scale(amp: float | None) -> float | None:
     [SyncPipelineOrchestrator, AsyncPipelineOrchestrator],
     ids=["sync", "async"],
 )
+@pytest.mark.parametrize(
+    "with_decimal",
+    [
+        False,
+        # A job's saved slot schema holds Python types, and a decimal column has none
+        # yet (its saved type is "null"): the loaded job cannot rebuild the source.
+        pytest.param(
+            True,
+            marks=pytest.mark.xfail(
+                strict=True,
+                raises=AssertionError,
+                reason="ITL-1323: a decimal column has no Python type for the job slot",
+            ),
+        ),
+    ],
+    ids=["no-decimal", "decimal"],
+)
 def test_a_saved_job_reloads_the_source_with_its_schema(
     tmp_path: Path,
     order: tuple[str, ...],
     orchestrator: type[SyncPipelineOrchestrator | AsyncPipelineOrchestrator],
+    with_decimal: bool,
 ) -> None:
-    # Without the decimal: a job's saved slot schema holds Python types, and a
-    # decimal column has none yet (its saved type is "null"), whatever the source.
-    order = tuple(name for name in order if name != "price")
+    if not with_decimal:
+        order = tuple(name for name in order if name != "price")
     source = _source(tmp_path, order, source_id="readings")
     job = PipelineJob(database=DeltaTableDatabase(tmp_path / "store"))
     with job:
@@ -334,6 +351,7 @@ def test_a_saved_job_reloads_the_source_with_its_schema(
     assert list(config["schema"]["columns"]) == list(order)
 
     loaded = PipelineJob.load(tmp_path / "job.json")
+    assert len(loaded.sources) == 1, "the loaded job did not rebuild the source"
     (reloaded,) = loaded.sources.values()
     assert isinstance(reloaded, CSVSource)
     assert _identity(reloaded) == _identity(source)
