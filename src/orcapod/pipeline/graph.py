@@ -169,7 +169,6 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                     retained[key] = stored
         nodes: dict[str, Any] = {}
         for content_hash_str, node in self._persistent_node_map.items():
-            tag_schema, data_schema = node.output_schema()
             try:
                 type_converter = node.data_context.type_converter
             except (AttributeError, TypeError):
@@ -206,9 +205,11 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                     if content_hash_str in arrow_types
                     else dict(retained[content_hash_str])
                     if content_hash_str in retained
-                    else serialize_output_schema(
-                        tag_schema, data_schema, type_converter
-                    )
+                    # Only this branch reads the node's Python schema: a loaded node
+                    # whose saved schema names an unregistered logical type keeps
+                    # its retained texts above, and saving again never asks for a
+                    # Python type it cannot restore (CodeRabbit on PR 454).
+                    else serialize_output_schema(*node.output_schema(), type_converter)
                 )
             except ValueError as exc:
                 # A type text that would not read back (CodeRabbit on PR 454).
@@ -249,6 +250,13 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                 case FunctionNode():
                     if node._function_pod is not None:
                         descriptor["function_config"] = node._function_pod.to_config()
+                    elif "function_config" in node._descriptor:
+                        # A loaded read-only node (its pod not rebuilt, e.g. an output
+                        # of an unregistered class) writes its saved config back as it
+                        # is, so saving again keeps the file's entry (PR 454).
+                        descriptor["function_config"] = copy.deepcopy(
+                            node._descriptor["function_config"]
+                        )
                     descriptor["table_scope"] = node._table_scope
                     # Written for every function node, also a plain one (ITL-1019).
                     descriptor[FALL_THROUGH_TAGS_KEY] = list(node.declared_data_tags())
@@ -256,6 +264,12 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                 case OperatorNode():
                     if node._operator is not None:
                         descriptor["operator_config"] = node._operator.to_config()
+                    elif "operator_config" in node._descriptor:
+                        # A loaded read-only node writes its saved config back as it
+                        # is (PR 454).
+                        descriptor["operator_config"] = copy.deepcopy(
+                            node._descriptor["operator_config"]
+                        )
                     descriptor["table_scope"] = node._table_scope
 
             nodes[content_hash_str] = descriptor

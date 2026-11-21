@@ -223,6 +223,104 @@ job.save(root / "job.json")
         loaded.nodes["producer"].output_schema()
 
 
+# A writer process whose function returns a class only it registers, beside narrow
+# integer tags and data: the reader sees an unregistered logical type on a function node
+# ("producer", read-only) and on the operator node below it ("joined", read-only).
+_UNREGISTERED_WRITER = """from dataclasses import dataclass
+from pathlib import Path
+import sys
+import pyarrow as pa
+from orcapod import PipelineJob, function_pod
+from orcapod.core.operators import Join
+from orcapod.databases import DeltaTableDatabase
+from orcapod.sources import ArrowTableSource
+
+
+@dataclass
+class WriterOnly:
+    value: int
+
+
+@function_pod(output_keys=("payload", "doubled"))
+def make_payload(x: int) -> tuple[WriterOnly, int]:
+    return WriterOnly(x), 2 * x
+
+
+root = Path(sys.argv[1])
+left = ArrowTableSource(
+    pa.table({"id": pa.array([1, 2], pa.int32()), "k": pa.array([3, 4], pa.int16()),
+              "x": pa.array([5, 6], pa.int64())}, schema=pa.schema([pa.field("id", pa.int32(), nullable=False), pa.field("k", pa.int16(), nullable=False), pa.field("x", pa.int64(), nullable=False)])),
+    tag_columns=["id", "k"], tag_only_columns=True, source_id="left")
+right = ArrowTableSource(
+    pa.table({"id": pa.array([1, 2], pa.int32()), "k": pa.array([3, 4], pa.int16()),
+              "other": pa.array([7, None], pa.int16())}),
+    tag_columns=["id", "k"], tag_only_columns=True, source_id="right")
+job = PipelineJob(name="unknown", database=DeltaTableDatabase(root / "store"))
+with job:
+    produced = make_payload.pod(left, label="producer")
+    Join()(produced, right, label="joined")
+job.run()
+job.save(root / "job.json")
+job.pipeline.save(root / "pipeline.json")
+"""
+
+
+@pytest.mark.parametrize("save", ["job", "pipeline"])
+def test_a_loaded_file_with_an_unregistered_type_saves_again_unchanged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, save: str
+) -> None:
+    """Load accepts the file with a warning; saving it again writes every node's entry
+    as it was (its retained type texts and its saved config), and the reloaded file
+    reads the same. The type is still refused where it is used (CodeRabbit on PR
+    454)."""
+    script = tmp_path / "writer.py"
+    script.write_text(_UNREGISTERED_WRITER)
+    subprocess.run([sys.executable, str(script), str(tmp_path)], check=True)
+    original = tmp_path / f"{save}.json"
+    again = tmp_path / f"{save}_again.json"
+    with caplog.at_level(logging.WARNING):
+        if save == "job":
+            loaded = op.PipelineJob.load(original)
+            loaded.save(again)
+        else:
+            loaded = op.Pipeline.load(original)
+            loaded.save(again)
+    assert "payload" in caplog.text  # load warned about the unregistered type
+
+    def entries(path: Path) -> tuple[Any, Any]:
+        data = json.loads(path.read_text())
+        pipeline = data["pipeline"] if save == "job" else data
+        return pipeline["nodes"], pipeline["edges"]
+
+    assert entries(again) == entries(original)
+    labels = {d["label"]: d for d in entries(original)[0].values()}
+    assert labels["joined"]["output_schema"]["tag"] == {"id": "int32", "k": "int16"}
+    assert labels["joined"]["output_schema"]["data"]["other"] == "int16"
+    assert (
+        "extension<__main__.WriterOnly@"
+        in labels["producer"]["output_schema"]["data"]["payload"]
+    )
+    # The file saved again loads as the original did, and saves the same again.
+    reloaded = op.PipelineJob.load(again) if save == "job" else op.Pipeline.load(again)
+    third = tmp_path / f"{save}_third.json"
+    reloaded.save(third)
+    assert entries(third) == entries(original)
+
+    def statuses(pipeline: Any) -> dict[str, Any]:
+        return {
+            label: node.load_status
+            for label, node in pipeline.nodes.items()
+            if hasattr(node, "load_status")
+        }
+
+    assert statuses(reloaded) == statuses(loaded)
+    assert statuses(loaded)["joined"] == LoadStatus.UNAVAILABLE
+    assert statuses(loaded)["producer"] != LoadStatus.FULL
+    # Where the type is used, it is refused, as before.
+    with pytest.raises(ValueError, match="producer.*payload"):
+        reloaded.nodes["producer"].output_schema()
+
+
 @pytest.mark.parametrize("fallback_schema", [False, True])
 def test_source_schema_uses_saved_context_converter(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fallback_schema: bool
