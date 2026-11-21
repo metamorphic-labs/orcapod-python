@@ -197,14 +197,11 @@ class TestListSourceBuilder:
         src = ListSource(name="val", data=[1, 2, 3])
         assert len(list(src.iter_data())) == 3
 
-    def test_custom_identity_structure(self):
+    def test_identity_structure_is_that_of_every_root_source(self):
+        """Class name, output schema, source id, key columns (ITL-1272)."""
         src = ListSource(name="val", data=[1, 2, 3])
         identity = src.identity_structure()
-        assert identity[0] == "ListSource"
-        assert identity[1] == "val"
-        assert identity[2] == (1, 2, 3)
-        assert identity[4] == ()  # the key columns: the position (ITL-1154)
-        assert len(identity) == 5  # includes tag_function_hash and the key columns
+        assert identity == ("ListSource", src.output_schema(), src.source_id, ())
 
     def test_with_tag_function(self):
         src = ListSource(

@@ -38,6 +38,7 @@
   "add_tags.operator[every_type].content_hash": "semantic_v1:91fce7b9bb879c3d92cd6423e4368f42ebf667cf89af73af107ac1a88a814c30",
   "add_tags.operator[every_type].pipeline_hash": "semantic_v1:91fce7b9bb879c3d92cd6423e4368f42ebf667cf89af73af107ac1a88a814c30",
   "default_source_ids.as_source[function_node].source_id": "derived:semantic_v1:6ada754d8fc4292450d3fb8813f05878b8aabbd52da3615519c80c7418bc0b4e",
+  "default_source_ids.list.content_hash": "semantic_v1:9d892efaf950490f157554b14c2f32c8194dcb92e6fa21d29e6f86b0d3e64801",
   "drop_nulls_job.node[ratio].content_hash": "semantic_v1:09afbbcc0d89147e8bcc05227431ac2a674febbcea331f584bee55927c85e447",
   "drop_nulls_job.node[ratio].pipeline_hash": "semantic_v1:cf4f9b8dff56193f509a551e7f201a165dd011ec388f9e5c827bb14d82d58376",
   "drop_nulls_job.table[golden_drop_null_job/_result/golden_ratio/21e6485805726eb7ceed63ef6b677f0b6b11d2eaf48bd9fc44c1dccdf718aa1d/v0/python.function.v1/rev1/rdb_v1].input_data_hashes": [
