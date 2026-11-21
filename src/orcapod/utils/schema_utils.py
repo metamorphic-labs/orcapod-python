@@ -931,7 +931,7 @@ SCHEMA_HASH_REJECTED_KINDS: tuple[str, ...] = (
 )
 """The ``pyarrow.types`` predicates of the types the Arrow schema hash rejects (ITL-640).
 
-The kinds starfix refuses in a schema, at any depth (``starfix._format2._is_rejected_type``:
+The kinds starfix refuses in a schema, at any depth (as starfix 0.5.0 and 0.6.0 do:
 list views, unions and run-end-encoded types). This is the one list; it is not imported
 from starfix's private module, and ``tests/test_core/sources/
 test_schema_hash_rejected_columns_refused.py`` checks it against starfix's public

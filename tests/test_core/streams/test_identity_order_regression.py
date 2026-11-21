@@ -21,6 +21,7 @@ from typing import Any
 import pyarrow as pa
 import pytest
 
+from orcapod.hashing.orcapod_table import OrcapodTable
 from orcapod.core.streams import ArrowTableStream
 from orcapod.types import ColumnConfig
 
@@ -126,8 +127,10 @@ def test_the_identity_table_is_in_the_canonical_row_order(
     stream = build(shape)
     name, table, tag_columns = stream.identity_structure()
     assert name == "ArrowTableStream"
-    assert table.equals(canonical_rule(stream))
-    assert table.num_rows == 6
+    # The table, marked as one Orcapod built (hashed under the float rule, ITL-1179).
+    assert isinstance(table, OrcapodTable)
+    assert table.table.equals(canonical_rule(stream))
+    assert table.table.num_rows == 6
     assert tag_columns == tuple(sorted(shape[0]))
     for rows in ([5, 4, 3, 2, 1, 0], [2, 0, 4, 1, 5, 3]):
         assert build(shape, rows).content_hash() == stream.content_hash()

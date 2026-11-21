@@ -327,7 +327,7 @@ def _unhashable_table_error(
 ) -> ValueError | None:
     """Return the error for a table the Arrow hasher refused, naming every column.
 
-    The hasher (starfix 0.5) raises ``ValueError`` for a type it does not hash, at the
+    The hasher (starfix) raises ``ValueError`` for a type it does not hash, at the
     table or at its schema, and names the first such column only.
 
     Args:

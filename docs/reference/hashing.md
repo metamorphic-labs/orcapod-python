@@ -75,9 +75,10 @@ The labels of v0.3:
 | Label | Names | Defined in |
 |---|---|---|
 | `semantic_v1` | the structure hash: a Python structure expanded to tagged JSON, SHA-256 of its canonical text | `SEMANTIC_HASH_LABEL`, `hashing/semantic_hashing/semantic_hasher.py` |
-| `arrow_v1` | the Arrow table hash (§9) | `ARROW_HASH_LABEL`, `hashing/arrow_hashers.py` |
+| `arrow_v1` | the hash of an Arrow table Orcapod builds, under the float rule (`-0.0` as `0.0`, every NaN as one; §9) | `ARROW_HASH_LABEL`, `hashing/arrow_hashers.py` |
+| `arrow_strict_v1` | the same Arrow table hash by bits, without the float rule, where a value's representation is an Arrow table: a pyarrow `Table` or `RecordBatch` given as a value (§9) | `ARROW_STRICT_HASH_LABEL`, `hashing/arrow_hashers.py` |
 | `arrow_schema_v1` | the Arrow schema hash: every schema that enters an identity ("The Arrow schema hash", §8) | `ARROW_SCHEMA_HASH_LABEL`, `hashing/arrow_hashers.py` |
-| `arrow_ordered_v1` | the Arrow table hash with column and struct-field order included (§9), fed into the pandas value hash | `ARROW_ORDERED_HASH_LABEL`, `hashing/arrow_hashers.py` |
+| `arrow_ordered_v1` | the Arrow table hash with column and struct-field order included, by bits (§9), fed into the pandas value hash | `ARROW_ORDERED_HASH_LABEL`, `hashing/arrow_hashers.py` |
 | `directory_v1` | the directory hash: a SHA-256 Merkle tree over the entries, file leaves taken with their label | `DIRECTORY_HASH_LABEL`, `hashing/directory_hashers.py` |
 | `ndarray_v1` | the array value hash (§8) | `NumpyArrayHandler.HASH_LABEL`, `hashing/semantic_hashing/builtin_handlers.py` |
 | `pandas_dataframe_v1` | the `pandas.DataFrame` value hash (§10) | `PANDAS_DATAFRAME_HASH_LABEL`, `hashing/pandas_value_hash.py` |
@@ -297,7 +298,7 @@ test session with `-p tests.test_hashing.hash_site_trace`.
 | Location | What is hashed | Algorithm / label | Used as | Call sites |
 |---|---|---|---|---|
 | structure hasher | a Python value as a tagged JSON tree | SHA-256 of canonical JSON, `semantic_v1` | every `content_hash()` / `pipeline_hash()`, type and function hash; the names built on schema hashes | `hashing/semantic_hashing/semantic_hasher.py:SemanticAwarePythonHasher._hash_to_content_hash` |
-| Arrow hasher | a table after the semantic visitor | starfix, `arrow_v1`; `hash_table_ordered`: `arrow_ordered_v1`; `hash_schema`: `arrow_schema_v1` | row data hashes, entry ids, row keys, default source ids, table values; every schema in an identity | `hashing/arrow_hashers.py:StarfixArrowHasher.hash_table`, `hashing/arrow_hashers.py:StarfixArrowHasher.hash_table_ordered`, `hashing/arrow_hashers.py:StarfixArrowHasher.hash_schema`, `hashing/arrow_hashers.py:StarfixArrowHasher._digest` |
+| Arrow hasher | a table after the semantic visitor | starfix, `arrow_v1` (a table Orcapod built: float rule on); `hash_table_strict`: `arrow_strict_v1` (a pyarrow table given as a value: every bit counts); `hash_table_ordered`: `arrow_ordered_v1` (a library value's digest: every bit counts); `hash_schema`: `arrow_schema_v1` | row data hashes, entry ids, row keys, default source ids, table values; every schema in an identity | `hashing/arrow_hashers.py:StarfixArrowHasher.hash_table`, `hashing/arrow_hashers.py:StarfixArrowHasher.hash_table_strict`, `hashing/arrow_hashers.py:StarfixArrowHasher.hash_table_ordered`, `hashing/arrow_hashers.py:StarfixArrowHasher.hash_schema`, `hashing/arrow_hashers.py:StarfixArrowHasher._digest`, `hashing/starfix_digest.py:_digest_table`, `hashing/starfix_digest.py:digest_schema` |
 | file hasher | a file's bytes | the configured digest function, label = its name (`sha256` in the data context; others: ITL-1155) | `File` value hash | `hashing/hash_utils.py:hash_file`, `hashing/hash_cachers.py:SqliteHashCacher.get`, `hashing/hash_cachers.py:SqliteHashCacher.put` |
 | directory hasher | a directory tree | Merkle tree of SHA-256 entries, `directory_v1`; file leaves taken with their label | `Directory` value hash | `hashing/directory_hashers.py:BasicDirectoryHasher.hash_directory`, `hashing/directory_hashers.py:_hash_dir` |
 | array value hash | an array: element digest, then order, byte order, struct layout | SHA-256, `ndarray_v1` (the element digest is a step of the same algorithm) | `numpy.ndarray` value hash | `logical_types/numpy_type.py:array_value_digest`, `logical_types/array_format.py:array_digest_v1` |
@@ -579,7 +580,7 @@ The table below shows what each class returns from `identity_structure()`.
 
 | Class | `identity_structure()` return value | Notes |
 |-------|--------------------------------------|-------|
-| `Datagram` | `self._ensure_data_table()` — the raw Arrow table | Dispatched to `ArrowTableHandler` → `StarfixArrowHasher` |
+| `Datagram` | `OrcapodTable(self._ensure_data_table())` — the raw Arrow table, marked as one Orcapod built | Dispatched to `OrcapodTableHandler` → `StarfixArrowHasher.hash_table` (the float rule, §9) |
 | `Tag` | User tag columns only (raw Arrow table) | System tag columns (`_tag::*`) excluded — they are provenance metadata, not tag content |
 | `Data` | Data columns only (raw Arrow table) | Source info columns (`_source_*`) excluded — they are provenance metadata, not data content |
 | `EmptyData` | Raises `EmptyDataAccessError` | `content_hash()` is overridden to return a stored `cached_content_hash` directly |
@@ -652,10 +653,10 @@ implementation must reproduce bit for bit (the developer's parity requirement):
    table. A library value is therefore never ordered by its stored bytes: its column is no
    sort key, and its row hash holds its value hash.
 
-The float rule of ITL-1179 (starfix 0.6, `-0.0`/`0.0` and NaN bits not mattering) applies to
-this table once it is on `main`. Rows that differ only in such bits then tie in step 2 and
-get equal row hashes in step 3, so their order is arbitrary; that is harmless because the
-final table hash ignores the same bits.
+The float rule of ITL-1179 (§9: `-0.0` hashes as `0.0` and every NaN as the ordinary NaN)
+applies to this table and to its row hashes, which are `hash_table` digests. Rows that differ
+only in such bits tie in step 2 and get equal row hashes in step 3, so their order is
+arbitrary; that is harmless because the final table hash ignores the same bits.
 
 **Inputs of a commutative operator are a set (kept by decision, ITL-942).** A pipeline hash
 covers the structure of the pipeline, not only its schemas: a commutative operator's identity
@@ -988,12 +989,15 @@ dict or set whose nested unordered containers are all already in this order is s
 byte-for-byte as before this rule existed,
 so its hash did not change.
 
-**Signed zero.** A float is hashed by its stored bytes, and `0.0` and `-0.0` have different
-bytes, so they hash differently wherever they appear: in a plain `float` column and as a
-dict key or set element alike, although Python compares them equal (`{0.0: 1} == {-0.0: 1}`).
-Orcapod does not rewrite `-0.0` to `0.0`: pod code can tell them apart (`math.copysign`,
-`repr`, division), so the finer identity can cost a recompute but never serves a wrong
-result. Within one dict or set the two compare equal, so they cannot both be present.
+**Signed zero.** In a table Orcapod builds, `-0.0` hashes as `0.0` wherever it appears: in
+a plain `float` column and as a dict key or set element alike, as Python compares them
+equal (`{0.0: 1} == {-0.0: 1}`) and Polars matches them (the float rule, §9). Orcapod does
+not rewrite `-0.0` to `0.0`: the stored value keeps its sign, and pod code can still tell
+the two apart (`math.copysign`, `repr`, division). So a row that differs from a stored one
+only in the sign of a zero (or the bits of a NaN) has the same input hash and reuses the
+stored result: a function whose result depends on the sign of zero must not rely on
+memoization to tell them apart. Within one dict or set the two compare equal, so they
+cannot both be present.
 
 **Arrow tables are hashed exactly as stored.** `StarfixArrowHasher` never sorts list
 contents. A `list<struct<key, value>>` column that arrives already in Arrow form (an
@@ -1065,7 +1069,7 @@ topology suffix, encoding the full join lineage into each column name.
 | Field | Value |
 |---|---|
 | **Inputs** | Full raw Arrow table (all columns, before any system tag injection), its rows in the order given, or sorted by the key columns in key order with `hash_in_key_order=True` (`arrow_utils.key_row_order`, ITL-1272) |
-| **Algorithm** | `hash_source_id(<source kind>, StarfixArrowHasher.hash_table(table))`, at full length — the table hash is starfix hash format 2: the 3-byte format number `00 00 02` followed by a SHA-256 digest (`starfix` 0.5, byte-identical to the Rust crate) |
+| **Algorithm** | `hash_source_id(<source kind>, StarfixArrowHasher.hash_table(table))`, at full length — the table hash is starfix hash format 2: the 3-byte format number `00 00 02` followed by a SHA-256 digest (`starfix` 0.6.0 or newer, with the float rule, §9) |
 | **Output format** | `str`: `<source kind>:<algorithm label>:<hex>`, for example `dict:arrow_v1:000002fe…`. The source kind is the class's config type key (`SOURCE_KIND`: `arrow_table`, `dict`, `list`, `data_frame`); the label is the one the hash carries. Nothing is shortened: the hex is the full digest whatever `hashing.path_n_char` says (a default source id is a name; developer, November 16, 2026). The parts hold no `:`, so the id never contains the `::` that separates the parts of a source-info value |
 | **Uniqueness guarantee** | Unique per source kind and raw table content; changes if any cell value changes or the rows are reordered, except with `hash_in_key_order=True`, where a reorder changes nothing and a change of the key columns' order changes the id only when it sorts the table differently (it always changes the content hash, which holds the key columns in key order) |
 | **Known exclusions** | Used **only** as a fallback when no explicit `source_id` is provided. With a user-supplied `source_id` the builder still computes the table hash (it returns it as `table_hash`), but the hash enters neither the id nor the source's identity. |
@@ -1674,11 +1678,56 @@ What a schema must therefore agree on to be one identity:
 
 Every Arrow-derived hash in the sites above (row data hashes, `record_id`s built from a
 default `source_id`, base and pipeline entry ids, operator and cached-source record hashes,
-`pa.Table` values) comes from `StarfixArrowHasher.hash_table`, which returns
-`ContentHash(method="arrow_v1", digest=D)`. `D` is 35 bytes: the starfix hash format
-number `00 00 02` followed by a SHA-256 digest, computed by `starfix` 0.5 (hash format 2) and
-byte-identical to the Rust `starfix` crate. The byte layout is specified in starfix's
-`docs/byte-layout-spec.md`.
+datagram and stream hashes) comes from `StarfixArrowHasher.hash_table`, which returns
+`ContentHash(method="arrow_v1", digest=D)` (a pyarrow table given as a value takes
+`hash_table_strict` instead, below). `D` is 35 bytes: the starfix hash format number
+`00 00 02` followed by a SHA-256 digest (hash format 2), computed by `starfix` 0.6.0 or
+newer, the Rust implementation. With the float options off it is byte-identical to the
+pure-Python starfix-python 0.5.0 that Orcapod used before (ITL-1179), except for two
+dictionary inputs starfix-python 0.5.0 got wrong, which starfix 0.6.0 documents: a
+dictionary over a sliced nested fixed-size list (0.5.0 hashed values corrupted by
+pyarrow's `take`, ITL-1223) and a dictionary whose empty dictionary has no offsets buffer
+(0.5.0 raised `TypeError`). So what changed with the move is exactly:
+
+- the hash of a table Orcapod builds that holds `-0.0` or a NaN other than the ordinary
+  one (the float rule, below), and every hash built on it;
+- the hash of a pyarrow `Table` or `RecordBatch` given as a value, and of every structure
+  that contains one: it carries the label `arrow_strict_v1` instead of `arrow_v1` (the same
+  digest bytes; the enclosing structure hash embeds the label);
+- the two dictionary inputs above.
+
+Every other hash is unchanged.
+The byte layout is specified in starfix's `docs/byte-layout-spec.md`. Every starfix call
+goes through one module, `hashing/starfix_digest.py`, which states which use gets which
+float options.
+
+**The float rule.** Orcapod hashes with starfix 0.6.0 or newer, with
+`normalize_negative_zero` and `normalize_nan` explicitly on for the Arrow tables Orcapod
+builds (streams, rows, tag and data datagrams, record-id and entry-id preimages, operator and
+cached-source record hashes, the tables behind default source ids); starfix's own default
+for both is off. So, in `float16`, `float32` and `float64` leaves at every depth (lists,
+fixed-size lists, structs, dictionaries, extension storage), `-0.0` hashes as `0.0` and
+every NaN (any sign or payload, quiet or signalling) as the ordinary NaN: `0x7e00`,
+`0x7fc00000`, `0x7ff8000000000000`. This matches how Orcapod matches float keys (Polars:
+`0.0` equals `-0.0`, NaN equals NaN), so two rows that match as keys have equal key hashes.
+Stored values are never rewritten: only the hash input is normalized. A hash with the
+options on equals the hash with them off of the same table with those values normalized.
+The options are not recorded in the digest, so they are part of the `arrow_v1` procedure,
+not a setting. Out of scope, strict as before (every bit counts): every library value
+hash (numpy and torch arrays, their own canonical bytes; pandas values, through
+`arrow_ordered_v1`; Polars values, their own starfix digest with the options off; a
+pyarrow `Table` or `RecordBatch` given as a value, `arrow_strict_v1`) and the semantic
+hasher's Python floats (function defaults, operator arguments, fields of user classes).
+A library value inside a cell is replaced by its strict value digest before the row is
+hashed, so a row normalizes only its plain float columns.
+
+**The strict table hash (`arrow_strict_v1`).** `StarfixArrowHasher.hash_table_strict` is
+the procedure of `hash_table` with both float options explicitly off: the same Arrow table
+hash by bits. It is used where a value's representation is an Arrow table: a pyarrow
+`Table` or `RecordBatch` given as a value (`ArrowTableHandler`). No logical type defines its
+value hash as an unordered Arrow table hash today; pandas uses the ordered hash and Polars
+its own digest, both strict. A table Orcapod builds enters an identity structure wrapped in
+`OrcapodTable`, which the semantic hasher sends to `hash_table`, so the two never mix.
 
 **Label.** `arrow_v1` names this procedure: the replacement of extension-typed cells by
 their value digests, then the starfix digest. It moves to `arrow_v2` only when an existing
@@ -1687,7 +1736,8 @@ table would get a different digest. Its number is not kept equal to the starfix 
 | Label | starfix | Format prefix | Orcapod |
 |---|---|---|---|
 | `arrow_v0.1` | 0.4 | `00 00 01` | up to v0.2 |
-| `arrow_v1` | 0.5 | `00 00 02` | v0.3 |
+| `arrow_v1` | 0.5 (pure Python); 0.6.0 or newer (Rust), float options on, from v0.4 | `00 00 02` | v0.3 and later |
+| `arrow_strict_v1` | 0.6.0 or newer, float options off | `00 00 02` | v0.4 and later |
 
 **What is part of the hash.** Column names, Arrow types (with large and non-large layouts of
 strings, binaries and lists hashing alike), nullability at every depth (top-level columns,

@@ -5,6 +5,7 @@ import logging
 from collections.abc import Collection, Iterator
 from typing import TYPE_CHECKING, Any
 
+from orcapod.hashing.orcapod_table import OrcapodTable
 from orcapod import contexts
 from orcapod.core.datagrams import Data, Tag
 from orcapod.core.streams.base import (
@@ -224,7 +225,9 @@ class ArrowTableStream(StreamBase):
         # hashed whole by the Arrow table handler, and the names as sorted tuples.
         return (
             self.__class__.__name__,
-            self._identity_table(),
+            # A table Orcapod built: hashed by ``hash_table`` (Orcapod's float rule),
+            # never as a pyarrow value (ITL-1179).
+            OrcapodTable(self._identity_table()),
             tuple(sorted(self._tag_columns)),
         ) + (
             # Only when there is one: a plain stream keeps its identity, and a stream

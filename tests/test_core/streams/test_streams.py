@@ -390,10 +390,16 @@ class TestArrowTableStreamIdentityStructure:
         assert s1.content_hash() != s2.content_hash()
 
     def test_no_producer_identity_structure_contains_table(self):
-        """identity_structure() for sourceless stream embeds a pa.Table."""
+        """identity_structure() for sourceless stream embeds its table, marked as one
+        Orcapod built (``OrcapodTable``: hashed under the float rule, ITL-1179)."""
+        from orcapod.hashing.orcapod_table import OrcapodTable
+
         stream = make_table_stream()
         structure = stream.identity_structure()
-        assert any(isinstance(elem, pa.Table) for elem in structure)
+        assert any(
+            isinstance(elem, OrcapodTable) and isinstance(elem.table, pa.Table)
+            for elem in structure
+        )
 
     # -- with-source branch (source is not None) -----------------------------
 

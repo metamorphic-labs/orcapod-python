@@ -161,14 +161,20 @@ class ArrowHasherProtocol(Protocol):
     def hasher_id(self) -> str: ...
 
     def hash_table(self, table: "pa.Table | pa.RecordBatch") -> ContentHash:
-        """Hash a table ignoring column order and struct field order (streams, rows)."""
+        """Hash a table Orcapod built, ignoring column order and struct field order
+        (streams, rows), under Orcapod's float rule (-0.0 as 0.0, every NaN as one).
+        """
+        ...
+
+    def hash_table_strict(self, table: "pa.Table | pa.RecordBatch") -> ContentHash:
+        """Hash a pyarrow table given as a value: as ``hash_table``, every bit counting."""
         ...
 
     def hash_table_ordered(
         self, table: "pa.Table | pa.RecordBatch", *, struct_field_order: bool = True
     ) -> ContentHash:
         """Hash a table as a value: column order is part of it, and struct field order
-        too unless ``struct_field_order`` is false.
+        too unless ``struct_field_order`` is false. Every bit counts.
         """
         ...
 
