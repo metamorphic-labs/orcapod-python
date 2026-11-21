@@ -91,6 +91,12 @@ def validate_tags_as_data(
 class DerivedSource(RootSource):
     """A source whose rows are derived from another source or from a job node.
 
+    Provisional in data context v1, in both forms (ITL-1331, ``PROVISIONAL_SOURCES``):
+    its source id and hashes are not frozen and may change in a later release (ITL-1317),
+    and so are those of every step downstream of it. Building one, also through
+    ``node.as_source()``, ``from_config`` or a loaded job, issues
+    ``ProvisionalHashWarning`` once per process.
+
     There are two forms.
 
     **Plain** (``tags_as_data`` not given), created by ``FunctionNode.as_source()``
@@ -179,6 +185,8 @@ class DerivedSource(RootSource):
     # The config type key (names the class a saved config is rebuilt with) and
     # the kind prefix of the plain form's default source id.
     SOURCE_KIND: ClassVar[str] = "derived"
+    PROVISIONAL = True
+    """Provisional in data context v1, both forms (ITL-1331, ``PROVISIONAL_SOURCES``)."""
 
     @staticmethod
     def _missing_source_id() -> ValueError:
@@ -517,6 +525,9 @@ class DerivedSource(RootSource):
         return result.stream
 
     def _get_stream(self) -> ArrowTableStream:
+        # Every read of rows notes the provisional use, also of rows kept from an
+        # earlier read (ITL-1331), as a provisional operator's stream does.
+        self._note_provisional_identity_use()
         if self._tags_as_data is not None:
             if self._cached_stream is not None:
                 return self._cached_stream

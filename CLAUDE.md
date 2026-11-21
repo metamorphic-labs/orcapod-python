@@ -537,16 +537,22 @@ Orcapod stores or embeds in a name is pinned in the golden folder of the current
   identifier in an identity built once and cached, so golden items are split by
   `cases.provisional_types_of` (checked against every fixture class's identity record).
 - Provisional sources are outside the freeze too (developer, November 21, 2026, ITL-1314:
-  "make polling source provisional"): `orcapod.sources.PROVISIONAL_SOURCES`
+  "make polling source provisional"; ITL-1331: "Let's also make DerivedSource as
+  provisional?", both forms): `orcapod.sources.PROVISIONAL_SOURCES`
   (`core/sources/provisional.py`) is the one list (today `PollingSource`, its identity
-  decided by ITL-1316), each listed class sets `PROVISIONAL = True` (declared on
-  `RootSource`, which warns when one is constructed, also through `from_config`), and building
-  one issues `ProvisionalHashWarning` once per source kind per process. The warning and the
-  use record are one helper, `utils/provisional.warn_provisional_use` (operators use it
-  too). Unlike a provisional operator, a provisional source is never pinned, in no golden
-  file: only operators can be declared by a golden case, so `compute_group_kinds` refuses a
-  case that builds one. The mark never enters a hash, an identifier, a config or a stored
-  path.
+  decided by ITL-1316, and `DerivedSource`, plain and `tags_as_data`, by ITL-1317), each
+  listed class sets `PROVISIONAL = True` (declared on `RootSource`, which warns when one is
+  constructed, also through `node.as_source()`, `from_config` and a loaded job), and building
+  one issues `ProvisionalHashWarning` once per source kind per process. Everything downstream
+  of a provisional source is provisional. The warning and the use record are one helper,
+  `utils/provisional.warn_provisional_use` (operators use it too); a source notes its use
+  again where its identity is read (`source_id`, `content_hash`, `pipeline_hash`; a
+  `DerivedSource` also on every read of rows), as an operator does where its identity is
+  read or it is applied (one helper pair, `provisional_class_name` and
+  `note_provisional_use`). A golden case declares a provisional source as it does an
+  operator (`provisional=("DerivedSource",)`), and its entries live in the provisional
+  files; no case builds a `PollingSource` (its pins were removed, ITL-1314). The mark never
+  enters a hash, an identifier, a config or a stored path.
 - The unit of immutability is the golden file. The manifest's `golden.history`
   (`src/orcapod/contexts/data/<version>.json`) lists every file with the sha256 of its bytes;
   a release appends a revision with `added: {}`, pinned in

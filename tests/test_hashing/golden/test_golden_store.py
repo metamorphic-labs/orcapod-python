@@ -1283,7 +1283,9 @@ def _building_polling_sources(*source_ids: str) -> Any:
 def test_a_case_building_a_polling_source_is_refused(
     monkeypatch: pytest.MonkeyPatch, source_ids: tuple[str, ...]
 ) -> None:
-    """A provisional source is never pinned, and a case cannot declare it (ITL-1314)."""
+    """A case that builds a PollingSource undeclared is refused (ITL-1314). A provisional
+    source is declarable since ITL-1331, so a declaring case would be provisional; no
+    repository case declares one (``test_the_repository_cases_declare_exactly_the_measured_cases``)."""
     monkeypatch.setitem(
         cases._CASES,
         "semantic",
@@ -1298,8 +1300,8 @@ def test_a_case_building_a_polling_source_is_refused(
         "semantic",
         [("polling", _building_polling_sources(*source_ids), ("PollingSource",))],
     )
-    with pytest.raises(ValueError, match=re.escape("declares ['PollingSource']")):
-        _ = cases.compute_group_kinds("semantic")
+    _, provisional = cases.compute_group_kinds("semantic")
+    assert provisional == frozenset({"polling.value"})
 
 
 def _reading_built_polling_sources(read: str, *source_ids: str) -> Any:
@@ -1358,9 +1360,10 @@ def test_a_case_declaring_an_unknown_provisional_name_is_refused(
 
 
 def test_the_repository_cases_declare_exactly_the_measured_cases() -> None:
-    """The cases that depend on a provisional operator or library value type, measured
-    for ITL-1266, ITL-1279 and ITL-1324 (docs/dev/scripts/itl_1279/measure_relocation.py),
-    and no other. A split case is listed once: its provisional part."""
+    """The cases that depend on a provisional operator, source or library value type,
+    measured for ITL-1266, ITL-1279, ITL-1324 and ITL-1331
+    (docs/dev/scripts/itl_1279/measure_relocation.py), and no other. A split case is
+    listed once: its provisional part. No case declares a ``PollingSource`` (ITL-1314)."""
     declared = {
         (group, name): names
         for group, registered in cases._CASES.items()
@@ -1398,6 +1401,9 @@ def test_the_repository_cases_declare_exactly_the_measured_cases() -> None:
         ("pipeline", "add_tags"): ("AddTags",),
         ("pipeline", "group_by_arrangement"): ("GroupBy",),
         ("pipeline", "group_by_nan_keys"): ("GroupBy",),
+        ("schema", "derived_source_tags_as_data"): ("DerivedSource",),
+        ("schema", "key_policy_identity"): ("DerivedSource",),
+        ("pipeline", "default_source_ids"): ("DerivedSource",),
         ("torch", "value"): torch,
         ("torch", "type"): torch,
         ("torch", "single_field"): torch,
@@ -1418,6 +1424,7 @@ def test_the_provisional_library_value_types_are_declarable() -> None:
         cases.TORCH_TENSOR,
     } <= names
     assert {"PolarsFilter", "GroupBy", "MergeJoin"} <= names
+    assert {"DerivedSource", "PollingSource"} <= names
 
 
 def _hashing(*values: Any) -> Any:
@@ -1464,3 +1471,167 @@ def test_a_case_declaring_the_library_value_types_it_hashes_is_provisional(
     values, provisional = cases.compute_group_kinds("semantic")
     assert set(values) == {"lib.v0", "lib.v1", "plain.v0", "plain.v1"}
     assert provisional == frozenset({"lib.v0", "lib.v1"})
+
+
+# ---------------------------------------------------------------------------
+# DerivedSource is provisional (ITL-1331)
+# ---------------------------------------------------------------------------
+
+
+def _derived_origin() -> Any:
+    from orcapod.sources import ArrowTableSource
+
+    table = pa.table(
+        {
+            "subject": ["s1", "s2"],
+            "session": [1, 2],
+            "age": [2, 4],
+            "weight": [20.5, 22.25],
+        }
+    )
+    return ArrowTableSource(
+        table,
+        tag_columns=["subject", "session"],
+        tag_only_columns=True,
+        source_id="golden_derived_origin",
+    )
+
+
+def _derived(mapping: dict[str, str]) -> Any:
+    from orcapod.core.sources import DerivedSource
+
+    return DerivedSource(_derived_origin(), tags_as_data=mapping, source_id="copied")
+
+
+def _plain_derived() -> Any:
+    from orcapod import PipelineJob
+    from orcapod.databases import InMemoryArrowDatabase
+    from orcapod.operators import SelectDataColumns
+
+    job = PipelineJob(name="golden_derived", database=InMemoryArrowDatabase())
+    with job:
+        SelectDataColumns(["age", "weight"])(_derived_origin(), label="picked")
+    job.run()
+    return job.nodes["picked"].as_source()
+
+
+_AS_DATA = {"session": "session_value", "subject": "subject_value"}
+
+# Built inside the case: both forms, the mapping in two orders.
+_DERIVED_IN_CASE: dict[str, Any] = {
+    "tags_as_data": lambda: {"id": _derived(_AS_DATA).source_id},
+    "tags_as_data reversed": lambda: {
+        "id": _derived(dict(reversed(list(_AS_DATA.items())))).source_id
+    },
+    "plain": lambda: {"id": _plain_derived().source_id},
+}
+
+
+@functools.cache
+def _prebuilt_derived() -> dict[str, Any]:
+    """Both forms built, hashed and read before any case is recorded."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ProvisionalHashWarning)
+        built = {"tags_as_data": _derived(_AS_DATA), "plain": _plain_derived()}
+        for source in built.values():
+            _ = source.source_id, source.content_hash(), source.pipeline_hash()
+            _ = source.as_table()
+    return built
+
+
+def _reading(form: str, read: str) -> Any:
+    def fn() -> dict[str, Any]:
+        source = _prebuilt_derived()[form]
+        if read == "source_id":
+            return {"v": source.source_id}
+        if read == "rows":
+            return {"v": source.as_table().num_rows}
+        return {"v": getattr(source, read)().to_string()}
+
+    return fn
+
+
+_DERIVED_READS = [
+    (form, read)
+    for form in ("plain", "tags_as_data")
+    for read in ("source_id", "content_hash", "pipeline_hash", "rows")
+]
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
+@pytest.mark.parametrize("built", sorted(_DERIVED_IN_CASE))
+def test_a_case_building_a_derived_source_undeclared_is_refused(
+    monkeypatch: pytest.MonkeyPatch, built: str
+) -> None:
+    fn = _DERIVED_IN_CASE[built]
+    monkeypatch.setitem(cases._CASES, "schema", [("derived", fn, ())])
+    with pytest.raises(
+        ValueError, match=re.escape("uses the provisional ['DerivedSource']")
+    ):
+        _ = cases.compute_group_kinds("schema")
+    monkeypatch.setitem(cases._CASES, "schema", [("derived", fn, ("DerivedSource",))])
+    _, provisional = cases.compute_group_kinds("schema")
+    assert provisional == frozenset({"derived.id"})
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
+@pytest.mark.parametrize(("form", "read"), _DERIVED_READS)
+def test_a_case_reading_a_derived_source_built_before_it_is_refused(
+    monkeypatch: pytest.MonkeyPatch, form: str, read: str
+) -> None:
+    _ = _prebuilt_derived()
+    fn = _reading(form, read)
+    monkeypatch.setitem(cases._CASES, "schema", [("derived", fn, ())])
+    with pytest.raises(
+        ValueError, match=re.escape("uses the provisional ['DerivedSource']")
+    ):
+        _ = cases.compute_group_kinds("schema")
+    monkeypatch.setitem(cases._CASES, "schema", [("derived", fn, ("DerivedSource",))])
+    _, provisional = cases.compute_group_kinds("schema")
+    assert provisional == frozenset({"derived.v"})
+
+
+def _pinned_entry_names() -> dict[str, set[str]]:
+    """group -> every entry name pinned in a frozen or provisional file."""
+    folder = store.golden_folder(
+        store.PROJECT_ROOT,
+        store.read_json(store.manifest_path(store.PROJECT_ROOT, VERSION)),
+    )
+    names: dict[str, set[str]] = {}
+    for path in sorted(folder.rglob("*.json")):
+        names.setdefault(path.stem.split("-")[0], set()).update(store.read_json(path))
+    return names
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
+def test_split_cases_keep_every_entry_name() -> None:
+    """A case registered twice (its provisional part declared) computes exactly the
+    entry names pinned for it, each from one registration only (ITL-1279, ITL-1324,
+    ITL-1331)."""
+    cases.register_logical_classes()
+    pinned = _pinned_entry_names()
+    split = {
+        (group, name)
+        for group, registered in cases._CASES.items()
+        for name in {n for n, _, _ in registered}
+        if sum(1 for n, _, _ in registered if n == name) > 1
+    }
+    assert split == {
+        ("semantic", "value"),
+        ("semantic", "type"),
+        ("schema", "single_field"),
+        ("schema", "key_policy_identity"),
+        ("arrow", "extension_no_values"),
+        ("pipeline", "join_key_nullability"),
+        ("pipeline", "default_source_ids"),
+    }
+    for group, name in sorted(split):
+        parts = [
+            {f"{name}.{key}" for key in fn()}
+            for n, fn, _ in cases._CASES[group]
+            if n == name
+        ]
+        assert all(parts), (group, name)
+        assert not set.intersection(*parts), (group, name)
+        expected = {e for e in pinned[group] if e.startswith(f"{name}.")}
+        assert set.union(*parts) == expected, (group, name)

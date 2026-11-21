@@ -22,7 +22,7 @@ from orcapod.core.operators.provisional import (
     provisional_operator_name,
     warn_provisional_operator,
 )
-from orcapod.utils.provisional import note_provisional_use
+from orcapod.utils.provisional import note_provisional_use, provisional_class_name
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
@@ -105,10 +105,11 @@ class StaticOutputOperatorPod(TraceableBase):
         ``pipeline_hash``) and where it is applied to streams (``process``,
         ``static_process``, a ``DynamicPodStream``'s hashes and reads), so an operator
         built before a recording (a module-level ``Batch(2)``) is still seen by it
-        (ITL-1279). The warning stays at construction. The note enters no hash,
-        config or path.
+        (ITL-1279). The same note as ``RootSource._note_provisional_identity_use`` for a
+        provisional source (ITL-1314). The warning stays at construction. The note
+        enters no hash, config or path.
         """
-        provisional = provisional_operator_name(type(self))
+        provisional = provisional_class_name(type(self))
         if provisional is not None:
             note_provisional_use(provisional)
 

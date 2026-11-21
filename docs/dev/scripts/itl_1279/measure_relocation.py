@@ -5,7 +5,9 @@ usage: uv run python docs/dev/scripts/itl_1279/measure_relocation.py [mixed]
 ``mixed``: per entry, for the cases that mix frozen and provisional entries.
 
 In this process only, the approved provisional operators are marked provisional
-(``PROVISIONAL = True`` and ``PROVISIONAL_OPERATORS``), and the use of a provisional
+(``PROVISIONAL = True`` and ``PROVISIONAL_OPERATORS``; a no-op once the code marks them),
+a provisional source (``DerivedSource``, ITL-1331) is noted by the code itself, and the use
+of a provisional
 library value type (``provisional`` of ``contexts/logical_types.json``) is noted by its
 extension name, as the change will do. Every golden case of every available group then
 runs inside ``recording_provisional_uses``. For each case that uses a provisional feature
@@ -85,6 +87,9 @@ def main() -> None:
     import cases  # pyright: ignore[reportMissingImports]
     from orcapod.utils.provisional import recording_provisional_uses
 
+    # As compute_group_kinds does: the fixtures are registered outside every record, so
+    # registering one (GoldenWithArray resolves the ndarray type) is no case's use.
+    cases.register_logical_classes()
     where = pinned_files()
     totals: Counter[str] = Counter()
     by_feature: Counter[str] = Counter()

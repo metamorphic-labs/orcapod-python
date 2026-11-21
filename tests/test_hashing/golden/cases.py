@@ -106,20 +106,24 @@ def case(
 
 
 def declarable_provisional_names() -> frozenset[str]:
-    """The names a case may declare provisional: the provisional operators (ITL-1266)
-    and the provisional library value types, by extension name (the ``provisional``
-    list of ``contexts/logical_types.json``; ITL-1324)."""
+    """The names a case may declare provisional: the provisional operators (ITL-1266),
+    the provisional sources (ITL-1331) and the provisional library value types, by
+    extension name (the ``provisional`` list of ``contexts/logical_types.json``;
+    ITL-1324). No case builds a ``PollingSource`` (ITL-1314): its pins were removed."""
     import importlib.resources
 
     from orcapod.core.operators.provisional import PROVISIONAL_OPERATORS
+    from orcapod.core.sources.provisional import PROVISIONAL_SOURCES
 
     registration = json.loads(
         importlib.resources.files("orcapod.contexts")
         .joinpath("logical_types.json")
         .read_text()
     )
-    return frozenset(PROVISIONAL_OPERATORS) | frozenset(
-        registration.get("provisional", [])
+    return (
+        frozenset(PROVISIONAL_OPERATORS)
+        | frozenset(PROVISIONAL_SOURCES)
+        | frozenset(registration.get("provisional", []))
     )
 
 
@@ -1217,9 +1221,11 @@ def schema_location_default_source_ids() -> dict[str, Any]:
     return out
 
 
-@case("schema", "derived_source_tags_as_data")
+@case("schema", "derived_source_tags_as_data", provisional=("DerivedSource",))
 def schema_derived_source_tags_as_data() -> dict[str, Any]:
     """Pin a source derived from another source with a tag also offered as data (ITL-939).
+
+    Provisional: ``DerivedSource`` is (ITL-1331).
 
     Two variants, each with its own source id, as this form requires (ITL-1313): by
     position, and with a ``record_id_column``.
@@ -1252,6 +1258,37 @@ def schema_derived_source_tags_as_data() -> dict[str, Any]:
     return out
 
 
+@case("schema", "key_policy_identity", provisional=("DerivedSource",))
+def schema_key_policy_identity_derived() -> dict[str, Any]:
+    """The ``derived_tags_as_data`` entries of ``key_policy_identity``: provisional, as
+    ``DerivedSource`` is (ITL-1331). Its origin is the ``arrow_table`` variant's source."""
+    from orcapod.core.sources import ArrowTableSource, DerivedSource
+
+    out: dict[str, Any] = {}
+    for variant, key in {"position": None, "key": "subject"}.items():
+        arrow = ArrowTableSource(
+            _builder_table(),
+            tag_columns=["subject"],
+            record_id_columns=key,
+            source_id="golden_keys",
+            data_context=_ctx(),
+            tag_only_columns=True,
+        )
+        derived = DerivedSource(
+            arrow,
+            tags_as_data={"subject": "subject_value"},
+            source_id="golden_keys_derived",
+            record_id_columns=key,
+        )
+        out[f"derived_tags_as_data.{variant}.content_hash"] = (
+            derived.content_hash().to_string()
+        )
+        out[f"derived_tags_as_data.{variant}.pipeline_hash"] = (
+            derived.pipeline_hash().to_string()
+        )
+    return out
+
+
 @case("schema", "key_policy_identity")
 def schema_key_policy_identity() -> dict[str, Any]:
     """Pin sources that differ only in key policy (developer, November 16, 2026, ITL-1154).
@@ -1270,7 +1307,6 @@ def schema_key_policy_identity() -> dict[str, Any]:
 
     from orcapod.core.sources import (
         ArrowTableSource,
-        DerivedSource,
         ListSource,
         SQLiteTableSource,
     )
@@ -1292,13 +1328,6 @@ def schema_key_policy_identity() -> dict[str, Any]:
             tag_only_columns=True,
         )
         pin(f"arrow_table.{variant}", arrow)
-        derived = DerivedSource(
-            arrow,
-            tags_as_data={"subject": "subject_value"},
-            source_id="golden_keys_derived",
-            record_id_columns=key,
-        )
-        pin(f"derived_tags_as_data.{variant}", derived)
     for variant, key in {"position": None, "key": "element_index"}.items():
         listed = ListSource(
             "value",
@@ -2591,13 +2620,10 @@ def pipeline_default_source_ids() -> dict[str, Any]:
 
     A source built with no ``source_id`` is named ``<source kind>:<algorithm
     label>:<hex>``; a source made with ``node.as_source()`` is named
-    ``derived:<algorithm label>:<hex>``.
+    ``derived:<algorithm label>:<hex>`` (provisional: ``pipeline_default_source_ids_as_source``).
     """
     import polars as pl
 
-    from orcapod import PipelineJob
-    from orcapod.databases import InMemoryArrowDatabase
-    from orcapod.operators import Join
     from orcapod.sources import (
         ArrowTableSource,
         DataFrameSource,
@@ -2621,7 +2647,18 @@ def pipeline_default_source_ids() -> dict[str, Any]:
     for name, source in sources.items():
         out[f"{name}.source_id"] = source.source_id
         out[f"{name}.content_hash"] = source.content_hash().to_string()
+    return out
 
+
+@case("pipeline", "default_source_ids", provisional=("DerivedSource",))
+def pipeline_default_source_ids_as_source() -> dict[str, Any]:
+    """The ``as_source[...]`` entries of ``default_source_ids``: provisional, as
+    ``DerivedSource`` is (ITL-1331)."""
+    from orcapod import PipelineJob
+    from orcapod.databases import InMemoryArrowDatabase
+    from orcapod.operators import Join
+
+    out: dict[str, Any] = {}
     job = PipelineJob(
         name="golden_default_source_ids", database=InMemoryArrowDatabase()
     )

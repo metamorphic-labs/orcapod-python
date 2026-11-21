@@ -152,13 +152,14 @@ tests/test_hashing/golden/data/
 ### Provisional files
 
 `tests/test_hashing/golden/data/v1/provisional/<group>.json` holds the values of the cases
-that depend on a provisional operator (ITL-1266, ITL-1279) or a provisional library value type
-(ITL-1324), one file per group and no counter: such a file is never frozen, and the generator
+that depend on a provisional operator (ITL-1266, ITL-1279), a provisional source (ITL-1331) or
+a provisional library value type (ITL-1324), one file per group and no counter: such a file is never frozen, and the generator
 rewrites it in place.
 
-- **Which entries.** A case declares the provisional features it depends on, operators by
-  class name and library value types by extension name:
+- **Which entries.** A case declares the provisional features it depends on, operators and
+  sources by class name and library value types by extension name:
   `@case("pipeline", "group_by", provisional=("GroupBy",))`,
+  `@case("schema", "derived_source_tags_as_data", provisional=("DerivedSource",))`,
   `@case("datagram", "ndarray", provisional=("orcapod.numpy.ndarray",))`. The generator runs
   every case while Orcapod records which provisional features it uses
   (`orcapod.utils.provisional.recording_provisional_uses`), and refuses a case that uses
@@ -166,13 +167,14 @@ rewrites it in place.
   test checks that every entry is in the kind of file its case declares. An operator is
   recorded when it is built, when its own content or pipeline hash is read, when it is
   applied (`process`, its call, a stream method such as `stream.group_by`,
-  `static_process`), and when a stream it produced is hashed or read; a library value type
-  when it is resolved. So an operator built before the case, at module level, is still
+  `static_process`), and when a stream it produced is hashed or read; a source when it is
+  built and when its source id, content or pipeline hash is read (a `DerivedSource` also
+  when its rows are read); a library value type when it is resolved. So an operator built before the case, at module level, is still
   recorded when the case reads its hash or applies it, and a step built in the case
   downstream of it reaches it while its own hash is computed.
 - **A hash cached before the case.** A stream or job node downstream of a provisional
-  operator that was built and hashed, or computed, before the case answers from its cached
-  hash or kept result and never reaches the operator, so nothing is recorded. Cases build
+  operator or source that was built and hashed, or computed, before the case answers from its cached
+  hash or kept result and never reaches it, so nothing is recorded. Cases build
   their pipelines inside the case.
 - **A dependence the record cannot see.** A user class with a field of a provisional library
   type (the fixture `GoldenWithArray`) embeds that type's identifier in its own identity, but
@@ -184,23 +186,27 @@ rewrites it in place.
   predicate against every fixture class's identity record.
 - **Split cases.** A case whose items are partly provisional is registered twice under its
   one name, the provisional part declared, so every entry keeps its name: `semantic:value`,
-  `semantic:type`, `schema:single_field`, `arrow:extension_no_values` and
-  `pipeline:join_key_nullability` (its `merge_join.*` entries).
-- **Today:** 443 entries. The `PolarsFilter` cases (`polars_filter`, `polars_filter_expr`,
+  `semantic:type`, `schema:single_field`, `arrow:extension_no_values`,
+  `pipeline:join_key_nullability` (its `merge_join.*` entries),
+  `schema:key_policy_identity` (its `derived_tags_as_data.*` entries) and
+  `pipeline:default_source_ids` (its `as_source[...]` entries).
+- **No `PollingSource` values.** No case builds a `PollingSource` (ITL-1314): its pins were
+  removed rather than kept provisional.
+- **Today:** 475 entries. The `PolarsFilter` cases (`polars_filter`, `polars_filter_expr`,
   `polars_filter_expr_job` and the `semantic` case `polars_expr`, 86 entries) moved out of
   the frozen files with ITL-1266; the cases of the other provisional operators (229 entries)
   and of the library value types (128 entries, with the 12 of `GoldenWithArray`) moved with
-  ITL-1279 and ITL-1324. Every move was values unchanged, before `v1` was frozen.
+  ITL-1279 and ITL-1324, and those of `DerivedSource` (32 entries) with ITL-1331. Every move was values unchanged, before `v1` was frozen.
 - **What holds.** Every provisional value is computed and compared on every CI run, so a
   change nobody intended fails. An intended change needs the developer's approval of the
   exact list of entries that move, each explained (`--remove`, then `--add`), but no new
   data context, before or after a release. `--release` neither lists nor pins a provisional
   file, the manifest pin leaves out `golden`, and the tag check does not compare them.
-- **Leaving the group.** When an operator stops being provisional, at a release, it leaves
-  `PROVISIONAL_OPERATORS`, its `PROVISIONAL` marker and its cases' declarations go, and
+- **Leaving the group.** When an operator (or a source) stops being provisional, at a
+  release, it leaves `PROVISIONAL_OPERATORS` (or `PROVISIONAL_SOURCES`), its `PROVISIONAL` marker and its cases' declarations go, and
   `generate_golden_hashes.py --relocate` moves its entries, values unchanged, into the open
   frozen file of their group. The `--release` step then freezes them.
-- **Joining the group.** Only an operator whose values no release lists can become
+- **Joining the group.** Only an operator or source whose values no release lists can become
   provisional: `--relocate` refuses to move an entry out of a file a release lists.
 
 ### Digest definitions
@@ -495,7 +501,7 @@ so the bytes that are hashed are the bytes that were committed (4).
 | Values on `main` after the last release are open | An unreleased commit has no guarantee | Use a released version for anything that must stay stable |
 | Optional groups skip without their package | `torch` values are unchecked where torch is missing | CI installs every extra |
 | The `date` field cannot be verified | Informational | Order and integrity come from the chain and the tags |
-| Provisional values are outside the freeze | A pipeline with a provisional operator may compute its results again after an upgrade | `ProvisionalHashWarning` when the operator is built or a saved job holding it is loaded; the list in `PROVISIONAL_OPERATORS` and on the operators page |
+| Provisional values are outside the freeze | A pipeline with a provisional operator or source (`DerivedSource`, `PollingSource`) may compute its results again after an upgrade | `ProvisionalHashWarning` when the operator or source is built or a saved job holding it is loaded; the lists in `PROVISIONAL_OPERATORS` and `PROVISIONAL_SOURCES`, on the operators and sources pages |
 
 A deliberate attacker with merge rights who also rewrites history and tags is beyond what any
 check inside the repository can stop; the PyPI artifacts remain the record of what shipped.
