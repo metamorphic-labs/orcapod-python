@@ -1148,6 +1148,39 @@ class TestLoadRefusesASavedTagsAsDataSourceWithoutASourceId:
         with pytest.raises(ValueError, match="needs a source_id"):
             PipelineJob.load(path, database=InMemoryArrowDatabase())
 
+    @pytest.mark.parametrize("shape", ["cached", "derived_over_cached"])
+    def test_refused_inside_a_cached_source(self, tmp_path, shape):
+        """A tags_as_data config under a cached source's inner_source is checked too."""
+        import json
+
+        db_path = _make_probe_db(tmp_path / "edi.db")
+        job = PipelineJob(name="cached", database=InMemoryArrowDatabase())
+        with job:
+            inner = DerivedSource(
+                SQLiteTableSource(db_path, "probe", tag_only_columns=True),
+                tags_as_data={"name": "name_copy"},
+                source_id="inner",
+            )
+            cached = inner.cached(InMemoryArrowDatabase())
+            if shape == "cached":
+                top = cached
+                name_length.pod(top.select_data_columns(["name_copy"]), label="len")
+            else:
+                top = DerivedSource(
+                    cached, tags_as_data={"probe_id": "probe_copy"}, source_id="outer"
+                )
+                name_length.pod(top.select_data_columns(["name_copy"]), label="len")
+        path = tmp_path / "job.json"
+        job.save(path)
+        data = json.loads(path.read_text())
+        (binding,) = data["bindings"]["sources"].values()
+        nested = binding if shape == "cached" else binding["origin"]
+        nested["inner_source"]["source_id"] = None
+        _write(path, data)
+        with pytest.raises(ValueError, match="needs a source_id") as raised:
+            PipelineJob.load(path, database=InMemoryArrowDatabase())
+        assert str(path) in str(raised.value)
+
     def test_control_both_ids_present_loads_bound(self, tmp_path):
         path, _ = _saved(tmp_path)
         loaded = PipelineJob.load(path, database=InMemoryArrowDatabase())

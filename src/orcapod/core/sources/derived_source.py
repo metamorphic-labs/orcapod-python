@@ -194,27 +194,32 @@ class DerivedSource(RootSource):
     def require_saved_source_id(cls, config: Mapping[str, Any]) -> None:
         """Refuse a saved ``tags_as_data`` config without a ``source_id`` (ITL-1313).
 
-        Checks the config and, through ``origin``, every derived source it is built
-        over, without rebuilding anything. A missing id is an invalid config, not an
-        unavailable source, so ``PipelineJob.load`` calls this before it rebuilds the
-        sources best-effort, and ``from_config`` before it rebuilds the origin.
+        Checks the config and every source config nested in it (under the keys of
+        ``serialization.NESTED_SOURCE_CONFIG_KEYS``: a derived source's ``origin``, a
+        cached source's ``inner_source``), without rebuilding anything. A missing id is
+        an invalid config, not an unavailable source, so ``PipelineJob.load`` calls this
+        before it rebuilds the sources best-effort, and ``from_config`` before it
+        rebuilds the origin.
 
         Args:
             config: A source config, as ``to_config`` writes it.
 
         Raises:
-            ValueError: If the config, or a derived origin config, has ``tags_as_data``
-                but no ``source_id`` (absent or null).
+            ValueError: If the config, or a config nested in it, is a derived source
+                with ``tags_as_data`` but no ``source_id`` (absent or null).
         """
-        current: Mapping[str, Any] | None = config
-        while current is not None and current.get("source_type") == cls.SOURCE_KIND:
-            if (
-                current.get("tags_as_data") is not None
-                and current.get("source_id") is None
-            ):
-                raise cls._missing_source_id()
-            origin = current.get("origin")
-            current = origin if isinstance(origin, Mapping) else None
+        from orcapod.pipeline.serialization import NESTED_SOURCE_CONFIG_KEYS
+
+        if (
+            config.get("source_type") == cls.SOURCE_KIND
+            and config.get("tags_as_data") is not None
+            and config.get("source_id") is None
+        ):
+            raise cls._missing_source_id()
+        for key in NESTED_SOURCE_CONFIG_KEYS:
+            nested = config.get(key)
+            if isinstance(nested, Mapping):
+                cls.require_saved_source_id(nested)
 
     def __init__(
         self,
