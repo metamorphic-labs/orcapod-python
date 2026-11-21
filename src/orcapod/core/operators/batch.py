@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, ClassVar, TYPE_CHECKING
+from typing import Any, ClassVar, TYPE_CHECKING, cast
 
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.channels import ReadableChannel, WritableChannel
@@ -15,11 +15,11 @@ from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
-    import polars as pl
+    import numpy as np
     import pyarrow as pa
 else:
+    np = LazyModule("numpy")
     pa = LazyModule("pyarrow")
-    pl = LazyModule("polars")
 
 from orcapod.types import Schema
 
@@ -68,6 +68,29 @@ class Batch(UnaryOperator):
         """
         return None
 
+    def _batch_sizes(self, row_count: int) -> list[int]:
+        """Return the number of members of each batch, in row order.
+
+        Batches are consecutive rows: ``batch_size`` rows each (``0``: every row
+        in one batch), a last batch with fewer rows kept unless
+        ``drop_partial_batch``.
+
+        Args:
+            row_count: The number of input rows.
+
+        Returns:
+            One size per batch; their sum is the number of rows kept.
+        """
+        if row_count == 0:
+            return []
+        if self.batch_size == 0:
+            return [] if self.drop_partial_batch else [row_count]
+        full, rest = divmod(row_count, self.batch_size)
+        sizes = [self.batch_size] * full
+        if rest and not self.drop_partial_batch:
+            sizes.append(rest)
+        return sizes
+
     def unary_static_process(self, stream: StreamProtocol) -> StreamProtocol:
         """Group rows into fixed-size batches, list-wrapping their values.
 
@@ -76,6 +99,11 @@ class Batch(UnaryOperator):
         columns become list-valued too, one element per batch member.  System-tag
         columns are folded to a scalar instead -- record identity hashes them
         directly, so they must not become lists.
+
+        The lists are built from the input's Arrow arrays (the members are
+        consecutive rows, so each list is a slice; ITL-1281): every value is the
+        input's, bit for bit, for every Arrow type, and every list of a row is
+        parallel by member, in the input's row order.
 
         Args:
             stream: The upstream stream.
@@ -87,46 +115,44 @@ class Batch(UnaryOperator):
 
         tag_columns, _ = stream.keys()
 
-        system_tag_columns = tuple(
-            c for c in table.column_names if c.startswith(constants.SYSTEM_TAG_PREFIX)
+        sizes = self._batch_sizes(table.num_rows)
+        offsets = cast(
+            "pa.Int64Array",
+            pa.array(
+                np.concatenate([[0], np.cumsum(sizes, dtype=np.int64)]), pa.int64()
+            ),
         )
-        member_columns = tuple(
-            c for c in table.column_names if c not in system_tag_columns
-        )
+        kept = table.slice(0, int(offsets[-1].as_py()))
+        bounds = cast(list[int], offsets.to_pylist())
+        # Every stream has a data context; StreamProtocol does not declare it.
+        type_converter = stream.data_context.type_converter  # pyright: ignore[reportAttributeAccessIssue]
 
-        data_list = table.to_pylist()
-
-        batches: list[list[dict[str, Any]]] = []
-        next_batch: list[dict[str, Any]] = []
-
-        for entry in data_list:
-            next_batch.append(entry)
-            if self.batch_size > 0 and len(next_batch) >= self.batch_size:
-                batches.append(next_batch)
-                next_batch = []
-
-        if next_batch and not self.drop_partial_batch:
-            batches.append(next_batch)
-
-        batched_data = [
-            {
-                **{c: [m[c] for m in members] for c in member_columns},
-                **{
-                    c: arrow_utils.fold_system_tag_values(
-                        [m[c] for m in members], label=BATCH_FOLD_LABEL
+        fields: list[pa.Field[Any]] = []
+        arrays: list[pa.Array[Any]] = []
+        for field in table.schema:
+            column = kept.column(field.name)
+            if field.name.startswith(constants.SYSTEM_TAG_PREFIX):
+                # Text values, folded per batch; text loses nothing in Python.
+                values = cast(list[Any], column.to_pylist())
+                fields.append(field)
+                arrays.append(
+                    pa.array(
+                        [
+                            arrow_utils.fold_system_tag_values(
+                                values[start:end], label=BATCH_FOLD_LABEL
+                            )
+                            for start, end in zip(bounds[:-1], bounds[1:])
+                        ],
+                        field.type,
                     )
-                    for c in system_tag_columns
-                },
-            }
-            for members in batches
-        ]
-
-        batched_table = arrow_utils.build_aggregated_table(
-            batched_data,
-            table.schema,
-            member_columns,
-            stream.data_context.type_converter,
-        )
+                )
+                continue
+            list_type = arrow_utils.aggregated_list_type(
+                field.type, type_converter, column=field.name
+            )
+            fields.append(pa.field(field.name, list_type, nullable=False))
+            arrays.append(arrow_utils.aggregated_list_array(column, offsets, list_type))
+        batched_table = pa.Table.from_arrays(arrays, schema=pa.schema(fields))
 
         n_char = self.orcapod_config.hashing.system_tag_n_char
         batched_table = arrow_utils.append_to_system_tags(

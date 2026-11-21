@@ -350,15 +350,7 @@ def test_a_join_of_a_reused_node_finds_the_rows_of_the_first_run(
     assert rows[0] == rows[1] == [(1, 11, 10), (2, 21, 20)]
 
 
-# ── the sort fallback: part 2, after PR 459 (arrow_keys) ─────────────────────
-
-SORT_FALLBACK = pytest.mark.xfail(
-    strict=True,
-    reason="ITL-1295 part 2: arrow_utils.sort_by_tag_columns falls back to a Polars "
-    + "sort for list and struct tags, which carries every column through Polars "
-    + "(a date64 comes back at midnight, a decimal256 panics); it needs the key "
-    + "preparation of arrow_keys (PR 459).",
-)
+# ── a sorted read of stored list tags (the sort fallback, ITL-1295 part 2) ─────
 
 
 def _no_panic(read: Callable[[], Any]) -> Any:
@@ -371,7 +363,6 @@ def _no_panic(read: Callable[[], Any]) -> Any:
         raise AssertionError(f"{type(error).__name__}: {error}") from None
 
 
-@SORT_FALLBACK
 @pytest.mark.parametrize("type_name", ["large_list<date64>", "large_list<decimal256>"])
 @pytest.mark.parametrize("read", ["as_table", "view"])
 def test_a_sorted_read_of_a_list_tag_is_exact(type_name: str, read: str) -> None:

@@ -27,7 +27,6 @@ from orcapod.sources import DictSource
 from tests.test_arrays.array_cases import (
     ARRAYS,
     assert_arrays_identical,
-    assert_same_arrays_any_order,
 )
 from tests.test_core.operators.test_async_sync_equivalence import (
     async_rows,
@@ -166,9 +165,11 @@ def test_merge_join_colliding_array_column(shift: int) -> None:
     got = rows(MergeJoin()(left, right))
     assert sorted(got) == NAMES
     for name in NAMES:
-        assert_same_arrays_any_order(
-            list(got[name]["x"]), [expected_x(name), expected_x(name, shift)]
-        )
+        merged = list(got[name]["x"])
+        assert len(merged) == 2
+        # The first argument's value first (ITL-1281).
+        assert_arrays_identical(merged[0], expected_x(name))
+        assert_arrays_identical(merged[1], expected_x(name, shift))
 
 
 def grouped_arrays_source(source_id: str, shift: int = 0) -> StreamProtocol:
@@ -176,52 +177,37 @@ def grouped_arrays_source(source_id: str, shift: int = 0) -> StreamProtocol:
     return GroupBy(by=["g"])(arrays_source(source_id, shift))
 
 
-def assert_merged_groups(got: dict[str, Any], shift: int) -> None:
-    """Each group's merged ``x`` holds the left and the right member lists."""
+def assert_merged_groups(
+    got: dict[str, Any], second_shift: int, first_shift: int = 0
+) -> None:
+    """Each group's merged ``x`` holds the first argument's member list, then the
+    second's, in that order (``MergeJoin`` is ordered, ITL-1281)."""
     assert sorted(got) == ["g0", "g1", "g2"]
     for group, merged in got.items():
         names = [n for n in NAMES if GROUP[n] == group]
-        assert len(merged) == 2
-        remaining = [
-            [expected_x(n) for n in names],
-            [expected_x(n, shift) for n in names],
+        expected = [
+            [expected_x(n, first_shift) for n in names],
+            [expected_x(n, second_shift) for n in names],
         ]
-        # Each merged list matches a distinct expected list, so a lost input fails.
-        for members in merged:
-            match = next(
-                (
-                    i
-                    for i, e in enumerate(remaining)
-                    if len(members) == len(e)
-                    and all(_same_array(g, x) for g, x in zip(members, e, strict=True))
-                ),
-                None,
-            )
-            assert match is not None, f"unexpected member list in {group}"
-            del remaining[match]
-        assert not remaining
-
-
-def _same_array(got: Any, expected: Any) -> bool:
-    try:
-        assert_arrays_identical(got, expected)
-    except AssertionError:
-        return False
-    return True
+        assert len(merged) == len(expected) == 2, group
+        for members, want in zip(merged, expected, strict=True):
+            assert len(members) == len(want), group
+            for one, other in zip(members, want, strict=True):
+                assert_arrays_identical(one, other)
 
 
 @pytest.mark.parametrize("shift", [0, 1])
 def test_merge_join_colliding_grouped_array_column(shift: int) -> None:
-    """``MergeJoin`` merges colliding lists of arrays (after ``GroupBy``) in a deterministic order."""
+    """``MergeJoin`` merges colliding lists of arrays (after ``GroupBy``), in argument order."""
     left = grouped_arrays_source("left")
     right = grouped_arrays_source("right", shift)
     out = MergeJoin()(left, right)
     got = {fields(t)["g"]: fields(d)["x"] for t, d in out.iter_data()}
     assert_merged_groups(got, shift)
-    # The swapped call yields the same tags and data. Source info is left out: on
-    # tied values from inputs with one pipeline hash, its order follows the call.
+    # The swapped call holds the same pairs, reversed: MergeJoin is ordered (ITL-1281).
     swapped = MergeJoin()(right, left)
-    assert swapped.as_table().equals(out.as_table())
+    swapped_got = {fields(t)["g"]: fields(d)["x"] for t, d in swapped.iter_data()}
+    assert_merged_groups(swapped_got, 0, first_shift=shift)
 
 
 def test_merge_join_colliding_grouped_array_column_async_equals_sync() -> None:

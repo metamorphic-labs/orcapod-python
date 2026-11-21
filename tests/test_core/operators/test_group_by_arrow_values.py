@@ -25,11 +25,10 @@ import pytest
 
 import orcapod as op
 from orcapod.core.operators import GroupBy
+from orcapod.core.operators.arrow_keys import part_without_rule, polars_ready
 from orcapod.core.operators.group_by import (
     GROUP_BY_FOLD_LABEL,
-    _polars_ready,  # pyright: ignore[reportPrivateUsage]  # the test is about these
-    _sort_key,  # pyright: ignore[reportPrivateUsage]
-    _unorderable_part,  # pyright: ignore[reportPrivateUsage]
+    _sort_key,  # pyright: ignore[reportPrivateUsage]  # the test is about it
 )
 from orcapod.contexts import get_default_context
 from orcapod.core.streams import ArrowTableStream
@@ -733,13 +732,17 @@ def test_validation_and_preparation_agree_on_every_type(name: str) -> None:
     """A type validation accepts is prepared and read by Polars; any other is refused
     by both, never passed through."""
     array = AGREEMENT_TYPES[name]
-    accepted = _unorderable_part(array.type) is None
+    # GroupBy's rule is the shared key preparation's with structs refused
+    # (``arrow_keys``, ITL-1281).
+    accepted = part_without_rule(array.type, structs=False) is None
     assert accepted == (list(AGREEMENT_TYPES).index(name) < ORDERABLE)
     if accepted:
-        prepared = _polars_ready(array)
+        prepared = polars_ready(array)
         frame = pl.from_arrow(pa.Table.from_arrays([prepared], names=["x"]))
         assert isinstance(frame, pl.DataFrame)
         _ = frame.sort(_sort_key("x", frame.schema["x"]), nulls_last=True)
-    else:
-        with pytest.raises(TypeError, match="no order"):
-            _ = _polars_ready(array)
+    elif part_without_rule(array.type, structs=True) is not None:
+        with pytest.raises(TypeError, match="no rule"):
+            _ = polars_ready(array)
+    # A struct is prepared for matching (``Join``); GroupBy refuses it by its
+    # rule above, before anything is prepared.

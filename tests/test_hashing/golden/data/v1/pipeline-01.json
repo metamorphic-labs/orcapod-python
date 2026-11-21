@@ -327,24 +327,8 @@
     "_tag_source_id::fddb365c4147114d8cfc5dcbd611e037b0f7f2729238cd29ade9a66578acad87::fddb365c4147114d8cfc5dcbd611e037b0f7f2729238cd29ade9a66578acad87:1",
     "_tag_record_id::fddb365c4147114d8cfc5dcbd611e037b0f7f2729238cd29ade9a66578acad87::fddb365c4147114d8cfc5dcbd611e037b0f7f2729238cd29ade9a66578acad87:1"
   ],
-  "join_key_nullability.merge_join.content_hash": "semantic_v1:3558c668a6c823d64f5a18c265acf0b38ce8142b4e91e3256ae2e6d64c206a68",
-  "join_key_nullability.merge_join.pipeline_hash": "semantic_v1:9eb3978aba7a8acc270d9b177156027493a279c294013cec7b08c9e359139d6d",
-  "join_key_nullability.merge_join.row[{\"subject\":\"s1\"}]._tag_record_id::d8f6f3824cdd5ed5f1795c5a050b727f3e05354c78d68a1aaff4056a9b66771e::d8f6f3824cdd5ed5f1795c5a050b727f3e05354c78d68a1aaff4056a9b66771e:0": "row_0",
-  "join_key_nullability.merge_join.row[{\"subject\":\"s1\"}]._tag_record_id::fddb365c4147114d8cfc5dcbd611e037b0f7f2729238cd29ade9a66578acad87::fddb365c4147114d8cfc5dcbd611e037b0f7f2729238cd29ade9a66578acad87:1": "row_0",
-  "join_key_nullability.merge_join.row[{\"subject\":\"s1\"}]._tag_source_id::d8f6f3824cdd5ed5f1795c5a050b727f3e05354c78d68a1aaff4056a9b66771e::d8f6f3824cdd5ed5f1795c5a050b727f3e05354c78d68a1aaff4056a9b66771e:0": "golden_plain_key",
-  "join_key_nullability.merge_join.row[{\"subject\":\"s1\"}]._tag_source_id::fddb365c4147114d8cfc5dcbd611e037b0f7f2729238cd29ade9a66578acad87::fddb365c4147114d8cfc5dcbd611e037b0f7f2729238cd29ade9a66578acad87:1": "golden_nullable_key",
   "join_key_nullability.merge_join.row[{\"subject\":\"s1\"}].data_hash": "arrow_v1:0000025019693a2d1d578c8af9aaae0e3dab43933bbf1196b4e42a4c3a83c80a1f61ef",
-  "join_key_nullability.merge_join.row[{\"subject\":\"s3\"}]._tag_record_id::d8f6f3824cdd5ed5f1795c5a050b727f3e05354c78d68a1aaff4056a9b66771e::d8f6f3824cdd5ed5f1795c5a050b727f3e05354c78d68a1aaff4056a9b66771e:0": "row_2",
-  "join_key_nullability.merge_join.row[{\"subject\":\"s3\"}]._tag_record_id::fddb365c4147114d8cfc5dcbd611e037b0f7f2729238cd29ade9a66578acad87::fddb365c4147114d8cfc5dcbd611e037b0f7f2729238cd29ade9a66578acad87:1": "row_2",
-  "join_key_nullability.merge_join.row[{\"subject\":\"s3\"}]._tag_source_id::d8f6f3824cdd5ed5f1795c5a050b727f3e05354c78d68a1aaff4056a9b66771e::d8f6f3824cdd5ed5f1795c5a050b727f3e05354c78d68a1aaff4056a9b66771e:0": "golden_plain_key",
-  "join_key_nullability.merge_join.row[{\"subject\":\"s3\"}]._tag_source_id::fddb365c4147114d8cfc5dcbd611e037b0f7f2729238cd29ade9a66578acad87::fddb365c4147114d8cfc5dcbd611e037b0f7f2729238cd29ade9a66578acad87:1": "golden_nullable_key",
   "join_key_nullability.merge_join.row[{\"subject\":\"s3\"}].data_hash": "arrow_v1:0000022166408838e16c8aac02628c1ab78d2e6ab30d5751d26b5a603cfaeab2d65df6",
-  "join_key_nullability.merge_join.system_tag_columns": [
-    "_tag_source_id::d8f6f3824cdd5ed5f1795c5a050b727f3e05354c78d68a1aaff4056a9b66771e::d8f6f3824cdd5ed5f1795c5a050b727f3e05354c78d68a1aaff4056a9b66771e:0",
-    "_tag_record_id::d8f6f3824cdd5ed5f1795c5a050b727f3e05354c78d68a1aaff4056a9b66771e::d8f6f3824cdd5ed5f1795c5a050b727f3e05354c78d68a1aaff4056a9b66771e:0",
-    "_tag_source_id::fddb365c4147114d8cfc5dcbd611e037b0f7f2729238cd29ade9a66578acad87::fddb365c4147114d8cfc5dcbd611e037b0f7f2729238cd29ade9a66578acad87:1",
-    "_tag_record_id::fddb365c4147114d8cfc5dcbd611e037b0f7f2729238cd29ade9a66578acad87::fddb365c4147114d8cfc5dcbd611e037b0f7f2729238cd29ade9a66578acad87:1"
-  ],
   "join_key_nullability.semi_join_left_nullable.content_hash": "semantic_v1:78ec7d0b87b6e758692337725de8ecb40ae0d4a3c2fa66c906cb3ed1b9aa6267",
   "join_key_nullability.semi_join_left_nullable.pipeline_hash": "semantic_v1:427d4a07cdf3dd5e74d5a808a915ef74852ef592880c5a35d32bfdcbdfe92008",
   "join_key_nullability.semi_join_left_nullable.row[{\"subject\":\"s1\"}]._tag_record_id::fddb365c4147114d8cfc5dcbd611e037b0f7f2729238cd29ade9a66578acad87": "row_0",
@@ -449,8 +433,6 @@
     "_tag_source_id::ac699f6aae66ff1745c42c76a3cb6cf59ba8588efc02d66e4f23de4be09ac373",
     "_tag_record_id::ac699f6aae66ff1745c42c76a3cb6cf59ba8588efc02d66e4f23de4be09ac373"
   ],
-  "merge_join.content_hash": "semantic_v1:afa3176e91b541aac96c4b50b4948f94d96ca7505305cd42c8c8f1167934db47",
-  "merge_join.pipeline_hash": "semantic_v1:be7df9479834c360b9d90feebf81ab862382a945d76e443c1bf8b65ea704b387",
   "merge_join.row[{\"subject\":\"s1\"}]._tag_record_id::a1db704c27d87a21807be6313bd1ed34dfb58236ec9f902a19c10c9ce7d46f6b::a1db704c27d87a21807be6313bd1ed34dfb58236ec9f902a19c10c9ce7d46f6b:1": "row_0",
   "merge_join.row[{\"subject\":\"s1\"}]._tag_record_id::ac699f6aae66ff1745c42c76a3cb6cf59ba8588efc02d66e4f23de4be09ac373::291aa68096a29e11f917b6276a9932f6874aac880928e17ed9050701d91e4934:0": "row_0",
   "merge_join.row[{\"subject\":\"s1\"}]._tag_source_id::a1db704c27d87a21807be6313bd1ed34dfb58236ec9f902a19c10c9ce7d46f6b::a1db704c27d87a21807be6313bd1ed34dfb58236ec9f902a19c10c9ce7d46f6b:1": "reweigh",

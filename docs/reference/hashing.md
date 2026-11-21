@@ -354,7 +354,7 @@ test session with `-p tests.test_hashing.hash_site_trace`.
 | `schema:` / `instance:` / `node:` path components | `core/nodes/function_node.py:FunctionNodeBase.node_identity_path`, `core/nodes/operator_node.py:OperatorNodeBase.node_identity_path`, `side_effects.py:SideEffectJobNode.attach_databases`, `core/sources/cached_source.py:CachedSource._unversioned_cache_path` |
 | source-node slot names | `core/nodes/source_node.py:SourceNode.from_stream`, `core/nodes/source_node.py:SourceJobNode.from_stream` |
 | source system-tag column name (schema digest) | `utils/schema_utils.py:compute_schema_hash` |
-| system-tag suffixes of `Join`, `MergeJoin`, `Batch`, `GroupBy` | `core/operators/join.py:Join._compute_system_tag_suffixes`, `core/operators/join.py:Join._predict_system_tag_schema`, `core/operators/join.py:Join.static_process`, `core/operators/merge_join.py:MergeJoin._predict_system_tag_schema`, `core/operators/merge_join.py:MergeJoin.binary_static_process`, `core/operators/batch.py:Batch.unary_output_schema`, `core/operators/batch.py:Batch.unary_static_process`, `core/operators/group_by.py:GroupBy.unary_output_schema`, `core/operators/group_by.py:GroupBy.unary_static_process` |
+| system-tag suffixes of `Join`, `MergeJoin`, `Batch`, `GroupBy` | `core/operators/join.py:Join._compute_system_tag_suffixes`, `core/operators/join.py:Join._predict_system_tag_schema`, `core/operators/join.py:Join.static_process`, `core/operators/merge_join.py:MergeJoin._system_tag_suffix`, `core/operators/batch.py:Batch.unary_output_schema`, `core/operators/batch.py:Batch.unary_static_process`, `core/operators/group_by.py:GroupBy.unary_output_schema`, `core/operators/group_by.py:GroupBy.unary_static_process` |
 | a saved hash shown as a digest | `core/nodes/function_node.py:_bare_digest` |
 | source ids (`<kind>:<label>:<hex>`, rule 7) | `core/sources/source_ids.py:hash_source_id`, `core/sources/derived_source.py:DerivedSource._default_source_id` |
 
@@ -375,7 +375,7 @@ A record id is the row identifier (rule 8), built from row positions or key valu
 | observer events (`node_hash`) | `core/nodes/function_node.py:FunctionJobNode.execute`, `core/nodes/function_node.py:FunctionJobNode.async_execute`, `core/nodes/function_node.py:FunctionJobNode._execute_load_only`, `core/nodes/function_node.py:FunctionJobNode._async_execute_load_only`, `core/nodes/function_node.py:FunctionJobNode._async_execute_cache_only`, `core/nodes/operator_node.py:OperatorJobNode.execute`, `core/nodes/operator_node.py:OperatorJobNode.async_execute`, `core/nodes/source_node.py:SourceNodeBase.execute`, `core/nodes/source_node.py:SourceNodeBase.async_execute` |
 | hooks (`pod_hash`) | `core/function_pod.py:_FunctionPodBase._build_post_run_payload` |
 | in-memory graph keys and sort keys | `pipeline/base.py:AbstractPipelineBase.compile`, `pipeline/base.py:AbstractPipelineBase.compile.<locals>.<lambda>`, `pipeline/base.py:AbstractPipelineBase._record_invocation`, `pipeline/base.py:AbstractPipelineBase.to_invocations`, `pipeline/base.py:AbstractPipelineBase.from_invocations`, `pipeline/job.py:PipelineJob.compile`, `pipeline/restrictions.py:sources_read` (the source identity a restriction is kept under, ITL-1218) |
-| canonical input order (sort by digest). Inputs with equal pipeline hashes (developer decision, November 16, 2026, ITL-1154: kept as it is): system-tag column names follow the stable pipeline-hash sort; each row's values are sorted by (source id, record id) by `sort_system_tag_values`, so the result does not depend on argument order; the operator's identity holds its inputs as a frozenset | `core/operators/join.py:Join.order_input_streams.<locals>.<lambda>`, `core/operators/merge_join.py:MergeJoin._canonical_order.<locals>.<lambda>` |
+| canonical input order (sort by digest). Inputs with equal pipeline hashes (developer decision, November 16, 2026, ITL-1154: kept as it is): system-tag column names follow the stable pipeline-hash sort; each row's values are sorted by (source id, record id) by `sort_system_tag_values`, so the result does not depend on argument order; the operator's identity holds its inputs as a frozenset | `core/operators/join.py:Join.order_input_streams.<locals>.<lambda>` |
 | in-memory identity and repr | `core/base.py:ContentIdentifiableBase.__hash__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__hash__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__eq__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__repr__` |
 | comparing a stored hash with the computed one; error text | `core/nodes/operator_node.py:OperatorJobNode._read_run_records`, `core/sources/source_proxy.py:SourceProxy.bind`, `core/data_function_proxy.py:DataFunctionProxy.bind`, `pipeline/job.py:PipelineJob.bind`, `errors.py:EphemeralResultMissingError.__init__` |
 
@@ -592,7 +592,7 @@ The table below shows what each class returns from `identity_structure()`.
 | `SpiralDBTableSource` | `(class_name, output_schema, source_id, key_columns)`, then the sorted `tags_as_data` items when given | A restriction (`where`, `limit`, `asof`) chooses rows of the same table and adds nothing |
 | `CachedSource` | the wrapped source's identity | |
 | Operators (unary) | `(operator_class_name, upstream_stream)` | Stream reference resolved via `content_resolver` |
-| Operators (binary/N-ary) | `(operator_class_name, argument_symmetry(streams))` | `frozenset` for commutative (Join, MergeJoin); `tuple` for ordered (SemiJoin) |
+| Operators (binary/N-ary) | `(operator_class_name, argument_symmetry(streams))` | `frozenset` for commutative (Join); `tuple` for ordered (SemiJoin, MergeJoin: ITL-1281) |
 | `SelectTagColumns`, `SelectDataColumns`, `DropTagColumns`, `DropDataColumns`, `SelectColumns`, `DropColumns` | `(operator_class_name, sorted unique column names as a list, strict)` | The operators act on a set of names: a list, a tuple, a set, a single string, a repeated or a reordered name list give one hash (ITL-942) |
 | `MapTags`, `MapData`, `MapColumns` | `(operator_class_name, name_map, drop_unmapped, strict)` | An operator's identity is its full configuration, `strict` included, as for the column selection operators (ITL-1160) |
 | `AddTags` | `(operator_class_name, ((name, value), ...) in name order)` | The new tags are a set: the order they are given in never enters the identity, and the tags are placed in name order (ITL-1269) |
@@ -656,19 +656,26 @@ get equal row hashes in step 3, so their order is arbitrary; that is harmless be
 final table hash ignores the same bits.
 
 **Inputs of a commutative operator are a set (kept by decision, ITL-942).** A pipeline hash
-covers the structure of the pipeline, not only its schemas. `MergeJoin()(m1, m1)`, a stream
-joined with itself, is a different pipeline from `MergeJoin()(m1, m2)` and has a different
-pipeline hash even when both inputs share one schema. Inputs are an unordered set compared by
-identity, so input order never matters, and two inputs with the same source identity (same
-class, schemas and `source_id`) count as one input: `MergeJoin()(m1, m1b)` hashes like
-`MergeJoin()(m1, m1)` when `m1b` has the `source_id` of `m1`.
+covers the structure of the pipeline, not only its schemas: a commutative operator's identity
+holds its inputs (`Join`'s) as an unordered set compared by identity, so input order never
+matters, and two inputs with the same source identity (same class, schemas and `source_id`)
+count as one input.
 
 **Inputs with equal pipeline hashes tie, and argument order never breaks the tie** (developer
 decision, November 16, 2026, ITL-1154). The system-tag column names follow the stable
 pipeline-hash sort, and each row's system-tag values at the tied positions are sorted by
-(source id, record id) (`arrow_utils.sort_system_tag_values`), so `MergeJoin()(a, b)` and
-`MergeJoin()(b, a)` over two sources of one schema give the same rows, the same column names
+(source id, record id) (`arrow_utils.sort_system_tag_values`), so `Join()(a, b)` and
+`Join()(b, a)` over two sources of one schema give the same rows, the same column names
 and the same hashes.
+
+**`MergeJoin` is ordered** (developer decision, November 19, 2026, ITL-1281). Its identity
+holds its inputs as a tuple, in argument order. So `MergeJoin()(a, b)` and `MergeJoin()(b, a)`
+have different content hashes whenever `a` and `b` are different sources. Their pipeline
+hashes differ only when the inputs' pipeline hashes differ: two inputs of one schema have
+one pipeline hash, so the ordered pair is the same either way (as for `SemiJoin`). Apart
+from the identity, each input's system-tag columns end in its argument index (`:0` for the
+first, `:1` for the second), nothing is sorted, and every merged list holds the first
+argument's value first.
 
 **Known exclusions from `identity_structure()`:**
 

@@ -274,6 +274,45 @@ def source_exact(
     )
 
 
+def source_exact_colliding(
+    source_id: str, offset: int, with_data_tags: bool = False
+) -> ArrowTableSource:
+    """Tags ``k: date64`` (off midnight) and ``n: int64``; data columns that two such
+    sources share (``MergeJoin`` merges them) of the types Python changed (ITL-1281):
+    ``time64[ns]``, ``date64`` off midnight, a float32 signaling NaN, ``decimal256``,
+    a list and a struct of them; and one column of its own."""
+    dates = pa.array([1, 86_400_001, 2], pa.int64()).cast(pa.date64())
+    decimals = pa.array(
+        [decimal.Decimal(f"{n}.{offset + n:040d}") for n in range(3)],
+        pa.decimal256(76, 40),
+    )
+    times = pa.array([1 + offset, 1001 + offset, 2], pa.int64()).cast(pa.time64("ns"))
+    return _source(
+        {
+            "k": dates,
+            "n": pa.array([7, 8, 9], pa.int64()),
+            "time": times,
+            "date": pa.array([1 + offset, 86_400_001 + offset, 3], pa.int64()).cast(
+                pa.date64()
+            ),
+            "nan": pa.array(
+                [0x7F800001 + offset, 0x3F800000, 0xFFC00000], pa.uint32()
+            ).view(pa.float32()),
+            "dec": decimals,
+            "list": pa.LargeListArray.from_arrays(
+                pa.array([0, 1, 2, 3], pa.int64()), times
+            ),
+            "struct": pa.StructArray.from_arrays([dates, decimals], names=["a", "b"]),
+            f"only_{source_id}": pa.array(
+                [f"{source_id}{i}" for i in range(3)], pa.large_string()
+            ),
+        },
+        tags=("k", "n"),
+        source_id=source_id,
+        with_data_tags=with_data_tags,
+    )
+
+
 def merge_source(
     source_id: str, offset: int, with_data_tags: bool = False
 ) -> ArrowTableSource:
@@ -462,6 +501,30 @@ CASES = [
         "semijoin_exact_values",
         SemiJoin,
         lambda: (source_exact("e", 0, with_data_tags=True), source_exact("f", 5)),
+    ),
+    # Values Python changed when MergeJoin and Batch built their lists (ITL-1281).
+    Case(
+        "merge_join_exact_values",
+        MergeJoin,
+        lambda: (source_exact_colliding("e", 0), source_exact_colliding("f", 5)),
+    ),
+    Case(
+        "merge_join_exact_values_data_tags",
+        MergeJoin,
+        lambda: (
+            source_exact_colliding("f", 5, with_data_tags=True),
+            source_exact_colliding("e", 0, with_data_tags=True),
+        ),
+    ),
+    Case(
+        "batch_2_exact_values",
+        lambda: Batch(batch_size=2),
+        lambda: (source_exact_colliding("e", 0, with_data_tags=True),),
+    ),
+    Case(
+        "batch_all_exact_values",
+        Batch,
+        lambda: (source_exact_colliding("e", 0),),
     ),
     Case("batch_2", lambda: Batch(batch_size=2), lambda: (source_a(),)),
     Case("batch_all", Batch, lambda: (source_a(),)),
