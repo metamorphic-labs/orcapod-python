@@ -70,12 +70,16 @@ What it shows ([Looking at data](streams.md#looking-at-data) states each rule in
   here `first 10 of 64 rows, sorted by tags`. A source that reads only part of its table
   says so, as a [SpiralDB source](sources.md) does ("10 rows read, sorted by tags, of about
   63,349").
-- **Tag columns** come first and are marked: in a notebook their headers are bold (in an
-  accent colour), a vertical rule separates them from the data columns and a line under the
-  header says "bold = tag". A [data-tag](data-tags.md) is one column: the preview shows
-  it once, among the tags, with its header bold and underlined, and the line says
+- **Tag columns** come first and are marked, and so are data columns: in a notebook a tag's
+  header is bold (in an accent colour), a data column's is underlined, a vertical rule
+  separates the tags from the data columns, and a line under the header names the marks,
+  "bold = tag; underlined = data". A [data-tag](data-tags.md) is one column, a tag that is
+  also data: the preview shows it once, among the tags, with both marks (bold, in the
+  accent colour, and underlined), and the line adds
   "bold underlined = data-tag (a tag that is also data)". The line names only the marks
-  shown: the tags of `units` are all plain.
+  shown: the tags of `units` are all plain. (The pictures were taken before data headers
+  were underlined.) When `columns` asks for the hidden column groups, system tags are
+  marked as tags and the source-info, context and content-hash columns are left unmarked.
 - **Large cells** are summarised (an array as `ndarray float64 (2, 3)`, bytes as
   `bytes (300 B)`, long text and long lists shortened); `head().table` keeps the full values.
 

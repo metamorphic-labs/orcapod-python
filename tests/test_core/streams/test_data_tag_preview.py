@@ -435,50 +435,62 @@ def _cells(html_text: str) -> list[list[tuple[str, str]]]:
     return parser.rows
 
 
-TAG_STYLE = "font-weight:bold"
-DATA_TAG_STYLE = "text-decoration:underline"
+BOLD = "font-weight:bold"
+ACCENT = "color:#2a7fb8"
+UNDERLINE = "text-decoration:underline"
 TEXT_LEGEND = {"tag": "* = tag", "data-tag": "+ = data-tag (tag and data)"}
 HTML_LEGEND = {
     "tag": "bold = tag",
+    "data": "underlined = data",
     "data-tag": "bold underlined = data-tag (a tag that is also data)",
 }
 
 
 def _check_display(shown: object) -> None:
-    """Both displays of ``shown`` (a view) mark each plain tag, each data-tag and no data
-    column, with one rule after the tags, and a legend naming exactly the marks shown."""
+    """Both displays of ``shown`` (a view of the default columns) mark each plain tag,
+    each data-tag and each data column, with one rule after the tags, and a legend
+    naming exactly the marks shown: bold in the accent colour for a tag, an underline
+    for data, both for a data-tag."""
     view = _view(shown)
     data_tags = set(view.data_tag_columns)
     plain = [c for c in view.tag_columns if c not in data_tags]
-    roles = [*(["tag"] if plain else []), *(["data-tag"] if data_tags else [])]
+    others = [c for c in view.table.column_names if c not in view.tag_columns]
+    # A view of the default columns shows user columns only: every other one is data.
+    assert list(view.data_columns) == others
+    roles = [
+        *(["tag"] if plain else []),
+        *(["data"] if others else []),
+        *(["data-tag"] if data_tags else []),
+    ]
 
     html_text = view._repr_html_()
     legend = "; ".join(HTML_LEGEND[role] for role in roles)
     if legend:
         assert f"<small>{legend}</small>" in html_text
-    else:
-        assert "bold" not in html_text.split("<style>", 1)[0]
     if view.table.num_columns:
         rows = _cells(html_text)
         header = rows[0]
-        assert [name for name, _ in header] == [
-            *view.tag_columns,
-            *(c for c in view.table.column_names if c not in view.tag_columns),
-        ]
+        assert [name for name, _ in header] == [*view.tag_columns, *others]
         for name, style in header:
             if name in data_tags:
-                assert TAG_STYLE in style and DATA_TAG_STYLE in style, name
+                assert BOLD in style and ACCENT in style and UNDERLINE in style, name
             elif name in view.tag_columns:
-                assert TAG_STYLE in style and DATA_TAG_STYLE not in style, name
+                assert BOLD in style and ACCENT in style, name
+                assert UNDERLINE not in style, name
             else:
-                assert TAG_STYLE not in style and DATA_TAG_STYLE not in style, name
-        if view.tag_columns and len(header) > len(view.tag_columns):
+                assert "font-weight:normal" in style and UNDERLINE in style, name
+                assert ACCENT not in style, name
+        # Only the first header row is marked: the type row and the rows of values
+        # carry no mark.
+        for row in rows[1:]:
+            assert all(UNDERLINE not in s and BOLD not in s for _, s in row)
+        if view.tag_columns and others:
             for row in rows:
                 ruled = [i for i, (_, s) in enumerate(row) if "border-right" in s]
                 assert ruled == [len(view.tag_columns) - 1]
 
     lines = str(view).split("\n")
-    text_legend = "; ".join(TEXT_LEGEND[role] for role in roles)
+    text_legend = "; ".join(TEXT_LEGEND[role] for role in roles if role in TEXT_LEGEND)
     if text_legend:
         assert lines[1] == text_legend
     else:
@@ -488,7 +500,7 @@ def _check_display(shown: object) -> None:
         names = [cell.strip() for cell in names_line.strip("│").split("┆")]
         assert names == [
             *(("+" if c in data_tags else "*") + c for c in view.tag_columns),
-            *(c for c in view.table.column_names if c not in view.tag_columns),
+            *others,
         ]
 
 
@@ -512,7 +524,8 @@ def test_both_displays_mark_plain_tags_and_data_tags(
 
 
 def test_the_marks_of_a_known_stream() -> None:
-    """The exact header styles, text names and legends of one stream."""
+    """The exact header styles, text names and legends of one stream: tags in tag order
+    (plain and data-tags interleaved), then two data columns."""
     view = _source(TAG_ORDERS["interleaved"], LAYOUTS["tags_first"]).run()
     header = _cells(view._repr_html_())[0]
     assert header == [
@@ -524,36 +537,104 @@ def test_the_marks_of_a_known_stream() -> None:
             "font-weight:bold;text-decoration:underline;color:#2a7fb8;"
             "border-right:2px solid currentColor",
         ),
-        ("amp", ""),
-        ("label", ""),
+        ("amp", "font-weight:normal;text-decoration:underline"),
+        ("label", "font-weight:normal;text-decoration:underline"),
     ]
     assert (
-        "<small>bold = tag; bold underlined = data-tag (a tag that is also data)</small>"
-        in view._repr_html_()
-    )
+        "<small>bold = tag; underlined = data; "
+        "bold underlined = data-tag (a tag that is also data)</small>"
+    ) in view._repr_html_()
     text = str(view)
     assert text.split("\n")[1] == "* = tag; + = data-tag (tag and data)"
     assert "*session ┆ +unit ┆ *trial ┆ +time ┆ amp" in text
     # The legend's order is the marks' order, whatever the first column's role.
     first = _source(TAG_ORDERS["data_tags_first"]).run()
     assert str(first).split("\n")[1] == "* = tag; + = data-tag (tag and data)"
+    assert (
+        "<small>bold = tag; underlined = data; bold underlined = data-tag"
+        in first._repr_html_()
+    )
 
 
-def test_a_stream_with_only_plain_tags_shows_only_the_tag_mark() -> None:
-    """No data-tag: no underline and the legend names the tag mark only."""
+def test_a_stream_with_only_plain_tags_shows_no_data_tag_mark() -> None:
+    """No data-tag: no header is both bold and underlined, and the legend names the
+    tag and data marks only."""
     view = _source(plain=PLAIN + DATA_TAGS).run()
     _check_display(view)
-    assert "underline" not in view._repr_html_()
+    assert all(
+        not ("font-weight:bold" in s and UNDERLINE in s)
+        for _, s in _cells(view._repr_html_())[0]
+    )
+    assert "<small>bold = tag; underlined = data</small>" in view._repr_html_()
+    assert "data-tag" not in view._repr_html_()
     assert str(view).split("\n")[1] == "* = tag"
 
 
-def test_a_stream_with_only_data_tags_shows_only_the_data_tag_mark() -> None:
-    """Every tag a data-tag: the legend names the data-tag mark only."""
+def test_a_stream_with_only_data_tags_shows_no_plain_tag_mark() -> None:
+    """Every tag a data-tag: the legend names the data and data-tag marks only; with
+    no other data column, the data-tag mark only."""
     view = _source(plain=()).run()
     _check_display(view)
-    assert "bold = tag;" not in view._repr_html_()
-    assert "<small>bold underlined = data-tag" in view._repr_html_()
+    assert "<small>underlined = data; bold underlined = data-tag" in view._repr_html_()
     assert str(view).split("\n")[1] == "+ = data-tag (tag and data)"
+    only = (
+        _source(plain=())
+        .select_data_columns(["session", "unit", "trial", "time"])
+        .run()
+    )
+    _check_display(only)
+    assert only.data_columns == ()
+    assert (
+        "<small>bold underlined = data-tag (a tag that is also data)</small>"
+        in only._repr_html_()
+    )
+
+
+def test_a_stream_without_tags_marks_its_data_only() -> None:
+    """No tag: every column is underlined and the legend names the data mark only."""
+    view = ArrowTableStream(pa.table({"amp": [0.5, 0.25], "label": ["s", "b"]})).run()
+    _check_display(view)
+    assert "<small>underlined = data</small>" in view._repr_html_()
+    assert "= tag" not in str(view)
+
+
+def test_hidden_column_groups_keep_their_look() -> None:
+    """With every column group shown, only the user data columns are underlined:
+    system-tag columns keep the tag mark they had (they are tag columns of the view),
+    and source-info, context and content-hash columns stay unmarked."""
+    source = _source(TAG_ORDERS["interleaved"], LAYOUTS["data_first"])
+    computed = scale.pod(source)
+    _ = computed.run()
+    for head in (
+        _view(source.head(all_info=True)),
+        _view(computed.head(all_info=True)),
+    ):
+        user_tags = [c for c in head.tag_columns if not c.startswith("_")]
+        system_tags = [c for c in head.tag_columns if c.startswith("_tag")]
+        unmarked = [
+            c
+            for c in head.table.column_names
+            if c not in head.tag_columns and c not in head.data_columns
+        ]
+        assert sorted(head.data_tag_columns) == sorted(DATA_TAGS)
+        assert len(system_tags) == 2
+        assert any(c.startswith("_source_") for c in unmarked)
+        assert "_context_key" in unmarked
+        assert all(c.startswith("_") for c in unmarked)
+        assert not any(c.startswith("_") for c in head.data_columns)
+        header = dict(_cells(head._repr_html_())[0])
+        for name in system_tags:
+            assert header[name].startswith("font-weight:bold;color:#2a7fb8"), name
+            assert UNDERLINE not in header[name], name
+        for name in user_tags:
+            assert BOLD in header[name], name
+        for name in head.data_columns:
+            assert header[name] == "font-weight:normal;text-decoration:underline"
+        for name in unmarked:
+            assert header[name] == "", name
+        # The rule still follows the last tag.
+        ruled = [name for name, style in header.items() if "border-right" in style]
+        assert ruled == [head.tag_columns[-1]]
 
 
 def test_every_kind_of_stream_shows_the_marks() -> None:
@@ -583,7 +664,7 @@ def test_every_kind_of_stream_shows_the_marks() -> None:
         _check_display(stream.run().tail(2).sort_by_tags())
         preview = stream._repr_html_()
         assert HTML_LEGEND["data-tag"] in preview
-        assert DATA_TAG_STYLE in preview
+        assert HTML_LEGEND["data"] in preview
 
 
 @pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))

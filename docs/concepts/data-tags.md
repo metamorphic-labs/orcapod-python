@@ -37,9 +37,10 @@ not a declared tag is an error. A source built with all its tags plain is exactl
 source v0.3 built: same columns, same hashes.
 
 The column is stored once: `as_table()` shows it once, and every row's tag and data hold
-the same value. The preview shows it once, among the tags, marked as a data-tag: in a
-notebook its header is bold and underlined (a plain tag's is bold), and as text its name starts
-with `+` (a plain tag's with `*`). The legend line names the marks shown
+the same value. The preview shows it once, among the tags, marked as a data-tag. In a
+notebook the marks compose: a tag's header is bold in an accent colour, a data column's is
+underlined, and a data-tag's has both. As text a data-tag's name starts with `+` (a plain
+tag's with `*`; a data column's is unmarked). The legend line names the marks shown
 ([Working in notebooks](notebooks.md#a-stream-at-the-end-of-a-cell)). Only the display is
 marked: the view's table and `as_table()` keep the plain names.
 
