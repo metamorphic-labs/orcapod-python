@@ -916,7 +916,9 @@ def deserialize_schema(
     return result
 
 
-def arrow_type_texts(schema: "pa.Schema") -> dict[str, str]:
+def arrow_type_texts(
+    schema: "pa.Schema", type_converter: Any | None = None
+) -> dict[str, str]:
     """Return the saved type strings of an Arrow schema, its own types (ITL-640).
 
     The text of each field's own Arrow type (``_serialize_field_type``: nested
@@ -929,14 +931,59 @@ def arrow_type_texts(schema: "pa.Schema") -> dict[str, str]:
 
     Args:
         schema: The Arrow schema.
+        type_converter: The converter of the data context the text is read back
+            with (it resolves logical type identifiers); ``None`` for the default
+            data context's.
 
     Returns:
         A dict mapping field names to Arrow type strings, in the schema's order.
+
+    Raises:
+        ValueError: If a field's text would not read back as its type
+            (``_require_text_reads_back``).
     """
-    return {
-        field.name: _serialize_field_type(field)
-        for field in storage_form_schema(schema)
-    }
+    texts: dict[str, str] = {}
+    for field in storage_form_schema(schema):
+        text = _serialize_field_type(field)
+        _require_text_reads_back(field.name, text, type_converter)
+        texts[field.name] = text
+    return texts
+
+
+def _require_text_reads_back(name: str, text: str, type_converter: Any | None) -> None:
+    """Refuse a saved type text that does not read back as the type it was written for.
+
+    The one check of the writer of saved Arrow types (``arrow_type_texts``; CodeRabbit
+    on PR 454): the text is read (``parse_arrow_type_string``) and written again, and
+    must come back the same, so no type can be saved into a file that cannot be loaded
+    or loads as another type. Checked before anything is written: ``Pipeline.save``
+    and ``PipelineJob.save`` raise, and the caller names the node.
+
+    Args:
+        name: The column the text is for.
+        text: Its saved type text.
+        type_converter: The converter the text is read back with (``None``: the
+            default data context's).
+
+    Raises:
+        ValueError: If the text cannot be read, or reads back as another type.
+    """
+    try:
+        back = _serialize_arrow_type(parse_arrow_type_string(text, type_converter))
+    except Warning:
+        # A warning turned into an error (a provisional library value type under an
+        # error filter) is not the text's fault (ITL-1331).
+        raise
+    except Exception as exc:
+        raise ValueError(
+            f"column {name!r}: its saved type text {text!r} cannot be read back "
+            f"({exc}), so a file holding it could not be loaded; it is not saved"
+        ) from exc
+    if back != text:
+        raise ValueError(
+            f"column {name!r}: its saved type text {text!r} reads back as {back!r}, "
+            "another type; it is not saved"
+        )
 
 
 def arrow_nullable_names(schema: "pa.Schema") -> list[str]:
@@ -945,7 +992,7 @@ def arrow_nullable_names(schema: "pa.Schema") -> list[str]:
 
 
 def serialize_arrow_schemas(
-    tag_schema: "pa.Schema", data_schema: "pa.Schema"
+    tag_schema: "pa.Schema", data_schema: "pa.Schema", type_converter: Any | None = None
 ) -> dict[str, Any]:
     """Return the saved entry of a tag and data Arrow schema pair (ITL-640).
 
@@ -960,13 +1007,19 @@ def serialize_arrow_schemas(
     Args:
         tag_schema: The Arrow schema of the tag columns.
         data_schema: The Arrow schema of the data columns (data-tags included).
+        type_converter: The converter of the node's data context, which the texts
+            are read back with (``arrow_type_texts``); ``None`` for the default's.
 
     Returns:
         The entry, ready for JSON.
+
+    Raises:
+        ValueError: If a field's type text would not read back as its type; nothing
+            is written (the caller names the node).
     """
     return {
-        "tag": arrow_type_texts(tag_schema),
-        "data": arrow_type_texts(data_schema),
+        "tag": arrow_type_texts(tag_schema, type_converter),
+        "data": arrow_type_texts(data_schema, type_converter),
         "nullable": {
             "tag": arrow_nullable_names(tag_schema),
             "data": arrow_nullable_names(data_schema),
@@ -1540,8 +1593,8 @@ def _parse_parameterized_type(type_str: str) -> Any | None:
 
     Handles the canonical ``str()`` forms of ``timestamp[us]``,
     ``timestamp[us, tz=UTC]``, ``duration[us]``, ``time32[ms]``,
-    ``time64[us]``, ``date64[ms]``, ``decimal128(10, 2)``,
-    ``decimal256(40, 2)`` and ``fixed_size_binary[3]``.
+    ``time64[us]``, ``date64[ms]``, ``decimal32(5, 2)``, ``decimal64(12, 3)``,
+    ``decimal128(10, 2)``, ``decimal256(40, 2)`` and ``fixed_size_binary[3]``.
 
     Args:
         type_str: Arrow type string, stripped of surrounding whitespace.
@@ -1567,8 +1620,15 @@ def _parse_parameterized_type(type_str: str) -> Any | None:
         return pa.time64(cast(Literal["us", "ns"], match.group(1)))
     if type_str == "date64[ms]":
         return pa.date64()
-    if match := re.fullmatch(r"decimal(128|256)\((\d+), (-?\d+)\)", type_str):
-        factory = pa.decimal128 if match.group(1) == "128" else pa.decimal256
+    if match := re.fullmatch(r"decimal(32|64|128|256)\((\d+), (-?\d+)\)", type_str):
+        # Every width Arrow has (``decimal32`` and ``decimal64`` since pyarrow 18;
+        # Orcapod requires 22): a saved decimal reads back at its own width.
+        factory = {
+            "32": pa.decimal32,
+            "64": pa.decimal64,
+            "128": pa.decimal128,
+            "256": pa.decimal256,
+        }[match.group(1)]
         return factory(int(match.group(2)), int(match.group(3)))
     if match := re.fullmatch(r"fixed_size_binary\[(\d+)\]", type_str):
         return pa.binary(int(match.group(1)))

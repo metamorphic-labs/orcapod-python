@@ -636,7 +636,9 @@ class SourceNodeBase(TraceableBase, ABC):
         if self._resolve():
             from orcapod.pipeline.serialization import serialize_arrow_schemas
 
-            return serialize_arrow_schemas(*self.arrow_schemas)
+            return serialize_arrow_schemas(
+                *self.arrow_schemas, self.data_context.type_converter
+            )
         texts = self._saved_arrow_texts
         assert texts is not None  # unresolved
         return {

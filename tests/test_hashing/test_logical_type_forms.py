@@ -52,7 +52,7 @@ from orcapod.pipeline.serialization import (
     arrow_schema_from_texts,
     arrow_type_texts,
 )
-from orcapod.types import Cursor
+from orcapod.types import CacheMode, Cursor
 from orcapod.utils.arrow_utils import normalize_extension_columns
 
 from ..test_core.operators.test_async_sync_equivalence import source_a
@@ -467,6 +467,47 @@ def test_a_loaded_read_only_operator_has_its_saved_arrow_types_with_no_rows(
     assert expected.schema.field("n").type == pa.int32()
     assert expected.schema.field("k").type == pa.int16()
     assert expected.schema.field("m").nullable
+
+
+def _narrow_job(layout: str, database: Any) -> PipelineJob:
+    """A job of one ``Index`` node over the narrow source in ``layout``."""
+    columns, tags, tag_only = _NARROW_LAYOUTS[layout]
+    table = pa.Table.from_pydict(
+        {name: _NARROW_VALUES[name] for name in columns},
+        schema=pa.schema([_NARROW_FIELDS[name] for name in columns]),
+    )
+    source = ArrowTableSource(
+        table, tag_columns=tags, tag_only_columns=tag_only, source_id="narrow"
+    )
+    job = PipelineJob(name="read_only_narrow", database=database)
+    with job:
+        Index("l", 0, "l0")(source, label="ro")
+    return job
+
+
+@pytest.mark.parametrize("layout", list(_NARROW_LAYOUTS))
+def test_a_loaded_read_only_operator_replays_an_empty_store_with_its_saved_types(
+    tmp_path: Path, layout: str
+) -> None:
+    """In ``CacheMode.REPLAY`` over a database that holds none of its rows, a loaded
+    node without its operator answers its saved Arrow types (``get_cached_output``,
+    through ``_make_empty_table``), never the Python schema's ``int64`` (CodeRabbit
+    on PR 454)."""
+    job = _narrow_job(layout, InMemoryArrowDatabase())
+    expected = job.nodes["ro"].as_table()  # not run: its zero-row table
+    path = tmp_path / "job.json"
+    job.save(path)
+    empty = InMemoryArrowDatabase()
+    loaded = PipelineJob.load(path, database=empty).nodes["ro"]
+    assert loaded._operator is None  # pyright: ignore[reportAttributeAccessIssue]  # the case under test
+    loaded.attach_databases(
+        pipeline_database=empty.at("read_only_narrow"), cache_mode=CacheMode.REPLAY
+    )
+    cached = loaded.get_cached_output()
+    assert cached is not None
+    got = cached.as_table()
+    assert got.num_rows == 0
+    assert got.schema.equals(expected.schema), (got.schema, expected.schema)
 
 
 # ── 5. an identifier nested in a plain list, struct or map (Codex review 454b) ─

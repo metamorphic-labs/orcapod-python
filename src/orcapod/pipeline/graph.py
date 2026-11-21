@@ -151,7 +151,12 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         with shared_zero_row_memo():
             for key, node in self._persistent_node_map.items():
                 if isinstance(node, SourceNodeClass):
-                    slot_types[key] = node.saved_type_texts()
+                    try:
+                        slot_types[key] = node.saved_type_texts()
+                    except ValueError as exc:
+                        # A type text that would not read back (CodeRabbit on PR 454).
+                        exc.add_note(f"Saving the pipeline's node {node.label!r}")
+                        raise
                     continue
                 try:
                     arrow_types[key] = typed_arrow_schemas(node)
@@ -191,6 +196,25 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
             _cfg = node.orcapod_config
             config_val = None if _cfg == _DEFAULT_CONFIG else dataclasses.asdict(_cfg)
 
+            try:
+                output_schema: dict[str, Any] = (
+                    copy.deepcopy(slot_types[content_hash_str])
+                    if content_hash_str in slot_types
+                    else serialize_arrow_schemas(
+                        *arrow_types[content_hash_str], type_converter
+                    )
+                    if content_hash_str in arrow_types
+                    else dict(retained[content_hash_str])
+                    if content_hash_str in retained
+                    else serialize_output_schema(
+                        tag_schema, data_schema, type_converter
+                    )
+                )
+            except ValueError as exc:
+                # A type text that would not read back (CodeRabbit on PR 454).
+                exc.add_note(f"Saving the pipeline's node {node.label!r}")
+                raise
+
             descriptor: dict[str, Any] = {
                 "node_type": node.node_type,
                 "label": node.label,
@@ -201,17 +225,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                 # re-derived from Python ones (which lose time64[ns] or a decimal's
                 # precision). A slot whose class is not registered keeps its saved
                 # text below (ITL-1138).
-                "output_schema": (
-                    copy.deepcopy(slot_types[content_hash_str])
-                    if content_hash_str in slot_types
-                    else serialize_arrow_schemas(*arrow_types[content_hash_str])
-                    if content_hash_str in arrow_types
-                    else dict(retained[content_hash_str])
-                    if content_hash_str in retained
-                    else serialize_output_schema(
-                        tag_schema, data_schema, type_converter
-                    )
-                ),
+                "output_schema": output_schema,
                 "node_uri": list(node.node_uri),
                 "data_context_key": data_context_key,
                 "config": config_val,

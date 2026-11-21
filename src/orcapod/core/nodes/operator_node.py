@@ -396,6 +396,10 @@ class OperatorNodeBase(StreamBase):
         """This node's table with no rows; a read-only node's from its saved types."""
         if self._operator is not None:
             return super()._zero_row_table(config)
+        # ``head`` and the preview: the same saved types ``_make_empty_table`` uses.
+        # ``_typed_zero_row_table`` stays ``None`` for such a node: what it promises a
+        # downstream consumer (system-tag and source-info columns) the saved schema
+        # does not name.
         saved = self._saved_zero_row_table()
         if saved is None:
             return None
@@ -1540,18 +1544,22 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
     def _make_empty_table(self) -> "pa.Table":
         """Build the zero-row table this node reads as when it holds no rows.
 
-        The node's operator applied to its inputs' zero-row tables
+        The one place a node's zero-row table is built, for every path that reads
+        it (``as_table``, ``_load_cached_stream_from_db`` in REPLAY, the stored
+        view): the node's operator applied to its inputs' zero-row tables
         (``_typed_zero_row_table``), so the columns, Arrow types and nullability are
-        those of the node's rows. When an input cannot say its Arrow types without
-        rows (a known limitation, see ``as_table``), the table is built from the
-        node's Python output schema with ``arrow_utils.make_empty_table``: plain
-        types give ``nullable=False`` fields and ``T | None`` types
-        ``nullable=True`` fields.
-
-        Requires ``self._operator is not None`` (pre-existing limitation shared
-        with ``_replay_from_cache``).
+        those of the node's rows. A loaded node without its operator (``Index``,
+        ``Pick``) takes its saved Arrow pair (``_saved_zero_row_table``): a saved
+        ``int32`` stays ``int32`` (CodeRabbit on PR 454). Only when neither can say
+        the Arrow types (an input that cannot type itself without rows, a known
+        limitation, see ``as_table``; a saved text naming an unregistered logical
+        type) is the table built from the node's Python output schema with
+        ``arrow_utils.make_empty_table``: plain types give ``nullable=False`` fields
+        and ``T | None`` types ``nullable=True`` fields.
         """
         typed = self._typed_zero_row_table()
+        if typed is None:
+            typed = self._saved_zero_row_table()
         if typed is not None:
             return typed
         tag_schema, data_schema = self.output_schema()
@@ -1608,6 +1616,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
                 # schema without a live operator. Return None so callers fall
                 # back to iter([]) / _make_empty_table() guarded paths.
                 return None
+            # A loaded node without its operator gets its saved Arrow types here.
             records_table = self._make_empty_table()
         else:
             records_table = records
@@ -1959,28 +1968,8 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         current = self._current_output()
         if current is not None:
             return current.as_table(columns=columns, all_info=all_info)
-        if self._operator is None:
-            # A node rebuilt without its operator: the columns and Arrow types of its
-            # saved schema (``_saved_zero_row_table``). The Python schema's conversion
-            # only when the saved text cannot be restored (an unregistered logical
-            # type), where the Python schema cannot be read either and this raises.
-            config = ColumnConfig.handle_config(columns, all_info=all_info)
-            saved = self._zero_row_table(config)
-            if saved is not None:
-                return saved
-            tag_schema, data_schema = self.output_schema()
-            empty = pa.Table.from_pylist(
-                [],
-                schema=self.data_context.type_converter.python_schema_to_arrow_schema(
-                    tag_schema + data_schema
-                ),
-            )
-            return ArrowTableStream(
-                empty,
-                tag_columns=tuple(tag_schema),
-                data_tags=self.declared_data_tags(),
-                data_context=self.data_context,
-            ).as_table(columns=columns, all_info=all_info)
+        # Every node, one with an operator or one rebuilt without it, from the one
+        # builder of its zero-row table (``_make_empty_table``).
         empty_stream = ArrowTableStream(
             self._make_empty_table(),
             tag_columns=self.keys()[0],

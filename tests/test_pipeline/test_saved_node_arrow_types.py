@@ -140,3 +140,113 @@ def test_an_older_file_with_null_text_loads_and_refuses_only_the_stored_read(
     assert loaded.nodes["twice"].label == "twice"
     with pytest.raises(ValueError, match="'k1' has the saved type 'null'"):
         loaded.nodes["twice"].as_source().as_table()
+
+
+# ---------------------------------------------------------------------------
+# decimal32 and decimal64 read back at their own width; a type text that would not
+# read back is refused before anything is written (CodeRabbit on PR 454)
+# ---------------------------------------------------------------------------
+
+# Two precisions and scales per width, each width as a tag and as data; the second
+# arrangement swaps which precision is the tag.
+_DECIMAL_ARRANGEMENTS: dict[str, dict[str, pa.DataType]] = {
+    "narrow tags": {
+        "t32": pa.decimal32(5, 2),
+        "t64": pa.decimal64(18, 0),
+        "d32": pa.decimal32(9, 4),
+        "d64": pa.decimal64(12, 3),
+    },
+    "wide tags": {
+        "t32": pa.decimal32(9, 4),
+        "t64": pa.decimal64(12, 3),
+        "d32": pa.decimal32(5, 2),
+        "d64": pa.decimal64(18, 0),
+    },
+}
+
+
+def _decimal_source(arrangement: str) -> ArrowTableSource:
+    """A source with a decimal32 and a decimal64 tag and data column."""
+    types = _DECIMAL_ARRANGEMENTS[arrangement]
+    values = [decimal.Decimal(1), decimal.Decimal(2)]
+    table = pa.Table.from_arrays(
+        [pa.array(values, t) for t in types.values()], names=list(types)
+    )
+    return ArrowTableSource(
+        table,
+        tag_columns=["t32", "t64"],
+        tag_only_columns=True,
+        source_id="decimals",
+    )
+
+
+@pytest.mark.parametrize("arrangement", list(_DECIMAL_ARRANGEMENTS))
+def test_decimal32_and_decimal64_save_and_load_at_their_own_width(
+    tmp_path: Path, arrangement: str
+) -> None:
+    """The saved text of a decimal32 or decimal64 column reads back as that type: the
+    loaded slot has the source's Arrow pair, the original source binds, and a
+    load-only run reads the same rows."""
+    from orcapod.core.operators import MapData
+
+    source = _decimal_source(arrangement)
+    database = InMemoryArrowDatabase()
+    job = PipelineJob(name="decimals", database=database)
+    with job:
+        MapData({"d32": "e32"})(source, label="renamed")
+    job.run()
+    path = tmp_path / "job.json"
+    job.save(path)
+    saved = json.loads(path.read_text())
+    (slot,) = [
+        d["source_config"]
+        for d in saved["pipeline"]["nodes"].values()
+        if d["node_type"] == "source"
+    ]
+    types = _DECIMAL_ARRANGEMENTS[arrangement]
+    assert slot["tag_schema"] == {n: str(types[n]) for n in ("t32", "t64")}
+    assert slot["data_schema"] == {n: str(types[n]) for n in ("d32", "d64")}
+    loaded = PipelineJob.load(path, database=database)
+    assert loaded.nodes["decimals"].arrow_schemas == source.arrow_schemas
+    loaded.bind(sources={"decimals": _decimal_source(arrangement)})
+    loaded.run(load_only=True)
+    assert (
+        loaded.nodes["renamed"]
+        .as_table()
+        .schema.equals(job.nodes["renamed"].as_table().schema)
+    )
+
+
+@pytest.mark.parametrize(
+    "arrow_type",
+    [pa.month_day_nano_interval(), pa.string_view(), pa.binary_view()],
+    ids=["interval", "string_view", "binary_view"],
+)
+@pytest.mark.parametrize("save", ["pipeline", "job"])
+def test_a_type_text_that_would_not_read_back_is_refused_before_writing(
+    tmp_path: Path, arrow_type: pa.DataType, save: str
+) -> None:
+    """A slot declared in Arrow takes types no source holds (a source refuses to hash
+    them); their text is not one the reader takes. Saving refuses, naming the node,
+    the column and the text, and writes no file."""
+    from orcapod import Pipeline
+    from orcapod.core.nodes.source_node import SourceNode
+    from orcapod.core.operators import MapData
+
+    tags = pa.schema([pa.field("id", pa.int32(), nullable=False)])
+    data = pa.schema([pa.field("odd", arrow_type), pa.field("n", pa.int16())])
+    slot = SourceNode(name="declared", tag_schema=tags, data_schema=data)
+    pipeline = Pipeline(name="unreadable")
+    with pipeline:
+        MapData({"n": "m"})(slot, label="renamed")
+    path = tmp_path / "saved.json"
+    with pytest.raises(ValueError, match="cannot be read back") as caught:
+        if save == "pipeline":
+            pipeline.save(path)
+        else:
+            PipelineJob.from_pipeline(pipeline, database=InMemoryArrowDatabase()).save(
+                path
+            )
+    assert f"column 'odd': its saved type text {str(arrow_type)!r}" in str(caught.value)
+    assert "Saving the pipeline's node 'declared'" in caught.value.__notes__
+    assert not path.exists()
