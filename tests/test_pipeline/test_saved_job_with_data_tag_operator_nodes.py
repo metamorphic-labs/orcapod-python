@@ -220,7 +220,9 @@ def test_a_tags_as_data_source_over_a_data_tag_source_round_trips(
     tmp_path: Path,
 ) -> None:
     derived = DerivedSource(
-        _csv(tmp_path, "spikes", "amp"), tags_as_data={"time": "t0"}
+        _csv(tmp_path, "spikes", "amp"),
+        tags_as_data={"time": "t0"},
+        source_id="with_tags_as_data",
     )
     config = derived.to_config()
     # The origin's config states its plain tags under the 0.3.0 rule.
@@ -244,7 +246,9 @@ def test_a_job_over_a_tags_as_data_source_saves_and_loads(
     tmp_path: Path, orchestrator: Orchestrator
 ) -> None:
     derived = DerivedSource(
-        _csv(tmp_path, "spikes", "amp"), tags_as_data={"time": "t0"}
+        _csv(tmp_path, "spikes", "amp"),
+        tags_as_data={"time": "t0"},
+        source_id="with_tags_as_data",
     )
     job = PipelineJob(name="tad", database=DeltaTableDatabase(tmp_path / "store"))
     with job:

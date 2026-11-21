@@ -188,7 +188,9 @@ def _cached_source() -> Any:
 
 def _derived_source() -> Any:
     """A ``DerivedSource`` of ``_source()`` offering tag ``id`` as data ``id_value``."""
-    return DerivedSource(_source(), tags_as_data={"id": "id_value"})
+    return DerivedSource(
+        _source(), tags_as_data={"id": "id_value"}, source_id="with_tags_as_data"
+    )
 
 
 def _bound_source_proxy() -> Any:
