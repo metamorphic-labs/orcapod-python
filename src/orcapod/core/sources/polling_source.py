@@ -22,6 +22,7 @@ from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.source_ids import hash_source_id
+from orcapod.logical_types.canonical_form import canonical_logical_schema
 from orcapod.core.sources.stream_builder import (
     SourceStreamBuilder,
     normalize_record_id_columns,
@@ -331,11 +332,18 @@ class PollingSource(RootSource, Generic[T]):
         self._declared_arrow: pa.Schema | None = None
         unified_schema = self._impl.schema()
         if isinstance(unified_schema, pa.Schema):
-            self._declared_arrow = pa.schema(
-                [
-                    field.with_type(arrow_utils.normalize_to_large_types(field.type))
-                    for field in unified_schema
-                ]
+            # Logical types in one form first: a field declared with its identifier
+            # in ARROW:extension:* metadata is that logical type (ITL-640).
+            self._declared_arrow = canonical_logical_schema(
+                pa.schema(
+                    [
+                        field.with_type(
+                            arrow_utils.normalize_to_large_types(field.type)
+                        )
+                        for field in unified_schema
+                    ]
+                ),
+                self.data_context.type_converter,
             )
             unified_schema = Schema(
                 self.data_context.type_converter.arrow_schema_to_python_schema(

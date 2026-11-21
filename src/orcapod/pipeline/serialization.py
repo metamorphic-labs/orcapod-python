@@ -635,6 +635,26 @@ class SavedSchemaVersionError(ValueError):
     """A saved schema predates complete logical type identifiers."""
 
 
+def _serialize_field_type(field: Any) -> str:
+    """Render a field's type, with its logical identifier in either representation.
+
+    A logical type is carried as a live extension type, or as its storage type with
+    the ``ARROW:extension:name`` and ``ARROW:extension:metadata`` field metadata (the
+    IPC form of a table read from a store). Both are written as the identifier,
+    ``extension<name;hex-metadata>``, so the saved text never drops it (ITL-640).
+    """
+    import pyarrow as pa
+
+    metadata = field.metadata or {}
+    name = metadata.get(b"ARROW:extension:name")
+    if name is not None and not isinstance(field.type, pa.ExtensionType):
+        identifier = LogicalTypeIdentifier(
+            name.decode("utf-8"), metadata.get(b"ARROW:extension:metadata", b"")
+        )
+        return f"extension<{identifier.text}>"
+    return _serialize_arrow_type(field.type)
+
+
 def _serialize_arrow_type(arrow_type: Any) -> str:
     """Render a schema type, preserving complete logical identifiers at every depth."""
     import pyarrow as pa
@@ -643,7 +663,7 @@ def _serialize_arrow_type(arrow_type: Any) -> str:
         return f"extension<{arrow_type_identifier(arrow_type).text}>"
     if pa.types.is_list(arrow_type) or pa.types.is_large_list(arrow_type):
         field = arrow_type.value_field
-        child = _serialize_arrow_type(field.type)
+        child = _serialize_field_type(field)
         nullable = "" if field.nullable else " not null"
         outer = "large_list" if pa.types.is_large_list(arrow_type) else "list"
         return f"{outer}<{field.name}: {child}{nullable}>"
@@ -651,12 +671,12 @@ def _serialize_arrow_type(arrow_type: Any) -> str:
         field = arrow_type.value_field
         nullable = "" if field.nullable else " not null"
         return (
-            f"fixed_size_list<{field.name}: {_serialize_arrow_type(field.type)}"
+            f"fixed_size_list<{field.name}: {_serialize_field_type(field)}"
             f"{nullable}>[{arrow_type.list_size}]"
         )
     if pa.types.is_struct(arrow_type):
         fields = [
-            f"{field.name}: {_serialize_arrow_type(field.type)}"
+            f"{field.name}: {_serialize_field_type(field)}"
             + ("" if field.nullable else " not null")
             for field in arrow_type
         ]
@@ -668,8 +688,8 @@ def _serialize_arrow_type(arrow_type: Any) -> str:
     if pa.types.is_map(arrow_type):
         ordered = ", keys_sorted" if arrow_type.keys_sorted else ""
         return (
-            f"map<{_serialize_arrow_type(arrow_type.key_type)}, "
-            f"{_serialize_arrow_type(arrow_type.item_type)}{ordered}>"
+            f"map<{_serialize_field_type(arrow_type.key_field)}, "
+            f"{_serialize_field_type(arrow_type.item_field)}{ordered}>"
         )
     return str(arrow_type)
 
@@ -855,7 +875,7 @@ def arrow_type_texts(schema: "pa.Schema") -> dict[str, str]:
     Returns:
         A dict mapping field names to Arrow type strings, in the schema's order.
     """
-    return {field.name: _serialize_arrow_type(field.type) for field in schema}
+    return {field.name: _serialize_field_type(field) for field in schema}
 
 
 def arrow_nullable_names(schema: "pa.Schema") -> list[str]:

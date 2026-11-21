@@ -352,6 +352,40 @@ class OperatorNodeBase(StreamBase):
         self._input_streams = value
         self._forget_output_schema()
 
+    @property
+    def arrow_schemas(self) -> "tuple[pa.Schema, pa.Schema] | None":
+        """A read-only loaded node's tag and data Arrow schemas, as saved (ITL-640).
+
+        A node whose operator cannot be rebuilt (``Index``, ``Pick``, ITL-1326) cannot
+        type its zero-row table, but its saved ``output_schema`` text holds the Arrow
+        types its rows have; ``typed_arrow_schemas`` takes them from here, as a loaded
+        function node takes its saved output types. ``None`` for a node with an
+        operator, which derives its types, and for a saved text that cannot be
+        restored.
+        """
+        if self._operator is not None or not self._stored_schema:
+            return None
+        from orcapod.pipeline.serialization import arrow_schema_from_texts
+
+        saved = self._stored_schema
+        nullable = saved.get("nullable")
+        converter = self.data_context.type_converter
+        try:
+            return (
+                arrow_schema_from_texts(
+                    saved.get("tag", {}),
+                    converter,
+                    None if nullable is None else nullable.get("tag", []),
+                ),
+                arrow_schema_from_texts(
+                    saved.get("data", {}),
+                    converter,
+                    None if nullable is None else nullable.get("data", []),
+                ),
+            )
+        except (ValueError, TypeError):
+            return None
+
     def keys(
         self,
         *,

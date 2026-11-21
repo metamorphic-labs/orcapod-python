@@ -27,12 +27,12 @@ from orcapod.core.streams.view import (
 from orcapod.core.streams.base import (
     check_head_size,
     schema_requires_io,
+    typed_arrow_schemas,
     typed_zero_row_table,
 )
 from orcapod.errors import InputValidationError
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
-from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -513,12 +513,12 @@ class DerivedSource(RootSource):
         typed = typed_zero_row_table(self._origin)
         if isinstance(typed, pa.Table):
             return typed.select(names)
-        # Build empty table preserving declared field nullability.
-        tag_schema, data_schema = self._origin.output_schema()
-        tc = self.data_context.type_converter
-        python_schema = {k: tag_schema[k] for k in tag_keys}
-        python_schema.update(data_schema)
-        return arrow_utils.make_empty_table(python_schema, tc)
+        # An origin that cannot type its zero-row table states its Arrow types (a
+        # read-only loaded operator, from its saved text), or gives its declared
+        # Python schema, converted (``typed_arrow_schemas``).
+        tag_arrow, data_arrow = typed_arrow_schemas(self._origin)
+        fields = {field.name: field for field in (*tag_arrow, *data_arrow)}
+        return pa.schema([fields[name] for name in names]).empty_table()
 
     def _compute_arrow_schemas(self) -> "tuple[pa.Schema, pa.Schema]":
         """This source's Arrow schemas: its origin's columns (ITL-640).

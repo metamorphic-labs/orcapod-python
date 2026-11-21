@@ -11,6 +11,7 @@ from orcapod.hashing.schema_cleaner import (
     has_extension_type,
 )
 from orcapod.hashing.visitors import SemanticHashingVisitor
+from orcapod.logical_types.canonical_form import canonical_logical_schema
 from orcapod.utils.arrow_utils import normalize_extension_columns
 from orcapod.types import ContentHash
 
@@ -190,8 +191,15 @@ class StarfixArrowHasher:
         type: how such a type is stored is not part of its identity. Any other
         extension type is normalized to its storage type with the extension
         identity in field metadata, because its stored values are what is
-        hashed.
+        hashed. A field in the metadata form is first brought to the live form
+        (``logical_types.canonical_form.canonical_logical_schema``), so the live
+        form, the metadata form and a type pyarrow has not registered give one
+        hash.
         """
+        # One form for every logical type first (ITL-640): a field that carries its
+        # identifier in ARROW:extension:* metadata (a table read from a store, the
+        # IPC form) hashes as the live extension type with that identifier.
+        schema = canonical_logical_schema(schema, self._type_converter)
         visitor = SemanticHashingVisitor(self._type_converter, self._semantic_hasher)
         hashed = pa.schema([visitor.hashed_field(field) for field in schema])
         if schema.metadata is not None:
