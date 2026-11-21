@@ -37,8 +37,30 @@ not a declared tag is an error. A source built with all its tags plain is exactl
 source v0.3 built: same columns, same hashes.
 
 The column is stored once: `as_table()` shows it once, and every row's tag and data hold
-the same value. The notebook preview shows it once, among the tags, marked as a tag
-([Working in notebooks](notebooks.md#a-stream-at-the-end-of-a-cell)).
+the same value. The preview shows it once, among the tags, marked as a data-tag. In a
+notebook the marks compose: a tag's header is bold in an accent colour, a data column's is
+underlined, and a data-tag's has both. As text a data-tag's name starts with `+` (a plain
+tag's with `*`; a data column's is unmarked). The legend line names the marks shown
+([Working in notebooks](notebooks.md#a-stream-at-the-end-of-a-cell)). Only the display is
+marked: the view's table and `as_table()` keep the plain names.
+
+```python
+mixed = op.sources.DictSource(
+    rows, tag_columns=["unit", "time"], tag_only_columns=["time"], source_id="spikes"
+)
+print(mixed.head())
+# DictSource[spikes] — all 2 rows
+# * = tag; + = data-tag (tag and data)
+# shape: (2, 3)
+# ┌───────┬───────┬──────┐
+# │ +unit ┆ *time ┆ amp  │
+# │ ---   ┆ ---   ┆ ---  │
+# │ i64   ┆ i64   ┆ f64  │
+# ╞═══════╪═══════╪══════╡
+# │ 1     ┆ 10    ┆ 0.5  │
+# │ 2     ┆ 20    ┆ 0.25 │
+# └───────┴───────┴──────┘
+```
 
 Data-tags come first among the data columns, in tag order, then the other data columns in
 their table order. Every stream, operator result and row follows this order, whatever the
