@@ -28,6 +28,7 @@ from orcapod.pipeline.serialization import (
     NESTED_SOURCE_CONFIG_KEYS,
     check_saved_source_config,
     deserialize_arrow_schema,
+    parse_arrow_type_string,
     serialize_arrow_schema,
 )
 
@@ -397,6 +398,14 @@ _MALFORMED = {
         "repeats ['b']",
     ),
     "columns-empty": ({"columns": {}, "nullable": []}, "non-empty object"),
+    "type-unbalanced": (
+        # The parser once dropped the last character unchecked and read list<item: int64>.
+        {
+            "columns": {"a": "int64", "b": "list<item: int64X", "ab": "int64"},
+            "nullable": [],
+        },
+        "Column 'b' has the saved type 'list<item: int64X'",
+    ),
     "type-not-text": (
         {"columns": {"a": "int64", "b": 64, "ab": "int64"}, "nullable": []},
         "column 'b' must name its type as text",
@@ -472,3 +481,34 @@ def test_a_nested_malformed_schema_entry_is_refused(tmp_path: Path, key: str) ->
     inner["schema"] = None
     with pytest.raises(ValueError, match="must be an object"):
         check_saved_source_config({"source_type": "cached", key: inner})
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "list<item: int64X",
+        "list<item: int64>x",
+        "list<item: int64>>",
+        "large_list<item: struct<a: int8>",
+        "struct<a: int64",
+        "map<large_string, int64",
+    ],
+)
+def test_a_type_text_with_unbalanced_delimiters_is_refused(text: str) -> None:
+    with pytest.raises(ValueError, match="Unbalanced"):
+        parse_arrow_type_string(text)
+
+
+@pytest.mark.parametrize(
+    "arrow_type",
+    [
+        pa.large_list(pa.field("item", pa.struct([pa.field("a", pa.int8(), False)]))),
+        pa.struct([pa.field("p", pa.list_(pa.field("x", pa.float32(), False)))]),
+        pa.map_(pa.large_string(), pa.large_list(pa.int64()), True),
+        pa.list_(pa.field("item", pa.int64()), 2),
+    ],
+    ids=["list-of-struct", "struct-of-list", "map-of-list", "fixed-size-list"],
+)
+def test_nested_type_text_still_round_trips(arrow_type: pa.DataType) -> None:
+    schema = pa.schema([pa.field("v", arrow_type)])
+    assert deserialize_arrow_schema(serialize_arrow_schema(schema)).equals(schema)

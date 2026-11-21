@@ -1150,6 +1150,7 @@ def parse_arrow_type_string(type_str: str, type_converter: Any | None = None) ->
         raise ValueError(f"Unknown Arrow type: {type_str!r}")
 
     # Nested types — parse the outer type and recurse
+    _require_balanced_delimiters(type_str)
     bracket_pos = type_str.index("<")
     outer = type_str[:bracket_pos].strip()
     inner = type_str[bracket_pos + 1 : -1].strip()  # strip < and >
@@ -1184,6 +1185,29 @@ def parse_arrow_type_string(type_str: str, type_converter: Any | None = None) ->
         return pa.map_(key_type, value_type, False)
 
     raise ValueError(f"Unknown nested Arrow type: {type_str!r}")
+
+
+def _require_balanced_delimiters(type_str: str) -> None:
+    """Raise unless a nested type's ``<`` and ``>`` balance and its first ``<`` closes last.
+
+    ``list<item: int64X`` or ``list<item: int64>x`` is not a type: the parser must not
+    drop or ignore a character to read one.
+
+    Raises:
+        ValueError: If the delimiters do not balance, or text follows the closing ``>``.
+    """
+    depth = 0
+    for position, char in enumerate(type_str):
+        if char == "<":
+            depth += 1
+        elif char == ">":
+            depth -= 1
+            if depth < 0 or (depth == 0 and position != len(type_str) - 1):
+                break
+    else:
+        if depth == 0 and type_str.endswith(">"):
+            return
+    raise ValueError(f"Unbalanced '<' and '>' in the Arrow type text {type_str!r}")
 
 
 def _native_container_storage(

@@ -337,6 +337,22 @@ def test_sync_and_async_runs_see_the_declared_values(
 # ---------------------------------------------------------------------------
 
 
+def _settle_type_probes(tmp_path: Path, schema: pa.Schema) -> None:
+    """Build a source of ``schema``'s types once, unmocked.
+
+    The reader is asked once per declared type whether it parses it (a header-only
+    parse, cached); doing that here keeps those probes out of a mocked reader, which
+    then sees, counts and alters only the parses of the file.
+    """
+    probe_dir = tmp_path / "probes"
+    probe_dir.mkdir(exist_ok=True)
+    path = probe_dir / "types.csv"
+    path.write_text(",".join(schema.names) + "\n")
+    CSVSource(
+        str(path), schema=schema, tag_columns=[schema.names[0]], tag_only_columns=True
+    )
+
+
 def _replace_after_first_parse(path: str, replacement: str) -> Any:
     """Wrap the real CSV reader: after its first call, replace the file atomically."""
     real = pa_csv.read_csv
@@ -361,6 +377,7 @@ def test_the_parses_read_one_snapshot_of_the_file(tmp_path: Path) -> None:
     schema = pa.schema(
         [pa.field("id", pa.int64(), nullable=False), pa.field("label", pa.string())]
     )
+    _settle_type_probes(tmp_path, schema)
     wrapper, calls = _replace_after_first_parse(path, "id,label\n2,B\n1,A\n")
     with mock.patch("pyarrow.csv.read_csv", wrapper):
         source = CSVSource(
@@ -380,6 +397,7 @@ def test_parses_that_disagree_on_the_rows_raise(tmp_path: Path) -> None:
     schema = pa.schema(
         [pa.field("id", pa.int64(), nullable=False), pa.field("label", pa.string())]
     )
+    _settle_type_probes(tmp_path, schema)
     real = pa_csv.read_csv
     calls: list[int] = []
 
@@ -391,6 +409,7 @@ def test_parses_that_disagree_on_the_rows_raise(tmp_path: Path) -> None:
     with mock.patch("pyarrow.csv.read_csv", short_second_parse):
         with pytest.raises(ValueError, match="the two parses disagree"):
             CSVSource(path, schema=schema, tag_columns=["id"], tag_only_columns=True)
+    assert len(calls) == 2
 
 
 def test_a_compressed_file_is_read_as_declared(tmp_path: Path) -> None:
