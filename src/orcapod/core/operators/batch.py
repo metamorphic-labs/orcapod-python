@@ -284,4 +284,5 @@ class Batch(UnaryOperator):
         return config
 
     def identity_structure(self) -> Any:
+        self._note_provisional_identity_use()  # a direct read is a use (ITL-1279)
         return (self.__class__.__name__, self.batch_size, self.drop_partial_batch)

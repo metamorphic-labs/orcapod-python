@@ -587,6 +587,7 @@ class MapTags(UnaryOperator):
             await output.close()
 
     def identity_structure(self) -> Any:
+        self._note_provisional_identity_use()  # a direct read is a use (ITL-1279)
         # ``tag_only`` enters only when set, so a plain renaming keeps its identity.
         return (
             self.__class__.__name__,
@@ -659,6 +660,7 @@ class MapColumns(UnaryOperator):
         return config
 
     def identity_structure(self) -> Any:
+        self._note_provisional_identity_use()  # a direct read is a use (ITL-1279)
         return (
             self.__class__.__name__,
             self.name_map,

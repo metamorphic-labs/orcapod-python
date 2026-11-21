@@ -131,7 +131,8 @@ class RootSource(StreamBase):
         """Record a use of this source's identity if it is provisional (ITL-1314).
 
         The warning is issued at construction only; the use is recorded wherever the
-        identity is read (``source_id``, ``content_hash``, ``pipeline_hash``), so the
+        identity is read (``source_id``, ``content_hash``, ``pipeline_hash``, the identity
+        structures; ITL-1331), so the
         golden tool refuses a case that reads a provisional source built before the
         case ran. The record enters no hash.
         """
@@ -213,6 +214,7 @@ class RootSource(StreamBase):
         sources, so their records never share a cache (developer, November 16, 2026,
         ITL-1154). The pipeline hash stays schema-only.
         """
+        self._note_provisional_identity_use()  # a direct read is a use (ITL-1331)
         return (
             self.__class__.__name__,
             self.output_schema(),
@@ -265,6 +267,7 @@ class RootSource(StreamBase):
         identical schemas share the same pipeline hash and therefore the same
         pipeline database table.
         """
+        self._note_provisional_identity_use()  # a direct read is a use (ITL-1331)
         tag_schema, data_schema = self.output_schema()
         return (tag_schema, data_schema)
 

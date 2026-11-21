@@ -3,9 +3,9 @@
 Data context v1 freezes every hash at the 0.4.0 release. A provisional source is outside
 that freeze: its default source id and its content hash (and so the system-tag values,
 source-info tokens, stored paths and record ids downstream of it) may still change in a
-later release. A golden case that uses one declares it, and its golden values are kept in
-the provisional golden files, as for a provisional operator (ITL-1331); a case that uses
-one undeclared is refused by the golden tool.
+later release. A golden case that uses a ``DerivedSource`` declares it, and its golden
+values are kept in the provisional golden files, as for a provisional operator (ITL-1331);
+a case that builds a ``PollingSource`` is refused, declared or not (ITL-1314).
 
 ``PROVISIONAL_SOURCES`` is the one list. Each listed source also sets the class attribute
 ``PROVISIONAL = True`` (declared on ``RootSource``); a test checks that the list and the

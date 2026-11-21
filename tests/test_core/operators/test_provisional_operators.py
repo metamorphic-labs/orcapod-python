@@ -514,6 +514,11 @@ def test_an_operator_built_before_a_recording_is_noted_on_every_use(
         "kept stream rows": lambda: list(kept.iter_data()),
         "kept stream content hash": kept.content_hash,
         "kept stream pipeline hash": kept.pipeline_hash,
+        "operator identity structure": operator.identity_structure,
+        "operator pipeline identity structure": operator.pipeline_identity_structure,
+        "kept stream identity structure": kept.identity_structure,
+        "kept stream pipeline identity structure": kept.pipeline_identity_structure,
+        "kept stream head": lambda: kept.head(2),
     }
     for use, fn in uses.items():
         with warnings.catch_warnings(record=True) as caught:
@@ -528,3 +533,70 @@ def test_an_operator_built_before_a_recording_is_noted_on_every_use(
         kept.content_hash(),
         kept.pipeline_hash(),
     )
+
+
+@pytest.mark.parametrize("name", sorted(PROVISIONAL_OPERATORS))
+def test_reading_a_provisional_operators_identity_structure_is_a_use(name: str) -> None:
+    """Every provisional operator, built before the recording: a direct read of its
+    identity structure or pipeline identity structure notes the use (Codex review 2 of
+    PR 469), without warning again."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        if name == "PolarsFilter":
+            operator: Any = PolarsFilter(constraints={"subject": "s1", "session": 1})
+        else:
+            operator = BY_STREAM_METHOD[name]().producer
+    for read in (operator.identity_structure, operator.pipeline_identity_structure):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with recording_provisional_uses() as used:
+                _ = read()
+        assert used == {name}, read
+        assert _provisional_warnings(caught) == []
+
+
+def _saved_job(tmp_path: Any, name: str) -> Any:
+    """A saved job holding the provisional operator ``name`` (Pick and Index are kept
+    read-only on load, ITL-1326; the others are rebuilt)."""
+    from orcapod import PipelineJob
+    from orcapod.databases import InMemoryArrowDatabase
+
+    steps = {
+        "GroupBy": lambda: _stream().group_by("subject"),
+        "AddTags": lambda: _stream().add_tags(run=3, cohort="A"),
+        "Pick": lambda: _lists().pick("meta", "k"),
+        "Index": lambda: _lists().index("values", 0),
+    }
+    job = PipelineJob(name=f"saved_{name}", database=InMemoryArrowDatabase())
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with job:
+            _ = steps[name]()
+    path = tmp_path / f"{name}.json"
+    job.save(path)
+    return path
+
+
+@pytest.mark.parametrize("name", ["AddTags", "GroupBy", "Index", "Pick"])
+def test_loading_a_job_under_an_error_filter_raises_the_warning(
+    tmp_path: Any, name: str
+) -> None:
+    """A ProvisionalHashWarning turned into an error propagates from the load, whether
+    the operator is rebuilt or kept read-only (Codex review 2 of PR 469); without the
+    filter the job loads as before."""
+    from orcapod import PipelineJob
+    from orcapod.databases import InMemoryArrowDatabase
+
+    path = _saved_job(tmp_path, name)
+    for _ in range(2):  # every load raises: nothing is recorded as issued
+        reset_provisional_operator_warnings()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", ProvisionalHashWarning)
+            with pytest.raises(ProvisionalHashWarning, match=f"^{name} is provisional"):
+                _ = PipelineJob.load(path, database=InMemoryArrowDatabase())
+    reset_provisional_operator_warnings()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        loaded = PipelineJob.load(path, database=InMemoryArrowDatabase())
+    assert [m.split(" ", 1)[0] for m in _provisional_warnings(caught)] == [name]
+    assert loaded.nodes

@@ -1195,6 +1195,30 @@ _PREBUILT_USES: dict[str, tuple[str, Any]] = {
         "MergeJoin",
         lambda: {"rows": _prebuilt()["merged"].as_table().num_rows},
     ),
+    "unary identity structure": (
+        "Batch",
+        lambda: {"s": repr(_prebuilt()["batch"].identity_structure())},
+    ),
+    "unary pipeline identity structure": (
+        "Batch",
+        lambda: {"s": repr(_prebuilt()["batch"].pipeline_identity_structure())},
+    ),
+    "unary kept stream head": (
+        "Batch",
+        lambda: {"rows": len(_prebuilt()["batched"].head(2).as_table())},
+    ),
+    "binary identity structure": (
+        "MergeJoin",
+        lambda: {"s": repr(_prebuilt()["merge_join"].identity_structure())},
+    ),
+    "binary kept stream identity structure": (
+        "MergeJoin",
+        lambda: {"s": repr(_prebuilt()["merged"].identity_structure())},
+    ),
+    "binary kept stream head": (
+        "MergeJoin",
+        lambda: {"rows": len(_prebuilt()["merged"].head(2).as_table())},
+    ),
     "binary kept stream pipeline hash": (
         "MergeJoin",
         lambda: {"h": _prebuilt()["merged"].pipeline_hash().to_string()},
@@ -1283,9 +1307,8 @@ def _building_polling_sources(*source_ids: str) -> Any:
 def test_a_case_building_a_polling_source_is_refused(
     monkeypatch: pytest.MonkeyPatch, source_ids: tuple[str, ...]
 ) -> None:
-    """A case that builds a PollingSource undeclared is refused (ITL-1314). A provisional
-    source is declarable since ITL-1331, so a declaring case would be provisional; no
-    repository case declares one (``test_the_repository_cases_declare_exactly_the_measured_cases``)."""
+    """A case that builds a PollingSource is refused, undeclared and declared (ITL-1314):
+    only DerivedSource is a declarable source (ITL-1331)."""
     monkeypatch.setitem(
         cases._CASES,
         "semantic",
@@ -1300,8 +1323,8 @@ def test_a_case_building_a_polling_source_is_refused(
         "semantic",
         [("polling", _building_polling_sources(*source_ids), ("PollingSource",))],
     )
-    _, provisional = cases.compute_group_kinds("semantic")
-    assert provisional == frozenset({"polling.value"})
+    with pytest.raises(ValueError, match=re.escape("declares ['PollingSource']")):
+        _ = cases.compute_group_kinds("semantic")
 
 
 def _reading_built_polling_sources(read: str, *source_ids: str) -> Any:
@@ -1424,7 +1447,8 @@ def test_the_provisional_library_value_types_are_declarable() -> None:
         cases.TORCH_TENSOR,
     } <= names
     assert {"PolarsFilter", "GroupBy", "MergeJoin"} <= names
-    assert {"DerivedSource", "PollingSource"} <= names
+    assert "DerivedSource" in names
+    assert "PollingSource" not in names
 
 
 def _hashing(*values: Any) -> Any:
@@ -1546,6 +1570,10 @@ def _reading(form: str, read: str) -> Any:
             return {"v": source.source_id}
         if read == "rows":
             return {"v": source.as_table().num_rows}
+        if read == "head":
+            return {"v": len(source.head(2).as_table())}
+        if read.endswith("identity_structure"):
+            return {"v": repr(getattr(source, read)())}
         return {"v": getattr(source, read)().to_string()}
 
     return fn
@@ -1554,7 +1582,15 @@ def _reading(form: str, read: str) -> Any:
 _DERIVED_READS = [
     (form, read)
     for form in ("plain", "tags_as_data")
-    for read in ("source_id", "content_hash", "pipeline_hash", "rows")
+    for read in (
+        "source_id",
+        "content_hash",
+        "pipeline_hash",
+        "rows",
+        "head",
+        "identity_structure",
+        "pipeline_identity_structure",
+    )
 ]
 
 
@@ -1635,3 +1671,60 @@ def test_split_cases_keep_every_entry_name() -> None:
         assert not set.intersection(*parts), (group, name)
         expected = {e for e in pinned[group] if e.startswith(f"{name}.")}
         assert set.union(*parts) == expected, (group, name)
+
+
+# The module-level function pods of the golden modules: fixtures that hash with their
+# module path, so they never move (CLAUDE.md, Golden hash values). A function pod holds
+# no input, so it hides no provisional dependency behind a cached hash.
+_FIXTURE_FUNCTION_PODS = {("cases", "golden_adjust"), ("cases", "golden_ratio")}
+
+
+def _pipeline_objects(value: Any, depth: int = 0) -> list[str]:
+    """What in ``value`` (and in a container of it, two levels down) is a stream, source,
+    operator, pod, node or job, or a cached function."""
+    from orcapod.core.base import ContentIdentifiableBase
+    from orcapod.pipeline.job import PipelineJob
+
+    found: list[str] = []
+    if isinstance(value, (ContentIdentifiableBase, PipelineJob)):
+        found.append(type(value).__name__)
+    pod = getattr(value, "pod", None)
+    if pod is not None and not isinstance(value, type):
+        found.append(f"function pod {type(pod).__name__}")
+    if hasattr(value, "cache_info"):
+        found.append("cached function")
+    if depth < 2 and isinstance(value, (dict, list, tuple, set, frozenset)):
+        items = value.values() if isinstance(value, dict) else value
+        for item in items:
+            found.extend(_pipeline_objects(item, depth + 1))
+    return found
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
+def test_cases_hold_no_prebuilt_pipeline_objects() -> None:
+    """The convention that makes the provisional guard enough (ITL-1279, ITL-1331): the
+    guard sees a provisional object built or read inside a case, not one hidden behind a
+    hash computed before it. So no golden module holds a module-level or cached stream,
+    source, operator, node or job; the shared helpers are functions that build fresh
+    objects. The only module-level pipeline objects are the fixture function pods."""
+    import importlib
+    import inspect
+    import pkgutil
+
+    import tests.test_hashing.golden as golden
+
+    found: dict[tuple[str, str], list[str]] = {}
+    for info in pkgutil.iter_modules(golden.__path__):
+        if info.name.startswith("test_"):
+            continue
+        module = importlib.import_module(f"{golden.__name__}.{info.name}")
+        for name, value in vars(module).items():
+            if inspect.ismodule(value) or inspect.isclass(value):
+                continue
+            objects = _pipeline_objects(value)
+            if objects:
+                found[(info.name, name)] = objects
+    assert set(found) == _FIXTURE_FUNCTION_PODS, found
+    assert all(objects == ["function pod FunctionPod"] for objects in found.values()), (
+        found
+    )

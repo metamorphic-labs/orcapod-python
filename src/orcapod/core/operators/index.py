@@ -84,6 +84,7 @@ class Index(UnaryOperator):
         super().__init__(**kwargs)
 
     def identity_structure(self) -> Any:
+        self._note_provisional_identity_use()  # a direct read is a use (ITL-1279)
         return (self.__class__.__name__, self.column, self.i, self.out)
 
     def _output_nullable(self) -> bool:

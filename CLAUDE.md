@@ -546,13 +546,19 @@ Orcapod stores or embeds in a name is pinned in the golden folder of the current
   one issues `ProvisionalHashWarning` once per source kind per process. Everything downstream
   of a provisional source is provisional. The warning and the use record are one helper,
   `utils/provisional.warn_provisional_use` (operators use it too); a source notes its use
-  again where its identity is read (`source_id`, `content_hash`, `pipeline_hash`; a
-  `DerivedSource` also on every read of rows), as an operator does where its identity is
-  read or it is applied (one helper pair, `provisional_class_name` and
-  `note_provisional_use`). A golden case declares a provisional source as it does an
-  operator (`provisional=("DerivedSource",)`), and its entries live in the provisional
-  files; no case builds a `PollingSource` (its pins were removed, ITL-1314). The mark never
-  enters a hash, an identifier, a config or a stored path.
+  again where its identity is read (`source_id`, `content_hash`, `pipeline_hash`, the
+  identity structures; a `DerivedSource` also on every read or `head` of rows, and in
+  `from_config`, so a loaded job over a job node it cannot rebuild warns too), as an
+  operator does where its identity is read or it is applied (one helper pair,
+  `provisional_class_name` and `note_provisional_use`). A `ProvisionalHashWarning` turned
+  into an error propagates from a load: no reconstruction catch swallows a `Warning`.
+  A golden case declares a `DerivedSource` as it does an operator
+  (`provisional=("DerivedSource",)`; `cases.DECLARABLE_PROVISIONAL_SOURCES`), and its
+  entries live in the provisional files; a case that builds a `PollingSource` is refused,
+  declared or not (its pins were removed, ITL-1314). The guard sees a provisional object
+  built or read inside a case, not one behind a hash cached before it, so golden cases
+  build their pipeline objects inside the case (`test_cases_hold_no_prebuilt_pipeline_objects`).
+  The mark never enters a hash, an identifier, a config or a stored path.
 - The unit of immutability is the golden file. The manifest's `golden.history`
   (`src/orcapod/contexts/data/<version>.json`) lists every file with the sha256 of its bytes;
   a release appends a revision with `added: {}`, pinned in

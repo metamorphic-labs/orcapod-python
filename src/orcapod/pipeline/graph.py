@@ -482,6 +482,10 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                         )
 
                         operator = resolve_operator_from_config(op_config)
+                    except Warning:
+                        # A warning turned into an error (a ProvisionalHashWarning
+                        # under an error filter) propagates (ITL-1331).
+                        raise
                     except Exception as exc:
                         logger.warning(
                             "Could not reconstruct operator %r from config — "

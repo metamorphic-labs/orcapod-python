@@ -158,6 +158,7 @@ class AddTags(UnaryOperator):
         return MappingProxyType(self._tags)
 
     def identity_structure(self) -> Any:
+        self._note_provisional_identity_use()  # a direct read is a use (ITL-1279)
         return (self.__class__.__name__, tuple(self._tags.items()))
 
     def to_config(self) -> dict[str, Any]:

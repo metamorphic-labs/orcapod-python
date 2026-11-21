@@ -105,15 +105,21 @@ def case(
     return register
 
 
+# The provisional sources a case may declare: DerivedSource only (ITL-1331). A PollingSource
+# is never pinned, declared or not: the developer agreed to no PollingSource pins, and its
+# identity is to be redesigned (ITL-1314, ITL-1316). So a case that builds one is refused.
+DECLARABLE_PROVISIONAL_SOURCES = frozenset({"DerivedSource"})
+
+
 def declarable_provisional_names() -> frozenset[str]:
     """The names a case may declare provisional: the provisional operators (ITL-1266),
-    the provisional sources (ITL-1331) and the provisional library value types, by
-    extension name (the ``provisional`` list of ``contexts/logical_types.json``;
-    ITL-1324). No case builds a ``PollingSource`` (ITL-1314): its pins were removed."""
+    ``DECLARABLE_PROVISIONAL_SOURCES`` (ITL-1331) and the provisional library value
+    types, by extension name (the ``provisional`` list of ``contexts/logical_types.json``;
+    ITL-1324). ``PollingSource`` is not declarable: a case that builds one is refused,
+    declared or not (ITL-1314)."""
     import importlib.resources
 
     from orcapod.core.operators.provisional import PROVISIONAL_OPERATORS
-    from orcapod.core.sources.provisional import PROVISIONAL_SOURCES
 
     registration = json.loads(
         importlib.resources.files("orcapod.contexts")
@@ -122,7 +128,7 @@ def declarable_provisional_names() -> frozenset[str]:
     )
     return (
         frozenset(PROVISIONAL_OPERATORS)
-        | frozenset(PROVISIONAL_SOURCES)
+        | DECLARABLE_PROVISIONAL_SOURCES
         | frozenset(registration.get("provisional", []))
     )
 
@@ -231,18 +237,25 @@ def compute_group_kinds(
 
     Each case runs while the library records the provisional features it uses
     (``orcapod.utils.provisional.recording_provisional_uses``). A provisional operator is
-    recorded when it is built, when its own ``content_hash`` or ``pipeline_hash`` is read,
-    when it is applied (``process``, its call, a stream method, ``static_process``), and
-    when a stream it produced is hashed or read, so also an operator built before the case
-    (at module level). A provisional library value type is recorded when it is resolved. A
-    case that uses one it does not declare, or declares a name
-    ``declarable_provisional_names`` does not hold, is refused. The fixtures are
-    registered first, outside every record, so registering one is not a case's use.
+    recorded when it is built, when its own ``content_hash``, ``pipeline_hash`` or
+    identity structure is read, when it is applied (``process``, its call, a stream
+    method, ``static_process``), and when a stream it produced is hashed, read or
+    previewed. A provisional source is recorded when it is built or loaded and when its
+    ``source_id``, hashes or identity structure is read (a ``DerivedSource`` also when its
+    rows are read or previewed). So an operator or source built before the case (at module
+    level) is recorded too. A provisional library value type is recorded when it is
+    resolved. A case that uses one it does not declare, or declares a name
+    ``declarable_provisional_names`` does not hold (``PollingSource`` among them), is
+    refused. The fixtures are registered first, outside every record, so registering one
+    is not a case's use.
 
-    Limits: the record sees those uses only, never a hash cached before the case.
-    A stream or node downstream of a provisional operator that was built and hashed, or
-    computed, before the case returns its cached hash or kept result without reaching the
-    operator, so it records nothing: build pipelines inside the case. A user class with a
+    Limits: the guard sees a provisional object built or read inside the case, not one
+    hidden behind a hash computed before the case. A stream, source or node downstream of
+    a provisional operator or source that was built and hashed, or computed, before the
+    case returns its cached hash or kept result without reaching it, so it records
+    nothing. The convention that makes the guard enough: every case builds its sources,
+    operators and jobs inside the case function, which
+    ``test_golden_store.test_cases_hold_no_prebuilt_pipeline_objects`` checks. A user class with a
     field of a provisional library type embeds that type's identifier in its identity,
     which is built once, at registration, and cached; a later use of the class records
     nothing. Such items are split out by ``provisional_types_of`` instead

@@ -94,6 +94,7 @@ class TagBy(UnaryOperator):
         Returns:
             ``("TagBy", [names in name order])``.
         """
+        self._note_provisional_identity_use()  # a direct read is a use (ITL-1279)
         return (self.__class__.__name__, list(self.columns))
 
     @override

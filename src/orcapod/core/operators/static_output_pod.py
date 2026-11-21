@@ -102,8 +102,9 @@ class StaticOutputOperatorPod(TraceableBase):
         """Note a use of this operator when it is provisional; never warn.
 
         Called where the operator's identity is read (``content_hash``,
-        ``pipeline_hash``) and where it is applied to streams (``process``,
-        ``static_process``, a ``DynamicPodStream``'s hashes and reads), so an operator
+        ``pipeline_hash``, ``identity_structure`` of a provisional operator) and where it
+        is applied to streams (``process``, ``static_process``, a ``DynamicPodStream``'s
+        hashes, identity structures, reads and ``head``), so an operator
         built before a recording (a module-level ``Batch(2)``) is still seen by it
         (ITL-1279). The same note as ``RootSource._note_provisional_identity_use`` for a
         provisional source (ITL-1314). The warning stays at construction. The note
@@ -874,12 +875,14 @@ class DynamicPodStream(StreamBase):
         return super().pipeline_hash(hasher)
 
     def identity_structure(self) -> Any:
+        self._pod._note_provisional_identity_use()  # a direct read is a use (ITL-1279)
         structure = (self._pod,)
         if self._upstreams:
             structure += (self._pod.argument_symmetry(self._upstreams),)
         return structure
 
     def pipeline_identity_structure(self) -> Any:
+        self._pod._note_provisional_identity_use()  # a direct read is a use (ITL-1279)
         structure = (self._pod,)
         if self._upstreams:
             structure += (self._pod.argument_symmetry(self._upstreams),)
@@ -1061,6 +1064,8 @@ class DynamicPodStream(StreamBase):
         or after an input changed, there are no rows. See ``StreamBase.head``.
         """
         check_head_size(n)
+        # A preview of a kept result is a read: it notes a provisional use (ITL-1279).
+        self._pod._note_provisional_identity_use()
         config = ColumnConfig.handle_config(columns, all_info=all_info)
         had_result = self._cached_stream is not None
         self._update_cache_status()

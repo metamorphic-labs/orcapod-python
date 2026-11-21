@@ -13,6 +13,7 @@ from orcapod.core.data_tags import (
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource
+from orcapod.core.sources.provisional import warn_provisional_source
 from orcapod.core.sources.reload import same_rows
 from orcapod.core.sources.source_ids import hash_source_id
 from orcapod.core.sources.stream_builder import (
@@ -33,6 +34,7 @@ from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
+from orcapod.utils.provisional import provisional_class_name
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -299,6 +301,7 @@ class DerivedSource(RootSource):
         Returns:
             The identity structure.
         """
+        self._note_provisional_identity_use()  # a direct read is a use (ITL-1331)
         if self._tags_as_data is None:
             # Tied precisely to the specific node's data identity
             return (self._origin.content_hash(),)
@@ -369,6 +372,12 @@ class DerivedSource(RootSource):
         """
         from orcapod.pipeline.serialization import resolve_source_from_config
 
+        # Reading a saved DerivedSource is a use of a provisional source, also when its
+        # origin (a job node) cannot be rebuilt and the constructor is never reached: a
+        # loaded job warns for it as for a rebuilt one (ITL-1331).
+        provisional = provisional_class_name(cls)
+        if provisional is not None:
+            warn_provisional_source(provisional)
         cls.require_saved_source_id(config)
 
         if config.get("origin") is None:
@@ -631,6 +640,8 @@ class DerivedSource(RootSource):
         its head (see ``StreamBase.head``).
         """
         check_head_size(n)
+        # A preview is a read of rows: it notes the provisional use (ITL-1331).
+        self._note_provisional_identity_use()
         config = ColumnConfig.handle_config(columns, all_info=all_info)
         origin_kind = "held" if isinstance(self._origin, RootSource) else "stored"
         if self._tags_as_data is not None and self._cached_stream is not None:

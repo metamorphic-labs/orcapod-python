@@ -158,12 +158,19 @@ def test_behavior_is_unchanged_default_source_id_included() -> None:
     assert _polling("a").source_id == first.source_id
 
 
-def test_a_golden_case_can_declare_a_provisional_source() -> None:
-    """A provisional source is declarable (ITL-1331); no golden case builds a
-    PollingSource (ITL-1314), which ``test_golden_store`` checks."""
-    from tests.test_hashing.golden.cases import declarable_provisional_names
+def test_a_golden_case_can_declare_derived_source_but_never_polling_source() -> None:
+    """DerivedSource is declarable (ITL-1331); a case that builds a PollingSource is
+    refused, declared or not (ITL-1314; ``test_golden_store``)."""
+    from tests.test_hashing.golden.cases import (
+        DECLARABLE_PROVISIONAL_SOURCES,
+        declarable_provisional_names,
+    )
 
-    assert set(PROVISIONAL_SOURCES) <= declarable_provisional_names()
+    assert DECLARABLE_PROVISIONAL_SOURCES == {"DerivedSource"}
+    assert DECLARABLE_PROVISIONAL_SOURCES <= set(PROVISIONAL_SOURCES)
+    assert set(PROVISIONAL_SOURCES) & declarable_provisional_names() == {
+        "DerivedSource"
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -405,6 +412,9 @@ def test_a_derived_source_built_before_a_recording_is_noted_on_every_use(
         "pipeline hash": derived.pipeline_hash,
         "rows": derived.as_table,
         "iterated": lambda: list(derived.iter_data()),
+        "head": lambda: derived.head(2),
+        "identity structure": derived.identity_structure,
+        "pipeline identity structure": derived.pipeline_identity_structure,
     }
     for use, fn in uses.items():
         with warnings.catch_warnings(record=True) as caught:
@@ -413,3 +423,96 @@ def test_a_derived_source_built_before_a_recording_is_noted_on_every_use(
                 _ = fn()
         assert used == {"DerivedSource"}, use
         assert _provisional_warnings(caught) == [], use
+
+
+def test_reading_a_polling_sources_identity_structure_is_a_use() -> None:
+    """Its own ``identity_structure`` notes the use. (Its pipeline identity structure is
+    ``RootSource``'s, which needs a schema this stub has not got; the same line is
+    tested through ``DerivedSource``.)"""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        polling = _polling("a", source_id="polled")
+    with recording_provisional_uses() as used:
+        _ = polling.identity_structure()
+    assert used == {"PollingSource"}
+
+
+# A consumer job over a DerivedSource whose origin is a job node: the saved config holds
+# no origin, so the loader cannot rebuild it (the slot stays unbound) and never reaches
+# the constructor. Both forms, both node kinds.
+NODE_BACKED: dict[str, Any] = {
+    "plain over the function node": lambda job: job.nodes["total"].as_source(),
+    "plain over the operator node": lambda job: job.nodes["picked"].as_source(),
+    "tags_as_data over the operator node": lambda job: job.nodes["picked"].as_source(
+        tags_as_data=AS_DATA, source_id="picked_copied"
+    ),
+}
+
+
+def _consumer_job(tmp_path: Any, build: Any) -> Any:
+    from orcapod import PipelineJob
+    from orcapod.databases import InMemoryArrowDatabase
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        derived = build(_ran_job()) if build is not None else None
+        if derived is None:
+            derived = DerivedSource(
+                _csv_origin(tmp_path), tags_as_data=AS_DATA, source_id="copied"
+            )
+        job = PipelineJob(name="consumer", database=InMemoryArrowDatabase())
+        with job:
+            _ = derived.select_tag_columns(["subject"], label="consumed")
+        path = tmp_path / "consumer.json"
+        job.save(path)
+    return path
+
+
+@pytest.mark.parametrize("form", sorted(NODE_BACKED))
+def test_a_loaded_job_over_a_node_backed_derived_source_warns(
+    tmp_path: Any, form: str
+) -> None:
+    """Its origin cannot be rebuilt, but the load still warns once and notes the use
+    (Codex review 2 of PR 469)."""
+    from orcapod import PipelineJob
+    from orcapod.databases import InMemoryArrowDatabase
+
+    path = _consumer_job(tmp_path, NODE_BACKED[form])
+    reset_provisional_use_warnings()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with recording_provisional_uses() as used:
+            loaded = PipelineJob.load(path, database=InMemoryArrowDatabase())
+    assert [m.split(" ", 1)[0] for m in _provisional_warnings(caught)] == [
+        "DerivedSource"
+    ]
+    assert "DerivedSource" in used
+    assert loaded.sources == {}
+
+
+@pytest.mark.parametrize("form", ["over a CSV source", *sorted(NODE_BACKED)])
+def test_loading_a_derived_source_job_under_an_error_filter_raises(
+    tmp_path: Any, form: str
+) -> None:
+    """A ProvisionalHashWarning turned into an error propagates from the load; it is
+    never read as a source that could not be rebuilt, which would leave the slot unbound
+    with no error (Codex review 2 of PR 469). Without the filter the job loads as
+    before: bound over a CSV source, unbound over a job node."""
+    from orcapod import PipelineJob
+    from orcapod.databases import InMemoryArrowDatabase
+
+    path = _consumer_job(tmp_path, NODE_BACKED.get(form))
+    for _ in range(2):
+        reset_provisional_use_warnings()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", ProvisionalHashWarning)
+            with pytest.raises(ProvisionalHashWarning, match="^DerivedSource is"):
+                _ = PipelineJob.load(path, database=InMemoryArrowDatabase())
+    reset_provisional_use_warnings()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        loaded = PipelineJob.load(path, database=InMemoryArrowDatabase())
+    if form == "over a CSV source":
+        assert isinstance(loaded.sources["copied"], DerivedSource)
+    else:
+        assert loaded.sources == {}

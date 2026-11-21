@@ -24,17 +24,19 @@ wanted on purpose starts a new data context version. It never edits a released v
     entries that move, each explained. 0.4.0 freezes `v1`. See
     [Withdrawing a release](#withdrawing-a-release).
 
-!!! note "Provisional operators and library value types are outside the freeze"
+!!! note "Provisional operators, sources and library value types are outside the freeze"
     A provisional operator (`orcapod.operators.PROVISIONAL_OPERATORS`; ITL-1266, ITL-1279)
-    has an identity that no release freezes yet, and so has a provisional library value type
-    (`provisional` of `contexts/logical_types.json`: NumPy arrays, torch tensors, pandas and
-    Polars frames and series; ITL-1324). The golden values of every case that depends on one,
-    its own hashes and those of every step downstream of it, are in the provisional files,
-    `data/v1/provisional/<group>.json`. They are computed and checked on every run like every
-    other value, but no release lists them: they can change in a later release without a new
-    data context, with the developer's approval of the exact list. So the promise on this page
-    holds for a pipeline only when it contains neither. See
-    [Provisional files](#provisional-files).
+    has an identity that no release freezes yet, and so have a provisional source
+    (`orcapod.sources.PROVISIONAL_SOURCES`: `DerivedSource` in both forms, plain from
+    `node.as_source()` and with `tags_as_data`, ITL-1331; `PollingSource`, ITL-1314) and a
+    provisional library value type (`provisional` of `contexts/logical_types.json`: NumPy
+    arrays, torch tensors, pandas and Polars frames and series; ITL-1324). The golden values
+    of every case that depends on one, its own hashes and those of every step downstream of
+    it, are in the provisional files, `data/v1/provisional/<group>.json` (a `PollingSource`
+    has none). They are computed and checked on every run like every other value, but no
+    release lists them: they can change in a later release without a new data context, with
+    the developer's approval of the exact list. So the promise on this page holds for a
+    pipeline only when it contains none of them. See [Provisional files](#provisional-files).
 
 ## The pieces at a glance
 
@@ -165,17 +167,24 @@ rewrites it in place.
   (`orcapod.utils.provisional.recording_provisional_uses`), and refuses a case that uses
   one without declaring it, or that declares a name that is not provisional. The golden
   test checks that every entry is in the kind of file its case declares. An operator is
-  recorded when it is built, when its own content or pipeline hash is read, when it is
-  applied (`process`, its call, a stream method such as `stream.group_by`,
-  `static_process`), and when a stream it produced is hashed or read; a source when it is
-  built and when its source id, content or pipeline hash is read (a `DerivedSource` also
-  when its rows are read); a library value type when it is resolved. So an operator built before the case, at module level, is still
-  recorded when the case reads its hash or applies it, and a step built in the case
+  recorded when it is built, when its own content or pipeline hash or identity structure is
+  read, when it is applied (`process`, its call, a stream method such as `stream.group_by`,
+  `static_process`), and when a stream it produced is hashed, read or previewed (`head`); a
+  source when it is built and when its source id, content or pipeline hash or identity
+  structure is read (a `DerivedSource` also when its rows are read or previewed, and when a
+  saved one is loaded, also over a job node it cannot rebuild); a library value type when it
+  is resolved. So an operator or source built before the case, at module level, is still
+  recorded when the case reads its identity or applies it, and a step built in the case
   downstream of it reaches it while its own hash is computed.
-- **A hash cached before the case.** A stream or job node downstream of a provisional
-  operator or source that was built and hashed, or computed, before the case answers from its cached
-  hash or kept result and never reaches it, so nothing is recorded. Cases build
-  their pipelines inside the case.
+- **What the guard sees, and the convention that makes it enough.** The guard sees a
+  provisional object built or read inside the case, not one hidden behind a hash computed
+  before the case: a stream, source or job node downstream of a provisional operator or
+  source that was built and hashed, or computed, before the case answers from its cached
+  hash or kept result and never reaches it, so nothing is recorded. Recording that would
+  need the dependency carried through every hash cache, which Orcapod does not do. So every
+  case builds its sources, operators, pods' inputs and jobs inside the case function, and
+  `test_golden_store.py` (`test_cases_hold_no_prebuilt_pipeline_objects`) checks that the
+  golden modules hold no module-level or cached stream, source, operator or job.
 - **A dependence the record cannot see.** A user class with a field of a provisional library
   type (the fixture `GoldenWithArray`) embeds that type's identifier in its own identity, but
   the identity is built once, when the class is registered, and cached: a later use of the
@@ -191,7 +200,9 @@ rewrites it in place.
   `schema:key_policy_identity` (its `derived_tags_as_data.*` entries) and
   `pipeline:default_source_ids` (its `as_source[...]` entries).
 - **No `PollingSource` values.** No case builds a `PollingSource` (ITL-1314): its pins were
-  removed rather than kept provisional.
+  removed rather than kept provisional, and the tool refuses a case that builds one, declared
+  or not. Of the provisional sources only `DerivedSource` is declarable
+  (`cases.DECLARABLE_PROVISIONAL_SOURCES`).
 - **Today:** 475 entries. The `PolarsFilter` cases (`polars_filter`, `polars_filter_expr`,
   `polars_filter_expr_job` and the `semantic` case `polars_expr`, 86 entries) moved out of
   the frozen files with ITL-1266; the cases of the other provisional operators (229 entries)

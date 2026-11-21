@@ -86,6 +86,7 @@ class Pick(UnaryOperator):
         super().__init__(**kwargs)
 
     def identity_structure(self) -> Any:
+        self._note_provisional_identity_use()  # a direct read is a use (ITL-1279)
         # fail_on_miss intentionally excluded — it controls error behaviour,
         # not the functional transformation.
         return (self.__class__.__name__, self.column, self.key, self.out)
