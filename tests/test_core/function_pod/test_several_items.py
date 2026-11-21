@@ -196,18 +196,11 @@ def test_a_layout_of_the_input_does_not_change_a_fall_through_pods_hashes(
     assert all(result == first for result in hashes.values())
 
 
-FALL_THROUGH_ORDER_ISSUE = "ITL-1246"
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason=f"{FALL_THROUGH_ORDER_ISSUE}: the fall-through tags enter the pod's "
-    + "identity in the input's tag order",
-)
 @pytest.mark.parametrize("role", [DATA_TAGS, MIXED])
 def test_the_tag_order_of_the_input_does_not_change_a_fall_through_pods_hashes(
     role: str,
 ) -> None:
+    """The fall-through tags are a set of sorted names in the pod's identity (ITL-1246)."""
     results = {
         order: fingerprint(
             label_rows.pod(make_source(MAIN, Arrangement(order, TAGS_FIRST, role))),

@@ -16,9 +16,11 @@ This module holds what more than one operator needs: finding the data-tags of a 
 the namespace validator (sections 4 and 13.4), and the diagnostic emitted when a structural
 operator turns a data-tag into a plain tag (section 7).
 
-The identities of streams with data-tags are not frozen yet: on the integration branch of
-ITL-1023 they may still change. Plain (``tag_only_columns``) streams keep their v0.3
-identities exactly.
+The identities of streams with data-tags are settled (developer, November 18, 2026) and
+freeze with data context v1 at the 0.4.0 release. No identity depends on the order of a
+stream's tag columns: where a list of data-tags enters an identity, it enters as a set of
+sorted names (ITL-1246). Plain (``tag_only_columns``) streams keep their v0.3 identities
+exactly.
 """
 
 from __future__ import annotations

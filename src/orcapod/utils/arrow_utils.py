@@ -1914,12 +1914,155 @@ def with_content_hash_column(
     )
 
 
+def canonically_sortable(arrow_type: "pa.DataType") -> bool:
+    """Whether a column of ``arrow_type`` is a sort key of the canonical row order.
+
+    The closed list of ``canonical_identity_row_order`` (ITL-1227), decided from the
+    type alone, never by trying a sort: every signed and unsigned integer width,
+    ``float32`` and ``float64``, ``bool``, ``string`` and ``large_string``, ``binary``,
+    ``large_binary`` and ``fixed_size_binary``, ``date32`` and ``date64``, ``time32`` and
+    ``time64``, ``timestamp`` (any unit and zone), ``duration``, ``decimal128`` and the
+    ``null`` type. Nothing else is a sort key, whatever pyarrow can sort: no extension
+    type (every logical type, library values included), no ``float16``, list, struct,
+    map, union, view or ``decimal256``.
+
+    Args:
+        arrow_type: A column's Arrow type.
+
+    Returns:
+        ``True`` when the type is on the list.
+    """
+    if isinstance(arrow_type, pa.ExtensionType):
+        return False
+    types = pa.types
+    return (
+        types.is_integer(arrow_type)
+        or types.is_float32(arrow_type)
+        or types.is_float64(arrow_type)
+        or types.is_boolean(arrow_type)
+        or types.is_string(arrow_type)
+        or types.is_large_string(arrow_type)
+        or types.is_binary(arrow_type)
+        or types.is_large_binary(arrow_type)
+        or types.is_fixed_size_binary(arrow_type)
+        or types.is_date32(arrow_type)
+        or types.is_date64(arrow_type)
+        or types.is_time32(arrow_type)
+        or types.is_time64(arrow_type)
+        or types.is_timestamp(arrow_type)
+        or types.is_duration(arrow_type)
+        or types.is_decimal128(arrow_type)
+        or types.is_null(arrow_type)
+    )
+
+
+def _same_as_previous(
+    column: "pa.ChunkedArray[Any] | pa.Array[Any]",
+) -> "pa.Array[Any]":
+    """For rows 1..n-1 of a sorted key column, whether each equals the row before it.
+
+    Equality is the sort's own: two nulls are equal, every NaN equals every NaN, and
+    ``-0.0`` equals ``0.0`` (``pc.equal`` already holds the last).
+    """
+    import pyarrow.compute as pc
+
+    array = column.combine_chunks() if isinstance(column, pa.ChunkedArray) else column
+    n = len(array)
+    previous, current = array.slice(0, n - 1), array.slice(1)
+    if pa.types.is_null(array.type):
+        return pa.array([True] * (n - 1), pa.bool_())
+    same = pc.fill_null(pc.equal(previous, current), pa.scalar(False))
+    both_null = pc.and_(pc.is_null(previous), pc.is_null(current))
+    same = pc.or_(same, both_null)
+    if pa.types.is_floating(array.type):
+        both_nan = pc.fill_null(
+            pc.and_(pc.is_nan(previous), pc.is_nan(current)), pa.scalar(False)
+        )
+        same = pc.or_(same, both_nan)
+    return cast("pa.Array[Any]", same)
+
+
+def canonical_identity_row_order(
+    table: "pa.Table", tag_columns: Sequence[str], arrow_hasher: Any
+) -> "pa.Table":
+    """Return ``table`` with its rows in the canonical order of an identity table.
+
+    Developer decision, November 19, 2026 (ITL-1227, "option 2"): the rows of a raw
+    stream's identity table are put in an order that depends on their values only,
+    never on the order they came in or on the order of the columns, and the table is
+    then hashed whole. The order, stated in ``docs/reference/hashing.md`` ("The
+    canonical row order of an identity table") so that a native implementation can
+    reproduce it bit for bit:
+
+    1. Sort keys: the user tag columns ``tag_columns`` in name order, then every other
+       column in name order, each taking part only when ``canonically_sortable`` says
+       so for its type. Ascending, nulls last, with pyarrow's ``sort_indices``.
+    2. Rows still tied (equal in every sort key under the sort's own equality: nulls
+       equal, NaN equal to NaN, ``-0.0`` equal to ``0.0``) are ordered by their own row
+       hash: the Arrow hasher's ``hash_table`` of the one-row table with every column,
+       compared as the bytes of its prefixed digest (``to_prefixed_digest``). It is
+       computed for the rows of tie groups only. Rows with equal digests are equal
+       rows, so their order cannot change the table.
+
+    Args:
+        table: The identity table: every column the identity covers.
+        tag_columns: The user tag columns.
+        arrow_hasher: The data context's Arrow hasher (``hash_table``).
+
+    Returns:
+        The same rows and columns, in the canonical order.
+    """
+    import pyarrow.compute as pc
+
+    n = table.num_rows
+    if n < 2:
+        return table
+    tags = sorted(c for c in tag_columns if c in table.column_names)
+    rest = sorted(c for c in table.column_names if c not in tags)
+    keys = [
+        c for c in (*tags, *rest) if canonically_sortable(table.schema.field(c).type)
+    ]
+    if keys:
+        indices = pc.sort_indices(
+            table,
+            sort_keys=[(c, "ascending") for c in keys],
+            null_placement="at_end",
+        )
+        table = table.take(indices)
+        same = pa.array([True] * (n - 1), pa.bool_())
+        for c in keys:
+            same = pc.and_(same, _same_as_previous(table.column(c)))
+        tied_with_previous = cast("list[bool]", same.to_pylist())
+    else:
+        tied_with_previous = [True] * (n - 1)
+    order: list[int] = []
+    start = 0
+    for i in range(1, n + 1):
+        if i < n and tied_with_previous[i - 1]:
+            continue
+        group = list(range(start, i))
+        if len(group) > 1:
+            # A plain loop, not a comprehension: the hash-site inventory names this
+            # function on every Python version.
+            digests: dict[int, bytes] = {}
+            for row in group:
+                digests[row] = arrow_hasher.hash_table(
+                    table.slice(row, 1)
+                ).to_prefixed_digest()
+            group.sort(key=digests.__getitem__)
+        order.extend(group)
+        start = i
+    if order == list(range(n)):
+        return table
+    return table.take(pa.array(order, pa.int64()))
+
+
 def sort_by_tag_columns(table: "pa.Table", tag_keys: tuple[str, ...]) -> "pa.Table":
     """Return ``table`` with its rows in tag order: the sort every presentation uses.
 
     This is the order of ``as_table(sort_by_tags=True)``, ``head`` and the notebook
-    preview. It is not a hash input: a stream's identity keeps its own ordering
-    (``ArrowTableStream._identity_table``).
+    preview. It is not a hash input: a stream's identity does not depend on row order
+    (``ArrowTableStream._identity_table``: rows ordered by their own hash).
 
     The rows are ordered ascending by the tag columns ``tag_keys``, nulls last. Rows with
     equal tags are then ordered by the system tag columns ``table`` has (they hold the

@@ -19,7 +19,8 @@ type, in no order (the schema hash sorts field names, as for every schema). So:
 
 Every test over a source runs it in two arrangements: the declared tag order with the tags
 first, and the reversed tag order with the data first (``SHAPES``); neither changes a
-value, a hash or a stored path (over data-tags the last two still do: ITL-1246).
+value, a hash or a stored path, over plain tags as over data-tags (whose fall-through
+pod holds them as a set of sorted names, ITL-1246).
 """
 
 from __future__ import annotations
@@ -342,25 +343,7 @@ def test_in_memory_keys_swapped_with_their_values_give_each_name_its_value(
             assert rows == _partly_expected(), (keys, shape)
 
 
-FALL_THROUGH_ORDER_ISSUE = "ITL-1246"
-# Over data-tags the pod is a fall-through pod, whose identity holds the data-tags in
-# the input's tag order (ITL-1246, fixed by PR 453). Only an assertion can fail here.
-_FALL_THROUGH_ORDER = pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=f"{FALL_THROUGH_ORDER_ISSUE}: the fall-through tags enter the pod's identity "
-    + "in the input's tag order",
-)
-
-
-@pytest.mark.parametrize(
-    "role",
-    [
-        PLAIN,
-        pytest.param(DATA_TAGS, marks=_FALL_THROUGH_ORDER),
-        pytest.param(MIXED, marks=_FALL_THROUGH_ORDER),
-    ],
-)
+@pytest.mark.parametrize("role", [PLAIN, DATA_TAGS, MIXED])
 @pytest.mark.parametrize(("kind", "n"), list(FUNCTIONS), ids=lambda v: str(v))
 def test_the_arrangement_of_the_source_changes_no_hash_or_stored_path(
     kind: str, n: int, role: str

@@ -281,7 +281,7 @@ test session with `-p tests.test_hashing.hash_site_trace`.
 | Polars value hash | descriptor, `\0`, starfix digest called directly (a step of this algorithm) | SHA-256, `polars_dataframe_v1` / `polars_series_v1` | Polars value hash | `logical_types/polars_type.py:_digest`, `logical_types/polars_type.py:_values_digest` |
 | Polars expression hash | the expression's canonical tree | SHA-256 of canonical JSON, `polars_expr_v1` | `PolarsFilter` identity | `hashing/semantic_hashing/polars_expr.py:polars_expr_content_hash` |
 | value handlers with an ignore list | wrap the value digests above | the type's label | top level, nested, Arrow cell | `logical_types/ignore_list.py:IgnoreListHandler.handle`, `logical_types/ignore_list.py:IgnoreListHandler.hash_ignoring` |
-| parse a stored hash | `"<label>:<hex>"` or `b"<label>:" + digest` | the stored label | saved jobs and pipelines, proxies, a node's saved run hash, a cached output hash | `types.py:ContentHash.from_string`, `types.py:ContentHash.from_prefixed_digest` |
+| parse a stored hash | `"<label>:<hex>"` or `b"<label>:" + digest` | the stored label | saved jobs and pipelines, proxies, a node's saved run hash, a cached output hash | `types/__init__.py:ContentHash.from_string`, `types/__init__.py:ContentHash.from_prefixed_digest` |
 | folds of `Batch` / `GroupBy` | the canonical JSON list of a group's member values, for each system tag | SHA-256 hex after the operation's label: `batch_v1` (`batch.py`), `group_v1` (`group_by.py`); one helper | folded source id and record id | `utils/arrow_utils.py:fold_system_tag_values` |
 | run snapshot | sorted labelled sink hashes | SHA-256 hex, 16 digits | the run URI `<job>@<snapshot>` (a name) | `pipeline/job.py:PipelineJob._prepare_run`, `pipeline/job.py:PipelineJob._prepare_run.<locals>.<genexpr>` |
 | user-class identity | a class's identity record | SHA-256 hex prefix | extension name `name@<fingerprint>` (a name) | `logical_types/user_class_identity.py:identity_string` |
@@ -300,6 +300,7 @@ test session with `-p tests.test_hashing.hash_site_trace`.
 | logical-type cell, scalar and container | a value-hashed cell's value hash | the Arrow table hash | `<identifier>::<label>:<digest>`; a container cell: count, then per element a marker, a u64 length and the element token | `hashing/visitors.py:SemanticHashingVisitor.visit_extension` |
 | entry-id preimage | the input row's data hash | entry ids, pipeline record id, side-effect log key | `b"<label>:" + digest` | `core/nodes/function_node.py:_build_record_id_preimage` |
 | operator-cache row | the node content hash | `_record_hash` | `b"<label>:" + digest` | `core/nodes/operator_node.py:OperatorJobNode._store_output_stream` |
+| raw-stream tie-break | the Arrow hash (`arrow_v1`) of each row of a tie group | the canonical row order of a raw stream's identity table (compared as bytes, then the table is hashed whole) | `b"<label>:" + digest` | `utils/arrow_utils.py:canonical_identity_row_order` |
 | run snapshot | sink nodes' content hashes | the snapshot | `"<label>:<hex>"` | `pipeline/job.py:PipelineJob._prepare_run.<locals>.<genexpr>` |
 | pandas value hash | the ordered Arrow digest | the pandas value hash | `b"arrow_ordered_v1:" + digest` | `hashing/pandas_value_hash.py:pandas_frame_content_hash`, `hashing/pandas_value_hash.py:pandas_series_content_hash` |
 | directory entry | a file's hash | the directory hash | `b"<label>:" + digest` | `hashing/directory_hashers.py:_hash_dir` |
@@ -350,7 +351,7 @@ A record id is the row identifier (rule 8), built from row positions or key valu
 |---|---|
 | observer events (`node_hash`) | `core/nodes/function_node.py:FunctionJobNode.execute`, `core/nodes/function_node.py:FunctionJobNode.async_execute`, `core/nodes/function_node.py:FunctionJobNode._execute_load_only`, `core/nodes/function_node.py:FunctionJobNode._async_execute_load_only`, `core/nodes/function_node.py:FunctionJobNode._async_execute_cache_only`, `core/nodes/operator_node.py:OperatorJobNode.execute`, `core/nodes/operator_node.py:OperatorJobNode.async_execute`, `core/nodes/source_node.py:SourceNodeBase.execute`, `core/nodes/source_node.py:SourceNodeBase.async_execute` |
 | hooks (`pod_hash`) | `core/function_pod.py:_FunctionPodBase._build_post_run_payload` |
-| in-memory graph keys and sort keys | `pipeline/base.py:AbstractPipelineBase.compile`, `pipeline/base.py:AbstractPipelineBase.compile.<locals>.<lambda>`, `pipeline/base.py:AbstractPipelineBase._record_invocation`, `pipeline/base.py:AbstractPipelineBase.to_invocations`, `pipeline/base.py:AbstractPipelineBase.from_invocations`, `pipeline/job.py:PipelineJob.compile` |
+| in-memory graph keys and sort keys | `pipeline/base.py:AbstractPipelineBase.compile`, `pipeline/base.py:AbstractPipelineBase.compile.<locals>.<lambda>`, `pipeline/base.py:AbstractPipelineBase._record_invocation`, `pipeline/base.py:AbstractPipelineBase.to_invocations`, `pipeline/base.py:AbstractPipelineBase.from_invocations`, `pipeline/job.py:PipelineJob.compile`, `pipeline/restrictions.py:sources_read` (the source identity a restriction is kept under, ITL-1218) |
 | canonical input order (sort by digest). Inputs with equal pipeline hashes (developer decision, November 16, 2026, ITL-1154: kept as it is): system-tag column names follow the stable pipeline-hash sort; each row's values are sorted by (source id, record id) by `sort_system_tag_values`, so the result does not depend on argument order; the operator's identity holds its inputs as a frozenset | `core/operators/join.py:Join.order_input_streams.<locals>.<lambda>` |
 | in-memory identity and repr | `core/base.py:ContentIdentifiableBase.__hash__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__hash__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__eq__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__repr__` |
 | comparing a stored hash with the computed one; error text | `core/nodes/operator_node.py:OperatorJobNode._read_run_records`, `core/sources/source_proxy.py:SourceProxy.bind`, `core/data_function_proxy.py:DataFunctionProxy.bind`, `pipeline/job.py:PipelineJob.bind`, `errors.py:EphemeralResultMissingError.__init__` |
@@ -559,7 +560,8 @@ The table below shows what each class returns from `identity_structure()`.
 | `EmptyData` | Raises `EmptyDataAccessError` | `content_hash()` is overridden to return a stored `cached_content_hash` directly |
 | `DataFunctionBase` | `self.uri` — `(canonical_function_name, output_schema_hash, major_version, data_function_type_id)` | `output_schema_hash` is site 11; see §5 |
 | `FunctionPod` | `self.data_function` (bare object) when no ctx arg; `(self.data_function, self._ctx_arg_name)` when ctx arg present | `ctx_arg_name` is included when present so a ctx-aware pod has a distinct `content_hash` from a plain pod using the same data function |
-| `ArrowTableStream` | `(producer, argument_symmetry(upstreams))` | Falls back to `(class_name, as_table(all_info=True), tag_columns)` when no producer or producer is not a `PipelineElementProtocol` |
+| `FallThroughPod` (`pod(stream)` over data-tags) | `(plain_pod, ("fall_through_tags", sorted names))` | The data-tags that fall through are a set: sorted by name, so the order of the input's tag columns never moves the pod's hashes or its node's table paths (ITL-1246). The pod's config and a saved job's `fall_through_tags` list them sorted too |
+| `ArrowTableStream` | `(producer, argument_symmetry(upstreams))` | With no producer (a raw stream), or a producer that is not a `PipelineElementProtocol`: `(class_name, identity table in canonical row order, sorted tag columns)`, plus `("data_tags", sorted names)` when it has any. See "The identity of a raw stream" below |
 | `RootSource` (`ArrowTableSource` and every other root source without its own rule) | `(class_name, (tag_schema, data_schema), source_id, key_columns)` | `source_id` is the explicit user-supplied value; when not provided it defaults to `<source kind>:<algorithm label>:<hex>` of the Arrow hash of the raw table (site 4). `key_columns` is the resolved tuple of record-id key columns in key order (`record_id_columns`, or a database or SpiralDB table's primary key), `()` for the position: two sources that differ only in how they name their rows are two sources (developer decision, November 16, 2026, ITL-1154). Data-inclusive base case of the Merkle chain. |
 | `DerivedSource` | Origin node's `content_hash` | Inherits its generating node's identity |
 | `DerivedSource` with `tags_as_data` | `(class_name, output_schema, source_id, key_columns, ("tags_as_data", sorted items))`; the default `source_id` is `tags_as_data:<label>:<hex>` of the hash of `(("DerivedSource", sorted tags_as_data items), (origin,))`, the origin entering through its `content_hash`; `record_id_columns`, when given, is appended to the parameters as `("record_id_columns", (names...))` | The rule of every root source plus the mapping, which enters the `content_hash` directly (two mappings can give one schema) and so also with an explicit `source_id`; the origin enters through the default `source_id` only, which is the content hash an operator node doing the derivation would have |
@@ -572,6 +574,64 @@ The table below shows what each class returns from `identity_structure()`.
 | `SelectTagColumns`, `SelectDataColumns`, `DropTagColumns`, `DropDataColumns`, `SelectColumns`, `DropColumns` | `(operator_class_name, sorted unique column names as a list, strict)` | The operators act on a set of names: a list, a tuple, a set, a single string, a repeated or a reordered name list give one hash (ITL-942) |
 | `MapTags`, `MapData`, `MapColumns` | `(operator_class_name, name_map, drop_unmapped, strict)` | An operator's identity is its full configuration, `strict` included, as for the column selection operators (ITL-1160) |
 | `AddTags` | `(operator_class_name, ((name, value), ...) in name order)` | The new tags are a set: the order they are given in never enters the identity, and the tags are placed in name order (ITL-1269) |
+
+**The identity of a raw stream (ITL-1227).** An `ArrowTableStream` built over a table, with
+no producer, is its identity table, its tag columns and its data-tags, and none of them
+enters in an order the input chose (developer, November 18, 2026: "nothing should depend on
+tag order"; November 19, 2026: "take the data, order it as we had agreed and then hash the
+entirety of the arrow table"):
+
+- The identity table holds every column group but the derived `_content_hash` column: user
+  tags, system tags, data, source info, `_context_key` and meta (`__`) columns.
+- Its rows are put in the canonical row order of an identity table (below), and the table
+  is hashed whole, once, by the Arrow table handler (`hash_table`, `arrow_v1`, which ignores
+  column order) and nested as a labelled hash. That one hash covers the schema (names, types,
+  nullability at every level, logical type identifiers), so a stream with no rows still
+  commits to its columns. A row that occurs twice counts twice.
+- The tag columns and the data-tags are sets of names: sorted tuples.
+
+So the same rows in any order, under any order of `tag_columns`, `data_tags` or system-tag
+columns, in any table layout, have one content hash; a changed, missing or duplicated row, or
+another column, is another stream. Operator results and node outputs have a producer and
+hash through it, so this applies only to raw streams. Until ITL-1227 the rows were sorted by
+the tags in tag order and the system tags in column order: a stream with nothing to sort by
+could not be hashed, and rows tied on every tag, or with a list tag, hashed in their given
+order.
+
+**The canonical row order of an identity table** (`arrow_utils.canonical_identity_row_order`;
+developer, November 19, 2026, "option 2"). It is a specification that a native
+implementation must reproduce bit for bit (the developer's parity requirement):
+
+1. **Sort keys.** The user tag columns in name order, then every other column of the table in
+   name order (names compared as Python strings), each taking part only when its type is on
+   this closed list, decided from the type and never by trying a sort
+   (`arrow_utils.canonically_sortable`): every signed and unsigned integer width; `float32`
+   and `float64`; `bool`; `string`, `large_string`, `binary`, `large_binary` and
+   `fixed_size_binary`; `date32` and `date64`; `time32` and `time64`; `timestamp` of any
+   unit and zone; `duration`; `decimal128`; the `null` type. Nothing else is a sort key:
+   no extension type (every logical type, library values included), no `float16`,
+   `decimal256`, list, fixed-size list, struct, map, union or view type, even where pyarrow
+   can sort it. With no sort key, every row is in one tie group (step 3).
+2. **The comparison** (pyarrow's `sort_indices`, ascending, `null_placement="at_end"`, one
+   key after another): integers by value; floats `-inf < ... < -0.0 = 0.0 < ... < +inf < NaN`,
+   every NaN equal to every NaN; `false < true`; strings and binaries by their bytes (UTF-8
+   for strings: code point order, no locale), a shorter prefix first; dates, times,
+   timestamps and durations by their stored integer (a timestamp's zone belongs to the column
+   and is not compared); `decimal128` by value; the `null` type, all equal. A null sorts after
+   every value of its column. `tests/test_utils/test_canonical_identity_row_order.py` fails
+   if pyarrow ever disagrees with this comparison for a type on the list.
+3. **Ties.** Rows equal in every sort key under that comparison form a tie group, ordered by
+   their own row hash: the Arrow hasher's `hash_table` of the one-row table with every
+   column, compared as the bytes of its prefixed digest (`b"arrow_v1:" + digest`). It is
+   computed for the rows of tie groups only, so a table whose sort keys tell every row apart
+   costs one sort. Rows with equal digests are equal rows, so their order cannot change the
+   table. A library value is therefore never ordered by its stored bytes: its column is no
+   sort key, and its row hash holds its value hash.
+
+The float rule of ITL-1179 (starfix 0.6, `-0.0`/`0.0` and NaN bits not mattering) applies to
+this table once it is on `main`. Rows that differ only in such bits then tie in step 2 and
+get equal row hashes in step 3, so their order is arbitrary; that is harmless because the
+final table hash ignores the same bits.
 
 **Inputs of a commutative operator are a set (kept by decision, ITL-942).** A pipeline hash
 covers the structure of the pipeline, not only its schemas: a commutative operator's identity
@@ -615,6 +675,7 @@ The pipeline hash uses the same `SemanticAwarePythonHasher` with the **`pipeline
 | `DerivedSource` | `(tag_schema, data_schema)` | Acts as a new root in the pipeline Merkle chain |
 | `DataFunctionBase` | `self.uri` (same as `identity_structure()`) | Function identity is already schema-only |
 | `FunctionPod` | `self.data_function` **only** (excludes `ctx_arg_name`) | A ctx-aware pod and a plain pod over the same data function share the same `pipeline_hash` value, but have different `uri` values (`ctx_arg_name` is set → `"side_effect_function"` is prepended to the URI) and therefore write to **different** DB table paths |
+| `FallThroughPod` | `(plain_pod, ("fall_through_tags", sorted names))` | As its content identity: the data-tags are a set of names (ITL-1246) |
 | `ArrowTableStream` | `(producer, argument_symmetry(upstreams pipeline hashes))` | `pipeline_resolver` routes upstreams through `pipeline_hash()`. Falls back to `(tag_schema, data_schema)` when producer is absent or not a `PipelineElementProtocol`. |
 | Operators | `(operator_class_name, argument_symmetry(upstream pipeline hashes))` | Same structure as content identity but using pipeline hashes of upstreams |
 | `SideEffectPodStream` | `(pod, argument_symmetry(upstreams))` | Same as `identity_structure()` |

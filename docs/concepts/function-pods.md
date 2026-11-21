@@ -798,6 +798,12 @@ output, and it then reads as a zero-row table, as before the first run, until th
 An operator node attached in `CacheMode.REPLAY` does not compute: its run replays the rows
 stored under its key by `CacheMode.LOG` runs, every logged run of that key, not only the
 latest; before its run it shows nothing, like every node (a narrower replay is ITL-1098).
+An operator node that caches (`CacheMode.LOG` or `CacheMode.REPLAY`) cannot read a restricted
+source (one restricted with `where` or `limit=`; see
+[Restricting a source versus filtering in the pipeline](sources.md#restricting-a-source-versus-filtering-in-the-pipeline)):
+its cache is kept under the node's identity, which a restriction is not part of, so it is
+refused with `ValueError` before anything is read or written, and no log is ever written from
+a restricted read. `CacheMode.OFF` is not concerned.
 
 ### When the database cannot be written
 
