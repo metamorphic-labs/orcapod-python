@@ -13,6 +13,12 @@ context, it checks in HEAD:
 - the pins of the current data context at the tag (the manifest pin and every ``releases``
   line) are present unchanged.
 
+A pre-release (``0.4.0rc1``, ``0.4.0a1``, ``0.4.0b2``, ``0.4.0.dev3``) freezes nothing
+(developer, November 21, 2026, ITL-1329): it carries the hashes intended to be final, and
+only a final release runs the golden release step. ``--release-version`` of a pre-release
+therefore checks that HEAD does NOT record it as a release; its tag pins no release, so the
+tag check skips it. ``release_version`` is the one rule that tells the two apart.
+
 A withdrawn release is not compared with HEAD (ITL-1255): when HEAD's
 ``released_manifests.json`` records release ``X.Y.Z`` under ``withdrawn`` of the current data
 context, the tag ``v<X.Y.Z>`` is checked against that record instead: the record's
@@ -28,6 +34,8 @@ The current data context is the one manifest in ``src/orcapod/contexts/data/`` a
 Usage:
 
     uv run python scripts/check_golden_tags.py [--repo DIR]
+    uv run python scripts/check_golden_tags.py --release-version X.Y.Z
+    uv run python scripts/check_golden_tags.py --classify-version X.Y.Z
 
 It exits 1 on a difference. Without git, history or tags (not a repository, a shallow
 clone, no tags) it exits 1 in CI (``CI=true``) and 0 with a message elsewhere. The script
@@ -39,6 +47,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -53,6 +62,71 @@ GOLDEN_ROOT = PurePosixPath("tests/test_hashing/golden/data")
 
 class GitUnavailableError(RuntimeError):
     """git, the history or the tags cannot be read."""
+
+
+# A release version in the PEP 440 spellings this project uses: a release of exactly three
+# numbers (``X.Y.Z``), an optional pre-release, post-release and development part, in any of
+# the spellings PEP 440 normalizes (a leading ``v``, any case, ``-``/``_``/``.`` separators,
+# ``alpha``/``beta``/``c``/``pre``/``preview``, an implicit number). No epoch, no local part:
+# a version this project never publishes is refused, never guessed.
+_RELEASE_VERSION = re.compile(
+    r"""
+    ^\s*v?
+    (?P<release>[0-9]+\.[0-9]+\.[0-9]+)
+    (?:[-_.]?(?P<pre_l>alpha|beta|preview|pre|rc|a|b|c)[-_.]?(?P<pre_n>[0-9]+)?)?
+    (?:-(?P<post_n1>[0-9]+)|[-_.]?(?P<post_l>post|rev|r)[-_.]?(?P<post_n2>[0-9]+)?)?
+    (?:[-_.]?(?P<dev_l>dev)[-_.]?(?P<dev_n>[0-9]+)?)?
+    \s*$
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+_PRE_RELEASE_LETTERS = {
+    "a": "a",
+    "alpha": "a",
+    "b": "b",
+    "beta": "b",
+    "c": "rc",
+    "rc": "rc",
+    "pre": "rc",
+    "preview": "rc",
+}
+
+
+def release_version(text: str) -> tuple[str, bool]:
+    """The normalized form of a release version, and whether it is a pre-release.
+
+    The one rule for telling a final release from a pre-release (ITL-1329). A final
+    release is ``X.Y.Z`` or ``X.Y.Z.postN``; a pre-release has an alpha, beta or release
+    candidate part (``0.4.0a1``, ``0.4.0b2``, ``0.4.0rc1``) or a development part
+    (``0.4.0.dev3``), as PEP 440 defines one. The spellings PEP 440 normalizes are
+    accepted (``v0.4.0``, ``0.4.0RC1``, ``0.4.0-rc.1``).
+
+    Args:
+        text: The version, optionally with a leading ``v``.
+
+    Returns:
+        The PEP 440 normalized version (``0.4.0rc1``) and ``True`` for a pre-release.
+
+    Raises:
+        ValueError: If ``text`` is not a version of the form this project releases (an
+            epoch, a local part, or a release that is not three numbers): the gate never
+            guesses.
+    """
+    match = _RELEASE_VERSION.match(text)
+    if match is None:
+        raise ValueError(
+            f"{text!r} is not a release version: give X.Y.Z, optionally with a "
+            "pre-release (aN, bN, rcN), post-release (.postN) or development (.devN) part"
+        )
+    parts = [".".join(str(int(n)) for n in match["release"].split("."))]
+    if match["pre_l"]:
+        letter = _PRE_RELEASE_LETTERS[match["pre_l"].lower()]
+        parts.append(f"{letter}{int(match['pre_n'] or 0)}")
+    if match["post_n1"] is not None or match["post_l"]:
+        parts.append(f".post{int(match['post_n1'] or match['post_n2'] or 0)}")
+    if match["dev_l"]:
+        parts.append(f".dev{int(match['dev_n'] or 0)}")
+    return "".join(parts), bool(match["pre_l"] or match["dev_l"])
 
 
 # Variables that point git at another repository than ``--repo`` (git(1), "Environment
@@ -378,13 +452,22 @@ def check_release(repo: Path, release: str) -> list[str]:
     release revision of ``release`` in HEAD's golden history, which is its last revision
     (no golden file added after the release step ships unreleased).
 
+    A pre-release is checked by ``check_pre_release`` instead (ITL-1329).
+
     Args:
         repo: Repository root.
-        release: The library version being released, without a leading ``v``.
+        release: The library version being released, optionally with a leading ``v``.
 
     Returns:
-        One sentence per problem; empty when HEAD records the release.
+        One sentence per problem; empty when HEAD records the release (or, for a
+        pre-release, does not).
     """
+    try:
+        release, prerelease = release_version(release)
+    except ValueError as exc:
+        return [str(exc)]
+    if prerelease:
+        return check_pre_release(repo, release)
     version = _current_version(repo)
     step = (
         f"run generate_golden_hashes.py --release {release} in the release pull request"
@@ -431,6 +514,78 @@ def check_release(repo: Path, release: str) -> list[str]:
     return problems
 
 
+def check_pre_release(repo: Path, release: str) -> list[str]:
+    """Check that HEAD does not record a pre-release as a release, before it is tagged.
+
+    A pre-release carries the hashes intended to be final but freezes nothing: only a
+    final release runs the golden release step (developer, November 21, 2026, ITL-1329).
+    So HEAD must not record ``release`` under the current data context's ``releases``, nor
+    as withdrawn (a package index never takes a version twice). Unpinned data function
+    type snapshots are allowed: the final release step pins them. What earlier final
+    releases froze is checked by the tag check, which the Release workflow runs for a
+    pre-release too.
+
+    Args:
+        repo: Repository root.
+        release: The normalized pre-release version (``release_version``).
+
+    Returns:
+        One sentence per problem; empty when HEAD does not record the pre-release.
+    """
+    version = _current_version(repo)
+    pins = _show_json(repo, "HEAD", PINS)
+    pin = pins.get(version) if isinstance(pins, dict) else None
+    releases = pin.get("releases") if isinstance(pin, dict) else None
+    recorded = sorted(releases) if isinstance(releases, dict) else []
+    problems: list[str] = []
+    if any(_same_version(name, release) for name in recorded):
+        problems.append(
+            f"HEAD records pre-release {release} as a release of data context {version}: "
+            "a pre-release never runs the golden release step (only a final release "
+            "freezes a data context); revert the release step's commit"
+        )
+    if any(_same_version(name, release) for name in _head_withdrawn(repo, version)):
+        problems.append(
+            f"release {release} of data context {version} was withdrawn and is never "
+            "released again: a package index never takes a version twice"
+        )
+    return problems
+
+
+def _same_version(name: str, release: str) -> bool:
+    """Whether a recorded version name is ``release``, in any spelling."""
+    try:
+        return release_version(name)[0] == release
+    except ValueError:
+        return False
+
+
+def classify_version(text: str) -> tuple[str, bool]:
+    """The version the Release workflow tags, and whether it is a pre-release.
+
+    The workflow tags ``v<version>`` and ``hatch-vcs`` builds the package version from
+    that tag, so the version must already be in its PEP 440 normal form: a spelling PEP
+    440 would normalize (``0.4.0-rc.1``) is refused, naming the normal form, so that the
+    tag, the package, the GitHub Release and the Linear release name the same version.
+
+    Args:
+        text: The workflow's version input, optionally with a leading ``v``.
+
+    Returns:
+        The version and ``True`` for a pre-release.
+
+    Raises:
+        ValueError: If ``text`` is not a release version, or not in its normal form.
+    """
+    normalized, prerelease = release_version(text)
+    if text.removeprefix("v") != normalized:
+        raise ValueError(
+            f"{text!r} is not in its PEP 440 normal form: give it as {normalized!r}, so "
+            "that the tag and the package name the same version"
+        )
+    return normalized, prerelease
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the check.
 
@@ -452,22 +607,54 @@ def main(argv: Sequence[str] | None = None) -> int:
             "(the Release workflow's gate before it tags); fails without git"
         ),
     )
+    _ = parser.add_argument(
+        "--classify-version",
+        metavar="X.Y.Z",
+        help=(
+            "print 'version=<version>' and 'prerelease=true|false' for the Release "
+            "workflow's step outputs; fails on a version that is not a release version "
+            "in its normal form"
+        ),
+    )
     args = parser.parse_args(argv)
+    if args.classify_version is not None:
+        try:
+            normalized, prerelease = classify_version(args.classify_version)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(f"version={normalized}")
+        print(f"prerelease={'true' if prerelease else 'false'}")
+        return 0
     if args.release_version is not None:
+        try:
+            _, prerelease = release_version(args.release_version)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
         try:
             problems = check_release(args.repo, args.release_version.removeprefix("v"))
         except GitUnavailableError as exc:
             print(f"error: cannot read HEAD: {exc}", file=sys.stderr)
             return 1
         if problems:
-            print(
-                f"release {args.release_version} is not recorded in the golden history:",
-                file=sys.stderr,
+            heading = (
+                f"pre-release {args.release_version} cannot be tagged:"
+                if prerelease
+                else f"release {args.release_version} is not recorded in the golden history:"
             )
+            print(heading, file=sys.stderr)
             for problem in problems:
                 print(f"  {problem}", file=sys.stderr)
             return 1
-        print(f"HEAD records release {args.release_version} in the golden history")
+        if prerelease:
+            print(
+                f"{args.release_version} is a pre-release: it freezes nothing, so no golden "
+                "release step is required and HEAD does not record it; the data function "
+                "type snapshots may stay unpinned until the final release step pins them"
+            )
+        else:
+            print(f"HEAD records release {args.release_version} in the golden history")
         return 0
     in_ci = os.environ.get("CI", "").lower() == "true"
     try:

@@ -644,3 +644,284 @@ def test_the_gate_reports_a_snapshot_git_cannot_read(
     monkeypatch.setattr(module, "_show", show)
     problems = module.unpinned_type_snapshots(repo)
     assert problems == [f"git cannot read data function type snapshot {key}"]
+
+
+# ---------------------------------------------------------------------------
+# Pre-releases freeze nothing (ITL-1329)
+# ---------------------------------------------------------------------------
+
+# (text, normal form, pre-release) for every spelling the gate accepts.
+VERSIONS = [
+    ("0.4.0", "0.4.0", False),
+    ("v0.4.0", "0.4.0", False),
+    ("V0.4.0", "0.4.0", False),
+    ("00.04.00", "0.4.0", False),
+    ("0.4.0.post1", "0.4.0.post1", False),
+    ("0.4.0-1", "0.4.0.post1", False),
+    ("0.4.0.rev2", "0.4.0.post2", False),
+    ("0.4.0rc1", "0.4.0rc1", True),
+    ("v0.4.0rc1", "0.4.0rc1", True),
+    ("0.4.0RC1", "0.4.0rc1", True),
+    ("0.4.0-rc.1", "0.4.0rc1", True),
+    ("0.4.0_rc_1", "0.4.0rc1", True),
+    ("0.4.0.rc01", "0.4.0rc1", True),
+    ("0.4.0c1", "0.4.0rc1", True),
+    ("0.4.0pre2", "0.4.0rc2", True),
+    ("0.4.0preview3", "0.4.0rc3", True),
+    ("0.4.0rc", "0.4.0rc0", True),
+    ("0.4.0a1", "0.4.0a1", True),
+    ("0.4.0alpha1", "0.4.0a1", True),
+    ("0.4.0b2", "0.4.0b2", True),
+    ("0.4.0beta2", "0.4.0b2", True),
+    ("0.4.0.dev3", "0.4.0.dev3", True),
+    ("0.4.0dev3", "0.4.0.dev3", True),
+    ("0.4.0-dev", "0.4.0.dev0", True),
+    ("0.4.0rc1.dev2", "0.4.0rc1.dev2", True),
+    ("0.4.0.post1.dev1", "0.4.0.post1.dev1", True),
+]
+# Texts the gate refuses: valid PEP 440 it never releases (an epoch, a local part, a
+# release that is not three numbers), and texts that are no version at all.
+NOT_RELEASE_VERSIONS = [
+    "1!0.4.0",
+    "0.4.0+local",
+    "0.4",
+    "0.4.0.1",
+    "0.4.0rc1x",
+    "latest",
+    "",
+    "v",
+    "0.4.0-",
+    "0.4.0 rc1",
+]
+
+
+@pytest.mark.parametrize(("text", "normal", "prerelease"), VERSIONS)
+def test_release_version_tells_a_pre_release_from_a_final_one(
+    text: str, normal: str, prerelease: bool
+) -> None:
+    """The one rule agrees with PEP 440 (``packaging``) on every spelling it accepts."""
+    from packaging.version import Version
+
+    module = _gate_module()
+    assert module.release_version(text) == (normal, prerelease)
+    reference = Version(text)
+    assert (str(reference), reference.is_prerelease) == (normal, prerelease)
+
+
+@pytest.mark.parametrize("text", NOT_RELEASE_VERSIONS)
+def test_release_version_refuses_what_it_does_not_release(text: str) -> None:
+    """A version the project never releases is refused, never guessed."""
+    module = _gate_module()
+    with pytest.raises(ValueError, match="is not a release version"):
+        module.release_version(text)
+
+
+def _classify(version: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), "--classify-version", version],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_env(ci=False),
+    )
+
+
+@pytest.mark.parametrize(
+    ("version", "prerelease"),
+    [
+        ("0.4.0", "false"),
+        ("0.4.0rc1", "true"),
+        ("v0.4.0b2", "true"),
+        ("0.4.0.dev3", "true"),
+    ],
+)
+def test_classify_writes_the_step_outputs(version: str, prerelease: str) -> None:
+    """The Release workflow's outputs, one ``name=value`` line each."""
+    result = _classify(version)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        f"version={version.removeprefix('v')}",
+        f"prerelease={prerelease}",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("version", "normal"), [("0.4.0-rc.1", "0.4.0rc1"), ("0.4.0RC1", "0.4.0rc1")]
+)
+def test_classify_refuses_a_spelling_that_is_not_the_normal_form(
+    version: str, normal: str
+) -> None:
+    """The tag and the package must name one version: the normal form is named."""
+    result = _classify(version)
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert f"give it as '{normal}'" in result.stderr
+
+
+def test_classify_refuses_what_is_not_a_release_version() -> None:
+    result = _classify("0.4.0+local")
+    assert result.returncode == 1
+    assert "is not a release version" in result.stderr
+
+
+@pytest.mark.parametrize("candidate", ["0.4.0rc1", "0.4.0a1", "0.4.0b2", "0.4.0.dev3"])
+def test_the_gate_passes_a_pre_release_with_no_record(
+    repo: Path, candidate: str
+) -> None:
+    """A pre-release needs no release step: the gate passes when HEAD does not record
+    it, and says that it freezes nothing."""
+    result = _gate(repo, candidate)
+    assert result.returncode == 0, result.stderr
+    assert f"{candidate} is a pre-release: it freezes nothing" in result.stdout
+    assert "unpinned" in result.stdout
+
+
+@pytest.mark.parametrize("recorded", ["0.4.0rc1", "0.4.0-rc.1"])
+def test_the_gate_refuses_a_pre_release_that_head_records(
+    repo: Path, recorded: str
+) -> None:
+    """A pre-release recorded as a release (in any spelling) is refused: a pre-release
+    never runs the release step."""
+    pins = store.read_json(store.pins_path(repo))
+    pins[VERSION]["releases"][recorded] = "1" * 64
+    store.write_json(store.pins_path(repo), pins)
+    _commit(repo, "record a pre-release as a release")
+    result = _gate(repo, "0.4.0rc1")
+    assert result.returncode == 1
+    assert "pre-release 0.4.0rc1 cannot be tagged" in result.stderr
+    assert "a pre-release never runs the golden release step" in result.stderr
+
+
+def test_the_gate_refuses_a_withdrawn_pre_release(repo: Path) -> None:
+    pins = store.read_json(store.pins_path(repo))
+    pins[VERSION].setdefault("withdrawn", {})["0.4.0rc1"] = {
+        "date": "2026-11-21",
+        "reason": "test",
+        "revision": "2" * 64,
+        "manifest": "3" * 64,
+    }
+    store.write_json(store.pins_path(repo), pins)
+    _commit(repo, "withdraw a pre-release")
+    result = _gate(repo, "0.4.0rc1")
+    assert result.returncode == 1
+    assert "was withdrawn and is never released again" in result.stderr
+
+
+def test_a_final_version_without_its_release_step_still_fails(repo: Path) -> None:
+    """A final version behaves as before: the release step is required."""
+    result = _gate(repo, "0.4.0")
+    assert result.returncode == 1
+    assert "generate_golden_hashes.py --release 0.4.0" in result.stderr
+    post = _gate(repo, "0.3.0.post1")
+    assert post.returncode == 1
+    assert "generate_golden_hashes.py --release 0.3.0.post1" in post.stderr
+
+
+def test_the_gate_refuses_a_version_it_does_not_release(repo: Path) -> None:
+    result = _gate(repo, "0.4.0+local")
+    assert result.returncode == 1
+    assert "is not a release version" in result.stderr
+
+
+def test_a_pre_release_allows_an_unpinned_type_snapshot(repo: Path) -> None:
+    """Snapshots are pinned by the final release step; a pre-release may ship them open."""
+    import json
+
+    snapshot = repo / SNAPSHOT
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    _ = snapshot.write_text('{"revision": 2}\n')
+    key = SNAPSHOT.relative_to(PINS.parent).as_posix()
+    _ = (repo / PINS).write_text(
+        json.dumps({key: {"released_in": None, "sha256": None}}, indent=2) + "\n"
+    )
+    _commit(repo, "add a snapshot after the release step")
+    assert _gate(repo, "0.3.0").returncode == 1
+    result = _gate(repo, "0.4.0rc1")
+    assert result.returncode == 0, result.stderr
+
+
+def test_a_pre_release_run_still_fails_on_a_changed_released_file(repo: Path) -> None:
+    """The Release workflow runs the gate and then the tag check for every version: a
+    pre-release passes the gate, and the tag check still catches HEAD changing a file
+    that the final release 0.3.0 froze."""
+    released = next(_folder(repo).glob("*.json"))
+    _ = released.write_text(released.read_text().replace("{", "{ ", 1))
+    _commit(repo, "edit a released golden file")
+    assert _gate(repo, "0.4.0rc1").returncode == 0
+    result = _check(repo, ci=True)
+    assert result.returncode == 1
+    assert "differs from the released file" in result.stderr
+
+
+def test_a_pre_release_tag_is_not_a_release(repo: Path) -> None:
+    """A candidate's tag pins no release, so the tag check skips it and still checks
+    the final release before it."""
+    (repo / "README.candidate").write_text("a commit after 0.3.0\n")
+    _commit(repo, "work after the release")
+    assert _gate(repo, "0.4.0rc1").returncode == 0
+    _git(repo, "tag", "v0.4.0rc1")
+    module = _gate_module()
+    assert module.tag_release(repo, "v0.4.0rc1", VERSION) is None
+    assert module.check_tag(repo, "v0.4.0rc1", VERSION) is None
+    result = _check(repo, ci=True)
+    assert result.returncode == 0, result.stderr
+    assert "HEAD keeps what v0.3.0 released" in result.stdout
+    assert "v0.4.0rc1" not in result.stdout
+
+
+def test_the_generator_refuses_to_release_a_pre_release(repo: Path) -> None:
+    """``--release`` of a pre-release freezes nothing: it refuses and writes nothing."""
+    pins_before = store.pins_path(repo).read_bytes()
+    manifest = store.manifest_path(repo, VERSION)
+    manifest_before = manifest.read_bytes()
+    for candidate in ("0.4.0rc1", "0.4.0.dev1", "v0.4.0b1"):
+        with pytest.raises(SystemExit, match="is a pre-release"):
+            main(["--root", str(repo), "--release", candidate])
+    assert store.pins_path(repo).read_bytes() == pins_before
+    assert manifest.read_bytes() == manifest_before
+
+
+# ---------------------------------------------------------------------------
+# The Release workflow reads the rule (ITL-1329)
+# ---------------------------------------------------------------------------
+
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
+
+
+def _job(name: str) -> str:
+    """The text of one job of the Release workflow (up to the next job)."""
+    text = WORKFLOW.read_text()
+    start = text.index(f"\n  {name}:\n")
+    following = [
+        text.find(f"\n  {other}:\n", start + 1)
+        for other in (
+            "test",
+            "license-check",
+            "build",
+            "publish-testpypi",
+            "publish-pypi",
+            "linear-sync",
+            "linear-complete",
+        )
+    ]
+    end = min((i for i in following if i > start), default=len(text))
+    return text[start:end]
+
+
+def test_the_workflow_classifies_the_version_with_the_script() -> None:
+    """The build job's ``prerelease`` output comes from the script, before the gate."""
+    build = _job("build")
+    assert "prerelease: ${{ steps.classify.outputs.prerelease }}" in build
+    classify = build.index("id: classify")
+    assert "--classify-version" in build[classify : classify + 600]
+    assert classify < build.index("--release-version")
+    # The tag check runs for every version, a pre-release included.
+    assert "run: python3 scripts/check_golden_tags.py\n" in build
+
+
+def test_the_workflow_marks_a_pre_release_and_skips_linear() -> None:
+    publish = _job("publish-pypi")
+    assert "prerelease: ${{ needs.build.outputs.prerelease == 'true' }}" in publish
+    assert "freezes nothing" in publish
+    for name in ("linear-sync", "linear-complete"):
+        assert "needs.build.outputs.prerelease == 'false'" in _job(name), name

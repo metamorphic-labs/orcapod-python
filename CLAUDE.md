@@ -504,9 +504,14 @@ Orcapod stores or embeds in a name is pinned in the golden folder of the current
   `released_manifests.json`, with the date and the reason, so no v1 file is released today.
   Until 0.4.0, a change to any v1 golden value needs the developer's approval of the exact
   list of entries that move, each explained; it is made with `--remove <entry>`, then the
-  generator writes the new value. `--release 0.4.0` freezes v1. Any version published
-  before it, a pre-release included, would freeze v1 there: the Release workflow requires
-  the release step for every version. A withdrawn version is never released again.
+  generator writes the new value. `--release 0.4.0` freezes v1. A pre-release freezes
+  nothing (developer, November 21, 2026, ITL-1329): `0.4.0rc1` carries the hashes intended
+  to be final, the release gate (`scripts/check_golden_tags.py`, `release_version` is the
+  one rule) requires that HEAD does NOT record it, and `--release` refuses it. Between a
+  candidate and the final release a golden value changes only for a blocking reason, with
+  the developer's approval of the exact list, then a new candidate; data stored with a
+  candidate is not guaranteed valid under the final release. A withdrawn version is never
+  released again.
 - Provisional operators are outside the freeze (developer, November 18, 2026, ITL-1266):
   `orcapod.operators.PROVISIONAL_OPERATORS` (`core/operators/provisional.py`) is the one
   list (name to the issue deciding its identity; today `PolarsFilter`), and each listed class

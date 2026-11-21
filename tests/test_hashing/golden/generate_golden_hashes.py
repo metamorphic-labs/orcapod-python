@@ -28,8 +28,11 @@ The rules (developer, November 15, 2026, ITL-946; reopened November 17, 2026, IT
    ``withdrawn`` in ``released_manifests.json``, so no file is released today. Until 0.4.0,
    a change to any v1 value needs the developer's approval of the exact list of entries
    that move, each explained; it is made with ``--remove`` then ``--add`` (rule 4). 0.4.0
-   freezes v1 with ``--release 0.4.0``; so would any version published before it, a
-   pre-release included (the Release workflow requires the release step for every version).
+   freezes v1 with ``--release 0.4.0``. A pre-release (``0.4.0rc1``) freezes nothing
+   (developer, November 21, 2026, ITL-1329): it carries the hashes intended to be final,
+   ``--release`` refuses it, and the Release workflow publishes it without the release step.
+   Between a candidate and the final release a value changes only for a blocking reason,
+   with the developer's approval of the exact list, and a new candidate follows.
 1. A golden file listed by a released revision never changes and is never removed. This
    script never rewrites one.
 2. Adding values is allowed in any release. ``--add`` (the default) writes the entries the
@@ -488,6 +491,40 @@ def release(root: pathlib.Path, version: str, release_text: str) -> str:
     return history[-1]["digest"]
 
 
+def refuse_pre_release(release_text: str) -> None:
+    """Refuse to run the release step for a pre-release (ITL-1329).
+
+    Only a final release freezes a data context; a pre-release carries the hashes intended
+    to be final and is published without the release step. The rule is the Release
+    workflow's gate, ``release_version`` in ``scripts/check_golden_tags.py`` (standard
+    library only, so the workflow runs it before installing anything), loaded from this
+    repository by path: ``scripts`` is not a package.
+
+    Args:
+        release_text: The version given to ``--release``.
+
+    Raises:
+        SystemExit: If ``release_text`` is a pre-release, or not a release version.
+    """
+    import importlib.util
+
+    script = _PROJECT_ROOT / "scripts" / "check_golden_tags.py"
+    spec = importlib.util.spec_from_file_location("check_golden_tags_script", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    try:
+        name, prerelease = module.release_version(release_text)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if prerelease:
+        raise SystemExit(
+            f"{name} is a pre-release: a pre-release never runs the release step, only a "
+            "final release freezes a data context (RELEASING.md, Pre-releases); nothing "
+            "was released"
+        )
+
+
 def _data_function_types_script(root: pathlib.Path) -> Any | None:
     """The module ``scripts/data_function_types.py`` of ``root``.
 
@@ -662,6 +699,7 @@ def main(argv: list[str] | None = None) -> None:
         _ = remove(args.root, version, args.remove)
         return
     if args.release is not None:
+        refuse_pre_release(args.release)
         check_data_function_types(args.root)
         module = _data_function_types_script(args.root)
         snapshots = args.root / "src" / "orcapod" / "data_function_types"
