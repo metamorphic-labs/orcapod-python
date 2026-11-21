@@ -22,6 +22,7 @@ from orcapod.core.operators.provisional import (
     provisional_operator_name,
     warn_provisional_operator,
 )
+from orcapod.utils.provisional import note_provisional_use, provisional_class_name
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
@@ -96,6 +97,46 @@ class StaticOutputOperatorPod(TraceableBase):
             warn_provisional_operator(provisional)
         self.tracker_manager = tracker_manager or DEFAULT_TRACKER_MANAGER
         super().__init__(**kwargs)
+
+    def _note_provisional_identity_use(self) -> None:
+        """Note a use of this operator when it is provisional; never warn.
+
+        Called where the operator's identity is read (``content_hash``,
+        ``pipeline_hash``, ``identity_structure`` of a provisional operator) and where it
+        is applied to streams (``process``, ``static_process``, a ``DynamicPodStream``'s
+        hashes, identity structures, reads and ``head``), so an operator
+        built before a recording (a module-level ``Batch(2)``) is still seen by it
+        (ITL-1279). The same note as ``RootSource._note_provisional_identity_use`` for a
+        provisional source (ITL-1314). The warning stays at construction. The note
+        enters no hash, config or path.
+        """
+        provisional = provisional_class_name(type(self))
+        if provisional is not None:
+            note_provisional_use(provisional)
+
+    def content_hash(self, hasher=None) -> ContentHash:
+        """The operator's content hash; notes the use of a provisional operator.
+
+        Args:
+            hasher: Optional semantic hasher, as for ``ContentIdentifiableBase``.
+
+        Returns:
+            The content hash, unchanged by the note.
+        """
+        self._note_provisional_identity_use()
+        return super().content_hash(hasher)
+
+    def pipeline_hash(self, hasher=None) -> ContentHash:
+        """The operator's pipeline hash; notes the use of a provisional operator.
+
+        Args:
+            hasher: Optional semantic hasher, as for ``PipelineElementBase``.
+
+        Returns:
+            The pipeline hash, unchanged by the note.
+        """
+        self._note_provisional_identity_use()
+        return super().pipeline_hash(hasher)
 
     def check_data_tag_support(self, *streams: StreamProtocol) -> None:
         """Raise if a data-tag reaches an operator that does not handle it yet.
@@ -207,6 +248,7 @@ class StaticOutputOperatorPod(TraceableBase):
             A ``DynamicPodStream`` wrapping the computation.
         """
         logger.debug("Invoking kernel %s on streams: %s", self, streams)
+        self._note_provisional_identity_use()
 
         # perform input stream validation
         self.check_data_tag_support(*streams)
@@ -805,13 +847,42 @@ class DynamicPodStream(StreamBase):
         self._kept_states: tuple[tuple[str, object], ...] | None = None
         self._reset_generation: int = 0
 
+    def content_hash(self, hasher=None) -> ContentHash:
+        """The stream's content hash; notes the use of a provisional operator.
+
+        The hash is cached, so the note is made here rather than where the operator's
+        hash is read (ITL-1279).
+
+        Args:
+            hasher: Optional semantic hasher, as for ``ContentIdentifiableBase``.
+
+        Returns:
+            The content hash, unchanged by the note.
+        """
+        self._pod._note_provisional_identity_use()
+        return super().content_hash(hasher)
+
+    def pipeline_hash(self, hasher=None) -> ContentHash:
+        """The stream's pipeline hash; notes the use of a provisional operator.
+
+        Args:
+            hasher: Optional semantic hasher, as for ``PipelineElementBase``.
+
+        Returns:
+            The pipeline hash, unchanged by the note.
+        """
+        self._pod._note_provisional_identity_use()
+        return super().pipeline_hash(hasher)
+
     def identity_structure(self) -> Any:
+        self._pod._note_provisional_identity_use()  # a direct read is a use (ITL-1279)
         structure = (self._pod,)
         if self._upstreams:
             structure += (self._pod.argument_symmetry(self._upstreams),)
         return structure
 
     def pipeline_identity_structure(self) -> Any:
+        self._pod._note_provisional_identity_use()  # a direct read is a use (ITL-1279)
         structure = (self._pod,)
         if self._upstreams:
             structure += (self._pod.argument_symmetry(self._upstreams),)
@@ -940,7 +1011,11 @@ class DynamicPodStream(StreamBase):
 
     def _refresh(self) -> None:
         """Run the operator unless its kept result is current: the one computation
-        path of ``as_table``, ``iter_data`` and so ``run``."""
+        path of ``as_table``, ``iter_data`` and so ``run``.
+
+        Notes the use of a provisional operator on every read, also of a kept result
+        (ITL-1279)."""
+        self._pod._note_provisional_identity_use()
         self._update_cache_status()
 
         # recompute if cache is invalid
@@ -989,6 +1064,8 @@ class DynamicPodStream(StreamBase):
         or after an input changed, there are no rows. See ``StreamBase.head``.
         """
         check_head_size(n)
+        # A preview of a kept result is a read: it notes a provisional use (ITL-1279).
+        self._pod._note_provisional_identity_use()
         config = ColumnConfig.handle_config(columns, all_info=all_info)
         had_result = self._cached_stream is not None
         self._update_cache_status()

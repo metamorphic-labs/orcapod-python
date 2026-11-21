@@ -24,15 +24,19 @@ wanted on purpose starts a new data context version. It never edits a released v
     entries that move, each explained. 0.4.0 freezes `v1`. See
     [Withdrawing a release](#withdrawing-a-release).
 
-!!! note "Provisional operators are outside the freeze"
-    A provisional operator (`orcapod.operators.PROVISIONAL_OPERATORS`, today only
-    `PolarsFilter`) has an identity that no release freezes yet (ITL-1266). The golden values
+!!! note "Provisional operators, sources and library value types are outside the freeze"
+    A provisional operator (`orcapod.operators.PROVISIONAL_OPERATORS`; ITL-1266, ITL-1279)
+    has an identity that no release freezes yet, and so have a provisional source
+    (`orcapod.sources.PROVISIONAL_SOURCES`: `DerivedSource` in both forms, plain from
+    `node.as_source()` and with `tags_as_data`, ITL-1331; `PollingSource`, ITL-1314) and a
+    provisional library value type (`provisional` of `contexts/logical_types.json`: NumPy
+    arrays, torch tensors, pandas and Polars frames and series; ITL-1324). The golden values
     of every case that depends on one, its own hashes and those of every step downstream of
-    it, are in the provisional files, `data/v1/provisional/<group>.json`. They are computed
-    and checked on every run like every other value, but no release lists them: they can
-    change in a later release without a new data context, with the developer's approval of
-    the exact list. So the promise on this page holds for a pipeline only when it contains
-    no provisional operator. See [Provisional files](#provisional-files).
+    it, are in the provisional files, `data/v1/provisional/<group>.json` (a `PollingSource`
+    has none). They are computed and checked on every run like every other value, but no
+    release lists them: they can change in a later release without a new data context, with
+    the developer's approval of the exact list. So the promise on this page holds for a
+    pipeline only when it contains none of them. See [Provisional files](#provisional-files).
 
 ## The pieces at a glance
 
@@ -150,32 +154,70 @@ tests/test_hashing/golden/data/
 ### Provisional files
 
 `tests/test_hashing/golden/data/v1/provisional/<group>.json` holds the values of the cases
-that depend on a provisional operator (ITL-1266), one file per group and no counter: such a
-file is never frozen, and the generator rewrites it in place.
+that depend on a provisional operator (ITL-1266, ITL-1279), a provisional source (ITL-1331) or
+a provisional library value type (ITL-1324), one file per group and no counter: such a file is never frozen, and the generator
+rewrites it in place.
 
-- **Which entries.** A case declares the provisional operators it depends on:
-  `@case("pipeline", "polars_filter", provisional=("PolarsFilter",))`. The generator runs
-  every case while Orcapod records which provisional operators it builds
-  (`orcapod.utils.provisional.recording_provisional_uses`), and refuses a case that builds
-  one without declaring it, or that declares a name `PROVISIONAL_OPERATORS` does not hold.
-  The golden test checks that every entry is in the kind of file its case declares. So a
-  value that depends on a provisional operator cannot be pinned in a frozen file: neither
-  through a stream method that builds it (`stream.polars_filter`) nor in a step downstream
-  of it.
-- **Today:** the `pipeline` cases `polars_filter`, `polars_filter_expr` and
-  `polars_filter_expr_job`, and the `semantic` case `polars_expr`: the `polars_expr_v1`
-  hashes, which only `PolarsFilter`'s identity feeds in the library. The 86 entries moved
-  out of `pipeline-01.json` and `semantic-01.json`, values unchanged, before `v1` was frozen.
+- **Which entries.** A case declares the provisional features it depends on, operators and
+  sources by class name and library value types by extension name:
+  `@case("pipeline", "group_by", provisional=("GroupBy",))`,
+  `@case("schema", "derived_source_tags_as_data", provisional=("DerivedSource",))`,
+  `@case("datagram", "ndarray", provisional=("orcapod.numpy.ndarray",))`. The generator runs
+  every case while Orcapod records which provisional features it uses
+  (`orcapod.utils.provisional.recording_provisional_uses`), and refuses a case that uses
+  one without declaring it, or that declares a name that is not provisional. The golden
+  test checks that every entry is in the kind of file its case declares. An operator is
+  recorded when it is built, when its own content or pipeline hash or identity structure is
+  read, when it is applied (`process`, its call, a stream method such as `stream.group_by`,
+  `static_process`), and when a stream it produced is hashed, read or previewed (`head`); a
+  source when it is built and when its source id, content or pipeline hash or identity
+  structure is read (a `DerivedSource` also when its rows are read or previewed, and when a
+  saved one is loaded, also over a job node it cannot rebuild); a library value type when it
+  is resolved. So an operator or source built before the case, at module level, is still
+  recorded when the case reads its identity or applies it, and a step built in the case
+  downstream of it reaches it while its own hash is computed.
+- **What the guard sees, and the convention that makes it enough.** The guard sees a
+  provisional object built or read inside the case, not one hidden behind a hash computed
+  before the case: a stream, source or job node downstream of a provisional operator or
+  source that was built and hashed, or computed, before the case answers from its cached
+  hash or kept result and never reaches it, so nothing is recorded. Recording that would
+  need the dependency carried through every hash cache, which Orcapod does not do. So every
+  case builds its sources, operators, pods' inputs and jobs inside the case function, and
+  `test_golden_store.py` (`test_cases_hold_no_prebuilt_pipeline_objects`) checks that the
+  golden modules hold no module-level or cached stream, source, operator or job.
+- **A dependence the record cannot see.** A user class with a field of a provisional library
+  type (the fixture `GoldenWithArray`) embeds that type's identifier in its own identity, but
+  the identity is built once, when the class is registered, and cached: a later use of the
+  class resolves no type and records nothing. So a case whose items mix such values with
+  others is split by a predicate on the items' types (`cases.provisional_types_of`, which
+  reads field types, generic arguments and container elements), the fixtures are registered
+  before any case records its uses, and `test_golden_provisional_types.py` checks the
+  predicate against every fixture class's identity record.
+- **Split cases.** A case whose items are partly provisional is registered twice under its
+  one name, the provisional part declared, so every entry keeps its name: `semantic:value`,
+  `semantic:type`, `schema:single_field`, `arrow:extension_no_values`,
+  `pipeline:join_key_nullability` (its `merge_join.*` entries),
+  `schema:key_policy_identity` (its `derived_tags_as_data.*` entries) and
+  `pipeline:default_source_ids` (its `as_source[...]` entries).
+- **No `PollingSource` values.** No case builds a `PollingSource` (ITL-1314): its pins were
+  removed rather than kept provisional, and the tool refuses a case that builds one, declared
+  or not. Of the provisional sources only `DerivedSource` is declarable
+  (`cases.DECLARABLE_PROVISIONAL_SOURCES`).
+- **Today:** 475 entries. The `PolarsFilter` cases (`polars_filter`, `polars_filter_expr`,
+  `polars_filter_expr_job` and the `semantic` case `polars_expr`, 86 entries) moved out of
+  the frozen files with ITL-1266; the cases of the other provisional operators (229 entries)
+  and of the library value types (128 entries, with the 12 of `GoldenWithArray`) moved with
+  ITL-1279 and ITL-1324, and those of `DerivedSource` (32 entries) with ITL-1331. Every move was values unchanged, before `v1` was frozen.
 - **What holds.** Every provisional value is computed and compared on every CI run, so a
   change nobody intended fails. An intended change needs the developer's approval of the
   exact list of entries that move, each explained (`--remove`, then `--add`), but no new
   data context, before or after a release. `--release` neither lists nor pins a provisional
   file, the manifest pin leaves out `golden`, and the tag check does not compare them.
-- **Leaving the group.** When an operator stops being provisional, at a release, it leaves
-  `PROVISIONAL_OPERATORS`, its `PROVISIONAL` marker and its cases' declarations go, and
+- **Leaving the group.** When an operator (or a source) stops being provisional, at a
+  release, it leaves `PROVISIONAL_OPERATORS` (or `PROVISIONAL_SOURCES`), its `PROVISIONAL` marker and its cases' declarations go, and
   `generate_golden_hashes.py --relocate` moves its entries, values unchanged, into the open
   frozen file of their group. The `--release` step then freezes them.
-- **Joining the group.** Only an operator whose values no release lists can become
+- **Joining the group.** Only an operator or source whose values no release lists can become
   provisional: `--relocate` refuses to move an entry out of a file a release lists.
 
 ### Digest definitions
@@ -247,9 +289,18 @@ edit and the generator refuses to write over it.
 An operator that stops being provisional in this release has its entries moved into a frozen
 file (`--relocate`) before the release step, so that the release freezes them.
 
-Every published version needs the release step, a pre-release included: the release gate
-refuses to tag a version without it. So the first version of a data context published on
-PyPI freezes it; for `v1`, publishing `0.4.0rc1` would freeze `v1` at the release candidate.
+Every final version needs the release step: the release gate refuses to tag one without it.
+A pre-release (`0.4.0rc1`, `0.4.0a1`, `0.4.0b2`, `0.4.0.dev3`) freezes nothing (developer,
+November 21, 2026, ITL-1329). It carries the hashes intended to be final, the release gate
+checks that no release record at HEAD names it, and `generate_golden_hashes.py
+--release` refuses it. So the first final version of a data context freezes it: for `v1`,
+`0.4.0`, not `0.4.0rc1`. Between a candidate and the final release a golden value changes
+only for a blocking reason, with the developer's approval of the exact list of entries that
+move, and a new candidate follows. Data stored with a candidate is not guaranteed to be valid
+under the final release, and the candidate's release notes say so (the Release workflow
+writes it into the GitHub Release). What an earlier final release froze stays protected in a
+pre-release run: the tag check runs for every version, and a pre-release's own tag pins no
+release, so the tag check skips it.
 
 ### Withdrawing a release
 
@@ -395,7 +446,23 @@ build job before the tag is made; tested by `tests/test_check_golden_tags.py`
   release `X.Y.Z` of the current data context, its `manifest` pin is set, and the pinned digest is the release revision of
   `X.Y.Z`, which is the last revision of HEAD's golden history: a golden file added after
   the release step would ship unreleased, so such a commit is not tagged. It fails without
-  git.
+  git. For a pre-release (ITL-1329) it checks the opposite: no release record at HEAD
+  names a pre-release, in any spelling `release_version` accepts (the `releases` and
+  `withdrawn` keys of every data context in `released_manifests.json`, the current
+  manifest's `released_in`, a release revision of its golden history, a data function type
+  snapshot's `released_in`), and the version is not withdrawn in any data context; the
+  release step and the type snapshot pins are not required. A release record holding a
+  version text the gate cannot classify (`0.4.0rc1+local`, `0.4rc1`, `1!0.4.0rc1`) is
+  refused in a pre-release run and in a final run alike: it fails closed, never read as
+  final. A final run also refuses a version withdrawn in any data context. The tag check
+  skips every tag whose name is a pre-release (`v0.4.0rc1`), so such a tag protects no
+  golden file, revision, pin or snapshot; every other tag is checked as before, one whose
+  name the gate cannot classify (`v0.4.0rc1+local`) included, and the output names it.
+  `scripts/data_function_types.py --release` refuses a pre-release too, so nothing can be
+  pinned under one. Which versions are pre-releases is one rule, `release_version` in the same
+  script (PEP 440; a version that is not `X.Y.Z` with an optional pre-release, post-release
+  or development part is refused, never guessed), which the Release workflow also reads
+  (`--classify-version`) to mark the GitHub Release and to skip the Linear jobs.
 - **Protects against:** a release cut without the release step (11). The final-release
   check cannot catch it in the Release workflow, whose tests run before the tag exists,
   under a development version.
@@ -470,7 +537,7 @@ so the bytes that are hashed are the bytes that were committed (4).
 | Values on `main` after the last release are open | An unreleased commit has no guarantee | Use a released version for anything that must stay stable |
 | Optional groups skip without their package | `torch` values are unchecked where torch is missing | CI installs every extra |
 | The `date` field cannot be verified | Informational | Order and integrity come from the chain and the tags |
-| Provisional values are outside the freeze | A pipeline with a provisional operator may compute its results again after an upgrade | `ProvisionalHashWarning` when the operator is built; the list in `PROVISIONAL_OPERATORS` and on the operators page |
+| Provisional values are outside the freeze | A pipeline with a provisional operator or source (`DerivedSource`, `PollingSource`) may compute its results again after an upgrade | `ProvisionalHashWarning` when the operator or source is built or a saved job holding it is loaded; the lists in `PROVISIONAL_OPERATORS` and `PROVISIONAL_SOURCES`, on the operators and sources pages |
 
 A deliberate attacker with merge rights who also rewrites history and tags is beyond what any
 check inside the repository can stop; the PyPI artifacts remain the record of what shipped.

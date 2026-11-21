@@ -334,6 +334,9 @@ class MapTags(UnaryOperator):
         tag_only: Rename data-tags in the tag role only.
     """
 
+    # Provisional: its identity is not frozen with data context v1 (ITL-1279).
+    PROVISIONAL: ClassVar[bool] = True
+
     # Data-tags (ITL-1023): handled.
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
@@ -584,6 +587,7 @@ class MapTags(UnaryOperator):
             await output.close()
 
     def identity_structure(self) -> Any:
+        self._note_provisional_identity_use()  # a direct read is a use (ITL-1279)
         # ``tag_only`` enters only when set, so a plain renaming keeps its identity.
         return (
             self.__class__.__name__,
@@ -619,6 +623,9 @@ class MapColumns(UnaryOperator):
             or (with ``drop_unmapped``) no data column would remain.
     """
 
+    # Provisional: its identity is not frozen with data context v1 (ITL-1279).
+    PROVISIONAL: ClassVar[bool] = True
+
     def __init__(
         self,
         name_map: Mapping[str, str],
@@ -653,6 +660,7 @@ class MapColumns(UnaryOperator):
         return config
 
     def identity_structure(self) -> Any:
+        self._note_provisional_identity_use()  # a direct read is a use (ITL-1279)
         return (
             self.__class__.__name__,
             self.name_map,

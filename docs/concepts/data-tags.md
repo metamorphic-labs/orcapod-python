@@ -417,7 +417,8 @@ the file is checked against the stored tables when a node reads them.
 
 `MapColumns` (`map_columns`) raises "not supported with data-tags yet" when a
 data-tag reaches it; rename with `map_tags` and `map_data`.
-`PollingSource` keeps its tags plain. Each error names its issue and the way out: build the
+`PollingSource` (provisional, see [Provisional sources](sources.md#provisional-sources)) keeps
+its tags plain. Each error names its issue and the way out: build the
 source with `tag_only_columns=True` to keep every tag plain, as in v0.3. A plain tag is not
 data, so a function that reads a tag's value (as `scale` above reads `time`) can no longer
 take it from that column: as in v0.3, the value must also be a data column of its own, for

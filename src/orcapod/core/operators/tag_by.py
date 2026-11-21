@@ -73,6 +73,9 @@ class TagBy(UnaryOperator):
             column name, or one holding ``::``.
     """
 
+    # Provisional: its identity is not frozen with data context v1 (ITL-1279).
+    PROVISIONAL: ClassVar[bool] = True
+
     # Data-tags (ITL-1023): handled; this operator makes them.
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
@@ -91,6 +94,7 @@ class TagBy(UnaryOperator):
         Returns:
             ``("TagBy", [names in name order])``.
         """
+        self._note_provisional_identity_use()  # a direct read is a use (ITL-1279)
         return (self.__class__.__name__, list(self.columns))
 
     @override

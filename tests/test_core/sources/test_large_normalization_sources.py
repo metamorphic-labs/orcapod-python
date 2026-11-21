@@ -220,7 +220,9 @@ def test_function_nodes_and_derived_sources_are_large(
         assert non_large_columns(node.as_table(columns=ALL_COLUMNS)) == []
         derived = node.as_source()
         assert non_large_columns(derived.as_table(columns=ALL_COLUMNS)) == []
-        with_tags = node.as_source(tags_as_data={"t": "t_data"})
+        with_tags = node.as_source(
+            tags_as_data={"t": "t_data"}, source_id="with_tags_as_data"
+        )
         assert non_large_columns(with_tags.as_table(columns=ALL_COLUMNS)) == []
 
 

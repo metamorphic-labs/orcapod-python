@@ -91,7 +91,9 @@ def _computed_operator_stream() -> Any:
 
 
 def _derived_source() -> DerivedSource:
-    return DerivedSource(_source(), tags_as_data={"id": "id_copy"})
+    return DerivedSource(
+        _source(), tags_as_data={"id": "id_copy"}, source_id="with_tags_as_data"
+    )
 
 
 STREAMS = {

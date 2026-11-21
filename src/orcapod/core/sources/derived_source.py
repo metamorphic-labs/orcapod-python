@@ -13,6 +13,7 @@ from orcapod.core.data_tags import (
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource
+from orcapod.core.sources.provisional import warn_provisional_source
 from orcapod.core.sources.reload import same_rows
 from orcapod.core.sources.source_ids import hash_source_id
 from orcapod.core.sources.stream_builder import (
@@ -30,9 +31,10 @@ from orcapod.core.streams.base import (
 )
 from orcapod.errors import InputValidationError
 from orcapod.system_constants import constants
-from orcapod.types import ColumnConfig, ContentHash, Schema
+from orcapod.types import ColumnConfig, Schema
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
+from orcapod.utils.provisional import provisional_class_name
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -41,42 +43,6 @@ if TYPE_CHECKING:
     from orcapod.core.nodes.operator_node import OperatorJobNode
 else:
     pa = LazyModule("pyarrow")
-
-
-def _derivation_hash(
-    origin: "FunctionJobNode | OperatorJobNode | RootSource",
-    tags_as_data: Mapping[str, str],
-    record_id_columns: tuple[str, ...] | None,
-) -> ContentHash:
-    """Return the content hash an operator node doing this derivation would have.
-
-    The hashed structure has the shape an operator's output stream hashes for its
-    ``content_hash``: the producer's identity (class name and parameters) followed
-    by its upstreams. Here that is ``(("DerivedSource", sorted tags_as_data items),
-    (origin,))``, with the origin entering through its own ``content_hash``. A
-    ``record_id_columns`` is a parameter of the derivation too, since it decides
-    the record IDs: when they are given, ``("record_id_columns", names)`` is
-    appended to the parameters. The hasher is the origin's, so the result depends on the
-    origin's identity and on these parameters, and on nothing else.
-
-    Args:
-        origin: The source or job node the derived source reads from.
-        tags_as_data: Maps a tag column of the origin to the name of its data copy.
-        record_id_columns: The key columns that identify a row, or ``None`` for
-            the row position.
-
-    Returns:
-        The derivation hash, from which ``_default_source_id`` builds the default
-        ``source_id`` of a ``DerivedSource`` built with ``tags_as_data``.
-    """
-    hasher = origin.data_context.semantic_hasher
-    parameters: tuple[Any, ...] = ("DerivedSource", tuple(sorted(tags_as_data.items())))
-    if record_id_columns is not None:
-        parameters += (("record_id_columns", record_id_columns),)
-    return hasher.hash_object(
-        (parameters, (origin,)),
-        resolver=lambda obj: obj.content_hash(hasher),
-    )
 
 
 def validate_tags_as_data(
@@ -127,6 +93,12 @@ def validate_tags_as_data(
 class DerivedSource(RootSource):
     """A source whose rows are derived from another source or from a job node.
 
+    Provisional in data context v1, in both forms (ITL-1331, ``PROVISIONAL_SOURCES``):
+    its source id and hashes are not frozen and may change in a later release (ITL-1317),
+    and so are those of every step downstream of it. Building one, also through
+    ``node.as_source()``, ``from_config`` or a loaded job, issues
+    ``ProvisionalHashWarning`` once per process.
+
     There are two forms.
 
     **Plain** (``tags_as_data`` not given), created by ``FunctionNode.as_source()``
@@ -154,13 +126,10 @@ class DerivedSource(RootSource):
     any source it can be wrapped with ``cached(database)``.
 
     Identity (``tags_as_data`` form):
-        - ``source_id`` defaults to ``tags_as_data:<algorithm label>:<hex digest>``,
-          where label and digest are the derivation hash: the content hash an
-          operator node doing this derivation over the origin would have, built
-          from the origin's content hash, the sorted ``tags_as_data`` items and
-          the ``record_id_columns`` when one is set. It changes when the origin's
-          identity or one of these parameters changes. An explicit ``source_id``
-          replaces it.
+        - ``source_id`` is required: there is no default (developer, November 21,
+          2026, ITL-1313). The default this form had, a hash of the derivation,
+          was of questionable stability (``record_id_columns=None`` and ``()``,
+          one key policy, gave two ids).
         - ``content_hash`` follows the rule of every root source (class name,
           output schema and ``source_id``) plus the sorted ``tags_as_data`` items,
           since two mappings can give one schema and one explicit ``source_id``.
@@ -187,7 +156,9 @@ class DerivedSource(RootSource):
 
     Args:
         origin: The source or DB-backed job node to derive from.
-        source_id: Canonical source name. Defaults as described above.
+        source_id: Canonical source name. Required with ``tags_as_data``; the plain
+            form defaults it to ``derived:<algorithm label>:<hex>`` of the origin's
+            content hash.
         tags_as_data: Maps a tag column of the origin to the name of the data
             column that receives a copy of it.
         record_id_columns: Key columns whose values identify a row in record IDs and
@@ -200,7 +171,8 @@ class DerivedSource(RootSource):
         InputValidationError: If ``tags_as_data`` names a column that is not a tag
             of the origin, or a new name that is already a column, is repeated,
             or is reserved.
-        ValueError: If ``record_id_columns`` is given without ``tags_as_data``.
+        ValueError: If ``tags_as_data`` is given without a ``source_id`` (before the
+            origin is read), or ``record_id_columns`` without ``tags_as_data``.
         TypeError: If the origin is a source and ``tags_as_data`` is not given.
 
     Example::
@@ -208,44 +180,56 @@ class DerivedSource(RootSource):
         experiment = DerivedSource(
             SpiralDBTableSource(project, "experiment"),
             tags_as_data={"session_start_datetime": "session_start"},
+            source_id="experiment_with_start",
         )
     """
 
     # The config type key (names the class a saved config is rebuilt with) and
     # the kind prefix of the plain form's default source id.
     SOURCE_KIND: ClassVar[str] = "derived"
-    # The kind prefix of a hash-based default source id names the operation that
-    # derives the source. One constant per operation.
-    TAGS_AS_DATA_KIND: ClassVar[str] = "tags_as_data"
+    PROVISIONAL = True
+    """Provisional in data context v1, both forms (ITL-1331, ``PROVISIONAL_SOURCES``)."""
+
+    @staticmethod
+    def _missing_source_id() -> ValueError:
+        """The error for a ``tags_as_data`` source built or loaded without a ``source_id``."""
+        return ValueError(
+            "DerivedSource with tags_as_data needs a source_id: it has no default, "
+            "because a default built from a hash of the derivation was of "
+            "questionable stability (ITL-1313). Pass source_id='<a name for this "
+            "source>'."
+        )
 
     @classmethod
-    def _default_source_id(
-        cls,
-        origin: "FunctionJobNode | OperatorJobNode | RootSource",
-        tags_as_data: Mapping[str, str],
-        record_id_columns: tuple[str, ...] | None,
-    ) -> str:
-        """Return the default ``source_id`` of a source built with ``tags_as_data``.
+    def require_saved_source_id(cls, config: Mapping[str, Any]) -> None:
+        """Refuse a saved ``tags_as_data`` config without a ``source_id`` (ITL-1313).
 
-        The format is ``<kind>:<algorithm label>:<hex digest>``, for example
-        ``tags_as_data:semantic_v1:01bb...``: the kind names the operation that
-        derives the source, and the label and digest are the derivation hash
-        (``_derivation_hash``) in its labelled form. An empty mapping is still
-        this operation and gets the same kind. This one string is the
-        source's name everywhere it appears: the system-tag ``source_id`` values,
-        the source-info tokens, and the name of the source in a job.
+        Checks the config and every source config nested in it (under the keys of
+        ``serialization.NESTED_SOURCE_CONFIG_KEYS``: a derived source's ``origin``, a
+        cached source's ``inner_source``), without rebuilding anything. A missing id is
+        an invalid config, not an unavailable source, so ``PipelineJob.load`` calls this
+        before it rebuilds the sources best-effort, and ``from_config`` before it
+        rebuilds the origin.
 
         Args:
-            origin: The source or job node the derived source reads from.
-            tags_as_data: Maps a tag column of the origin to the name of its copy.
-            record_id_columns: The key columns that identify a row, or ``None`` for
-                the row position.
+            config: A source config, as ``to_config`` writes it.
 
-        Returns:
-            The default source id.
+        Raises:
+            ValueError: If the config, or a config nested in it, is a derived source
+                with ``tags_as_data`` but no ``source_id`` (absent or null).
         """
-        derivation_hash = _derivation_hash(origin, tags_as_data, record_id_columns)
-        return f"{cls.TAGS_AS_DATA_KIND}:{derivation_hash.to_string()}"
+        from orcapod.pipeline.serialization import NESTED_SOURCE_CONFIG_KEYS
+
+        if (
+            config.get("source_type") == cls.SOURCE_KIND
+            and config.get("tags_as_data") is not None
+            and config.get("source_id") is None
+        ):
+            raise cls._missing_source_id()
+        for key in NESTED_SOURCE_CONFIG_KEYS:
+            nested = config.get(key)
+            if isinstance(nested, Mapping):
+                cls.require_saved_source_id(nested)
 
     def __init__(
         self,
@@ -268,6 +252,9 @@ class DerivedSource(RootSource):
                 )
             self._tags_as_data: dict[str, str] | None = None
         else:
+            # No default source id (ITL-1313): refused before the origin is read.
+            if source_id is None:
+                raise self._missing_source_id()
             # The mapping names a set of copies: they are placed in the order of their
             # new names, so the order it is given in changes nothing (ITL-1271).
             self._tags_as_data = dict(
@@ -279,16 +266,12 @@ class DerivedSource(RootSource):
 
         self._explicit_source_id = source_id
         if source_id is None:
-            # A source id is the source's name, used as-is in system tags and
-            # source-info values. A default built from a hash keeps a source-kind
-            # prefix and the hash's label (developer, November 11, 2026):
-            # ``derived:<algorithm label>:<hex>`` of the origin's content hash.
-            if self._tags_as_data is None:
-                source_id = hash_source_id(self.SOURCE_KIND, origin.content_hash())
-            else:
-                source_id = self._default_source_id(
-                    origin, self._tags_as_data, key_columns
-                )
+            # Only the plain form gets here without a source id. A source id is the
+            # source's name, used as-is in system tags and source-info values; a
+            # default built from a hash keeps a source-kind prefix and the hash's
+            # label (developer, November 11, 2026): ``derived:<algorithm
+            # label>:<hex>`` of the origin's content hash.
+            source_id = hash_source_id(self.SOURCE_KIND, origin.content_hash())
         super().__init__(source_id=source_id, **kwargs)
         self._origin = origin
         self._record_id_columns = key_columns
@@ -318,6 +301,7 @@ class DerivedSource(RootSource):
         Returns:
             The identity structure.
         """
+        self._note_provisional_identity_use()  # a direct read is a use (ITL-1331)
         if self._tags_as_data is None:
             # Tied precisely to the specific node's data identity
             return (self._origin.content_hash(),)
@@ -334,8 +318,9 @@ class DerivedSource(RootSource):
         """Serialize this source to a JSON-compatible dict.
 
         The origin's own config is embedded when the origin is a source, which
-        makes the derived source reloadable whenever its origin is. A default
-        ``source_id`` is not written: it is recomputed from the reloaded origin.
+        makes the derived source reloadable whenever its origin is. The
+        ``source_id`` is the one given (always, with ``tags_as_data``); the plain
+        form's default is not written, since it is recomputed from the origin.
 
         Args:
             db_registry: Optional database registry, forwarded to the origin.
@@ -382,8 +367,18 @@ class DerivedSource(RootSource):
         Raises:
             NotImplementedError: If the config holds no origin: a derived source
                 over a job node cannot be rebuilt from a config.
+            ValueError: If the config has ``tags_as_data`` but no ``source_id``,
+                before the origin is rebuilt.
         """
         from orcapod.pipeline.serialization import resolve_source_from_config
+
+        # Reading a saved DerivedSource is a use of a provisional source, also when its
+        # origin (a job node) cannot be rebuilt and the constructor is never reached: a
+        # loaded job warns for it as for a rebuilt one (ITL-1331).
+        provisional = provisional_class_name(cls)
+        if provisional is not None:
+            warn_provisional_source(provisional)
+        cls.require_saved_source_id(config)
 
         if config.get("origin") is None:
             raise NotImplementedError(
@@ -539,6 +534,9 @@ class DerivedSource(RootSource):
         return result.stream
 
     def _get_stream(self) -> ArrowTableStream:
+        # Every read of rows notes the provisional use, also of rows kept from an
+        # earlier read (ITL-1331), as a provisional operator's stream does.
+        self._note_provisional_identity_use()
         if self._tags_as_data is not None:
             if self._cached_stream is not None:
                 return self._cached_stream
@@ -642,6 +640,8 @@ class DerivedSource(RootSource):
         its head (see ``StreamBase.head``).
         """
         check_head_size(n)
+        # A preview is a read of rows: it notes the provisional use (ITL-1331).
+        self._note_provisional_identity_use()
         config = ColumnConfig.handle_config(columns, all_info=all_info)
         origin_kind = "held" if isinstance(self._origin, RootSource) else "stored"
         if self._tags_as_data is not None and self._cached_stream is not None:

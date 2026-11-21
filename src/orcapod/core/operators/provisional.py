@@ -10,87 +10,90 @@ checked on every run but never frozen by a release.
 attribute ``PROVISIONAL = True`` (declared on ``StaticOutputOperatorPod``); a test checks
 that the list and the markers agree. Constructing a provisional operator issues
 ``ProvisionalHashWarning`` once per operator per process and notes the use
-(``utils/provisional.note_provisional_use``). An operator leaves the list at a release:
+(``utils/provisional.warn_provisional_use``). An operator leaves the list at a release:
 its golden values then move into a frozen golden file, and its identity is frozen from that
 release on.
 """
 
 from __future__ import annotations
 
-import threading
-import warnings
 from collections.abc import Mapping
 from types import MappingProxyType
 
-from orcapod.errors import ProvisionalHashWarning
-from orcapod.utils.provisional import note_provisional_use
-from orcapod.utils.warning_utils import outside_orcapod_stacklevel
+from orcapod.utils.provisional import (
+    provisional_class_name,
+    reset_provisional_use_warnings,
+    warn_provisional_use,
+)
 
 PROVISIONAL_OPERATORS: Mapping[str, str] = MappingProxyType(
     {
+        # Developer, November 19, 2026 (ITL-1279): "anything whose identity choice isn't
+        # obvious and feels solid should be put into provisional first". Each names the
+        # issue that decides its identity or output; the reasons per operator are in
+        # docs/dev/specs/itl-1271-order-invariance-audit.md.
         # Whether the order of its predicates is part of its identity (ITL-1247), and
         # whether a general Filter over a Condition supersedes it (ITL-1265).
         "PolarsFilter": "ITL-1247",
+        # Its output for a data-tag and its data column (ITL-1017); a mode keeping the
+        # non-key tags (ITL-1071).
+        "GroupBy": "ITL-1017",
+        # Its output for a data-tag and its data column (ITL-1017).
+        "Batch": "ITL-1017",
+        # Its rules for data-tags (ITL-1018); it became ordered in ITL-1281.
+        "MergeJoin": "ITL-1018",
+        # Its rename rules for data-tags (ITL-1018); arguments under two weeks old.
+        "MapTags": "ITL-1018",
+        # Its behaviour with data-tags (ITL-1022); two days old.
+        "MapColumns": "ITL-1022",
+        # The policy for a miss changes its output (ITL-439).
+        "Pick": "ITL-439",
+        # As Pick (ITL-439), plus a stored source-info token known wrong (ITL-866).
+        "Index": "ITL-439",
+        # Days old, its identity just changed (ITL-1226): the review of the tag
+        # operators (ITL-1290).
+        "TagBy": "ITL-1290",
+        # Days old, its identity just changed (ITL-1269), a function form is future: the
+        # review of the tag operators (ITL-1290).
+        "AddTags": "ITL-1290",
     }
 )
 """The provisional operators: class name to the issue that decides its identity."""
 
-_lock = threading.RLock()
-_issued: set[str] = set()
-
 
 def provisional_operator_name(cls: type) -> str | None:
-    """The provisional operator a class is, or derives from.
+    """The provisional operator a class is, or derives from (``provisional_class_name``).
 
     Args:
         cls: An operator class.
 
     Returns:
-        The name of the nearest class in ``cls``'s method resolution order that sets
-        ``PROVISIONAL = True`` itself, or ``None`` when ``cls`` is not provisional.
+        The provisional class's name, or ``None`` when ``cls`` is not provisional.
     """
-    if not getattr(cls, "PROVISIONAL", False):
-        return None
-    for klass in cls.__mro__:
-        if klass.__dict__.get("PROVISIONAL") is True:
-            return klass.__name__
-    return None
+    return provisional_class_name(cls)
 
 
 def warn_provisional_operator(name: str) -> None:
     """Note the use of a provisional operator and warn, once per operator per process.
 
-    The use is noted every time. The warning is recorded as issued only after
-    ``warnings.warn`` returns, so under an error filter every construction raises. It is
-    attributed to the first frame outside Orcapod, the code that built the operator.
-
     Args:
         name: The provisional operator's class name.
     """
-    note_provisional_use(name)
-    if name in _issued:
-        return
-    with _lock:
-        if name in _issued:
-            return
-        warnings.warn(
-            f"{name} is provisional: its identity is not frozen with data context v1 "
-            "and may change in a later release. Then the stored paths and record ids "
-            f"of its results, and of every step downstream of {name}, change, and "
-            "those results are computed again instead of reused (nothing stored is "
-            "lost or wrong). See 'Provisional operators' in docs/concepts/operators.md. "
-            "To silence: warnings.filterwarnings('ignore', "
-            "category=orcapod.errors.ProvisionalHashWarning).",
-            ProvisionalHashWarning,
-            stacklevel=outside_orcapod_stacklevel(),
-        )
-        _issued.add(name)
+    warn_provisional_use(
+        name,
+        f"{name} is provisional: its identity is not frozen with data context v1 "
+        "and may change in a later release. Then the stored paths and record ids "
+        f"of its results, and of every step downstream of {name}, change, and "
+        "those results are computed again instead of reused (nothing stored is "
+        "lost or wrong). See 'Provisional operators' in docs/concepts/operators.md. "
+        "To silence: warnings.filterwarnings('ignore', "
+        "category=orcapod.errors.ProvisionalHashWarning).",
+    )
 
 
 def reset_provisional_operator_warnings() -> None:
-    """Forget which provisional operators have warned, so each warns again.
+    """Forget which provisional features have warned, so each warns again.
 
     A test hook: a test that checks the warning starts as a new process would.
     """
-    with _lock:
-        _issued.clear()
+    reset_provisional_use_warnings()

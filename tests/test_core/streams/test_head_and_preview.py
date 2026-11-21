@@ -438,7 +438,9 @@ def test_derived_source_over_a_polling_source_never_polls() -> None:
     fake = _FakeDynamicSource()
     origin = PollingSource(fake, tag_columns="id", record_id_columns="id")
     # Building the derived source reads the origin's columns, which polls it once.
-    derived = DerivedSource(origin, tags_as_data={"id": "id_value"})
+    derived = DerivedSource(
+        origin, tags_as_data={"id": "id_value"}, source_id="with_tags_as_data"
+    )
     seen = (fake.polls, fake.fetches)
     head = derived.head()
     _ = derived._repr_html_()
@@ -698,7 +700,9 @@ def test_derived_source_rowless_head_has_its_own_columns() -> None:
     """Before its origin polls, a derived source shows its columns, tag copies included."""
     fake = _FakeDynamicSource(declared=Schema({"id": int, "val": int}))
     origin = PollingSource(fake, tag_columns="id", record_id_columns="id")
-    derived = DerivedSource(origin, tags_as_data={"id": "id_value"})
+    derived = DerivedSource(
+        origin, tags_as_data={"id": "id_value"}, source_id="with_tags_as_data"
+    )
     head = derived.head()
     assert (fake.polls, fake.fetches) == (0, 0)
     assert head.status is ViewStatus.NOT_COMPUTED

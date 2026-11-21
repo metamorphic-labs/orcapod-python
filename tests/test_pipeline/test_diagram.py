@@ -299,7 +299,9 @@ def test_a_tags_as_data_source_is_drawn_without_reading_its_origin(
 ) -> None:
     """A source over a job node that has stored nothing yet: its columns are predicted."""
     origin = _job()
-    derived = origin.nodes["rates"].as_source(tags_as_data={"k": "k_copy"})
+    derived = origin.nodes["rates"].as_source(
+        tags_as_data={"k": "k_copy"}, source_id="with_tags_as_data"
+    )
     job = PipelineJob(name="second", database=InMemoryArrowDatabase())
     with job:
         derived.select_data_columns(["k_copy"])

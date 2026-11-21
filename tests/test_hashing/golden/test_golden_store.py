@@ -6,14 +6,21 @@ repository itself.
 
 from __future__ import annotations
 
+import functools
 import json
 import re
+import warnings
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+import pandas as pd
+import pyarrow as pa
 import pytest
 
 from orcapod.contexts import get_default_context
+from orcapod.errors import ProvisionalHashWarning
+from orcapod.operators import Batch, MergeJoin
 from tests.test_hashing.golden import cases, store
 from tests.test_hashing.golden.generate_golden_hashes import dump, main
 
@@ -791,9 +798,25 @@ def _freeze_provisional(root: Path, group: str, frozen_file: str) -> dict[str, A
     return entries
 
 
-def _without_declarations(group: str) -> list[tuple[str, Any, tuple[str, ...]]]:
-    """The cases of a group as if no provisional operator were left in it."""
-    return [(name, fn, ()) for name, fn, _ in cases._CASES[group]]
+def _without_declaration(
+    group: str, feature: str = "PolarsFilter"
+) -> list[tuple[str, Any, tuple[str, ...]]]:
+    """The cases of a group as if ``feature`` had left the provisional group: no case
+    declares it any more; every other declaration stays (ITL-1324: a group holds
+    provisional library value types too)."""
+    return [
+        (name, fn, tuple(n for n in declared if n != feature))
+        for name, fn, declared in cases._CASES[group]
+    ]
+
+
+def _declaring(group: str, feature: str) -> set[str]:
+    """The case names of a group that declare ``feature`` and nothing else."""
+    return {
+        name
+        for name, _, declared in cases._CASES[group]
+        if tuple(declared) == (feature,)
+    }
 
 
 def test_the_repository_pins_provisional_entries_outside_the_history() -> None:
@@ -845,15 +868,20 @@ def test_relocate_refuses_a_provisional_entry_in_a_released_file(tree: Path) -> 
 def test_relocate_freezes_the_entries_of_an_operator_that_left_the_group(
     tree: Path, monkeypatch: pytest.MonkeyPatch, released: bool
 ) -> None:
-    """Graduation: the entries go to the open frozen file, the provisional file goes."""
-    entries = store.read_json(_provisional(tree) / "semantic.json")
+    """Graduation: the entries of the feature that left go to the open frozen file; the
+    provisional file keeps the entries of every other provisional feature."""
+    graduating = _declaring("semantic", "PolarsFilter")
+    provisional = store.read_json(_provisional(tree) / "semantic.json")
+    entries = {k: v for k, v in provisional.items() if k.split(".")[0] in graduating}
+    staying = {k: v for k, v in provisional.items() if k not in entries}
+    assert entries and staying
     if released:
         main(["--root", str(tree), "--release", "0.3.0"])
     newest = store.read_json(_folder(tree) / NEWEST_SEMANTIC)
-    monkeypatch.setitem(cases._CASES, "semantic", _without_declarations("semantic"))
+    monkeypatch.setitem(cases._CASES, "semantic", _without_declaration("semantic"))
     main(["--root", str(tree), "--relocate", "--group", "semantic"])
-    assert not (_provisional(tree) / "semantic.json").exists()
-    assert "semantic.json" not in _listing(tree)
+    assert store.read_json(_provisional(tree) / "semantic.json") == staying
+    assert "semantic.json" in _listing(tree)
     if released:
         assert store.read_json(_folder(tree) / NEWEST_SEMANTIC) == newest
         assert store.read_json(_folder(tree) / NEXT_SEMANTIC) == entries
@@ -879,8 +907,13 @@ def test_check_reports_a_provisional_entry_in_a_frozen_file(tree: Path) -> None:
 def test_check_reports_an_entry_in_the_provisional_file_whose_case_is_not(
     tree: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    entry = sorted(store.read_json(_provisional(tree) / "semantic.json"))[0]
-    monkeypatch.setitem(cases._CASES, "semantic", _without_declarations("semantic"))
+    graduating = _declaring("semantic", "PolarsFilter")
+    entry = sorted(
+        k
+        for k in store.read_json(_provisional(tree) / "semantic.json")
+        if k.split(".")[0] in graduating
+    )[0]
+    monkeypatch.setitem(cases._CASES, "semantic", _without_declaration("semantic"))
     with pytest.raises(
         SystemExit,
         match=re.escape(f"semantic:{entry} is pinned in the provisional file"),
@@ -896,7 +929,14 @@ def test_add_writes_provisional_entries_to_their_provisional_files(
     original = _everything(tree)
     for name in ("semantic.json", "pipeline.json"):
         (_provisional(tree) / name).unlink()
-    _set_listing(tree, {})
+    _set_listing(
+        tree,
+        {
+            k: v
+            for k, v in _listing(tree).items()
+            if k not in ("semantic.json", "pipeline.json")
+        },
+    )
     args = ["--root", str(tree)]
     for group in order:
         args += ["--group", group]
@@ -934,6 +974,9 @@ def test_removing_every_entry_of_a_provisional_file_removes_it(tree: Path) -> No
 
 
 def test_an_unlisted_provisional_file_is_reported(tree: Path) -> None:
+    listing = dict(_listing(tree))
+    listing.pop("schema.json", None)
+    _set_listing(tree, listing)
     _write(_provisional(tree), "schema.json", {"x.y": "z"})
     assert any(
         "golden.provisional does not list it" in p
@@ -1057,6 +1100,278 @@ def test_a_case_using_an_undeclared_provisional_operator_is_refused(
         _ = cases.compute_group_kinds("semantic")
 
 
+def _prebuilt_inputs() -> tuple[Any, Any]:
+    """Two inputs with two tags and two data columns, colliding on ``age``."""
+    from orcapod.sources import ArrowTableSource
+
+    left = pa.table(
+        {
+            "subject": ["s1", "s2", "s3"],
+            "session": [1, 2, 1],
+            "age": [2, 4, 6],
+            "weight": [20.5, 22.25, 19.0],
+        }
+    )
+    right = pa.table(
+        {
+            "session": [2, 1],
+            "subject": ["s2", "s1"],
+            "height": [1.5, 1.25],
+            "age": [8, 7],
+        }
+    )
+    return (
+        ArrowTableSource(
+            left, tag_columns=["subject", "session"], tag_only_columns=True
+        ),
+        ArrowTableSource(
+            right, tag_columns=["session", "subject"], tag_only_columns=True
+        ),
+    )
+
+
+@functools.cache
+def _prebuilt() -> dict[str, Any]:
+    """Provisional operators and their computed, hashed streams, built once and before
+    any case is recorded, as a module-level ``op = Batch(2)`` is: the construction
+    warning (and its note) falls outside every recording, so only a note on use can
+    reveal them (ITL-1279). Built on first call, not at import, so collecting this module
+    uses up no once-per-process warning."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ProvisionalHashWarning)
+        batch, merge_join = Batch(2), MergeJoin()
+        batched, merged = batch(_prebuilt_inputs()[0]), merge_join(*_prebuilt_inputs())
+        for stream in (batched, merged):
+            _ = stream.as_table(), stream.content_hash(), stream.pipeline_hash()
+    return {
+        "batch": batch,
+        "merge_join": merge_join,
+        "batched": batched,
+        "merged": merged,
+    }
+
+
+# Each use of a prebuilt provisional operator inside a case: one unary, one binary.
+_PREBUILT_USES: dict[str, tuple[str, Any]] = {
+    "unary content hash": (
+        "Batch",
+        lambda: {"h": _prebuilt()["batch"].content_hash().to_string()},
+    ),
+    "unary pipeline hash": (
+        "Batch",
+        lambda: {"h": _prebuilt()["batch"].pipeline_hash().to_string()},
+    ),
+    "unary applied": (
+        "Batch",
+        lambda: cases.stream_summary(_prebuilt()["batch"](_prebuilt_inputs()[0])),
+    ),
+    "unary kept stream read": (
+        "Batch",
+        lambda: {"rows": _prebuilt()["batched"].as_table().num_rows},
+    ),
+    "unary kept stream hash": (
+        "Batch",
+        lambda: {"h": _prebuilt()["batched"].content_hash().to_string()},
+    ),
+    "binary content hash": (
+        "MergeJoin",
+        lambda: {"h": _prebuilt()["merge_join"].content_hash().to_string()},
+    ),
+    "binary pipeline hash": (
+        "MergeJoin",
+        lambda: {"h": _prebuilt()["merge_join"].pipeline_hash().to_string()},
+    ),
+    "binary applied": (
+        "MergeJoin",
+        lambda: cases.stream_summary(_prebuilt()["merge_join"](*_prebuilt_inputs())),
+    ),
+    "binary applied in the other order": (
+        "MergeJoin",
+        lambda: cases.stream_summary(
+            _prebuilt()["merge_join"](*reversed(_prebuilt_inputs()))
+        ),
+    ),
+    "binary kept stream read": (
+        "MergeJoin",
+        lambda: {"rows": _prebuilt()["merged"].as_table().num_rows},
+    ),
+    "unary identity structure": (
+        "Batch",
+        lambda: {"s": repr(_prebuilt()["batch"].identity_structure())},
+    ),
+    "unary pipeline identity structure": (
+        "Batch",
+        lambda: {"s": repr(_prebuilt()["batch"].pipeline_identity_structure())},
+    ),
+    "unary kept stream head": (
+        "Batch",
+        lambda: {"rows": len(_prebuilt()["batched"].head(2).as_table())},
+    ),
+    "binary identity structure": (
+        "MergeJoin",
+        lambda: {"s": repr(_prebuilt()["merge_join"].identity_structure())},
+    ),
+    "binary kept stream identity structure": (
+        "MergeJoin",
+        lambda: {"s": repr(_prebuilt()["merged"].identity_structure())},
+    ),
+    "binary kept stream head": (
+        "MergeJoin",
+        lambda: {"rows": len(_prebuilt()["merged"].head(2).as_table())},
+    ),
+    "binary kept stream pipeline hash": (
+        "MergeJoin",
+        lambda: {"h": _prebuilt()["merged"].pipeline_hash().to_string()},
+    ),
+}
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
+@pytest.mark.parametrize("use", sorted(_PREBUILT_USES))
+def test_a_case_using_a_prebuilt_provisional_operator_undeclared_is_refused(
+    monkeypatch: pytest.MonkeyPatch, use: str
+) -> None:
+    """An operator built before the case (at module level) is noted where its identity
+    is read and where it is applied, so an undeclared case is refused (Codex review of
+    PR 469)."""
+    name, fn = _PREBUILT_USES[use]
+    _ = _prebuilt()
+    monkeypatch.setitem(cases._CASES, "semantic", [("prebuilt", fn, ())])
+    with pytest.raises(ValueError, match=re.escape(f"uses the provisional {[name]}")):
+        _ = cases.compute_group_kinds("semantic")
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
+@pytest.mark.parametrize("use", sorted(_PREBUILT_USES))
+def test_a_case_declaring_a_prebuilt_provisional_operator_is_provisional(
+    monkeypatch: pytest.MonkeyPatch, use: str
+) -> None:
+    name, fn = _PREBUILT_USES[use]
+    _ = _prebuilt()
+    monkeypatch.setitem(cases._CASES, "semantic", [("prebuilt", fn, (name,))])
+    values, provisional = cases.compute_group_kinds("semantic")
+    assert values
+    assert provisional == frozenset(values)
+
+
+class _GoldenStubPolling:
+    """A polling implementation that is never polled (ITL-1314 refusal test)."""
+
+    def identity(self) -> Any:
+        return ("_GoldenStubPolling",)
+
+    def to_config(self) -> None:
+        return None
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any]) -> _GoldenStubPolling:
+        return cls()
+
+    def schema(self) -> Any:
+        from orcapod.types import Schema
+
+        return Schema({"id": str, "value": int})
+
+    async def poll(self, cursor: Any = None) -> bool:
+        return False
+
+    async def fetch(self, cursor: Any = None) -> Any:
+        raise NotImplementedError
+
+    async def close(self) -> None:
+        return None
+
+
+def _building_polling_sources(*source_ids: str) -> Any:
+    """A case function that builds a PollingSource per id and pins their names."""
+
+    def fn() -> dict[str, Any]:
+        from orcapod.core.sources import PollingSource
+
+        built = [
+            PollingSource(
+                _GoldenStubPolling(),
+                tag_columns="id",
+                record_id_columns="id",
+                source_id=source_id,
+            )
+            for source_id in source_ids
+        ]
+        return {"value": [source.source_id for source in built]}
+
+    return fn
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
+@pytest.mark.parametrize("source_ids", [("one",), ("one", "two")])
+def test_a_case_building_a_polling_source_is_refused(
+    monkeypatch: pytest.MonkeyPatch, source_ids: tuple[str, ...]
+) -> None:
+    """A case that builds a PollingSource is refused, undeclared and declared (ITL-1314):
+    only DerivedSource is a declarable source (ITL-1331)."""
+    monkeypatch.setitem(
+        cases._CASES,
+        "semantic",
+        [("polling", _building_polling_sources(*source_ids), ())],
+    )
+    with pytest.raises(
+        ValueError, match=re.escape("uses the provisional ['PollingSource']")
+    ):
+        _ = cases.compute_group_kinds("semantic")
+    monkeypatch.setitem(
+        cases._CASES,
+        "semantic",
+        [("polling", _building_polling_sources(*source_ids), ("PollingSource",))],
+    )
+    with pytest.raises(ValueError, match=re.escape("declares ['PollingSource']")):
+        _ = cases.compute_group_kinds("semantic")
+
+
+def _reading_built_polling_sources(read: str, *source_ids: str) -> Any:
+    """A case function over PollingSources built BEFORE the case runs (a fixture).
+
+    The sources are built (and, for the hashes, hashed once) outside any recording, so
+    only the reads inside the case can record the provisional use.
+    """
+    from orcapod.core.sources import PollingSource
+
+    built = [
+        PollingSource(
+            _GoldenStubPolling(),
+            tag_columns="id",
+            record_id_columns="id",
+            source_id=source_id,
+        )
+        for source_id in source_ids
+    ]
+    for source in built:  # cached before the case runs
+        _ = source.content_hash(), source.pipeline_hash()
+
+    def fn() -> dict[str, Any]:
+        if read == "source_id":
+            return {"value": [source.source_id for source in built]}
+        if read == "content_hash":
+            return {"value": [source.content_hash().to_string() for source in built]}
+        return {"value": [source.pipeline_hash().to_string() for source in built]}
+
+    return fn
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
+@pytest.mark.parametrize("read", ["source_id", "content_hash", "pipeline_hash"])
+@pytest.mark.parametrize("source_ids", [("one",), ("one", "two")])
+def test_a_case_reading_a_polling_source_built_before_it_is_refused(
+    monkeypatch: pytest.MonkeyPatch, read: str, source_ids: tuple[str, ...]
+) -> None:
+    """Reading a provisional source's identity records its use, cached or not (ITL-1314)."""
+    case = _reading_built_polling_sources(read, *source_ids)
+    monkeypatch.setitem(cases._CASES, "semantic", [("polling", case, ())])
+    with pytest.raises(
+        ValueError, match=re.escape("uses the provisional ['PollingSource']")
+    ):
+        _ = cases.compute_group_kinds("semantic")
+
+
 def test_a_case_declaring_an_unknown_provisional_name_is_refused(
     monkeypatch: pytest.MonkeyPatch, two_provisional: None
 ) -> None:
@@ -1067,17 +1382,349 @@ def test_a_case_declaring_an_unknown_provisional_name_is_refused(
         _ = cases.compute_group_kinds("semantic")
 
 
-def test_the_repository_cases_declare_exactly_the_polars_filter_cases() -> None:
-    """The cases that depend on PolarsFilter, measured for ITL-1266, and no other."""
+def test_the_repository_cases_declare_exactly_the_measured_cases() -> None:
+    """The cases that depend on a provisional operator, source or library value type,
+    measured for ITL-1266, ITL-1279, ITL-1324 and ITL-1331
+    (docs/dev/scripts/itl_1279/measure_relocation.py), and no other. A split case is
+    listed once: its provisional part. No case declares a ``PollingSource`` (ITL-1314)."""
     declared = {
         (group, name): names
         for group, registered in cases._CASES.items()
         for name, _, names in registered
         if names
     }
+    numpy_pandas = cases.NUMPY_PANDAS_TYPES
+    polars = cases.POLARS_TYPES
+    torch = (cases.TORCH_TENSOR,)
     assert declared == {
         ("semantic", "polars_expr"): ("PolarsFilter",),
+        ("semantic", "value"): numpy_pandas,
+        ("semantic", "type"): numpy_pandas,
+        ("semantic", "polars_value"): polars,
+        ("semantic", "polars_type"): polars,
+        ("schema", "single_field"): numpy_pandas,
+        ("schema", "polars_single_field"): polars,
+        ("arrow", "extension_no_values"): numpy_pandas,
+        ("arrow", "polars_extension_no_values"): polars,
+        ("datagram", "ndarray"): (cases.NUMPY_NDARRAY,),
+        ("datagram", "dataframe"): (cases.PANDAS_DATAFRAME,),
+        ("datagram", "structural_with_array"): (cases.NUMPY_NDARRAY,),
+        ("datagram", "polars_data_hash"): polars,
+        ("datagram", "polars_dataframe"): (cases.POLARS_DATAFRAME,),
+        ("datagram", "polars_series"): (cases.POLARS_SERIES,),
         ("pipeline", "polars_filter"): ("PolarsFilter",),
         ("pipeline", "polars_filter_expr"): ("PolarsFilter",),
         ("pipeline", "polars_filter_expr_job"): ("PolarsFilter",),
+        ("pipeline", "merge_join"): ("MergeJoin",),
+        ("pipeline", "join_key_nullability"): ("MergeJoin",),
+        ("pipeline", "batch"): ("Batch",),
+        ("pipeline", "group_by"): ("GroupBy",),
+        ("pipeline", "index_pick"): ("Index", "Pick"),
+        ("pipeline", "map_columns"): ("MapColumns",),
+        ("pipeline", "add_tags"): ("AddTags",),
+        ("pipeline", "group_by_arrangement"): ("GroupBy",),
+        ("pipeline", "group_by_nan_keys"): ("GroupBy",),
+        ("schema", "derived_source_tags_as_data"): ("DerivedSource",),
+        ("schema", "key_policy_identity"): ("DerivedSource",),
+        ("pipeline", "default_source_ids"): ("DerivedSource",),
+        ("torch", "value"): torch,
+        ("torch", "type"): torch,
+        ("torch", "single_field"): torch,
+        ("torch", "datagram"): torch,
     }
+
+
+def test_the_provisional_library_value_types_are_declarable() -> None:
+    """The names a case may declare include each provisional library value type
+    (ITL-1324), by extension name, beside the provisional operators."""
+    names = cases.declarable_provisional_names()
+    assert {
+        cases.NUMPY_NDARRAY,
+        cases.PANDAS_DATAFRAME,
+        cases.PANDAS_SERIES,
+        cases.POLARS_DATAFRAME,
+        cases.POLARS_SERIES,
+        cases.TORCH_TENSOR,
+    } <= names
+    assert {"PolarsFilter", "GroupBy", "MergeJoin"} <= names
+    assert "DerivedSource" in names
+    assert "PollingSource" not in names
+
+
+def _hashing(*values: Any) -> Any:
+    def fn() -> dict[str, Any]:
+        hasher = cases._ctx().semantic_hasher  # pyright: ignore[reportPrivateUsage]
+        return {
+            f"v{i}": hasher.hash_object(v).to_string() for i, v in enumerate(values)
+        }
+
+    return fn
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
+@pytest.mark.parametrize(
+    ("values", "missing"),
+    [
+        ((np.arange(3), pd.Series([1.0])), [cases.NUMPY_NDARRAY, cases.PANDAS_SERIES]),
+        ((pd.Series([1.0]), np.arange(3)), [cases.NUMPY_NDARRAY, cases.PANDAS_SERIES]),
+        ((1, np.arange(3)), [cases.NUMPY_NDARRAY]),
+    ],
+)
+def test_a_case_hashing_an_undeclared_library_value_type_is_refused(
+    monkeypatch: pytest.MonkeyPatch, values: tuple[Any, ...], missing: list[str]
+) -> None:
+    """A direct use of a provisional library value type is recorded on every use, in
+    any order, so a frozen case that hashes one without declaring it is refused."""
+    monkeypatch.setitem(cases._CASES, "semantic", [("lib", _hashing(*values), ())])
+    with pytest.raises(ValueError, match=re.escape(f"uses the provisional {missing}")):
+        _ = cases.compute_group_kinds("semantic")
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
+def test_a_case_declaring_the_library_value_types_it_hashes_is_provisional(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(
+        cases._CASES,
+        "semantic",
+        [
+            ("lib", _hashing(pd.Series([1.0]), np.arange(3)), cases.NUMPY_PANDAS_TYPES),
+            ("plain", _hashing(1, "a"), ()),
+        ],
+    )
+    values, provisional = cases.compute_group_kinds("semantic")
+    assert set(values) == {"lib.v0", "lib.v1", "plain.v0", "plain.v1"}
+    assert provisional == frozenset({"lib.v0", "lib.v1"})
+
+
+# ---------------------------------------------------------------------------
+# DerivedSource is provisional (ITL-1331)
+# ---------------------------------------------------------------------------
+
+
+def _derived_origin() -> Any:
+    from orcapod.sources import ArrowTableSource
+
+    table = pa.table(
+        {
+            "subject": ["s1", "s2"],
+            "session": [1, 2],
+            "age": [2, 4],
+            "weight": [20.5, 22.25],
+        }
+    )
+    return ArrowTableSource(
+        table,
+        tag_columns=["subject", "session"],
+        tag_only_columns=True,
+        source_id="golden_derived_origin",
+    )
+
+
+def _derived(mapping: dict[str, str]) -> Any:
+    from orcapod.core.sources import DerivedSource
+
+    return DerivedSource(_derived_origin(), tags_as_data=mapping, source_id="copied")
+
+
+def _plain_derived() -> Any:
+    from orcapod import PipelineJob
+    from orcapod.databases import InMemoryArrowDatabase
+    from orcapod.operators import SelectDataColumns
+
+    job = PipelineJob(name="golden_derived", database=InMemoryArrowDatabase())
+    with job:
+        SelectDataColumns(["age", "weight"])(_derived_origin(), label="picked")
+    job.run()
+    return job.nodes["picked"].as_source()
+
+
+_AS_DATA = {"session": "session_value", "subject": "subject_value"}
+
+# Built inside the case: both forms, the mapping in two orders.
+_DERIVED_IN_CASE: dict[str, Any] = {
+    "tags_as_data": lambda: {"id": _derived(_AS_DATA).source_id},
+    "tags_as_data reversed": lambda: {
+        "id": _derived(dict(reversed(list(_AS_DATA.items())))).source_id
+    },
+    "plain": lambda: {"id": _plain_derived().source_id},
+}
+
+
+@functools.cache
+def _prebuilt_derived() -> dict[str, Any]:
+    """Both forms built, hashed and read before any case is recorded."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ProvisionalHashWarning)
+        built = {"tags_as_data": _derived(_AS_DATA), "plain": _plain_derived()}
+        for source in built.values():
+            _ = source.source_id, source.content_hash(), source.pipeline_hash()
+            _ = source.as_table()
+    return built
+
+
+def _reading(form: str, read: str) -> Any:
+    def fn() -> dict[str, Any]:
+        source = _prebuilt_derived()[form]
+        if read == "source_id":
+            return {"v": source.source_id}
+        if read == "rows":
+            return {"v": source.as_table().num_rows}
+        if read == "head":
+            return {"v": len(source.head(2).as_table())}
+        if read.endswith("identity_structure"):
+            return {"v": repr(getattr(source, read)())}
+        return {"v": getattr(source, read)().to_string()}
+
+    return fn
+
+
+_DERIVED_READS = [
+    (form, read)
+    for form in ("plain", "tags_as_data")
+    for read in (
+        "source_id",
+        "content_hash",
+        "pipeline_hash",
+        "rows",
+        "head",
+        "identity_structure",
+        "pipeline_identity_structure",
+    )
+]
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
+@pytest.mark.parametrize("built", sorted(_DERIVED_IN_CASE))
+def test_a_case_building_a_derived_source_undeclared_is_refused(
+    monkeypatch: pytest.MonkeyPatch, built: str
+) -> None:
+    fn = _DERIVED_IN_CASE[built]
+    monkeypatch.setitem(cases._CASES, "schema", [("derived", fn, ())])
+    with pytest.raises(
+        ValueError, match=re.escape("uses the provisional ['DerivedSource']")
+    ):
+        _ = cases.compute_group_kinds("schema")
+    monkeypatch.setitem(cases._CASES, "schema", [("derived", fn, ("DerivedSource",))])
+    _, provisional = cases.compute_group_kinds("schema")
+    assert provisional == frozenset({"derived.id"})
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
+@pytest.mark.parametrize(("form", "read"), _DERIVED_READS)
+def test_a_case_reading_a_derived_source_built_before_it_is_refused(
+    monkeypatch: pytest.MonkeyPatch, form: str, read: str
+) -> None:
+    _ = _prebuilt_derived()
+    fn = _reading(form, read)
+    monkeypatch.setitem(cases._CASES, "schema", [("derived", fn, ())])
+    with pytest.raises(
+        ValueError, match=re.escape("uses the provisional ['DerivedSource']")
+    ):
+        _ = cases.compute_group_kinds("schema")
+    monkeypatch.setitem(cases._CASES, "schema", [("derived", fn, ("DerivedSource",))])
+    _, provisional = cases.compute_group_kinds("schema")
+    assert provisional == frozenset({"derived.v"})
+
+
+def _pinned_entry_names() -> dict[str, set[str]]:
+    """group -> every entry name pinned in a frozen or provisional file."""
+    folder = store.golden_folder(
+        store.PROJECT_ROOT,
+        store.read_json(store.manifest_path(store.PROJECT_ROOT, VERSION)),
+    )
+    names: dict[str, set[str]] = {}
+    for path in sorted(folder.rglob("*.json")):
+        names.setdefault(path.stem.split("-")[0], set()).update(store.read_json(path))
+    return names
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
+def test_split_cases_keep_every_entry_name() -> None:
+    """A case registered twice (its provisional part declared) computes exactly the
+    entry names pinned for it, each from one registration only (ITL-1279, ITL-1324,
+    ITL-1331)."""
+    cases.register_logical_classes()
+    pinned = _pinned_entry_names()
+    split = {
+        (group, name)
+        for group, registered in cases._CASES.items()
+        for name in {n for n, _, _ in registered}
+        if sum(1 for n, _, _ in registered if n == name) > 1
+    }
+    assert split == {
+        ("semantic", "value"),
+        ("semantic", "type"),
+        ("schema", "single_field"),
+        ("schema", "key_policy_identity"),
+        ("arrow", "extension_no_values"),
+        ("pipeline", "join_key_nullability"),
+        ("pipeline", "default_source_ids"),
+    }
+    for group, name in sorted(split):
+        parts = [
+            {f"{name}.{key}" for key in fn()}
+            for n, fn, _ in cases._CASES[group]
+            if n == name
+        ]
+        assert all(parts), (group, name)
+        assert not set.intersection(*parts), (group, name)
+        expected = {e for e in pinned[group] if e.startswith(f"{name}.")}
+        assert set.union(*parts) == expected, (group, name)
+
+
+# The module-level function pods of the golden modules: fixtures that hash with their
+# module path, so they never move (CLAUDE.md, Golden hash values). A function pod holds
+# no input, so it hides no provisional dependency behind a cached hash.
+_FIXTURE_FUNCTION_PODS = {("cases", "golden_adjust"), ("cases", "golden_ratio")}
+
+
+def _pipeline_objects(value: Any, depth: int = 0) -> list[str]:
+    """What in ``value`` (and in a container of it, two levels down) is a stream, source,
+    operator, pod, node or job, or a cached function."""
+    from orcapod.core.base import ContentIdentifiableBase
+    from orcapod.pipeline.job import PipelineJob
+
+    found: list[str] = []
+    if isinstance(value, (ContentIdentifiableBase, PipelineJob)):
+        found.append(type(value).__name__)
+    pod = getattr(value, "pod", None)
+    if pod is not None and not isinstance(value, type):
+        found.append(f"function pod {type(pod).__name__}")
+    if hasattr(value, "cache_info"):
+        found.append("cached function")
+    if depth < 2 and isinstance(value, (dict, list, tuple, set, frozenset)):
+        items = value.values() if isinstance(value, dict) else value
+        for item in items:
+            found.extend(_pipeline_objects(item, depth + 1))
+    return found
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
+def test_cases_hold_no_prebuilt_pipeline_objects() -> None:
+    """The convention that makes the provisional guard enough (ITL-1279, ITL-1331): the
+    guard sees a provisional object built or read inside a case, not one hidden behind a
+    hash computed before it. So no golden module holds a module-level or cached stream,
+    source, operator, node or job; the shared helpers are functions that build fresh
+    objects. The only module-level pipeline objects are the fixture function pods."""
+    import importlib
+    import inspect
+    import pkgutil
+
+    import tests.test_hashing.golden as golden
+
+    found: dict[tuple[str, str], list[str]] = {}
+    for info in pkgutil.iter_modules(golden.__path__):
+        if info.name.startswith("test_"):
+            continue
+        module = importlib.import_module(f"{golden.__name__}.{info.name}")
+        for name, value in vars(module).items():
+            if inspect.ismodule(value) or inspect.isclass(value):
+                continue
+            objects = _pipeline_objects(value)
+            if objects:
+                found[(info.name, name)] = objects
+    assert set(found) == _FIXTURE_FUNCTION_PODS, found
+    assert all(objects == ["function pod FunctionPod"] for objects in found.values()), (
+        found
+    )

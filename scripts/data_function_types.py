@@ -16,7 +16,10 @@ a type stores needs a new revision (or a new major), with a new snapshot.
     uv run python scripts/data_function_types.py --write     # after changing a declaration
     uv run python scripts/data_function_types.py --release X.Y.Z   # the release step
 
-``--release`` pins every open snapshot; ``generate_golden_hashes.py --release`` runs it.
+``--release`` pins every open snapshot; ``generate_golden_hashes.py --release`` runs it. It
+refuses a pre-release (ITL-1329): only a final release pins, so that a release candidate
+freezes nothing. Which versions are pre-releases is the release gate's rule,
+``release_version`` in ``check_golden_tags.py`` beside this script.
 """
 
 from __future__ import annotations
@@ -157,8 +160,41 @@ def open_snapshots(snapshots: Path) -> list[str]:
     )
 
 
+def _refuse_pre_release(version: str) -> None:
+    """Refuse to pin for a pre-release, or for a text that is not a release version.
+
+    The rule is ``release_version`` of ``check_golden_tags.py`` beside this script (the
+    release gate's, standard library only), loaded by path: ``scripts`` is not a package.
+
+    Raises:
+        SystemExit: If ``version`` is a pre-release or not a release version, or the gate
+            script is missing (the rule is never guessed).
+    """
+    import importlib.util
+
+    gate = Path(__file__).resolve().with_name("check_golden_tags.py")
+    if not gate.is_file():
+        raise SystemExit(
+            f"{gate} is missing: it decides which versions are pre-releases; nothing "
+            "was pinned"
+        )
+    spec = importlib.util.spec_from_file_location("check_golden_tags_script", gate)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    try:
+        name, prerelease = module.release_version(version)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if prerelease:
+        raise SystemExit(
+            f"{name} is a pre-release: a pre-release pins no snapshot, only a final "
+            "release does (ITL-1329); nothing was pinned"
+        )
+
+
 def release(snapshots: Path, version: str) -> list[str]:
-    """Pin every open snapshot as released in ``version``.
+    """Pin every open snapshot as released in ``version``, a final release.
 
     Args:
         snapshots: The snapshot folder.
@@ -166,7 +202,11 @@ def release(snapshots: Path, version: str) -> list[str]:
 
     Returns:
         The relative paths pinned now.
+
+    Raises:
+        SystemExit: If ``version`` is a pre-release (ITL-1329), or a snapshot is unsound.
     """
+    _refuse_pre_release(version)
     problems = check(snapshots)
     if problems:
         raise SystemExit("\n".join(problems))
