@@ -23,7 +23,12 @@ from datetime import date, datetime, timezone
 from typing import TYPE_CHECKING, Any, TypedDict, get_args, get_origin
 
 from orcapod.contexts import DataContext, resolve_context
-from orcapod.errors import CanonicalOrderError, UnsupportedValueError
+from orcapod.errors import (
+    CanonicalOrderError,
+    NaiveDatetimeError,
+    SubMicrosecondDatetimeError,
+    UnsupportedValueError,
+)
 from orcapod.semantic_types.canonical_order import (
     sort_dict_entries,
     sort_set_elements,
@@ -165,6 +170,54 @@ def _is_optional_type(python_type: DataType) -> bool:
     if origin is typing.Literal:
         return None in get_args(python_type)
     return False
+
+
+def storable_instant(value: datetime, timezone_policy: str) -> datetime:
+    """Return ``value`` as a ``datetime`` column holds it, or refuse it (ITL-1268).
+
+    The one rule for storing a Python ``datetime`` (or a subclass, such as a
+    ``pandas.Timestamp``) under the type ``datetime``, which the converter maps to an
+    instant at microsecond precision (``timestamp[us, tz=UTC]``). Every path that
+    stores such a value goes through it: a source's Python values and a function's
+    outputs, at any depth. An aware value of any zone is the instant it names (Arrow
+    stores it in UTC). A naive value names no instant: refused under the ``strict``
+    time zone policy, read as UTC under ``coerce_utc``. A value with a part below one
+    microsecond is refused, never truncated.
+
+    Args:
+        value: The value to store.
+        timezone_policy: The converter's policy for naive values, ``"strict"`` or
+            ``"coerce_utc"`` (its ``datetime_timezone``).
+
+    Returns:
+        The value to hand to Arrow: ``value`` itself, or with UTC attached under
+        ``coerce_utc``.
+
+    Raises:
+        NaiveDatetimeError: If ``value`` has no time zone under the ``strict`` policy.
+        SubMicrosecondDatetimeError: If ``value`` has a part below one microsecond.
+    """
+    if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+        if timezone_policy == "strict":
+            raise NaiveDatetimeError(value)
+        # coerce_utc: attach UTC so the value is treated as UTC.
+        value = value.replace(tzinfo=timezone.utc)
+    # A plain datetime has whole microseconds. A subclass may hold more (a
+    # pandas.Timestamp holds nanoseconds); it equals its whole-microsecond part only
+    # when it has nothing below one microsecond.
+    if type(value) is not datetime and value != datetime(
+        value.year,
+        value.month,
+        value.day,
+        value.hour,
+        value.minute,
+        value.second,
+        value.microsecond,
+        tzinfo=value.tzinfo,
+        fold=value.fold,
+    ):
+        raise SubMicrosecondDatetimeError(value)
+    return value
 
 
 class UniversalTypeConverter:
@@ -1796,18 +1849,7 @@ class UniversalTypeConverter:
                 # level — consistent with all other primitive converters.
                 if dt is None:
                     return None  # type: ignore[return-value]
-                _is_naive = dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None
-                if _is_naive:
-                    if _tz_policy == "strict":
-                        raise ValueError(
-                            "Naive datetime (no timezone info) is not supported "
-                            "under the current 'strict' timezone policy. "
-                            "Use a timezone-aware datetime, "
-                            f"e.g. datetime.now(timezone.utc). Got: {dt!r}"
-                        )
-                    # coerce_utc: attach UTC so the value is treated as UTC.
-                    return dt.replace(tzinfo=timezone.utc)
-                return dt
+                return storable_instant(dt, _tz_policy)
 
             return _convert_datetime
 

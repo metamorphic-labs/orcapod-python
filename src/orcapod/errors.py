@@ -85,6 +85,76 @@ class UnsupportedValueError(ValueError):
     """
 
 
+class UnstorableDatetimeError(ValueError):
+    """A ``datetime`` value that a ``datetime`` column cannot hold as it is (ITL-1268).
+
+    A ``datetime`` column holds an instant, in UTC, at microsecond precision
+    (``timestamp[us, tz=UTC]``). The type converter's one rule for storing a
+    ``datetime`` (``universal_converter.storable_instant``) raises a subclass for every
+    path that stores one: a source's Python values and a function's outputs, sync or
+    async, at the top level or inside a list, dict or class field. ``reason`` and
+    ``hint`` name no value, so a function's ``OutputTypeError`` shows them as they
+    are; the message adds the value.
+
+    Attributes:
+        reason: What is wrong with the value, without the value.
+        hint: How to convert the value.
+        value: The value.
+    """
+
+    reason: str = ""
+    hint: str = ""
+
+    def __init__(self, value: object) -> None:
+        """Create the error for ``value``.
+
+        Args:
+            value: The ``datetime`` (or subclass, such as a ``pandas.Timestamp``) that
+                cannot be stored.
+        """
+        self.value: object = value
+        super().__init__(f"{self.reason}. {self.hint}. Got: {value!r}")
+
+    def __reduce__(self) -> tuple[object, ...]:
+        """Pickle with the value (executors send errors across processes)."""
+        return (type(self), (self.value,))
+
+
+class NaiveDatetimeError(UnstorableDatetimeError):
+    """A ``datetime`` without a time zone, under the ``strict`` time zone policy.
+
+    A ``datetime`` column holds an instant, and a value with no time zone names none. A
+    type converter built with ``datetime_timezone="coerce_utc"`` reads such a value as
+    UTC instead.
+    """
+
+    reason = (
+        "Naive datetime (no timezone info) is not supported under the current "
+        "'strict' timezone policy: a datetime is stored as an instant, in UTC, and a "
+        "value without a time zone names no instant"
+    )
+    hint = (
+        "Use a timezone-aware datetime: attach the time zone its wall time is in, "
+        "e.g. value.replace(tzinfo=timezone.utc) when it is UTC or "
+        'value.replace(tzinfo=ZoneInfo("Europe/Berlin")) for another zone '
+        "(value.astimezone() takes this machine's local time zone)"
+    )
+
+
+class SubMicrosecondDatetimeError(UnstorableDatetimeError):
+    """A ``datetime`` with a part below one microsecond, such as a ``pandas.Timestamp``
+    with nanoseconds: storing it would drop that part, so it is refused."""
+
+    reason = (
+        "Datetime with a part below one microsecond is not supported: a datetime is "
+        "stored at microsecond precision, and storing it would drop that part"
+    )
+    hint = (
+        "Round or truncate it to whole microseconds first, "
+        'e.g. value.floor("us") or value.round("us") for a pandas.Timestamp'
+    )
+
+
 class UnstorableColumnError(ValueError):
     """A database cannot store a column of a table it is asked to hold (ITL-1162).
 
