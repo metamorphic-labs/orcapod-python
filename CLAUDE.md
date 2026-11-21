@@ -1142,6 +1142,17 @@ then through the data context's type converter — never call `pa.array(values)`
 inference widens `int8` to `int64`, `float32` to `double`, and takes decimal precision from the
 data. The rules:
 
+- **An explicit CSV schema is read as declared** (developer, November 21, 2026, ITL-1322):
+  `CSVSource(schema=...)` parses each cell's text as its column's declared type
+  (`csv_source._read_declared`), never infers a type and casts afterwards: `007` under a string
+  type stays `"007"`, and a cell that is not a value of its type raises naming the column. The
+  schema names every column of the file, in order. Nulls (option C; the class is decided once,
+  `_is_text_like`): in a text-like column (string or binary of any width, or a logical type
+  stored as one) only an unquoted empty field is null (a quoted `""` is empty, `NA` is text); in
+  any other column pyarrow's null markers are null. A finite value too large for its float type
+  raises; a spelled infinity is kept. `float16` and `decimal256` are read as text and cast with a
+  checked cast; a type the reader cannot parse, and a nested type, are refused naming the
+  column. Every parse reads one in-memory snapshot of the file.
 - **The Arrow schema is never computed** (developer, November 13, 2026, ITL-912): "Generally
   Orcapod should never have to compute anything to get the arrow schema, all function pods and
   operator pods can deterministically derive the output stream schema from the input stream
@@ -1186,6 +1197,18 @@ data. The rules:
   `-> torch.Tensor` is stored, read back and hashed as an `nn.Parameter`).
   Structural classes additionally accept equivalent structural identities. Numeric
   narrowing and unrelated container types require explicit conversion.
+
+- `-> datetime` is an instant, stored as `timestamp[us, tz=UTC]` (developer, November 21,
+  2026, ITL-1268; the mapping does not change in data context v1). Every Arrow timestamp
+  type reads as `datetime`. One rule stores a Python `datetime` the type converter
+  converts (function outputs at any depth, `DictSource` and `ListSource` values; not a
+  `DataFrameSource` over a plain dict or list, ITL-1330): `universal_converter.storable_instant`.
+  An aware value of any zone is stored as its exact instant (an offset with a part below
+  one second is converted to UTC first: Arrow drops that part; any other value is handed to
+  Arrow as before, so no stored value moves); a naive value raises `NaiveDatetimeError` (strict policy); a
+  value with a part below one microsecond (a `pandas.Timestamp` with nanoseconds) raises
+  `SubMicrosecondDatetimeError`, never truncated. A function output shows the error's
+  `reason` and `hint` (no value). No unzoned or nanosecond output exists yet (ITL-1325).
 
 - Every output column takes the large-normalized form of its input type
   (`arrow_utils.normalize_to_large_types`: `string` to `large_string`, `binary` to `large_binary`, `list`
