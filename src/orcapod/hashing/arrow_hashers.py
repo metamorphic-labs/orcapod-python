@@ -3,8 +3,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pyarrow as pa
-from starfix import ArrowDigester
 
+from orcapod.hashing.starfix_digest import (
+    digest_library_value,
+    digest_orcapod_table,
+    digest_schema,
+)
 from orcapod.hashing.schema_cleaner import (
     clean_schema_for_hashing,
     has_extension_metadata,
@@ -23,10 +27,19 @@ ARROW_HASH_LABEL = "arrow_v1"
 """``ContentHash.method`` of an Arrow table or schema hash: the single definition.
 
 It names the whole procedure of ``StarfixArrowHasher``: the replacement of
-extension-typed cells by their value digests, then the starfix digest (hash format 2,
-starfix 0.5). A change that gives an existing table a different digest takes a new
+extension-typed cells by their value digests, then the starfix digest (hash format 2:
+starfix 0.5 and later; Orcapod uses starfix 0.6, the Rust implementation, ITL-1179). A change that gives an existing table a different digest takes a new
 label (``arrow_v2``). The number is not kept equal to the starfix hash format number.
 The data context file names the hasher class and does not repeat the label.
+"""
+
+ARROW_STRICT_HASH_LABEL = "arrow_strict_v1"
+"""``ContentHash.method`` of ``StarfixArrowHasher.hash_table_strict``: the single definition.
+
+The hash of a pyarrow table or record batch given as a VALUE (not a table Orcapod built):
+the procedure of ``hash_table`` without Orcapod's float rule, so every bit counts, as for
+every library value (ITL-1179). One label, one procedure: it differs from ``arrow_v1``
+only for ``-0.0`` and for NaNs other than the ordinary one.
 """
 
 ARROW_ORDERED_HASH_LABEL = "arrow_ordered_v1"
@@ -35,12 +48,13 @@ ARROW_ORDERED_HASH_LABEL = "arrow_ordered_v1"
 The order-including table hash is a procedure of its own (column order and, by default,
 struct field order are part of the digest; the options are an input of the digest), so it
 has its own label: one label, one procedure (ITL-1154). It is fed, with this label, into the
-value hashes built on it (pandas ``DataFrame`` and ``Series``).
+value hashes built on it (pandas ``DataFrame`` and ``Series``). It is a library value's
+digest, so Orcapod's float rule does not apply: every bit counts (ITL-1179).
 """
 
 
 class StarfixArrowHasher:
-    """Arrow table hasher backed by the starfix-python ``ArrowDigester``.
+    """Arrow table hasher backed by starfix (the Rust implementation), via ``starfix_digest``.
 
     Pipeline
     --------
@@ -52,8 +66,8 @@ class StarfixArrowHasher:
        their full extension metadata intact.
     2. **Starfix hashing** — ``ArrowDigester.hash_table`` produces a 35-byte
        digest: the starfix hash format number ``00 00 02`` (hash format 2,
-       starfix 0.5) followed by a SHA-256 digest, byte-for-byte identical to
-       the Rust ``starfix`` crate output. In ``hash_table`` the order of columns
+       starfix 0.5 and later) followed by a SHA-256 digest. starfix 0.6 computes
+       it in Rust, byte-for-byte as the pure-Python starfix-python 0.5.0 did. In ``hash_table`` the order of columns
        and of struct fields is not part of the hash (starfix's order options stay
        off); ``hash_table_ordered`` turns both options on. Row order and list
        element order are always part of it. Extension identity
@@ -61,6 +75,12 @@ class StarfixArrowHasher:
        through starfix's ``include_metadata`` whenever the table has an
        extension column, including pyarrow's built-in canonical extension types
        such as ``arrow.uuid``.
+    3. **Floats.** ``hash_table`` hashes a table Orcapod built, under Orcapod's
+       float rule (starfix's ``normalize_negative_zero`` and ``normalize_nan``,
+       explicitly on): ``-0.0`` as ``0.0`` and every NaN as the ordinary NaN.
+       ``hash_table_ordered`` and ``hash_table_strict`` hash a library value, with
+       both options explicitly off: every bit counts. ``hashing/starfix_digest.py``
+       is the one module that calls starfix and states which use gets which.
 
     starfix raises ``ValueError`` for inputs it cannot hash: data of ``null``,
     ``map``, interval and view types (whatever the row count); union and
@@ -183,19 +203,44 @@ class StarfixArrowHasher:
         include_meta = has_extension_metadata(schema) or has_extension_type(schema)
         if include_meta:
             schema = clean_schema_for_hashing(schema)
-        digest = ArrowDigester.hash_schema(schema, include_metadata=include_meta)
+        digest = digest_schema(schema, include_metadata=include_meta)
         return ContentHash(method=self._hasher_id, digest=digest)
 
     def hash_table(self, table: "pa.Table | pa.RecordBatch") -> ContentHash:
-        """Hash an Arrow table (or ``RecordBatch``) using starfix.
+        """Hash an Arrow table (or ``RecordBatch``) that Orcapod built, using starfix.
 
         Column order and struct field order are not part of the hash: this is the hash of
-        Orcapod's own tables (streams, datagrams, rows), which ignore order on purpose.
+        Orcapod's own tables (streams, datagrams, rows, preimages), which ignore order on
+        purpose. Floats are hashed under Orcapod's float rule: ``-0.0`` as ``0.0`` and
+        every NaN as the ordinary NaN (``starfix_digest.digest_orcapod_table``). A
+        library value inside a cell keeps its own strict value digest, which replaces
+        the cell before the table is hashed.
         """
         return ContentHash(
             method=self._hasher_id,
             digest=self._digest(
-                table, ordered_columns=False, ordered_struct_fields=False
+                table,
+                ordered_columns=False,
+                ordered_struct_fields=False,
+                orcapod_table=True,
+            ),
+        )
+
+    def hash_table_strict(self, table: "pa.Table | pa.RecordBatch") -> ContentHash:
+        """Hash a pyarrow table (or ``RecordBatch``) given as a value: every bit counts.
+
+        The procedure of ``hash_table`` (the same preprocessing, column and struct field
+        order not part of it) without Orcapod's float rule, as for every library value:
+        ``-0.0`` and ``0.0``, and NaNs that differ in bits, hash apart. Labelled
+        ``ARROW_STRICT_HASH_LABEL``.
+        """
+        return ContentHash(
+            method=ARROW_STRICT_HASH_LABEL,
+            digest=self._digest(
+                table,
+                ordered_columns=False,
+                ordered_struct_fields=False,
+                orcapod_table=False,
             ),
         )
 
@@ -212,7 +257,8 @@ class StarfixArrowHasher:
         even for a one-column table. Value types whose own equality depends on order build
         their hash on this digest (pandas ``DataFrame`` and ``Series``), which they take with
         its label. The ``ContentHash`` returned here is labelled
-        ``ARROW_ORDERED_HASH_LABEL``: it is another procedure than ``hash_table``.
+        ``ARROW_ORDERED_HASH_LABEL``: it is another procedure than ``hash_table``. It is a
+        library value's digest, so Orcapod's float rule does not apply: every bit counts.
 
         Args:
             table: The table or record batch to hash.
@@ -223,7 +269,10 @@ class StarfixArrowHasher:
         return ContentHash(
             method=ARROW_ORDERED_HASH_LABEL,
             digest=self._digest(
-                table, ordered_columns=True, ordered_struct_fields=struct_field_order
+                table,
+                ordered_columns=True,
+                ordered_struct_fields=struct_field_order,
+                orcapod_table=False,
             ),
         )
 
@@ -233,13 +282,17 @@ class StarfixArrowHasher:
         *,
         ordered_columns: bool,
         ordered_struct_fields: bool,
+        orcapod_table: bool,
     ) -> bytes:
-        """Preprocess ``table`` and return its starfix digest; the only starfix table call.
+        """Preprocess ``table`` and return its starfix digest.
 
         Args:
             table: The table or record batch to hash.
             ordered_columns: Whether column order is part of the digest.
             ordered_struct_fields: Whether struct field order is part of the digest.
+            orcapod_table: Whether Orcapod built the table (its floats are hashed under
+                Orcapod's float rule) rather than it being a library value's Arrow form
+                (every bit counts).
 
         Returns:
             The starfix digest (version prefix included).
@@ -258,7 +311,8 @@ class StarfixArrowHasher:
             )
         else:
             clean_table = processed_table
-        return ArrowDigester.hash_table(
+        digest = digest_orcapod_table if orcapod_table else digest_library_value
+        return digest(
             clean_table,
             include_metadata=include_meta,
             ordered_columns=ordered_columns,

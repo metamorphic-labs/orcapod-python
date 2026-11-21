@@ -356,8 +356,9 @@ def test_a_list_column_is_ordered_by_row_hash_not_by_its_values() -> None:
     ids=["zero-signs", "nan-payloads", "nan-signs"],
 )
 def test_float_values_the_sort_counts_equal_are_a_tie(bits: tuple[int, int]) -> None:
-    """The sort counts -0.0 equal to 0.0 and every NaN equal: such rows are a tie group,
-    ordered by their row hashes (which still tell the bits apart before ITL-1179)."""
+    """The sort counts -0.0 equal to 0.0 and every NaN equal: such rows are a tie group.
+    Under the float rule (ITL-1179) their row hashes are equal too, so their order is
+    arbitrary, and the table hash, which ignores the same bits, is one either way."""
     floats = pa.array(np.array(bits, np.uint64).view(np.float64))
     base = pa.table({"k": [1, 1], "x": floats})
     results = []
@@ -369,13 +370,6 @@ def test_float_values_the_sort_counts_equal_are_a_tie(bits: tuple[int, int]) -> 
     assert results[0] == results[1]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="ITL-1179: the float rule (starfix 0.6, PR 456) is not on this branch; once it "
-    + "is, -0.0/0.0 and NaN bit patterns hash alike, so two raw streams differing only "
-    + "in them are one stream. Rows the sort ties then also get equal row hashes, and "
-    + "their order is arbitrary, which the final table hash ignores for the same reason.",
-)
 def test_raw_streams_differing_only_in_zero_signs_or_nan_bits_are_one_stream() -> None:
     def stream(bits: list[int]) -> ArrowTableStream:
         floats = pa.array(np.array(bits, np.uint64).view(np.float64))

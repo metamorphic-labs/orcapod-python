@@ -245,7 +245,13 @@ class TestRejections:
             _hash_table(table)
 
     def test_non_nullable_column_holding_a_null_is_rejected(self):
-        """A source refuses a null in a column declared non-nullable."""
+        """A source refuses a null in a column declared non-nullable.
+
+        The refusal is a ``ValueError`` naming the column. Its wording is starfix's: 0.5.0 said
+        "Non-nullable field 'x' contains nulls"; 0.6.0 refuses a top-level column while
+        importing the table ("Column 'x' is declared as non-nullable but contains null
+        values") and keeps the 0.5.0 wording for a nested field (ITL-1179).
+        """
         table = pa.Table.from_arrays(
             [pa.array(["a", "b"], pa.large_string()), pa.array([1, None], pa.int64())],
             schema=pa.schema(
@@ -255,7 +261,9 @@ class TestRejections:
                 ]
             ),
         )
-        with pytest.raises(ValueError, match="Non-nullable field 'x'"):
+        with pytest.raises(
+            ValueError, match=r"(?i)'x'.*non-nullable|non-nullable.*'x'"
+        ):
             ArrowTableSource(table, tag_columns=["k"], tag_only_columns=True)
 
     def test_duplicate_column_names_are_rejected(self):

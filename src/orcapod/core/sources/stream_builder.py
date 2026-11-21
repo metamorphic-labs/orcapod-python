@@ -493,7 +493,7 @@ class SourceStreamBuilder:
         try:
             table_hash = hasher.hash_table(hashed)
         except ValueError as exc:
-            # The hasher (starfix 0.5) raises ValueError for a type it does not hash
+            # The hasher (starfix) raises ValueError for a type it does not hash
             # and names the first such column only; name every column it refuses.
             unhashable = _unhashable_columns(hasher, table)
             if not unhashable:

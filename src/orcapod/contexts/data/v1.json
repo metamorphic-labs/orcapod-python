@@ -167,6 +167,15 @@
                 ],
                 [
                     {
+                        "_type": "orcapod.hashing.orcapod_table.OrcapodTable"
+                    },
+                    {
+                        "_class": "orcapod.hashing.semantic_hashing.builtin_handlers.OrcapodTableHandler",
+                        "_config": {}
+                    }
+                ],
+                [
+                    {
                         "_type": "polars.Expr"
                     },
                     {
@@ -222,7 +231,7 @@
         "type_conversion": "type_conversion_v1"
     },
     "libraries": {
-        "starfix": "0.5.0 (hash format 2, digest prefix 000002): Arrow table and schema hashes",
+        "starfix": "0.6.0 or newer, the Rust implementation (hash format 2, digest prefix 000002): Arrow table and schema hashes, with normalize_negative_zero and normalize_nan explicitly on for the Arrow tables Orcapod builds (starfix's own default is off) and off for library values; stored values are never rewritten",
         "pyarrow": "23.0.1: conversion of Python values to Arrow types, which are hashed",
         "polars": "1.41.2: serialisation of filter expressions, which is hashed"
     },
@@ -266,6 +275,10 @@
         {
             "definition": "arrow_hasher",
             "change": "starfix hash format 1 (starfix 0.4) to hash format 2 (starfix 0.5): every Arrow-derived hash value (ITL-910)"
+        },
+        {
+            "definition": "arrow_hasher",
+            "change": "starfix 0.6 (the Rust implementation; with the float options off byte-identical to 0.5.0, except two dictionary inputs 0.5.0 got wrong: a dictionary over a sliced nested fixed-size list, ITL-1223, and a dictionary whose empty dictionary has no offsets buffer) with the float rule for the Arrow tables Orcapod builds: -0.0 hashes as 0.0 and every NaN as the ordinary NaN; a pyarrow table given as a value is hashed strictly under its own label, arrow_strict_v1; library values unchanged (ITL-1179, ITL-1251)"
         },
         {
             "definition": "semantic_hasher",
