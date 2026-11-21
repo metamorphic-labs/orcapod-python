@@ -850,7 +850,7 @@ November 19, 2026). Each name maps to the issue that decides its identity or out
 | `MapColumns` | its behaviour with data-tags (ITL-1022) |
 | `Pick`, `Index` | the policy for a miss, which changes the output (ITL-439) |
 | `PolarsFilter` | whether the order of its predicates belongs to its identity (ITL-1247) |
-| `TagBy`, `AddTags` | days old, their identities just changed (ITL-1279) |
+| `TagBy`, `AddTags` | days old, their identities just changed: the review of the tag operators (ITL-1290) |
 
 Every other operator is frozen with data context v1: `Join`, `SemiJoin`, `MapData`, the
 column selections (`SelectTagColumns`, `SelectDataColumns`, `DropTagColumns`,

@@ -121,8 +121,8 @@ APPROVED = {
     "MapColumns": "ITL-1022",
     "Pick": "ITL-439",
     "Index": "ITL-439",
-    "TagBy": "ITL-1279",
-    "AddTags": "ITL-1279",
+    "TagBy": "ITL-1290",
+    "AddTags": "ITL-1290",
 }
 # The operators frozen with data context v1 (ITL-1279).
 FROZEN = {
@@ -391,7 +391,7 @@ NOT_REBUILT_FROM_CONFIG = pytest.mark.xfail(
     raises=TypeError,
     reason="Pick and Index have no to_config and are not in the operator registry of "
     + "pipeline/serialization.py: a saved job loads such a node read-only and never "
-    + "rebuilds the operator (pre-existing; found by ITL-1279, issue to be filed)",
+    + "rebuilds the operator (ITL-1326)",
 )
 
 

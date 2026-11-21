@@ -50,10 +50,12 @@ PROVISIONAL_OPERATORS: Mapping[str, str] = MappingProxyType(
         "Pick": "ITL-439",
         # As Pick (ITL-439), plus a stored source-info token known wrong (ITL-866).
         "Index": "ITL-439",
-        # Days old, its identity just changed (ITL-1226); no issue decides more yet.
-        "TagBy": "ITL-1279",
-        # Days old, its identity just changed (ITL-1269); a function form is future.
-        "AddTags": "ITL-1279",
+        # Days old, its identity just changed (ITL-1226): the review of the tag
+        # operators (ITL-1290).
+        "TagBy": "ITL-1290",
+        # Days old, its identity just changed (ITL-1269), a function form is future: the
+        # review of the tag operators (ITL-1290).
+        "AddTags": "ITL-1290",
     }
 )
 """The provisional operators: class name to the issue that decides its identity."""
