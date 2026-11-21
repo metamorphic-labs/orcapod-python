@@ -2,9 +2,11 @@
 
 Every row is a column type, every column a database. A cell is measured, never declared:
 a table holding two columns of the type (the second with a null when the type is
-nullable) is written with ``add_records``, flushed and read back with
-``get_all_records``, then compared with what was written, up to the large variants every
-Orcapod table uses (``arrow_utils.normalize_to_large_types``). The outcome is one of:
+nullable) is written with ``add_records`` and flushed, a second batch of the same type is
+appended, and both are read back with ``get_all_records``, then compared exactly with what
+was written (every nested field's name, nullability and metadata, a map's
+``keys_sorted``, values bit for bit), up to the large variants every Orcapod table uses
+(``arrow_utils.normalize_to_large_types``). The outcome is one of:
 
 - ``KEPT``: read back equal, type (with nested nullability) and values.
 - ``KEPT VIA RECORDED TYPE``: read back equal through Delta's recorded-type mechanism
@@ -743,6 +745,22 @@ def measure(row: Row, database: str, root: Path) -> Cell:
                 SILENT,
                 f"write failed without naming the column: {type(exc).__name__}: {str(exc)[:160]}",
             )
+        # A second batch of the same type appended: the stored type must take it, and
+        # both batches read back exactly (on Delta, through the merged record).
+        appended = written.set_column(
+            0,
+            written.schema.field("id"),
+            pa.array([b"s1", b"s2", b"s3"], pa.large_binary()),
+        )
+        try:
+            db.add_records(path, appended, record_id_column="id", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            return Cell(
+                SILENT,
+                f"first write kept, the same type appended failed: "
+                f"{type(exc).__name__}: {str(exc)[:160]}",
+            )
+        written = pa.concat_tables([written, appended])
         try:
             back = db.get_all_records(path, record_id_column="id")
         except Exception as exc:  # noqa: BLE001
@@ -840,7 +858,8 @@ What a cell says:
   a connector database), and nothing of the table is written.
 
 How it is measured: a table holding two columns of the type (the second nullable, with a
-null row) is written with `add_records`, flushed and read back with `get_all_records`.
+null row) is written with `add_records` and flushed, a second batch of the same type is
+appended, and both are read back with `get_all_records`.
 The SpiralDB column is measured through the test suite's disk fake of SpiralDB, which
 models what SpiralDB does to a column (no SpiralDB is used). No database tells tag
 columns from data columns, so a type is kept or refused the same way in either role.
@@ -868,7 +887,11 @@ Some refusals depend on the values or names as well as the type:
 
 Appending to a Delta table may evolve a struct column (fields added, omitted or in
 another order): every value keeps its field's name, and an omitted field reads as null
-in the appended rows.
+in the appended rows. An append is refused, naming the column and the field, before
+anything is written, when it would add a non-nullable struct field (the stored rows have
+no value for it), add a struct field inside a map (Delta cannot), or change what the
+column states about a nested field: a list item's name or metadata, a struct child's
+metadata, a map's sorted keys.
 """
 
 

@@ -36,7 +36,8 @@ What a cell says:
   a connector database), and nothing of the table is written.
 
 How it is measured: a table holding two columns of the type (the second nullable, with a
-null row) is written with `add_records`, flushed and read back with `get_all_records`.
+null row) is written with `add_records` and flushed, a second batch of the same type is
+appended, and both are read back with `get_all_records`.
 The SpiralDB column is measured through the test suite's disk fake of SpiralDB, which
 models what SpiralDB does to a column (no SpiralDB is used). No database tells tag
 columns from data columns, so a type is kept or refused the same way in either role.
@@ -64,7 +65,11 @@ Some refusals depend on the values or names as well as the type:
 
 Appending to a Delta table may evolve a struct column (fields added, omitted or in
 another order): every value keeps its field's name, and an omitted field reads as null
-in the appended rows.
+in the appended rows. An append is refused, naming the column and the field, before
+anything is written, when it would add a non-nullable struct field (the stored rows have
+no value for it), add a struct field inside a map (Delta cannot), or change what the
+column states about a nested field: a list item's name or metadata, a struct child's
+metadata, a map's sorted keys.
 
 ## Integer
 
@@ -171,7 +176,7 @@ in the appended rows.
 | Type | in-memory | Delta | SQLite | PostgreSQL | SpiralDB |
 |---|---|---|---|---|---|
 | `large_list<named: int16 {unit: m}>` | kept | kept (recorded type) | refused | refused | kept |
-| `struct<a: int32 {unit: s}>` | kept | kept | refused | refused | refused |
+| `struct<a: int32 {unit: s}>` | kept | kept (recorded type) | refused | refused | refused |
 | `map<string, int64>, keys sorted` | kept | kept (recorded type) | refused | refused | kept |
 | `map<k: string, v: int64>, keys sorted` | kept | refused | refused | refused | refused |
 | `int64 {unit: s} (field metadata)` | kept | kept | refused | refused | kept |

@@ -613,7 +613,16 @@ class FakeTable:
                 raise ValueError(
                     "fake SpiralDB: column set differs from existing table"
                 )
-            incoming = incoming.cast(existing.schema)
+            # Column by column, only where the type changes: pyarrow refuses to cast a
+            # fixed-size list with non-null items to its own type when a null row
+            # hides null item slots (ITL-1334).
+            incoming = pa.Table.from_arrays(
+                [
+                    column if column.type == field.type else column.cast(field.type)
+                    for column, field in zip(incoming.columns, existing.schema)
+                ],
+                schema=existing.schema,
+            )
             if not keys.names:
                 incoming = pa.concat_tables([existing, incoming])
             else:

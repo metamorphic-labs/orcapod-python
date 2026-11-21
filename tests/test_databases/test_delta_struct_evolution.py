@@ -242,3 +242,167 @@ def test_a_map_with_renamed_fields_is_refused(tmp_path: pathlib.Path) -> None:
         DeltaTableDatabase(tmp_path).add_records(
             PATH, _rows([b"1"], x=([[("a", 1)]], renamed)), record_id_column="id"
         )
+
+
+# ---------------------------------------------------------------------------
+# Appends the stored column cannot take: refused before buffering (ITL-1334)
+# ---------------------------------------------------------------------------
+
+
+def _new_non_null(inner: Any) -> Any:
+    """``struct<a: float16, b: float16 not null>`` wrapped by ``inner``."""
+    return inner(pa.struct([pa.field("a", F16), pa.field("b", F16, nullable=False)]))
+
+
+def _old(inner: Any) -> Any:
+    return inner(_struct(("a", F16)))
+
+
+_WRAPPERS: dict[str, tuple[Any, Any, Any]] = {
+    # name: (wrap a type, wrap an old value, wrap a new value)
+    "top level": (lambda t: t, lambda v: v, lambda v: v),
+    "in a large_list": (pa.large_list, lambda v: [v], lambda v: [v]),
+    "in a fixed_size_list": (
+        lambda t: pa.list_(t, 1),
+        lambda v: [v],
+        lambda v: [v],
+    ),
+    "in large_list<struct<fixed_size_list>>": (
+        lambda t: pa.large_list(pa.struct([pa.field("s", pa.list_(t, 1))])),
+        lambda v: [{"s": [v]}],
+        lambda v: [{"s": [v]}],
+    ),
+}
+
+
+def _assert_refused_and_nothing_pending(
+    tmp_path: pathlib.Path, first: pa.Table, second: pa.Table, match: str
+) -> None:
+    db = DeltaTableDatabase(tmp_path)
+    db.add_records(PATH, first, record_id_column="id", flush=True)
+    with pytest.raises(InputValidationError, match=match):
+        db.add_records(PATH, second, record_id_column="id")
+    db.flush()  # nothing was buffered: the flush has nothing to fail on
+    for reader in (db, DeltaTableDatabase(tmp_path)):
+        back = reader.get_all_records(PATH, record_id_column="id")
+        assert back is not None
+        # Values, not types: a read gives text in its large variant.
+        assert back.sort_by("id").to_pylist() == first.sort_by("id").to_pylist()
+
+
+@pytest.mark.parametrize("where", sorted(_WRAPPERS))
+def test_adding_a_non_nullable_struct_field_is_refused(
+    tmp_path: pathlib.Path, where: str
+) -> None:
+    """The stored rows have no value for it, and Delta could not read the table back."""
+    wrap_type, wrap_old, wrap_new = _WRAPPERS[where]
+    first = _rows(
+        [b"1", b"2"],
+        x=([wrap_old({"a": 1.0}), wrap_old({"a": 2.0})], _old(wrap_type)),
+        y=([wrap_old({"a": 1.0}), wrap_old({"a": 2.0})], _old(wrap_type)),
+    )
+    new = [wrap_new({"a": 3.0, "b": 4.0}), wrap_new({"a": 5.0, "b": 6.0})]
+    second = _rows(
+        [b"3", b"4"],
+        x=(new, _new_non_null(wrap_type)),
+        y=(new, _new_non_null(wrap_type)),
+    )
+    _assert_refused_and_nothing_pending(
+        tmp_path, first, second, "'x'.*new non-nullable struct field"
+    )
+
+
+def test_adding_a_nullable_field_with_a_non_nullable_child_appends(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The stored rows read the new field as null, so its child needs no value."""
+    added = pa.struct(
+        [pa.field("a", F16), pa.field("b", pa.struct([pa.field("c", F16, False)]))]
+    )
+    db = DeltaTableDatabase(tmp_path)
+    db.add_records(
+        PATH,
+        _rows([b"1"], x=([{"a": 1.0}], _struct(("a", F16)))),
+        record_id_column="id",
+        flush=True,
+    )
+    db.add_records(
+        PATH,
+        _rows([b"2"], x=([{"a": 2.0, "b": {"c": 3.0}}], added)),
+        record_id_column="id",
+        flush=True,
+    )
+    back = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="id")
+    assert back is not None
+    assert back.sort_by("id").column("x").to_pylist() == [
+        {"a": 1.0, "b": None},
+        {"a": 2.0, "b": {"c": 3.0}},
+    ]
+
+
+def _named(name: str, unit: str = "m") -> Any:
+    return pa.large_list(pa.field(name, I64, metadata={"unit": unit}))
+
+
+def _child(unit: str) -> Any:
+    return pa.struct([pa.field("a", I64, metadata={"unit": unit})])
+
+
+# (first type, appended type, first value, appended value, reason): each change is
+# tested in both orders.
+_ATTRIBUTE_CHANGES: dict[str, tuple[Any, Any, Any, Any, str]] = {
+    "list item name": (_named("itemA"), _named("itemB"), [1], [2], "is named"),
+    "list item metadata": (
+        _named("item", "m"),
+        _named("item", "s"),
+        [1],
+        [2],
+        "metadata",
+    ),
+    "struct child metadata": (_child("m"), _child("s"), {"a": 1}, {"a": 2}, "metadata"),
+    "map keys_sorted": (
+        pa.map_(pa.string(), I64, keys_sorted=True),  # pyright: ignore[reportCallIssue]  # the stubs lack keys_sorted
+        pa.map_(pa.string(), I64, keys_sorted=False),  # pyright: ignore[reportCallIssue]  # the stubs lack keys_sorted
+        [("a", 1), ("z", 2)],
+        [("a", 3), ("b", 4)],
+        "keys_sorted",
+    ),
+}
+
+
+@pytest.mark.parametrize("order", ["forward", "reversed"])
+@pytest.mark.parametrize("change", sorted(_ATTRIBUTE_CHANGES))
+def test_an_append_changing_a_recorded_nested_attribute_is_refused(
+    tmp_path: pathlib.Path, change: str, order: str
+) -> None:
+    """The record states these for every row: an append may not silently restate the
+    appended rows' (a sorted-keys flag over unsorted keys would be a false type)."""
+    first_type, second_type, first_value, second_value, reason = _ATTRIBUTE_CHANGES[
+        change
+    ]
+    if order == "reversed":
+        first_type, second_type = second_type, first_type
+    first = _rows([b"1"], x=([first_value], first_type), y=([first_value], first_type))
+    second = _rows(
+        [b"2"], x=([second_value], second_type), y=([second_value], second_type)
+    )
+    _assert_refused_and_nothing_pending(tmp_path, first, second, f"'x'.*{reason}")
+
+
+def test_adding_a_struct_field_inside_a_map_is_refused(tmp_path: pathlib.Path) -> None:
+    """Delta's merge cannot add it: refused by column before buffering, not at flush."""
+    old = pa.map_(pa.large_string(), _struct(("a", F16)))
+    new = pa.map_(pa.large_string(), _struct(("a", F16), ("b", F16)))
+    first = _rows(
+        [b"1", b"2"],
+        x=([[("k", {"a": 1.0})], [("k", {"a": 2.0})]], old),
+        y=([[("k", {"a": 1.0})], [("k", {"a": 2.0})]], old),
+    )
+    second = _rows(
+        [b"3", b"4"],
+        x=([[("k", {"a": 3.0, "b": 4.0})], [("k", {"a": 5.0, "b": None})]], new),
+        y=([[("k", {"a": 3.0, "b": 4.0})], [("k", {"a": 5.0, "b": None})]], new),
+    )
+    _assert_refused_and_nothing_pending(
+        tmp_path, first, second, "'x'.*inside a map, which Delta cannot add"
+    )

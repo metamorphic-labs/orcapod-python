@@ -449,6 +449,103 @@ def _with_merged_records(
     return written
 
 
+def _append_change(
+    stored: Any, incoming: Any, path: str, *, recorded: bool, in_map: bool = False
+) -> str | None:
+    """Say why rows of ``incoming`` cannot be appended to a column of ``stored``.
+
+    Walks both types by struct field NAME and through lists and maps (ITL-1334):
+
+    - a struct field ``incoming`` adds may not be non-nullable (the stored rows have
+      no value for it), nor be inside a map (Delta's merge cannot add it);
+    - where the column is recorded, a list item's name and metadata, a struct child's
+      metadata and a map's ``keys_sorted`` must be the stored ones: the record states
+      them for every row.
+
+    A type conflict and a ``null`` part are left to their own checks
+    (``_incompatible_append_column``, ``_untyped_null_path``).
+
+    Args:
+        stored: The column's stored type (its record, else its stored type).
+        incoming: The appended rows' type, large-normalized.
+        path: Where in the column this is, for the reason.
+        recorded: Whether the column's type is recorded.
+        in_map: Whether ``path`` is inside a map.
+
+    Returns:
+        The reason, or ``None`` when the rows can be appended.
+    """
+    t = pa.types
+    if t.is_struct(stored) and t.is_struct(incoming):
+        known = {f.name: f for f in stored}
+        for field in incoming:
+            here = f"{path}.{field.name}"
+            if field.name not in known:
+                if in_map:
+                    return f"{here} is a new struct field inside a map, which Delta cannot add"
+                if not field.nullable:
+                    return (
+                        f"{here} is a new non-nullable struct field, which the stored "
+                        "rows have no value for"
+                    )
+                continue
+            if recorded and dict(field.metadata or {}) != dict(
+                known[field.name].metadata or {}
+            ):
+                return f"{here} has other field metadata than the stored column"
+            found = _append_change(
+                known[field.name].type,
+                field.type,
+                here,
+                recorded=recorded,
+                in_map=in_map,
+            )
+            if found is not None:
+                return found
+        return None
+    if t.is_map(stored) and t.is_map(incoming):
+        if recorded and stored.keys_sorted != incoming.keys_sorted:
+            return (
+                f"{path} has keys_sorted={incoming.keys_sorted}, the stored column "
+                f"{stored.keys_sorted}"
+            )
+        return _append_change(
+            stored.key_type,
+            incoming.key_type,
+            f"{path}.key",
+            recorded=recorded,
+            in_map=True,
+        ) or _append_change(
+            stored.item_type,
+            incoming.item_type,
+            f"{path}.item",
+            recorded=recorded,
+            in_map=True,
+        )
+    lists = (t.is_list, t.is_large_list, t.is_fixed_size_list)
+    if any(k(stored) for k in lists) and any(k(incoming) for k in lists):
+        # cast: the type guards above narrow ``stored`` in the stubs' terms.
+        stored_item = cast(Any, stored).value_field
+        incoming_item = incoming.value_field
+        if recorded and stored_item.name != incoming_item.name:
+            return (
+                f"{path}[] is named {incoming_item.name!r}, the stored column's item "
+                f"{stored_item.name!r}"
+            )
+        if recorded and dict(stored_item.metadata or {}) != dict(
+            incoming_item.metadata or {}
+        ):
+            return f"{path}[] has other field metadata than the stored column's item"
+        return _append_change(
+            stored_item.type,
+            incoming_item.type,
+            f"{path}[]",
+            recorded=recorded,
+            in_map=in_map,
+        )
+    return None
+
+
 def _untyped_null_path(incoming: Any, given: Any, path: str) -> str | None:
     """The first path where ``incoming`` is ``null``-typed and ``given`` has no type.
 
@@ -1317,6 +1414,64 @@ class DeltaTableDatabase:
                     reason=reason,
                 )
 
+    def _refuse_unmergeable_append(
+        self, record_path: tuple[str, ...], schema: pa.Schema
+    ) -> None:
+        """Refuse rows the stored table cannot take without a changed or broken column.
+
+        Checked against the stored table, before anything is buffered (ITL-1334), by
+        ``_append_change``: an append may evolve a struct (fields added, omitted or
+        reordered: ``_conformed_to_stored``), but not add a non-nullable field (the
+        stored rows have no value for it, and Delta then cannot read the table), not
+        add a struct field inside a map (Delta's merge cannot), and not change what a
+        recorded column states about its nested fields (a list item's name or metadata,
+        a struct child's metadata, a map's ``keys_sorted``), which the record would
+        otherwise state wrongly for one side's rows.
+
+        Args:
+            record_path: The table the rows are for.
+            schema: The schema of the rows about to be added.
+
+        Only rows with a nested column are checked, and a stored table that cannot be
+        loaded is left to the flush, which reports it (``OrcapodDatabaseReadError``).
+
+        Raises:
+            InputValidationError: For the first such column, naming it and the path.
+        """
+        if not any(f.type.num_fields for f in schema):
+            return
+        try:
+            delta_table = self._get_delta_table(record_path)
+        except OrcapodDatabaseReadError:
+            return
+        if delta_table is None:
+            return
+        stored = _stored_arrow_schema(delta_table)
+        records = {
+            f.name: recorded_type(f.metadata) for f in delta_table.schema().fields
+        }
+        for field in schema:
+            position = stored.get_field_index(field.name)
+            if position < 0 or isinstance(field.type, pa.ExtensionType):
+                continue
+            record = records.get(field.name)
+            stored_type = (
+                record
+                if record is not None
+                else arrow_utils.normalize_to_large_types(stored.field(position).type)
+            )
+            change = _append_change(
+                stored_type,
+                arrow_utils.normalize_to_large_types(field.type, keep_null=True),
+                field.name,
+                recorded=record is not None,
+            )
+            if change is not None:
+                raise InputValidationError(
+                    f"Cannot append to the stored table at {record_path!r}: column "
+                    f"{field.name!r}: {change}. Nothing was written."
+                )
+
     def _refuse_untyped_null_columns(
         self, record_path: tuple[str, ...], schema: pa.Schema
     ) -> None:
@@ -1339,7 +1494,11 @@ class DeltaTableDatabase:
         untyped = [f for f in schema if _holds_null_type(f.type)]
         if not untyped:
             return
-        delta_table = self._get_delta_table(record_path)
+        try:
+            delta_table = self._get_delta_table(record_path)
+        except OrcapodDatabaseReadError:
+            # A stored table that cannot be loaded is left to the flush to report.
+            return
         stored = _stored_arrow_schema(delta_table) if delta_table is not None else None
         pending = self._pending_batches.get(self._get_record_key(record_path))
         for field in untyped:
@@ -1411,6 +1570,7 @@ class DeltaTableDatabase:
         # A column Delta cannot hold is refused before anything is buffered (ITL-1334).
         self.require_storable(records.schema)
         self._refuse_untyped_null_columns(record_path, records.schema)
+        self._refuse_unmergeable_append(record_path, records.schema)
 
         # Step 2: Deduplicate within input table (keep last occurrence)
         deduplicated_table = self._deduplicate_within_table(records)

@@ -146,9 +146,9 @@ def _is_recorded(arrow_type: pa.DataType) -> bool:
 
     It does when it has, at any depth, a part Delta would not give back: an unsigned
     integer, a timestamp in another unit than microseconds or with a zone other than
-    UTC, a ``date64``, ``time``, ``duration``, ``float16`` or fixed-size binary, or
-    any list or map: Delta names every list item ``element`` and drops its metadata,
-    and drops a map's ``keys_sorted`` (ITL-1334).
+    UTC, a ``date64``, ``time``, ``duration``, ``float16`` or fixed-size binary, any
+    list or map (Delta names every list item ``element`` and drops its metadata, and
+    drops a map's ``keys_sorted``), or a nested field with metadata (ITL-1334).
     """
     t = pa.types
     if (
@@ -166,8 +166,11 @@ def _is_recorded(arrow_type: pa.DataType) -> bool:
         return True
     if t.is_timestamp(arrow_type):
         return arrow_type.unit != "us" or arrow_type.tz not in (None, "UTC")
+    # A nested field with metadata: the record states it for every row, so an append
+    # cannot silently restate it (ITL-1334).
     return any(
-        _is_recorded(arrow_type.field(i).type) for i in range(arrow_type.num_fields)
+        _is_recorded(arrow_type.field(i).type) or bool(arrow_type.field(i).metadata)
+        for i in range(arrow_type.num_fields)
     )
 
 
@@ -187,9 +190,12 @@ def to_delta_layout(table: pa.Table) -> pa.Table:
             continue
         metadata = dict(field.metadata or {})
         metadata[ARROW_TYPE_KEY] = _serialize(field.type)
-        stored_type = _stored_form(field.type)
-        # An integer view of the same values: a wrap-around cast keeps the bits.
-        column = table.column(index).cast(stored_type, safe=False)
+        # Any: pyarrow's stubs type ``chunked_array``'s ``type`` too narrowly.
+        stored_type: Any = _stored_form(field.type)
+        column = pa.chunked_array(
+            [_to_stored(chunk, field.type) for chunk in table.column(index).chunks],
+            type=stored_type,
+        )
         table = table.set_column(
             index,
             pa.field(field.name, stored_type, field.nullable, metadata),
@@ -233,6 +239,54 @@ def from_delta_layout(table: pa.Table) -> pa.Table:
             restored,
         )
     return table
+
+
+def _to_stored(array: Any, original: Any) -> Any:
+    """Return ``array``, of type ``original``, in the form it is written (``_stored_form``).
+
+    A leaf is cast: an integer view of the same values (a wrap-around cast keeps the
+    bits), ``float16`` widened to ``float32``. A nested type is rebuilt around its
+    converted children, so a fixed-size list's null row becomes an empty list: the
+    items a null row hides (null under a non-nullable item field) never reach Delta,
+    whose writer panics on them (ITL-1334).
+    """
+    t = pa.types
+    stored: Any = _stored_form(original)  # dispatched on below, as pyarrow allows
+    if not _is_nested(original):
+        return array.cast(stored, safe=False)
+    mask = array.is_null() if array.null_count else None
+    if t.is_fixed_size_list(original):
+        valid = ~array.is_null().to_numpy(zero_copy_only=False)
+        lengths = np.where(valid, original.list_size, 0)
+        offsets = np.concatenate([[0], np.cumsum(lengths)]).astype(np.int64)
+        # flatten() gives the items of the non-null rows only, in row order.
+        return pa.LargeListArray.from_arrays(
+            pa.array(offsets, pa.int64()),
+            _to_stored(array.flatten(), original.value_type),
+            type=stored,
+            mask=mask,
+        )
+    if t.is_struct(original):
+        children = [
+            _to_stored(array.field(i), original.field(i).type)
+            for i in range(original.num_fields)
+        ]
+        return pa.StructArray.from_arrays(children, fields=list(stored), mask=mask)
+    if t.is_map(original):
+        return pa.MapArray.from_arrays(
+            array.offsets,
+            _to_stored(array.keys, original.key_type),
+            _to_stored(array.items, original.item_type),
+            type=cast(Any, stored),  # pyarrow's stubs type ``type`` too narrowly
+            mask=mask,
+        )
+    array_class = pa.LargeListArray if t.is_large_list(original) else pa.ListArray
+    return array_class.from_arrays(
+        array.offsets,
+        _to_stored(array.values, original.value_type),
+        type=stored,
+        mask=mask,
+    )
 
 
 def _is_nested(arrow_type: pa.DataType) -> bool:
