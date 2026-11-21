@@ -10,6 +10,7 @@ from orcapod.hashing.schema_cleaner import (
     has_extension_metadata,
     has_extension_type,
 )
+from orcapod.errors import MissingOptionalDependencyError
 from orcapod.hashing.visitors import SemanticHashingVisitor
 from orcapod.logical_types.canonical_form import storage_form_schema
 from orcapod.utils.arrow_utils import normalize_extension_columns
@@ -160,6 +161,11 @@ class StarfixArrowHasher:
                 new_columns.append(pa.array(processed_data, type=new_field.type))
                 new_fields.append(new_field)
 
+            except MissingOptionalDependencyError:
+                # A logical type whose library is not installed: raised as itself,
+                # naming the type and the package (the schema hash looks nothing up
+                # since ITL-640, so this is where such a column is first met).
+                raise
             except Exception as exc:
                 raise RuntimeError(
                     f"Failed to process column '{field.name}': {exc}"
