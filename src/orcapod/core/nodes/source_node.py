@@ -499,6 +499,10 @@ class SourceNodeBase(TraceableBase, ABC):
         self._saved_pipeline_hash: ContentHash | None = None
         self._saved_content_hash: ContentHash | None = None
         self._pending_types: dict[str, _PendingType] = {}
+        # The saved Arrow type texts of a loaded slot whose Arrow types could not be
+        # rebuilt at load (a column's class not registered yet): kept whole, so the
+        # pair is rebuilt from them, never from Python types (ITL-640).
+        self._saved_arrow_texts: dict[str, Any] | None = None
         if arrow_schemas is None:
             missing = _columns_without_arrow_type(
                 tag_schema, data_schema, self.data_context.type_converter
@@ -538,6 +542,14 @@ class SourceNodeBase(TraceableBase, ABC):
             self._saved_pipeline_hash = ContentHash.from_string(pipeline_hash)
         if content_hash is not None:
             self._saved_content_hash = ContentHash.from_string(content_hash)
+        if self._given_arrow_schemas is None:
+            # The Arrow pair could not be rebuilt at load: keep every column's saved
+            # text, the precise ones too (an int32 must not become int64 later).
+            self._saved_arrow_texts = {
+                "tag": dict(saved_types.get("tag", {})),
+                "data": dict(saved_types.get("data", {})),
+                "nullable": None if nullable is None else dict(nullable),
+            }
         for role, schema in (("tag", self._tag_schema), ("data", self._data_schema)):
             for name, value in schema.items():
                 text = saved_types.get(role, {}).get(name)
@@ -560,6 +572,7 @@ class SourceNodeBase(TraceableBase, ABC):
         if self._name == other._name:
             self._saved_content_hash = other._saved_content_hash
         self._pending_types = dict(other._pending_types)
+        self._saved_arrow_texts = other._saved_arrow_texts
 
     def _pending_nullable_columns(self) -> dict[str, list[str]]:
         """The pending columns the saved job records as nullable, by role.
@@ -572,6 +585,37 @@ class SourceNodeBase(TraceableBase, ABC):
             if pending.nullable:
                 names[pending.role].append(name)
         return names
+
+    def _rebuild_saved_arrow_schemas(self) -> None:
+        """Rebuild the slot's Arrow pair from its saved texts, once all can be read.
+
+        Every column's saved Arrow type, not a conversion of its Python type: a column
+        saved as ``int32`` stays ``int32`` (ITL-640; CodeRabbit on PR 454). A text that
+        still cannot be read leaves the pair unbuilt, and the slot unresolved.
+        """
+        texts = self._saved_arrow_texts
+        if texts is None or self._given_arrow_schemas is not None:
+            return
+        from orcapod.pipeline.serialization import arrow_schema_from_texts
+
+        converter = self.data_context.type_converter
+        nullable = texts["nullable"]
+        try:
+            self._given_arrow_schemas = (
+                arrow_schema_from_texts(
+                    texts["tag"],
+                    converter,
+                    None if nullable is None else nullable["tag"],
+                ),
+                arrow_schema_from_texts(
+                    texts["data"],
+                    converter,
+                    None if nullable is None else nullable["data"],
+                ),
+            )
+        except (ValueError, TypeError, KeyError):
+            return
+        self._saved_arrow_texts = None
 
     def _restore_pending_types(self) -> dict[str, str]:
         """Restore the pending columns whose type this process can now restore.
@@ -609,6 +653,8 @@ class SourceNodeBase(TraceableBase, ABC):
                 schemas["data"], optional_fields=self._data_schema.optional_fields
             )
             self._pending_types = still_pending
+            if not still_pending:
+                self._rebuild_saved_arrow_schemas()
             # The system-tag names come from the schema hash, now of the restored types.
             with contextlib.suppress(AttributeError):  # not computed yet
                 del self._schema_hash_str
@@ -660,10 +706,33 @@ class SourceNodeBase(TraceableBase, ABC):
         """
         if self._given_arrow_schemas is not None:
             return self._given_arrow_schemas
+        if self._saved_arrow_texts is not None:
+            # A loaded slot whose saved Arrow types cannot be rebuilt yet is
+            # unresolved: its types are the saved ones, never converter defaults.
+            self._rebuild_saved_arrow_schemas()
+            if self._given_arrow_schemas is not None:
+                return self._given_arrow_schemas
+            raise ValueError(self._unresolved_message())
         converter = self.data_context.type_converter
         return (
             declared_arrow_schema(self._tag_schema, converter),
             declared_arrow_schema(self._data_schema, converter),
+        )
+
+    def _unresolved_message(self) -> str:
+        """The error of a loaded slot whose saved Arrow types cannot be rebuilt yet."""
+        pending = sorted(self._pending_types) or sorted(
+            {
+                **(self._saved_arrow_texts or {}).get("tag", {}),
+                **(self._saved_arrow_texts or {}).get("data", {}),
+            }
+        )
+        return (
+            f"SourceNode {self._name!r} was loaded with columns {pending} whose saved "
+            "types this process cannot read yet (a user class not registered): its "
+            "Arrow types are the saved ones and cannot be rebuilt until the class is "
+            "registered; bind a source of that class or define a function pod that "
+            "uses it first."
         )
 
     def _schema_identity(self) -> Any:
@@ -673,8 +742,12 @@ class SourceNodeBase(TraceableBase, ABC):
         registered (ITL-1138) has no Arrow type for it yet: until the class is
         registered, the saved type text stands in, as the saved hashes do.
         """
-        if self._given_arrow_schemas is None and self._pending_types:
-            return (self._tag_schema, self._data_schema)
+        if self._given_arrow_schemas is None and (
+            self._pending_types or self._saved_arrow_texts is not None
+        ):
+            self._rebuild_saved_arrow_schemas()
+            if self._given_arrow_schemas is None:
+                return (self._tag_schema, self._data_schema)
         return arrow_schema_identity(*self.arrow_schemas, self.data_context)
 
     def identity_structure(self) -> Any:
@@ -731,7 +804,13 @@ class SourceNodeBase(TraceableBase, ABC):
         Returns:
             Hex string schema hash.
         """
-        if self._given_arrow_schemas is None and self._pending_types:
+        if self._given_arrow_schemas is None and (
+            self._pending_types or self._saved_arrow_texts is not None
+        ):
+            self._rebuild_saved_arrow_schemas()
+        if self._given_arrow_schemas is None and (
+            self._pending_types or self._saved_arrow_texts is not None
+        ):
             # The saved type text stands in until the class is registered (ITL-1138).
             return self.data_context.semantic_hasher.hash_object(
                 (self._tag_schema, self._data_schema)
@@ -886,10 +965,18 @@ class SourceNodeBase(TraceableBase, ABC):
                 "source of that class (building one registers it) or define a function "
                 "pod that uses it before binding"
             )
+        if not unrestored and self._saved_arrow_texts is not None:
+            # Every column restored, but the saved Arrow types still cannot be rebuilt:
+            # the slot is unresolved, never checked against substituted types.
+            self._rebuild_saved_arrow_schemas()
+            if self._given_arrow_schemas is None:
+                issues.append(self._unresolved_message())
         narrower: set[str] = set()
         # The Arrow types of the slot's and the source's columns, read once (ITL-640);
         # a slot with a column it cannot restore has no Arrow schema to compare.
-        compare_arrow = not unrestored
+        compare_arrow = not unrestored and not (
+            self._given_arrow_schemas is None and self._saved_arrow_texts is not None
+        )
         source_arrow: dict[str, pa.Schema] = (
             dict(zip(("tag", "data"), typed_arrow_schemas(source)))
             if compare_arrow
