@@ -22,6 +22,7 @@ import uuid
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
+from orcapod.databases.utils import is_direct_projection
 from orcapod.errors import UnstorableTableNameError
 from orcapod.types import ColumnInfo
 from orcapod.utils.lazy_module import LazyModule
@@ -595,10 +596,14 @@ class PostgreSQLConnector:
                 infos[n].arrow_type if n in infos else _pa.large_string()
                 for n in col_names
             ]
-            # A column created NOT NULL reads back non-null (ITL-1276).
+            # A column created NOT NULL reads back non-null (ITL-1276), only as a
+            # direct projection of its table (an outer join can give it nulls).
+            direct = is_direct_projection(query)
             schema = _pa.schema(
                 [
-                    _pa.field(n, t, infos[n].nullable if n in infos else True)
+                    _pa.field(
+                        n, t, infos[n].nullable or not direct if n in infos else True
+                    )
                     for n, t in zip(col_names, arrow_types)
                 ]
             )

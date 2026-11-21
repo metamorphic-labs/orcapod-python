@@ -27,8 +27,10 @@ from orcapod.errors import (
 from orcapod.databases.delta_arrow_types import (
     first_column_out_of_stored_range,
     from_delta_layout,
+    merged_type,
     recorded_type,
     to_delta_layout,
+    with_recorded_type,
     written_field,
 )
 from orcapod.databases.delta_statistics import statistics_configuration
@@ -262,6 +264,237 @@ def _as_delta_writer_stores(schema: pa.Schema) -> pa.Schema:
     )
 
 
+def _conformed_to_stored(
+    delta_table: deltalake.DeltaTable, written: pa.Table, table_uri: str
+) -> pa.Table:
+    """Return ``written`` with each struct, at every depth, in the stored layout.
+
+    Delta's MERGE matches the fields of a struct by POSITION, so a struct appended with
+    its fields in another order would store each value under another field's name. Each
+    column the table stores is given the stored struct layout, by name: the stored
+    fields in their order (a field the rows omit is filled with nulls), then the rows'
+    new fields (schema evolution), at every depth of lists and maps. Logical
+    (extension) columns, whose layout their type fixes, are left as they are.
+
+    Args:
+        delta_table: The loaded stored table.
+        written: The rows about to be appended, as written (``to_delta_layout``).
+        table_uri: The table, for the error message.
+
+    Returns:
+        ``written`` in the stored layout.
+
+    Raises:
+        InputValidationError: The rows omit a struct field the table stores as
+            non-nullable.
+    """
+    stored = _stored_arrow_schema(delta_table)
+    for index, field in enumerate(written.schema):
+        position = stored.get_field_index(field.name)
+        if position < 0 or isinstance(field.type, pa.ExtensionType):
+            continue
+        column = written.column(index)
+        try:
+            conformed = pa.chunked_array(
+                [
+                    _conformed_array(chunk, stored.field(position).type)
+                    for chunk in column.chunks
+                ]
+            )
+        except ValueError as exc:
+            raise InputValidationError(
+                f"Cannot append to the stored table {table_uri!r}: column "
+                f"{field.name!r}: {exc}. The stored rows are unchanged and nothing "
+                "was written."
+            ) from exc
+        if conformed.type != column.type or _struct_orders(conformed.type) != (
+            _struct_orders(column.type)
+        ):
+            written = written.set_column(
+                index, field.with_type(conformed.type), conformed
+            )
+    return written
+
+
+def _struct_orders(arrow_type: pa.DataType) -> tuple[Any, ...]:
+    """The field names of every struct in ``arrow_type``, in order (Arrow's type
+    equality compares them, but this states the intent)."""
+    if pa.types.is_struct(arrow_type):
+        return tuple((f.name, _struct_orders(f.type)) for f in arrow_type)
+    return tuple(
+        _struct_orders(arrow_type.field(i).type) for i in range(arrow_type.num_fields)
+    )
+
+
+def _conformed_array(array: Any, stored: Any) -> Any:
+    """Return ``array`` with every struct in the stored layout (``_conformed_to_stored``).
+
+    Raises:
+        ValueError: The array omits a struct field ``stored`` has as non-nullable.
+    """
+    t = pa.types
+    mask = array.is_null() if array.null_count else None
+    if t.is_struct(array.type) and t.is_struct(stored):
+        own = {array.type.field(i).name: i for i in range(array.type.num_fields)}
+        fields, children = [], []
+        for stored_field in stored:
+            if stored_field.name in own:
+                i = own[stored_field.name]
+                child = _conformed_array(array.field(i), stored_field.type)
+                fields.append(array.type.field(i).with_type(child.type))
+                children.append(child)
+            elif stored_field.nullable:
+                fields.append(stored_field)
+                children.append(pa.nulls(len(array), stored_field.type))
+            else:
+                raise ValueError(
+                    f"the rows omit the struct field {stored_field.name!r}, stored as "
+                    "non-nullable"
+                )
+        stored_names = {f.name for f in stored}
+        for i in range(array.type.num_fields):
+            own_field = array.type.field(i)
+            if own_field.name not in stored_names:
+                fields.append(own_field)
+                children.append(array.field(i))
+        return pa.StructArray.from_arrays(children, fields=fields, mask=mask)
+    if t.is_map(array.type) and t.is_map(stored):
+        keys = _conformed_array(array.keys, stored.key_type)
+        items = _conformed_array(array.items, stored.item_type)
+        return pa.MapArray.from_arrays(
+            array.offsets,
+            keys,
+            items,
+            type=cast(
+                Any,
+                pa.map_(  # pyright: ignore[reportCallIssue]  # pyarrow takes fields
+                    array.type.key_field.with_type(keys.type),
+                    array.type.item_field.with_type(items.type),
+                    keys_sorted=array.type.keys_sorted,
+                ),
+            ),
+            mask=mask,
+        )
+    # A fixed-size list is written as a large_list (``to_delta_layout``), so only the
+    # variable-size lists appear here.
+    lists = (t.is_list, t.is_large_list)
+    if any(k(array.type) for k in lists) and any(k(stored) for k in lists):
+        # cast: the type guards above narrow the types in the stubs' terms.
+        list_type: Any = array.type
+        values = _conformed_array(array.values, cast(Any, stored).value_type)
+        if values.type == list_type.value_type and _struct_orders(values.type) == (
+            _struct_orders(list_type.value_type)
+        ):
+            return array
+        value_field = list_type.value_field.with_type(values.type)
+        if t.is_large_list(array.type):
+            return pa.LargeListArray.from_arrays(
+                array.offsets, values, type=pa.large_list(value_field), mask=mask
+            )
+        return pa.ListArray.from_arrays(
+            array.offsets, values, type=pa.list_(value_field), mask=mask
+        )
+    return array
+
+
+def _with_merged_records(
+    delta_table: deltalake.DeltaTable, original: pa.Table, written: pa.Table
+) -> pa.Table:
+    """Return ``written`` with each recorded column's record describing the column
+    after the append (ITL-1334).
+
+    A column recorded on either side (stored or incoming) is recorded as the merge of
+    its stored type (its record, else its stored type) and the incoming rows' type
+    (``merged_type``): an append that evolves a struct (a field added, omitted or in
+    another order) keeps every stored field and its values, which a read then matches
+    by name. Columns the stored table does not have, and logical (extension) columns,
+    are left as they are.
+
+    Args:
+        delta_table: The loaded stored table.
+        original: The rows about to be appended, with their own types.
+        written: ``original`` as it is written (``to_delta_layout``).
+
+    Returns:
+        ``written`` with the merged records.
+    """
+    stored = _stored_arrow_schema(delta_table)
+    stored_records = {
+        f.name: recorded_type(f.metadata) for f in delta_table.schema().fields
+    }
+    for index, field in enumerate(written.schema):
+        position = stored.get_field_index(field.name)
+        own = original.schema.field(field.name).type
+        if position < 0 or isinstance(own, pa.ExtensionType):
+            continue
+        stored_record = stored_records.get(field.name)
+        incoming_record = recorded_type(field.metadata)
+        if stored_record is None and incoming_record is None:
+            continue
+        base = (
+            stored_record
+            if stored_record is not None
+            else arrow_utils.normalize_to_large_types(stored.field(position).type)
+        )
+        incoming = (
+            incoming_record
+            if incoming_record is not None
+            else arrow_utils.normalize_to_large_types(own)
+        )
+        written = written.set_column(
+            index,
+            with_recorded_type(field, merged_type(base, incoming)),
+            written.column(index),
+        )
+    return written
+
+
+def _untyped_null_path(incoming: Any, given: Any, path: str) -> str | None:
+    """The first path where ``incoming`` is ``null``-typed and ``given`` has no type.
+
+    ``given`` is what the stored table (or a pending batch) has at ``path``, or ``None``
+    when it has nothing there; a stored ``null`` type gives no type either. Struct
+    fields are matched by name, and list items, map keys and items followed.
+
+    Returns:
+        The dotted path (``x.b``, ``x[]``), or ``None`` when every ``null`` part of
+        ``incoming`` has a typed counterpart.
+    """
+    t = pa.types
+    if given is not None and t.is_null(given):
+        given = None
+    if t.is_null(incoming):
+        return path if given is None else None
+    if t.is_struct(incoming):
+        known = (
+            {f.name: f.type for f in given}
+            if given is not None and t.is_struct(given)
+            else {}
+        )
+        for field in incoming:
+            found = _untyped_null_path(
+                field.type, known.get(field.name), f"{path}.{field.name}"
+            )
+            if found is not None:
+                return found
+        return None
+    if t.is_map(incoming):
+        is_map = given is not None and t.is_map(given)
+        return _untyped_null_path(
+            incoming.key_type, given.key_type if is_map else None, f"{path}.key"
+        ) or _untyped_null_path(
+            incoming.item_type, given.item_type if is_map else None, f"{path}.item"
+        )
+    if incoming.num_fields or t.is_fixed_size_list(incoming):
+        is_list = given is not None and (
+            t.is_list(given) or t.is_large_list(given) or t.is_fixed_size_list(given)
+        )
+        return _untyped_null_path(
+            incoming.value_type, given.value_type if is_list else None, f"{path}[]"
+        )
+    return None
+
+
 def _holds_null_type(arrow_type: pa.DataType) -> bool:
     """Whether ``arrow_type`` is or nests a ``null`` type (Delta has none; ITL-1334)."""
     if pa.types.is_null(arrow_type):
@@ -290,6 +523,9 @@ def _delta_unstorable_reason(field: "pa.Field[Any]") -> str | None:
         Delta's reason (``Invalid data type for Delta Lake: Decimal256(40, 2)``), or
         ``None`` when Delta holds the column.
     """
+    if arrow_utils.holds_renamed_map(field.type):
+        # The recorded type goes through Arrow IPC, which renames them (ITL-1334).
+        return "a map's key and item fields read back as 'key' and 'value'"
     written = written_field(field)
     reduced = _without_null_types(written.type)
     if reduced is None:
@@ -1084,40 +1320,46 @@ class DeltaTableDatabase:
     def _refuse_untyped_null_columns(
         self, record_path: tuple[str, ...], schema: pa.Schema
     ) -> None:
-        """Refuse a column with ``null``-typed parts that no stored column types (ITL-1334).
+        """Refuse a ``null``-typed part that nothing stored gives a type (ITL-1334).
 
-        Delta has no ``null`` type. A ``null``-typed value fits a column the stored
-        table (or a batch pending for it) already has with a type, and the append
-        check leaves it out; a column no stored or pending batch gives a type cannot be
-        written, so it is refused here, before anything is buffered, instead of failing
-        the flush without naming it.
+        Delta has no ``null`` type. A ``null``-typed value, at any depth, fits where
+        the stored table (or a batch pending for it) already has a typed column or
+        nested field at the same path, and the append check leaves it out. A ``null``
+        part at a path nothing gives a type (a new column, a new struct field, the items
+        of a new list) cannot be written, so it is refused here, before anything is
+        buffered, instead of failing the flush without naming it.
 
         Args:
             record_path: The table the rows are for.
             schema: The schema of the rows about to be added.
 
         Raises:
-            UnstorableColumnError: For the first such column.
+            UnstorableColumnError: For the first such column, naming the path.
         """
         untyped = [f for f in schema if _holds_null_type(f.type)]
         if not untyped:
             return
-        typed: set[str] = set()
         delta_table = self._get_delta_table(record_path)
-        if delta_table is not None:
-            typed.update(_stored_arrow_schema(delta_table).names)
+        stored = _stored_arrow_schema(delta_table) if delta_table is not None else None
         pending = self._pending_batches.get(self._get_record_key(record_path))
-        if pending is not None:
-            typed.update(f.name for f in pending.schema if not _holds_null_type(f.type))
         for field in untyped:
-            if field.name not in typed:
+            known = [
+                given.field(given.get_field_index(field.name)).type
+                for given in (stored, pending.schema if pending is not None else None)
+                if given is not None and given.get_field_index(field.name) >= 0
+            ]
+            paths = [_untyped_null_path(field.type, t, field.name) for t in known]
+            path = _untyped_null_path(field.type, None, field.name)
+            if paths:
+                path = next((p for p in paths if p is None), paths[0])
+            if path is not None:
                 raise UnstorableColumnError(
                     database_kind=type(self).__name__,
                     column=field.name,
                     arrow_type=field.type,
                     reason=(
-                        "Delta has no null type, and no stored column gives this "
-                        "all-null column a type"
+                        f"Delta has no null type, and nothing stored gives {path!r} a "
+                        "type"
                     ),
                 )
 
@@ -1931,6 +2173,16 @@ class DeltaTableDatabase:
                         "cannot hold. The stored rows are unchanged and nothing was "
                         "written; rebuild the database."
                     )
+                # Delta's MERGE matches struct fields by position: the rows are given
+                # the stored struct layout by name first, so an evolved struct (fields
+                # reordered, omitted or added) keeps every value under its name; and a
+                # recorded column's record describes the column after this append
+                # (ITL-1334).
+                combined_table = _with_merged_records(
+                    delta_table,
+                    original_table,
+                    _conformed_to_stored(delta_table, combined_table, table_uri),
+                )
                 base = self._snapshot_for_commit(
                     record_key, delta_table, table_uri, abs_path_components
                 )
@@ -2052,6 +2304,15 @@ class DeltaTableDatabase:
             incoming = _as_delta_writer_stores(schema)
         except Exception:
             # A type Delta cannot store directly (null): leave it to the MERGE.
+            return False
+        # A changed recorded type must reach the log: the MERGE writes it (ITL-1334).
+        stored_records = {
+            f.name: recorded_type(f.metadata) for f in delta_table.schema().fields
+        }
+        if any(
+            recorded_type(f.metadata) != stored_records.get(f.name)
+            for f in batch.schema
+        ):
             return False
         return incoming.equals(_stored_arrow_schema(delta_table), check_metadata=False)
 

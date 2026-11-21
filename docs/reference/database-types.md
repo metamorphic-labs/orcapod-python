@@ -7,24 +7,31 @@ this page and the measurements differ. Do not edit by hand.
 -->
 
 Each database Orcapod stores into keeps some Arrow types exactly and refuses the others.
-None of them gives a column back as another type: a type a database cannot keep is
-refused, with an error naming the column, before anything of the table is written. This
-page lists every type for every database. It is generated from a test that writes and
-reads each type through each database, so it cannot drift from the code.
+For every type on this page, each database either gives the column back exactly or refuses
+it, with an error naming the column, before anything of the table is written: none gives
+it back as another type. The page is generated from a test that writes and reads each
+type through each database, so it cannot drift from the code. The rows are
+representative, not every Arrow type: dictionary-encoded columns are refused by every
+stream before they reach a database, and union, run-end-encoded and list-view types are
+not covered.
 
 What a cell says:
 
-- **kept**: read back exactly, with its Arrow type (nested field names and nullability
-  included) and its values. Text, binary and list columns may come back in their large
+- **kept**: read back exactly: the Arrow type with the name, nullability and metadata of
+  the column and of every nested field (a list's item, a struct's children, a map's key
+  and item, and whether its keys are sorted), and the values bit for bit (a float's
+  `-0.0` and NaN included). Text, binary and list columns may come back in their large
   variants (`large_string`, `large_binary`, `large_list`), the types every Orcapod table
   uses.
-- **kept (recorded type)**: kept by `DeltaTableDatabase` through a recorded type. Delta Lake
-  has no column type for it, so the column's Arrow type is recorded in its field metadata,
-  its values are written in a form Delta keeps (an integer form, `float32` for
-  `float16`, a `large_list` for a fixed-size list) and the type is restored on read.
+- **kept (recorded type)**: kept by `DeltaTableDatabase` through a recorded type. Delta
+  Lake has no column type for it, or gives it back changed (it names every list item
+  `element` and drops a map's sorted keys), so the column's Arrow type is recorded in its
+  field metadata, its values are written in a form Delta keeps (an integer form,
+  `float32` for `float16`, a `large_list` for a fixed-size list) and the type is restored
+  on read, nested fields matched by name.
 - **kept (by rule)**: PostgreSQL stores the column, by the connector's own rule. No
   PostgreSQL server is used to build this page, so this cell is the rule, not a measured
-  read.
+  read: it does not show that the server keeps every value (a NaN, a time zone).
 - **refused**: writing the column raises an error naming it (`UnstorableColumnError` for
   a connector database), and nothing of the table is written.
 
@@ -41,15 +48,23 @@ The databases: `InMemoryArrowDatabase` (in-memory), `DeltaTableDatabase` (Delta)
 `SpiralDBConnector`. See [The database](../concepts/pipeline-job.md#the-database) for how a
 job uses one.
 
-Three refusals depend on the values as well as the type:
+Some refusals depend on the values or names as well as the type:
 
 - SpiralDB cannot store a null struct, so a struct column with a null row is refused
   (the rows below have one); a struct column with no null row is kept.
-- Delta has no `null` type: a new column holding only nulls with no type is refused (the
-  `null` row below), while a `null`-typed value is kept in a column the table already
-  stores with a type.
+- SQLite reads a NaN back as NULL and `-0.0` as `0.0`, so a `double` column holding one
+  is refused (the float rows below hold both); one without them is kept.
+- Delta has no `null` type: a new column, or a new nested field, holding only nulls with
+  no type is refused (the `null` row below), while a `null`-typed value is kept where the
+  table already stores a type.
+- Delta and SpiralDB give a map's key and item fields back as `key` and `value`, so a map
+  with other names is refused.
 - A fixed-size list or fixed-size binary read back by Delta with another length or width
   than its type is refused on read, never padded or cut.
+
+Appending to a Delta table may evolve a struct column (fields added, omitted or in
+another order): every value keeps its field's name, and an omitted field reads as null
+in the appended rows.
 
 ## Integer
 
@@ -70,7 +85,7 @@ Three refusals depend on the values as well as the type:
 |---|---|---|---|---|---|
 | `halffloat (float16)` | kept | kept (recorded type) | refused | refused | kept |
 | `float (float32)` | kept | kept | refused | kept (by rule) | kept |
-| `double (float64)` | kept | kept | kept | kept (by rule) | kept |
+| `double (float64)` | kept | kept | refused | kept (by rule) | kept |
 
 ## Decimal
 
@@ -134,13 +149,14 @@ Three refusals depend on the values as well as the type:
 
 | Type | in-memory | Delta | SQLite | PostgreSQL | SpiralDB |
 |---|---|---|---|---|---|
-| `list<int64>` | kept | kept | refused | refused | kept |
+| `list<int64>` | kept | kept (recorded type) | refused | refused | kept |
 | `list<int64 not null item>` | kept | kept (recorded type) | refused | refused | kept |
-| `large_list<int64>` | kept | kept | refused | refused | kept |
+| `large_list<int64>` | kept | kept (recorded type) | refused | refused | kept |
 | `large_list<int64 not null item>` | kept | kept (recorded type) | refused | refused | kept |
 | `fixed_size_list<int64>[2]` | kept | kept (recorded type) | refused | refused | kept |
 | `fixed_size_list<int64 not null item>[2]` | kept | kept (recorded type) | refused | refused | kept |
 | `large_list<float16>` | kept | kept (recorded type) | refused | refused | kept |
+| `fixed_size_list<int16>[0]` | kept | kept (recorded type) | refused | refused | kept |
 
 ## Struct and map
 
@@ -148,7 +164,17 @@ Three refusals depend on the values as well as the type:
 |---|---|---|---|---|---|
 | `struct<a: int32, b: string not null>` | kept | kept | refused | refused | refused |
 | `struct<f: fixed_size_list<int64>[2]>` | kept | kept (recorded type) | refused | refused | refused |
-| `map<string, int64>` | kept | kept | refused | refused | kept |
+| `map<string, int64>` | kept | kept (recorded type) | refused | refused | kept |
+
+## Names and metadata
+
+| Type | in-memory | Delta | SQLite | PostgreSQL | SpiralDB |
+|---|---|---|---|---|---|
+| `large_list<named: int16 {unit: m}>` | kept | kept (recorded type) | refused | refused | kept |
+| `struct<a: int32 {unit: s}>` | kept | kept | refused | refused | refused |
+| `map<string, int64>, keys sorted` | kept | kept (recorded type) | refused | refused | kept |
+| `map<k: string, v: int64>, keys sorted` | kept | refused | refused | refused | refused |
+| `int64 {unit: s} (field metadata)` | kept | kept | refused | refused | kept |
 
 ## Nullability
 
@@ -169,7 +195,7 @@ Three refusals depend on the values as well as the type:
 | `list[Path]` | kept | kept | refused | refused | refused |
 | `set[int]` | kept | kept | refused | refused | refused |
 | `set[uuid.UUID]` | kept | kept | refused | refused | refused |
-| `dict[str, int]` | kept | kept | refused | refused | kept |
+| `dict[str, int]` | kept | kept (recorded type) | refused | refused | kept |
 | `user class, exact (dataclass)` | kept | kept | refused | refused | refused |
 | `user class, structural (orcapod.dataclass)` | kept | kept | refused | refused | refused |
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
@@ -53,3 +54,38 @@ def as_table_committing(database: object) -> TableCommittingDatabaseProtocol | N
     if not callable(flush_batch):
         return None
     return cast("TableCommittingDatabaseProtocol", database)
+
+
+_IDENTIFIER = r'(?:"[^"]+"|\w+)'
+_DIRECT_PROJECTION = re.compile(
+    rf"^\s*SELECT\s+(?:\*|{_IDENTIFIER}(?:\s*,\s*{_IDENTIFIER})*)\s+"
+    rf"FROM\s+{_IDENTIFIER}\s*(?P<rest>.*?)\s*;?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+# After the table: nothing, or a clause that only chooses or orders rows.
+_ROW_CLAUSE = re.compile(r"^(?:$|(?:WHERE|ORDER\s+BY|LIMIT|OFFSET)\b)", re.IGNORECASE)
+_NOT_DIRECT = re.compile(
+    r"\b(?:JOIN|UNION|INTERSECT|EXCEPT|GROUP\s+BY|HAVING|SELECT)\b", re.IGNORECASE
+)
+
+
+def is_direct_projection(query: str) -> bool:
+    """Whether ``query`` gives rows of one table's columns unchanged (ITL-1334).
+
+    That is ``SELECT *`` or a list of plain column names ``FROM`` one table, followed
+    by nothing but a ``WHERE``, ``ORDER BY``, ``LIMIT`` or ``OFFSET``. Only then does a
+    result column have the stored column's nullability: an outer join, an aggregate,
+    an expression or a union can give nulls in a column stored ``NOT NULL``. The test
+    is conservative: a query it does not recognize reads every column nullable.
+
+    Args:
+        query: An SQL query.
+
+    Returns:
+        Whether every result column is a stored column as it is stored.
+    """
+    match = _DIRECT_PROJECTION.match(query)
+    if match is None:
+        return False
+    rest = match.group("rest")
+    return _ROW_CLAUSE.match(rest) is not None and _NOT_DIRECT.search(rest) is None

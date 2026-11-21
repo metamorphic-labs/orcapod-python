@@ -21,6 +21,7 @@ import threading
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
+from orcapod.databases.utils import is_direct_projection
 from orcapod.types import ColumnInfo
 
 if TYPE_CHECKING:
@@ -138,6 +139,38 @@ def _sqlite_unstorable_reason(arrow_type: pa.DataType) -> str | None:
     if read_back != arrow_type:
         return f"SQLite stores it as {sql_type}, which reads back as {read_back}"
     return None
+
+
+def _refuse_lost_floats(records: pa.Table) -> None:
+    """Refuse a ``double`` column holding a value SQLite does not keep (ITL-1334).
+
+    SQLite stores a NaN as NULL and ``-0.0`` as ``0.0``, so a column holding either
+    would read back with other values; it is refused before anything is written.
+
+    Args:
+        records: The rows about to be written.
+
+    Raises:
+        UnstorableColumnError: For the first such column.
+    """
+    import numpy as np  # noqa: PLC0415
+
+    from orcapod.errors import UnstorableColumnError  # noqa: PLC0415
+
+    for field in records.schema:
+        if not pa.types.is_floating(field.type):
+            continue
+        # Nulls dropped first: to_numpy would give them as NaN.
+        values = records.column(field.name).drop_null().to_numpy(zero_copy_only=False)
+        if values.dtype.kind != "f":
+            continue
+        if np.isnan(values).any() or (np.signbit(values) & (values == 0)).any():
+            raise UnstorableColumnError(
+                database_kind="SQLiteConnector",
+                column=field.name,
+                arrow_type=field.type,
+                reason="SQLite reads a NaN back as NULL and -0.0 as 0.0",
+            )
 
 
 def _coerce_column(values: list[Any], arrow_type: pa.DataType) -> list[Any]:
@@ -349,9 +382,12 @@ class SQLiteConnector:
                 table_match = _re.search(r"FROM\s+(\w+)", query, _re.IGNORECASE)
             if table_match:
                 queried_table = table_match.group(1)
+                # The stored NOT NULL holds for a column only as a direct projection
+                # of its table (an outer join can give it nulls).
+                direct = is_direct_projection(query)
                 for ci in self.get_column_info(queried_table):
                     type_lookup[ci.name] = ci.arrow_type
-                    nullable_lookup[ci.name] = ci.nullable
+                    nullable_lookup[ci.name] = ci.nullable or not direct
 
             # rowid is an implicit SQLite integer column; it does not appear in
             # PRAGMA table_info, so it would otherwise fall back to large_string.
@@ -504,9 +540,12 @@ class SQLiteConnector:
             records: Arrow table to validate.
 
         Raises:
+            UnstorableColumnError: If a ``double`` column holds a NaN or ``-0.0``,
+                which SQLite reads back as NULL and ``0.0`` (ITL-1334).
             ValueError: If any field (or any nested child field) carries
                 metadata, or if the schema itself carries metadata.
         """
+        _refuse_lost_floats(records)
         problem_fields = [f.name for f in records.schema if _field_has_metadata(f)]
         has_schema_meta = bool(records.schema.metadata)
         if problem_fields or has_schema_meta:

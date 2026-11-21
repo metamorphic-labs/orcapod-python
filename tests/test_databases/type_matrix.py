@@ -102,15 +102,18 @@ class Row:
 
 
 def _plain(
-    arrow_type: pa.DataType, values: list[Any], nullable: bool = True
+    arrow_type: pa.DataType,
+    values: list[Any],
+    nullable: bool = True,
+    metadata: dict[str, str] | None = None,
 ) -> Callable[[Path], tuple[Any, Any, list[Any], list[Any]]]:
     """Two columns of ``arrow_type``; the second has a null in the middle if nullable."""
 
     def build(_root: Path) -> tuple[Any, Any, list[Any], list[Any]]:
         second = [values[0], None, values[2]] if nullable else list(reversed(values))
         return (
-            pa.field("x", arrow_type, nullable=nullable),
-            pa.field("y", arrow_type, nullable=nullable),
+            pa.field("x", arrow_type, nullable=nullable, metadata=metadata),
+            pa.field("y", arrow_type, nullable=nullable, metadata=metadata),
             values,
             second,
         )
@@ -132,6 +135,7 @@ def _logical(
 
 
 D = decimal.Decimal
+_NAN = float("nan")
 _TS = [
     dt.datetime(2026, 1, 1, 0, 0, 1),
     dt.datetime(2026, 1, 2),
@@ -213,9 +217,10 @@ ROWS: tuple[Row, ...] = (
         Row(str(t), "integer", _plain(t, [1, 2, 200]))
         for t in (pa.uint8(), pa.uint16(), pa.uint32(), pa.uint64())
     ),
-    Row("halffloat (float16)", "float", _plain(pa.float16(), [1.5, 2.0, 0.25])),
-    Row("float (float32)", "float", _plain(pa.float32(), [1.5, 2.0, 0.25])),
-    Row("double (float64)", "float", _plain(pa.float64(), [1.5, 2.0, 0.1])),
+    # -0.0 and NaN in both columns: values are compared bit for bit.
+    Row("halffloat (float16)", "float", _plain(pa.float16(), [-0.0, 2.0, _NAN])),
+    Row("float (float32)", "float", _plain(pa.float32(), [-0.0, 2.0, _NAN])),
+    Row("double (float64)", "float", _plain(pa.float64(), [-0.0, 0.1, _NAN])),
     Row(
         "decimal128(10, 2)",
         "decimal",
@@ -352,6 +357,52 @@ ROWS: tuple[Row, ...] = (
         _plain(
             pa.map_(pa.string(), pa.int64()), [[("a", 1)], [], [("b", 2), ("c", None)]]
         ),
+    ),
+    Row(
+        "fixed_size_list<int16>[0]",
+        "list",
+        _plain(pa.list_(pa.int16(), 0), [[], [], []]),
+    ),
+    Row(
+        "large_list<named: int16 {unit: m}>",
+        "names and metadata",
+        _plain(
+            pa.large_list(pa.field("named", pa.int16(), metadata={"unit": "m"})),
+            [[1, 2], [], [3, None]],
+        ),
+    ),
+    Row(
+        "struct<a: int32 {unit: s}>",
+        "names and metadata",
+        _plain(
+            pa.struct([pa.field("a", pa.int32(), metadata={"unit": "s"})]),
+            [{"a": 1}, {"a": None}, {"a": 3}],
+        ),
+    ),
+    Row(
+        "map<string, int64>, keys sorted",
+        "names and metadata",
+        _plain(
+            pa.map_(pa.string(), pa.int64(), keys_sorted=True),  # pyright: ignore[reportCallIssue]  # the stubs lack keys_sorted
+            [[("a", 1), ("b", 2)], [], [("c", None)]],
+        ),
+    ),
+    Row(
+        "map<k: string, v: int64>, keys sorted",
+        "names and metadata",
+        _plain(
+            pa.map_(  # pyright: ignore[reportCallIssue]  # pyarrow takes key/item fields
+                pa.field("k", pa.string(), nullable=False),
+                pa.field("v", pa.int64()),
+                keys_sorted=True,
+            ),
+            [[("a", 1), ("b", 2)], [], [("c", None)]],
+        ),
+    ),
+    Row(
+        "int64 {unit: s} (field metadata)",
+        "names and metadata",
+        _plain(pa.int64(), [1, 2, 3], metadata={"unit": "s"}),
     ),
     Row("int64 not null", "nullability", _plain(pa.int64(), [1, 2, 3], nullable=False)),
     Row(
@@ -536,31 +587,122 @@ def _expected_field(field: "pa.Field[Any]") -> "pa.Field[Any]":
     return field.with_type(normalize_to_large_types(field.type, keep_null=True))
 
 
-def _describe(field: "pa.Field[Any]") -> str:
-    nested = _nested_flags(field.type)
-    return f"{field.type}{'' if field.nullable else ' not null'}{nested}"
+def _field_difference(a: "pa.Field[Any]", b: "pa.Field[Any]", path: str) -> str | None:
+    """The first difference between two fields, at any depth, or ``None``.
+
+    Everything that makes a field counts: its name, nullability and metadata, and its
+    type's kind and parameters, with every child field compared the same way (a list's
+    item, a struct's children, a map's key and item and whether its keys are sorted).
+    Arrow's own type equality ignores child names and metadata, so it is not used.
+    """
+    if a.name != b.name:
+        return f"{path}: name {a.name!r} -> {b.name!r}"
+    if a.nullable != b.nullable:
+        return f"{path}: nullable {a.nullable} -> {b.nullable}"
+    if dict(a.metadata or {}) != dict(b.metadata or {}):
+        return f"{path}: metadata {dict(a.metadata or {})} -> {dict(b.metadata or {})}"
+    return _type_difference(a.type, b.type, path)
 
 
-def _nested_flags(arrow_type: pa.DataType) -> str:
-    """The non-null nested fields, which ``str(type)`` may not show."""
-    flags = []
-    for i in range(getattr(arrow_type, "num_fields", 0)):
-        child = arrow_type.field(i)
-        if not child.nullable:
-            flags.append(child.name)
-        inner = _nested_flags(child.type)
-        if inner:
-            flags.append(f"{child.name}{inner}")
-    return f" [non-null: {', '.join(flags)}]" if flags else ""
-
-
-def _same_field(a: "pa.Field[Any]", b: "pa.Field[Any]") -> bool:
-    return (
-        a.name == b.name
-        and a.nullable == b.nullable
-        and a.type == b.type
-        and _nested_flags(a.type) == _nested_flags(b.type)
+def _type_difference(a: Any, b: Any, path: str) -> str | None:
+    t = pa.types
+    if isinstance(a, pa.ExtensionType) or isinstance(b, pa.ExtensionType):
+        if not (
+            isinstance(a, pa.ExtensionType)
+            and isinstance(b, pa.ExtensionType)
+            and a.extension_name == b.extension_name
+            and a.__arrow_ext_serialize__() == b.__arrow_ext_serialize__()
+        ):
+            return f"{path}: {a} -> {b}"
+        return _type_difference(a.storage_type, b.storage_type, path)
+    kinds = (
+        t.is_struct,
+        t.is_map,
+        t.is_fixed_size_list,
+        t.is_large_list,
+        t.is_list,
     )
+    kind_a = next((k for k in kinds if k(a)), None)
+    kind_b = next((k for k in kinds if k(b)), None)
+    if kind_a is not kind_b or (kind_a is None and a != b):
+        return f"{path}: {a} -> {b}"
+    if kind_a is None:
+        return None
+    if t.is_map(a):
+        if a.keys_sorted != b.keys_sorted:
+            return f"{path}: keys_sorted {a.keys_sorted} -> {b.keys_sorted}"
+        return _field_difference(a.key_field, b.key_field, f"{path}.key") or (
+            _field_difference(a.item_field, b.item_field, f"{path}.item")
+        )
+    if t.is_fixed_size_list(a) and a.list_size != b.list_size:
+        return f"{path}: list size {a.list_size} -> {b.list_size}"
+    if t.is_struct(a):
+        if a.num_fields != b.num_fields:
+            return f"{path}: {a} -> {b}"
+        for i in range(a.num_fields):
+            found = _field_difference(
+                a.field(i), b.field(i), f"{path}.{a.field(i).name}"
+            )
+            if found:
+                return found
+        return None
+    return _field_difference(a.value_field, b.value_field, f"{path}[]")
+
+
+def _lengths(array: Any) -> list[int]:
+    """The item count of each non-null row of a list or map array (from its offsets:
+    pyarrow's ``list_value_length`` has no kernel for a map)."""
+    import numpy as np
+
+    counts = np.diff(array.offsets.to_numpy(zero_copy_only=False))
+    return counts[array.is_valid().to_numpy(zero_copy_only=False)].tolist()
+
+
+def _items(array: Any) -> list[Any]:
+    """The items of the non-null rows of a list or map array, in row order: the values
+    of a list, the keys and the items of a map (whose arrays have no ``flatten``)."""
+    import numpy as np
+
+    offsets = array.offsets.to_numpy(zero_copy_only=False)
+    rows = np.flatnonzero(array.is_valid().to_numpy(zero_copy_only=False))
+    indices = pa.array(
+        np.concatenate(
+            [np.arange(offsets[r], offsets[r + 1]) for r in rows] or [np.zeros(0)]
+        ).astype(np.int64)
+    )
+    if pa.types.is_map(array.type):
+        return [array.keys.take(indices), array.items.take(indices)]
+    return [array.values.take(indices)]
+
+
+def _same_values(a: Any, b: Any) -> bool:
+    """Whether two arrays of one type hold the same values, bit for bit.
+
+    Nulls must be in the same rows. A float is compared by its bits (``-0.0`` is not
+    ``0.0``, a NaN equals the same NaN); nested values are compared child by child, and
+    an extension array by its storage.
+    """
+    if isinstance(a, pa.ChunkedArray):
+        a = a.combine_chunks()
+    if isinstance(b, pa.ChunkedArray):
+        b = b.combine_chunks()
+    if len(a) != len(b) or not a.is_null().equals(b.is_null()):
+        return False
+    t = pa.types
+    if isinstance(a.type, pa.ExtensionType):
+        return _same_values(a.storage, b.storage)
+    if t.is_floating(a.type):
+        bits = {16: pa.uint16(), 32: pa.uint32(), 64: pa.uint64()}[a.type.bit_width]
+        return a.view(bits).equals(b.view(bits))
+    if t.is_struct(a.type):
+        return all(_same_values(x, y) for x, y in zip(a.flatten(), b.flatten()))
+    if t.is_list(a.type) or t.is_large_list(a.type) or t.is_map(a.type):
+        return _lengths(a) == _lengths(b) and all(
+            _same_values(x, y) for x, y in zip(_items(a), _items(b))
+        )
+    if t.is_fixed_size_list(a.type):
+        return _same_values(a.flatten(), b.flatten())
+    return a.equals(b)
 
 
 def measure(row: Row, database: str, root: Path) -> Cell:
@@ -588,6 +730,14 @@ def measure(row: Row, database: str, root: Path) -> Cell:
             db.add_records(path, written, record_id_column="id", flush=True)
         except Exception as exc:  # noqa: BLE001
             if _names_a_column(exc):
+                # A refusal writes nothing: the table still reads back empty.
+                try:
+                    db.flush()
+                    stored = db.get_all_records(path, record_id_column="id")
+                except Exception as read_exc:  # noqa: BLE001
+                    return Cell(SILENT, f"refused, then unreadable: {read_exc}")
+                if stored is not None and stored.num_rows:
+                    return Cell(SILENT, "refused, but rows were stored")
                 return Cell(REFUSED, f"{type(exc).__name__}")
             return Cell(
                 SILENT,
@@ -607,17 +757,17 @@ def measure(row: Row, database: str, root: Path) -> Cell:
         exact = written.schema.field(name)
         got = back.schema.field(name)
         # The type written, or its large variant (every Orcapod table is large).
-        if _same_field(exact, got):
-            want = exact
-        else:
+        want = exact
+        difference = _field_difference(exact, got, name)
+        if difference is not None:
             want = _expected_field(exact)
-            if not _same_field(want, got):
-                problems.append(f"{name}: {_describe(exact)} -> {_describe(got)}")
+            if _field_difference(want, got, name) is not None:
+                problems.append(difference)
                 continue
         expected = written.column(name)
         if want.type != exact.type:
             expected = expected.cast(want.type)
-        if not back.column(name).combine_chunks().equals(expected.combine_chunks()):
+        if not _same_values(back.column(name), expected):
             problems.append(f"{name}: values differ")
     if problems:
         return Cell(SILENT, "; ".join(problems))
@@ -661,24 +811,31 @@ this page and the measurements differ. Do not edit by hand.
 -->
 
 Each database Orcapod stores into keeps some Arrow types exactly and refuses the others.
-None of them gives a column back as another type: a type a database cannot keep is
-refused, with an error naming the column, before anything of the table is written. This
-page lists every type for every database. It is generated from a test that writes and
-reads each type through each database, so it cannot drift from the code.
+For every type on this page, each database either gives the column back exactly or refuses
+it, with an error naming the column, before anything of the table is written: none gives
+it back as another type. The page is generated from a test that writes and reads each
+type through each database, so it cannot drift from the code. The rows are
+representative, not every Arrow type: dictionary-encoded columns are refused by every
+stream before they reach a database, and union, run-end-encoded and list-view types are
+not covered.
 
 What a cell says:
 
-- **kept**: read back exactly, with its Arrow type (nested field names and nullability
-  included) and its values. Text, binary and list columns may come back in their large
+- **kept**: read back exactly: the Arrow type with the name, nullability and metadata of
+  the column and of every nested field (a list's item, a struct's children, a map's key
+  and item, and whether its keys are sorted), and the values bit for bit (a float's
+  `-0.0` and NaN included). Text, binary and list columns may come back in their large
   variants (`large_string`, `large_binary`, `large_list`), the types every Orcapod table
   uses.
-- **kept (recorded type)**: kept by `DeltaTableDatabase` through a recorded type. Delta Lake
-  has no column type for it, so the column's Arrow type is recorded in its field metadata,
-  its values are written in a form Delta keeps (an integer form, `float32` for
-  `float16`, a `large_list` for a fixed-size list) and the type is restored on read.
+- **kept (recorded type)**: kept by `DeltaTableDatabase` through a recorded type. Delta
+  Lake has no column type for it, or gives it back changed (it names every list item
+  `element` and drops a map's sorted keys), so the column's Arrow type is recorded in its
+  field metadata, its values are written in a form Delta keeps (an integer form,
+  `float32` for `float16`, a `large_list` for a fixed-size list) and the type is restored
+  on read, nested fields matched by name.
 - **kept (by rule)**: PostgreSQL stores the column, by the connector's own rule. No
   PostgreSQL server is used to build this page, so this cell is the rule, not a measured
-  read.
+  read: it does not show that the server keeps every value (a NaN, a time zone).
 - **refused**: writing the column raises an error naming it (`UnstorableColumnError` for
   a connector database), and nothing of the table is written.
 
@@ -695,15 +852,23 @@ The databases: `InMemoryArrowDatabase` (in-memory), `DeltaTableDatabase` (Delta)
 `SpiralDBConnector`. See [The database](../concepts/pipeline-job.md#the-database) for how a
 job uses one.
 
-Three refusals depend on the values as well as the type:
+Some refusals depend on the values or names as well as the type:
 
 - SpiralDB cannot store a null struct, so a struct column with a null row is refused
   (the rows below have one); a struct column with no null row is kept.
-- Delta has no `null` type: a new column holding only nulls with no type is refused (the
-  `null` row below), while a `null`-typed value is kept in a column the table already
-  stores with a type.
+- SQLite reads a NaN back as NULL and `-0.0` as `0.0`, so a `double` column holding one
+  is refused (the float rows below hold both); one without them is kept.
+- Delta has no `null` type: a new column, or a new nested field, holding only nulls with
+  no type is refused (the `null` row below), while a `null`-typed value is kept where the
+  table already stores a type.
+- Delta and SpiralDB give a map's key and item fields back as `key` and `value`, so a map
+  with other names is refused.
 - A fixed-size list or fixed-size binary read back by Delta with another length or width
   than its type is refused on read, never padded or cut.
+
+Appending to a Delta table may evolve a struct column (fields added, omitted or in
+another order): every value keeps its field's name, and an omitted field reads as null
+in the appended rows.
 """
 
 

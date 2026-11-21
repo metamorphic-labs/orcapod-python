@@ -1034,7 +1034,9 @@ class SpiralDBConnector:
         back as another type and is refused. It drops Arrow field metadata, so an
         extension (logical) type at any depth (``File``, ``Path``, ``UUID``, a user
         class, ``set[int]``, a NumPy array) would read back as its storage type and
-        is refused (ITL-1334; keeping it is a follow-up).
+        is refused (ITL-1334; keeping it is a follow-up). A map whose key or item
+        field has another name than ``key`` / ``value`` reads back with those names,
+        and is refused too.
 
         Args:
             name: The column's name.
@@ -1062,6 +1064,10 @@ class SpiralDBConnector:
             return (
                 "SpiralDB drops Arrow field metadata, so a logical (extension) type "
                 "reads back as its storage type"
+            )
+        if arrow_utils.holds_renamed_map(arrow_type):
+            return (
+                "SpiralDB gives a map's key and item fields back as 'key' and 'value'"
             )
         return None
 

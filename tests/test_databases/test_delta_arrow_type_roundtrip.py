@@ -84,6 +84,15 @@ COLUMNS: dict[str, pa.Array[Any]] = {
         pa.large_list(pa.list_(pa.uint8(), 3)),
     ),
     "fixed_size_binary[3]": pa.array([b"abc", None, b"\x00\x01\x02"], pa.binary(3)),
+    "fixed_size_list<int16>[0]": pa.array([[], None, []], pa.list_(pa.int16(), 0)),
+    "map<string, int64>, keys sorted": pa.array(
+        [[("a", 1), ("b", 2)], None, []],
+        pa.map_(pa.string(), pa.int64(), keys_sorted=True),  # pyright: ignore[reportCallIssue]  # the stubs lack keys_sorted
+    ),
+    "large_list<named: int16 {unit: m}>": pa.array(
+        [[1], None, [2, None]],
+        pa.large_list(pa.field("named", pa.int16(), metadata={"unit": "m"})),
+    ),
     "large_list<non-null int64>": pa.array(
         [[1], [], [2, 3]], pa.large_list(pa.field("item", pa.int64(), False))
     ),
