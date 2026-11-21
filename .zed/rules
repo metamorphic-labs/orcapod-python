@@ -1420,8 +1420,9 @@ data. The rules:
   when computed. At most one row per origin row in each input (a first rule, refused naming the
   input and the values); a null system-tag value is refused; a shared user tag, and every
   system tag Polars matched, must agree on matched rows bit for bit (so the result never
-  follows argument order); the inputs share one data context, which the result keeps
-  (rows of another are refused); data columns disjoint; N-ary and commutative; identity
+  follows argument order); the inputs' rows must share one data context, read from the
+  rows, which the result keeps (rows of another are refused; some operators return rows
+  in the default context, ITL-1339); data columns disjoint; N-ary and commutative; identity
   `"Rejoin"`; async is the barrier, which rebuilds each input in its rows' data context.
 - `Join` and `SemiJoin` give Polars only their key columns and row numbers (ITL-1284): Polars
   decides which rows match, and every output column is taken from the input tables by row

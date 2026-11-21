@@ -289,7 +289,8 @@ class Rejoin(Join):
         if len(context_keys) > 1:
             raise InputValidationError(
                 f"Rejoin: the inputs' rows are of different data contexts "
-                f"{context_keys}; branches of one source share its data context"
+                f"{context_keys}; rejoined rows must share one (a branch through some "
+                "operators comes back in the default data context: ITL-1339)"
             )
         data_context = (
             context_keys[0] if context_keys else ordered_streams[0].data_context_key
