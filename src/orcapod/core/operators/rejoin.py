@@ -245,13 +245,6 @@ class Rejoin(Join):
             return without_input_meta(streams[0], streams)
         ordered_streams = self.order_input_streams(*streams)
         tag_schema, data_schema = self._joined_user_schemas(*streams)
-        # The rows of one origin row carry one data context: so must the inputs.
-        context_keys = sorted({stream.data_context_key for stream in streams})
-        if len(context_keys) > 1:
-            raise InputValidationError(
-                f"Rejoin: the inputs are of different data contexts {context_keys}; "
-                "branches of one source share its data context"
-            )
 
         tables: list[pa.Table] = []
         for stream in ordered_streams:
@@ -281,6 +274,25 @@ class Rejoin(Join):
             name
             for name in tables[0].column_names
             if name.startswith(constants.SYSTEM_TAG_PREFIX)
+        )
+        # The rows of one origin row carry one data context: so must the inputs. It
+        # is read from the rows, which carry it, never from what a stream reports (an
+        # operator's lazy stream reports its pod's context, ITL-1339).
+        context_keys = sorted(
+            {
+                # The context column is text and never null.
+                str(key)
+                for table in tables
+                for key in table.column(constants.CONTEXT_KEY).unique().to_pylist()
+            }
+        )
+        if len(context_keys) > 1:
+            raise InputValidationError(
+                f"Rejoin: the inputs' rows are of different data contexts "
+                f"{context_keys}; branches of one source share its data context"
+            )
+        data_context = (
+            context_keys[0] if context_keys else ordered_streams[0].data_context_key
         )
         for stream, table in zip(ordered_streams, tables):
             for name in keys:
@@ -321,7 +333,7 @@ class Rejoin(Join):
             result_table,
             tag_columns=tuple(tag_order),
             data_tags=data_tag_names(tag_schema, data_schema),
-            data_context=ordered_streams[0].data_context_key,
+            data_context=data_context,
         )
 
     def _rejoin_pair(

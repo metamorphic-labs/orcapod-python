@@ -605,3 +605,108 @@ def test_inputs_of_different_data_contexts_are_refused(
     for inputs in ((a, b), (b, a)):
         with pytest.raises(InputValidationError, match="different data contexts"):
             _ = Rejoin()(*inputs).as_table()
+
+
+def _wide_in_context(context: contexts.DataContext) -> ArrowTableStream:
+    """A raw stream of ``context``: tags ``g`` and ``h``, data ``w``, ``x``, ``y``,
+    ``z``, one system tag."""
+    table = pa.table(
+        {
+            "g": pa.array([1, 2, 3], pa.int64()),
+            "h": pa.array(["a", "b", "c"], pa.large_string()),
+            "w": pa.array([1, 2, 3], pa.int64()),
+            "x": pa.array([0.5, 0.25, 0.125], pa.float64()),
+            "y": pa.array(["p", "q", "r"], pa.large_string()),
+            "z": pa.array([True, False, True], pa.bool_()),
+            "origin": pa.array(["r1", "r2", "r3"], pa.large_string()),
+            constants.CONTEXT_KEY: pa.array(
+                [context.context_key] * 3, pa.large_string()
+            ),
+        }
+    )
+    return ArrowTableStream(
+        table,
+        tag_columns=["g", "h"],
+        system_tag_columns=["origin"],
+        data_context=context,
+    )
+
+
+def test_stacked_rejoins_in_a_non_default_context_are_accepted(
+    other_context: contexts.DataContext,
+) -> None:
+    """A Rejoin over Rejoins and branches of one non-default data context computes, on
+    the sync and the async path, whatever each input stream reports (a lazy operator
+    stream reports its pod's context; the rows carry theirs): the context is read from
+    the rows (CodeRabbit on PR 472)."""
+    from orcapod.channels import Channel
+    from orcapod.core.operators import SelectDataColumns
+
+    source = _wide_in_context(other_context)
+    lazy = {c: source.select_data_columns([c]) for c in "wxyz"}
+    eager = {c: SelectDataColumns([c]).static_process(source) for c in "wxyz"}
+    assert lazy["w"].data_context_key != eager["w"].data_context_key == OTHER_CONTEXT
+    stacks = {
+        "rejoins": (Rejoin()(lazy["w"], lazy["x"]), Rejoin()(eager["y"], lazy["z"])),
+        "rejoin_and_branches": (
+            Rejoin()(lazy["x"], eager["w"]),
+            eager["y"],
+            lazy["z"],
+        ),
+        "raw_input": (
+            Rejoin()(lazy["w"], lazy["x"]),
+            source.select_data_columns(["y", "z"]),
+        ),
+    }
+    for name, inputs in stacks.items():
+        for ordered in (inputs, tuple(reversed(inputs))):
+            result = Rejoin().static_process(*ordered)
+            assert result.data_context_key == OTHER_CONTEXT, name
+            table = result.as_table(columns={"context": True})
+            assert (
+                table.column(constants.CONTEXT_KEY).to_pylist() == [OTHER_CONTEXT] * 3
+            ), name
+            assert sorted(table.column_names) == sorted(
+                ["g", "h", "w", "x", "y", "z", constants.CONTEXT_KEY]
+            ), name
+            lazy_result = Rejoin()(*ordered)
+            assert (
+                lazy_result.as_table(columns={"context": True})
+                .column(constants.CONTEXT_KEY)
+                .to_pylist()
+                == [OTHER_CONTEXT] * 3
+            ), name
+
+        async def run(streams: tuple[Any, ...]) -> list[Any]:
+            channels = []
+            for stream in streams:
+                channel: Channel[Any] = Channel()
+                for row in stream.iter_data():
+                    await channel.writer.send(row)
+                await channel.writer.close()
+                channels.append(channel.reader)
+            out: Channel[Any] = Channel()
+            await Rejoin().async_execute(
+                channels,
+                out.writer,
+                input_pipeline_hashes=[stream.pipeline_hash() for stream in streams],
+            )
+            return await out.reader.collect()
+
+        rows = asyncio.run(run(inputs))
+        assert len(rows) == 3, name
+        assert {tag.data_context_key for tag, _ in rows} == {OTHER_CONTEXT}, name
+        assert {data.data_context_key for _, data in rows} == {OTHER_CONTEXT}, name
+
+
+def test_rows_of_different_data_contexts_are_refused_whatever_the_streams_report(
+    other_context: contexts.DataContext,
+) -> None:
+    """Mixed contexts are refused from the rows: two lazy branches both report the
+    default context, yet one's rows are of another."""
+    a = _in_context(other_context, "x").select_data_columns(["x"])
+    b = _in_context(contexts.get_default_context(), "y").select_data_columns(["y"])
+    assert a.data_context_key == b.data_context_key
+    for inputs in ((a, b), (b, a)):
+        with pytest.raises(InputValidationError, match="different data contexts"):
+            _ = Rejoin()(*inputs).as_table()

@@ -219,8 +219,8 @@ The rules:
 - **Provenance is never null, and exact.** An input with a null in a system-tag column is
   refused, naming the column. Matched system-tag values are compared bit for bit too, like
   shared tags.
-- **One data context.** The inputs must be of one data context (branches of one source
-  are); the result keeps it. Inputs of different data contexts are refused.
+- **One data context.** The inputs' rows must be of one data context (branches of one
+  source are); the result keeps it. Rows of different data contexts are refused.
 - **Data columns are disjoint**, as in `Join`; a data-tag present in several inputs is one
   column.
 - **Different sources give nothing.** Two sources with the same schema have the same
