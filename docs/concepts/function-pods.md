@@ -249,6 +249,9 @@ The function-output rule is: the returned value must be an instance of the decla
 | `dict[K, V]` | another mapping, such as `MappingProxyType` or `UserDict` | rejected: return `dict(value)` |
 | `Literal[...]` | a value that is not a member, or equals one with another type (`True`, `1.0` or `numpy.int64(1)` for `Literal[1]`) | rejected: a `Literal` names exact values, so no numeric exception applies |
 | `date` | `datetime` | accepted as a Python subclass; storage keeps the date only |
+| `datetime` | an aware `datetime` in any zone | accepted; stored as the same instant, in UTC (see "Dates and times" below) |
+| `datetime` | a naive `datetime` (no time zone) | rejected: attach its zone, e.g. `value.replace(tzinfo=timezone.utc)` |
+| `datetime` | a `pandas.Timestamp` with a part below one microsecond | rejected, not truncated: `value.floor("us")` or `value.round("us")` |
 | `int` | `bool` | accepted as a Python subclass; stored as an integer |
 | `int` | float, Decimal, Fraction | rejected; choose an explicit conversion |
 | `bool` | `int` | rejected: return `bool(value)` explicitly |
@@ -310,6 +313,88 @@ for tag, data in twice.pod(weights):
 
 Previously stored rows are served unchanged; this check does not repair or recompute them.
 Input-source conformance remains outside this change.
+
+### Dates and times
+
+Every Arrow timestamp column reads as the Python type `datetime`, whatever its unit and its
+time zone, and a source stores it as given. What a function receives follows the column:
+
+| Column | A function receives |
+|---|---|
+| `timestamp[s]`, `timestamp[ms]`, `timestamp[us]` (no zone) | a naive `datetime`: the wall time |
+| `timestamp[s, tz=...]`, `timestamp[ms, tz=...]`, `timestamp[us, tz=...]` | an aware `datetime`, in the column's zone |
+| `timestamp[ns]`, with or without a zone | a `pandas.Timestamp` (a `datetime` subclass), naive or aware likewise |
+
+An output declared `-> datetime` is an instant, stored as `timestamp[us, tz=UTC]` for every
+function:
+
+- An aware value in any zone is stored as its exact instant, in UTC: 09:00 in Los Angeles on
+  2 January (UTC-8) is stored as 17:00 UTC, and 09:00 there on 2 July (UTC-7, daylight
+  saving time) as 16:00 UTC; each reads back as the same instant, also for an offset with a
+  part below one second.
+- A naive value names no instant, so it is refused with an `OutputTypeError` that says so
+  and how to attach a zone.
+- A value with a part below one microsecond (a `pandas.Timestamp` from an `ns` column with
+  nanoseconds) is refused, not truncated: `value.floor("us")` or `value.round("us")` says
+  what to keep. One whose part below a microsecond is zero is stored exactly.
+- The same rule holds for a `datetime` inside a list, a dict or a class field, and for the
+  Python values of a `DictSource` or a `ListSource`. There it raises `NaiveDatetimeError`
+  or `SubMicrosecondDatetimeError`, both `ValueError`s, and names the value. A
+  `DataFrameSource` given a plain dict or list is not covered yet: Polars converts the
+  values before Orcapod sees them, so a naive value is stored without a zone and
+  nanoseconds are dropped (ITL-1330). Over a real data frame, a `DataFrameSource` keeps
+  each timestamp column's unit and zone as given.
+
+A function over a column without a zone therefore says which zone its wall times are in:
+
+```python
+from datetime import datetime, timedelta, timezone
+
+import pyarrow as pa
+from orcapod.sources import ArrowTableSource
+
+# A timestamp column without a time zone: its wall times are UTC.
+started = pa.array([1_700_000_000, 1_700_003_600], pa.int64()).cast(pa.timestamp("s"))
+sessions = ArrowTableSource(
+    pa.table(
+        {"session": ["s1", "s2"], "started": started.cast(pa.timestamp("us"))},
+        schema=pa.schema(
+            [
+                pa.field("session", pa.large_string(), nullable=False),
+                pa.field("started", pa.timestamp("us"), nullable=False),
+            ]
+        ),
+    ),
+    tag_columns=["session"],
+    tag_only_columns=True,
+    source_id="sessions",
+)
+
+@function_pod(output_keys="ended")
+def end_naive(started: datetime) -> datetime:
+    return started + timedelta(minutes=30)  # still naive
+
+try:
+    list(end_naive.pod(sessions).iter_data())
+except OutputTypeError as err:
+    print(err)
+# Function 'end_naive' returned datetime.datetime for output 'ended', which is declared datetime.datetime: Naive datetime (no timezone info) is not supported under the current 'strict' timezone policy: a datetime is stored as an instant, in UTC, and a value without a time zone names no instant. The output does not conform. Use a timezone-aware datetime: attach the time zone its wall time is in, e.g. value.replace(tzinfo=timezone.utc) when it is UTC or value.replace(tzinfo=ZoneInfo("Europe/Berlin")) for another zone (value.astimezone() takes this machine's local time zone).
+
+@function_pod(output_keys="ended")
+def end(started: datetime) -> datetime:
+    # Say which zone the wall time is in; the result is an instant.
+    return started.replace(tzinfo=timezone.utc) + timedelta(minutes=30)
+
+ended = end.pod(sessions).as_table()
+print(ended.schema.field("ended").type)
+# timestamp[us, tz=UTC]
+print(sorted(value.isoformat() for value in ended.column("ended").to_pylist()))
+# ['2023-11-14T22:43:20+00:00', '2023-11-14T23:43:20+00:00']
+```
+
+There is no way yet to declare an output without a time zone or with nanoseconds
+(ITL-1325). A `date` output is stored as `date32`. A time of day (`datetime.time`) has no
+type yet: a column of `time64` reads as `Any`, and an output annotated `-> time` is refused.
 
 ## `PipelineJob` -- database-backed, cached execution
 
