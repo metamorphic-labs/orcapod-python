@@ -67,6 +67,10 @@ class CachedSource(RootSource):
         The cache is a correct cumulative record.  The union of cache + live
         data is the full set of data ever available from that source.
 
+    A restricted source (``SpiralDBTableSource.where`` or ``limit=``, ITL-1218) is
+    refused: a restriction is not part of the source's identity, so its rows would be
+    kept under the whole table's identity and read back by every cache of that table.
+
     Example::
 
         source = ArrowTableSource(table, tag_columns=["id"])
@@ -96,6 +100,14 @@ class CachedSource(RootSource):
         data_context: str | contexts.DataContext | None = None,
         config: OrcapodConfig | None = None,
     ) -> None:
+        """Wrap ``source`` in a cache kept in ``cache_database``.
+
+        Raises:
+            ValueError: If ``source`` is restricted (a condition or a limit).
+        """
+        from orcapod.pipeline.restrictions import refuse_restricted_cache_input
+
+        refuse_restricted_cache_input(source)
         if data_context is None:
             data_context = source.data_context_key
         if source_id is None:
@@ -208,6 +220,11 @@ class CachedSource(RootSource):
 
         # All sources accept db_registry — always forward it so nested
         # CachedSources can resolve their own cache database references.
+        # A saved restricted source never produces a cache, also when the source
+        # cannot be rebuilt and a proxy (which carries no restriction) stands in.
+        from orcapod.pipeline.restrictions import refuse_restricted_cache_config
+
+        refuse_restricted_cache_config(config["inner_source"])
         inner_source = resolve_source_from_config(
             config["inner_source"], fallback_to_proxy=True, db_registry=db_registry
         )
@@ -296,11 +313,21 @@ class CachedSource(RootSource):
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         return self._source.keys(columns=columns, all_info=all_info)
 
+    @property
+    def cached_source(self) -> SourceProtocol:
+        """The source this cache reads and keeps the rows of."""
+        return self._source
+
     def _live_records(self) -> pa.Table:
         """Read the wrapped source's rows, each with its record hash in front.
 
-        Raises if the source cannot provide data (e.g. an unbound ``SourceProxy``).
+        Raises if the source cannot provide data (e.g. an unbound ``SourceProxy``),
+        or reads under a restriction (a proxy bound to a restricted source after the
+        cache was built, ITL-1218): nothing is read or stored then.
         """
+        from orcapod.pipeline.restrictions import refuse_restricted_cache_input
+
+        refuse_restricted_cache_input(self._source)
         require_same_data_context(self._source.data_context_key, self.data_context_key)
         live_table = self._source.as_table(
             columns={"source": True, "system_tags": True}

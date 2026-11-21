@@ -44,15 +44,15 @@ def _is_list_kind(arrow_type: "pa.DataType") -> bool:
 
 
 def _value_type(arrow_type: "pa.DataType") -> "pa.DataType":
-    """Return the type a column's values are read as: a logical type's storage,
-    a dictionary's values, at the top level."""
-    while True:
-        if isinstance(arrow_type, pa.BaseExtensionType):
-            arrow_type = arrow_type.storage_type
-        elif pa.types.is_dictionary(arrow_type):
-            arrow_type = arrow_type.value_type
-        else:
-            return arrow_type
+    """Return the type a column's values are read as: a logical type's storage, at the
+    top level.
+
+    No dictionary reaches ``GroupBy``: every stream refuses a dictionary-encoded column
+    (ITL-1264), so a dictionary type is no orderable type here.
+    """
+    while isinstance(arrow_type, pa.BaseExtensionType):
+        arrow_type = arrow_type.storage_type
+    return arrow_type
 
 
 def _is_orderable_scalar(arrow_type: "pa.DataType") -> bool:
@@ -90,7 +90,7 @@ def _unorderable_part(arrow_type: "pa.DataType") -> "pa.DataType | None":
     nothing reaches Polars that ``_polars_ready`` does not prepare: Polars panics on
     some types (``decimal256``), and a panic is not an error a caller can catch. A
     list, large list or fixed-size list is ordered element by element, through
-    logical storage and dictionary values at every depth. A struct or a map (a user
+    logical storage at every depth. A struct or a map (a user
     class, a ``dict[K, V]``) has no decided order (developer, November 19, 2026), and
     neither has any type not named in ``_is_orderable_scalar`` (an interval, a
     union, a list view).
@@ -111,24 +111,6 @@ def _unorderable_part(arrow_type: "pa.DataType") -> "pa.DataType | None":
     return None if _is_orderable_scalar(value_type) else value_type
 
 
-def _without_dictionary(array: "pa.Array[Any]") -> "pa.Array[Any]":
-    """Decode a dictionary-encoded column to its values; any other column as it is.
-
-    The one place ``GroupBy`` handles a dictionary-encoded tag, a float key's
-    included: the values each member's index points at, bits as stored. (A stream may
-    stop carrying dictionary-encoded tags, ITL-1264; then this goes.)
-
-    Args:
-        array: A column of the input table, or its storage.
-
-    Returns:
-        The decoded array.
-    """
-    if isinstance(array, pa.DictionaryArray):
-        return array.dictionary_decode()
-    return array
-
-
 def _storage(column: "pa.ChunkedArray[Any]") -> "pa.Array[Any]":
     """Return a column as one array: a logical type as its storage, decoded.
 
@@ -142,11 +124,10 @@ def _storage(column: "pa.ChunkedArray[Any]") -> "pa.Array[Any]":
 
 
 def _values_of(array: "pa.Array[Any]") -> "pa.Array[Any]":
-    """Return an array as its values are read: through logical types and dictionaries.
+    """Return an array as its values are read: through logical types.
 
-    The array twin of ``_value_type``: a logical type's storage and a dictionary's
-    values, alternately, until neither applies, so a dictionary over a logical type
-    (or a logical type over a dictionary) is read as validation reads its type.
+    The array twin of ``_value_type``: a logical type's storage, until none applies, as
+    validation reads its type.
 
     Args:
         array: A column of the input table, or the values of one.
@@ -154,13 +135,9 @@ def _values_of(array: "pa.Array[Any]") -> "pa.Array[Any]":
     Returns:
         The array of plain values.
     """
-    while True:
-        if isinstance(array, pa.ExtensionArray):
-            array = array.storage
-        elif isinstance(array, pa.DictionaryArray):
-            array = _without_dictionary(array)
-        else:
-            return array
+    while isinstance(array, pa.ExtensionArray):
+        array = array.storage
+    return array
 
 
 def _decimal256_limbs(array: "pa.Array[Any]") -> "pa.Array[Any]":
@@ -205,8 +182,8 @@ def _polars_ready(array: "pa.Array[Any]") -> "pa.Array[Any]":
     type ``_unorderable_part`` accepts is prepared here, and no other type reaches
     it (the caller refuses it first):
 
-    * a logical type is its storage and a dictionary its values, alternately until
-      neither applies (``_values_of``, as ``_value_type`` reads the type);
+    * a logical type is its storage (``_values_of``, as ``_value_type`` reads the
+      type);
     * a date, time, timestamp or duration is its integer (the column's unit and zone
       are its type, so the integers order and compare as the values do), so no
       conversion of Polars' own can change it;
@@ -302,8 +279,7 @@ def _sort_key(name: str, dtype: object) -> "pl.Expr":
 def _float_bits(array: "pa.Array[Any]") -> "pa.Array[Any] | None":
     """Return a float key's bit patterns, or ``None`` when the key is not a float.
 
-    A logical type stored as a float, or a dictionary over floats, is a float key,
-    read through its storage or its values.
+    A logical type stored as a float is a float key, read through its storage.
 
     Args:
         array: A key column's values as stored (``_storage``).

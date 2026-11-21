@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
 from orcapod.protocols.core_protocols.streams import StreamProtocol
-from orcapod.types import Cursor
+from orcapod.types import Condition, Cursor
 
 T = TypeVar("T")
 
@@ -24,10 +24,27 @@ class SourceProtocol(StreamProtocol, Protocol):
     - ``source`` is always ``None`` (no upstream pod)
     - ``upstreams`` is always empty
     - ``source_id`` provides a canonical name for registry and provenance
+    - ``condition`` and ``row_limit`` state the source's restriction (ITL-1218):
+      which of its rows it reads. A restriction is part of no identity, schema or
+      saved hash. Only sources answer them for now; ``StreamProtocol`` gets them
+      when restrictions reach general streams (ITL-1219). The name ``limit`` is kept
+      for the planned method ``source.limit(n)``, the counterpart of ``where()``
+      (ITL-1219).
     """
 
     @property
     def source_id(self) -> str: ...
+
+    @property
+    def condition(self) -> Condition:
+        """The row conditions the source reads under: the empty ``Condition`` when
+        it reads every row."""
+        ...
+
+    @property
+    def row_limit(self) -> int | None:
+        """The most rows the source reads, or ``None`` for no limit."""
+        ...
 
     def to_config(
         self, db_registry: DatabaseRegistryProtocol | None = None

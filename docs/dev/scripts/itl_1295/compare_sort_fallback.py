@@ -219,6 +219,8 @@ def audit_types() -> dict[str, "pa.Array[Any]"]:
         "fixed_size_binary": pa.array([b"bb", b"aa", None, b"ab", b"aa"], pa.binary(2)),
         "bool": pa.array([True, False, None, True, False], pa.bool_()),
         "uint64 max": pa.array([2**64 - 1, 0, None, 5, 0], pa.uint64()),
+        # Since ITL-1264 (PR 455) no stream carries a dictionary-encoded column; this
+        # row measures the sort helper on a table directly, which no stream reaches.
         "dictionary<string>": pa.DictionaryArray.from_arrays(
             pa.array([0, 1, None, 2, 1], pa.int32()), pa.array(["c", "a", "b"])
         ),

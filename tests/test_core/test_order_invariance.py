@@ -747,9 +747,6 @@ def _side_effect(role: str, order: int, layout: str, _tmp: Path) -> Any:
     return SideEffectPod(notify)(selected)
 
 
-_DATA_TAG_ROLES_1246 = {DATA_TAGS: "ITL-1246", MIXED: "ITL-1246"}
-_EVERY_ROLE_1227 = {role: "ITL-1227" for role in ROLES}
-
 STREAM_CASES: tuple[StreamCase, ...] = (
     StreamCase(
         "arrow_table_source_given_id", lambda *a: _arrow_source(*a, source_id="s")
@@ -765,17 +762,10 @@ STREAM_CASES: tuple[StreamCase, ...] = (
     StreamCase("polling_source", _polling_source, roles=(PLAIN,)),
     StreamCase("cached_source", _cached_source),
     StreamCase("derived_source_tags_as_data", _derived_source),
-    StreamCase("raw_arrow_table_stream", _raw_stream, issue=_EVERY_ROLE_1227),
-    StreamCase(
-        "function_pod_call", _pod_call, issue=_DATA_TAG_ROLES_1246, with_async=True
-    ),
+    StreamCase("raw_arrow_table_stream", _raw_stream),
+    StreamCase("function_pod_call", _pod_call, with_async=True),
     StreamCase("function_pod_process", _pod_process, with_async=True),
-    StreamCase(
-        "function_pod_two_inputs",
-        _pod_two_inputs,
-        issue=_DATA_TAG_ROLES_1246,
-        with_async=True,
-    ),
+    StreamCase("function_pod_two_inputs", _pod_two_inputs, with_async=True),
     # Its async path delivers: tested in a job (test_a_job_...).
     StreamCase("side_effect_pod", _side_effect),
 )
@@ -1116,17 +1106,14 @@ def test_a_jobs_operators_and_side_effect_do_not_depend_on_the_arrangement(
     assert_all_equal(_jobs_by_arrangement(role, tmp_path, pod=False))
 
 
-@pytest.mark.parametrize(
-    "role",
-    [pytest.param(r, marks=[xfail("ITL-1246")] if r != PLAIN else []) for r in ROLES],
-)
+@pytest.mark.parametrize("role", ROLES)
 def test_a_jobs_function_pod_does_not_depend_on_the_arrangement(
     role: str, tmp_path: Path
 ) -> None:
     """The function pod node, alone in its job: the same elements as above.
 
-    Building, running, the async run and loading are checked before the comparison and
-    fail as usual; only the comparison across arrangements is ITL-1246's.
+    Building, running, the async run and loading are checked before the comparison; the
+    data-tags of a fall-through pod are a set of sorted names (ITL-1246).
     """
     results = _jobs_by_arrangement(role, tmp_path, pod=True)
     assert_all_equal(results)

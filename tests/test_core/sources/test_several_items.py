@@ -16,8 +16,10 @@ chains"):
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import json
+from typing import Any
 
 import pyarrow as pa
 import pytest
@@ -41,6 +43,7 @@ from ..operators.several_items import (
     Arrangement,
     fingerprint,
     make_source,
+    ordered_rows_fingerprint,
     presentation,
 )
 
@@ -214,6 +217,16 @@ def test_a_cached_source_reads_back_every_role_and_arrangement(
             assert fingerprint(again) == fingerprint(cached)
 
 
+def _async_rows(stream: Any) -> list[Any]:
+    async def collect() -> list[Any]:
+        return [row async for row in stream.async_iter_data()]
+
+    return asyncio.run(collect())
+
+
+@pytest.mark.parametrize(
+    "tag_columns", [["t1", "t2"], ["t2", "t1"]], ids=["t1-t2", "t2-t1"]
+)
 @pytest.mark.parametrize(
     "data_schema",
     [
@@ -224,9 +237,14 @@ def test_a_cached_source_reads_back_every_role_and_arrangement(
 )
 @pytest.mark.parametrize("role", ROLES)
 def test_a_schema_in_another_field_order_gives_the_same_source(
-    data_schema: dict[str, type], role: str
+    data_schema: dict[str, type], role: str, tag_columns: list[str]
 ) -> None:
-    """A ``DictSource`` schema with several fields, in the rows' order or another."""
+    """A ``DictSource`` schema with several fields, in the rows' order or another.
+
+    Neither the schema's field order nor the tag order changes the source (rows, hashes,
+    column names); the tags are presented in the order given, and the async rows are
+    the sync rows.
+    """
     rows = [
         {"t1": "a", "t2": 1, "d1": 10, "d3": "x"},
         {"t1": "b", "t2": 2, "d1": 20, "d3": "y"},
@@ -234,7 +252,7 @@ def test_a_schema_in_another_field_order_gives_the_same_source(
     tag_only = {PLAIN: True, DATA_TAGS: [], MIXED: ["t2"]}[role]
     source = DictSource(
         rows,
-        tag_columns=["t1", "t2"],
+        tag_columns=tag_columns,
         source_id="d",
         data_schema=data_schema,
         tag_only_columns=tag_only,
@@ -247,4 +265,7 @@ def test_a_schema_in_another_field_order_gives_the_same_source(
         tag_only_columns=tag_only,
     )
     assert fingerprint(source) == fingerprint(reference)
-    assert presentation(source)[0] == ("t1", "t2")
+    assert presentation(source)[0] == tuple(tag_columns)
+    assert ordered_rows_fingerprint(_async_rows(source)) == ordered_rows_fingerprint(
+        list(source.iter_data())
+    )

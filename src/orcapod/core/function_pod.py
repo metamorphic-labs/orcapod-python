@@ -5,7 +5,7 @@ import itertools
 import dataclasses
 import logging
 from abc import abstractmethod
-from collections.abc import Callable, Collection, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
 from functools import update_wrapper, wraps
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
@@ -2001,9 +2001,16 @@ class FallThroughPod(WrappedFunctionPod):
     ``pod.process(stream)`` is the plain pod: there a data-tag becomes a plain
     tag at the pod boundary.
 
+    The data-tags are a set (developer, November 18, 2026, ITL-1246): the pod holds
+    their sorted names, and its identity, pipeline identity and config hold that
+    tuple, so the order of the input's tag columns never changes the pod's hashes or
+    a job's table paths. Its output lists the data-tags first in the input's own order
+    (its data-tags first, in tag order, ITL-1205): column order is presentation only.
+
     Args:
         function_pod: The plain pod.
-        fall_through_tags: The data-tags of the pod's input that fall through.
+        fall_through_tags: The data-tags of the pod's input that fall through, in any
+            order.
     """
 
     def __init__(
@@ -2013,14 +2020,23 @@ class FallThroughPod(WrappedFunctionPod):
         # plain pod would record it.
         super().__init__(function_pod, tracker_manager=function_pod.tracker_manager)
         self._plain_pod = function_pod
-        self._fall_through_tags = tuple(fall_through_tags)
+        # A set of names: sorted, so their order never forms identity (ITL-1246).
+        self._fall_through_tags = tuple(sorted(set(fall_through_tags)))
         # The plain pod's hooks, the same list: a hook registered on it fires here.
         self._post_run_hooks = function_pod._post_run_hooks  # pyright: ignore[reportPrivateUsage]  # one pod family
 
     @property
     def fall_through_tags(self) -> tuple[str, ...]:
-        """The data-tags that fall through the pod."""
+        """The data-tags that fall through the pod, sorted by name."""
         return self._fall_through_tags
+
+    def _in_input_order(self, names: Iterable[str]) -> list[str]:
+        """The fall-through tags among ``names``, in the order of ``names``.
+
+        ``names`` are the input's data columns, which list its data-tags first in tag
+        order (ITL-1205), so the output keeps the input's presentation.
+        """
+        return [name for name in names if name in self._fall_through_tags]
 
     @property
     def plain_pod(self) -> FunctionPod:
@@ -2115,7 +2131,9 @@ class FallThroughPod(WrappedFunctionPod):
                 f"A fall-through pod needs its function's output as Data, got "
                 f"{type(output).__name__}"
             )
-        return output.with_columns_of(input_data, self._fall_through_tags)
+        return output.with_columns_of(
+            input_data, self._in_input_order(input_data.keys())
+        )
 
     def function_input_schema(self, input_schema: Schema) -> Schema:
         """The part of an input data schema the function takes (see ``function_input``)."""
@@ -2157,7 +2175,7 @@ class FallThroughPod(WrappedFunctionPod):
         self._validate_output_keys(tag_schema.keys())
         return tag_schema, Schema(
             {
-                **{name: incoming[name] for name in self._fall_through_tags},
+                **{name: incoming[name] for name in self._in_input_order(incoming)},
                 **self.data_function.output_data_schema,
             },
             optional_fields=(incoming.optional_fields & set(self._fall_through_tags))
@@ -2279,8 +2297,12 @@ def result_data_schema(pod: FunctionPodProtocol, input_schema: Schema) -> Schema
     data_tags = fall_through_tags(pod)
     if not data_tags:
         return outputs
+    # The data-tags in the input's order (data-tags first, in tag order, ITL-1205).
     return Schema(
-        {**{name: input_schema[name] for name in data_tags}, **outputs},
+        {
+            **{name: input_schema[name] for name in input_schema if name in data_tags},
+            **outputs,
+        },
         optional_fields=(input_schema.optional_fields & set(data_tags))
         | outputs.optional_fields,
     )

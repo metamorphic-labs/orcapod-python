@@ -13,3 +13,5 @@ Core type definitions used throughout Orcapod.
 ::: orcapod.types.ColumnConfig
 
 ::: orcapod.types.ContentHash
+
+::: orcapod.types.Condition

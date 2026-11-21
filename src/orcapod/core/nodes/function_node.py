@@ -350,8 +350,13 @@ def run_job_node(
         refuse_unloadable_inputs,
         run_with_dependencies,
     )
+    from orcapod.pipeline.restrictions import refuse_restriction_conflicts
     from orcapod.pipeline.run_summary import warn_row_failures
 
+    # A source read under two restrictions, or a caching operator over a restricted
+    # source, is refused before any source is checked and before anything is
+    # computed or written (ITL-1218).
+    refuse_restriction_conflicts([node])
     # Every source feeding the run first takes in any new data (ITL-1102).
     unchecked = check_sources([node])
     if node.holds_current_run(load_only=load_only):
@@ -3975,6 +3980,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         from dataclasses import replace
 
         from orcapod.pipeline.node_run import commit_run
+        from orcapod.pipeline.restrictions import restrictions_in_force
         from orcapod.pipeline.run_summary import RunCountingObserver, RunSummary
         from orcapod.utils.database_errors import flush_best_effort
 
@@ -4011,6 +4017,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             load_only=load_only,
             target=self.label,
             unchecked_sources=unchecked_sources,
+            restricted_sources=restrictions_in_force([self]),
         )
 
     def _incomplete_inputs(self) -> list[str]:

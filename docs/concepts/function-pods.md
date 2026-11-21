@@ -408,6 +408,12 @@ print("function calls:", len(calls))
     values. To force recomputation after changing what a function does, bump the major
     version, e.g. `@function_pod(output_keys="bmi", version="v1.0")` (the default is
     `"v0.0"`; a minor bump such as `"v0.1"` is not enough), or rename the function.
+    The same holds when an output name now receives another value because you reordered
+    `output_keys` among outputs of the same type without reordering the returned values
+    (or the reverse): the output schema is a set of named, typed outputs, so its identity
+    does not change, and only a major version bump makes the function compute the new
+    values. Reordering both together changes nothing (see *Change detection* in
+    [Identity & Hashing](identity.md#change-detection)).
 
 !!! note "When the database cannot be read"
     A table that does not exist yet reads as empty, and its rows are computed. In a
@@ -792,6 +798,12 @@ output, and it then reads as a zero-row table, as before the first run, until th
 An operator node attached in `CacheMode.REPLAY` does not compute: its run replays the rows
 stored under its key by `CacheMode.LOG` runs, every logged run of that key, not only the
 latest; before its run it shows nothing, like every node (a narrower replay is ITL-1098).
+An operator node that caches (`CacheMode.LOG` or `CacheMode.REPLAY`) cannot read a restricted
+source (one restricted with `where` or `limit=`; see
+[Restricting a source versus filtering in the pipeline](sources.md#restricting-a-source-versus-filtering-in-the-pipeline)):
+its cache is kept under the node's identity, which a restriction is not part of, so it is
+refused with `ValueError` before anything is read or written, and no log is ever written from
+a restricted read. `CacheMode.OFF` is not concerned.
 
 ### When the database cannot be written
 

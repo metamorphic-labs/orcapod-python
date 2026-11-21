@@ -128,15 +128,14 @@ def _group_twice(
 def test_no_arrangement_of_the_input_changes_the_result(
     mode: str, kind: str, member_order: list[str] | None
 ) -> None:
-    # A raw stream's own content hash depends on its tag order (ITL-1227): only its
-    # values and pipeline hash are compared.
-    content_hash = kind == "source"
+    # A raw stream's content hash depends on no order either (ITL-1227), so the
+    # content hashes are compared for both kinds of input.
     seen: dict[str, Any] = {}
     for tag_order, layout in itertools.product(TAG_ORDERS, LAYOUTS):
         once, twice = _group_twice(_input(mode, kind, tag_order, layout), member_order)
         found = {
-            "once": _fingerprint(once, content_hash=content_hash),
-            "twice": _fingerprint(twice, content_hash=content_hash),
+            "once": _fingerprint(once, content_hash=True),
+            "twice": _fingerprint(twice, content_hash=True),
         }
         if not seen:
             seen = found

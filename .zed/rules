@@ -645,7 +645,8 @@ audit is `docs/dev/specs/itl-1271-order-invariance-audit.md`.
 ## Project layout
 
 src/orcapod/
-  types.py                    — Schema, ColumnConfig, ContentHash
+  types/                      — Schema, ColumnConfig, ContentHash (__init__.py);
+                                Condition (condition.py)
   system_constants.py         — Column prefixes and separators
   errors.py                   — InputValidationError, DuplicateTagError
   config.py                   — Config dataclass
@@ -853,7 +854,13 @@ Every pipeline element has two parallel hashes:
    identity: the default source_id of the in-memory sources
    (<source kind>:<algorithm label>:<hex> of the table hash, used when none is given) and the elements of a ListSource. A downstream stream or node hashes its
    pod's identity plus its upstreams' content hashes; a function pod's identity is its uri,
-   not its body. Only a datagram (one row's tags or data) has a content_hash() that is a
+   not its body. The uri holds the hash of the output schema, a set of named, typed outputs
+   in no order (developer, November 17, 2026, ITL-1244): reordering output_keys changes it
+   only when a key's type changes; when a name now receives another value (same-typed keys
+   reordered without the returned values, or the reverse), what the function computes
+   changed, like a body edit, and it needs a MAJOR version bump (v0.0 to v1.0: the uri
+   holds only the major, so a minor bump serves the earlier order's stored values) while
+   there is no check on a cache hit (ITL-1253); reordering both together changes nothing. The input parameters (names and order) are in no part of the uri. Only a datagram (one row's tags or data) has a content_hash() that is a
    digest of its values; that row hash, not the node's content hash, is what results are
    memoized by. The node's content hash tells apart, inside a shared table, the rows of
    pipelines bound to different sources (__node_content_hash).
@@ -863,6 +870,24 @@ Every pipeline element has two parallel hashes:
 Base case: RootSource.pipeline_identity_structure() returns (tag_schema, data_schema).
 Each downstream node's pipeline hash commits to its own identity plus upstream pipeline
 hashes, forming a Merkle chain.
+
+No identity follows column order (developer, November 18, 2026, ITL-1246, ITL-1227): "it
+shouldn't depend on tag order -- generally nothing should depend on tag order". A list of tag
+or data-tag names enters an identity as a set of sorted names (FallThroughPod's
+fall_through_tags, also in its config and a saved job; a raw stream's tag columns and
+data-tags). A raw ArrowTableStream (no producer) hashes its whole identity
+table once (every column group but _content_hash; hash_table covers the schema, so a stream
+with no rows still commits to its columns) with its rows in the canonical row order of an
+identity table (arrow_utils.canonical_identity_row_order, developer, November 19, 2026,
+"option 2"; the specification is in docs/reference/hashing.md): a pyarrow value sort, ascending
+and nulls last, over the user tags in name order then every other column in name order, each
+only when its type is on the closed list arrow_utils.canonically_sortable (decided from the
+type, never by trying a sort; no extension, list, struct, float16 or decimal256), and rows
+still tied ordered by their own one-row hash_table digest (prefixed bytes), computed for tie
+groups only. Outputs still list the
+data-tags first in the input's tag order: column order is presentation. An operation whose
+result could depend on a column order takes that order as an explicit argument that is part
+of its identity (GroupBy's member_order), never the input's column order.
 
 ### Column naming conventions
 
@@ -1011,6 +1036,21 @@ hash or default source id moves. Not covered: what is inside a library value (nu
 polars, torch) keeps its library's own distinction. list_view and large_list_view are not
 supported: a source refuses them (the Arrow hasher cannot hash them) and a raw ArrowTableStream
 holds them as given (ITL-1129).
+
+Dictionary-encoded columns are refused, tags and data alike (developer, November 18, 2026,
+ITL-1264: "Say it is not currently supported in orcapod. We MAY support but not immediately in
+the plan"; November 19, 2026, ITL-1277: "safe default, though could be inconvenient, is to
+reject working with it"). Every column of a stream (tag, data-tag, data, and Orcapod's own
+system-tag, source-info, context and meta columns, which only a hand-built table could encode)
+whose Arrow type is, or contains, a dictionary (list, list-view or fixed-size list item, struct
+child, map key or item, run-end-encoded values, extension storage) raises InputValidationError naming each such
+column with its role, its type and its decoded type (arrow_utils.decode_dictionaries), then
+the pyarrow and polars ways to decode. One rule, schema_utils.dictionary_columns with
+schema_utils.dictionary_columns_error, applied by ArrowTableStream.__init__ (every source
+and operator result) and first by SourceStreamBuilder.build (before the key columns and the
+hash); never check it elsewhere. A library value in a cell (a pandas or polars data frame with
+a categorical column) is an extension column, not a dictionary, and is accepted. Supporting
+dictionary columns later is ITL-1277.
 
 Respect the Arrow types the inputs already have, normalized to their large variants (developer,
 November 10, 2026: large and non-large variants hash identically, so always normalize to large
@@ -1209,6 +1249,67 @@ data. The rules:
   only after the read succeeded. Without key columns a row's record id is its position: a
   change of row order is a change; with one, only content counts
   (reload.same_rows(..., ordered=), decided by the caller; in doubt, order counts).
+- A restriction is not an operator (developer, November 17, 2026, ITL-1218). It is attached
+  to a source, chooses which of its rows flow, and changes no row, schema, DAG node or
+  identity: content_hash, pipeline_hash, source_id, schema, system-tag column names and
+  every row's record id equal the unrestricted source's (a positional record id is never
+  renumbered). Selecting rows as part of what a pipeline computes is an operator
+  (SemiJoin, PolarsFilter). The conditions are one public class, orcapod.types.Condition
+  (defined in types/condition.py; developer, November 18, 2026): row conditions only, no limit, no source, in no hash; a
+  future in-pipeline filter operator is to take the same class (its identity then: ITL-1265).
+  Its factory Condition.of(mapping=None, /, **columns) takes where()'s arguments and does
+  every check that needs no table (None, a value not exactly bool/int/float/str/
+  bytes/datetime/date, mapping against keyword); combined adds two and refuses a
+  contradiction; equality is by value, order-free, exact types, floats as Orcapod matches them
+  (0.0 equals -0.0, NaN equals NaN), an aware datetime by its instant (fold counts, zones do
+  not; never Python's ==, which ignores fold within one tzinfo), with a consistent hash.
+  That equality decides whether two restrictions are one, never which rows a source returns:
+  a condition is pushed down as column == value and the table system's equality decides
+  (developer, November 19, 2026: a NaN, an infinity or a signed zero is accepted, pushed down
+  and documented, never filtered on the client or refused; a NaN or infinite value is saved
+  as {"float": "nan" | "inf" | "-inf"}); text()/str, and
+  to_config/from_config (the saved where mapping). Internally terms (column, operator,
+  value), equality only today; the public surface names no operator. Never add a second
+  restriction class: a limit stays the source's own (limit=). Today only
+  SpiralDBTableSource.where(mapping=None, /, **columns) exists: Condition.of, then the
+  source checks it against its table (unknown column, the column's exact Python type and
+  Arrow range, no conversion) and combines it with where='s, applied by SpiralDB in the
+  scan. where() is _copy() then _apply_restriction() in place on the copy, the future
+  public copy() and apply_restriction(); other source kinds and limit() are ITL-1219.
+  A source states its restriction through two read-only members of SourceProtocol,
+  condition (the empty Condition when it reads every row) and row_limit (None
+  for none): RootSource answers the defaults, SpiralDBTableSource its own, and a
+  source over another (CachedSource, SourceProxy) answers for itself only
+  (developer, November 20, 2026: StreamProtocol gets them when restrictions reach
+  general streams, ITL-1219). Every rule that reads them is in one module,
+  pipeline/restrictions.py, typed, never probing a private attribute.
+  RunSummary records each restricted source by slot: conditions (slot to Condition),
+  limits (slot to limit), restricted_source_ids (every such slot), filled by one walk;
+  the saved job keeps where and limit in the source config. A slot's new restriction need not
+  match its previous one (bind does not compare the two), but bind refuses, before replacing
+  any binding, a bind after which two slots would read one source identity under different
+  restrictions (below). A job run over a restricted source feeding GroupBy, Batch or MergeJoin issues one RestrictedAggregationWarning.
+  A pipeline keeps one restriction (or none) per source identity (a restriction leaves the
+  identity unchanged), so one table restricted two ways (or with and without a restriction) in
+  one pipeline is refused (restrictions.require_one_restriction, over the sources the streams
+  read now, sources_read; nothing is remembered between checks, since a rebound slot changes
+  what they read) at capture, at compile, by bind before it binds and at the start of every
+  run (refuse_restriction_conflicts), whatever streams lead there: projections, operator
+  chains, streams built before the capture. A bind's walk matches the job's own slots by object
+  (Rebinding), never by name. RunSummary keeps one condition and one limit per slot (ITL-1293). Every restriction walk goes through a slot's bound source,
+  a SourceProxy's delegate and a CachedSource's source (_streams_beneath); a
+  DerivedSource is a root. A CachedSource
+  over a restricted source is refused at construction (a cache is kept under the table's
+  identity; developer, November 18, 2026), and so is an operator job node that caches (LOG or
+  REPLAY) over a restricted source (developer, November 19, 2026: its cache is kept under the
+  node's identity): restrictions.refuse_restricted_operator_cache(s), called where the cache mode
+  is attached, by bind before it binds, before a job distributes its databases, by the
+  upstreams setter, by execute (on the streams it is handed) and async_execute, and at
+  the start of job.run(), run_async() and a job node's run(), before any source is
+  checked or anything computed or written; a new way to run or rewire a caching operator node
+  calls it too (it reads the node's public cache_mode). CacheMode.OFF and function nodes
+  are not concerned. The refusal is for now: how an operator node logs and replays is to be
+  redesigned to load its cache and then apply the restriction (TODO(ITL-1219)).
 - Empty data → ArrowTableSource raises ValueError("Table is empty").
 - A side-effect job node delivers only when it runs (developer, November 13, 2026, ITL-1091):
   job.run(), node.run() (state-driven, ITL-1095: a node holding a current run delivers
@@ -1310,21 +1411,20 @@ data. The rules:
   Python's precision (`time64[ns]` within a microsecond, `date64` on one day) are separate
   groups. A list-valued tag sorts through `(is_null, value)` pairs at every depth (`_sort_key`:
   Polars puts a null inside a list first). The sort frame only sees prepared columns
-  (`_polars_ready`: a logical type as its storage, a dictionary decoded in one place,
-  `_without_dictionary`, a temporal value as its integer, `float16` as `float32`, a view as
+  (`_polars_ready`: a logical type as its storage, a temporal value as its integer, `float16` as `float32`, a view as
   its large variant, `decimal256` as four 64-bit limbs, which Polars cannot read (it panics,
   which no caller can catch), every list kind, fixed-size lists included, as a large list
   over its prepared values). What may reach it is one rule, `_unorderable_part` (an integer,
   float, decimal, boolean, string, binary, date, time, timestamp, duration or null, through
-  logical storage, dictionary values and lists of every kind at every depth), checked from
+  logical storage and lists of every kind at every depth; no dictionary, since no stream
+  carries one, ITL-1264), checked from
   the schema at validation and from the table when grouping (the async path skips
   validation); anything else is refused, never passed through. The output is built from the input's Arrow table: `take()` in the
   sorted order and list arrays from group offsets (`arrow_utils.aggregated_list_array`, the
   array-based sibling of `build_aggregated_table`), so every key and list element is a value
   a member holds, bit for bit (`time64[ns]` keeps its nanoseconds, a float32 signaling NaN
   its bits; ITL-1248 for `GroupBy`). The hashes read a float's bits, so a group emits, for
-  each float key column (a logical type stored as a float, or a dictionary over floats,
-  included), its members' value with the smallest bit pattern at the column's own width
+  each float key column (a logical type stored as a float included), its members' value with the smallest bit pattern at the column's own width
   (`0.0` over `-0.0`, a positive NaN over a negative one; a signaling NaN has smaller bits
   than the canonical quiet NaN, so it wins): never the first row's, never chosen by
   `member_order`. Every other key is the group's first member's (equal values are identical).

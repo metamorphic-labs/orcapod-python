@@ -83,9 +83,6 @@ ORDER_EXCEPTIONS: tuple[OrderException, ...] = (
 
 # Open issues whose cases the test marks as expected failures.
 KNOWN_VIOLATIONS: dict[str, str] = {
-    "ITL-1227": "a raw ArrowTableStream's content hash depends on the order of its tags",
-    "ITL-1246": "a function pod over data-tags: its content and pipeline hash (and its "
-    "node's stored paths) depend on the input's tag order and table layout",
     "ITL-1247": "PolarsFilter: the order of its predicates is in its identity (undecided)",
     "ITL-1270": "the presentation sort (head, sort_by_tags, preview) orders rows by the "
     "tags in tag column order",

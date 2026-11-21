@@ -363,7 +363,9 @@ def test_a_job_node_sorted_read_keeps_every_value(
                 else NestedNoneNotRestorableError,
                 reason="ITL-1144: NestedNoneNotRestorableError: a None inside a "
                 + "container cannot be read back yet, so the rows whose list-of-struct "
-                + "data-tag holds a null element fail in the function",
+                + "data-tag holds a null element fail in the function; ITL-1308: the "
+                + "sync run records those rows as failed and continues, the async run "
+                + "raises",
             )
         )
     full = _table(tag_name, tag_order)
