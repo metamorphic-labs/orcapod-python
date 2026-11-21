@@ -6,6 +6,7 @@ import pyarrow as pa
 import pytest
 
 from orcapod.core.sources.arrow_table_source import ArrowTableSource
+from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.dict_source import DictSource
 from orcapod.core.sources.data_frame_source import DataFrameSource
 from orcapod.core.sources.csv_source import CSVSource
@@ -198,10 +199,12 @@ class TestListSourceBuilder:
         assert len(list(src.iter_data())) == 3
 
     def test_identity_structure_is_that_of_every_root_source(self):
-        """Class name, output schema, source id, key columns (ITL-1272)."""
+        """Class name, Arrow schema identity, source id, key columns (ITL-1272)."""
         src = ListSource(name="val", data=[1, 2, 3])
         identity = src.identity_structure()
-        assert identity == ("ListSource", src.output_schema(), src.source_id, ())
+        assert identity == RootSource.identity_structure(src)
+        assert identity[0] == "ListSource"
+        assert identity[2:] == (src.source_id, ())
 
     def test_with_tag_function(self):
         src = ListSource(

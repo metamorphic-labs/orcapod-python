@@ -172,6 +172,10 @@ class ArrowHasherProtocol(Protocol):
         """
         ...
 
+    def hash_schema(self, schema: "pa.Schema") -> ContentHash:
+        """Hash a schema: the hash of every schema that enters an identity (ITL-640)."""
+        ...
+
 
 K = TypeVar("K")
 V = TypeVar("V")

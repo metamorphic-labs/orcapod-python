@@ -921,15 +921,25 @@ def _tag_data_schemas() -> tuple[Any, Any]:
     )
 
 
+def _tag_data_arrow_schemas() -> tuple[pa.Schema, pa.Schema]:
+    """The Arrow schemas the converter gives ``_tag_data_schemas`` (ITL-640)."""
+    converter = _ctx().type_converter
+    tag_schema, data_schema = _tag_data_schemas()
+    return (
+        converter.python_schema_to_arrow_schema(tag_schema),
+        converter.python_schema_to_arrow_schema(data_schema),
+    )
+
+
 @case("schema", "compute_schema_hash")
 def schema_compute_schema_hash() -> dict[str, Any]:
     from orcapod.utils.schema_utils import compute_schema_hash
 
-    tag_schema, data_schema = _tag_data_schemas()
-    hasher = _ctx().semantic_hasher
+    tag_schema, data_schema = _tag_data_arrow_schemas()
+    ctx = _ctx()
     return {
-        "full": compute_schema_hash(tag_schema, data_schema, hasher, None),
-        "chars_16": compute_schema_hash(tag_schema, data_schema, hasher, 16),
+        "full": compute_schema_hash(tag_schema, data_schema, ctx, None),
+        "chars_16": compute_schema_hash(tag_schema, data_schema, ctx, 16),
     }
 
 
@@ -939,7 +949,7 @@ def schema_source_schema_hash() -> dict[str, Any]:
     from orcapod.utils.arrow_utils import system_tag_column_names
     from orcapod.utils.schema_utils import compute_source_schema_hash
 
-    tag_schema, data_schema = _tag_data_schemas()
+    tag_schema, data_schema = _tag_data_arrow_schemas()
     schema_hash = compute_source_schema_hash(
         tag_schema, data_schema, _ctx(), DEFAULT_CONFIG
     )
@@ -1600,6 +1610,82 @@ def arrow_extension_schema_hashes() -> dict[str, Any]:
         k: hasher.hash_schema(t.schema).to_string()
         for k, t in _extension_tables().items()
     }
+
+
+def _storage_form_field(name: str, extension: Any) -> Any:  # pyright: ignore[reportExplicitAny]  # an Arrow extension type; returns a field
+    """A field in the storage form, built by hand: the storage type and the identifier.
+
+    Written out here, not taken from ``canonical_form.storage_form_schema``, so the pins
+    below fix the form itself (ITL-640, option (a)).
+    """
+    return pa.field(
+        name,
+        extension.storage_type,
+        metadata={
+            b"ARROW:extension:name": extension.extension_name.encode("utf-8"),
+            b"ARROW:extension:metadata": extension.__arrow_ext_serialize__(),
+        },
+    )
+
+
+def _schema_forms(python_types: dict[str, Any]) -> dict[str, Any]:  # pyright: ignore[reportExplicitAny]  # Python types; Arrow schemas
+    """Each type as a one-column schema, live and in the storage form."""
+    converter = _ctx().type_converter
+    forms: dict[str, Any] = {}
+    for label, python_type in python_types.items():
+        extension = converter.python_type_to_arrow_type(python_type)
+        forms[f"{label}.live"] = pa.schema([pa.field("c", extension)])
+        forms[f"{label}.storage"] = pa.schema([_storage_form_field("c", extension)])
+    return forms
+
+
+@case("arrow", "schema_storage_form")
+def arrow_schema_storage_form() -> dict[str, Any]:
+    """The schema hash of a value-hashed logical type is its storage form's (ITL-640).
+
+    Each type live and in the storage form (its storage type with its identifier as
+    field metadata): one value per type, both entries equal. Also ``list[File]`` and a
+    plain struct with a ``Directory`` field, whose nested identifier stays in the
+    storage form.
+    """
+    import orcapod as op
+
+    hasher = _ctx().arrow_hasher
+    converter = _ctx().type_converter
+    schemas = _schema_forms(
+        {"File": op.File, "Directory": op.Directory, "list[File]": list[op.File]}
+    )
+    directory = converter.python_type_to_arrow_type(op.Directory)
+    count = pa.field("n", pa.int64(), nullable=False)
+    schemas["struct_with_Directory.live"] = pa.schema(
+        [pa.field("c", pa.struct([pa.field("d", directory), count]))]
+    )
+    schemas["struct_with_Directory.storage"] = pa.schema(
+        [pa.field("c", pa.struct([_storage_form_field("d", directory), count]))]
+    )
+    return {k: hasher.hash_schema(t).to_string() for k, t in schemas.items()}
+
+
+@case(
+    "arrow",
+    "schema_storage_form_library",
+    provisional=(*NUMPY_PANDAS_TYPES, *POLARS_TYPES),
+)
+def arrow_schema_storage_form_library() -> dict[str, Any]:
+    """As ``schema_storage_form``, for the provisional library value types."""
+    import polars as pl
+
+    hasher = _ctx().arrow_hasher
+    schemas = _schema_forms(
+        {
+            "numpy.ndarray": np.ndarray,
+            "pandas.DataFrame": pd.DataFrame,
+            "pandas.Series": pd.Series,
+            "polars.DataFrame": pl.DataFrame,
+            "polars.Series": pl.Series,
+        }
+    )
+    return {k: hasher.hash_schema(t).to_string() for k, t in schemas.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -2808,6 +2894,16 @@ def torch_single_field() -> dict[str, Any]:
             Schema({"c": torch.Tensor})
         ).to_string(),
     }
+
+
+@case("torch", "schema_storage_form", provisional=(TORCH_TENSOR,))
+def torch_schema_storage_form() -> dict[str, Any]:
+    """As ``arrow`` ``schema_storage_form``, for ``torch.Tensor`` (ITL-640)."""
+    import torch
+
+    hasher = _ctx().arrow_hasher
+    schemas = _schema_forms({"torch.Tensor": torch.Tensor})
+    return {k: hasher.hash_schema(t).to_string() for k, t in schemas.items()}
 
 
 @case("torch", "datagram", provisional=(TORCH_TENSOR,))

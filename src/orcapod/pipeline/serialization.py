@@ -5,11 +5,17 @@ from __future__ import annotations
 import hashlib
 import json as _json
 import logging
+import re
 from collections.abc import Collection, Iterable
 from enum import Enum
 from typing import TYPE_CHECKING, Any, cast
 
 from orcapod.types import Schema
+from orcapod.logical_types.canonical_form import (
+    declaration_form_field,
+    declaration_form_schema,
+    storage_form_schema,
+)
 from orcapod.logical_types.identifier import (
     LogicalTypeIdentifier,
     LogicalTypeIdentifierError,
@@ -28,22 +34,35 @@ logger = logging.getLogger(__name__)
 # Format version
 # ---------------------------------------------------------------------------
 
-# The version a pipeline file is written at, and the versions a load accepts.
-# A format change adds the new version here and to the supported set; the loaders
-# only test membership (``Pipeline.load``).
-#   0.1.0: first format (v0.2.0).
-#   0.2.0: adds ``orcapod_version`` (v0.3.0); a 0.1.0 file loads unchanged.
-#   0.3.0: a source's tags may be data-tags (ITL-1023). A file at 0.1.0 or 0.2.0
-#          holds v0.3 sources: their configs carry no ``tag_only_columns`` and read
-#          back with every declared tag plain, so their saved hashes match.
-# Plain tags are decided by this version, never by a missing key (ITL-1159, ITL-1019):
-# everything in a file at a ``PLAIN_TAG_FORMAT_VERSIONS`` version is plain, and such a
-# file never holds ``tag_only_columns`` or ``fall_through_tags``. From 0.3.0 on,
-# every source config that takes the option writes ``tag_only_columns`` and every
-# function node writes ``fall_through_tags``; a load refuses a file without them.
-PIPELINE_FORMAT_VERSION = "0.3.0"
-SUPPORTED_FORMAT_VERSIONS = frozenset({"0.1.0", "0.2.0", "0.3.0"})
-PLAIN_TAG_FORMAT_VERSIONS = frozenset({"0.1.0", "0.2.0"})
+# The version a pipeline file is written at, and the only one a load reads.
+#   0.4.0: a nested field name in saved type text that is not plain is JSON-quoted
+#          (ITL-640, ``_nested_field_name_text``); a map's key and item are written as
+#          whole fields. Every source config that takes the option writes
+#          ``tag_only_columns`` and every function node writes ``fall_through_tags``;
+#          a load refuses a file without them (ITL-1159, ITL-1019).
+# A file of an earlier format (0.1.0 to 0.3.0) is refused at load, never read in its
+# old grammar: load and save had not been used in production (developer, 2026-11-21).
+# Taking such files to the current format is the migration tool's work (ITL-1048).
+PIPELINE_FORMAT_VERSION = "0.4.0"
+
+
+def require_current_format(version: str, current: str) -> None:
+    """Refuse a saved file whose format version is not the one this Orcapod writes.
+
+    Args:
+        version: The format version the file records.
+        current: The format version this Orcapod writes and reads.
+
+    Raises:
+        ValueError: If ``version`` is not ``current``.
+    """
+    if version != current:
+        raise ValueError(
+            f"Unsupported format version {version!r}: the file was saved with format "
+            f"{version!r}; this Orcapod reads only format {current}. Save the "
+            "pipeline again with this version of Orcapod."
+        )
+
 
 # ---------------------------------------------------------------------------
 # LoadStatus
@@ -641,6 +660,58 @@ class SavedSchemaVersionError(ValueError):
     """A saved schema predates complete logical type identifiers."""
 
 
+def _serialize_field_type(field: Any) -> str:
+    """Render a field's type, with its logical identifier in either representation.
+
+    A logical type is carried as a live extension type, or as its storage type with
+    the ``ARROW:extension:name`` and ``ARROW:extension:metadata`` field metadata (the
+    IPC form of a table read from a store). Both are written as the identifier,
+    ``extension<name;hex-metadata>``, so the saved text never drops it (ITL-640).
+    """
+    import pyarrow as pa
+
+    metadata = field.metadata or {}
+    name = metadata.get(b"ARROW:extension:name")
+    if name is not None and not isinstance(field.type, pa.ExtensionType):
+        identifier = LogicalTypeIdentifier(
+            name.decode("utf-8"), metadata.get(b"ARROW:extension:metadata", b"")
+        )
+        return f"extension<{identifier.text}>"
+    return _serialize_arrow_type(field.type)
+
+
+_PLAIN_FIELD_NAME = re.compile(r"[A-Za-z0-9_.\-]+")
+"""A nested field name written as it is: ASCII letters, digits, ``_``, ``.`` and ``-``."""
+
+
+def _nested_field_name_text(name: str) -> str:
+    """The text of a nested field's name: as it is when plain, otherwise JSON-quoted.
+
+    One rule (CodeRabbit on PR 454): a name made only of characters that cannot
+    confuse the reader (``_PLAIN_FIELD_NAME``: ``item``, ``key``, ``value``,
+    ``element``, ``x_1``, ``a.b``) keeps the text it always had; every other name (a
+    character of the type grammar, whitespace anywhere, a newline, a quote, a
+    backslash, a non-ASCII character, the empty name) is written as a JSON string,
+    ``"a:b"``, ``"a\\nb"``, ``""``, which the reader takes back exactly. This is
+    the grammar of format 0.4.0, the only one a load reads
+    (``require_current_format``).
+    """
+    return name if _PLAIN_FIELD_NAME.fullmatch(name) else _json.dumps(name)
+
+
+def _serialize_nested_field(field: Any) -> str:
+    """Render a nested field exactly: ``<name>: <type>``, then `` not null`` if it is.
+
+    The one text of a list, large list or fixed-size list item, a struct child and a
+    map's key and item field, so each keeps its name, nullability and logical
+    identifier through a save and load. The name is quoted when it must be
+    (``_nested_field_name_text``).
+    """
+    nullable = "" if field.nullable else " not null"
+    name = _nested_field_name_text(field.name)
+    return f"{name}: {_serialize_field_type(field)}{nullable}"
+
+
 def _serialize_arrow_type(arrow_type: Any) -> str:
     """Render a schema type, preserving complete logical identifiers at every depth."""
     import pyarrow as pa
@@ -648,30 +719,28 @@ def _serialize_arrow_type(arrow_type: Any) -> str:
     if isinstance(arrow_type, pa.ExtensionType):
         return f"extension<{arrow_type_identifier(arrow_type).text}>"
     if pa.types.is_list(arrow_type) or pa.types.is_large_list(arrow_type):
-        field = arrow_type.value_field
-        child = _serialize_arrow_type(field.type)
-        nullable = "" if field.nullable else " not null"
         outer = "large_list" if pa.types.is_large_list(arrow_type) else "list"
-        return f"{outer}<{field.name}: {child}{nullable}>"
+        return f"{outer}<{_serialize_nested_field(arrow_type.value_field)}>"
     if pa.types.is_fixed_size_list(arrow_type):
-        field = arrow_type.value_field
-        nullable = "" if field.nullable else " not null"
         return (
-            f"fixed_size_list<{field.name}: {_serialize_arrow_type(field.type)}"
-            f"{nullable}>[{arrow_type.list_size}]"
+            f"fixed_size_list<{_serialize_nested_field(arrow_type.value_field)}>"
+            f"[{arrow_type.list_size}]"
         )
     if pa.types.is_struct(arrow_type):
-        fields = [
-            f"{field.name}: {_serialize_arrow_type(field.type)}"
-            + ("" if field.nullable else " not null")
-            for field in arrow_type
-        ]
+        fields = [_serialize_nested_field(field) for field in arrow_type]
         return "struct<" + ", ".join(fields) + ">"
+    if pa.types.is_dictionary(arrow_type):
+        # Dictionary encoding is a layout, not part of a schema's identity (ITL-640):
+        # the saved type is the value type.
+        return _serialize_arrow_type(arrow_type.value_type)
     if pa.types.is_map(arrow_type):
+        # The key and the item as whole fields (ITL-640, Codex review 3 of PR 454): a
+        # bare ``map<K, V>`` would lose the item's name and its nullability, which are
+        # part of the schema's identity.
         ordered = ", keys_sorted" if arrow_type.keys_sorted else ""
         return (
-            f"map<{_serialize_arrow_type(arrow_type.key_type)}, "
-            f"{_serialize_arrow_type(arrow_type.item_type)}{ordered}>"
+            f"map<{_serialize_nested_field(arrow_type.key_field)}, "
+            f"{_serialize_nested_field(arrow_type.item_field)}{ordered}>"
         )
     return str(arrow_type)
 
@@ -770,12 +839,16 @@ def _python_type_of_saved_column(
 ) -> Any:
     """Return the Python type of a saved column: its Arrow type, ``T | None`` if nullable.
 
-    Goes through ``arrow_schema_to_python_schema``, the converter's own rule for a
-    field's nullability, so a restored type hashes as the running node's does.
+    The field is first brought to the declaration form (``declaration_form_field``:
+    a nested logical type in the storage form, never a nested live extension type),
+    then goes through ``arrow_schema_to_python_schema``, the converter's own rule for
+    a field's nullability, so a restored type hashes as the running node's does.
     """
     import pyarrow as pa
 
-    field = pa.field(name, arrow_type, nullable=nullable)
+    field = declaration_form_field(
+        pa.field(name, arrow_type, nullable=nullable), type_converter
+    )
     return type_converter.arrow_schema_to_python_schema(pa.schema([field]))[name]
 
 
@@ -843,6 +916,160 @@ def deserialize_schema(
         except Exception:
             result[name] = type_str
     return result
+
+
+def arrow_type_texts(
+    schema: "pa.Schema", type_converter: Any | None = None
+) -> dict[str, str]:
+    """Return the saved type strings of an Arrow schema, its own types (ITL-640).
+
+    The text of each field's own Arrow type (``_serialize_field_type``: nested
+    nullability, units, zones, widths and logical type identifiers), never a type
+    re-derived from a Python type. The schema is first brought to the storage form
+    (``storage_form_schema``, the walker ``hash_schema`` applies), so a logical type
+    is written as its identifier, ``extension<name;hex-metadata>``, whether it came
+    live, in metadata form or nested in a list, struct or map. Top-level nullability
+    is saved apart (``arrow_nullable_names``).
+
+    Args:
+        schema: The Arrow schema.
+        type_converter: The converter of the data context the text is read back
+            with (it resolves logical type identifiers); ``None`` for the default
+            data context's.
+
+    Returns:
+        A dict mapping field names to Arrow type strings, in the schema's order.
+
+    Raises:
+        ValueError: If a field's text would not read back as its type
+            (``_require_text_reads_back``).
+    """
+    texts: dict[str, str] = {}
+    for field in storage_form_schema(schema):
+        text = _serialize_field_type(field)
+        _require_text_reads_back(field.name, text, type_converter)
+        texts[field.name] = text
+    return texts
+
+
+def _require_text_reads_back(name: str, text: str, type_converter: Any | None) -> None:
+    """Refuse a saved type text that does not read back as the type it was written for.
+
+    The one check of the writer of saved Arrow types (``arrow_type_texts``; CodeRabbit
+    on PR 454): the text is read (``parse_arrow_type_string``) and written again, and
+    must come back the same, so no type can be saved into a file that cannot be loaded
+    or loads as another type. Checked before anything is written: ``Pipeline.save``
+    and ``PipelineJob.save`` raise, and the caller names the node.
+
+    Args:
+        name: The column the text is for.
+        text: Its saved type text.
+        type_converter: The converter the text is read back with (``None``: the
+            default data context's).
+
+    Raises:
+        ValueError: If the text cannot be read, or reads back as another type.
+    """
+    try:
+        back = _serialize_arrow_type(parse_arrow_type_string(text, type_converter))
+    except Warning:
+        # A warning turned into an error (a provisional library value type under an
+        # error filter) is not the text's fault (ITL-1331).
+        raise
+    except Exception as exc:
+        raise ValueError(
+            f"column {name!r}: its saved type text {text!r} cannot be read back "
+            f"({exc}), so a file holding it could not be loaded; it is not saved"
+        ) from exc
+    if back != text:
+        raise ValueError(
+            f"column {name!r}: its saved type text {text!r} reads back as {back!r}, "
+            "another type; it is not saved"
+        )
+
+
+def arrow_nullable_names(schema: "pa.Schema") -> list[str]:
+    """Return the names of the nullable top-level fields of ``schema``, in order."""
+    return [field.name for field in schema if field.nullable]
+
+
+def serialize_arrow_schemas(
+    tag_schema: "pa.Schema", data_schema: "pa.Schema", type_converter: Any | None = None
+) -> dict[str, Any]:
+    """Return the saved entry of a tag and data Arrow schema pair (ITL-640).
+
+    The one writer of a saved schema pair, for a slot's ``source_config`` and for
+    every node's ``output_schema``: ``{"tag": {...}, "data": {...}, "nullable":
+    {"tag": [...], "data": [...]}}``, the type text of each field's own Arrow type
+    (``arrow_type_texts``: exact widths, units, zones, precision, nested
+    nullability, logical type identifiers) and the nullable top-level fields. The
+    text is read back by the readers of the Python form (``deserialize_output_schema``)
+    and of the Arrow form (``arrow_schema_from_texts``) alike.
+
+    Args:
+        tag_schema: The Arrow schema of the tag columns.
+        data_schema: The Arrow schema of the data columns (data-tags included).
+        type_converter: The converter of the node's data context, which the texts
+            are read back with (``arrow_type_texts``); ``None`` for the default's.
+
+    Returns:
+        The entry, ready for JSON.
+
+    Raises:
+        ValueError: If a field's type text would not read back as its type; nothing
+            is written (the caller names the node).
+    """
+    return {
+        "tag": arrow_type_texts(tag_schema, type_converter),
+        "data": arrow_type_texts(data_schema, type_converter),
+        "nullable": {
+            "tag": arrow_nullable_names(tag_schema),
+            "data": arrow_nullable_names(data_schema),
+        },
+    }
+
+
+def arrow_schema_from_texts(
+    schema_dict: dict[str, str],
+    type_converter: Any,
+    nullable: Collection[str] | None,
+) -> "pa.Schema":
+    """Rebuild the Arrow schema saved by ``arrow_type_texts`` (ITL-640).
+
+    The rebuilt schema is in the declaration form (``declaration_form_schema``): a
+    logical type at the top of a column is the live type, one inside a list, struct
+    or map is its storage type with its identifier as field metadata, as a schema
+    declared in Arrow is.
+
+    Args:
+        schema_dict: The saved type strings.
+        type_converter: The saved node's converter, for logical type identifiers.
+        nullable: The saved nullable column names; ``None`` when the file records no
+            nullability, and every column is then non-nullable.
+
+    Returns:
+        The Arrow schema.
+
+    Raises:
+        ValueError: If a type string cannot be parsed (a class this process has not
+            registered yet), or ``nullable`` names a column not in ``schema_dict``.
+    """
+    import pyarrow as pa
+
+    if nullable is not None:
+        _check_nullable_names(schema_dict, nullable)
+    fields = []
+    for name, type_str in schema_dict.items():
+        try:
+            arrow_type = parse_arrow_type_string(type_str, type_converter)
+        except LogicalTypeIdentifierError as exc:
+            raise exc.for_column(name) from exc
+        fields.append(
+            pa.field(
+                name, arrow_type, nullable=nullable is not None and name in nullable
+            )
+        )
+    return declaration_form_schema(pa.schema(fields), type_converter)
 
 
 def serialize_output_schema(
@@ -1174,7 +1401,10 @@ def parse_arrow_type_string(type_str: str, type_converter: Any | None = None) ->
         )
 
     if outer == "struct":
-        # "struct<a: int64, b: string>" — split on top-level commas
+        # "struct<a: int64, b: string>" — split on top-level commas. "struct<>" is the
+        # struct with no fields (CodeRabbit on PR 454), never one field of no text.
+        if not inner.strip():
+            return pa.struct([])
         fields = _split_struct_fields(inner)
         pa_fields = [
             _parse_arrow_field(field_str, type_converter) for field_str in fields
@@ -1182,15 +1412,26 @@ def parse_arrow_type_string(type_str: str, type_converter: Any | None = None) ->
         return pa.struct(pa_fields)
 
     if outer == "map":
-        # "map<large_string, int64>" — split on first top-level comma
+        # "map<key: large_string not null, value: int64 not null, keys_sorted>": the
+        # key and item fields whole, as Orcapod writes a map. Arrow's own text of a
+        # map, the bare "map<large_string, int64>" (``str(type)``), reads as Arrow's
+        # default fields (a non-null "key", a nullable "value").
         parts = _split_top_level(inner, ",")
         keys_sorted = len(parts) == 3 and parts[-1].strip() == "keys_sorted"
         if keys_sorted:
             parts = parts[:-1]
         if len(parts) != 2:
             raise ValueError(f"Cannot parse map type: {type_str!r}")
-        key_type = parse_arrow_type_string(parts[0].strip(), type_converter)
-        value_type = parse_arrow_type_string(parts[1].strip(), type_converter)
+        key_text, item_text = (part.strip() for part in parts)
+        named = [_names_a_field(text) for text in (key_text, item_text)]
+        if named == [True, True]:
+            key = _parse_arrow_field(key_text, type_converter)
+            item = _parse_arrow_field(item_text, type_converter)
+            return pa.map_(key, item, keys_sorted)  # pyright: ignore[reportCallIssue, reportArgumentType]  # pyarrow takes fields for both; the stubs only types
+        if named != [False, False]:
+            raise ValueError(f"Cannot parse map type: {type_str!r}")
+        key_type = parse_arrow_type_string(key_text, type_converter)
+        value_type = parse_arrow_type_string(item_text, type_converter)
         if keys_sorted:
             return pa.map_(key_type, value_type, True)
         return pa.map_(key_type, value_type, False)
@@ -1208,7 +1449,7 @@ def _require_balanced_delimiters(type_str: str) -> None:
         ValueError: If the delimiters do not balance, or text follows the closing ``>``.
     """
     depth = 0
-    for position, char in enumerate(type_str):
+    for position, char in _unquoted(type_str):
         if char == "<":
             depth += 1
         elif char == ">":
@@ -1310,18 +1551,43 @@ def _parse_arrow_field(text: str, type_converter: Any | None) -> Any:
     """Restore a nested field's type and nullability from schema text."""
     import pyarrow as pa
 
-    name, separator, type_text = text.strip().partition(":")
-    if not separator:
-        name, type_text = "item", text
+    text = text.strip()
+    if text.startswith('"'):
+        # A quoted name (``_nested_field_name_text``): exactly the JSON string.
+        name, end = _json.JSONDecoder().raw_decode(text)
+        rest = text[end:].lstrip()
+        if not isinstance(name, str) or not rest.startswith(":"):
+            raise ValueError(f"Malformed nested field: {text!r}")
+        type_text = rest[1:]
+    else:
+        name, separator, type_text = text.partition(":")
+        if not separator:
+            name, type_text = "item", text
+        name = name.strip()
     type_text = type_text.strip()
     nullable = not type_text.endswith(" not null")
     if not nullable:
         type_text = type_text[: -len(" not null")]
     return pa.field(
-        name.strip(),
+        name,
         parse_arrow_type_string(type_text, type_converter),
         nullable=nullable,
     )
+
+
+def _names_a_field(text: str) -> bool:
+    """Return True if ``text`` is ``<name>: <type>``, not a bare type.
+
+    A bare type holds a ``:`` only inside its brackets (``list<item: int64>``), so
+    the text names a field exactly when a ``:`` comes before any bracket.
+    """
+    if text.lstrip().startswith('"'):
+        return True
+    colon = text.find(":")
+    if colon == -1:
+        return False
+    brackets = [position for position in map(text.find, "<[(") if position != -1]
+    return not brackets or colon < min(brackets)
 
 
 def _parse_parameterized_type(type_str: str) -> Any | None:
@@ -1329,8 +1595,8 @@ def _parse_parameterized_type(type_str: str) -> Any | None:
 
     Handles the canonical ``str()`` forms of ``timestamp[us]``,
     ``timestamp[us, tz=UTC]``, ``duration[us]``, ``time32[ms]``,
-    ``time64[us]``, ``date64[ms]``, ``decimal128(10, 2)`` and
-    ``decimal256(40, 2)``.
+    ``time64[us]``, ``date64[ms]``, ``decimal32(5, 2)``, ``decimal64(12, 3)``,
+    ``decimal128(10, 2)``, ``decimal256(40, 2)`` and ``fixed_size_binary[3]``.
 
     Args:
         type_str: Arrow type string, stripped of surrounding whitespace.
@@ -1356,9 +1622,18 @@ def _parse_parameterized_type(type_str: str) -> Any | None:
         return pa.time64(cast(Literal["us", "ns"], match.group(1)))
     if type_str == "date64[ms]":
         return pa.date64()
-    if match := re.fullmatch(r"decimal(128|256)\((\d+), (-?\d+)\)", type_str):
-        factory = pa.decimal128 if match.group(1) == "128" else pa.decimal256
+    if match := re.fullmatch(r"decimal(32|64|128|256)\((\d+), (-?\d+)\)", type_str):
+        # Every width Arrow has (``decimal32`` and ``decimal64`` since pyarrow 18;
+        # Orcapod requires 22): a saved decimal reads back at its own width.
+        factory = {
+            "32": pa.decimal32,
+            "64": pa.decimal64,
+            "128": pa.decimal128,
+            "256": pa.decimal256,
+        }[match.group(1)]
         return factory(int(match.group(2)), int(match.group(3)))
+    if match := re.fullmatch(r"fixed_size_binary\[(\d+)\]", type_str):
+        return pa.binary(int(match.group(1)))
     return None
 
 
@@ -1371,6 +1646,29 @@ def _strip_field_name(s: str) -> str:
         if bracket_pos == -1 or colon_pos < bracket_pos:
             return s[colon_pos + 1 :].strip()
     return s
+
+
+def _quoted_positions(text: str) -> "list[tuple[int, str]]":
+    """The positions and characters of ``text`` inside a JSON-quoted field name."""
+    inside: list[tuple[int, str]] = []
+    position = 0
+    while position < len(text):
+        if text[position] == '"':
+            try:
+                _, end = _json.JSONDecoder().raw_decode(text, position)
+            except ValueError:
+                end = len(text)
+            inside.extend((p, text[p]) for p in range(position, end))
+            position = end
+        else:
+            position += 1
+    return inside
+
+
+def _unquoted(text: str) -> "list[tuple[int, str]]":
+    """The positions and characters of ``text`` outside JSON-quoted field names."""
+    quoted = {position for position, _ in _quoted_positions(text)}
+    return [(p, c) for p, c in enumerate(text) if p not in quoted]
 
 
 def _split_top_level(s: str, sep: str, max_splits: int = -1) -> list[str]:
@@ -1390,7 +1688,11 @@ def _split_top_level(s: str, sep: str, max_splits: int = -1) -> list[str]:
     parts: list[str] = []
     depth = 0
     current: list[str] = []
-    for ch in s:
+    quoted = {position for position, _ in _quoted_positions(s)}
+    for position, ch in enumerate(s):
+        if position in quoted:
+            current.append(ch)
+            continue
         if ch in "<[(":
             depth += 1
         elif ch in ">])":
@@ -1489,11 +1791,9 @@ _BUILTIN_TYPE_MAP: dict[str, type] = {
 # PipelineJob format version
 # ---------------------------------------------------------------------------
 
-# Same scheme as ``PIPELINE_FORMAT_VERSION``: the written version, and the set a
-# load accepts (``PipelineJob.load``). The plain-tag rule stated there holds for a
-# job file too (``PLAIN_TAG_FORMAT_VERSIONS``, ``source_config_at_version``).
-PIPELINE_JOB_FORMAT_VERSION = "0.3.0"
-SUPPORTED_JOB_FORMAT_VERSIONS = frozenset({"0.1.0", "0.2.0", "0.3.0"})
+# Same scheme as ``PIPELINE_FORMAT_VERSION``: the written version, the only one a
+# load reads (``PipelineJob.load``, ``require_current_format``).
+PIPELINE_JOB_FORMAT_VERSION = "0.4.0"
 
 
 # ---------------------------------------------------------------------------
@@ -1505,59 +1805,73 @@ FALL_THROUGH_TAGS_KEY = "fall_through_tags"
 through (a list; empty for a plain pod)."""
 
 
-def saved_fall_through_tags(
-    descriptor: dict[str, Any], version: str
-) -> tuple[str, ...]:
+def require_nullability_records(descriptor: dict[str, Any]) -> None:
+    """Refuse a saved node descriptor that does not record which columns may be null.
+
+    A saved file records it for every node, in its ``output_schema`` and, for a source
+    slot, in its ``source_config`` (ITL-1043): the Arrow type text cannot say it. A
+    descriptor without the record is malformed and is refused, never loaded with every
+    column read as non-null (developer, 2026-11-21: no backward compatibility for
+    saved files).
+
+    Args:
+        descriptor: A node descriptor of a saved pipeline.
+
+    Raises:
+        ValueError: If a record is missing, naming it.
+    """
+    missing = []
+    if "nullable" not in (descriptor.get("output_schema") or {}):
+        missing.append("output_schema.nullable")
+    if "source_config" in descriptor and "nullable" not in descriptor["source_config"]:
+        missing.append("source_config.nullable")
+    if missing:
+        raise ValueError(
+            f"the file has no {' or '.join(missing)} record; a saved file records "
+            "which columns may be null for every node. Save the pipeline again with "
+            "this version of Orcapod."
+        )
+
+
+def saved_fall_through_tags(descriptor: dict[str, Any]) -> tuple[str, ...]:
     """Return the data-tags a saved function node lets fall through.
 
-    The file's format version decides what a file may hold (ITL-1019): at a
-    ``PLAIN_TAG_FORMAT_VERSIONS`` version nothing is a data-tag and the key is never
-    written; from 0.3.0 on the key is always written. The saved output schema is
-    checked against it: its tag and data halves share exactly these names. When the
+    Every function node of a saved file names them (ITL-1019). The saved output schema
+    is checked against it: its tag and data halves share exactly these names. When the
     descriptor holds the pod's config, the config's list must agree too.
 
     Args:
         descriptor: A function node descriptor of a saved pipeline.
-        version: The file's format version.
 
     Returns:
         The data-tags, in the saved order.
 
     Raises:
-        ValueError: If the key is present in a file of a plain-tag version, missing
-            or not a list of names in a later one, or disagrees with the saved output
-            schema or the saved pod config.
+        ValueError: If the key is missing or not a list of names, or disagrees with
+            the saved output schema or the saved pod config.
     """
     from orcapod.core.data_tags import data_tag_names
 
     output_schema = descriptor.get("output_schema") or {}
     shared = data_tag_names(output_schema.get("tag", {}), output_schema.get("data", {}))
-    if version in PLAIN_TAG_FORMAT_VERSIONS:
-        if FALL_THROUGH_TAGS_KEY in descriptor:
-            raise ValueError(
-                f"a file at format {version} holds only plain tags, but it names "
-                f"{FALL_THROUGH_TAGS_KEY} {descriptor[FALL_THROUGH_TAGS_KEY]!r}"
-            )
-        data_tags: tuple[str, ...] = ()
-    else:
-        if FALL_THROUGH_TAGS_KEY not in descriptor:
-            raise ValueError(
-                f"a file at format {version} names the fall-through tags of "
-                f"every function node, but this one has no {FALL_THROUGH_TAGS_KEY}"
-            )
-        saved = descriptor[FALL_THROUGH_TAGS_KEY]
-        if not isinstance(saved, list) or not all(isinstance(n, str) for n in saved):
-            raise ValueError(
-                f"{FALL_THROUGH_TAGS_KEY} must be a list of names, got {saved!r}"
-            )
-        data_tags = tuple(saved)
+    if FALL_THROUGH_TAGS_KEY not in descriptor:
+        raise ValueError(
+            "a saved file names the fall-through tags of every function node, but "
+            f"this one has no {FALL_THROUGH_TAGS_KEY}"
+        )
+    saved = descriptor[FALL_THROUGH_TAGS_KEY]
+    if not isinstance(saved, list) or not all(isinstance(n, str) for n in saved):
+        raise ValueError(
+            f"{FALL_THROUGH_TAGS_KEY} must be a list of names, got {saved!r}"
+        )
+    data_tags = tuple(saved)
     if set(shared) != set(data_tags):
         raise ValueError(
             f"the saved output schema has the data-tags {sorted(shared)}, but "
             f"{FALL_THROUGH_TAGS_KEY} is {sorted(data_tags)}"
         )
     function_config = descriptor.get("function_config")
-    if function_config is not None and version not in PLAIN_TAG_FORMAT_VERSIONS:
+    if function_config is not None:
         configured = function_config.get(FALL_THROUGH_TAGS_KEY, [])
         if set(configured) != set(data_tags):
             raise ValueError(
@@ -1565,45 +1879,6 @@ def saved_fall_through_tags(
                 f"{FALL_THROUGH_TAGS_KEY} is {sorted(data_tags)}"
             )
     return data_tags
-
-
-def check_saved_output_schema_is_plain(
-    descriptor: dict[str, Any], version: str
-) -> None:
-    """Refuse a saved node with a data-tag in a file of a plain-tag version.
-
-    Args:
-        descriptor: A node descriptor of a saved pipeline.
-        version: The file's format version.
-
-    A source node is rebuilt from its source config's ``tag_schema`` and
-    ``data_schema`` when the config holds them, so those are checked too.
-
-    Raises:
-        ValueError: If the version holds only plain tags and the node's saved tag and
-            data halves share a name, in its output schema or in the schemas its
-            source config restores.
-    """
-    from orcapod.core.data_tags import data_tag_names
-
-    if version not in PLAIN_TAG_FORMAT_VERSIONS:
-        return
-    output_schema = descriptor.get("output_schema") or {}
-    if shared := data_tag_names(
-        output_schema.get("tag", {}), output_schema.get("data", {})
-    ):
-        raise ValueError(
-            f"a file at format {version} holds only plain tags, but the saved output "
-            f"schema has the data-tags {list(shared)}"
-        )
-    source_config = descriptor.get("source_config") or {}
-    if shared := data_tag_names(
-        source_config.get("tag_schema") or {}, source_config.get("data_schema") or {}
-    ):
-        raise ValueError(
-            f"a file at format {version} holds only plain tags, but the saved source "
-            f"schema has the data-tags {list(shared)}"
-        )
 
 
 # The fields of a source config that hold a nested source config: a cached source's
@@ -1637,57 +1912,35 @@ def check_saved_source_config(config: dict[str, Any]) -> None:
         check(config)
 
 
-def source_config_at_version(config: dict[str, Any], version: str) -> dict[str, Any]:
-    """Return a saved source config with its ``tag_only_columns`` as its version means.
+def require_tag_only_columns(config: dict[str, Any]) -> None:
+    """Refuse a saved source config that does not state its plain tags.
 
-    A source config of a ``PLAIN_TAG_FORMAT_VERSIONS`` file never holds
-    ``tag_only_columns``: every one of its tags is plain, which the returned config
-    states (``tag_only_columns=True``) for each source in it that takes the option,
-    nested sources (the inner source of a cached source, a derived source's origin)
-    included. A config of a later version holds the option for each such source and
-    is returned as it is.
+    Every source of a saved file that takes ``tag_only_columns`` writes it (ITL-1019,
+    ITL-1159), nested sources (the inner source of a cached source, a derived source's
+    origin) included; a missing key is never read as a default.
 
     Args:
         config: A saved source config.
-        version: The file's format version.
-
-    Returns:
-        The config to rebuild the source from (a copy when anything was added).
 
     Raises:
-        ValueError: If a config of a plain-tag version holds ``tag_only_columns``, or
-            one of a later version lacks it.
+        ValueError: If the config, or a source config nested in it, takes the option
+            and lacks it.
     """
     _ensure_registries()
-    plain_version = version in PLAIN_TAG_FORMAT_VERSIONS
-
-    def upgrade(value: dict[str, Any]) -> dict[str, Any]:
-        # Only the nested source fields hold source configs; any other mapping (a
-        # filter such as ``where``) is the source's own data, whatever its keys.
-        upgraded = dict(value)
-        for key in NESTED_SOURCE_CONFIG_KEYS:
-            if isinstance(upgraded.get(key), dict):
-                upgraded[key] = upgrade(upgraded[key])
-        cls = SOURCE_REGISTRY.get(upgraded.get("source_type"))  # pyright: ignore[reportArgumentType]  # any saved value
-        if cls is None or not getattr(cls, "TAKES_TAG_ONLY_COLUMNS", False):
-            return upgraded
-        if plain_version and "tag_only_columns" in upgraded:
-            raise ValueError(
-                f"a file at format {version} holds only plain tags, but source "
-                f"config {upgraded.get('source_type')!r} names tag_only_columns "
-                f"{upgraded['tag_only_columns']!r}"
-            )
-        if plain_version:
-            upgraded["tag_only_columns"] = True
-        elif "tag_only_columns" not in upgraded:
-            raise ValueError(
-                f"a file at format {version} states the plain tags of every source, "
-                f"but source config {upgraded.get('source_type')!r} has no "
-                "tag_only_columns"
-            )
-        return upgraded
-
-    return upgrade(config)
+    # Only the nested source fields hold source configs; any other mapping (a filter
+    # such as ``where``) is the source's own data, whatever its keys.
+    for key in NESTED_SOURCE_CONFIG_KEYS:
+        nested = config.get(key)
+        if isinstance(nested, dict):
+            require_tag_only_columns(cast("dict[str, Any]", nested))
+    cls = SOURCE_REGISTRY.get(config.get("source_type"))  # pyright: ignore[reportArgumentType]  # any saved value
+    if cls is None or not getattr(cls, "TAKES_TAG_ONLY_COLUMNS", False):
+        return
+    if "tag_only_columns" not in config:
+        raise ValueError(
+            "a saved file states the plain tags of every source, but source config "
+            f"{config.get('source_type')!r} has no tag_only_columns"
+        )
 
 
 def check_source_config_binding(
@@ -1703,8 +1956,7 @@ def check_source_config_binding(
     its tags from the table's keys), is not checked here.
 
     Args:
-        config: A saved source config, as its file version means it
-            (``source_config_at_version``).
+        config: A saved source config (``require_tag_only_columns`` checked).
         tag_names: The slot's saved tag column names.
         data_names: The slot's saved data column names.
 

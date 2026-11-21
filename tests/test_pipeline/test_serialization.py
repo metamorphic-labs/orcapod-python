@@ -67,7 +67,7 @@ class TestPipelineBlueprintSave:
         pipeline.save(str(path))
         data = json.loads(path.read_text())
         assert data["orcapod_version"] == orcapod.__version__
-        assert data["orcapod_pipeline_version"] == "0.3.0"
+        assert data["orcapod_pipeline_version"] == "0.4.0"
 
     def test_load_ignores_orcapod_version(self, spec_pipeline):
         """The stamp is informational: absent or unfamiliar, the file loads."""
@@ -255,7 +255,7 @@ def compiled_pipeline():
 
 
 class TestNewSerializationFormat:
-    """Serialization format tests (current format 0.2.0, loads 0.1.0)."""
+    """Serialization format tests (format 0.4.0, the only one a load reads)."""
 
     def test_save_load_roundtrip_with_source_node(self, tmp_path, compiled_pipeline):
         """Pipeline.save/load round-trip preserves SourceNode slots."""
@@ -285,43 +285,38 @@ class TestNewSerializationFormat:
                     node_data.get("source_config", {}).get("source_type") == "node"
                 ), f"Expected source_type='node', got {node_data.get('source_config')}"
 
-    def test_format_version_is_0_2_0(self, tmp_path, compiled_pipeline):
-        """Saved format version is 0.2.0."""
+    def test_format_version_is_0_4_0(self, tmp_path, compiled_pipeline):
+        """Saved format version is 0.4.0."""
         save_path = tmp_path / "test_pipeline.json"
         compiled_pipeline.save(save_path)
 
         with open(save_path) as f:
             data = json.load(f)
 
-        assert data.get("orcapod_pipeline_version") == "0.3.0", (
-            f"Expected version '0.3.0', got {data.get('orcapod_pipeline_version')!r}"
+        assert data.get("orcapod_pipeline_version") == "0.4.0", (
+            f"Expected version '0.4.0', got {data.get('orcapod_pipeline_version')!r}"
         )
 
-    def test_format_0_1_0_pipeline_loads_unchanged(self, tmp_path, compiled_pipeline):
-        """A 0.1.0 file (no orcapod_version) loads with the same node hashes."""
-        save_path = tmp_path / "pipeline.json"
-        compiled_pipeline.save(save_path)
-        data = json.loads(save_path.read_text())
-        data["orcapod_pipeline_version"] = "0.1.0"
-        del data["orcapod_version"]
-        old_path = tmp_path / "old_format.json"
-        old_path.write_text(json.dumps(data))
-
-        loaded = Pipeline.load(old_path)
-        assert set(loaded.nodes) == set(Pipeline.load(save_path).nodes)
-
-    def test_unsupported_version_raises(self, tmp_path, compiled_pipeline):
-        """Loading a pipeline with an unsupported version string raises ValueError."""
+    @pytest.mark.parametrize("version", ["0.1.0", "0.2.0", "0.3.0", "9.9.9", ""])
+    def test_an_earlier_or_unknown_version_is_refused(
+        self, tmp_path, compiled_pipeline, version
+    ):
+        """Only format 0.4.0 is read: an earlier file is refused, never migrated."""
         save_path = tmp_path / "pipeline.json"
         compiled_pipeline.save(save_path)
 
         with open(save_path) as f:
             data = json.load(f)
 
-        data["orcapod_pipeline_version"] = "9.9.9"
+        data["orcapod_pipeline_version"] = version
         old_path = tmp_path / "old_format.json"
         with open(old_path, "w") as f:
             json.dump(data, f)
 
-        with pytest.raises(ValueError, match="version"):
+        with pytest.raises(ValueError) as caught:
             Pipeline.load(old_path)
+        message = str(caught.value)
+        assert f"the file was saved with format {version!r}" in message
+        assert "this Orcapod reads only format 0.4.0" in message
+        assert "Save the pipeline again" in message
+        assert str(old_path) in "".join(caught.value.__notes__)

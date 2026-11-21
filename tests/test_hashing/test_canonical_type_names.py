@@ -341,7 +341,7 @@ class TestFunctionPodGolden:
     def test_uri(self, data_function: PythonDataFunction):
         assert data_function.uri == (
             "golden_pod_fn",
-            "7f73f4eca0b57ef29a6acbea0664eb60e3a7e5886b75be06b3463ed1f56b981a",
+            "809b59f28984f4c35967225612597bffca25adeda8356c148e45e99a46d3345a",
             "v0",
             "python.function.v1",
         )

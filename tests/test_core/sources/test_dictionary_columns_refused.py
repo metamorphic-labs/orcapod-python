@@ -611,19 +611,21 @@ def _plain_list_view(kind: str) -> pa.Array[Any]:
 @NESTED_ARRANGEMENTS
 @pytest.mark.parametrize("column", ["a", "w"], ids=["in-tag", "in-data"])
 @pytest.mark.parametrize("kind", ["list_view", "large_list_view"])
-def test_a_list_view_without_a_dictionary_is_handled_as_before(
+def test_a_list_view_without_a_dictionary_is_refused_as_a_list_view(
     kind: str, column: str, tag_order: tuple[str, str], layout: str, roles: str
 ) -> None:
-    """Only a dictionary inside a list view is refused here (CodeRabbit on PR 455).
-
-    A list view of plain values keeps what it had: a raw stream holds it as given,
-    and a source refuses it because the Arrow hasher cannot hash it (ITL-1129).
-    """
+    """A list view of plain values is no dictionary (CodeRabbit on PR 455): a raw
+    stream and a source both refuse it as a list view, with one message (developer,
+    November 21, 2026, ITL-640; it used to be held by a raw stream, ITL-1129)."""
     table = _nested_table(_plain_list_view(kind), column, layout)
-    _build_nested("stream", table, tag_order, roles)
-    with pytest.raises(ValueError, match="the Arrow hasher refused") as info:
-        _build_nested("source", table, tag_order, roles)
-    assert NOT_SUPPORTED not in str(info.value)
+    messages = []
+    for build in ("stream", "source"):
+        with pytest.raises(InputValidationError) as info:
+            _build_nested(build, table, tag_order, roles)
+        messages.append(str(info.value))
+        assert NOT_SUPPORTED not in messages[-1]
+        assert schema_utils.SCHEMA_HASH_REJECTED_COLUMNS_NOT_SUPPORTED in messages[-1]
+        assert f"column {column!r} has type {kind}" in messages[-1]
 
 
 # ── the decoding the message suggests works ─────────────────────────────────

@@ -12,9 +12,10 @@ from orcapod import contexts
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.config import OrcapodConfig
 from orcapod.core.sources.base import RootSource
-from orcapod.errors import UnstorableColumnError
+from orcapod.errors import InputValidationError, UnstorableColumnError
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
+    typed_arrow_schemas,
     check_head_size,
     schema_requires_io,
     typed_zero_row_table,
@@ -38,6 +39,7 @@ from orcapod.protocols.core_protocols import DataProtocol, SourceProtocol, TagPr
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.system_constants import SOURCE_DB_SCHEMA_VERSION, constants
 from orcapod.types import ColumnConfig, Schema
+from orcapod.utils import schema_utils
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -243,6 +245,10 @@ class CachedSource(RootSource):
 
     def identity_structure(self) -> Any:
         return self._source.identity_structure()
+
+    def _compute_arrow_schemas(self) -> "tuple[pa.Schema, pa.Schema]":
+        """The wrapped source's Arrow schemas: the cache stores that source's rows."""
+        return typed_arrow_schemas(self._source)
 
     # -------------------------------------------------------------------------
     # Cache path — scoped to source's content hash
@@ -460,13 +466,20 @@ class CachedSource(RootSource):
     def _read_cached_records_with_hashes(self) -> "pa.Table | None":
         """Read the cached rows written under the current data context, as stored.
 
-        Every read of the whole cache table goes through here. Rows of another data
-        context stay in the table untouched, and a cache at the older layout is not
-        read (ITL-944).
+        Every read of the cache's rows goes through here: ``get_all_records()`` and
+        the merged stream behind ``as_table()`` and every other read of this source.
+        (``_cached_record_hashes`` reads the record-hash column only, and returns no
+        row value.) Rows of another data context stay in the table untouched, and a
+        cache at the older layout is not read (ITL-944). Rows whose Arrow types are
+        not the source's are refused here (``_require_declared_types``), so no read
+        can present them.
 
         Returns:
             The cached rows with their record hash and ``__data_context`` columns, or
             ``None`` when the cache table does not exist.
+
+        Raises:
+            InputValidationError: If a cached column reads back as another Arrow type.
         """
         self._account_for_stale_tables()
         records = self._cache_database.get_all_records(
@@ -482,6 +495,7 @@ class CachedSource(RootSource):
                 self._cache_database.base_path + self.cache_path,
                 stored_rows - records.num_rows,
             )
+        self._require_declared_types(records)
         return records
 
     def _build_merged_stream(self) -> ArrowTableStream:
@@ -522,6 +536,33 @@ class CachedSource(RootSource):
             data_context=self.data_context,
             data_tags=stream_data_tags(self._source),
         )
+
+    def _require_declared_types(self, records: pa.Table) -> None:
+        """Refuse cached rows whose Arrow types are not the source's (ITL-640).
+
+        This source's identity is built from the wrapped source's Arrow types
+        (``_compute_arrow_schemas``); a cache store that gives a column back as
+        another type (Delta reads a fixed-size list back as a list, ITL-1275) would
+        present rows of another schema under that identity, and an empty and a
+        filled cache would differ. So nothing is read; nothing is converted. The rule
+        is ``schema_utils.stored_type_mismatch``, as for a ``DerivedSource``.
+
+        Raises:
+            InputValidationError: Naming the column and both types.
+        """
+        tag_schema, data_schema = self.arrow_schemas
+        mismatch = schema_utils.stored_type_mismatch(
+            pa.schema([*tag_schema, *data_schema]),
+            records.schema,
+            self.data_context.arrow_hasher,
+        )
+        if mismatch is not None:
+            field, stored = mismatch
+            raise InputValidationError(
+                f"CachedSource over {self._source.source_id!r}: the cached column "
+                f"{field.name!r} reads back as {stored.type}, but the source's rows "
+                f"have {field.type}; nothing was read."
+            )
 
     def _empty_table(self) -> pa.Table:
         """Build an empty Arrow table matching the source's output schema.

@@ -32,6 +32,23 @@ class DataContext:
     arrow_hasher: ArrowHasherProtocol
     semantic_hasher: SemanticHasherProtocol
 
+    def __post_init__(self) -> None:
+        """Refuse an Arrow hasher without ``hash_schema`` (ITL-640).
+
+        Every schema that enters an identity is hashed by ``arrow_hasher.hash_schema``
+        (a member of ``ArrowHasherProtocol``), so a hasher without it would fail only
+        when an identity is first computed, far from the context that holds it.
+
+        Raises:
+            ContextValidationError: Naming the hasher's class.
+        """
+        if not callable(getattr(self.arrow_hasher, "hash_schema", None)):
+            raise ContextValidationError(
+                f"Data context {self.context_key!r}: its Arrow hasher "
+                f"{type(self.arrow_hasher).__qualname__} has no hash_schema method; "
+                "every schema in an identity is hashed by it (ArrowHasherProtocol)."
+            )
+
 
 class ContextValidationError(Exception):
     """Raised when context validation fails."""

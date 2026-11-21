@@ -4,13 +4,18 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from orcapod import contexts
 from orcapod.config import OrcapodConfig
-from orcapod.core.streams.base import StreamBase, typed_zero_row_table
+from orcapod.core.streams.base import (
+    StreamBase,
+    typed_arrow_schemas,
+    typed_zero_row_table,
+)
 from orcapod.system_constants import constants
 from orcapod.core.streams.view import StreamView
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.types import ColumnConfig, Condition, ContentHash, Schema
 from orcapod.core.sources.provisional import warn_provisional_source
 from orcapod.utils.provisional import note_provisional_use, provisional_class_name
+from orcapod.utils.schema_utils import arrow_schema_identity
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -23,8 +28,7 @@ if TYPE_CHECKING:
 def saved_tag_only_columns(config: dict[str, Any]) -> bool | list[str]:
     """Return the ``tag_only_columns`` of a saved source config (ITL-1019).
 
-    A config of format 0.3.0 always holds it; the loader of an older file, whose tags
-    are all plain, puts ``True`` in first (``serialization.source_config_at_version``).
+    A saved config always holds it (``serialization.require_tag_only_columns``).
 
     Args:
         config: A saved source config.
@@ -206,8 +210,35 @@ class RootSource(StreamBase):
     """The resolved key columns of the record ids, in key order; ``()`` for the
     position. Every concrete source sets it in ``__init__``."""
 
+    _arrow_schemas_cache: "tuple[pa.Schema, pa.Schema] | None" = None
+
+    @property
+    def arrow_schemas(self) -> "tuple[pa.Schema, pa.Schema]":
+        """The Arrow schemas of this source's tag and data columns (ITL-640).
+
+        The Arrow types its rows have (``_compute_arrow_schemas``), derived once: a
+        source's schema is fixed when it is built, whatever rows it reads later.
+        """
+        if self._arrow_schemas_cache is None:
+            self._arrow_schemas_cache = self._compute_arrow_schemas()
+        return self._arrow_schemas_cache
+
+    def _compute_arrow_schemas(self) -> "tuple[pa.Schema, pa.Schema]":
+        """Derive ``arrow_schemas``: the typed zero-row table's types (``typed_arrow_schemas``)."""
+        return typed_arrow_schemas(self, own=False)
+
+    def _schema_identity(self) -> tuple[ContentHash, ContentHash]:
+        """The identity of this source's schema: its Arrow tag and data schemas (ITL-640).
+
+        The Arrow schemas its rows have (``typed_arrow_schemas``), hashed by the one rule
+        (``schema_utils.arrow_schema_identity``): two sources whose columns differ only
+        in an Arrow type (``int32`` and ``int64``) are two identities, with two pipeline
+        hashes, stored paths and system-tag column names.
+        """
+        return arrow_schema_identity(*self.arrow_schemas, self.data_context)
+
     def identity_structure(self) -> Any:
-        """Identity from the class name, output schema, ``source_id`` and key columns.
+        """Identity from the class name, Arrow schema, ``source_id`` and key columns.
 
         The key columns are the resolved ``record_id_columns`` (``()`` for the
         position): two sources that differ only in how they name their rows are two
@@ -217,7 +248,7 @@ class RootSource(StreamBase):
         self._note_provisional_identity_use()  # a direct read is a use (ITL-1331)
         return (
             self.__class__.__name__,
-            self.output_schema(),
+            self._schema_identity(),
             self.source_id,
             self._key_columns,
         )
@@ -251,9 +282,9 @@ class RootSource(StreamBase):
     def _tag_only_config(self) -> dict[str, Any]:
         """Return ``tag_only_columns`` for ``to_config``: always written (ITL-1019).
 
-        The format version decides what a saved file means, never a missing key: a
-        config of format 0.3.0 states its plain tags, ``True`` when every tag is plain
-        and the names otherwise (``saved_tag_only_columns`` reads it back).
+        A missing key is never read as a default: a saved config states its plain
+        tags, ``True`` when every tag is plain and the names otherwise
+        (``saved_tag_only_columns`` reads it back).
         """
         tag_columns = tuple(getattr(self, "_tag_columns", ()))
         tag_only = tuple(getattr(self, "_tag_only_columns", tag_columns))
@@ -262,14 +293,14 @@ class RootSource(StreamBase):
         return {"tag_only_columns": list(tag_only)}
 
     def pipeline_identity_structure(self) -> Any:
-        """Return (tag_schema, data_schema) as the pipeline identity for this
-        source.  Schema-only: no data content is included, so sources with
-        identical schemas share the same pipeline hash and therefore the same
-        pipeline database table.
+        """Return the hashes of the Arrow tag and data schemas: the pipeline identity.
+
+        Schema-only: no data content is included, so sources whose Arrow schemas are
+        equal share the same pipeline hash and therefore the same pipeline database
+        table; sources whose Arrow types differ do not (ITL-640).
         """
         self._note_provisional_identity_use()  # a direct read is a use (ITL-1331)
-        tag_schema, data_schema = self.output_schema()
-        return (tag_schema, data_schema)
+        return self._schema_identity()
 
     # -------------------------------------------------------------------------
     # StreamProtocol protocol
