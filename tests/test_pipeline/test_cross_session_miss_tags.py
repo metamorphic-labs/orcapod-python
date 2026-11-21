@@ -21,7 +21,8 @@ recomputed row on its own base entry, as the next recomputation) are unchanged.
 
 The source has tags of several types (``int8``, ``float32``, ``large_string``, a struct,
 a ``large_list`` and the logical ``Path``), two or more at a time and in more than one
-tag order, as plain tags and as data-tags; one ``int64`` data column ``x``. The graph is
+tag order, as plain tags and as data-tags; two ``int64`` data columns ``x`` and ``w``, the
+table laid out tags first, data first, or tags and data interleaved. The graph is
 ``inc`` (node ``one``) then ``dbl`` (node ``two``): both nodes ephemeral, or only
 ``one``. Every case runs on the sync and the async orchestrator.
 """
@@ -75,8 +76,8 @@ ORCHESTRATORS = {"sync": SyncPipelineOrchestrator, "async": AsyncPipelineOrchest
 
 
 @function_pod(output_keys="y")
-def inc(x: int) -> int:
-    return x + 1
+def inc(x: int, w: int) -> int:
+    return x + w + 1
 
 
 @function_pod(output_keys="z")
@@ -84,11 +85,31 @@ def dbl(y: int) -> int:
     return 2 * y
 
 
-def _source(tags: tuple[str, ...], role: str, rows: int = 2) -> ArrowTableSource:
-    arrays = {
-        **{name: TAG_COLUMNS[name].slice(0, rows) for name in tags},
-        "x": pa.array([10, 20][:rows]),
-    }
+TAGS_FIRST, DATA_FIRST, INTERLEAVED = "tags_first", "data_first", "interleaved"
+LAYOUTS = (TAGS_FIRST, DATA_FIRST, INTERLEAVED)
+
+
+def _source(
+    tags: tuple[str, ...], role: str, layout: str, rows: int = 2
+) -> ArrowTableSource:
+    """Tags ``tags`` (in this order) and two data columns ``x`` and ``w``, the table
+    laid out tags first, data first, or tags and data interleaved."""
+    tag_arrays = [(name, TAG_COLUMNS[name].slice(0, rows)) for name in tags]
+    data_arrays = [
+        ("x", pa.array([10, 20][:rows])),
+        ("w", pa.array([100, 200][:rows])),
+    ]
+    if layout == TAGS_FIRST:
+        ordered = [*tag_arrays, *data_arrays]
+    elif layout == DATA_FIRST:
+        ordered = [*data_arrays, *tag_arrays]
+    else:
+        ordered = []
+        for index, tag in enumerate(tag_arrays):
+            ordered.append(tag)
+            if index < len(data_arrays):
+                ordered.append(data_arrays[index])
+    arrays = dict(ordered)
     schema = pa.schema(pa.field(n, a.type, nullable=False) for n, a in arrays.items())
     return ArrowTableSource(
         pa.Table.from_arrays(list(arrays.values()), schema=schema),
@@ -104,11 +125,12 @@ def _job(
     tags: tuple[str, ...],
     role: str,
     config: str,
+    layout: str,
     rows: int = 2,
 ) -> PipelineJob:
     job = PipelineJob(name="itl1298", database=database)
     with job:
-        dbl.pod(inc.pod(_source(tags, role, rows), label="one"), label="two")
+        dbl.pod(inc.pod(_source(tags, role, layout, rows), label="one"), label="two")
     job.set_ephemeral_database(ephemeral)
     if config == BOTH_EPHEMERAL:
         job.apply_node_config(NodeConfig(is_result_ephemeral=True))
@@ -185,6 +207,7 @@ def _stored(database: Any, function: str) -> list[tuple[Any, ...]]:
 ALL_MISSING, MIXED_LOAD = "all_missing", "mixed"
 
 
+@pytest.mark.parametrize("layout", LAYOUTS)
 @pytest.mark.parametrize("scenario", [ALL_MISSING, MIXED_LOAD])
 @pytest.mark.parametrize("store", ["memory", "delta"])
 @pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
@@ -198,6 +221,7 @@ def test_a_cross_session_miss_keeps_its_stored_tag(
     orchestrator: str,
     store: str,
     scenario: str,
+    layout: str,
     tmp_path: Path,
 ) -> None:
     """The pipeline database is in memory or a Delta store; the ephemeral one is in
@@ -213,7 +237,7 @@ def test_a_cross_session_miss_keeps_its_stored_tag(
     run = ORCHESTRATORS[orchestrator]
 
     # Session 1: every row computed and stored.
-    first = _job(database, InMemoryArrowDatabase(), tags, role, config)
+    first = _job(database, InMemoryArrowDatabase(), tags, role, config, layout)
     summary = first.run(orchestrator=run())
     assert {
         label: (summary.nodes[label].computed, summary.nodes[label].reused)
@@ -235,13 +259,13 @@ def test_a_cross_session_miss_keeps_its_stored_tag(
     ephemeral = InMemoryArrowDatabase()
     if scenario == MIXED_LOAD:
         # Row 0 alone, over session 2's ephemeral database: its results are there.
-        _ = _job(database, ephemeral, tags, role, config, rows=1).run(
+        _ = _job(database, ephemeral, tags, role, config, layout, rows=1).run(
             orchestrator=run()
         )
     before = {function: _stored(database, function) for function in ("inc", "dbl")}
 
     # Session 2: a new job over the same database.
-    second = _job(database, ephemeral, tags, role, config)
+    second = _job(database, ephemeral, tags, role, config, layout)
     for label, function in (("one", "inc"), ("two", "dbl")):
         if label not in ephemeral_nodes:
             continue
