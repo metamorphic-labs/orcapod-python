@@ -789,14 +789,15 @@ def schema_source_stream_builder() -> dict[str, Any]:
 
     builder = SourceStreamBuilder(_ctx(), DEFAULT_CONFIG)
     out: dict[str, Any] = {}
-    for variant, kwargs in {
+    variants: dict[str, dict[str, Any]] = {
         "default_source_id": {"source_kind": "arrow_table"},
         "named_source_id": {"source_id": "golden_source"},
         "record_id_column": {
             "source_id": "golden_source",
             "record_id_columns": "subject",
         },
-    }.items():
+    }
+    for variant, kwargs in variants.items():
         result = builder.build(_builder_table(), tag_columns=["subject"], **kwargs)
         out[f"{variant}.schema_hash"] = result.schema_hash
         out[f"{variant}.table_hash"] = result.table_hash.to_string()
@@ -853,6 +854,129 @@ def schema_row_identifiers() -> dict[str, Any]:
             tag_only_columns=True,
         )
         out.update(_prefixed(variant, stream_summary(source)))
+    return out
+
+
+# Rows of the hash_in_key_order case: two tag columns, no single one a key, given out
+# of key order for both key orders, which sort them differently.
+KEY_ORDER_ROWS = [
+    {"subject": "s2", "trial": 1, "weight": 19.0},
+    {"subject": "s1", "trial": 2, "weight": 22.25},
+    {"subject": "s2", "trial": 2, "weight": 21.75},
+    {"subject": "s1", "trial": 1, "weight": 20.5},
+]
+# Rows whose two key columns rise together: both key orders sort them into one table.
+ALIGNED_KEY_ROWS = [
+    {"subject": "s2", "trial": 2, "weight": 22.25},
+    {"subject": "s3", "trial": 3, "weight": 19.0},
+    {"subject": "s1", "trial": 1, "weight": 20.5},
+]
+
+
+@case("schema", "hash_in_key_order")
+def schema_hash_in_key_order() -> dict[str, Any]:
+    """Pin default source ids hashed with ``hash_in_key_order`` (ITL-1272).
+
+    For each in-memory source kind, over rows given out of key order: with
+    ``hash_in_key_order=True``, both orders of the two key columns (two values), each in
+    two row orders (``given`` and ``reversed``, one value); without it, the two row
+    orders (two values). Pinned: the default source id and the content hash, and the
+    builder's table hash for the same variants.
+
+    Returns:
+        Each variant's source id, content hash and table hash.
+    """
+    from orcapod import DEFAULT_CONFIG
+    from orcapod.core.sources import (
+        ArrowTableSource,
+        DataFrameSource,
+        DictSource,
+        ListSource,
+    )
+    from orcapod.core.sources.stream_builder import SourceStreamBuilder
+
+    tags = ["subject", "trial"]
+    row_orders = {"given": KEY_ORDER_ROWS, "reversed": KEY_ORDER_ROWS[::-1]}
+    schema = pa.schema(
+        [
+            pa.field("subject", pa.large_string(), nullable=False),
+            pa.field("trial", pa.int64(), nullable=False),
+            pa.field("weight", pa.float64(), nullable=False),
+        ]
+    )
+
+    def build(kind: str, rows: list[dict[str, Any]], **kw: Any) -> Any:
+        if kind == "arrow_table":
+            return ArrowTableSource(
+                pa.Table.from_pylist(rows, schema=schema),
+                tag_columns=tags,
+                tag_only_columns=True,
+                data_context=_ctx(),
+                **kw,
+            )
+        if kind == "dict":
+            return DictSource(
+                rows, tag_columns=tags, tag_only_columns=True, data_context=_ctx(), **kw
+            )
+        if kind == "data_frame":
+            import polars as pl
+
+            return DataFrameSource(
+                pl.DataFrame(rows),
+                tag_columns=tags,
+                tag_only_columns=True,
+                data_context=_ctx(),
+                **kw,
+            )
+        by_weight = {row["weight"]: row for row in rows}
+        return ListSource(
+            "weight",
+            [row["weight"] for row in rows],
+            tag_function=lambda w, _i: {t: by_weight[w][t] for t in tags},
+            expected_tag_keys=tags,
+            data_context=_ctx(),
+            **kw,
+        )
+
+    variants: dict[str, dict[str, Any]] = {
+        "key_order.subject_trial": {
+            "record_id_columns": ["subject", "trial"],
+            "hash_in_key_order": True,
+        },
+        "key_order.trial_subject": {
+            "record_id_columns": ["trial", "subject"],
+            "hash_in_key_order": True,
+        },
+        "as_given.subject_trial": {"record_id_columns": ["subject", "trial"]},
+    }
+    out: dict[str, Any] = {}
+    for kind in ("arrow_table", "dict", "data_frame", "list"):
+        for variant, kwargs in variants.items():
+            for order, rows in row_orders.items():
+                source = build(kind, rows, **kwargs)
+                prefix = f"{kind}.{variant}.{order}"
+                out[f"{prefix}.source_id"] = source.source_id
+                out[f"{prefix}.content_hash"] = source.content_hash().to_string()
+        for key_name, key in (
+            ("subject_trial", ["subject", "trial"]),
+            ("trial_subject", ["trial", "subject"]),
+        ):
+            source = build(
+                kind, ALIGNED_KEY_ROWS, record_id_columns=key, hash_in_key_order=True
+            )
+            prefix = f"{kind}.aligned.{key_name}"
+            out[f"{prefix}.source_id"] = source.source_id
+            out[f"{prefix}.content_hash"] = source.content_hash().to_string()
+    builder = SourceStreamBuilder(_ctx(), DEFAULT_CONFIG)
+    for variant, kwargs in variants.items():
+        for order, rows in row_orders.items():
+            result = builder.build(
+                pa.Table.from_pylist(rows, schema=schema),
+                tag_columns=tags,
+                source_kind="arrow_table",
+                **kwargs,
+            )
+            out[f"builder.{variant}.{order}.table_hash"] = result.table_hash.to_string()
     return out
 
 

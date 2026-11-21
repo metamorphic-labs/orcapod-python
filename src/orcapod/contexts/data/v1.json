@@ -235,22 +235,22 @@
                 "added": {
                     "arrow-01.json": "c66fa55619178f2631d04232555cd58059813e97e9ecd2b9de9e63699e60c964",
                     "datagram-01.json": "598d4a2851819d76ba674e189222e61733ca1861ca82a59e990a8ee5e1b0a7b3",
-                    "pipeline-01.json": "b43cf8301991c4b667dbbd1806bd0f36c7680470618415be5d10f3c2ba8ea781",
-                    "schema-01.json": "79aa2a068e0724891cf43ee528ce8f569e65f08864faa5e34773bfc69ac9576e",
+                    "pipeline-01.json": "86098fcf6f982fccc61ee862fc1219d5270c453ffd9b3a9730883c36f086c2e1",
+                    "schema-01.json": "885efd01435126d4a5deed2764f470dfa7bcc83460d4dc24e7e88a347f01eb8f",
                     "semantic-01.json": "973a97cd3d74f558910b5854dce773fe5aa38a4df96be88ef10e5e6504ffe73d",
                     "torch-01.json": "af2e8b68d66dffaa37e1d0ad75acd42f595d65b9fae00ddcde81bf9e13a265c8"
                 },
                 "previous": null,
-                "digest": "9333ecbeedd18f7925b628abeb877f5d5f75eca63e2133f95c855f7e23cfce8c"
+                "digest": "0939af5caefe76114c76d42b826d7731c7de66dd80d89bfb9032f3da4d75b9a4"
             },
             {
                 "date": "2026-11-20",
                 "release": null,
                 "added": {
-                    "pipeline-02.json": "b56491a9ec668272cf29e8ae95a84b269f08f32c728d0f7c16fdf05d2e0525cb"
+                    "pipeline-02.json": "61dff22a05ff342eb5163d2f364ace10690a03d3a86976dc388de49af26f8707"
                 },
-                "previous": "9333ecbeedd18f7925b628abeb877f5d5f75eca63e2133f95c855f7e23cfce8c",
-                "digest": "9a9ecabfb3c447ca48bb855e8d4cae70dbd06286e4119fb91e55072f34d287f5"
+                "previous": "0939af5caefe76114c76d42b826d7731c7de66dd80d89bfb9032f3da4d75b9a4",
+                "digest": "5d93b81218fe0d889c4f89da2a944b58dda640227a3f3edd6655a020ba35504f"
             }
         ],
         "provisional": {
