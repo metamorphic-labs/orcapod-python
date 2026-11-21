@@ -689,7 +689,8 @@ column as nullable.
 ### `DerivedSource`
 
 A `DerivedSource` is a source whose rows come from something Orcapod already has: another
-source, or a node of a job. It has two uses.
+source, or a node of a job. It has two uses. It is [provisional](#provisional-sources) in both
+forms: its identity may change in a later release.
 
 **Reading a job's results.** A `DerivedSource` reads the stored results of a node of a
 [`PipelineJob`](function-pods.md#pipelinejob-database-backed-cached-execution) that has run
@@ -795,20 +796,30 @@ new data, which is what a source is for.
 ### Provisional sources
 
 Data context v1 freezes the hashes of Orcapod at the 0.4.0 release. A provisional source is
-outside that freeze: its default `source_id` and its content hash are still being decided
-(ITL-1316), so a later release may change them, and with them the system tags, stored paths
-and record ids of its rows and of every step downstream of it, which then compute their
-results again (nothing stored is lost or wrong). It works as any source does otherwise.
+outside that freeze: its default `source_id` and its content hash are still being decided, so
+a later release may change them, and with them the system tags, stored paths and record ids
+of its rows and of every step downstream of it, which then compute their results again
+(nothing stored is lost or wrong). It works as any source does otherwise.
 
 ```python
 from orcapod.sources import PROVISIONAL_SOURCES
 
 print(sorted(PROVISIONAL_SOURCES))
-# ['PollingSource']
+# ['DerivedSource', 'PollingSource']
 ```
 
-Building one, directly or from a saved config, issues `orcapod.errors.ProvisionalHashWarning`
-once per process; filter its class to silence it, as for
+| Source | What is still open |
+|---|---|
+| `PollingSource` | its default source id hashes the implementation's own identity, and its content hash leaves out the source id and the declared schema (ITL-1316) |
+| `DerivedSource`, both forms | the plain form (`node.as_source()`) hashes only its origin's content hash and accepts a `source_id` its identity does not use; the `tags_as_data` form changed just before this release (ITL-1317) |
+
+So everything built on a `DerivedSource`, whether it came from `node.as_source()` or from
+`DerivedSource(origin, tags_as_data=...)`, is provisional too: every step downstream of it
+keeps its hashes only until its identity is decided.
+
+Building one, directly, through `node.as_source()` on a function or operator node, from a
+saved config or by loading a saved job, issues `orcapod.errors.ProvisionalHashWarning` once
+per source kind per process; filter its class to silence it, as for
 [provisional operators](operators.md#provisional-operators).
 
 ## What a source does at a run

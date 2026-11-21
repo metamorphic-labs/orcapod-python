@@ -176,6 +176,7 @@ class UnaryOperator(StaticOutputOperatorPod):
 
     def static_process(self, *streams: StreamProtocol) -> StreamProtocol:
         """Forward to ``unary_static_process`` with the single input stream."""
+        self._note_provisional_identity_use()
         stream = streams[0]
         # No operator carries its input's Data meta columns (ITL-1080).
         return without_input_meta(self.unary_static_process(stream), streams)
@@ -277,6 +278,7 @@ class BinaryOperator(StaticOutputOperatorPod):
 
     def static_process(self, *streams: StreamProtocol) -> StreamProtocol:
         """Forward to ``binary_static_process`` with two input streams."""
+        self._note_provisional_identity_use()
         left_stream, right_stream = streams
         # No operator carries its inputs' Data meta columns (ITL-1080).
         return without_input_meta(

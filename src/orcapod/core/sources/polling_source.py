@@ -437,6 +437,7 @@ class PollingSource(RootSource, Generic[T]):
         declared in changes no hash (ITL-1271). The key columns keep their order: it
         is the explicit order of the record id.
         """
+        self._note_provisional_identity_use()  # a direct read is a use (ITL-1331)
         return (
             self._impl.identity(),
             tuple(sorted(self._tag_columns)),

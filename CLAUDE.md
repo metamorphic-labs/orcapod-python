@@ -453,7 +453,9 @@ Developer, November 12, 2026 (ITL-981); see `docs/concepts/arrays.md` and
   (developer, November 13, 2026, ITL-1068; moved past 0.4.0rc1 on November 17, 2026): their
   extension names are listed in `provisional` of `contexts/logical_types.json`, and using
   one issues `ProvisionalHashWarning` once per type
-  per process. A new library value type must be added to that list. The list never enters a
+  per process. A new library value type must be added to that list. Its golden entries live in the
+  provisional golden files (ITL-1324), and so do those of a user class with a field of such a
+  type, whose identity embeds the type's identifier. The list never enters a
   hash, identifier or stored path.
 
 ## User classes: exact and structural
@@ -504,34 +506,67 @@ Orcapod stores or embeds in a name is pinned in the golden folder of the current
   `released_manifests.json`, with the date and the reason, so no v1 file is released today.
   Until 0.4.0, a change to any v1 golden value needs the developer's approval of the exact
   list of entries that move, each explained; it is made with `--remove <entry>`, then the
-  generator writes the new value. `--release 0.4.0` freezes v1. Any version published
-  before it, a pre-release included, would freeze v1 there: the Release workflow requires
-  the release step for every version. A withdrawn version is never released again.
+  generator writes the new value. `--release 0.4.0` freezes v1. A pre-release freezes
+  nothing (developer, November 21, 2026, ITL-1329): `0.4.0rc1` carries the hashes intended
+  to be final, the release gate (`scripts/check_golden_tags.py`, `release_version` is the
+  one rule) requires that no release record at HEAD names a pre-release (`releases` and
+  `withdrawn` keys of every context, the manifest's `released_in`, golden history,
+  snapshot `released_in`; a record it cannot classify fails closed, in every run), the tag
+  check gives a pre-release tag no protecting power, and `--release` (golden and `data_function_types.py`) refuses it. Between a
+  candidate and the final release a golden value changes only for a blocking reason, with
+  the developer's approval of the exact list, then a new candidate; data stored with a
+  candidate is not guaranteed valid under the final release. A version withdrawn in any
+  data context is never released again.
 - Provisional operators are outside the freeze (developer, November 18, 2026, ITL-1266):
   `orcapod.operators.PROVISIONAL_OPERATORS` (`core/operators/provisional.py`) is the one
-  list (name to the issue deciding its identity; today `PolarsFilter`), and each listed class
-  sets `PROVISIONAL = True` (a test checks they agree). Building one issues
-  `ProvisionalHashWarning` once per operator per process. A golden case that depends on one
+  list (name to the issue deciding its identity), and each listed class sets
+  `PROVISIONAL = True` (a test checks they agree, and that every exported operator is either
+  provisional or frozen). The list (developer, November 19, 2026, ITL-1279: "anything whose
+  identity choice isn't obvious and feels solid should be put into provisional first"):
+  `PolarsFilter`, `GroupBy`, `TagBy`, `AddTags`, `MergeJoin`, `MapTags`, `MapColumns`,
+  `Pick`, `Index`, `Batch`. Frozen: `Join`, `SemiJoin`, `MapData`, the Select/Drop column
+  operators, `DropNulls`. An operator joins the group only while no release has frozen its
+  values, and leaves it when its identity is decided (before or at a release), never the other
+  way after a release. Building one (directly, through a stream method, or by loading a saved
+  job) issues `ProvisionalHashWarning` once per operator per process. A golden case that depends on one
   declares it (`@case(..., provisional=("PolarsFilter",))`; `compute_group_kinds` refuses a
-  case that builds an undeclared one); its entries live in
+  case that builds, hashes or applies an undeclared one, also one built before the case);
+  its entries live in
   `data/<folder>/provisional/<group>.json`, listed in `golden.provisional` of the manifest,
   outside the history, so no release freezes them. They are checked like every other value
   and change only with the developer's approval of the exact list, without a new data
   context. `generate_golden_hashes.py --relocate` moves entries, values unchanged, between
   frozen and provisional files; an operator leaving the group has its entries relocated into
   a frozen file before the release step. Never put a value that depends on a provisional
-  operator in a frozen file.
+  operator in a frozen file. The provisional library value types are outside the freeze the
+  same way (ITL-1324): a case declares one by extension name
+  (`provisional=("orcapod.numpy.ndarray",)`), and each use of one is noted for the refusal.
+  The refusal sees a direct use only: a user class with a field of such a type embeds its
+  identifier in an identity built once and cached, so golden items are split by
+  `cases.provisional_types_of` (checked against every fixture class's identity record).
 - Provisional sources are outside the freeze too (developer, November 21, 2026, ITL-1314:
-  "make polling source provisional"): `orcapod.sources.PROVISIONAL_SOURCES`
+  "make polling source provisional"; ITL-1331: "Let's also make DerivedSource as
+  provisional?", both forms): `orcapod.sources.PROVISIONAL_SOURCES`
   (`core/sources/provisional.py`) is the one list (today `PollingSource`, its identity
-  decided by ITL-1316), each listed class sets `PROVISIONAL = True` (declared on
-  `RootSource`, which warns when one is constructed, also through `from_config`), and building
-  one issues `ProvisionalHashWarning` once per source kind per process. The warning and the
-  use record are one helper, `utils/provisional.warn_provisional_use` (operators use it
-  too). Unlike a provisional operator, a provisional source is never pinned, in no golden
-  file: only operators can be declared by a golden case, so `compute_group_kinds` refuses a
-  case that builds one. The mark never enters a hash, an identifier, a config or a stored
-  path.
+  decided by ITL-1316, and `DerivedSource`, plain and `tags_as_data`, by ITL-1317), each
+  listed class sets `PROVISIONAL = True` (declared on `RootSource`, which warns when one is
+  constructed, also through `node.as_source()`, `from_config` and a loaded job), and building
+  one issues `ProvisionalHashWarning` once per source kind per process. Everything downstream
+  of a provisional source is provisional. The warning and the use record are one helper,
+  `utils/provisional.warn_provisional_use` (operators use it too); a source notes its use
+  again where its identity is read (`source_id`, `content_hash`, `pipeline_hash`, the
+  identity structures; a `DerivedSource` also on every read or `head` of rows, and in
+  `from_config`, so a loaded job over a job node it cannot rebuild warns too), as an
+  operator does where its identity is read or it is applied (one helper pair,
+  `provisional_class_name` and `note_provisional_use`). A `ProvisionalHashWarning` turned
+  into an error propagates from a load: no reconstruction catch swallows a `Warning`.
+  A golden case declares a `DerivedSource` as it does an operator
+  (`provisional=("DerivedSource",)`; `cases.DECLARABLE_PROVISIONAL_SOURCES`), and its
+  entries live in the provisional files; a case that builds a `PollingSource` is refused,
+  declared or not (its pins were removed, ITL-1314). The guard sees a provisional object
+  built or read inside a case, not one behind a hash cached before it, so golden cases
+  build their pipeline objects inside the case (`test_cases_hold_no_prebuilt_pipeline_objects`).
+  The mark never enters a hash, an identifier, a config or a stored path.
 - The unit of immutability is the golden file. The manifest's `golden.history`
   (`src/orcapod/contexts/data/<version>.json`) lists every file with the sha256 of its bytes;
   a release appends a revision with `added: {}`, pinned in

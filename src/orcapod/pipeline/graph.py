@@ -539,6 +539,10 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                         )
 
                         operator = resolve_operator_from_config(op_config)
+                    except Warning:
+                        # A warning turned into an error (a ProvisionalHashWarning
+                        # under an error filter) propagates (ITL-1331).
+                        raise
                     except Exception as exc:
                         logger.warning(
                             "Could not reconstruct operator %r from config — "
@@ -546,6 +550,18 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                             op_config.get("class_name"),
                             exc,
                         )
+                if operator is None and op_config:
+                    # A provisional operator kept read-only (Pick and Index have no
+                    # config to rebuild from, ITL-1326) never reaches its constructor:
+                    # the loaded job warns for it here, as a rebuilt one does (ITL-1279).
+                    from orcapod.core.operators.provisional import (
+                        PROVISIONAL_OPERATORS,
+                        warn_provisional_operator,
+                    )
+
+                    saved_name = op_config.get("class_name")
+                    if saved_name in PROVISIONAL_OPERATORS:
+                        warn_provisional_operator(saved_name)
                 if operator is not None:
                     from orcapod.logical_types.identifier import (
                         LogicalTypeIdentifierError,

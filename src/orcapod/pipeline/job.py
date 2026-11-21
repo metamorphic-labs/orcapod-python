@@ -1689,6 +1689,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     spec_name,
                     spec_name,
                 )
+            except Warning:
+                # A warning turned into an error (a ProvisionalHashWarning under an
+                # error filter) is the caller's request: it propagates, never read as a
+                # source that could not be rebuilt (ITL-1331).
+                raise
             except Exception as exc:
                 logger.warning(
                     "Could not reconstruct source %r (%s) from its saved config: %s. "

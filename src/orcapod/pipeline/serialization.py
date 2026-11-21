@@ -481,6 +481,10 @@ def resolve_source_from_config(
         # All sources accept db_registry — always forward it.
         # Sources that don't embed database references simply ignore it.
         return cls.from_config(config, db_registry=db_registry)
+    except Warning:
+        # A warning turned into an error (a ProvisionalHashWarning under an error
+        # filter) propagates; it is not a source that could not be rebuilt (ITL-1331).
+        raise
     except Exception:
         if fallback_to_proxy:
             logger.warning(
@@ -854,7 +858,9 @@ def deserialize_schema(
             )
         except LogicalTypeIdentifierError as exc:
             raise exc.for_column(name) from exc
-        except SavedSchemaVersionError:
+        except (SavedSchemaVersionError, Warning):
+            # A warning turned into an error (a provisional library value type under an
+            # error filter) propagates (ITL-1331).
             raise
         except Exception:
             result[name] = type_str
@@ -1014,6 +1020,9 @@ def deserialize_output_schema(
                 raise exc.for_column(name) from exc
             except SavedSchemaVersionError as exc:
                 raise SavedSchemaVersionError(f"Column {name!r}: {exc}") from exc
+            except Warning:
+                # A warning turned into an error propagates as itself (ITL-1331).
+                raise
             except Exception as exc:
                 raise ValueError(
                     f"Column {name!r} has the saved type {type_str!r}, which cannot "

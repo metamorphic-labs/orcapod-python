@@ -319,6 +319,9 @@ class GroupBy(UnaryOperator):
         NotImplementedError: If ``member_order`` is a function.
     """
 
+    # Provisional: its identity is not frozen with data context v1 (ITL-1279).
+    PROVISIONAL: ClassVar[bool] = True
+
     # Data-tags (ITL-1023): handled.
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
@@ -345,6 +348,7 @@ class GroupBy(UnaryOperator):
         super().__init__(**kwargs)
 
     def identity_structure(self) -> Any:
+        self._note_provisional_identity_use()  # a direct read is a use (ITL-1279)
         # ``member_order`` enters only when given, so a GroupBy without it keeps the
         # identity it had before the option existed (ITL-1226).
         identity: tuple[Any, ...] = (self.__class__.__name__, self.by)

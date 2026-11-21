@@ -49,6 +49,7 @@ from orcapod.system_constants import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "data_function_types.py"
+GATE = REPO_ROOT / "scripts" / "check_golden_tags.py"
 SNAPSHOTS = REPO_ROOT / "src" / "orcapod" / "data_function_types"
 RECORD_ID = "_record_id"
 
@@ -486,6 +487,7 @@ def test_a_release_with_an_unsound_snapshot_writes_nothing(tmp_path: Path) -> No
     store.reopen_tree(root, version, "2026-11-18")
     (root / "scripts").mkdir(exist_ok=True)
     shutil.copy(SCRIPT, root / "scripts" / SCRIPT.name)
+    shutil.copy(GATE, root / "scripts" / GATE.name)
     shutil.copytree(
         _open_copy(tmp_path), root / "src" / "orcapod" / "data_function_types"
     )
@@ -638,6 +640,7 @@ def _release_tree(tmp_path: Path, *, with_script: bool = True) -> Path:
     if with_script:
         (root / "scripts").mkdir(exist_ok=True)
         shutil.copy(SCRIPT, root / "scripts" / SCRIPT.name)
+        shutil.copy(GATE, root / "scripts" / GATE.name)
     shutil.copytree(
         _open_copy(tmp_path), root / "src" / "orcapod" / "data_function_types"
     )
@@ -725,3 +728,18 @@ def test_a_retry_after_the_golden_history_changed_is_refused(
         (root / "src" / "orcapod" / "data_function_types" / "released.json").read_text()
     )
     assert pins[CURRENT]["sha256"] is None
+
+
+@pytest.mark.parametrize("version", ["0.4.0rc1", "0.4.0.dev2", "v0.4.0b1"])
+def test_release_refuses_a_pre_release_and_pins_nothing(
+    tmp_path: Path, version: str
+) -> None:
+    """A pre-release pins no snapshot (ITL-1329): only a final release does."""
+    snapshots = _open_copy(tmp_path)
+    before = (snapshots / "released.json").read_bytes()
+    result = _run("--release", version, "--snapshots", snapshots)
+    assert result.returncode != 0
+    assert "is a pre-release: a pre-release pins no snapshot" in (
+        result.stdout + result.stderr
+    )
+    assert (snapshots / "released.json").read_bytes() == before

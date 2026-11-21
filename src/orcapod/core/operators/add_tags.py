@@ -119,6 +119,9 @@ class AddTags(UnaryOperator):
             ``::`` separator).
     """
 
+    # Provisional: its identity is not frozen with data context v1 (ITL-1279).
+    PROVISIONAL: ClassVar[bool] = True
+
     # Data-tags pass through as they are; the new tags are plain (ITL-1023).
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
@@ -155,6 +158,7 @@ class AddTags(UnaryOperator):
         return MappingProxyType(self._tags)
 
     def identity_structure(self) -> Any:
+        self._note_provisional_identity_use()  # a direct read is a use (ITL-1279)
         return (self.__class__.__name__, tuple(self._tags.items()))
 
     def to_config(self) -> dict[str, Any]:

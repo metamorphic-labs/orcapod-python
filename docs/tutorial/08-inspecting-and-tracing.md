@@ -211,7 +211,10 @@ print(session_means.keys())
 ```
 
 A `DerivedSource` is a source like those of Part 1, so it can be joined, filtered and fed to
-pods. Here the next stage flags sessions with a low mean rate:
+pods. The first one you build prints a `ProvisionalHashWarning`, once: its identity is not
+frozen yet, so a later release of Orcapod may compute the stages built on it again instead of
+reusing what they stored (see [Provisional sources](../concepts/sources.md#provisional-sources)).
+Here the next stage flags sessions with a low mean rate:
 
 ```python
 @function_pod(output_keys="is_low")
