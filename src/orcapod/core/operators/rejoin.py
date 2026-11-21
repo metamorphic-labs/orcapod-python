@@ -1,0 +1,370 @@
+"""Rejoin: put the branches of one stream back together, row by origin row (ITL-1336).
+
+A pipeline that splits one stream into branches and puts them back together (a diamond)
+is expected to use ``Rejoin``, not ``Join`` (developer, November 21, 2026). ``Join``
+combines different rows on their user tags and keeps every input's system tags, renamed
+per input, so a diamond's system-tag columns double at every ``Join``; that is correct for
+``Join``, which may pair rows of different origins. ``Rejoin`` pairs the rows of the
+branches that come from the same origin row, by matching every system-tag column, and
+keeps those columns unchanged: a result row has its origin row's provenance, and stacked
+diamonds keep a constant number of system-tag columns.
+
+Provisional (``PROVISIONAL_OPERATORS``): its identity is not frozen with data context v1.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Collection, Sequence
+from typing import TYPE_CHECKING, Any, ClassVar, cast
+
+from orcapod.channels import ReadableChannel, WritableChannel
+from orcapod.core.data_tags import data_tag_names, data_tags_first
+from orcapod.core.operators.arrow_keys import polars_key_frame, polars_ready
+from orcapod.core.operators.base import (
+    require_matchable_key,
+    require_shared_arrow_type,
+)
+from orcapod.core.operators.join import Join
+from orcapod.core.operators.meta_columns import (
+    without_input_meta,
+    without_meta_columns,
+)
+from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+from orcapod.core.streams import ArrowTableStream
+from orcapod.errors import InputValidationError
+from orcapod.protocols.core_protocols import (
+    DataProtocol,
+    StreamProtocol,
+    TagProtocol,
+)
+from orcapod.system_constants import constants
+from orcapod.types import ColumnConfig, ContentHash, Schema
+from orcapod.utils import arrow_utils, schema_utils
+from orcapod.utils.lazy_module import LazyModule
+
+if TYPE_CHECKING:
+    import polars as pl
+    import pyarrow as pa
+else:
+    pa = LazyModule("pyarrow")
+    pl = LazyModule("polars")
+
+# Row-number columns of the frames Polars matches; never a key (keys are system tags).
+_LEFT_ROW = "__rejoin_left_row"
+_RIGHT_ROW = "__rejoin_right_row"
+
+
+def _system_tag_names(stream: StreamProtocol) -> list[str]:
+    """The system-tag column names of a stream, sorted."""
+    tag_schema, _ = stream.output_schema(columns={"system_tags": True})
+    return sorted(
+        name for name in tag_schema if name.startswith(constants.SYSTEM_TAG_PREFIX)
+    )
+
+
+def _same_values(left: "pa.Array[Any]", right: "pa.Array[Any]") -> bool:
+    """Whether two arrays of one type hold the same value on every row.
+
+    Equality is Polars' over the prepared Arrow values (``arrow_keys.polars_ready``), as
+    ``Join`` matches a key: a null equals a null, a NaN a NaN, ``0.0`` equals ``-0.0``.
+    """
+    frame = cast(
+        "pl.DataFrame",
+        pl.from_arrow(
+            pa.Table.from_arrays(
+                [polars_ready(left), polars_ready(right)], names=["left", "right"]
+            )
+        ),
+    )
+    return bool(frame.select(pl.col("left").eq_missing(pl.col("right")).all()).item())
+
+
+def _require_same_system_tags(names: Sequence[Sequence[str]]) -> None:
+    """Raise unless every input has the same non-empty set of system-tag columns.
+
+    Args:
+        names: Each input's system-tag column names, sorted, in call order.
+
+    Raises:
+        InputValidationError: Naming each input's system-tag columns.
+    """
+    if all(list(name_list) == list(names[0]) for name_list in names) and names[0]:
+        return
+    listing = "; ".join(
+        f"input {i + 1}: {list(name_list) or 'none'}"
+        for i, name_list in enumerate(names)
+    )
+    reason = (
+        "an input has no system-tag columns, so no origin row to match on"
+        if not all(names)
+        else "the inputs' system-tag columns differ, so they are not branches of one "
+        "stream (a branch through Join, GroupBy or Batch has other system-tag columns)"
+    )
+    raise InputValidationError(
+        f"Rejoin: {reason} ({listing}). Rejoin puts back together the branches of one "
+        "stream, row by origin row; to combine different rows on their tags, use Join."
+    )
+
+
+class Rejoin(Join):
+    """Put the branches of one stream back together, row by origin row.
+
+    The inputs must share their system-tag columns: the same names, which they have when
+    each branch went through operators that keep system tags (filters, column selection
+    and renaming, ``AddTags``, function pods) and no ``Join``, ``GroupBy`` or ``Batch``.
+    Rows are matched on every system-tag column, so each result row pairs the rows of the
+    branches that come from one origin row, at most one per input: an input holding two
+    rows of one origin row is refused. That is a deliberate first rule, which no operator
+    that keeps system tags breaks today; it can be relaxed later if a branch may duplicate
+    rows. A user tag in several inputs must have the same
+    value on matched rows; a tag of one input is kept. Data columns must be disjoint, as
+    in ``Join``, and a data-tag in several inputs is one column. The result keeps the
+    common system-tag columns unchanged.
+
+    Inputs from two different sources with the same schema share their system-tag column
+    names but no value: their rejoin is empty, not an error. To combine different rows
+    on their tags, use ``Join``.
+
+    Rejoin is provisional (``PROVISIONAL_OPERATORS``): its identity may change in a later
+    release.
+    """
+
+    PROVISIONAL: ClassVar[bool] = True
+
+    def validate_nonzero_inputs(self, *streams: StreamProtocol) -> None:
+        """Check that the inputs can be rejoined: shared system tags, compatible columns.
+
+        Raises:
+            InputValidationError: If the inputs' system-tag columns differ or are absent,
+                or their user columns cannot be combined (``Join``'s rules).
+        """
+        if len(streams) > 1:
+            self._require_rejoinable(streams)
+        super().validate_nonzero_inputs(*streams)
+
+    @staticmethod
+    def _require_rejoinable(streams: Sequence[StreamProtocol]) -> None:
+        """Check, before computing, the system-tag columns the inputs state.
+
+        An input whose schema states no system-tag column (a raw stream without system
+        tags, or a node of a loaded job downstream of a read-only function node, whose
+        saved schema holds none) is checked when computed, on its table
+        (``_require_same_system_tags``); every input that states its system-tag columns
+        must state the same ones.
+
+        Args:
+            streams: The input streams, in call order.
+
+        Raises:
+            InputValidationError: If two inputs state different system-tag columns.
+        """
+        names = [_system_tag_names(stream) for stream in streams]
+        if all(names):
+            _require_same_system_tags(names)
+
+    def output_schema(
+        self,
+        *streams: StreamProtocol,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> tuple[Schema, Schema]:
+        """The result's schema: Join's user columns, the inputs' system tags unchanged.
+
+        Args:
+            *streams: The input streams.
+            columns: The column groups to include.
+            all_info: Include every column group.
+
+        Returns:
+            The ``(tag_schema, data_schema)`` of the result.
+        """
+        if len(streams) == 1:
+            return super().output_schema(*streams, columns=columns, all_info=all_info)
+        columns_config = ColumnConfig.handle_config(columns, all_info=all_info)
+        self._require_rejoinable(streams)
+        tag_schema, data_schema = self._joined_user_schemas(*streams)
+        data_schema = data_tags_first(tag_schema, data_schema)
+        if columns_config.system_tags:
+            # The common system-tag columns, from the first input that states them.
+            for stream in self.order_input_streams(*streams):
+                full_tags, _ = stream.output_schema(columns={"system_tags": True})
+                system_tags = Schema(
+                    {
+                        name: full_tags[name]
+                        for name in full_tags
+                        if name.startswith(constants.SYSTEM_TAG_PREFIX)
+                    }
+                )
+                if system_tags:
+                    tag_schema = schema_utils.union_schemas(tag_schema, system_tags)
+                    break
+        return tag_schema, data_schema
+
+    def static_process(self, *streams: StreamProtocol) -> StreamProtocol:
+        """Rejoin the streams on their system-tag columns.
+
+        Raises:
+            InputValidationError: If the inputs cannot be rejoined, an input holds two
+                rows of one origin row, a shared tag (or a shared data-tag's source info)
+                differs on matched rows, or a shared tag's Arrow type differs.
+        """
+        if len(streams) == 1:
+            return without_input_meta(streams[0], streams)
+        ordered_streams = self.order_input_streams(*streams)
+        tag_schema, data_schema = self._joined_user_schemas(*streams)
+
+        tables: list[pa.Table] = []
+        for stream in ordered_streams:
+            tag_keys, _ = stream.keys()
+            tables.append(
+                without_meta_columns(
+                    stream.as_table(columns={"source": True, "system_tags": True}),
+                    tag_keys,
+                )
+            )
+        # The rule on the tables themselves, in call order: an input whose schema
+        # states no system tag (``_require_rejoinable``) is checked here.
+        by_call = {id(stream): table for stream, table in zip(ordered_streams, tables)}
+        _require_same_system_tags(
+            [
+                sorted(
+                    name
+                    for name in by_call[id(stream)].column_names
+                    if name.startswith(constants.SYSTEM_TAG_PREFIX)
+                )
+                for stream in streams
+            ]
+        )
+        keys = sorted(
+            name
+            for name in tables[0].column_names
+            if name.startswith(constants.SYSTEM_TAG_PREFIX)
+        )
+        for stream, table in zip(ordered_streams, tables):
+            frame = polars_key_frame(table, keys)
+            duplicated = frame.is_duplicated()
+            if duplicated.any():
+                # The system-tag values are text (a source id and a record id): name them.
+                values = dict(zip(keys, frame.filter(duplicated).row(0)))
+                raise InputValidationError(
+                    f"Rejoin: input {stream} holds two rows of one origin row, the "
+                    f"system-tag values {values}; a first rule pairs at most one row per "
+                    "origin row in each input, so such rows are refused (to be relaxed if "
+                    "a branch may duplicate rows)"
+                )
+
+        table = tables[0]
+        user_tags = set(ordered_streams[0].keys()[0])
+        for next_table, next_stream in zip(tables[1:], ordered_streams[1:]):
+            next_tags = set(next_stream.keys()[0])
+            table = self._rejoin_pair(table, next_table, keys, user_tags & next_tags)
+            user_tags |= next_tags
+
+        # Lay the columns out as Join does: tags, data, then the hidden columns.
+        tag_order = list(tag_schema.keys())
+        data_order = [name for name in data_schema if name not in tag_schema]
+        listed = {*tag_order, *data_order}
+        result_table = table.select(
+            tag_order
+            + data_order
+            + [name for name in table.column_names if name not in listed]
+        )
+        return ArrowTableStream(
+            result_table,
+            tag_columns=tuple(tag_order),
+            data_tags=data_tag_names(tag_schema, data_schema),
+        )
+
+    def _rejoin_pair(
+        self,
+        left: "pa.Table",
+        right: "pa.Table",
+        keys: Sequence[str],
+        shared_tags: Collection[str],
+    ) -> "pa.Table":
+        """Pair the rows of two tables of one origin, by their system-tag columns.
+
+        Every output value is taken from ``left`` or ``right`` by row number; Polars
+        only decides which rows match (``arrow_keys``). A column both tables have (a
+        system tag, a shared tag, a shared data-tag's source info) is kept once, from
+        ``left``, after checking that the matched rows agree on it.
+
+        Args:
+            left: The rows rejoined so far.
+            right: The next input's rows.
+            keys: The system-tag columns, in both tables.
+            shared_tags: The user tags of both tables.
+
+        Returns:
+            The paired rows.
+
+        Raises:
+            InputValidationError: If a shared tag or a shared column differs on matched
+                rows, or a shared tag's Arrow type differs.
+        """
+        for name in sorted(shared_tags):
+            tag_type = require_shared_arrow_type(
+                "Rejoin",
+                name,
+                arrow_utils.column_arrow_type(left.schema, name),
+                arrow_utils.column_arrow_type(right.schema, name),
+            )
+            require_matchable_key("Rejoin", name, tag_type)
+        pairs = polars_key_frame(left, keys, _LEFT_ROW).join(
+            polars_key_frame(right, keys, _RIGHT_ROW), on=list(keys), how="inner"
+        )
+        left_rows = pairs.get_column(_LEFT_ROW).to_arrow()
+        right_rows = pairs.get_column(_RIGHT_ROW).to_arrow()
+        names: list[str] = []
+        arrays: list[Any] = []
+        for name in left.column_names:
+            names.append(name)
+            arrays.append(left.column(name).combine_chunks().take(left_rows))
+        for name in right.column_names:
+            right_values = right.column(name).combine_chunks().take(right_rows)
+            if name not in left.column_names:
+                names.append(name)
+                arrays.append(right_values)
+                continue
+            if name in keys:
+                continue
+            left_values = arrays[names.index(name)]
+            if not _same_values(left_values, right_values):
+                what = (
+                    f"tag {name!r}"
+                    if name in shared_tags
+                    else f"column {name!r} (a shared data-tag's source info)"
+                )
+                raise InputValidationError(
+                    f"Rejoin: {what} has different values on rows of one origin row in "
+                    "two inputs; a branch changed it, so the rows cannot be put back "
+                    "together (rename it in one branch, or use Join)"
+                )
+        table = pa.Table.from_arrays(arrays, names=names)
+        table = arrow_utils.restore_schema_nullability(table, left.schema, right.schema)
+        return self._shared_key_nullability(
+            table, left.schema, right.schema, shared_tags
+        )
+
+    async def async_execute(
+        self,
+        inputs: Sequence[ReadableChannel[tuple[TagProtocol, DataProtocol]]],
+        output: WritableChannel[tuple[TagProtocol, DataProtocol]],
+        *,
+        input_pipeline_hashes: Sequence[ContentHash],
+    ) -> None:
+        """Collect the inputs and rejoin them (the barrier of every operator).
+
+        Rejoin is an inner match, so an input with no rows gives no rows; the rows equal
+        the sync path's (``static_process``).
+        """
+        await StaticOutputOperatorPod.async_execute(
+            self, inputs, output, input_pipeline_hashes=input_pipeline_hashes
+        )
+
+    def identity_structure(self) -> Any:
+        self._note_provisional_identity_use()  # a direct read is a use (ITL-1279)
+        return self.__class__.__name__
+
+    def __repr__(self) -> str:
+        return "Rejoin()"

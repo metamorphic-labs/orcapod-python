@@ -204,6 +204,7 @@ def _build_operator_registry() -> dict[str, type]:
         MapTags,
         MergeJoin,
         PolarsFilter,
+        Rejoin,
         SelectColumns,
         SelectDataColumns,
         SelectTagColumns,
@@ -213,6 +214,7 @@ def _build_operator_registry() -> dict[str, type]:
 
     return {
         "Join": Join,
+        "Rejoin": Rejoin,
         "MergeJoin": MergeJoin,
         "SemiJoin": SemiJoin,
         "Batch": Batch,
