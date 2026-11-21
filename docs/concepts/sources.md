@@ -812,6 +812,55 @@ order or content can vary between runs, pass an explicit, stable `source_id` **a
 key columns that are unique per row; this avoids both the duplicate entries and the repeated
 deliveries.
 
+An in-memory source with key columns and no `source_id` can instead hash its rows in key
+order: pass `hash_in_key_order=True` (`ArrowTableSource`, `DictSource`, `DataFrameSource`,
+`ListSource`; ITL-1272). The table is hashed sorted by the key columns, in the order you list
+them, so the same rows in any order give one default `source_id` and one content hash; the
+rows are still presented in the order you gave. It is off by default, because the order you
+gave may matter to you. It is refused without key columns (there is no key order) and with a
+`source_id`: the table hash is still computed then, but it does not determine a given
+`source_id` and enters no identity, so the argument would change nothing. The order of the key
+columns is part of the content hash either way; it changes the default `source_id` only when
+the two orders sort the table differently.
+
+```python
+from orcapod.sources import DictSource
+
+rows = [
+    {"subject": "s1", "trial": 1, "weight": 20.5, "count": 3},
+    {"subject": "s1", "trial": 2, "weight": 22.25, "count": 1},
+    {"subject": "s2", "trial": 1, "weight": 19.0, "count": 4},
+]
+orders = (rows, rows[::-1], [rows[1], rows[2], rows[0]])
+keyed = [
+    DictSource(order, tag_columns=["subject", "trial"],
+               record_id_columns=["subject", "trial"], hash_in_key_order=True)
+    for order in orders
+]
+print(len({s.source_id for s in keyed}), len({s.content_hash() for s in keyed}))
+# 1 1
+print(keyed[1].as_table().column("weight").to_pylist())
+# [19.0, 22.25, 20.5]
+other_key_order = DictSource(rows, tag_columns=["subject", "trial"],
+                             record_id_columns=["trial", "subject"],
+                             hash_in_key_order=True)
+print(other_key_order.source_id == keyed[0].source_id)
+# False
+as_given = [
+    DictSource(order, tag_columns=["subject", "trial"],
+               record_id_columns=["subject", "trial"])
+    for order in orders
+]
+print(len({s.source_id for s in as_given}))
+# 3
+```
+
+A source given a `source_id` is an address: its content hash is built from its class, schema,
+`source_id` and key columns, never from its rows, so changing the rows changes it only when the
+schema changes (a column of another type). This holds for `ListSource` too (developer,
+November 21, 2026, ITL-1272): its elements and its tag function enter its identity only through
+its default `source_id` and its output schema.
+
 These columns are hidden by default. You can reveal them using `ColumnConfig`:
 
 ```python
@@ -842,7 +891,7 @@ print(table.column_names)
 ```
 
 Pass `source_id` to give the source a readable name in these provenance tokens. Without it,
-Orcapod derives an id from the source's content hash.
+Orcapod derives an id from a hash of the source's table, as described above.
 
 ## Code example
 

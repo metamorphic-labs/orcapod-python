@@ -871,7 +871,11 @@ Every pipeline element has two parallel hashes:
    sources that differ only in how they name their rows are two sources, with one pipeline
    hash and one source id (developer, November 16, 2026, ITL-1154). Row content enters only where a source puts it into its own
    identity: the default `source_id` of the in-memory sources
-   (`<source kind>:<algorithm label>:<hex>` of the table hash, used when none is given) and the elements of a `ListSource`. A downstream stream or node hashes its
+   (`<source kind>:<algorithm label>:<hex>` of the table hash, used when none is given; the rows
+   in the order given, or sorted by the key columns with `hash_in_key_order=True`, ITL-1272). A
+   `ListSource` has no rule of its own (developer, November 21, 2026, ITL-1272): its elements
+   and tag function enter only through that default and its output schema (their types), and
+   with a given `source_id` it is an address like every other source (the review of every source's identity is ITL-1311). A downstream stream or node hashes its
    pod's identity plus its upstreams' content hashes; a function pod's identity is its uri,
    not its body. The uri holds the hash of the output schema, a set of named, typed outputs
    in no order (developer, November 17, 2026, ITL-1244): reordering `output_keys` changes it
@@ -1231,7 +1235,11 @@ data. The rules:
   `delta_table`, `sqlite_table`, `postgresql_table`, `db_table`, `spiraldb_table`,
   `polling_source`, `cached`), or names the operation that derives the source
   (`tags_as_data`). A default built from a hash is `<kind>:<algorithm label>:<hex>`, built
-  only by `core/sources/source_ids.hash_source_id`; one built from where the data lives is
+  only by `core/sources/source_ids.hash_source_id` (an in-memory source hashes its table as
+  given; `hash_in_key_order=True`, refused without key columns or with a `source_id`, hashes
+  it sorted by the key columns in key order, `arrow_utils.key_row_order`, an Arrow sort after
+  the keys are validated, rows presented as given; developer, November 21, 2026, ITL-1272);
+  one built from where the data lives is
   `<kind>:<location>`, built only by `location_source_id`: `csv:<path as passed>`,
   `delta_table:<path or URI as passed>`, `sqlite_table:<db path as passed>:main.<table>`,
   `postgresql_table:<host>:<port>/<database>.<schema>.<table>` (the server the connection
