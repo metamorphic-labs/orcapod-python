@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json as _json
 import logging
+import re
 from collections.abc import Collection, Iterable
 from enum import Enum
 from typing import TYPE_CHECKING, Any, cast
@@ -664,21 +665,22 @@ def _serialize_field_type(field: Any) -> str:
     return _serialize_arrow_type(field.type)
 
 
-_NAME_CHARACTERS_NEEDING_QUOTES = frozenset(':,<>[]()"\\')
+_PLAIN_FIELD_NAME = re.compile(r"[A-Za-z0-9_.\-]+")
+"""A nested field name written as it is: ASCII letters, digits, ``_``, ``.`` and ``-``."""
 
 
 def _nested_field_name_text(name: str) -> str:
-    """The text of a nested field's name: as it is, or JSON-quoted when it must be.
+    """The text of a nested field's name: as it is when plain, otherwise JSON-quoted.
 
-    A name holding a character the type grammar uses (``:``, ``,``, ``<``, ``>``,
-    brackets, parentheses, a quote or a backslash), or starting or ending with
-    whitespace, is written as a JSON string (``"left:right"``) so the reader takes it
-    back exactly (CodeRabbit on PR 454); every other name, ``item``, ``key`` and
-    ``value`` among them, keeps the text it always had.
+    One rule (CodeRabbit on PR 454): a name made only of characters that cannot
+    confuse the reader (``_PLAIN_FIELD_NAME``: ``item``, ``key``, ``value``,
+    ``element``, ``x_1``, ``a.b``) keeps the text it always had; every other name (a
+    character of the type grammar, whitespace anywhere, a newline, a quote, a
+    backslash, a non-ASCII character, the empty name) is written as a JSON string,
+    ``"a:b"``, ``"a\\nb"``, ``""``, which the reader takes back exactly. A saved
+    file's unquoted names are read as before.
     """
-    if name != name.strip() or any(c in _NAME_CHARACTERS_NEEDING_QUOTES for c in name):
-        return _json.dumps(name)
-    return name
+    return name if _PLAIN_FIELD_NAME.fullmatch(name) else _json.dumps(name)
 
 
 def _serialize_nested_field(field: Any) -> str:

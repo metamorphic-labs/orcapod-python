@@ -779,6 +779,76 @@ def test_a_nested_field_name_reads_back_exactly(label: str) -> None:
     assert _hasher().hash_schema(restored) == _hasher().hash_schema(schema)
 
 
+NAMES = {
+    "newline": "a\nb",
+    "tab": "a\tb",
+    "quote": 'say "hi"',
+    "backslash": "back\\slash",
+    "unicode": "ünïcødé 日本",
+    "empty": "",
+    "leading space": " lead",
+    "trailing space": "trail ",
+    "inner space": "in ner",
+    "grammar characters": "a:b,c<d>e[f](g)",
+    "plain": "plain_x1",
+    "plain with dot and dash": "a.b-c",
+}
+PLAIN = {"plain", "plain with dot and dash"}
+
+
+def _holding(name: str) -> dict[str, pa.DataType]:
+    """Every container kind, at several depths, with a nested field named ``name``."""
+    field = pa.field(name, pa.int8(), nullable=False)
+    named_key: Any = pa.field(name, pa.large_string(), nullable=False)
+    item: Any = pa.field("v", pa.int8())
+    key: Any = pa.field("k", pa.large_string(), nullable=False)
+    value: Any = field
+    return {
+        "list": pa.list_(field),
+        "large_list": pa.large_list(field),
+        "fixed_size_list": pa.list_(field, 2),
+        "struct": pa.struct([field, pa.field("z", pa.int8())]),
+        # pyarrow takes key and item fields; its stubs name only types (hence Any).
+        "map key": pa.map_(named_key, item),
+        "map item": pa.map_(key, value),
+        "three deep": pa.large_list(
+            pa.field("item", pa.struct([pa.field("s", pa.list_(field, 2))]))
+        ),
+    }
+
+
+@pytest.mark.parametrize("name", list(NAMES))
+def test_every_nested_field_name_reads_back_exactly(name: str) -> None:
+    """One rule (CodeRabbit on PR 454): a plain name is written as it is, any other
+    JSON-quoted; every name reads back exactly, in every container and depth."""
+    for kind, arrow_type in _holding(NAMES[name]).items():
+        schema = pa.schema([pa.field("c", arrow_type), pa.field("d", arrow_type)])
+        texts = arrow_type_texts(schema)
+        if name in PLAIN:
+            assert '"' not in texts["c"], kind
+        else:
+            assert json.dumps(NAMES[name]) in texts["c"], kind
+        restored = arrow_schema_from_texts(texts, _converter(), ["c", "d"])
+        assert restored.equals(schema, check_metadata=True), kind
+        assert _hasher().hash_schema(restored) == _hasher().hash_schema(schema), kind
+
+
+def test_an_earlier_files_unquoted_names_still_read() -> None:
+    """Names an earlier file wrote unquoted (an inner space, the empty name)."""
+    restored = arrow_schema_from_texts(
+        {
+            "c": "struct<in ner: int8, : int16 not null>",
+            "d": "large_list<my item: int8>",
+        },
+        _converter(),
+        ["c", "d"],
+    )
+    assert restored.field("c").type == pa.struct(
+        [pa.field("in ner", pa.int8()), pa.field("", pa.int16(), nullable=False)]
+    )
+    assert restored.field("d").type == pa.large_list(pa.field("my item", pa.int8()))
+
+
 @pytest.mark.parametrize("label", list(CONTAINER_TEXTS))
 def test_a_container_text_reads_back_exactly(label: str) -> None:
     """Names, nullability, identifiers and ``keys_sorted`` all survive the text."""

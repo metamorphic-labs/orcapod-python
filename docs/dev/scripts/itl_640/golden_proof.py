@@ -340,7 +340,7 @@ def main() -> int:
 
     # Resolved once: the listing and every blob read use this one commit.
     base_commit = subprocess.run(
-        ["git", "rev-parse", "--verify", f"{args.base}^{{commit}}"],
+        ["git", "rev-parse", "--verify", "--end-of-options", f"{args.base}^{{commit}}"],
         cwd=ROOT,
         check=True,
         capture_output=True,
