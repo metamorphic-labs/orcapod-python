@@ -834,15 +834,121 @@ def test_an_explicit_column_limit_marks_the_columns_polars_shows(layout: str) ->
 
 def test_an_unmatched_header_marks_nothing() -> None:
     """When the rendered header cannot be matched to the columns, no cell is marked."""
-    from orcapod.core.streams.view import _mark_columns
+    from orcapod.core.streams.view import _mark_columns, _rendered_columns
 
     frame = (
         "<table><thead><tr><th>a</th><th>b</th></tr>"
         "<tr><td>i64</td><td>i64</td></tr></thead>"
         "<tbody><tr><td>1</td><td>2</td></tr></tbody></table>"
     )
-    marked = _mark_columns(frame, [("x", "tag"), ("y", "data")])
+    assert _rendered_columns(["a", "b"], ["x", "y"]) is None
+    marked = _mark_columns(frame, [("x", "tag"), ("y", "data")], None)
     assert "style=" not in marked
-    matched = _mark_columns(frame, [("a", "tag"), ("b", "data")])
+    columns = [("a", "tag"), ("b", "data")]
+    matched = _mark_columns(frame, columns, _rendered_columns(["a", "b"], ["a", "b"]))
     assert f'<th style="{STYLES["tag"]};{RULE}">a</th>' in matched
     assert f'<th style="{STYLES["data"]}">b</th>' in matched
+
+
+def test_an_unmatched_header_has_no_html_legend_and_a_full_text_legend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A header that cannot be matched: the HTML marks nothing and so names no mark;
+    the text display, whose marks are part of the names, names every column's."""
+    from orcapod.core.streams import view as view_module
+
+    monkeypatch.setattr(view_module, "_rendered_columns", lambda cells, names: None)
+    view = _view(_source().run())
+    html_text = view._repr_html_()
+    assert "<small>" not in html_text.split("<style>", 1)[0]
+    assert "style=" not in html_text.split("</style>", 1)[1]
+    assert str(view).split("\n")[1] == "* = tag; + = data-tag (tag and data)"
+
+
+def _legends(view: StreamView, columns: int | None) -> tuple[str, str]:
+    """The HTML and text legend lines of ``view`` under ``tbl_cols=columns`` (Polars'
+    default when ``None``), empty when there is none."""
+    import polars as pl
+
+    with pl.Config(tbl_cols=columns) if columns else pl.Config():
+        html_text = view._repr_html_()
+        text = str(view)
+    html_legend = ""
+    if "<div><small>" in html_text:
+        html_legend = html_text.split("<div><small>", 1)[1].split("</small>", 1)[0]
+    second = text.split("\n")[1]
+    return html_legend, "" if second.startswith("shape:") else second
+
+
+TAGS_AND_DATA = "bold = tag; underlined = data"
+DATA_AND_DATA_TAGS = (
+    "underlined = data; bold underlined = data-tag (a tag that is also data)"
+)
+FULL = "bold = tag; " + DATA_AND_DATA_TAGS
+TEXT_FULL = "* = tag; + = data-tag (tag and data)"
+
+
+@pytest.mark.parametrize("layout", list(LAYOUTS))
+@pytest.mark.parametrize(
+    ("case", "tag_order", "columns", "html_legend", "text_legend"),
+    [
+        # Plain tags first: tbl_cols=4 shows trial, session, …, two data columns.
+        ("hides every data-tag", "plain_first", 4, TAGS_AND_DATA, "* = tag"),
+        # Data-tags first: shows time, unit, …, two data columns.
+        (
+            "hides every plain tag",
+            "data_tags_first",
+            4,
+            DATA_AND_DATA_TAGS,
+            "+ = data-tag (tag and data)",
+        ),
+        # tbl_cols=1: the text shows one tag and the ellipsis; the HTML no column.
+        ("hides every data column", "plain_first", 1, "", "* = tag"),
+        ("hides nothing", "interleaved", 20, FULL, TEXT_FULL),
+        ("hides nothing by default", "interleaved", None, FULL, TEXT_FULL),
+    ],
+    ids=lambda value: value if isinstance(value, str) and " " in value else None,
+)
+def test_the_legend_names_the_marks_of_the_rendered_columns(
+    case: str,
+    tag_order: str,
+    columns: int | None,
+    html_legend: str,
+    text_legend: str,
+    layout: str,
+) -> None:
+    """Each display's legend names the marks of the columns it rendered: a mark whose
+    columns Polars left out is not named; with nothing left out, every mark is."""
+    view = _view(_source(TAG_ORDERS[tag_order], LAYOUTS[layout]).run())
+    assert _legends(view, columns) == (html_legend, text_legend), case
+
+
+@pytest.mark.parametrize("layout", list(LAYOUTS))
+def test_the_legend_follows_hidden_data_columns_with_every_column_group(
+    layout: str,
+) -> None:
+    """With every column group shown, tbl_cols=4 shows two tags and two source-info
+    columns: the data columns and data-tags are left out, and no legend names them."""
+    view = _view(
+        _source(TAG_ORDERS["plain_first"], LAYOUTS[layout]).head(all_info=True)
+    )
+    assert _legends(view, 4) == ("bold = tag", "* = tag")
+
+
+def test_the_legend_of_the_wide_table() -> None:
+    """The 100-column table: the HTML (75 columns by default) shows every kind of
+    column; the text (8 by default) shows plain tags and data, not a data-tag; under
+    tbl_cols=6 the HTML shows plain tags and data only."""
+    plain = [f"p{i}" for i in range(5)]
+    data_tags = [f"t{i}" for i in range(85)]
+    data = [f"d{i}" for i in range(10)]
+    source = DictSource(
+        [{name: i for i, name in enumerate(plain + data_tags + data)}],
+        tag_columns=plain + data_tags,
+        tag_only_columns=plain,
+        source_id="wide",
+    )
+    view = _view(source.run())
+    assert _legends(view, None) == (FULL, "* = tag")
+    assert _legends(view, 6) == (TAGS_AND_DATA, "* = tag")
+    assert _legends(view, 200) == (FULL, TEXT_FULL)

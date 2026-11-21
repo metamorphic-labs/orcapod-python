@@ -20,7 +20,7 @@ import ast
 import dataclasses
 import html
 import importlib
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from html.parser import HTMLParser
@@ -547,10 +547,15 @@ class StreamView:
             if c not in self.tag_columns
         ]
 
-    def _legend(self, text: bool) -> str:
-        """Return the legend line of the marks the shown columns carry, in the order of
-        ``COLUMN_ROLE_MARKS``, or empty."""
-        shown = {role for _, role in self._display_columns()}
+    def _legend(self, text: bool, roles: Iterable[str]) -> str:
+        """Return the legend line of the marks of ``roles``, the roles of the columns a
+        display rendered, in the order of ``COLUMN_ROLE_MARKS``, or empty.
+
+        Args:
+            text: Whether the legend is the text display's (else the HTML display's).
+            roles: The role of each rendered column.
+        """
+        shown = set(roles)
         legends = [
             mark.text_legend if text else mark.html_legend
             for role, mark in COLUMN_ROLE_MARKS.items()
@@ -615,33 +620,62 @@ class StreamView:
 
     def _repr_html_(self) -> str:
         """Return the notebook preview: header, legend and the rows (large cells
-        summarised), each column's header styled by its role (``COLUMN_ROLE_MARKS``)."""
+        summarised), each rendered column's header styled by its role
+        (``COLUMN_ROLE_MARKS``). The legend names the marks of the columns Polars
+        rendered (``_rendered_columns``): none when the header cannot be matched, since
+        no cell is then marked, and none when Polars renders no column."""
         parts = [
             f"<div><strong>{html.escape(self.header(), quote=False)}</strong></div>"
         ]
-        legend = self._legend(text=False)
-        if legend:
-            parts.append(
-                f"<div><small>{html.escape(legend, quote=False)}</small></div>"
-            )
+        table_html = ""
+        roles: list[str] = []
         if self.table.num_columns:
             # Polars shortens strings to its own default length; show up to _MAX_TEXT.
             with pl.Config(fmt_str_lengths=_MAX_TEXT, tbl_rows=self._display_rows()):
                 frame_html = self._display_frame()._repr_html_()
-            parts.append(_mark_columns(frame_html, self._display_columns()))
+            columns = self._display_columns()
+            names = _HeaderNames()
+            names.feed(frame_html)
+            names.close()
+            rendered = _rendered_columns(names.cells, [name for name, _ in columns])
+            table_html = _mark_columns(frame_html, columns, rendered)
+            if rendered is not None:
+                roles = [columns[i][1] for i in rendered if i is not None]
+        legend = self._legend(text=False, roles=roles)
+        if legend:
+            parts.append(
+                f"<div><small>{html.escape(legend, quote=False)}</small></div>"
+            )
+        if table_html:
+            parts.append(table_html)
         return "\n".join(parts)
 
     def __str__(self) -> str:
         """Return the preview as text: header, legend and the rows, each column's
         header prefixed by its role's mark (``*`` for a plain tag, ``+`` for a
-        data-tag)."""
+        data-tag). The legend names the marks of the columns Polars rendered
+        (``_rendered_columns``); when its header cannot be read, of every column."""
         lines = [self.header()]
-        legend = self._legend(text=True)
-        if legend:
-            lines.append(legend)
+        frame_text = ""
+        roles: list[str] = []
         if self.table.num_columns:
             with pl.Config(fmt_str_lengths=_MAX_TEXT, tbl_rows=self._display_rows()):
-                lines.append(str(self._display_frame(text=True)))
+                frame = self._display_frame(text=True)
+                frame_text = str(frame)
+            columns = self._display_columns()
+            rendered = _rendered_columns(_text_header_cells(frame_text), frame.columns)
+            if rendered is not None:
+                roles = [columns[i][1] for i in rendered if i is not None]
+            else:
+                # A header that cannot be read (a name Polars wraps over two lines,
+                # another table style): the marks are part of the names, so every
+                # column's role is named.
+                roles = [role for _, role in columns]
+        legend = self._legend(text=True, roles=roles)
+        if legend:
+            lines.append(legend)
+        if frame_text:
+            lines.append(frame_text)
         return "\n".join(lines)
 
     def __repr__(self) -> str:
@@ -652,26 +686,31 @@ class StreamView:
         )
 
 
-def _mark_columns(frame_html: str, columns: Sequence[tuple[str, str]]) -> str:
+def _mark_columns(
+    frame_html: str,
+    columns: Sequence[tuple[str, str]],
+    rendered: Sequence[int | None] | None,
+) -> str:
     """Return Polars' HTML table ``frame_html`` with its columns styled by role.
 
     Polars may leave columns out of a wide table, showing the first and the last ones
-    around an ellipsis cell, so each rendered header cell is matched to its column by
-    name (``_rendered_roles``), never by its position among all the columns. The header
-    cell of a column gets its role's ``html_style``; every cell of the last column of a
-    group of roles followed by another group gets ``ROLE_BOUNDARY_STYLE`` (the ellipsis
-    cell's when the boundary is among the columns left out). The ellipsis cell gets no
-    mark, and a header Polars wrote in a form that cannot be matched leaves every cell
-    unmarked: no mark is better than a wrong one. Everything else is passed on unchanged.
+    around an ellipsis cell, so each rendered header cell is styled by the column
+    ``rendered`` matched it to by name (``_rendered_columns``), never by its position
+    among all the columns. The header cell of a column gets its role's ``html_style``;
+    every cell of the last column of a group of roles followed by another group gets
+    ``ROLE_BOUNDARY_STYLE`` (the ellipsis cell's when the boundary is among the columns
+    left out). The ellipsis cell gets no mark, and a header that could not be matched
+    leaves every cell unmarked: no mark is better than a wrong one. Everything else is
+    passed on unchanged.
 
     Args:
         frame_html: The HTML of the display frame, one column per entry of ``columns``.
         columns: The name and the role of each column, in display order.
+        rendered: For each rendered header cell, the index of its column in
+            ``columns``, or ``None`` for the ellipsis cell; ``None`` when the cells
+            could not be matched (``_rendered_columns``).
     """
-    names = _HeaderNames()
-    names.feed(frame_html)
-    names.close()
-    cells = _rendered_columns(names.cells, [name for name, _ in columns])
+    cells = [] if rendered is None else list(rendered)
     roles = [role for _, role in columns]
     header = [
         "" if column is None else COLUMN_ROLE_MARKS[roles[column]].html_style
@@ -698,12 +737,17 @@ def _mark_columns(frame_html: str, columns: Sequence[tuple[str, str]]) -> str:
 _ELLIPSIS = "…"
 
 
-def _rendered_columns(cells: Sequence[str], names: Sequence[str]) -> list[int | None]:
+def _rendered_columns(
+    cells: Sequence[str], names: Sequence[str]
+) -> list[int | None] | None:
     """Return, for each rendered header cell, the index of its column in ``names``, or
-    ``None`` for the ellipsis cell (and for every cell when they cannot be matched).
+    ``None`` for the ellipsis cell; ``None`` instead of the list when the cells cannot be
+    matched to the columns.
 
     Polars renders either every column, or a first run and a last run of them around one
-    ellipsis cell; the match is checked by name on both sides of the ellipsis.
+    ellipsis cell; the match is checked by name on both sides of the ellipsis. The one
+    reading of which columns a display rendered: the HTML display's header marks and
+    legend, and the text display's legend, all use it.
 
     Args:
         cells: The text of each cell of the first header row, as rendered.
@@ -720,7 +764,16 @@ def _rendered_columns(cells: Sequence[str], names: Sequence[str]) -> list[int | 
                 and list(cells[i + 1 :]) == list(names[i + left_out :])
             ):
                 return [*range(i), None, *range(i + left_out, len(names))]
-    return [None] * len(cells)
+    return None
+
+
+def _text_header_cells(frame_text: str) -> list[str]:
+    """Return the text of each cell of the first header line of Polars' text table, or
+    no cell when the table has no such line."""
+    for line in frame_text.splitlines():
+        if line.startswith("│"):
+            return [cell.strip() for cell in line.strip().strip("│").split("┆")]
+    return []
 
 
 class _HeaderNames(HTMLParser):
