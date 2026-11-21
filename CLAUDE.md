@@ -506,9 +506,17 @@ Orcapod stores or embeds in a name is pinned in the golden folder of the current
   `released_manifests.json`, with the date and the reason, so no v1 file is released today.
   Until 0.4.0, a change to any v1 golden value needs the developer's approval of the exact
   list of entries that move, each explained; it is made with `--remove <entry>`, then the
-  generator writes the new value. `--release 0.4.0` freezes v1. Any version published
-  before it, a pre-release included, would freeze v1 there: the Release workflow requires
-  the release step for every version. A withdrawn version is never released again.
+  generator writes the new value. `--release 0.4.0` freezes v1. A pre-release freezes
+  nothing (developer, November 21, 2026, ITL-1329): `0.4.0rc1` carries the hashes intended
+  to be final, the release gate (`scripts/check_golden_tags.py`, `release_version` is the
+  one rule) requires that no release record at HEAD names a pre-release (`releases` and
+  `withdrawn` keys of every context, the manifest's `released_in`, golden history,
+  snapshot `released_in`; a record it cannot classify fails closed, in every run), the tag
+  check gives a pre-release tag no protecting power, and `--release` (golden and `data_function_types.py`) refuses it. Between a
+  candidate and the final release a golden value changes only for a blocking reason, with
+  the developer's approval of the exact list, then a new candidate; data stored with a
+  candidate is not guaranteed valid under the final release. A version withdrawn in any
+  data context is never released again.
 - Provisional operators are outside the freeze (developer, November 18, 2026, ITL-1266):
   `orcapod.operators.PROVISIONAL_OPERATORS` (`core/operators/provisional.py`) is the one
   list (name to the issue deciding its identity), and each listed class sets

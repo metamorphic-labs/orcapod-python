@@ -105,7 +105,10 @@ jobs:
     permissions:
       contents: write  # required to push the release tag
     outputs:
-      version: ${{ steps.normalize.outputs.version }}
+      version: ${{ steps.classify.outputs.version }}
+      # 'true' for a pre-release (aN, bN, rcN, .devN), 'false' for a final release:
+      # decided by scripts/check_golden_tags.py, the one rule (ITL-1329).
+      prerelease: ${{ steps.classify.outputs.prerelease }}
     steps:
       - name: Report skipped tests
         if: ${{ inputs.skip_tests }}
@@ -121,27 +124,34 @@ jobs:
             echo "Validation, the license check and the build ran as usual."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Normalize version
-        id: normalize
-        run: |
-          VERSION="${{ inputs.version }}"
-          VERSION="${VERSION#v}"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           fetch-depth: 0  # required: hatch-vcs reads tag to set version
           ref: ${{ inputs.branch }}
 
+      - name: Classify the version
+        id: classify
+        # The one normalization of the version input (ITL-1329): writes version=<X.Y.Z>
+        # (without the leading v) and prerelease=true|false. Fails on anything that is
+        # not a release version in its PEP 440 normal form with at most one leading
+        # lowercase v (0.4.0rc1 or v0.4.0rc1; not 0.4.0-rc.1, V0.4.0 or vv0.4.0), so that
+        # the tag, the package, the GitHub Release and the Linear release name one
+        # version. Every later step uses its version output.
+        env:
+          VERSION: ${{ inputs.version }}
+        run: python3 scripts/check_golden_tags.py --classify-version "$VERSION" >> "$GITHUB_OUTPUT"
+
       - name: Check the golden release step
-        # Nothing is tagged or published unless the release pull request ran
-        # generate_golden_hashes.py --release for this version (ITL-946).
-        run: python3 scripts/check_golden_tags.py --release-version "${{ steps.normalize.outputs.version }}"
+        # A final release: nothing is tagged or published unless the release pull request
+        # ran generate_golden_hashes.py --release for this version (ITL-946). A
+        # pre-release freezes nothing: HEAD must not record it as a release (ITL-1329).
+        run: python3 scripts/check_golden_tags.py --release-version "${{ steps.classify.outputs.version }}"
 
       - name: Check golden files against release tags
         # Every golden file, revision and pin an earlier release tag of the current data
-        # context shipped is unchanged here (ITL-946). Tags of no such release (older
-        # data contexts) are not checked; it fails only without git, history or tags.
+        # context shipped is unchanged here (ITL-946), for a pre-release too. Tags of no
+        # such release (older data contexts, pre-releases) are not checked; it fails only
+        # without git, history or tags.
         run: python3 scripts/check_golden_tags.py
 
       - name: Configure git identity
@@ -150,7 +160,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Create local release tag
-        run: git tag "v${{ steps.normalize.outputs.version }}"
+        run: git tag "v${{ steps.classify.outputs.version }}"
 
       - name: Install uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
@@ -160,13 +170,13 @@ jobs:
 
       - name: Guard against duplicate tag
         run: |
-          if git ls-remote --tags origin "refs/tags/v${{ steps.normalize.outputs.version }}" | grep -q .; then
-            echo "::error::Tag v${{ steps.normalize.outputs.version }} already exists on origin. Aborting."
+          if git ls-remote --tags origin "refs/tags/v${{ steps.classify.outputs.version }}" | grep -q .; then
+            echo "::error::Tag v${{ steps.classify.outputs.version }} already exists on origin. Aborting."
             exit 1
           fi
 
       - name: Push release tag
-        run: git push origin "v${{ steps.normalize.outputs.version }}"
+        run: git push origin "v${{ steps.classify.outputs.version }}"
 
       - name: Upload dist artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
@@ -237,16 +247,27 @@ jobs:
           tag_name: "v${{ needs.build.outputs.version }}"
           generate_release_notes: true
           files: dist/*
+          # A pre-release is marked as one, and its notes (prepended to the generated
+          # ones) say that it freezes nothing (ITL-1329).
+          prerelease: ${{ needs.build.outputs.prerelease == 'true' }}
+          body: >-
+            ${{ needs.build.outputs.prerelease == 'true'
+            && 'This is a pre-release. It carries the hashes intended for the final release, but freezes nothing: a golden value may still change before the final release (only for a blocking reason), and data stored with this pre-release is not guaranteed to be valid under the final release.'
+            || '' }}
 
   linear-sync:
     name: Sync Linear release
     needs: build
     # Explicit status check, because a skipped test job would otherwise skip this job too.
+    # Not for a pre-release (ITL-1329): sync with a version creates or targets a Linear
+    # release of exactly that version, which would split the candidate's issues from the
+    # final release; the open Linear release stays open for the final version.
     if: >-
       ${{
         github.repository == 'metamorphic-labs/orcapod-python'
         && !cancelled()
         && needs.build.result == 'success'
+        && needs.build.outputs.prerelease == 'false'
       }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -268,11 +289,13 @@ jobs:
     name: Complete Linear release
     needs: [build, publish-pypi, linear-sync]
     # Explicit status check, because a skipped test job would otherwise skip this job too.
+    # Not for a pre-release (ITL-1329): the Linear release is completed by the final one.
     if: >-
       ${{
         github.repository == 'metamorphic-labs/orcapod-python'
         && !cancelled()
         && needs.build.result == 'success'
+        && needs.build.outputs.prerelease == 'false'
         && needs.publish-pypi.result == 'success'
         && needs.linear-sync.result == 'success'
       }}
