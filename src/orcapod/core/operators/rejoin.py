@@ -15,11 +15,11 @@ Provisional (``PROVISIONAL_OPERATORS``): its identity is not frozen with data co
 from __future__ import annotations
 
 from collections.abc import Collection, Sequence
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.data_tags import data_tag_names, data_tags_first
-from orcapod.core.operators.arrow_keys import polars_key_frame, polars_ready
+from orcapod.core.operators.arrow_keys import polars_key_frame
 from orcapod.core.operators.base import (
     require_matchable_key,
     require_shared_arrow_type,
@@ -62,21 +62,47 @@ def _system_tag_names(stream: StreamProtocol) -> list[str]:
     )
 
 
-def _same_values(left: "pa.Array[Any]", right: "pa.Array[Any]") -> bool:
-    """Whether two arrays of one type hold the same value on every row.
+_FLOAT_BITS = {16: "uint16", 32: "uint32", 64: "uint64"}
 
-    Equality is Polars' over the prepared Arrow values (``arrow_keys.polars_ready``), as
-    ``Join`` matches a key: a null equals a null, a NaN a NaN, ``0.0`` equals ``-0.0``.
+
+def _bits(array: "pa.Array[Any]") -> "pa.Array[Any]":
+    """An array whose equality is bit for bit: each float as its integer bits.
+
+    ``-0.0`` and ``0.0``, or two NaNs of different payloads, are then different values;
+    every other type already compares exactly. Lists, fixed-size lists and structs are
+    rebuilt over their converted children, with their own validity.
     """
-    frame = cast(
-        "pl.DataFrame",
-        pl.from_arrow(
-            pa.Table.from_arrays(
-                [polars_ready(left), polars_ready(right)], names=["left", "right"]
-            )
-        ),
-    )
-    return bool(frame.select(pl.col("left").eq_missing(pl.col("right")).all()).item())
+    arrow_type = array.type
+    if pa.types.is_floating(arrow_type):
+        return array.view(getattr(pa, _FLOAT_BITS[arrow_type.bit_width])())
+    if isinstance(array, pa.ExtensionArray):
+        return _bits(array.storage)
+    mask = array.is_null() if array.null_count else None
+    if isinstance(array, pa.ListArray):
+        return pa.ListArray.from_arrays(array.offsets, _bits(array.values), mask=mask)
+    if isinstance(array, pa.LargeListArray):
+        return pa.LargeListArray.from_arrays(
+            array.offsets, _bits(array.values), mask=mask
+        )
+    if isinstance(array, pa.FixedSizeListArray):
+        return pa.FixedSizeListArray.from_arrays(
+            _bits(array.values), arrow_type.list_size, mask=mask
+        )
+    if isinstance(array, pa.StructArray):
+        children = [_bits(array.field(i)) for i in range(arrow_type.num_fields)]
+        names = [arrow_type.field(i).name for i in range(arrow_type.num_fields)]
+        return pa.StructArray.from_arrays(children, names=names, mask=mask)
+    return array
+
+
+def _same_bits(left: "pa.Array[Any]", right: "pa.Array[Any]") -> bool:
+    """Whether two arrays of one type hold the same value, bit for bit, on every row.
+
+    The matched rows of a rejoin come from one origin row, so a column they share holds
+    one value; equal values in different bits (``-0.0`` and ``0.0``) mean a branch
+    changed it, and the rejoin would otherwise keep one input's bits by argument order.
+    """
+    return _bits(left).equals(_bits(right))
 
 
 def _require_same_system_tags(names: Sequence[Sequence[str]]) -> None:
@@ -94,11 +120,13 @@ def _require_same_system_tags(names: Sequence[Sequence[str]]) -> None:
         f"input {i + 1}: {list(name_list) or 'none'}"
         for i, name_list in enumerate(names)
     )
+    stated = [list(name_list) for name_list in names if name_list]
+    differ = any(name_list != stated[0] for name_list in stated)
     reason = (
-        "an input has no system-tag columns, so no origin row to match on"
-        if not all(names)
-        else "the inputs' system-tag columns differ, so they are not branches of one "
+        "the inputs' system-tag columns differ, so they are not branches of one "
         "stream (a branch through Join, GroupBy or Batch has other system-tag columns)"
+        if differ
+        else "an input has no system-tag columns, so no origin row to match on"
     )
     raise InputValidationError(
         f"Rejoin: {reason} ({listing}). Rejoin puts back together the branches of one "
@@ -116,10 +144,11 @@ class Rejoin(Join):
     branches that come from one origin row, at most one per input: an input holding two
     rows of one origin row is refused. That is a deliberate first rule, which no operator
     that keeps system tags breaks today; it can be relaxed later if a branch may duplicate
-    rows. A user tag in several inputs must have the same
-    value on matched rows; a tag of one input is kept. Data columns must be disjoint, as
-    in ``Join``, and a data-tag in several inputs is one column. The result keeps the
-    common system-tag columns unchanged.
+    rows. A user tag in several inputs must have the same value on matched rows, bit for
+    bit (so the result never depends on the order of the inputs); a tag of one input is
+    kept. Provenance is never null: an input with a null system-tag value is refused.
+    Data columns must be disjoint, as in ``Join``, and a data-tag in several inputs is
+    one column. The result keeps the common system-tag columns unchanged.
 
     Inputs from two different sources with the same schema share their system-tag column
     names but no value: their rejoin is empty, not an error. To combine different rows
@@ -146,11 +175,10 @@ class Rejoin(Join):
     def _require_rejoinable(streams: Sequence[StreamProtocol]) -> None:
         """Check, before computing, the system-tag columns the inputs state.
 
-        An input whose schema states no system-tag column (a raw stream without system
-        tags, or a node of a loaded job downstream of a read-only function node, whose
-        saved schema holds none) is checked when computed, on its table
-        (``_require_same_system_tags``); every input that states its system-tag columns
-        must state the same ones.
+        Every input that states its system-tag columns must state the same ones. An input
+        whose schema states none (a raw stream without system tags, or a node of a loaded
+        job downstream of a read-only function node, whose saved schema holds none) is
+        checked when computed, on its table (``_require_same_system_tags``).
 
         Args:
             streams: The input streams, in call order.
@@ -159,7 +187,8 @@ class Rejoin(Join):
             InputValidationError: If two inputs state different system-tag columns.
         """
         names = [_system_tag_names(stream) for stream in streams]
-        if all(names):
+        stated = [name_list for name_list in names if name_list]
+        if len(stated) > 1 and any(name_list != stated[0] for name_list in stated):
             _require_same_system_tags(names)
 
     def output_schema(
@@ -241,6 +270,12 @@ class Rejoin(Join):
             if name.startswith(constants.SYSTEM_TAG_PREFIX)
         )
         for stream, table in zip(ordered_streams, tables):
+            for name in keys:
+                if table.column(name).null_count:
+                    raise InputValidationError(
+                        f"Rejoin: input {stream} has a null in system-tag column "
+                        f"{name!r}; provenance is never null, so the input is refused"
+                    )
             frame = polars_key_frame(table, keys)
             duplicated = frame.is_duplicated()
             if duplicated.any():
@@ -329,7 +364,7 @@ class Rejoin(Join):
             if name in keys:
                 continue
             left_values = arrays[names.index(name)]
-            if not _same_values(left_values, right_values):
+            if not _same_bits(left_values, right_values):
                 what = (
                     f"tag {name!r}"
                     if name in shared_tags
@@ -337,8 +372,9 @@ class Rejoin(Join):
                 )
                 raise InputValidationError(
                     f"Rejoin: {what} has different values on rows of one origin row in "
-                    "two inputs; a branch changed it, so the rows cannot be put back "
-                    "together (rename it in one branch, or use Join)"
+                    "two inputs (compared bit for bit: -0.0 is not 0.0, NaNs of "
+                    "different payloads differ); a branch changed it, so the rows cannot "
+                    "be put back together (rename it in one branch, or use Join)"
                 )
         table = pa.Table.from_arrays(arrays, names=names)
         table = arrow_utils.restore_schema_nullability(table, left.schema, right.schema)

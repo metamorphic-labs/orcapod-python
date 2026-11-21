@@ -1462,8 +1462,9 @@ data. The rules:
   every input that states its system-tag columns states the same ones (a branch through
   `Join`, `GroupBy` or `Batch` is refused); an input that states none is checked on its table
   when computed. At most one row per origin row in each input (a first rule, refused naming the
-  input and the values); a shared user tag must agree on matched rows; data columns disjoint;
-  N-ary and commutative; identity `"Rejoin"`; async is the barrier.
+  input and the values); a null system-tag value is refused; a shared user tag must agree on
+  matched rows bit for bit (so the result never follows argument order); data columns
+  disjoint; N-ary and commutative; identity `"Rejoin"`; async is the barrier.
 - `Join` and `SemiJoin` give Polars only their key columns and row numbers (ITL-1284): Polars
   decides which rows match, and every output column is taken from the input tables by row
   number (`take`), so every value is the input's, bit for bit (they used to carry every column

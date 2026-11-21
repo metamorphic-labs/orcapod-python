@@ -407,3 +407,81 @@ def test_join_is_unchanged() -> None:
     )
     assert len(_system_tags(joined)) == 4
     assert all(constants.BLOCK_SEPARATOR in name for name in _system_tags(joined))
+
+
+# ---------------------------------------------------------------------------
+# Codex review of PR 472
+# ---------------------------------------------------------------------------
+
+
+def test_a_null_in_a_system_tag_is_refused() -> None:
+    """Provenance is never null: an input with a null in a system-tag column is refused,
+    naming the column, instead of silently losing the row (the reviewer's case)."""
+    source = _source()
+    full = source.as_table(columns={"system_tags": True})
+    names = _system_tags(source)
+    source_id = next(name for name in names if "source_id" in name)
+    values = full.column(source_id).to_pylist()
+    nulled = full.set_column(
+        full.schema.get_field_index(source_id),
+        pa.field(source_id, pa.large_string(), nullable=True),
+        pa.array([None, None, *values[2:]], pa.large_string()),
+    )
+    a = ArrowTableStream(
+        nulled.select(["subject", "unit", "rate", *names]),
+        tag_columns=["subject", "unit"],
+    )
+    b = ArrowTableStream(
+        nulled.select(["subject", "unit", "depth", *names]),
+        tag_columns=["subject", "unit"],
+    )
+    with pytest.raises(InputValidationError, match="null in system-tag column"):
+        _ = Rejoin()(a, b).as_table()
+
+
+def _tied(k: list[float]) -> ArrowTableStream:
+    """A raw stream with data-tags ``k`` (float) and ``g``, and fixed system tags."""
+    table = pa.table(
+        {
+            "k": pa.array(k, pa.float64()),
+            "g": pa.array([1, 2], pa.int64()),
+            f"{constants.SYSTEM_TAG_PREFIX}source_id::x": ["s", "s"],
+            f"{constants.SYSTEM_TAG_PREFIX}record_id::x": ["r1", "r2"],
+        }
+    )
+    return ArrowTableStream(table, tag_columns=["k", "g"], data_tags=["k", "g"])
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [([0.0, 0.0], [-0.0, -0.0]), ([float("nan")] * 2, [-float("nan")] * 2)],
+    ids=["signed_zero", "nan_payload"],
+)
+def test_equal_values_in_different_bits_are_refused_in_both_orders(
+    left: list[float], right: list[float]
+) -> None:
+    """Inputs with equal pipeline hashes keep the caller's order; a shared tag equal in
+    value but not in bits would make the output's bits follow it. Refused in both
+    orders, naming the tag (the reviewer's case)."""
+    a, b = _tied(left), _tied(right)
+    assert a.pipeline_hash() == b.pipeline_hash()
+    for inputs in ((a, b), (b, a)):
+        with pytest.raises(InputValidationError, match="tag 'k' has different values"):
+            _ = Rejoin()(*inputs).as_table()
+    same = Rejoin()(a, _tied(left)).as_table()
+    assert same.num_rows == 2
+
+
+def test_stated_system_tags_are_compared_even_beside_an_input_that_states_none() -> (
+    None
+):
+    """Two inputs that state different system-tag columns are refused at construction,
+    even when a third states none (the reviewer's case)."""
+    source = _source()
+    a = source.select_data_columns(["rate"])
+    b = GroupBy("subject")(source.select_data_columns(["depth"]))
+    c = ArrowTableStream(
+        pa.table({"thirdtag": [1, 2], "thirddata": [3, 4]}), tag_columns=["thirdtag"]
+    )
+    with pytest.raises(InputValidationError, match="system-tag columns differ"):
+        _ = Rejoin()(a, b, c)

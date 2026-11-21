@@ -204,16 +204,20 @@ The rules:
   selection and renaming, `AddTags` and function pods. A branch that went through `Join`,
   `GroupBy` or `Batch` has other system-tag columns, and Rejoin refuses it
   (`InputValidationError`, naming each input's system-tag columns and pointing to `Join`).
-  An input whose schema states no system-tag column (a raw stream without system tags, or
-  a node of a loaded job downstream of a function node, whose saved schema holds none) is
-  checked when the rejoin is computed, on its rows, by the same rule.
+  The inputs that state their system-tag columns are compared when the rejoin is built; an
+  input whose schema states none (a raw stream without system tags, or a node of a loaded
+  job downstream of a function node, whose saved schema holds none) is checked when the
+  rejoin is computed, on its rows, by the same rule.
 - **One row per origin row.** Rows are matched on every system-tag column. A first rule,
   deliberate and open to relaxing later: each input holds at most one row of an origin row,
   so pairing is one to one; an input with two rows of one origin row is refused, naming the
   input and the system-tag values. No operator that keeps system tags duplicates rows today.
-- **Shared tags agree.** A user tag present in several inputs must have the same value on
-  matched rows (compared as `Join` compares keys); otherwise Rejoin refuses, naming the tag.
-  A tag of one input only is kept.
+- **Shared tags agree, bit for bit.** A user tag present in several inputs must hold the
+  same value on matched rows, bit for bit (`-0.0` is not `0.0`, NaNs of different payloads
+  differ), so the result never depends on the order of the inputs; otherwise Rejoin refuses,
+  naming the tag. A tag of one input only is kept.
+- **Provenance is never null.** An input with a null in a system-tag column is refused,
+  naming the column.
 - **Data columns are disjoint**, as in `Join`; a data-tag present in several inputs is one
   column.
 - **Different sources give nothing.** Two sources with the same schema have the same
