@@ -184,7 +184,10 @@ The schema is part of the source's configuration: `to_config()` saves it, field 
 (Arrow type text, nested fields included, and which fields may be null), and `from_config()`
 and a saved job (`PipelineJob.save` / `PipelineJob.load`) read the file with it again, so the
 reloaded source has the same schema, content hash and pipeline hash as the one you built. A
-source built without `schema=` saves no schema and infers again when it is reloaded.
+source built without `schema=` saves no schema and infers again when it is reloaded. Only
+a missing entry means that: a saved entry that is not what `to_config()` writes (`null`, a
+string where the list of nullable fields belongs, an unknown key) raises `ValueError`, and
+`PipelineJob.load` refuses the file.
 
 ```python
 import json

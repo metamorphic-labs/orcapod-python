@@ -1605,6 +1605,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         from orcapod.pipeline.graph import Pipeline
         from orcapod.pipeline.serialization import (
             SUPPORTED_JOB_FORMAT_VERSIONS,
+            check_saved_source_config,
             check_source_config_binding,
             resolve_source_from_config,
             source_config_at_version,
@@ -1656,6 +1657,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     check_source_config_binding(
                         src_config, slot.tag_schema.keys(), slot.data_schema.keys()
                     )
+                # A malformed entry of a source's own (a CSVSource's saved schema,
+                # ITL-1315) is the file's error: refused here, where the best-effort
+                # rebuild below would leave the slot unbound.
+                check_saved_source_config(src_config)
             except ValueError as exc:
                 raise ValueError(f"{path}: source {spec_name!r}: {exc}") from exc
             try:

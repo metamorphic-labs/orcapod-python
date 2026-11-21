@@ -974,8 +974,62 @@ def serialize_arrow_schema(
     return entry
 
 
+_SAVED_ARROW_SCHEMA_KEYS = ("columns", "nullable")
+
+
+def _saved_arrow_schema_parts(entry: object) -> tuple[dict[str, str], list[str]]:
+    """Return the columns and nullable names of a saved schema entry, checked.
+
+    Only the shape `serialize_arrow_schema` writes is read; anything else is refused,
+    never interpreted (a ``null`` entry, a string where a list belongs).
+
+    Raises:
+        ValueError: Naming what is wrong with the entry.
+    """
+    if not isinstance(entry, dict):
+        raise ValueError(
+            "the saved schema must be an object with 'columns' and 'nullable', "
+            f"not {type(entry).__name__} {entry!r}"
+        )
+    fields = cast("dict[str, object]", entry)
+    missing = [key for key in _SAVED_ARROW_SCHEMA_KEYS if key not in fields]
+    unknown = sorted(str(key) for key in fields if key not in _SAVED_ARROW_SCHEMA_KEYS)
+    if missing or unknown:
+        raise ValueError(
+            "the saved schema holds exactly 'columns' and 'nullable'"
+            + (f"; missing {missing}" if missing else "")
+            + (f"; unknown keys {unknown}" if unknown else "")
+        )
+    columns = fields["columns"]
+    if not isinstance(columns, dict) or not columns:
+        raise ValueError(
+            "the saved schema's 'columns' must be a non-empty object of column names "
+            f"to type text, not {columns!r}"
+        )
+    for name, type_text in cast("dict[object, object]", columns).items():
+        if not isinstance(name, str) or not isinstance(type_text, str):
+            raise ValueError(
+                f"the saved schema's column {name!r} must name its type as text, not "
+                f"{type_text!r}"
+            )
+    nullable = fields["nullable"]
+    if not isinstance(nullable, list) or not all(
+        isinstance(name, str) for name in cast("list[object]", nullable)
+    ):
+        raise ValueError(
+            "the saved schema's 'nullable' must be a list of column names, not "
+            f"{nullable!r}"
+        )
+    names = cast("list[str]", nullable)
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    if repeated:
+        raise ValueError(f"the saved schema's 'nullable' repeats {repeated}")
+    _check_nullable_names(columns, names)
+    return cast("dict[str, str]", columns), names
+
+
 def deserialize_arrow_schema(
-    entry: dict[str, Any], type_converter: Any | None = None
+    entry: object, type_converter: Any | None = None
 ) -> pa.Schema:
     """Restore an Arrow schema saved by `serialize_arrow_schema`.
 
@@ -988,14 +1042,14 @@ def deserialize_arrow_schema(
         The schema, with its fields in the saved order.
 
     Raises:
-        ValueError: If a saved type cannot be parsed, or a saved nullable name is not
-            a saved column. The message names the column.
+        ValueError: If the entry is not of the saved shape (an object with exactly
+            ``columns``, a non-empty object of column names to type text, and
+            ``nullable``, a list of distinct column names), or a saved type cannot
+            be parsed. The message says what is wrong, naming the column.
     """
     import pyarrow as pa
 
-    columns: dict[str, str] = entry["columns"]
-    nullable = entry["nullable"]
-    _check_nullable_names(columns, nullable)
+    columns, nullable = _saved_arrow_schema_parts(entry)
     fields = []
     for name, type_str in columns.items():
         try:
@@ -1520,6 +1574,32 @@ def check_saved_output_schema_is_plain(
 # The fields of a source config that hold a nested source config: a cached source's
 # inner source and a derived source's origin.
 NESTED_SOURCE_CONFIG_KEYS = ("inner_source", "origin")
+
+
+def check_saved_source_config(config: dict[str, Any]) -> None:
+    """Refuse a saved source config whose own entries are malformed.
+
+    Each source class that reads entries of its own from a saved config may declare
+    ``check_saved_config(config)``, which raises ``ValueError`` on an entry it would
+    have to interpret (a ``CSVSource``'s ``schema``, ITL-1315). It is called here for
+    the config and for every source config nested in it, so ``PipelineJob.load``
+    refuses such a file instead of loading it with the source unbound.
+
+    Args:
+        config: A saved source config.
+
+    Raises:
+        ValueError: If the config or a config nested in it is malformed.
+    """
+    _ensure_registries()
+    for key in NESTED_SOURCE_CONFIG_KEYS:
+        nested = config.get(key)
+        if isinstance(nested, dict):
+            check_saved_source_config(cast("dict[str, Any]", nested))
+    cls = SOURCE_REGISTRY.get(config.get("source_type"))  # pyright: ignore[reportArgumentType]  # any saved value
+    check = getattr(cls, "check_saved_config", None)
+    if check is not None:
+        check(config)
 
 
 def source_config_at_version(config: dict[str, Any], version: str) -> dict[str, Any]:

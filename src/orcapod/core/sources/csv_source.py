@@ -200,18 +200,54 @@ class CSVSource(RootSource):
         }
 
     @classmethod
+    def saved_schema(cls, config: dict[str, Any]) -> pa.Schema | None:
+        """Return the explicit schema a saved config holds, or ``None`` if it holds none.
+
+        Only an absent ``"schema"`` key means no explicit schema (a source built
+        without ``schema=``, or a config written before ITL-1315). A present entry
+        must be what ``to_config`` writes; anything else (``null``, a string where a
+        list belongs, an unknown key) is refused, never interpreted.
+
+        Args:
+            config: A saved ``CSVSource`` config.
+
+        Returns:
+            The schema, or ``None``.
+
+        Raises:
+            ValueError: If the ``"schema"`` entry is malformed, naming what is wrong
+                and the file the config reads.
+        """
+        if "schema" not in config:
+            return None
+        from orcapod.pipeline.serialization import deserialize_arrow_schema
+
+        try:
+            return deserialize_arrow_schema(config["schema"])
+        except ValueError as exc:
+            exc.add_note(f"saved CSVSource config over {config.get('file_path')!r}")
+            raise
+
+    @classmethod
+    def check_saved_config(cls, config: dict[str, Any]) -> None:
+        """Refuse a saved config whose ``"schema"`` entry is malformed (``saved_schema``).
+
+        Raises:
+            ValueError: If the ``"schema"`` entry is malformed.
+        """
+        cls.saved_schema(config)
+
+    @classmethod
     def from_config(cls, config: dict[str, Any], db_registry=None) -> CSVSource:
         """Reconstruct a CSVSource from a config dict.
 
         The saved ``"schema"`` entry, when there is one, is given to the constructor
         as ``schema=``; a config without it (a source built without ``schema=``, or a
         config written before ITL-1315) infers the types from the file.
-        """
-        schema = None
-        if config.get("schema") is not None:
-            from orcapod.pipeline.serialization import deserialize_arrow_schema
 
-            schema = deserialize_arrow_schema(config["schema"])
+        Raises:
+            ValueError: If a ``"schema"`` entry is present but malformed.
+        """
         return cls(
             file_path=config["file_path"],
             tag_columns=config.get("tag_columns", ()),
@@ -219,5 +255,5 @@ class CSVSource(RootSource):
             system_tag_columns=config.get("system_tag_columns", ()),
             record_id_columns=config.get("record_id_columns"),
             source_id=config.get("source_id"),
-            schema=schema,
+            schema=cls.saved_schema(config),
         )

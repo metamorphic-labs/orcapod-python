@@ -9,6 +9,7 @@ same source id.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,8 @@ from orcapod.pipeline import (
     SyncPipelineOrchestrator,
 )
 from orcapod.pipeline.serialization import (
+    NESTED_SOURCE_CONFIG_KEYS,
+    check_saved_source_config,
     deserialize_arrow_schema,
     serialize_arrow_schema,
 )
@@ -362,3 +365,110 @@ def test_a_saved_job_reloads_the_source_with_its_schema(
     assert rows == sorted(
         job.nodes["scale"].as_table().to_pylist(), key=lambda r: r["unit"]
     )
+
+
+# A saved "schema" entry other than the one to_config writes is refused, never
+# interpreted: only an ABSENT key means "no explicit schema".
+_MALFORMED = {
+    "null": (None, "must be an object"),
+    "empty-object": ({}, "missing ['columns', 'nullable']"),
+    "unknown-key": (
+        {
+            "columns": {"a": "int64", "b": "int64", "ab": "int64"},
+            "nullable": [],
+            "metadata": {},
+        },
+        "unknown keys ['metadata']",
+    ),
+    "nullable-as-text": (
+        # Overlapping names: iterated as characters, "ab" would have matched them all.
+        {"columns": {"a": "int64", "b": "int64", "ab": "int64"}, "nullable": "ab"},
+        "must be a list of column names",
+    ),
+    "nullable-unknown-column": (
+        {"columns": {"a": "int64", "b": "int64", "ab": "int64"}, "nullable": ["c"]},
+        "not among the saved columns",
+    ),
+    "nullable-repeated": (
+        {
+            "columns": {"a": "int64", "b": "int64", "ab": "int64"},
+            "nullable": ["b", "b"],
+        },
+        "repeats ['b']",
+    ),
+    "columns-empty": ({"columns": {}, "nullable": []}, "non-empty object"),
+    "type-not-text": (
+        {"columns": {"a": "int64", "b": 64, "ab": "int64"}, "nullable": []},
+        "column 'b' must name its type as text",
+    ),
+}
+MALFORMED = pytest.mark.parametrize(
+    ("entry", "message"), list(_MALFORMED.values()), ids=list(_MALFORMED)
+)
+
+
+def _overlap_source(tmp_path: Path) -> CSVSource:
+    path = tmp_path / "overlap.csv"
+    path.write_text("a,b,ab\n1,2,3\n4,5,6\n")
+    schema = pa.schema(
+        [
+            pa.field("a", pa.int64(), nullable=False),
+            pa.field("b", pa.int64(), nullable=False),
+            pa.field("ab", pa.int64(), nullable=False),
+        ]
+    )
+    return CSVSource(str(path), schema=schema, tag_columns=["a"], source_id="overlap")
+
+
+@MALFORMED
+def test_a_malformed_schema_entry_is_refused_by_from_config(
+    tmp_path: Path, entry: object, message: str
+) -> None:
+    config = _overlap_source(tmp_path).to_config()
+    config["schema"] = entry
+    with pytest.raises(ValueError, match=re.escape(message)) as info:
+        CSVSource.from_config(config)
+    assert any(str(tmp_path / "overlap.csv") in n for n in info.value.__notes__)
+
+
+@MALFORMED
+def test_a_job_file_with_a_malformed_schema_entry_is_refused(
+    tmp_path: Path, entry: object, message: str
+) -> None:
+    job = PipelineJob(database=DeltaTableDatabase(tmp_path / "store"))
+    with job:
+        double_b.pod(_overlap_source(tmp_path), label="double")
+    job.run()
+    job.save(tmp_path / "job.json")
+    saved = json.loads((tmp_path / "job.json").read_text())
+    saved["bindings"]["sources"]["overlap"]["schema"] = entry
+    (tmp_path / "bad.json").write_text(json.dumps(saved))
+    # Refused as the file's error, not loaded with the source unbound.
+    with pytest.raises(ValueError, match=re.escape(message)) as info:
+        PipelineJob.load(tmp_path / "bad.json")
+    assert "source 'overlap'" in str(info.value)
+    assert str(tmp_path / "bad.json") in str(info.value)
+
+
+def test_a_job_file_without_the_schema_entry_loads_bound(tmp_path: Path) -> None:
+    job = PipelineJob(database=DeltaTableDatabase(tmp_path / "store"))
+    with job:
+        double_b.pod(_overlap_source(tmp_path), label="double")
+    job.run()
+    job.save(tmp_path / "job.json")
+    saved = json.loads((tmp_path / "job.json").read_text())
+    del saved["bindings"]["sources"]["overlap"]["schema"]
+    (tmp_path / "old.json").write_text(json.dumps(saved))
+    loaded = PipelineJob.load(tmp_path / "old.json")
+    (reloaded,) = loaded.sources.values()
+    # The file's columns infer as the declared int64 non-null: the slot accepts it.
+    assert reloaded.output_schema() == job.sources["overlap"].output_schema()
+
+
+@pytest.mark.parametrize("key", NESTED_SOURCE_CONFIG_KEYS)
+def test_a_nested_malformed_schema_entry_is_refused(tmp_path: Path, key: str) -> None:
+    inner = _overlap_source(tmp_path).to_config()
+    check_saved_source_config(inner)  # the entry to_config writes passes
+    inner["schema"] = None
+    with pytest.raises(ValueError, match="must be an object"):
+        check_saved_source_config({"source_type": "cached", key: inner})
