@@ -10,6 +10,7 @@ columns; diamonds go through filters, renames, ``AddTags`` and function pods.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import itertools
 import warnings
 from pathlib import Path
@@ -19,6 +20,7 @@ import polars as pl
 import pyarrow as pa
 import pytest
 
+import orcapod.contexts as contexts
 from orcapod import function_pod
 from orcapod.core.operators import GroupBy, Join, Rejoin
 from orcapod.core.sources import DictSource
@@ -485,3 +487,121 @@ def test_stated_system_tags_are_compared_even_beside_an_input_that_states_none()
     )
     with pytest.raises(InputValidationError, match="system-tag columns differ"):
         _ = Rejoin()(a, b, c)
+
+
+def _float_provenance(origin: list[float], data: str) -> ArrowTableStream:
+    """A raw stream whose one system tag is a float, with data column ``data``."""
+    table = pa.table(
+        {
+            "g": pa.array([1, 2], pa.int64()),
+            "origin": pa.array(origin, pa.float64()),
+            data: pa.array([0.5, 0.25], pa.float64()),
+        }
+    )
+    return ArrowTableStream(table, tag_columns=["g"], system_tag_columns=["origin"])
+
+
+def test_system_tags_matched_by_equality_must_be_the_same_bits() -> None:
+    """Polars matches -0.0 with 0.0; a system tag matched that way is refused, in
+    both argument orders, naming the system tag (CodeRabbit on PR 472)."""
+    a = _float_provenance([0.0, 1.0], "x")
+    b = _float_provenance([-0.0, 1.0], "y")
+    for inputs in ((a, b), (b, a)):
+        with pytest.raises(InputValidationError, match="system tag '_tag_origin'"):
+            _ = Rejoin()(*inputs).as_table()
+    same = Rejoin()(a, _float_provenance([0.0, 1.0], "y")).as_table()
+    assert same.num_rows == 2
+
+
+OTHER_CONTEXT = "std:v1:test-other"
+
+
+@pytest.fixture
+def other_context(monkeypatch: pytest.MonkeyPatch) -> contexts.DataContext:
+    """A copy of the default data context, registered under another key (one data
+    context ships, so the copy stands in for a second)."""
+    other = dataclasses.replace(
+        contexts.get_default_context(), context_key=OTHER_CONTEXT
+    )
+    registry = contexts._get_registry()  # pyright: ignore[reportPrivateUsage]  # the test registers a second context
+    original = registry.get_context
+
+    def get_context(key: Any = None) -> contexts.DataContext:  # pyright: ignore[reportExplicitAny]  # the registry's own argument
+        return other if key == OTHER_CONTEXT else original(key)
+
+    monkeypatch.setattr(registry, "get_context", get_context)
+    return other
+
+
+def _in_context(context: contexts.DataContext, data: str) -> ArrowTableStream:
+    """A raw stream of the given data context: tags ``g`` and ``h``, one system tag,
+    data column ``data``."""
+    table = pa.table(
+        {
+            "g": pa.array([1, 2, 3], pa.int64()),
+            "h": pa.array(["a", "b", "c"], pa.large_string()),
+            data: pa.array([0.5, 0.25, 0.125], pa.float64()),
+            "origin": pa.array(["r1", "r2", "r3"], pa.large_string()),
+            constants.CONTEXT_KEY: pa.array(
+                [context.context_key] * 3, pa.large_string()
+            ),
+        }
+    )
+    return ArrowTableStream(
+        table,
+        tag_columns=["g", "h"],
+        system_tag_columns=["origin"],
+        data_context=context,
+    )
+
+
+def test_the_result_keeps_the_inputs_data_context(
+    other_context: contexts.DataContext,
+) -> None:
+    """The rejoined rows keep their inputs' data context on the sync and the async
+    path, in either argument order (CodeRabbit on PR 472)."""
+    from orcapod.channels import Channel
+
+    a = _in_context(other_context, "x")
+    b = _in_context(other_context, "y")
+    for inputs in ((a, b), (b, a)):
+        result = Rejoin().static_process(*inputs)
+        assert result.data_context_key == OTHER_CONTEXT
+        table = result.as_table(columns={"context": True})
+        assert table.column(constants.CONTEXT_KEY).to_pylist() == [OTHER_CONTEXT] * 3
+        assert {data.data_context_key for _, data in result.iter_data()} == {
+            OTHER_CONTEXT
+        }
+
+    async def run() -> list[Any]:
+        inputs = []
+        for branch in (a, b):
+            channel: Channel[Any] = Channel()
+            for row in branch.iter_data():
+                await channel.writer.send(row)
+            await channel.writer.close()
+            inputs.append(channel.reader)
+        out: Channel[Any] = Channel()
+        await Rejoin().async_execute(
+            inputs,
+            out.writer,
+            input_pipeline_hashes=[a.pipeline_hash(), b.pipeline_hash()],
+        )
+        return await out.reader.collect()
+
+    rows = asyncio.run(run())
+    assert len(rows) == 3
+    assert {tag.data_context_key for tag, _ in rows} == {OTHER_CONTEXT}
+    assert {data.data_context_key for _, data in rows} == {OTHER_CONTEXT}
+
+
+def test_inputs_of_different_data_contexts_are_refused(
+    other_context: contexts.DataContext,
+) -> None:
+    """Rows of one origin row carry one data context: inputs that do not are refused,
+    naming both keys, in either argument order."""
+    a = _in_context(other_context, "x")
+    b = _in_context(contexts.get_default_context(), "y")
+    for inputs in ((a, b), (b, a)):
+        with pytest.raises(InputValidationError, match="different data contexts"):
+            _ = Rejoin()(*inputs).as_table()

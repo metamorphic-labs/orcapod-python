@@ -146,7 +146,9 @@ class Rejoin(Join):
     that keeps system tags breaks today; it can be relaxed later if a branch may duplicate
     rows. A user tag in several inputs must have the same value on matched rows, bit for
     bit (so the result never depends on the order of the inputs); a tag of one input is
-    kept. Provenance is never null: an input with a null system-tag value is refused.
+    kept. Provenance is never null: an input with a null system-tag value is refused;
+    matched system-tag values are compared bit for bit too. The inputs share one data
+    context, which the result keeps; inputs of different data contexts are refused.
     Data columns must be disjoint, as in ``Join``, and a data-tag in several inputs is
     one column. The result keeps the common system-tag columns unchanged.
 
@@ -233,21 +235,32 @@ class Rejoin(Join):
         """Rejoin the streams on their system-tag columns.
 
         Raises:
-            InputValidationError: If the inputs cannot be rejoined, an input holds two
-                rows of one origin row, a shared tag (or a shared data-tag's source info)
-                differs on matched rows, or a shared tag's Arrow type differs.
+            InputValidationError: If the inputs cannot be rejoined or are of different
+                data contexts, an input holds two rows of one origin row, a shared
+                column (a system tag, a tag, a shared data-tag's source info, the data
+                context) differs bit for bit on matched rows, or a shared tag's Arrow
+                type differs.
         """
         if len(streams) == 1:
             return without_input_meta(streams[0], streams)
         ordered_streams = self.order_input_streams(*streams)
         tag_schema, data_schema = self._joined_user_schemas(*streams)
+        # The rows of one origin row carry one data context: so must the inputs.
+        context_keys = sorted({stream.data_context_key for stream in streams})
+        if len(context_keys) > 1:
+            raise InputValidationError(
+                f"Rejoin: the inputs are of different data contexts {context_keys}; "
+                "branches of one source share its data context"
+            )
 
         tables: list[pa.Table] = []
         for stream in ordered_streams:
             tag_keys, _ = stream.keys()
             tables.append(
                 without_meta_columns(
-                    stream.as_table(columns={"source": True, "system_tags": True}),
+                    stream.as_table(
+                        columns={"source": True, "system_tags": True, "context": True}
+                    ),
                     tag_keys,
                 )
             )
@@ -308,6 +321,7 @@ class Rejoin(Join):
             result_table,
             tag_columns=tuple(tag_order),
             data_tags=data_tag_names(tag_schema, data_schema),
+            data_context=ordered_streams[0].data_context_key,
         )
 
     def _rejoin_pair(
@@ -321,8 +335,9 @@ class Rejoin(Join):
 
         Every output value is taken from ``left`` or ``right`` by row number; Polars
         only decides which rows match (``arrow_keys``). A column both tables have (a
-        system tag, a shared tag, a shared data-tag's source info) is kept once, from
-        ``left``, after checking that the matched rows agree on it.
+        system tag, a shared tag, a shared data-tag's source info, the data context) is
+        kept once, from ``left``, after checking that the matched rows hold the same
+        bits.
 
         Args:
             left: The rows rejoined so far.
@@ -361,15 +376,18 @@ class Rejoin(Join):
                 names.append(name)
                 arrays.append(right_values)
                 continue
-            if name in keys:
-                continue
+            # Polars matched the system tags by equality; they too must be the same
+            # bits (a float system tag of -0.0 matches 0.0).
             left_values = arrays[names.index(name)]
             if not _same_bits(left_values, right_values):
-                what = (
-                    f"tag {name!r}"
-                    if name in shared_tags
-                    else f"column {name!r} (a shared data-tag's source info)"
-                )
+                if name in shared_tags:
+                    what = f"tag {name!r}"
+                elif name in keys:
+                    what = f"system tag {name!r}"
+                elif name == constants.CONTEXT_KEY:
+                    what = f"the data context column {name!r}"
+                else:
+                    what = f"column {name!r} (a shared data-tag's source info)"
                 raise InputValidationError(
                     f"Rejoin: {what} has different values on rows of one origin row in "
                     "two inputs (compared bit for bit: -0.0 is not 0.0, NaNs of "
