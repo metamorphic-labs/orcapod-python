@@ -72,13 +72,13 @@ def print_lineage(node, depth=0):
 
 print_lineage(job.nodes["session_means"])
 # session_means
-#   SelectDataColumns_1
+#   SelectDataColumns_2
 #     GroupBy
 #       rates
 #         Join
 #           SelectDataColumns_3
 #             units
-#           SelectDataColumns_2
+#           SelectDataColumns_1
 #             sessions
 ```
 
@@ -269,7 +269,7 @@ result of the node, including those of earlier runs over other inputs, like
     #   Join
     #     SelectDataColumns_3
     #       units
-    #     SelectDataColumns_2
+    #     SelectDataColumns_1
     #       sessions
     ```
 

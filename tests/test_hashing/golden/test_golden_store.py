@@ -1385,7 +1385,8 @@ def test_a_case_declaring_an_unknown_provisional_name_is_refused(
 def test_the_repository_cases_declare_exactly_the_measured_cases() -> None:
     """The cases that depend on a provisional operator, source or library value type,
     measured for ITL-1266, ITL-1279, ITL-1324 and ITL-1331
-    (docs/dev/scripts/itl_1279/measure_relocation.py), and no other. A split case is
+    (docs/dev/scripts/itl_1279/measure_relocation.py), plus the two canonical schema
+    form cases of ITL-640, and no other. A split case is
     listed once: its provisional part. No case declares a ``PollingSource`` (ITL-1314)."""
     declared = {
         (group, name): names
@@ -1431,6 +1432,9 @@ def test_the_repository_cases_declare_exactly_the_measured_cases() -> None:
         ("torch", "type"): torch,
         ("torch", "single_field"): torch,
         ("torch", "datagram"): torch,
+        # The canonical schema form of the library value types (ITL-640).
+        ("arrow", "schema_storage_form_library"): (*numpy_pandas, *polars),
+        ("torch", "schema_storage_form"): torch,
     }
 
 

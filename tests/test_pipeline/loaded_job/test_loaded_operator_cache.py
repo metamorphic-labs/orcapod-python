@@ -609,11 +609,22 @@ def _store_the_fixture_join(store: ArrowDatabaseProtocol) -> Any:
     return run_join
 
 
-def test_a_format_0_1_0_file_finds_its_join_table_and_never_shows_its_rows_as_none() -> (
+# The Join's pipeline hash as the 0.1.0 file records it, and as this build computes it:
+# ITL-640 (a schema enters every pipeline hash as its Arrow schema) moved it, so this
+# build stores the join at another path and the file keeps the one it records.
+FORMAT_0_1_0_JOIN_PIPELINE_HASH = (
+    "semantic_v1:09b483535c0d9c1fc9a3a82b93739225dd44bae3ab51673532ca890bb4e5975d"
+)
+ITL_640_JOIN_PIPELINE_HASH = (
+    "semantic_v1:84d4fb834381a28efa8e41394421cf8663bf0e08bf665d9de54c857b9b1ca833"
+)
+
+
+def test_a_format_0_1_0_file_keeps_its_join_path_and_never_shows_its_rows_as_none() -> (
     None
 ):
-    """The real 0.1.0 file: the run's path; the node has not run (ITL-1095) and its
-    stored view raises."""
+    """The real 0.1.0 file: the path it records; the node has not run (ITL-1095) and
+    its stored view raises."""
     store = InMemoryArrowDatabase()
     run_join = _store_the_fixture_join(store)
     loaded = PipelineJob.load(str(FORMAT_0_1_0), database=store)
@@ -622,8 +633,11 @@ def test_a_format_0_1_0_file_finds_its_join_table_and_never_shows_its_rows_as_no
     node.attach_databases(
         pipeline_database=store.at(*name), cache_mode=CacheMode.REPLAY
     )
-    assert node.pipeline_hash() == run_join.pipeline_hash()
-    assert node.node_identity_path == run_join.node_identity_path
+    assert node.pipeline_hash().to_string() == FORMAT_0_1_0_JOIN_PIPELINE_HASH
+    assert run_join.pipeline_hash().to_string() == ITL_640_JOIN_PIPELINE_HASH
+    # The same operator; only the schema component of the path moved.
+    assert node.node_identity_path[:-1] == run_join.node_identity_path[:-1]
+    assert node.node_identity_path[-1] == f"schema:{node.pipeline_hash().to_hex()}"
     assert node.head().status is ViewStatus.NOT_COMPUTED
     with pytest.raises(
         RuntimeError, match=r"'Join': the job file does not record .*ITL-1048"

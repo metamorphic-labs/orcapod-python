@@ -128,23 +128,23 @@ rule_job.run()
 # A hash kept as a value carries its label.
 rule_node = rule_job.nodes["double"]
 print(rule_node.pipeline_hash())
-# semantic_v1:d6a114849775f6c2b3ddffadea22542268abb320e09a6fa5d4b0caa2e6a374d6
+# semantic_v1:c5017a4872a8f16b99ae544571d5f0459d59cb001451bde11021825f4c2c020f
 
 # A hash inside a name is the bare digest: the function uri and the table path.
 print(double.pod.uri)
-# ('double', '32567b339b2e50ee4f435e6234441a0415db766db953431439e81cf471c94945', 'v0', 'python.function.v1')
+# ('double', 'ba1e0a0db33c4ca8ffd67ba2b02ce05a00f0fd5b9d16ab8153cc540fd67e55be', 'v0', 'python.function.v1')
 pipeline_table = next(p for p in rule_store.list_sources() if "_result" not in p)
 print("/".join(pipeline_table))
-# my_pipeline/double/32567b339b2e50ee4f435e6234441a0415db766db953431439e81cf471c94945/v0/python.function.v1/schema:d6a114849775f6c2b3ddffadea22542268abb320e09a6fa5d4b0caa2e6a374d6/pdb_v1
+# my_pipeline/double/ba1e0a0db33c4ca8ffd67ba2b02ce05a00f0fd5b9d16ab8153cc540fd67e55be/v0/python.function.v1/schema:c5017a4872a8f16b99ae544571d5f0459d59cb001451bde11021825f4c2c020f/pdb_v1
 
 # Stored columns hold labelled hashes; the system-tag column name holds a bare digest.
 stored = rule_store.get_all_records(pipeline_table)
 print(ContentHash.from_prefixed_digest(stored["__input_data_hash"][0].as_py()))
 # arrow_v1:000002fcbe7eec1821a57679d34084a583d8282798563aa706ecb9c0c24382580de4df
 print(ContentHash.from_prefixed_digest(stored["__node_content_hash"][0].as_py()))
-# semantic_v1:9f558e2253c200686d3f0a8c01b7d6e9ae6fd93885d396e697f9b9b79a06a197
+# semantic_v1:97b375d9ccdb0a11c6c90c6c0e8818c874a816b94eaea77a6949be3f7433e507
 print([name for name in stored.column_names if name.startswith("_tag_source_id")])
-# ['_tag_source_id::3bd6e739b7e15bd3402717af3bafd487d480f3b382028cb22c2250fcb6a90e64']
+# ['_tag_source_id::a6cc3f4239c696722e50039db2c30e3fbd35b07dbfe9e07fe406ca71b5035af2']
 ```
 
 The path is `<job>/<function name>/<output-schema digest>/v<major>/<wrapper kind>/schema:<pipeline digest>/<table layout>`.
