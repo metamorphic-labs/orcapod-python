@@ -2,9 +2,11 @@
 
 Every row is a column type, every column a database. A cell is measured, never declared:
 a table holding two columns of the type (the second with a null when the type is
-nullable) is written with ``add_records`` and flushed, a second batch of the same type is
-appended, and both are read back with ``get_all_records``, then compared exactly with what
-was written (every nested field's name, nullability and metadata, a map's
+nullable) is written with ``add_records`` and flushed; the same type is appended as slices
+of a larger table (three rows over two chunks, then the null row alone at a nonzero
+offset); the same columns with other field metadata (the column's own, and a nested
+field's) are appended, which must be refused naming the column; and every batch is read
+back with ``get_all_records``, then compared exactly with what was written (every nested field's name, nullability and metadata, a map's
 ``keys_sorted``, values bit for bit), up to the large variants every Orcapod table uses
 (``arrow_utils.normalize_to_large_types``). The outcome is one of:
 
@@ -35,7 +37,7 @@ import decimal
 import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
@@ -135,6 +137,9 @@ def _logical(
 
     return build
 
+
+# ``pa.map_`` with key and item fields (which pyarrow takes; its stubs take types only).
+map_of_fields: Any = pa.map_
 
 D = decimal.Decimal
 _NAN = float("nan")
@@ -402,6 +407,28 @@ ROWS: tuple[Row, ...] = (
         ),
     ),
     Row(
+        "map<string, int64 {unit: m}> (item metadata)",
+        "names and metadata",
+        _plain(
+            map_of_fields(
+                pa.field("key", pa.string(), nullable=False),
+                pa.field("value", pa.int64(), metadata={"unit": "m"}),
+            ),
+            [[("a", 1), ("b", 2)], [], [("c", None)]],
+        ),
+    ),
+    Row(
+        "map<string {unit: m}, int64> (key metadata)",
+        "names and metadata",
+        _plain(
+            map_of_fields(
+                pa.field("key", pa.string(), nullable=False, metadata={"unit": "m"}),
+                pa.field("value", pa.int64()),
+            ),
+            [[("a", 1), ("b", 2)], [], [("c", None)]],
+        ),
+    ),
+    Row(
         "int64 {unit: s} (field metadata)",
         "names and metadata",
         _plain(pa.int64(), [1, 2, 3], metadata={"unit": "s"}),
@@ -557,7 +584,8 @@ def build_table(row: Row, root: Path) -> pa.Table:
 
 
 @contextlib.contextmanager
-def _database(name: str, root: Path) -> Iterator[Any]:
+def open_database(name: str, root: Path) -> Iterator[Any]:
+    """The database ``name`` (one of ``DATABASES``), its files under ``root``."""
     if name == "in-memory":
         yield InMemoryArrowDatabase()
     elif name == "Delta":
@@ -707,6 +735,65 @@ def _same_values(a: Any, b: Any) -> bool:
     return a.equals(b)
 
 
+_CHANGED = {b"orcapod:matrix": b"changed"}
+
+
+def _with_changed_metadata(field: "pa.Field[Any]") -> "pa.Field[Any]":
+    return field.with_metadata(cast(Any, {**(field.metadata or {}), **_CHANGED}))
+
+
+def _nested_changed(arrow_type: Any) -> Any:
+    """``arrow_type`` with its first nested field's metadata changed, or ``None``."""
+    t = pa.types
+    if isinstance(arrow_type, pa.ExtensionType):
+        return None
+    if t.is_struct(arrow_type):
+        fields = list(arrow_type)
+        return pa.struct([_with_changed_metadata(fields[0]), *fields[1:]])
+    if t.is_map(arrow_type):
+        return pa.map_(  # pyright: ignore[reportCallIssue]  # pyarrow takes key/item fields
+            arrow_type.key_field,
+            _with_changed_metadata(arrow_type.item_field),
+            keys_sorted=arrow_type.keys_sorted,
+        )
+    if t.is_large_list(arrow_type):
+        return pa.large_list(_with_changed_metadata(arrow_type.value_field))
+    if t.is_list(arrow_type):
+        return pa.list_(_with_changed_metadata(arrow_type.value_field))
+    if t.is_fixed_size_list(arrow_type):
+        return pa.list_(
+            _with_changed_metadata(arrow_type.value_field), arrow_type.list_size
+        )
+    return None
+
+
+def _attribute_changes(rows: pa.Table) -> list[tuple[str, pa.Table]]:
+    """``rows`` (new ids) with other field attributes on ``x`` and ``y``: the columns'
+    own metadata, then, for a nested type, its first nested field's metadata."""
+    ids = pa.array([b"c1", b"c2", b"c3"], pa.large_binary())
+    rows = rows.set_column(0, rows.schema.field("id"), ids)
+    out = []
+    own = rows
+    for name in ("x", "y"):
+        index = own.schema.get_field_index(name)
+        own = own.set_column(
+            index, _with_changed_metadata(own.schema.field(name)), own.column(index)
+        )
+    out.append(("column metadata", own))
+    nested = rows
+    for name in ("x", "y"):
+        index = nested.schema.get_field_index(name)
+        field = nested.schema.field(name)
+        changed = _nested_changed(field.type)
+        if changed is None:
+            return out
+        # Built from the values: the append must be refused, so they are never read.
+        column = pa.array(nested.column(index).to_pylist(), changed)
+        nested = nested.set_column(index, field.with_type(changed), column)
+    out.append(("nested field metadata", nested))
+    return out
+
+
 def measure(row: Row, database: str, root: Path) -> Cell:
     """Write ``row``'s table to ``database`` and say what came back."""
     root.mkdir(parents=True, exist_ok=True)
@@ -714,7 +801,7 @@ def measure(row: Row, database: str, root: Path) -> Cell:
         written = build_table(row, root)
     except Exception as exc:  # noqa: BLE001  # a row Orcapod cannot build is reported
         return Cell(SILENT, f"cannot build the column: {type(exc).__name__}: {exc}")
-    with _database(database, root) as db:
+    with open_database(database, root) as db:
         path = ("matrix", "t")
         if database == "PostgreSQL":
             try:
@@ -745,22 +832,43 @@ def measure(row: Row, database: str, root: Path) -> Cell:
                 SILENT,
                 f"write failed without naming the column: {type(exc).__name__}: {str(exc)[:160]}",
             )
-        # A second batch of the same type appended: the stored type must take it, and
-        # both batches read back exactly (on Delta, through the merged record).
-        appended = written.set_column(
-            0,
-            written.schema.field("id"),
-            pa.array([b"s1", b"s2", b"s3"], pa.large_binary()),
-        )
-        try:
-            db.add_records(path, appended, record_id_column="id", flush=True)
-        except Exception as exc:  # noqa: BLE001
-            return Cell(
-                SILENT,
-                f"first write kept, the same type appended failed: "
-                f"{type(exc).__name__}: {str(exc)[:160]}",
+        # The same type appended as slices (a list's offsets then start past zero):
+        # three rows over two chunks, then the null row alone at a nonzero offset. The
+        # stored type must take them, and every batch reads back exactly (on Delta,
+        # through the merged record).
+        doubled = pa.concat_tables([written, written])
+        for ids, rows in (
+            ([b"s1", b"s2", b"s3"], doubled.slice(1, 3)),
+            ([b"s4"], doubled.slice(4, 1)),
+        ):
+            appended = rows.set_column(
+                0, written.schema.field("id"), pa.array(ids, pa.large_binary())
             )
-        written = pa.concat_tables([written, appended])
+            try:
+                db.add_records(path, appended, record_id_column="id", flush=True)
+            except Exception as exc:  # noqa: BLE001
+                return Cell(
+                    SILENT,
+                    f"first write kept, the same type appended as a slice failed: "
+                    f"{type(exc).__name__}: {str(exc)[:160]}",
+                )
+            written = pa.concat_tables([written, appended])
+        # The same columns with other field attributes appended: the table holds one
+        # type per column, so the append must be refused naming the column (the rows
+        # read back below are then those already written).
+        for where, changed in _attribute_changes(written.slice(0, 3)):
+            try:
+                db.add_records(path, changed, record_id_column="id", flush=True)
+            except Exception as exc:  # noqa: BLE001
+                if not _names_a_column(exc):
+                    return Cell(
+                        SILENT,
+                        f"an append with other {where} failed without naming the "
+                        f"column: {type(exc).__name__}: {str(exc)[:160]}",
+                    )
+                db.flush()
+                continue
+            return Cell(SILENT, f"an append with other {where} was accepted")
         try:
             back = db.get_all_records(path, record_id_column="id")
         except Exception as exc:  # noqa: BLE001
@@ -858,8 +966,11 @@ What a cell says:
   a connector database), and nothing of the table is written.
 
 How it is measured: a table holding two columns of the type (the second nullable, with a
-null row) is written with `add_records` and flushed, a second batch of the same type is
-appended, and both are read back with `get_all_records`.
+null row) is written with `add_records` and flushed. The same type is then appended as
+slices of a larger table (three rows over two chunks, then the null row alone), and the
+same columns with other field metadata (the column's own, and a nested field's) are
+appended, which every database must refuse, naming the column. Every batch written is read
+back with `get_all_records`.
 The SpiralDB column is measured through the test suite's disk fake of SpiralDB, which
 models what SpiralDB does to a column (no SpiralDB is used). No database tells tag
 columns from data columns, so a type is kept or refused the same way in either role.
@@ -881,17 +992,24 @@ Some refusals depend on the values or names as well as the type:
   no type is refused (the `null` row below), while a `null`-typed value is kept where the
   table already stores a type.
 - Delta and SpiralDB give a map's key and item fields back as `key` and `value`, so a map
-  with other names is refused.
+  with other names is refused. SpiralDB does not keep metadata on a map's key or item
+  field, so a map with such metadata is refused there.
 - A fixed-size list or fixed-size binary read back by Delta with another length or width
   than its type is refused on read, never padded or cut.
 
+A table holds one type per column. An append whose columns differ from the held ones
+(stored, or still pending) in field metadata (the column's own, or a nested field's: a
+struct child, a list item, a map key or item), in a nested field's name, or in whether a
+map's keys are sorted is refused by every database, naming the column and the field,
+before anything is written: either side's rows would otherwise read back with the other
+side's attributes. A change of nullability is left to each database's own rule.
+
 Appending to a Delta table may evolve a struct column (fields added, omitted or in
 another order): every value keeps its field's name, and an omitted field reads as null
-in the appended rows. An append is refused, naming the column and the field, before
-anything is written, when it would add a non-nullable struct field (the stored rows have
-no value for it), add a struct field inside a map (Delta cannot), or change what the
-column states about a nested field: a list item's name or metadata, a struct child's
-metadata, a map's sorted keys.
+in the appended rows. An append is refused, naming the column and the field, when it
+would add a non-nullable struct field (the stored rows have no value for it) or add a
+struct field inside a map (Delta cannot). A nested field the append makes nullable reads
+as nullable afterwards, as Delta stores it.
 """
 
 

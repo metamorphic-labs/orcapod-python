@@ -272,21 +272,45 @@ def _to_stored(array: Any, original: Any) -> Any:
             for i in range(original.num_fields)
         ]
         return pa.StructArray.from_arrays(children, fields=list(stored), mask=mask)
+    offsets, start, length = rebased_offsets(array)
     if t.is_map(original):
         return pa.MapArray.from_arrays(
-            array.offsets,
-            _to_stored(array.keys, original.key_type),
-            _to_stored(array.items, original.item_type),
+            offsets,
+            _to_stored(array.keys.slice(start, length), original.key_type),
+            _to_stored(array.items.slice(start, length), original.item_type),
             type=cast(Any, stored),  # pyarrow's stubs type ``type`` too narrowly
             mask=mask,
         )
     array_class = pa.LargeListArray if t.is_large_list(original) else pa.ListArray
     return array_class.from_arrays(
-        array.offsets,
-        _to_stored(array.values, original.value_type),
+        offsets,
+        _to_stored(array.values.slice(start, length), original.value_type),
         type=stored,
         mask=mask,
     )
+
+
+def rebased_offsets(array: Any) -> tuple[Any, int, int]:
+    """Return a list or map array's offsets from zero, and the child rows they index.
+
+    The offsets of a sliced array start where its first row's items do, and Arrow's
+    ``from_arrays`` constructors take no validity mask over such offsets ("Null bitmap
+    with offsets slice not supported"). Rebased offsets over the child sliced to the
+    returned span index the same items, so a rebuilt array keeps every row, null or
+    not, of the slice (ITL-1334).
+
+    Args:
+        array: A list, large list or map array, possibly sliced.
+
+    Returns:
+        The offsets as a new array starting at zero, of the array's offset type; the
+        position of the first child row; the number of child rows.
+    """
+    offsets = array.offsets
+    values = offsets.to_numpy(zero_copy_only=False)
+    start = int(values[0]) if len(values) else 0
+    stop = int(values[-1]) if len(values) else 0
+    return pa.array(values - start, offsets.type), start, stop - start
 
 
 def _is_nested(arrow_type: pa.DataType) -> bool:
@@ -337,19 +361,20 @@ def _restore(array: Any, target: Any) -> Any:
             _restore(array.field(stored[field.name]), field.type) for field in target
         ]
         return pa.StructArray.from_arrays(children, fields=list(target), mask=mask)
+    offsets, start, length = rebased_offsets(array)
     if t.is_map(target):
         return pa.MapArray.from_arrays(
-            array.offsets,
-            _restore(array.keys, target.key_type),
-            _restore(array.items, target.item_type),
+            offsets,
+            _restore(array.keys.slice(start, length), target.key_type),
+            _restore(array.items.slice(start, length), target.item_type),
             type=cast(Any, target),  # pyarrow's stubs type ``type`` too narrowly
             mask=mask,
         )
     large = t.is_large_list(target)
     array_class = pa.LargeListArray if large else pa.ListArray
     return array_class.from_arrays(
-        array.offsets.cast(pa.int64() if large else pa.int32()),
-        _restore(array.values, target.value_type),
+        offsets.cast(pa.int64() if large else pa.int32()),
+        _restore(array.values.slice(start, length), target.value_type),
         type=target,
         mask=mask,
     )
@@ -469,8 +494,9 @@ def merged_type(stored: pa.DataType, incoming: pa.DataType) -> pa.DataType:
     and adds the new ones, so the merged struct has the stored fields, in their order,
     each merged with the incoming field of the same name, then the incoming fields the
     stored struct does not have. Lists, fixed-size lists and maps merge their items.
-    Any other type is the stored one: the append check (``_types_conflict``) has
-    already refused an incoming type that changes it.
+    A nested field is nullable when either side's is (``_merged_field``). Any other
+    type is the stored one: the append check (``_types_conflict``) has already refused
+    an incoming type that changes it.
 
     Args:
         stored: The column's type as stored (its recorded type, else its stored type).
@@ -484,7 +510,7 @@ def merged_type(stored: pa.DataType, incoming: pa.DataType) -> pa.DataType:
         incoming_fields = {field.name: field for field in incoming}
         stored_names = {field.name for field in stored}
         fields = [
-            field.with_type(merged_type(field.type, incoming_fields[field.name].type))
+            _merged_field(field, incoming_fields[field.name])
             if field.name in incoming_fields
             else field
             for field in stored
@@ -492,10 +518,8 @@ def merged_type(stored: pa.DataType, incoming: pa.DataType) -> pa.DataType:
         return pa.struct(fields)
     if t.is_map(stored) and t.is_map(incoming):
         return pa.map_(  # pyright: ignore[reportCallIssue]  # pyarrow takes key/item fields
-            stored.key_field.with_type(merged_type(stored.key_type, incoming.key_type)),
-            stored.item_field.with_type(
-                merged_type(stored.item_type, incoming.item_type)
-            ),
+            _merged_field(stored.key_field, incoming.key_field),
+            _merged_field(stored.item_field, incoming.item_field),
             keys_sorted=stored.keys_sorted,
         )
     if (
@@ -507,15 +531,25 @@ def merged_type(stored: pa.DataType, incoming: pa.DataType) -> pa.DataType:
             and stored.list_size == incoming.list_size
         )
     ):
-        value_field = stored.value_field.with_type(
-            merged_type(stored.value_type, incoming.value_type)
-        )
+        value_field = _merged_field(stored.value_field, incoming.value_field)
         if t.is_large_list(stored):
             return pa.large_list(value_field)
         if t.is_list(stored):
             return pa.list_(value_field)
         return pa.list_(value_field, stored.list_size)
     return stored
+
+
+def _merged_field(
+    stored: "pa.Field[Any]", incoming: "pa.Field[Any]"
+) -> "pa.Field[Any]":
+    """A nested field once rows of ``incoming`` are appended where ``stored`` is held:
+    the stored field (its name and metadata, which the append check requires the rows
+    to share), of the merged type, nullable when either side is: Delta relaxes a
+    nested field so, and a record claiming non-null over appended nulls would be
+    false (whether such an append is refused belongs to ITL-842)."""
+    merged = stored.with_type(merged_type(stored.type, incoming.type))
+    return merged.with_nullable(stored.nullable or incoming.nullable)
 
 
 def with_recorded_type(

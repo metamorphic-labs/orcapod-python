@@ -324,7 +324,8 @@ def test_spiraldb_failed_marker_write_stores_no_row(
 
 
 def test_spiraldb_write_of_stored_rows_keeps_the_stored_metadata(spiral: None) -> None:
-    """A write that stores no row never replaces a metadata entry already stored."""
+    """A write with other field metadata never replaces a metadata entry already stored:
+    it is refused, naming the column, even when every row is already stored (ITL-1334)."""
     db = ConnectorArrowDatabase(SpiralDBConnector("p"))
     path = ("node", "table")
     db.add_records(path, _rows([1, 2]), record_id_column="rid", flush=True)
@@ -340,21 +341,28 @@ def test_spiraldb_write_of_stored_rows_keeps_the_stored_metadata(spiral: None) -
             ]
         )
     )
-    db.add_records(
-        path, other, record_id_column="rid", skip_duplicates=True, flush=True
-    )
+    with pytest.raises(InputValidationError, match="'unit'"):
+        db.add_records(
+            path, other, record_id_column="rid", skip_duplicates=True, flush=True
+        )
+    db.flush()
     table = ConnectorArrowDatabase(SpiralDBConnector("p")).get_all_records(path)
     assert table is not None and stored_data_tags(table.schema) == ("unit",)
 
 
 def test_spiraldb_marks_no_stored_row_it_skips(spiral: None) -> None:
-    """Rows stored unmarked stay unmarked when the same ids are written marked."""
+    """Rows stored unmarked stay unmarked when the same ids are written marked: the
+    write is refused, naming the column (ITL-1334)."""
     db = ConnectorArrowDatabase(SpiralDBConnector("p"))
     path = ("node", "table")
     rows = _rows([1, 2])
     unmarked = rows.cast(pa.schema([field.remove_metadata() for field in rows.schema]))
     db.add_records(path, unmarked, record_id_column="rid", flush=True)
-    db.add_records(path, rows, record_id_column="rid", skip_duplicates=True, flush=True)
+    with pytest.raises(InputValidationError, match="'unit'"):
+        db.add_records(
+            path, rows, record_id_column="rid", skip_duplicates=True, flush=True
+        )
+    db.flush()
     table = ConnectorArrowDatabase(SpiralDBConnector("p")).get_all_records(path)
     assert table is not None and stored_data_tags(table.schema) == ()
 

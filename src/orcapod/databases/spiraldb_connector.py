@@ -414,6 +414,28 @@ def _holds_extension_type(arrow_type: pa.DataType) -> bool:
     )
 
 
+def _holds_map_field_metadata(arrow_type: pa.DataType) -> bool:
+    """Whether ``arrow_type`` is or nests a map whose key or item field has metadata.
+
+    The connector's metadata record (``_serialize_field_meta_tree``) does not cover a
+    map's key and item fields, so such metadata would read back dropped (ITL-1334).
+
+    Args:
+        arrow_type: The column's Arrow type.
+
+    Returns:
+        ``True`` for such a map at any depth of lists, structs and maps.
+    """
+    if pa.types.is_map(arrow_type) and (
+        arrow_type.key_field.metadata or arrow_type.item_field.metadata
+    ):
+        return True
+    return any(
+        _holds_map_field_metadata(arrow_type.field(i).type)
+        for i in range(arrow_type.num_fields)
+    )
+
+
 class SpiralDBConnector:
     """DBConnectorProtocol implementation backed by SpiralDB (pyspiral).
 
@@ -1068,6 +1090,11 @@ class SpiralDBConnector:
         if arrow_utils.holds_renamed_map(arrow_type):
             return (
                 "SpiralDB gives a map's key and item fields back as 'key' and 'value'"
+            )
+        if _holds_map_field_metadata(arrow_type):
+            return (
+                "the connector does not keep the field metadata of a map's key and "
+                "item, so it would read back without it"
             )
         return None
 

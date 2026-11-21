@@ -406,3 +406,53 @@ def test_adding_a_struct_field_inside_a_map_is_refused(tmp_path: pathlib.Path) -
     _assert_refused_and_nothing_pending(
         tmp_path, first, second, "'x'.*inside a map, which Delta cannot add"
     )
+
+
+def _with_new_column_rows(ids: list[bytes], *, added: bool) -> pa.Table:
+    """A recorded list, a recorded ``uint8`` and two logical lists; ``added`` adds a
+    column the stored table does not have."""
+    import pathlib as _pathlib
+
+    from orcapod.contexts import get_default_context
+
+    logical = get_default_context().type_converter.python_dicts_to_arrow_table(
+        [{"s": {1, 2}, "p": [_pathlib.Path("/a")]} for _ in ids],
+        python_schema={"s": set[int], "p": list[_pathlib.Path]},
+    )
+    table = _rows(
+        ids,
+        items=(
+            [[1, 2]] * len(ids),
+            pa.large_list(pa.field("item", I64, nullable=False)),
+        ),
+        u=([200] * len(ids), pa.uint8()),
+    )
+    table = table.append_column("k", pa.array([7] * len(ids), I64))
+    table = table.append_column(logical.schema.field("s"), logical.column("s"))
+    table = table.append_column(logical.schema.field("p"), logical.column("p"))
+    if added:
+        table = table.append_column("added", pa.array(["a"] * len(ids)))
+    return table
+
+
+@pytest.mark.parametrize("read", sorted(READS))
+def test_a_new_column_keeps_every_other_columns_type(
+    tmp_path: pathlib.Path, read: str
+) -> None:
+    """An append adding a column goes through a MERGE that writes each field's metadata
+    from the rows: a list column handed to it keeps its record and a logical list its
+    extension name, so neither reads back as Delta's plain list (ITL-1334)."""
+    first = _with_new_column_rows([b"1"], added=False)
+    db = DeltaTableDatabase(tmp_path)
+    db.add_records(PATH, first, record_id_column="id", flush=True)
+    db.add_records(
+        PATH,
+        _with_new_column_rows([b"2"], added=True),
+        record_id_column="id",
+        flush=True,
+    )
+    back = READS[read](DeltaTableDatabase(tmp_path))
+    assert back is not None
+    for name in ("items", "u", "s", "p"):
+        assert str(back.schema.field(name).type) == str(first.schema.field(name).type)
+    assert back.sort_by("id").column("added").to_pylist() == [None, "a"]

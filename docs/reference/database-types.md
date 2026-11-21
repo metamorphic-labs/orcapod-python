@@ -36,8 +36,11 @@ What a cell says:
   a connector database), and nothing of the table is written.
 
 How it is measured: a table holding two columns of the type (the second nullable, with a
-null row) is written with `add_records` and flushed, a second batch of the same type is
-appended, and both are read back with `get_all_records`.
+null row) is written with `add_records` and flushed. The same type is then appended as
+slices of a larger table (three rows over two chunks, then the null row alone), and the
+same columns with other field metadata (the column's own, and a nested field's) are
+appended, which every database must refuse, naming the column. Every batch written is read
+back with `get_all_records`.
 The SpiralDB column is measured through the test suite's disk fake of SpiralDB, which
 models what SpiralDB does to a column (no SpiralDB is used). No database tells tag
 columns from data columns, so a type is kept or refused the same way in either role.
@@ -59,17 +62,24 @@ Some refusals depend on the values or names as well as the type:
   no type is refused (the `null` row below), while a `null`-typed value is kept where the
   table already stores a type.
 - Delta and SpiralDB give a map's key and item fields back as `key` and `value`, so a map
-  with other names is refused.
+  with other names is refused. SpiralDB does not keep metadata on a map's key or item
+  field, so a map with such metadata is refused there.
 - A fixed-size list or fixed-size binary read back by Delta with another length or width
   than its type is refused on read, never padded or cut.
 
+A table holds one type per column. An append whose columns differ from the held ones
+(stored, or still pending) in field metadata (the column's own, or a nested field's: a
+struct child, a list item, a map key or item), in a nested field's name, or in whether a
+map's keys are sorted is refused by every database, naming the column and the field,
+before anything is written: either side's rows would otherwise read back with the other
+side's attributes. A change of nullability is left to each database's own rule.
+
 Appending to a Delta table may evolve a struct column (fields added, omitted or in
 another order): every value keeps its field's name, and an omitted field reads as null
-in the appended rows. An append is refused, naming the column and the field, before
-anything is written, when it would add a non-nullable struct field (the stored rows have
-no value for it), add a struct field inside a map (Delta cannot), or change what the
-column states about a nested field: a list item's name or metadata, a struct child's
-metadata, a map's sorted keys.
+in the appended rows. An append is refused, naming the column and the field, when it
+would add a non-nullable struct field (the stored rows have no value for it) or add a
+struct field inside a map (Delta cannot). A nested field the append makes nullable reads
+as nullable afterwards, as Delta stores it.
 
 ## Integer
 
@@ -179,6 +189,8 @@ metadata, a map's sorted keys.
 | `struct<a: int32 {unit: s}>` | kept | kept (recorded type) | refused | refused | refused |
 | `map<string, int64>, keys sorted` | kept | kept (recorded type) | refused | refused | kept |
 | `map<k: string, v: int64>, keys sorted` | kept | refused | refused | refused | refused |
+| `map<string, int64 {unit: m}> (item metadata)` | kept | kept (recorded type) | refused | refused | refused |
+| `map<string {unit: m}, int64> (key metadata)` | kept | kept (recorded type) | refused | refused | refused |
 | `int64 {unit: s} (field metadata)` | kept | kept | refused | refused | kept |
 
 ## Nullability
