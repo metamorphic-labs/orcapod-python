@@ -72,8 +72,10 @@ What it shows ([Looking at data](streams.md#looking-at-data) states each rule in
   63,349").
 - **Tag columns** come first and are marked: in a notebook their headers are bold (in an
   accent colour), a vertical rule separates them from the data columns and a line under the
-  header says "bold = tag". A [data-tag](data-tags.md) is one column: the notebook preview
-  shows it once, among the tags, marked as a tag.
+  header says "bold = tag". A [data-tag](data-tags.md) is one column: the preview shows
+  it once, among the tags, with its header bold and underlined, and the line says
+  "bold underlined = data-tag (a tag that is also data)". The line names only the marks
+  shown: the tags of `units` are all plain.
 - **Large cells** are summarised (an array as `ndarray float64 (2, 3)`, bytes as
   `bytes (300 B)`, long text and long lists shortened); `head().table` keeps the full values.
 
@@ -83,8 +85,9 @@ what is held or stored, or make a bounded table read), never call your code (a f
 predicate, a side effect) and never write to a database. So a job node shown before the job
 has run has no rows: its header says `not run`, and the table shows its columns only.
 
-In a terminal, `print(stream.head())` prints the same preview as text. There, each tag
-column's name starts with `*` ("* = tag"):
+In a terminal, `print(stream.head())` prints the same preview as text. There, each plain tag
+column's name starts with `*` ("* = tag"), and each data-tag's with `+`
+("+ = data-tag (tag and data)"):
 
 ```python
 print(units.head(3))
@@ -110,6 +113,30 @@ print(job.nodes["rates"].head())
 # │ str         ┆ str      ┆ str    ┆ i64   ┆ f64     │
 # ╞═════════════╪══════════╪════════╪═══════╪═════════╡
 # └─────────────┴──────────┴────────┴───────┴─────────┘
+```
+
+The same table read with `probe` and `unit` as data-tags (only `subject_id` and `session`
+kept plain) marks the two kinds of tag apart:
+
+```python
+units_by_probe = CSVSource(
+    str(data_dir / "units.csv"),
+    tag_columns=["subject_id", "session", "probe", "unit"],
+    tag_only_columns=["subject_id", "session"],
+    source_id="units",
+)
+print(units_by_probe.head(2))
+# CSVSource[units] — first 2 of 64 rows
+# * = tag; + = data-tag (tag and data)
+# shape: (2, 7)
+# ┌─────────────┬──────────┬────────┬───────┬────────┬──────────┬──────────┐
+# │ *subject_id ┆ *session ┆ +probe ┆ +unit ┆ region ┆ depth_um ┆ n_spikes │
+# │ ---         ┆ ---      ┆ ---    ┆ ---   ┆ ---    ┆ ---      ┆ ---      │
+# │ str         ┆ str      ┆ str    ┆ i64   ┆ str    ┆ i64      ┆ i64      │
+# ╞═════════════╪══════════╪════════╪═══════╪════════╪══════════╪══════════╡
+# │ mouse_01    ┆ s1       ┆ imec0  ┆ 0     ┆ V1     ┆ 1580     ┆ 149      │
+# │ mouse_01    ┆ s1       ┆ imec0  ┆ 1     ┆ V1     ┆ 2560     ┆ 326      │
+# └─────────────┴──────────┴────────┴───────┴────────┴──────────┴──────────┘
 ```
 
 (`head()` does not sort, so its header does not say `sorted by tags`; the preview asks for

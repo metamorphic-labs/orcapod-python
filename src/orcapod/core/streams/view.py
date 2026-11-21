@@ -136,30 +136,44 @@ class ColumnRoleMark:
         html_style: Inline CSS of the column's header cell in the HTML display.
         text_legend: The legend line of the text display naming this mark, or empty.
         html_legend: The legend line of the HTML display naming this mark, or empty.
+        group: The group of columns the role is shown in: the HTML display draws its
+            rule between two groups, never between two roles of one group.
     """
 
     text_prefix: str = ""
     html_style: str = ""
     text_legend: str = ""
     html_legend: str = ""
+    group: str = ""
 
 
 # The one place that says how the display marks each column role (developer, November 13,
-# 2026, ITL-1081). Roles today: "tag" and "data". A new role (e.g. a data-tag) gets
-# its own entry here; the renderers need no change. The accent colour has a contrast of
-# about 4.3:1 on white and on #111; bold carries the meaning without the colour.
+# 2026, ITL-1081; the data-tag, ITL-1304). Roles: "tag" (a plain tag), "data-tag" (a tag
+# that is also the data column of the same name, shown once) and "data". The renderers
+# read only this table. The accent colour has a contrast of about 4.3:1 on white and on
+# #111; bold (and the underline of a data-tag) carries the meaning without the colour. The
+# legend names the marks shown, in this table's order.
 COLUMN_ROLE_MARKS: dict[str, ColumnRoleMark] = {
     "tag": ColumnRoleMark(
         text_prefix="*",
         html_style="font-weight:bold;color:#2a7fb8",
         text_legend="* = tag",
         html_legend="bold = tag",
+        group="tags",
     ),
-    "data": ColumnRoleMark(),
+    "data-tag": ColumnRoleMark(
+        text_prefix="+",
+        html_style="font-weight:bold;text-decoration:underline;color:#2a7fb8",
+        text_legend="+ = data-tag (tag and data)",
+        html_legend="bold underlined = data-tag (a tag that is also data)",
+        group="tags",
+    ),
+    "data": ColumnRoleMark(group="data"),
 }
 
-# The HTML display draws this rule after the last column of each role, on every row, so
-# the table reads "tags | data". It takes the text colour, so it reads on any theme.
+# The HTML display draws this rule after the last column of each group of roles, on every
+# row, so the table reads "tags | data". It takes the text colour, so it reads on any
+# theme.
 ROLE_BOUNDARY_STYLE = "border-right:2px solid currentColor"
 
 
@@ -186,6 +200,8 @@ class StreamView:
         label: The name shown for it: its label, or for a source given no label its
             source id (``display_name``). Never used as an identity.
         tag_columns: The columns of ``table`` that are tags.
+        data_tag_columns: The columns of ``tag_columns`` that are data-tags: each is also
+            a data column of the stream (``data_tags_of``). Only the display marks them.
         total_rows: The stream's row count when it is known without computing, else
             ``None``. For ``PARTIAL``, the number of rows computed so far.
         total_is_estimate: ``True`` when ``total_rows`` is a recorded estimate.
@@ -219,6 +235,7 @@ class StreamView:
     kind: str
     label: str
     tag_columns: tuple[str, ...] = ()
+    data_tag_columns: tuple[str, ...] = ()
     total_rows: int | None = None
     total_is_estimate: bool = False
     origin: str = "held"
@@ -245,13 +262,15 @@ class StreamView:
         description: str | None = None,
         display_all_rows: bool = True,
     ) -> StreamView:
-        """Return a view with rows of ``stream``."""
+        """Return a view with rows of ``stream``; its data-tags are ``data_tags_of``."""
+        tags = tuple(c for c in tag_columns if c in table.column_names)
         return cls(
             table=table,
             status=status,
             kind=type(stream).__name__,
             label=display_name(stream),
-            tag_columns=tuple(c for c in tag_columns if c in table.column_names),
+            tag_columns=tags,
+            data_tag_columns=data_tags_of(stream, tags),
             total_rows=total_rows,
             total_is_estimate=total_is_estimate,
             origin=origin,
@@ -270,13 +289,16 @@ class StreamView:
         tag_columns: tuple[str, ...],
         note: str | None = None,
     ) -> StreamView:
-        """Return a head of ``stream`` with no rows: ``table`` holds its columns only."""
+        """Return a head of ``stream`` with no rows: ``table`` holds its columns only;
+        its data-tags are ``data_tags_of``."""
+        tags = tuple(c for c in tag_columns if c in table.column_names)
         return cls(
             table=table.slice(0, 0),
             status=status,
             kind=type(stream).__name__,
             label=display_name(stream),
-            tag_columns=tuple(c for c in tag_columns if c in table.column_names),
+            tag_columns=tags,
+            data_tag_columns=data_tags_of(stream, tags),
             note=note,
         )
 
@@ -492,20 +514,22 @@ class StreamView:
         return f"first {shown:,} of {total:,} {noun}{suffix}"
 
     def _display_columns(self) -> list[tuple[str, str]]:
-        """Return the shown columns in display order, each with its role: tags first."""
+        """Return the shown columns in display order, each with its role: the tags first,
+        in tag order, each a ``"data-tag"`` or a plain ``"tag"``, then the data. A
+        data-tag is one column and is shown once, among the tags."""
         tags = [c for c in self.tag_columns if c in self.table.column_names]
-        return [(c, "tag") for c in tags] + [
-            (c, "data") for c in self.table.column_names if c not in self.tag_columns
-        ]
+        return [
+            (c, "data-tag" if c in self.data_tag_columns else "tag") for c in tags
+        ] + [(c, "data") for c in self.table.column_names if c not in self.tag_columns]
 
     def _legend(self, text: bool) -> str:
-        """Return the legend line of the marks the shown columns carry, or empty."""
-        roles = dict.fromkeys(role for _, role in self._display_columns())
+        """Return the legend line of the marks the shown columns carry, in the order of
+        ``COLUMN_ROLE_MARKS``, or empty."""
+        shown = {role for _, role in self._display_columns()}
         legends = [
-            COLUMN_ROLE_MARKS[role].text_legend
-            if text
-            else COLUMN_ROLE_MARKS[role].html_legend
-            for role in roles
+            mark.text_legend if text else mark.html_legend
+            for role, mark in COLUMN_ROLE_MARKS.items()
+            if role in shown
         ]
         return "; ".join(legend for legend in legends if legend)
 
@@ -585,7 +609,8 @@ class StreamView:
 
     def __str__(self) -> str:
         """Return the preview as text: header, legend and the rows, each column's
-        header prefixed by its role's mark (``*`` for a tag)."""
+        header prefixed by its role's mark (``*`` for a plain tag, ``+`` for a
+        data-tag)."""
         lines = [self.header()]
         legend = self._legend(text=True)
         if legend:
@@ -608,17 +633,20 @@ def _mark_columns(frame_html: str, roles: Sequence[str]) -> str:
 
     The cells are found by position, never by name, so a name that HTML escapes is
     handled as Polars wrote it. The header cell of a column gets its role's
-    ``html_style``; every cell of the last column of a role followed by another role gets
-    ``ROLE_BOUNDARY_STYLE``. Everything else is passed on unchanged.
+    ``html_style``; every cell of the last column of a group of roles followed by another
+    group gets ``ROLE_BOUNDARY_STYLE``. Everything else is passed on unchanged.
 
     Args:
         frame_html: The HTML of the display frame, one column per entry of ``roles``.
         roles: The role of each column, in display order.
     """
     header = [COLUMN_ROLE_MARKS[role].html_style for role in roles]
+    groups = [COLUMN_ROLE_MARKS[role].group for role in roles]
     boundary = [
-        ROLE_BOUNDARY_STYLE if i + 1 < len(roles) and roles[i + 1] != roles[i] else ""
-        for i in range(len(roles))
+        ROLE_BOUNDARY_STYLE
+        if i + 1 < len(groups) and groups[i + 1] != groups[i]
+        else ""
+        for i in range(len(groups))
     ]
     marker = _ColumnMarker(header, boundary)
     marker.feed(frame_html)
@@ -733,6 +761,26 @@ def display_name(stream: Any) -> str:
     if len(name) > _MAX_NAME:
         name = f"{name[:30]}…{name[-12:]}"
     return name
+
+
+def data_tags_of(stream: Any, tag_columns: Sequence[str]) -> tuple[str, ...]:
+    """Return the names of ``tag_columns`` that are data-tags of ``stream``.
+
+    A data-tag is one column in both roles: a name among both the tag and the data keys
+    of the stream's public ``keys()``. A view that shows tag columns has its stream's
+    schema already, so reading the keys computes, reads and polls nothing; a view with no
+    tag column (one whose schema would need a poll, ``schema_requires_io``) does not read
+    them.
+
+    Args:
+        stream: The stream, source or node whose view is built.
+        tag_columns: The tag columns the view shows, in display order.
+    """
+    if not tag_columns:
+        return ()
+    tags, data = stream.keys()
+    both = set(tags) & set(data)
+    return tuple(c for c in tag_columns if c in both)
 
 
 def preview_html(stream: Any) -> str:
