@@ -72,10 +72,12 @@ class FormsStructural:
 
 
 def _converter() -> Any:
+    """The default data context's type converter."""
     return get_default_context().type_converter
 
 
 def _hasher() -> Any:
+    """The default data context's Arrow hasher."""
     return get_default_context().arrow_hasher
 
 
@@ -173,6 +175,7 @@ def test_two_logical_types_still_differ() -> None:
 
 @pytest.mark.parametrize("name", list(LOGICAL))
 def test_the_writer_keeps_an_identifier_in_metadata_form(name: str) -> None:
+    """Each form writes the live form's text, and reads back to its hash."""
     live = _schema(LOGICAL[name])
     for given in (live, _metadata_form(live), _unregistered_form(live)):
         texts = arrow_type_texts(given)
@@ -184,6 +187,7 @@ def test_the_writer_keeps_an_identifier_in_metadata_form(name: str) -> None:
 
 
 def test_the_writer_keeps_a_nested_identifier_in_metadata_form() -> None:
+    """A nested metadata-form identifier is written as its identifier."""
     path = _converter().python_type_to_arrow_type(Path)
     metadata = _metadata_form(pa.schema([pa.field("p", path)])).field("p").metadata
     assert metadata is not None
@@ -236,6 +240,7 @@ def test_a_saved_pipeline_keeps_a_metadata_form_slot(tmp_path: Path) -> None:
 
 
 def _path_table() -> pa.Table:
+    """Two tags and two ``Path`` data columns, non-null."""
     converter = _converter()
     table = converter.python_dicts_to_arrow_table(
         [
@@ -251,37 +256,46 @@ class _TableImpl:
     """A polling implementation that returns one table, declaring a given schema."""
 
     def __init__(self, table: pa.Table, schema: pa.Schema) -> None:
+        """Hold the one table to fetch and the schema to declare."""
         self._table = table
         self._schema = schema
         self._done = False
 
     def identity(self) -> Any:
+        """This implementation's identity, from the declared column names."""
         return ("forms", tuple(self._schema.names))
 
     def to_config(self) -> None:
+        """Not saved: a test implementation."""
         return None
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "_TableImpl":
+        """Never called: the implementation is not saved."""
         raise NotImplementedError
 
     def schema(self) -> pa.Schema:
+        """The declared schema."""
         return self._schema
 
     async def poll(self, cursor: Any = None) -> bool:
+        """New data until the one table is fetched."""
         return not self._done
 
     async def fetch(self, cursor: Any = None) -> Any:
+        """The one table, once."""
         self._done = True
         return Cursor.now(1), self._table
 
     async def close(self) -> None:
+        """Nothing to close."""
         return None
 
 
 @pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
 @pytest.mark.parametrize("form", ["live", "metadata"])
 def test_a_polling_source_declared_in_metadata_form_takes_its_rows(form: str) -> None:
+    """A metadata-form ``Path`` declares ``Path`` and takes its rows."""
     table = _path_table()
     declared = table.schema if form == "live" else _metadata_form(table.schema)
     source = PollingSource(
@@ -296,6 +310,7 @@ def test_a_polling_source_declared_in_metadata_form_takes_its_rows(form: str) ->
 
 @pytest.mark.parametrize("form", ["live", "metadata"])
 def test_a_slot_declared_in_metadata_form_binds_its_logical_type(form: str) -> None:
+    """A metadata-form slot declares ``Path``, binds the source and runs."""
     table = _path_table()
     schema = table.schema if form == "live" else _metadata_form(table.schema)
     tags = pa.schema([schema.field("k"), schema.field("g")])
@@ -317,6 +332,7 @@ def test_a_slot_declared_in_metadata_form_binds_its_logical_type(form: str) -> N
 
 
 def test_a_slot_declared_in_metadata_form_refuses_another_logical_type() -> None:
+    """A metadata-form ``Path`` slot refuses plain strings."""
     table = _path_table()
     schema = _metadata_form(table.schema)
     slot = SourceNode(
@@ -349,10 +365,12 @@ def test_a_slot_declared_in_metadata_form_refuses_another_logical_type() -> None
 
 
 def _index(stream: Any) -> Any:
+    """A read-only ``Index`` operator over ``stream``."""
     return Index("l8", 0)(stream.select_data_columns(["l8", "i8"]), label="ro")
 
 
 def _pick(stream: Any) -> Any:
+    """A read-only ``Pick`` operator over ``stream``."""
     return Pick("d", "q")(stream.select_data_columns(["d", "i8"]), label="ro")
 
 
@@ -367,6 +385,7 @@ ORCHESTRATORS: dict[str, Callable[[], Any]] = {
 def test_a_loaded_read_only_operator_keeps_its_arrow_types(
     tmp_path: Path, build: Callable[[Any], Any], orchestrator: str
 ) -> None:
+    """After a save and load, ``as_source()`` keeps the narrow Arrow types."""
     database = InMemoryArrowDatabase()
     job = PipelineJob(name="read_only", database=database)
     with job:
@@ -397,6 +416,7 @@ NESTED_IDENTIFIERS: dict[str, Any] = {"Path": Path, "File": op.File}
 
 
 def _identifier_metadata(python_type: Any) -> dict[bytes | str, bytes | str]:
+    """The ``ARROW:extension:*`` keys of ``python_type``'s logical type."""
     extension = _converter().python_type_to_arrow_type(python_type)
     assert isinstance(extension, pa.ExtensionType)
     return {
@@ -482,6 +502,7 @@ NESTED_CASES = [
 
 
 def _data_schema(schema: pa.Schema) -> pa.Schema:
+    """The ``x`` and ``w`` fields of ``schema``."""
     return pa.schema([schema.field("x"), schema.field("w")])
 
 
@@ -510,7 +531,10 @@ def test_an_arrow_declared_slot_with_a_nested_identifier_works(
 
 @pytest.mark.parametrize(("container", "identifier"), NESTED_CASES)
 class TestNestedIdentifier:
+    """An identifier nested in a plain struct or list: the source, its slots, a save and load."""
+
     def _source(self, table: pa.Table) -> ArrowTableSource:
+        """An in-memory source of ``table`` with tags ``k``, ``g``."""
         return ArrowTableSource(
             table, tag_columns=["k", "g"], tag_only_columns=True, source_id="nested"
         )
@@ -519,6 +543,7 @@ class TestNestedIdentifier:
     def test_an_arrow_declared_slot_is_the_source_and_its_stream_slot(
         self, container: str, identifier: str, live: bool
     ) -> None:
+        """Declared slot, stream slot and source: one Python schema, Arrow schema and hash."""
         tags, data, table = _nested(container, identifier, live=live)
         source = self._source(table)
         declared = SourceNode(name="src", tag_schema=tags, data_schema=data)
@@ -537,6 +562,7 @@ class TestNestedIdentifier:
     def test_the_identifier_is_part_of_the_hash(
         self, container: str, identifier: str
     ) -> None:
+        """Without its nested identifier, the source is another identity."""
         tags, data, table = _nested(container, identifier)
         plain = table.cast(
             pa.schema(
@@ -554,6 +580,7 @@ class TestNestedIdentifier:
     def test_the_saved_text_reads_back_typed_and_hashed(
         self, container: str, identifier: str, live: bool
     ) -> None:
+        """The saved text reads back to the stored schema, typed and hashed."""
         _, data, table = _nested(container, identifier, live=live)
         texts = arrow_type_texts(data)
         assert all("extension<" in text for text in texts.values())
@@ -569,6 +596,7 @@ class TestNestedIdentifier:
     def test_a_saved_slot_loads_and_binds(
         self, container: str, identifier: str, tmp_path: Path
     ) -> None:
+        """Both slot forms save and load to the source's identity, and the loaded slot runs."""
         tags, data, table = _nested(container, identifier)
         source = self._source(table)
         slots = {
@@ -593,14 +621,13 @@ class TestNestedIdentifier:
             assert typed_arrow_schemas(loaded_slot) == typed_arrow_schemas(source)
             for tags_or_data in typed_arrow_schemas(loaded_slot):
                 assert tags_or_data.empty_table().num_rows == 0, label
-        slot = slots["declared"]
-
-        job = PipelineJob(name="nested", database=InMemoryArrowDatabase())
-        with job:
-            MapData({"x": "z"})(slot, label="renamed")
-        job.bind(sources={"src": self._source(table)})
-        job.run()
-        assert job.nodes["renamed"].as_table().num_rows == 2
+            # The loaded slot itself binds the source and runs.
+            job = PipelineJob(name="nested", database=InMemoryArrowDatabase())
+            with job:
+                MapData({"x": "z"})(loaded_slot, label="renamed")
+            job.bind(sources={"src": self._source(table)})
+            job.run()
+            assert job.nodes["renamed"].as_table().num_rows == 2, label
 
 
 def _without_identifiers(arrow_type: pa.DataType) -> pa.DataType:
@@ -635,6 +662,7 @@ def _without_identifiers(arrow_type: pa.DataType) -> pa.DataType:
 
 
 def _identified(name: str, python_type: Any) -> pa.Field[Any]:
+    """A non-null storage-form field carrying ``python_type``'s identifier."""
     return pa.field(name, pa.large_string(), nullable=False).with_metadata(
         _identifier_metadata(python_type)
     )
@@ -688,6 +716,67 @@ CONTAINER_TEXTS: dict[str, pa.DataType] = {
         ),
     ),
 }
+
+
+# A nested field name holding a character of the type grammar, or starting or ending
+# with whitespace, is written JSON-quoted (CodeRabbit on PR 454); others as they are.
+QUOTED_NAMES: dict[str, tuple[pa.DataType, str]] = {
+    "map key named left:right": (
+        pa.map_(
+            pa.field("left:right", pa.large_string(), nullable=False),  # pyright: ignore[reportArgumentType]  # pyarrow takes fields; the stubs name only types
+            pa.field("v", pa.int8()),  # pyright: ignore[reportArgumentType]  # as above
+        ),
+        'map<"left:right": large_string not null, v: int8>',
+    ),
+    "struct child named a:b": (
+        pa.struct([pa.field("a:b", pa.int8())]),
+        'struct<"a:b": int8>',
+    ),
+    "struct children named 'a, b' and c": (
+        pa.struct([pa.field("a, b", pa.int8()), pa.field("c", pa.int8())]),
+        'struct<"a, b": int8, c: int8>',
+    ),
+    "struct child named a<b": (
+        pa.struct([pa.field("a<b", pa.int8(), nullable=False)]),
+        'struct<"a<b": int8 not null>',
+    ),
+    "large list item named x>y": (
+        pa.large_list(pa.field("x>y", pa.int8())),
+        'large_list<"x>y": int8>',
+    ),
+    "fixed-size list item named (i)": (
+        pa.list_(pa.field("(i)", pa.int8()), 2),
+        'fixed_size_list<"(i)": int8>[2]',
+    ),
+    "struct child named q with a trailing space": (
+        pa.struct([pa.field("q ", pa.int8())]),
+        'struct<"q ": int8>',
+    ),
+    "struct child named with a quote": (
+        pa.struct([pa.field('say "hi"', pa.int8())]),
+        'struct<"say \\"hi\\"": int8>',
+    ),
+    "nested: a list of a struct with a:b": (
+        pa.large_list(pa.field("item", pa.struct([pa.field("a:b", pa.int8())]))),
+        'large_list<item: struct<"a:b": int8>>',
+    ),
+    "ordinary names stay as they are": (
+        pa.struct([pa.field("key", pa.int8()), pa.field("value", pa.int8())]),
+        "struct<key: int8, value: int8>",
+    ),
+}
+
+
+@pytest.mark.parametrize("label", list(QUOTED_NAMES))
+def test_a_nested_field_name_reads_back_exactly(label: str) -> None:
+    """Names, quoted or not, survive the saved text exactly."""
+    arrow_type, text = QUOTED_NAMES[label]
+    schema = pa.schema([pa.field("c", arrow_type), pa.field("d", arrow_type)])
+    texts = arrow_type_texts(schema)
+    assert texts == {"c": text, "d": text}
+    restored = arrow_schema_from_texts(texts, _converter(), ["c", "d"])
+    assert restored.equals(schema, check_metadata=True)
+    assert _hasher().hash_schema(restored) == _hasher().hash_schema(schema)
 
 
 @pytest.mark.parametrize("label", list(CONTAINER_TEXTS))

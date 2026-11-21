@@ -616,9 +616,24 @@ class PollingSource(RootSource, Generic[T]):
             tag_schema, data_schema = self.output_schema(
                 columns=ColumnConfig(system_tags=config.system_tags)
             )
+            converter = self.data_context.type_converter
             table = arrow_utils.make_empty_table(
-                {**tag_schema, **data_schema}, self.data_context.type_converter
+                {**tag_schema, **data_schema}, converter
             )
+            if self._declared_arrow is not None:
+                # The declared columns have the declared Arrow types (ITL-640; a
+                # Python type means one Arrow type, but a pa.Schema declaration may
+                # name another, int32 for int); only the system tags are built from
+                # their Python schema.
+                declared = self._declared_arrow
+                table = pa.schema(
+                    [
+                        declared.field(name)
+                        if name in declared.names
+                        else table.schema.field(name)
+                        for name in table.column_names
+                    ]
+                ).empty_table()
             tag_columns = tuple(tag_schema.keys())
         else:
             table = pa.table({})

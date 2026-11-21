@@ -1163,8 +1163,9 @@ class UniversalTypeConverter:
         """The Arrow extension names of every logical type this converter knows, sorted.
 
         The registry's ``registered_extension_names``: the registered types and the
-        ones declared for loading on first use. Types built by a factory (native
-        containers, user classes) have no fixed name and are not listed.
+        ones declared for loading on first use, and a type a factory built (a native
+        container, a user class) once it has been registered; one not built yet is
+        absent.
 
         Returns:
             The extension names; empty without a logical type registry.

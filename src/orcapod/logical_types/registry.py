@@ -323,12 +323,15 @@ class LogicalTypeRegistry:
             )
 
     def registered_extension_names(self) -> tuple[str, ...]:
-        """The Arrow extension names of every logical type this registry knows, sorted.
+        """The Arrow extension names of every logical type this registry holds, sorted.
 
         The types registered and the ones declared for loading on first use (a type
-        whose library is imported only when needed, such as ``torch.Tensor``). Types
-        built by a factory (``factory_categories``) are not listed: they have no fixed
-        name.
+        whose library is imported only when needed, such as ``torch.Tensor``). A type a
+        factory builds (``factory_categories``: a native container, a user class) is
+        listed only once something has built and registered it in this registry (a
+        conversion of ``list[uuid.UUID]`` registers ``list[orcapod.uuid]``); one not
+        built yet is absent. A registry built fresh from a data context's registration
+        lists its built-in types only.
 
         Returns:
             The extension names.

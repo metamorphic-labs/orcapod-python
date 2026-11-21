@@ -63,8 +63,8 @@ You do not say what to join on. `units` has tags `subject_id, session, probe, un
 the tags and all data columns of both. This is the step the two-stream function pod in Part 2
 did for you.
 
-The column order is chosen by Orcapod, not by the order you wrote the streams in: here the
-columns of `sessions` come first. Refer to columns by name, never by position.
+The column order is chosen by Orcapod, not by the order you wrote the streams in. Refer to
+columns by name, never by position.
 
 Four things to know:
 

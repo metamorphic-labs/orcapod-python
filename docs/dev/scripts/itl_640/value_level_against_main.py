@@ -10,8 +10,10 @@ and once over main's, and compare the outputs:
     PYTHONPATH=<main checkout>/src uv run python \\
         docs/dev/scripts/itl_640/value_level_against_main.py OUT_DIR > main.json
 
-``OUT_DIR`` holds the files and directories (fixed paths, so the metadata form, which
-hashes the path text, is comparable between the two runs).
+The fixture files and directories are written into ``OUT_DIR/fixtures``, which each run
+deletes and creates again, at the same absolute path, so both runs hash the same paths
+(the metadata form hashes the path text) and the same contents, and nothing else already
+in ``OUT_DIR`` is touched or hashed.
 """
 
 from __future__ import annotations
@@ -32,7 +34,22 @@ warnings.simplefilter("ignore")
 
 
 def main(root: Path) -> dict[str, object]:
-    root.mkdir(parents=True, exist_ok=True)
+    """Write the fixtures under ``root`` and return the value-level hashes.
+
+    Args:
+        root: The output directory. Its ``fixtures`` folder is deleted and written
+            again on every run, so each run hashes exactly the same files at the same
+            absolute paths; nothing else in ``root`` is read or changed.
+
+    Returns:
+        The hashes of each case, by case and kind of hash.
+    """
+    import shutil
+
+    root = root / "fixtures"
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
     converter = get_default_context().type_converter
     hasher = get_default_context().arrow_hasher
     files, directories = [], []

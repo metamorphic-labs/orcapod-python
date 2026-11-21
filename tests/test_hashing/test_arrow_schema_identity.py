@@ -239,8 +239,9 @@ class TestStoredTables:
         assert first.node_identity_path != second.node_identity_path
         for node, x in zip(nodes, DIFFERENT[pair]):
             stored = node.as_source().as_table().schema.field("z").type
-            assert pa.types.is_large_list(stored) == pa.types.is_large_list(x.type)
-            assert node.as_source().pipeline_hash() == node.as_source().pipeline_hash()
+            # The stored type is the input's exactly: width and sign, and a list
+            # item's nullability (CodeRabbit on PR 454: compared directly).
+            assert stored == x.type
             assert stored == node.as_table().schema.field("z").type
 
     def test_as_source_keeps_its_identity_when_rows_arrive(
@@ -382,6 +383,29 @@ class TestPollingSource:
         ):
             source.as_table()
         assert source.pipeline_hash() == before
+
+    def test_an_unpolled_preview_has_the_declared_arrow_types(self) -> None:
+        """``head()`` before a poll shows the declared types, not the Python types'
+        (CodeRabbit on PR 454), and fetches nothing."""
+        table = _table(pa.array([1, 2], pa.int32()))
+        declared = table.schema.set(
+            table.schema.get_field_index("g"), pa.field("g", pa.int16(), nullable=False)
+        )
+
+        class _NeverFetched(_Impl):
+            async def fetch(self, cursor: Any = None) -> Any:
+                raise AssertionError("fetched")
+
+        source = PollingSource(
+            _NeverFetched(table, declared),
+            tag_columns=["k", "g"],
+            record_id_columns="k",
+        )
+        for columns in (None, {"system_tags": True}):
+            shown = source.head(columns=columns).as_table().schema
+            assert shown.field("g").type == pa.int16()
+            assert shown.field("x").type == pa.int32()
+            assert shown.field("w").type == pa.float64()
 
     @pytest.mark.parametrize("form", ["python", "arrow"])
     def test_a_batch_with_undeclared_columns_is_refused(self, form: str) -> None:
@@ -626,3 +650,37 @@ def test_get_all_records_of_a_memory_cache_keeps_the_type(tmp_path: Path) -> Non
         records = source.get_all_records()
         assert records is not None
         assert records.schema.field("x").type == pa.list_(pa.int8(), 2)
+
+
+# CodeRabbit on PR 454: a slot that declares one role and takes the other from its
+# source keeps its declared role's Arrow types.
+@pytest.mark.parametrize("declared_role", ["tag", "data"])
+def test_a_slot_declaring_one_role_keeps_that_roles_types(declared_role: str) -> None:
+    from orcapod.core.nodes.source_node import SourceJobNode
+
+    table = _table(
+        pa.array([1, 2], pa.int64()), pa.field("x", pa.int64(), nullable=False)
+    )
+    source = _source(table)
+    tags = Schema({"k": str | None, "g": int | None})
+    data = Schema({"x": int | None, "w": float | None})
+    partial = (
+        SourceJobNode("slot", tag_schema=tags, bound_source=source)
+        if declared_role == "tag"
+        else SourceJobNode("slot", data_schema=data, bound_source=source)
+    )
+    source_tags, source_data = typed_arrow_schemas(source)
+    full = SourceJobNode(
+        "slot",
+        tag_schema=tags if declared_role == "tag" else partial.output_schema()[0],
+        data_schema=data if declared_role == "data" else partial.output_schema()[1],
+        bound_source=source,
+    )
+    tag_arrow, data_arrow = partial.arrow_schemas
+    if declared_role == "tag":
+        assert all(field.nullable for field in tag_arrow)
+        assert data_arrow == source_data
+    else:
+        assert all(field.nullable for field in data_arrow)
+        assert tag_arrow == source_tags
+    assert partial.output_schema() == full.output_schema()

@@ -8,7 +8,7 @@ and every column type below, one table ``(id, x)`` is written with ``add_records
 flushed and read back with ``get_all_records``. The hash of the schema of ``x`` read
 back is compared with the hash of the schema written. ``REFUSED`` means the database
 refuses the type when it is written (``require_storable``), which is not a silent
-change. Every ``DIFFERS`` is a place where something stored and read again (a node's
+change; ``READ FAILED`` means the write succeeded and the read raised. Every ``DIFFERS`` is a place where something stored and read again (a node's
 stored view, ``as_source``, a cached source, a loaded job) would get another identity
 than the same rows in memory.
 """
@@ -145,6 +145,10 @@ def main(root: Path) -> None:
             path = ("t", f"c{i}")
             try:
                 db.add_records(path, written, record_id_column="id", flush=True)
+            except Exception as exc:  # noqa: BLE001
+                cells.append(f"REFUSED {type(exc).__name__}: {exc}"[:42])
+                continue
+            try:
                 back = db.get_all_records(path, record_id_column="id")
                 assert back is not None
                 read_field = back.schema.field("x")
@@ -157,7 +161,8 @@ def main(root: Path) -> None:
                 else:
                     cells.append(f"DIFFERS -> {describe(read_field)}"[:42])
             except Exception as exc:  # noqa: BLE001
-                cells.append(f"REFUSED {type(exc).__name__}: {exc}"[:42])
+                # Written, but the read failed: not a refusal (CodeRabbit on PR 454).
+                cells.append(f"READ FAILED {type(exc).__name__}: {exc}"[:42])
         print(f"{label:34}" + "".join(f"{c:44}" for c in cells))
 
 

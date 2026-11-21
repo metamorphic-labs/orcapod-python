@@ -8,9 +8,10 @@ It reads the golden files of ``REF`` (default ``origin/main``) from git and the 
 the working tree, the frozen and the provisional files together, and checks:
 
 1. every changed, removed or added entry is one of the developer's categories: A label
-   only (``arrow_v1`` to ``arrow_schema_v1``, same digest), B value moved, C renamed (an
-   entry whose name holds a system-tag column name: paired with its new name by the name
-   with every digest blanked), or one of ``ADDITIONS``;
+   only (exactly ``arrow_v1`` to ``arrow_schema_v1``, same digest), B value moved, C
+   renamed (an entry whose name holds a system-tag column name: paired with its new name
+   by the name with every digest blanked, exactly one old and one new entry per blanked
+   name), or one of ``ADDITIONS``;
 2. the A, B and C sets equal the sets measured before the golden step
    (``docs/dev/specs/itl-640/golden-moves-measured.json``);
 3. the "must not move" entries are byte-identical: the semantic group, data and row
@@ -20,11 +21,19 @@ the working tree, the frozen and the provisional files together, and checks:
    ``arrow_v1`` / ``arrow_ordered_v1`` value outside the arrow ``schema`` and
    ``extension_schema`` cases, whose schema hashes carried ``arrow_v1`` before ITL-640:
    those are category A) and operator identities;
-4. every entry stays in its kind of file (frozen or provisional);
-5. ``generate_golden_hashes.py --check`` matches.
+4. every entry stays in its kind of file (frozen or provisional), changed or not;
+5. a renamed entry whose value moved is a function pipeline table's ``record_ids``, and
+   its move is exactly the system-tag rename: each stored row's record-id preimage (its
+   tags, system tags, input data hash and recomputation index) is rebuilt from a fresh
+   run of the case, hashed (it must give the new pinned ids) and hashed again with every
+   renamed digest in the system-tag column names mapped back (it must give the old
+   pinned ids), so nothing but the column names moved those ids;
+6. ``generate_golden_hashes.py --check`` matches.
 
-``--write`` writes the full old/new list to ``docs/dev/specs/itl-640/golden-moves.json``.
-Exit status 1 if any check fails.
+The base is resolved once to a full commit, which every read of the base uses. With
+``--write``, the full old/new list is written to
+``docs/dev/specs/itl-640/golden-moves.json``, only when every check passes (a failed run
+leaves the last valid report). Exit status 0 when every check passes, 1 otherwise.
 """
 
 from __future__ import annotations
@@ -36,6 +45,8 @@ import pathlib
 import re
 import subprocess
 import sys
+import warnings
+from collections.abc import Iterable
 
 ROOT = pathlib.Path(__file__).resolve().parents[4]
 GOLDEN = "tests/test_hashing/golden/data/v1"
@@ -80,6 +91,7 @@ Entry = tuple[str, str]  # (group, entry name)
 
 
 def _group_and_place(path: str) -> tuple[str, str]:
+    """The group and the kind of file (frozen or provisional) of a golden file path."""
     name = pathlib.PurePosixPath(path)
     if name.parent.name == "provisional":
         return name.stem, "provisional"
@@ -87,6 +99,7 @@ def _group_and_place(path: str) -> tuple[str, str]:
 
 
 def _base_files(ref: str) -> dict[str, str]:
+    """Every golden file of the commit ``ref`` (a full commit id), read from git."""
     listing = subprocess.run(
         ["git", "ls-tree", "-r", "--name-only", ref, GOLDEN],
         cwd=ROOT,
@@ -108,6 +121,7 @@ def _base_files(ref: str) -> dict[str, str]:
 
 
 def _head_files() -> dict[str, str]:
+    """Every golden file in the working tree."""
     folder = ROOT / GOLDEN
     return {
         str(path.relative_to(ROOT)): path.read_text()
@@ -116,6 +130,7 @@ def _head_files() -> dict[str, str]:
 
 
 def _entries(files: dict[str, str]) -> tuple[dict[Entry, object], dict[Entry, str]]:
+    """The pinned values and the kind of file of every entry in ``files``."""
     values: dict[Entry, object] = {}
     places: dict[Entry, str] = {}
     for path, text in files.items():
@@ -130,10 +145,12 @@ def _entries(files: dict[str, str]) -> tuple[dict[Entry, object], dict[Entry, st
 
 
 def blank(name: str) -> str:
+    """``name`` with every digest blanked: the key a renamed entry keeps."""
     return HEX.sub("H", name)
 
 
 def kind_of(name: str) -> str:
+    """The kind of value an entry pins (its last name component, digests blanked)."""
     last = re.sub(r"\[[^\]]*\]", "[]", blank(name)).split(".")[-1]
     if last.startswith("_tag_record_id"):
         return "row record id (value)"
@@ -143,11 +160,144 @@ def kind_of(name: str) -> str:
 
 
 def label_only(old: object, new: object) -> bool:
+    """Whether ``old`` became ``new`` by category A: ``arrow_v1`` to ``arrow_schema_v1``,
+    the digest unchanged (no other label change counts)."""
     if not (isinstance(old, str) and isinstance(new, str)):
         return False
     old_label, _, old_digest = old.partition(":")
     new_label, _, new_digest = new.partition(":")
-    return old_label != new_label and old_digest == new_digest != ""
+    return (
+        old_label == "arrow_v1"
+        and new_label == "arrow_schema_v1"
+        and old_digest == new_digest != ""
+    )
+
+
+def _text(entries: Iterable[Entry]) -> set[str]:
+    """Entries as ``group:name`` text."""
+    return {f"{group}:{name}" for group, name in entries}
+
+
+def _record_id_moves_unexplained(
+    moved: set[Entry],
+    renamed: dict[Entry, Entry],
+    old: dict[Entry, object],
+    new: dict[Entry, object],
+) -> list[str]:
+    """Check 5: the failures among the renamed entries whose value moved.
+
+    Args:
+        moved: The renamed entries whose value moved, by their old name.
+        renamed: Every renamed entry, old name to new name.
+        old: The base's pinned values.
+        new: The pinned values after the step.
+
+    Returns:
+        One failure text per entry that is not a pipeline ``record_ids`` move exactly
+        explained by the system-tag rename.
+    """
+    failures: list[str] = []
+    record_ids = {
+        e for e in moved if e[0] == "pipeline" and e[1].endswith(".record_ids")
+    }
+    failures += [
+        f"renamed and moved, not a record_ids entry: {g}:{n}"
+        for g, n in sorted(moved - record_ids)
+    ]
+    if not record_ids:
+        return failures
+    sys.path.insert(0, str(ROOT))
+    warnings.simplefilter("ignore")
+    import pyarrow as pa
+
+    from orcapod.contexts import get_default_context
+    from orcapod.databases import InMemoryArrowDatabase
+    from tests.test_hashing.golden import cases
+
+    back: dict[str, str] = {}  # new digest -> old digest, from every rename
+    for (_, old_name), (_, new_name) in renamed.items():
+        for before, after in zip(HEX.findall(old_name), HEX.findall(new_name)):
+            if before != after:
+                if back.get(after, before) != before:
+                    failures.append(f"digest {after} renamed from two digests")
+                back[after] = before
+    hasher = get_default_context().arrow_hasher
+    captured: list[InMemoryArrowDatabase] = []
+    original_init = InMemoryArrowDatabase.__init__
+
+    def capturing_init(
+        self: InMemoryArrowDatabase, *args: object, **kwargs: object
+    ) -> None:
+        original_init(self, *args, **kwargs)  # pyright: ignore[reportArgumentType]  # passed through as given
+        captured.append(self)
+
+    case_functions = {name: fn for name, fn, _ in cases._CASES["pipeline"]}  # pyright: ignore[reportPrivateUsage]  # the registered cases, as the generator reads them
+    InMemoryArrowDatabase.__init__ = capturing_init  # pyright: ignore[reportAttributeAccessIssue]  # restored below
+    try:
+        for entry in sorted(record_ids):
+            case_name = entry[1].partition(".table[")[0]
+            table_path = renamed[entry][1].partition(".table[")[2][
+                : -len("].record_ids")
+            ]
+            captured.clear()
+            _ = case_functions[case_name]()
+            rebuilt_new: list[object] = []
+            rebuilt_old: list[object] = []
+            for database in captured:
+                for path in database.list_sources():
+                    if "/".join(path) != table_path:
+                        continue
+                    records = database.get_all_records(
+                        path, record_id_column="__golden_record_id"
+                    )
+                    assert records is not None
+                    names = records.column_names
+                    system = [c for c in names if c.startswith("_tag_")]
+                    user = names[1 : names.index(system[0])]
+                    for row in range(records.num_rows):
+                        preimage = records.slice(row, 1).select(
+                            [
+                                *user,
+                                *system,
+                                "__input_data_hash",
+                                "__pipeline_recomputation_index",
+                            ]
+                        )
+                        preimage = preimage.cast(
+                            pa.schema(
+                                [
+                                    f.with_type(pa.int32())
+                                    if f.name == "__pipeline_recomputation_index"
+                                    else f
+                                    for f in preimage.schema
+                                ]
+                            )
+                        )
+                        old_names = preimage.rename_columns(
+                            [
+                                HEX.sub(lambda m: back.get(m.group(0), m.group(0)), c)
+                                for c in preimage.column_names
+                            ]
+                        )
+                        rebuilt_new.append(
+                            cases._jsonable(
+                                hasher.hash_table(preimage).to_prefixed_digest()
+                            )  # pyright: ignore[reportPrivateUsage]  # the generator's own value encoding
+                        )
+                        rebuilt_old.append(
+                            cases._jsonable(
+                                hasher.hash_table(old_names).to_prefixed_digest()
+                            )  # pyright: ignore[reportPrivateUsage]  # as above
+                        )
+            if sorted(rebuilt_new, key=str) != new[renamed[entry]]:  # pyright: ignore[reportCallIssue, reportArgumentType]  # JSON values
+                failures.append(
+                    f"record ids not rebuilt from the stored rows: {entry[1]}"
+                )
+            elif sorted(rebuilt_old, key=str) != old[entry]:  # pyright: ignore[reportCallIssue, reportArgumentType]  # as above
+                failures.append(f"record ids moved beyond the rename: {entry[1]}")
+    finally:
+        InMemoryArrowDatabase.__init__ = original_init  # pyright: ignore[reportAttributeAccessIssue]  # restoring
+    return failures
 
 
 def must_not_move(entry: Entry, old: object) -> str | None:
@@ -178,19 +328,25 @@ def must_not_move(entry: Entry, old: object) -> str | None:
 
 
 def main() -> int:
+    """Run every check, print the report; with ``--write`` write it when all pass.
+
+    Returns:
+        0 when every check passes, 1 otherwise.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", default="origin/main")
     parser.add_argument("--write", action="store_true")
     args = parser.parse_args()
 
+    # Resolved once: the listing and every blob read use this one commit.
     base_commit = subprocess.run(
-        ["git", "rev-parse", "--short=8", args.base],
+        ["git", "rev-parse", "--verify", f"{args.base}^{{commit}}"],
         cwd=ROOT,
         check=True,
         capture_output=True,
         text=True,
     ).stdout.strip()
-    old, old_place = _entries(_base_files(args.base))
+    old, old_place = _entries(_base_files(base_commit))
     new, new_place = _entries(_head_files())
     failures: list[str] = []
 
@@ -205,20 +361,25 @@ def main() -> int:
     by_blank: dict[tuple[str, str], list[Entry]] = collections.defaultdict(list)
     for e in added:
         by_blank[(e[0], blank(e[1]))].append(e)
+    removed_by_blank: dict[tuple[str, str], list[Entry]] = collections.defaultdict(list)
+    for e in removed:
+        removed_by_blank[(e[0], blank(e[1]))].append(e)
     renamed: dict[Entry, Entry] = {}
     for e in sorted(removed):
-        partners = by_blank.get((e[0], blank(e[1])), [])
-        if len(partners) == 1:
+        key = (e[0], blank(e[1]))
+        partners = by_blank.get(key, [])
+        if len(partners) == 1 and len(removed_by_blank[key]) == 1:
             renamed[e] = partners[0]
         else:
-            failures.append(f"removed with {len(partners)} partners: {e[0]}:{e[1]}")
+            failures.append(
+                f"removed with {len(partners)} new and {len(removed_by_blank[key])} "
+                f"removed entries of one name: {e[0]}:{e[1]}"
+            )
     paired_new = set(renamed.values())
     extra = {f"{g}:{n}" for g, n in added - paired_new}
     c_moved = {e for e, to in renamed.items() if old[e] != new[to]}
 
-    def text(entries: object) -> set[str]:
-        return {f"{g}:{n}" for g, n in entries}  # pyright: ignore[reportGeneralTypeIssues]
-
+    text = _text
     measured = json.loads(MEASURED.read_text())
     for label, got, key in (
         ("A", text(a_set), "A_label_only"),
@@ -247,9 +408,10 @@ def main() -> int:
                 failures.append(f"must not move ({reason}), renamed and moved: {e}")
         elif e not in unchanged:
             failures.append(f"must not move ({reason}): {e[0]}:{e[1]}")
-    for e in changed:
+    for e in common:
         if old_place[e] != new_place[e]:
-            failures.append(f"changed file kind: {e}")
+            failures.append(f"in another kind of file: {e[0]}:{e[1]}")
+    failures += _record_id_moves_unexplained(c_moved, renamed, old, new)
     for e, to in renamed.items():
         if old_place[e] != new_place[to]:
             failures.append(f"renamed into another file kind: {e}")
@@ -281,7 +443,9 @@ def main() -> int:
     if check.returncode != 0:
         failures.append(f"--check failed: {check_line}")
 
-    print(f"base {args.base} = {base_commit}; frozen and provisional files together")
+    print(
+        f"base {args.base} = {base_commit[:8]}; frozen and provisional files together"
+    )
     print(f"entries on the base: {len(old)}; after the golden step: {len(new)}")
     print(f"byte-identical: {len(unchanged)}")
     print(f"A label only: {len(a_set)}")
@@ -297,8 +461,13 @@ def main() -> int:
         + ", ".join(f"{r} {n}" for r, n in sorted(guarded.items()))
     )
     print(f"--check: {check_line}")
+    if c_moved:
+        print(
+            f"record ids rebuilt: {len(c_moved)} entries; with the system-tag names "
+            "mapped back they are the old pinned ids"
+        )
 
-    if args.write:
+    if args.write and not failures:
         rows = []
         for e in sorted(a_set | b_set):
             rows.append(
@@ -334,7 +503,9 @@ def main() -> int:
                 }
             )
         OUTPUT.write_text(
-            json.dumps({"base": base_commit, "changes": rows}, indent=1, sort_keys=True)
+            json.dumps(
+                {"base": base_commit[:8], "changes": rows}, indent=1, sort_keys=True
+            )
             + "\n"
         )
         print(f"wrote {OUTPUT.relative_to(ROOT)} ({len(rows)} rows)")

@@ -54,14 +54,17 @@ def provisional_pins() -> set[tuple[str, str]]:
 
 
 def blank(name: str) -> str:
+    """``name`` with every digest blanked: the key a renamed entry keeps."""
     return HEX.sub("H", name)
 
 
 def case_of(entry: str) -> str:
+    """The case an entry belongs to (its first name component)."""
     return entry.split(".")[0]
 
 
 def kind_of(entry: str) -> str:
+    """The kind of value an entry pins (its last name component, digests blanked)."""
     name = re.sub(r"\[[^\]]*\]", "[]", blank(entry))
     last = name.split(".")[-1]
     if last.startswith("_tag_record_id"):
@@ -77,10 +80,20 @@ def label_only(old: object, new: object) -> bool:
         return False
     old_label, _, old_digest = old.partition(":")
     new_label, _, new_digest = new.partition(":")
-    return old_label != new_label and old_digest == new_digest != ""
+    return (
+        old_label == "arrow_v1"
+        and new_label == "arrow_schema_v1"
+        and old_digest == new_digest != ""
+    )
 
 
 def main(show: bool) -> None:
+    """Print the moves by category, group, case and kind.
+
+    Args:
+        show: Also list every changed entry by its full name: A (relabelled), B (moved,
+            with both values) and C (renamed, with the new name).
+    """
     pinned = pinned_entries()
     in_provisional = provisional_pins()
     kind_count: collections.Counter[tuple[str, str]] = collections.Counter()
@@ -88,6 +101,9 @@ def main(show: bool) -> None:
     renamed: list[tuple[str, str, str, bool]] = []
     relabelled: list[tuple[str, str]] = []
     unmatched: list[str] = []
+    relabelled_names: list[tuple[str, str]] = []
+    moved_names: list[tuple[str, str, object, object]] = []
+    renamed_names: list[tuple[str, str, str, bool]] = []
     stayed: collections.Counter[tuple[str, str]] = collections.Counter()
     total = 0
     for group in GROUPS:
@@ -107,9 +123,11 @@ def main(show: bool) -> None:
             if live[e] != pins[e]:
                 if label_only(pins[e], live[e]):
                     relabelled.append((group, case_of(e)))
+                    relabelled_names.append((group, e))
                     kind_count[("A label only", where)] += 1
                 else:
                     moved.append((group, case_of(e), kind_of(e), pins[e], live[e]))
+                    moved_names.append((group, e, pins[e], live[e]))
                     kind_count[("B moved", where)] += 1
             else:
                 stayed[(group, kind_of(e))] += 1
@@ -119,6 +137,7 @@ def main(show: bool) -> None:
             if len(partners) == 1:
                 value_moved = live[partners[0]] != pins[e]
                 renamed.append((group, case_of(e), kind_of(e), value_moved))
+                renamed_names.append((group, e, partners[0], value_moved))
                 where = "provisional" if (group, e) in in_provisional else "frozen"
                 kind_count[("C renamed", where)] += 1
                 if value_moved:
@@ -179,9 +198,14 @@ def main(show: bool) -> None:
             print(f"  {g:9} {k:40} {n}")
     if show:
         print()
-        print("EVERY MOVED ENTRY:")
-        for g, c, k, a, b in moved:
-            print(f"  {g}:{c} [{k}] {str(a)[:70]} -> {str(b)[:70]}")
+        print("EVERY CHANGED ENTRY (full names):")
+        for g, e in sorted(relabelled_names):
+            print(f"  A {g}:{e}")
+        for g, e, a, b in sorted(moved_names, key=lambda m: (m[0], m[1])):
+            print(f"  B {g}:{e} {str(a)[:70]} -> {str(b)[:70]}")
+        for g, e, partner, value_moved in sorted(renamed_names):
+            moved_note = " (value moved)" if value_moved else ""
+            print(f"  C {g}:{e} -> {partner}{moved_note}")
 
 
 if __name__ == "__main__":

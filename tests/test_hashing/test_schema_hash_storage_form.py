@@ -60,10 +60,12 @@ METADATA_KEY = b"ARROW:extension:metadata"
 
 
 def _converter() -> Any:
+    """The default data context's type converter."""
     return get_default_context().type_converter
 
 
 def _hasher() -> Any:
+    """The default data context's Arrow hasher."""
     return get_default_context().arrow_hasher
 
 
@@ -143,16 +145,31 @@ FACTORY_CASES: dict[str, Any] = {
 CASES: tuple[str, ...] = (*NAMED, *FACTORY_CASES)
 
 
-def _named_type(name: str) -> pa.ExtensionType:
-    """The live extension type registered under ``name``."""
+def _available_type(name: str) -> pa.ExtensionType | None:
+    """The live extension type registered under ``name``; ``None`` when the optional
+    package it needs (torch) is not installed."""
     try:
         logical_type = _converter().get_logical_type_by_arrow_extension_name(name)
-    except ImportError as exc:  # an optional package (torch) that is not installed
-        pytest.skip(f"{name}: {exc}")
+    except ImportError:  # an optional package that is not installed
+        return None
     assert logical_type is not None, name
     arrow_type = logical_type.get_arrow_extension_type()
     assert isinstance(arrow_type, pa.ExtensionType)
     return arrow_type
+
+
+def _named_type(name: str) -> pa.ExtensionType:
+    """The live extension type registered under ``name``; a test of one type is
+    skipped when its optional package is not installed."""
+    arrow_type = _available_type(name)
+    if arrow_type is None:
+        pytest.skip(f"{name}: its optional package is not installed")
+    return arrow_type
+
+
+def _available_names() -> list[str]:
+    """The named types whose optional package, if any, is installed."""
+    return [name for name in NAMED if _available_type(name) is not None]
 
 
 def _arrow_type(python_type: Any) -> pa.DataType:
@@ -204,6 +221,7 @@ def _metadata_field(field: pa.Field[Any]) -> pa.Field[Any]:
 
 
 def _metadata_type(arrow_type: pa.DataType) -> pa.DataType:
+    """``arrow_type`` with every nested extension type in the metadata form."""
     if pa.types.is_struct(arrow_type):
         return pa.struct([_metadata_field(child) for child in arrow_type])
     if pa.types.is_large_list(arrow_type):
@@ -304,9 +322,11 @@ def _non_large(schema: pa.Schema) -> pa.Schema:
     """A metadata-form schema with every storage type in its non-large variant."""
 
     def field_of(field: pa.Field[Any]) -> pa.Field[Any]:
+        """``field`` with its storage types in their non-large variants."""
         return field.with_type(type_of(field.type))
 
     def type_of(arrow_type: pa.DataType) -> pa.DataType:
+        """``arrow_type`` in its non-large variant, at any depth."""
         if arrow_type == pa.large_string():
             return pa.string()
         if arrow_type == pa.large_binary():
@@ -333,16 +353,19 @@ class _LookAlike(pa.ExtensionType):
     """An unregistered extension type with any identifier over any storage."""
 
     def __init__(self, name: str, metadata: bytes, storage: pa.DataType) -> None:
+        """Hold an identifier (``name``, ``metadata``) over ``storage``."""
         self._serialized = metadata
         super().__init__(storage, name)
 
     def __arrow_ext_serialize__(self) -> bytes:
+        """The extension metadata given."""
         return self._serialized
 
     @classmethod
     def __arrow_ext_deserialize__(
         cls, storage_type: pa.DataType, serialized: bytes
     ) -> pa.ExtensionType:
+        """Never called: the type is never registered."""
         raise NotImplementedError("never registered")
 
 
@@ -404,6 +427,7 @@ def _forms(schema: pa.Schema) -> dict[str, pa.Schema]:
 
 
 def _hash(schema: pa.Schema) -> Any:
+    """``hash_schema`` of ``schema``."""
     return _hasher().hash_schema(schema)
 
 
@@ -411,9 +435,13 @@ def _hash(schema: pa.Schema) -> Any:
 
 
 def test_every_registered_type_is_classified() -> None:
-    """A new registered type, or a changed value handler, is seen here first."""
-    classification = {name: _value_hashed(_named_type(name)) for name in NAMED}
-    assert classification == EXPECTED_CLASSIFICATION
+    """A new registered type, or a changed value handler, is seen here first.
+
+    The inventory is compared before any type is loaded, so it holds without an
+    optional package; each installed type's classification is then checked."""
+    assert set(NAMED) == set(EXPECTED_CLASSIFICATION)
+    for name in _available_names():
+        assert _value_hashed(_named_type(name)) == EXPECTED_CLASSIFICATION[name], name
 
 
 def test_every_logical_type_factory_has_an_example() -> None:
@@ -422,6 +450,7 @@ def test_every_logical_type_factory_has_an_example() -> None:
 
 
 def test_the_cases_are_every_registered_type() -> None:
+    """Every named type is a case, File and Directory among them."""
     assert set(NAMED) <= set(CASES)
     assert {"orcapod.file", "orcapod.directory"} <= set(NAMED)
 
@@ -431,31 +460,38 @@ def test_the_cases_are_every_registered_type() -> None:
 
 @pytest.mark.parametrize("case", CASES)
 class TestOneTypeOneSchemaHash:
+    """One schema hash per logical type: what must agree, what must differ."""
+
     def test_the_three_forms_give_one_hash(self, case: str) -> None:
+        """Live, metadata and unregistered forms: one hash, in two column orders."""
         for order in ORDERS:
             forms = _forms(_schema(_case_type(case), order))
             hashes = {form: _hash(schema) for form, schema in forms.items()}
             assert len(set(hashes.values())) == 1, hashes
 
     def test_column_order_is_not_part_of_it(self, case: str) -> None:
+        """Two column orders: one hash."""
         arrow_type = _case_type(case)
         assert len({_hash(_schema(arrow_type, order)) for order in ORDERS}) == 1
 
     def test_the_metadata_form_is_what_normalize_extension_columns_gives(
         self, case: str
     ) -> None:
+        """The test's metadata form is the library's own."""
         schema = _schema(_case_type(case))
         normalized = normalize_extension_columns(schema.empty_table()).schema
         assert normalized == _metadata_form(schema)
         assert _hash(normalized) == _hash(schema)
 
     def test_large_and_non_large_storage_give_one_hash(self, case: str) -> None:
+        """Large and non-large storage variants: one hash."""
         schema = _schema(_case_type(case))
         expected = _hash(schema)
         for form in ("metadata", "unregistered"):
             assert _hash(_non_large(_forms(schema)[form])) == expected, form
 
     def test_nullability_is_part_of_it_in_every_form(self, case: str) -> None:
+        """A nullable and a non-null column differ; each agrees across forms."""
         arrow_type = _case_type(case)
         nullable = _forms(_schema(arrow_type, x_nullable=True))
         non_null = _forms(_schema(arrow_type, x_nullable=False))
@@ -476,6 +512,7 @@ class TestOneTypeOneSchemaHash:
         assert _hash(_schema(look_alike)) == _hash(_schema(arrow_type))
 
     def test_another_identifier_is_another_hash_in_every_form(self, case: str) -> None:
+        """A different name or metadata differs from the type, in every form."""
         arrow_type = _case_type(case)
         base = _schema(arrow_type)
         expected = _hash(base)
@@ -496,6 +533,8 @@ def test_two_structural_classes_of_another_field_differ() -> None:
 
     @op.dataclass
     class FormsStructural2:
+        """A structural class with another field than ``FormsStructural``."""
+
         p: Path
         m: int
 
@@ -506,7 +545,8 @@ def test_two_structural_classes_of_another_field_differ() -> None:
 
 
 def test_the_named_types_have_distinct_hashes() -> None:
-    hashes = {name: _hash(_schema(_named_type(name))) for name in NAMED}
+    """Every installed named type has its own schema hash."""
+    hashes = {name: _hash(_schema(_named_type(name))) for name in _available_names()}
     assert len(set(hashes.values())) == len(hashes)
 
 
@@ -530,6 +570,7 @@ def _arrow_containers(arrow_type: pa.DataType) -> dict[str, pa.DataType]:
 
 
 def _safe(name: str) -> str:
+    """``name`` usable in a Python class name."""
     return re.sub(r"\W", "_", name)
 
 
@@ -567,7 +608,10 @@ def _orcapod_containers(name: str) -> dict[str, pa.DataType]:
 
 @pytest.mark.parametrize("name", NAMED)
 class TestContainers:
+    """Containers of every named type, Arrow's and Orcapod's, in every form."""
+
     def test_arrow_containers_give_one_hash_in_every_form(self, name: str) -> None:
+        """Arrow containers of the type: one hash in every form and layout."""
         for label, container in _arrow_containers(_named_type(name)).items():
             for order in ORDERS:
                 schema = _schema(container, order)
@@ -576,6 +620,7 @@ class TestContainers:
                 assert len(set(hashes.values())) == 1, (label, order, hashes)
 
     def test_arrow_containers_of_another_identifier_differ(self, name: str) -> None:
+        """Arrow containers of a look-alike identifier differ, in every form."""
         arrow_type = _named_type(name)
         for other_label, other in _other_identifiers(arrow_type).items():
             for label, container in _arrow_containers(arrow_type).items():
@@ -589,6 +634,7 @@ class TestContainers:
                     assert _hash(given) != _hash(base), (label, other_label)
 
     def test_orcapod_containers_give_one_hash_in_every_form(self, name: str) -> None:
+        """Orcapod's containers and class fields: one hash in every form."""
         for label, container in _orcapod_containers(name).items():
             assert isinstance(container, pa.ExtensionType), label
             for order in ORDERS:
@@ -608,7 +654,10 @@ class TestContainers:
     ["list[T]", "set[T]", "list[list[T]]", "exact class field", "list[exact class]"],
 )
 def test_containers_of_two_types_differ_in_every_form(label: str) -> None:
-    per_type = {name: _schema(_orcapod_containers(name)[label]) for name in NAMED}
+    """A container of one named type never hashes as a container of another."""
+    per_type = {
+        name: _schema(_orcapod_containers(name)[label]) for name in _available_names()
+    }
     for form in ("live", "metadata", "unregistered"):
         hashes = {
             name: _hash(_forms(schema)[form]) for name, schema in per_type.items()
@@ -641,6 +690,7 @@ def _values(kind: str, root: Path) -> list[Any]:
 
 
 def _python_schemas(kind: str) -> tuple[Schema, Schema]:
+    """The tag and data Python schemas of the identity-path tables."""
     python_type = _python_type(kind)
     return (
         Schema({"k": int, "t1": python_type, "t2": python_type}),
@@ -677,21 +727,25 @@ def _table(kind: str, root: Path) -> pa.Table:
 
 
 def _source(table: pa.Table, source_id: str = "s") -> ArrowTableSource:
+    """An in-memory source of ``table`` with tags ``k``, ``t1``, ``t2``."""
     return ArrowTableSource(
         table, tag_columns=list(TAGS), source_id=source_id, tag_only_columns=True
     )
 
 
 def _system_tag_names(stream: Any) -> tuple[str, ...]:
+    """The system-tag column names of ``stream``."""
     names = stream.as_table(columns={"system_tags": True}).column_names
     return tuple(n for n in names if n.startswith(constants.SYSTEM_TAG_PREFIX))
 
 
 def _identity(stream: Any) -> tuple[Any, ...]:
+    """Content hash, pipeline hash and system-tag names: what must be equal."""
     return (stream.content_hash(), stream.pipeline_hash(), _system_tag_names(stream))
 
 
 def _read_back(database: Any, table: pa.Table) -> pa.Table:
+    """``table`` written to ``database`` and read back, in its own column order."""
     record_ids = pa.array([f"r{i}".encode() for i in range(table.num_rows)])
     database.add_records(
         ("forms",),
@@ -720,10 +774,13 @@ SOURCE_FORMS: dict[str, Callable[[pa.Table, Path], pa.Table]] = {
 
 @pytest.mark.parametrize("kind", KINDS)
 class TestIdentityPaths:
+    """File, Directory and ndarray columns along every identity path."""
+
     @pytest.mark.parametrize("form", list(SOURCE_FORMS))
     def test_a_source_has_one_identity_however_its_table_arrives(
         self, kind: str, form: str, tmp_path: Path
     ) -> None:
+        """In memory, reordered, read back, metadata or unregistered: one identity."""
         table = _table(kind, tmp_path / "values")
         given = SOURCE_FORMS[form](table, tmp_path)
         assert _identity(_source(given)) == _identity(_source(table))
@@ -737,6 +794,7 @@ class TestIdentityPaths:
             _read_back(database, _table(kind, tmp_path / "values"))
 
     def test_another_type_is_another_identity(self, kind: str, tmp_path: Path) -> None:
+        """File, Directory and ndarray sources differ."""
         table = _table(kind, tmp_path / "values")
         others = [k for k in KINDS if k != kind]
         for other in others:
@@ -752,6 +810,7 @@ class TestIdentityPaths:
         stored = normalize_extension_columns(_table(kind, tmp_path / "values"))
 
         def bumped(field: pa.Field[Any]) -> pa.Field[Any]:
+            """``field`` with its identifier's version incremented."""
             metadata = dict(field.metadata or {})
             if NAME_KEY not in metadata:
                 return field
@@ -765,6 +824,7 @@ class TestIdentityPaths:
         assert first[1] != second[1] and first[2] != second[2]
 
     def _slots(self, kind: str, tmp_path: Path) -> dict[str, SourceNode]:
+        """The slot declared in Python types, in each Arrow form, and from a stream."""
         tags, data = _python_schemas(kind)
         live = _declared_arrow(kind)
         tag_fields = [live.field(name) for name in TAGS]
@@ -789,6 +849,7 @@ class TestIdentityPaths:
     def test_a_slot_has_one_identity_however_it_is_declared(
         self, kind: str, tmp_path: Path
     ) -> None:
+        """Every slot form: one identity, Python schema and Arrow schema."""
         slots = self._slots(kind, tmp_path)
         expected = typed_arrow_schemas(slots["python types"])
         for label, slot in slots.items():
@@ -840,6 +901,7 @@ class TestIdentityPaths:
 
 @function_pod(output_keys="m")
 def _count(n: int) -> int:
+    """A function pod over ``n``, for the jobs of the identity paths."""
     return n + 1
 
 

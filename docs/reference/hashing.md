@@ -1272,10 +1272,10 @@ v0.3, `from_fn` and `side_effect_function_pod` defaulted to `"v1.0"`).
 
 | Field | Value |
 |---|---|
-| **Inputs** | the Arrow schema the data context's type converter gives `output_data_schema` (the types the results are stored with; `T | None` is a nullable field) |
+| **Inputs** | the Arrow schema the data context's type converter gives `output_data_schema` (the types the results are stored with; `T \| None` is a nullable field) |
 | **Algorithm** | `SemanticAwarePythonHasher.hash_object((hash_schema(arrow_schema),)).to_hex()`: the labelled schema hash fed into the structure hasher, as for site 3 |
 | **Output format** | `str`: the bare hex digest, 64 characters, no label (the hash is part of a name: the function `uri`, table paths and source-info tokens) |
-| **Uniqueness guarantee** | Unique per Arrow schema of the declared outputs; changing any output column name or type (as the converter writes it: `list[int]` and `list[int | None]` are one Arrow type today, ITL-1136) changes this hash and therefore the function's entire URI, `content_hash`, and `pipeline_hash` |
+| **Uniqueness guarantee** | Unique per Arrow schema of the declared outputs; changing any output column name or type (as the converter writes it: `list[int]` and `list[int \| None]` are one Arrow type today, ITL-1136) changes this hash and therefore the function's entire URI, `content_hash`, and `pipeline_hash` |
 | **Known exclusions** | Input schema not included (changing input schema alone does not change the URI); function code not included (tracked separately via `major_version`); `data_function_type_id` not included (plain string component) |
 
 ---

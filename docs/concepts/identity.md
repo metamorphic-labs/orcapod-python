@@ -74,6 +74,10 @@ print(source_a.pipeline_hash() == source_b.pipeline_hash())
 - The content hashes differ -- different source identity
 - The pipeline hashes are equal -- same schema and structure
 
+If `source_a` and `source_b` feed into the same function in a `PipelineJob`, the nodes share
+a database table (same pipeline hash), but each row is stored and retrieved by its content
+hash.
+
 The schema in a hash is the Arrow schema, not the Python one. Two sources whose column holds
 the same numbers as `int32` in one and `int64` in the other have different pipeline hashes:
 
@@ -107,9 +111,6 @@ print(narrow.pipeline_hash() == wide.pipeline_hash())
 What the schema hash ignores (column order, large and non-large variants, a list's item
 field name, dictionary encoding, field metadata) and what it tells apart is listed in the
 [hashing reference](../reference/hashing.md#the-arrow-schema-hash).
-
-If both sources feed into the same function in a `PipelineJob`, the nodes share a database
-table (same pipeline hash), but each row is stored and retrieved by its content hash.
 
 ## The Merkle chain
 

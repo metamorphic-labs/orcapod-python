@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import pyarrow as pa
 import pytest
 
@@ -92,3 +94,30 @@ class TestComputeSchemaHash:
         expected = compute_schema_hash(TAG, DATA, ctx, None)
         assert compute_schema_hash(reordered_tag, reordered_data, ctx, None) == expected
         assert compute_schema_hash(plain_tag, DATA, ctx, None) == expected
+
+
+@dataclasses.dataclass
+class _PointForDeclaration:
+    """A dataclass nothing registers before the test below."""
+
+    x: int
+    y: int
+
+
+def test_declared_arrow_schema_registers_only_the_field_that_needs_it() -> None:
+    """A tuple field converts directly; an unregistered dataclass beside it is
+    registered alone (CodeRabbit on PR 454: registration refuses tuples)."""
+    import pyarrow as pa
+
+    from orcapod.contexts import get_default_context
+    from orcapod.utils.schema_utils import declared_arrow_schema
+
+    converter = get_default_context().type_converter
+    for order in (("pair", "point"), ("point", "pair")):
+        declared = {"pair": tuple[int, int], "point": _PointForDeclaration}
+        schema = declared_arrow_schema(
+            {name: declared[name] for name in order}, converter
+        )
+        assert schema.names == list(order)
+        assert schema.field("pair").type == pa.list_(pa.field("item", pa.int64()), 2)
+        assert isinstance(schema.field("point").type, pa.ExtensionType)

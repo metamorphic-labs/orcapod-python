@@ -664,15 +664,34 @@ def _serialize_field_type(field: Any) -> str:
     return _serialize_arrow_type(field.type)
 
 
+_NAME_CHARACTERS_NEEDING_QUOTES = frozenset(':,<>[]()"\\')
+
+
+def _nested_field_name_text(name: str) -> str:
+    """The text of a nested field's name: as it is, or JSON-quoted when it must be.
+
+    A name holding a character the type grammar uses (``:``, ``,``, ``<``, ``>``,
+    brackets, parentheses, a quote or a backslash), or starting or ending with
+    whitespace, is written as a JSON string (``"left:right"``) so the reader takes it
+    back exactly (CodeRabbit on PR 454); every other name, ``item``, ``key`` and
+    ``value`` among them, keeps the text it always had.
+    """
+    if name != name.strip() or any(c in _NAME_CHARACTERS_NEEDING_QUOTES for c in name):
+        return _json.dumps(name)
+    return name
+
+
 def _serialize_nested_field(field: Any) -> str:
     """Render a nested field exactly: ``<name>: <type>``, then `` not null`` if it is.
 
     The one text of a list, large list or fixed-size list item, a struct child and a
     map's key and item field, so each keeps its name, nullability and logical
-    identifier through a save and load.
+    identifier through a save and load. The name is quoted when it must be
+    (``_nested_field_name_text``).
     """
     nullable = "" if field.nullable else " not null"
-    return f"{field.name}: {_serialize_field_type(field)}{nullable}"
+    name = _nested_field_name_text(field.name)
+    return f"{name}: {_serialize_field_type(field)}{nullable}"
 
 
 def _serialize_arrow_type(arrow_type: Any) -> str:
@@ -1356,7 +1375,7 @@ def _require_balanced_delimiters(type_str: str) -> None:
         ValueError: If the delimiters do not balance, or text follows the closing ``>``.
     """
     depth = 0
-    for position, char in enumerate(type_str):
+    for position, char in _unquoted(type_str):
         if char == "<":
             depth += 1
         elif char == ">":
@@ -1458,15 +1477,25 @@ def _parse_arrow_field(text: str, type_converter: Any | None) -> Any:
     """Restore a nested field's type and nullability from schema text."""
     import pyarrow as pa
 
-    name, separator, type_text = text.strip().partition(":")
-    if not separator:
-        name, type_text = "item", text
+    text = text.strip()
+    if text.startswith('"'):
+        # A quoted name (``_nested_field_name_text``): exactly the JSON string.
+        name, end = _json.JSONDecoder().raw_decode(text)
+        rest = text[end:].lstrip()
+        if not isinstance(name, str) or not rest.startswith(":"):
+            raise ValueError(f"Malformed nested field: {text!r}")
+        type_text = rest[1:]
+    else:
+        name, separator, type_text = text.partition(":")
+        if not separator:
+            name, type_text = "item", text
+        name = name.strip()
     type_text = type_text.strip()
     nullable = not type_text.endswith(" not null")
     if not nullable:
         type_text = type_text[: -len(" not null")]
     return pa.field(
-        name.strip(),
+        name,
         parse_arrow_type_string(type_text, type_converter),
         nullable=nullable,
     )
@@ -1478,6 +1507,8 @@ def _names_a_field(text: str) -> bool:
     A bare type holds a ``:`` only inside its brackets (``list<item: int64>``), so
     the text names a field exactly when a ``:`` comes before any bracket.
     """
+    if text.lstrip().startswith('"'):
+        return True
     colon = text.find(":")
     if colon == -1:
         return False
@@ -1536,6 +1567,29 @@ def _strip_field_name(s: str) -> str:
     return s
 
 
+def _quoted_positions(text: str) -> "list[tuple[int, str]]":
+    """The positions and characters of ``text`` inside a JSON-quoted field name."""
+    inside: list[tuple[int, str]] = []
+    position = 0
+    while position < len(text):
+        if text[position] == '"':
+            try:
+                _, end = _json.JSONDecoder().raw_decode(text, position)
+            except ValueError:
+                end = len(text)
+            inside.extend((p, text[p]) for p in range(position, end))
+            position = end
+        else:
+            position += 1
+    return inside
+
+
+def _unquoted(text: str) -> "list[tuple[int, str]]":
+    """The positions and characters of ``text`` outside JSON-quoted field names."""
+    quoted = {position for position, _ in _quoted_positions(text)}
+    return [(p, c) for p, c in enumerate(text) if p not in quoted]
+
+
 def _split_top_level(s: str, sep: str, max_splits: int = -1) -> list[str]:
     """Split *s* on *sep*, but only at the top level (not inside ``<>``, ``[]`` or ``()``).
 
@@ -1553,7 +1607,11 @@ def _split_top_level(s: str, sep: str, max_splits: int = -1) -> list[str]:
     parts: list[str] = []
     depth = 0
     current: list[str] = []
-    for ch in s:
+    quoted = {position for position, _ in _quoted_positions(s)}
+    for position, ch in enumerate(s):
+        if position in quoted:
+            current.append(ch)
+            continue
         if ch in "<[(":
             depth += 1
         elif ch in ">])":

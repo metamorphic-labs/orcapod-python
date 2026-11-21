@@ -1371,12 +1371,25 @@ class SourceJobNode(SourceNodeBase):
                     "or a bound_source to derive schemas from."
                 )
             derived_tag, derived_data = bound_source.output_schema()
+            if arrow_schemas is None:
+                # Each role's Arrow schema from where that role comes from: an omitted
+                # role takes the source's, a declared one its declaration's (one Arrow
+                # type per Python type), so a declared role is never replaced by the
+                # source's types (CodeRabbit on PR 454).
+                source_tag, source_data = typed_arrow_schemas(bound_source)
+                converter = contexts.resolve_context(data_context).type_converter
+                arrow_schemas = (
+                    source_tag
+                    if tag_schema is None
+                    else declared_arrow_schema(tag_schema, converter),
+                    source_data
+                    if data_schema is None
+                    else declared_arrow_schema(data_schema, converter),
+                )
             if tag_schema is None:
                 tag_schema = derived_tag
             if data_schema is None:
                 data_schema = derived_data
-            if arrow_schemas is None:
-                arrow_schemas = typed_arrow_schemas(bound_source)
         super().__init__(
             name=name,
             tag_schema=tag_schema,

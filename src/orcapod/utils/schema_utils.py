@@ -572,7 +572,9 @@ def declared_arrow_schema(schema: SchemaLike, converter: Any) -> "pa.Schema":
     Each declared Python type means exactly one Arrow type (``int`` is ``int64``,
     ``datetime`` is ``timestamp[us, tz=UTC]``); ``T | None`` is a nullable field. A
     class a factory covers (a dataclass, a pydantic model) that nothing has registered
-    yet is registered first, as hashing it registers it.
+    yet is registered first, as hashing it registers it: field by field, so only a
+    field that needs it goes through registration (which refuses some annotations the
+    converter takes directly, such as a tuple; CodeRabbit on PR 454).
 
     Args:
         schema: The declared Python schema.
@@ -580,12 +582,27 @@ def declared_arrow_schema(schema: SchemaLike, converter: Any) -> "pa.Schema":
 
     Returns:
         The Arrow schema.
+
+    Raises:
+        TypeError, ValueError: If a field has no Arrow type even after registration.
     """
     try:
         return converter.python_schema_to_arrow_schema(schema)
     except (TypeError, ValueError):
-        converter.ensure_types_registered_for_schemas(Schema(dict(schema)))
-        return converter.python_schema_to_arrow_schema(schema)
+        pass
+    optional = getattr(schema, "optional_fields", frozenset())
+    fields = []
+    for name, python_type in schema.items():
+        single = Schema(
+            {name: python_type}, optional_fields=[name] if name in optional else None
+        )
+        try:
+            converted = converter.python_schema_to_arrow_schema(single)
+        except (TypeError, ValueError):
+            converter.ensure_types_registered_for_schemas(single)
+            converted = converter.python_schema_to_arrow_schema(single)
+        fields.append(converted.field(name))
+    return pa.schema(fields)
 
 
 def compute_schema_hash(
