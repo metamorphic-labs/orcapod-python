@@ -250,7 +250,7 @@ file (`--relocate`) before the release step, so that the release freezes them.
 Every final version needs the release step: the release gate refuses to tag one without it.
 A pre-release (`0.4.0rc1`, `0.4.0a1`, `0.4.0b2`, `0.4.0.dev3`) freezes nothing (developer,
 November 21, 2026, ITL-1329). It carries the hashes intended to be final, the release gate
-checks that HEAD does *not* record it as a release, and `generate_golden_hashes.py
+checks that no release record at HEAD names it, and `generate_golden_hashes.py
 --release` refuses it. So the first final version of a data context freezes it: for `v1`,
 `0.4.0`, not `0.4.0rc1`. Between a candidate and the final release a golden value changes
 only for a blocking reason, with the developer's approval of the exact list of entries that
@@ -404,9 +404,14 @@ build job before the tag is made; tested by `tests/test_check_golden_tags.py`
   release `X.Y.Z` of the current data context, its `manifest` pin is set, and the pinned digest is the release revision of
   `X.Y.Z`, which is the last revision of HEAD's golden history: a golden file added after
   the release step would ship unreleased, so such a commit is not tagged. It fails without
-  git. For a pre-release (ITL-1329) it checks the opposite: HEAD does not record that
-  version as a release (nor as withdrawn); the release step and the type snapshot pins are
-  not required. Which versions are pre-releases is one rule, `release_version` in the same
+  git. For a pre-release (ITL-1329) it checks the opposite: no release record at HEAD
+  names a pre-release, in any spelling (the `releases` pins, a release revision of the
+  golden history, a data function type snapshot's `released_in`), and the version is not
+  withdrawn; the release step and the type snapshot pins are not required. The tag check
+  skips every tag whose name is a pre-release (`v0.4.0rc1`), so such a tag protects no
+  golden file, revision, pin or snapshot; every other tag is checked as before.
+  `scripts/data_function_types.py --release` refuses a pre-release too, so nothing can be
+  pinned under one. Which versions are pre-releases is one rule, `release_version` in the same
   script (PEP 440; a version that is not `X.Y.Z` with an optional pre-release, post-release
   or development part is refused, never guessed), which the Release workflow also reads
   (`--classify-version`) to mark the GitHub Release and to skip the Linear jobs.

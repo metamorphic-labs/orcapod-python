@@ -228,8 +228,11 @@ def tag_release(repo: Path, tag: str, version: str) -> str | None:
 
     Returns:
         ``X.Y.Z`` when the tag is ``v<X.Y.Z>`` and its ``released_manifests.json`` pins
-        release ``X.Y.Z`` of ``version``; otherwise ``None``.
+        release ``X.Y.Z`` of ``version``; otherwise ``None``, always for the tag of a
+        pre-release, which freezes nothing (ITL-1329).
     """
+    if is_pre_release_tag(tag):
+        return None
     release = tag.removeprefix("v")
     tag_pins = _show_json(repo, tag, PINS)
     pin = tag_pins.get(version) if isinstance(tag_pins, dict) else None
@@ -356,6 +359,8 @@ TYPE_SNAPSHOTS = PurePosixPath("src/orcapod/data_function_types")
 def check_type_snapshots(repo: Path, tag: str) -> list[str]:
     """What HEAD changed of the data function type snapshots ``tag`` released.
 
+    The tag of a pre-release released nothing (ITL-1329): it has no problem to report.
+
     Every snapshot the tag's ``released.json`` pins (a ``sha256`` that is not null)
     must be at HEAD with the same bytes, and pinned there with the same ``sha256`` and
     version: rewriting a released snapshot together with its pin is caught here, as a
@@ -368,6 +373,8 @@ def check_type_snapshots(repo: Path, tag: str) -> list[str]:
     Returns:
         One problem per changed snapshot or pin; empty when HEAD keeps them.
     """
+    if is_pre_release_tag(tag):
+        return []
     pins_path = TYPE_SNAPSHOTS / "released.json"
     released = _show_json(repo, tag, pins_path)
     if not isinstance(released, dict):
@@ -515,15 +522,16 @@ def check_release(repo: Path, release: str) -> list[str]:
 
 
 def check_pre_release(repo: Path, release: str) -> list[str]:
-    """Check that HEAD does not record a pre-release as a release, before it is tagged.
+    """Check that HEAD records no pre-release as a release, before a pre-release is tagged.
 
     A pre-release carries the hashes intended to be final but freezes nothing: only a
     final release runs the golden release step (developer, November 21, 2026, ITL-1329).
-    So HEAD must not record ``release`` under the current data context's ``releases``, nor
-    as withdrawn (a package index never takes a version twice). Unpinned data function
-    type snapshots are allowed: the final release step pins them. What earlier final
-    releases froze is checked by the tag check, which the Release workflow runs for a
-    pre-release too.
+    So no release record at HEAD names a pre-release, in any spelling: not the current
+    data context's ``releases`` pins, not a release revision of its golden history, not
+    a data function type snapshot pin (``released_in``). Nor may ``release`` be withdrawn
+    (a package index never takes a version twice). Unpinned data function type snapshots
+    are allowed: the final release step pins them. What earlier final releases froze is
+    checked by the tag check, which the Release workflow runs for a pre-release too.
 
     Args:
         repo: Repository root.
@@ -537,19 +545,69 @@ def check_pre_release(repo: Path, release: str) -> list[str]:
     pin = pins.get(version) if isinstance(pins, dict) else None
     releases = pin.get("releases") if isinstance(pin, dict) else None
     recorded = sorted(releases) if isinstance(releases, dict) else []
-    problems: list[str] = []
-    if any(_same_version(name, release) for name in recorded):
-        problems.append(
-            f"HEAD records pre-release {release} as a release of data context {version}: "
-            "a pre-release never runs the golden release step (only a final release "
-            "freezes a data context); revert the release step's commit"
+    manifest = _show_json(repo, "HEAD", CONTEXTS / "data" / f"{version}.json")
+    golden = manifest.get("golden") if isinstance(manifest, dict) else None
+    history = golden.get("history") if isinstance(golden, dict) else None
+    revisions = [
+        str(revision["release"])
+        for revision in (history if isinstance(history, list) else [])
+        if isinstance(revision, dict) and revision.get("release") is not None
+    ]
+    snapshot_pins = _show_json(repo, "HEAD", TYPE_SNAPSHOTS / "released.json")
+    snapshot_releases = {
+        relative: str(snapshot_pin["released_in"])
+        for relative, snapshot_pin in (
+            snapshot_pins.items() if isinstance(snapshot_pins, dict) else []
         )
+        if isinstance(snapshot_pin, dict)
+        and snapshot_pin.get("released_in") is not None
+    }
+    step = (
+        "a pre-release never runs the golden release step (only a final release "
+        "freezes a data context); revert the release step's commit"
+    )
+    problems: list[str] = []
+    for name in recorded:
+        if _is_pre_release(name):
+            problems.append(
+                f"HEAD records pre-release {name} as a release of data context "
+                f"{version}: {step}"
+            )
+    for name in revisions:
+        if _is_pre_release(name):
+            problems.append(
+                f"the golden history of data context {version} at HEAD has a release "
+                f"revision of pre-release {name}: {step}"
+            )
+    for relative, name in sorted(snapshot_releases.items()):
+        if _is_pre_release(name):
+            problems.append(
+                f"data function type snapshot {relative} is pinned as released in "
+                f"pre-release {name}: a pre-release pins no snapshot; revert the pin"
+            )
     if any(_same_version(name, release) for name in _head_withdrawn(repo, version)):
         problems.append(
             f"release {release} of data context {version} was withdrawn and is never "
             "released again: a package index never takes a version twice"
         )
     return problems
+
+
+def _is_pre_release(name: str) -> bool:
+    """Whether a recorded version name is a pre-release, in any spelling."""
+    try:
+        return release_version(name)[1]
+    except ValueError:
+        return False
+
+
+def is_pre_release_tag(tag: str) -> bool:
+    """Whether ``tag`` names a pre-release (``v0.4.0rc1``): such a tag froze nothing.
+
+    A tag that names no release version (not a version, or one this project does not
+    release) is not a pre-release tag, and is checked as before.
+    """
+    return _is_pre_release(tag)
 
 
 def _same_version(name: str, release: str) -> bool:
@@ -670,6 +728,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     checked: list[str] = []
     problems: list[str] = []
     for tag in sorted(tags):
+        if is_pre_release_tag(tag):
+            # A pre-release froze nothing (ITL-1329): its tag protects nothing.
+            print(
+                f"{tag}: a pre-release, which freezes nothing; not compared with HEAD"
+            )
+            continue
         # The data function type snapshots do not belong to a data context.
         problems.extend(check_type_snapshots(args.repo, tag))
         found = check_tag(args.repo, tag, version)

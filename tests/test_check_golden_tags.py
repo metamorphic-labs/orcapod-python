@@ -7,6 +7,7 @@ the golden tree, released with ``generate_golden_hashes.py --release`` and tagge
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -866,7 +867,7 @@ def test_a_pre_release_tag_is_not_a_release(repo: Path) -> None:
     result = _check(repo, ci=True)
     assert result.returncode == 0, result.stderr
     assert "HEAD keeps what v0.3.0 released" in result.stdout
-    assert "v0.4.0rc1" not in result.stdout
+    assert "v0.4.0rc1: a pre-release, which freezes nothing" in result.stdout
 
 
 def test_the_generator_refuses_to_release_a_pre_release(repo: Path) -> None:
@@ -886,6 +887,13 @@ def test_the_generator_refuses_to_release_a_pre_release(repo: Path) -> None:
 # ---------------------------------------------------------------------------
 
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
+
+
+def _classify_step(build: str) -> tuple[str, str]:
+    """The text of the build job's classify step, and the text of the steps after it."""
+    start = build.rindex("      - name:", 0, build.index("id: classify"))
+    end = build.index("\n      - ", start + 1)
+    return build[start:end], build[end:]
 
 
 def _job(name: str) -> str:
@@ -912,9 +920,9 @@ def test_the_workflow_classifies_the_version_with_the_script() -> None:
     """The build job's ``prerelease`` output comes from the script, before the gate."""
     build = _job("build")
     assert "prerelease: ${{ steps.classify.outputs.prerelease }}" in build
-    classify = build.index("id: classify")
-    assert "--classify-version" in build[classify : classify + 600]
-    assert classify < build.index("--release-version")
+    step, later = _classify_step(build)
+    assert "--classify-version" in step
+    assert "--release-version" in later
     # The tag check runs for every version, a pre-release included.
     assert "run: python3 scripts/check_golden_tags.py\n" in build
 
@@ -925,3 +933,140 @@ def test_the_workflow_marks_a_pre_release_and_skips_linear() -> None:
     assert "freezes nothing" in publish
     for name in ("linear-sync", "linear-complete"):
         assert "needs.build.outputs.prerelease == 'false'" in _job(name), name
+
+
+# ---------------------------------------------------------------------------
+# No release record at HEAD names a pre-release (Codex review of PR 470)
+# ---------------------------------------------------------------------------
+
+
+def _pin_snapshot(repo: Path, released_in: str | None, content: str) -> str:
+    """Write the snapshot ``content`` and pin it as released in ``released_in``."""
+    import hashlib
+    import json
+
+    snapshot = repo / SNAPSHOT
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    _ = snapshot.write_text(content)
+    key = SNAPSHOT.relative_to(PINS.parent).as_posix()
+    digest = hashlib.sha256(snapshot.read_bytes()).hexdigest()
+    pin = {"released_in": released_in, "sha256": digest if released_in else None}
+    _ = (repo / PINS).write_text(json.dumps({key: pin}, indent=2) + "\n")
+    return key
+
+
+@pytest.mark.parametrize("spelling", ["0.4.0rc1", "0.4.0-rc.1"])
+def test_a_pre_release_in_the_golden_history_only_is_refused(
+    repo: Path, spelling: str
+) -> None:
+    """A release revision of the candidate in the golden history, with no pin, is a
+    release record: the candidate gate refuses it, so the workflow stops before the tag
+    check and the tag."""
+    path = store.manifest_path(repo, VERSION)
+    manifest = store.read_json(path)
+    manifest["golden"]["history"] = store.with_release(
+        manifest["golden"]["history"], spelling, "2026-11-21"
+    )
+    store.write_json(path, manifest)
+    _commit(repo, "a release revision of a candidate, without its pin")
+    result = _gate(repo, "0.4.0rc1")
+    assert result.returncode == 1
+    assert f"has a release revision of pre-release {spelling}" in result.stderr
+
+
+@pytest.mark.parametrize("spelling", ["0.4.0rc1", "0.4.0-rc.1", "0.3.1b1"])
+def test_a_snapshot_pinned_in_a_pre_release_is_refused(
+    repo: Path, spelling: str
+) -> None:
+    """A snapshot pin naming any pre-release is refused at the candidate gate: a
+    pre-release pins nothing."""
+    key = _pin_snapshot(repo, spelling, '{"value": 1}\n')
+    _commit(repo, "a snapshot pinned by a candidate")
+    result = _gate(repo, "0.4.0rc1")
+    assert result.returncode == 1
+    assert f"snapshot {key} is pinned as released in pre-release {spelling}" in (
+        result.stderr
+    )
+
+
+def test_a_candidate_tag_never_freezes_a_snapshot(repo: Path) -> None:
+    """The reviewer's sequence: a candidate that pinned a snapshot is refused at the
+    gate; and were its tag to exist anyway, a later change of that snapshot before the
+    final release is not blocked by it."""
+    _ = _pin_snapshot(repo, "0.4.0rc1", '{"value": 1}\n')
+    _commit(repo, "a candidate pins a snapshot")
+    assert _gate(repo, "0.4.0rc1").returncode == 1
+    _git(repo, "tag", "v0.4.0rc1")
+    module = _gate_module()
+    _ = _pin_snapshot(repo, None, '{"value": 2}\n')
+    _commit(repo, "the snapshot changes before the final release")
+    assert module.check_type_snapshots(repo, "v0.4.0rc1") == []
+    result = _check(repo, ci=True)
+    assert result.returncode == 0, result.stderr
+    assert "v0.4.0rc1: a pre-release, which freezes nothing" in result.stdout
+
+
+def test_a_pre_release_tag_is_never_a_release_even_with_a_record(repo: Path) -> None:
+    """A candidate tag whose commit records it (a malformed state) still protects
+    nothing: the tag check classifies the tag by its name."""
+    pins = store.read_json(store.pins_path(repo))
+    pins[VERSION]["releases"]["0.4.0rc1"] = "1" * 64
+    store.write_json(store.pins_path(repo), pins)
+    _commit(repo, "a candidate recorded as a release")
+    _git(repo, "tag", "v0.4.0rc1")
+    module = _gate_module()
+    assert module.tag_release(repo, "v0.4.0rc1", VERSION) is None
+    assert module.check_tag(repo, "v0.4.0rc1", VERSION) is None
+
+
+def test_final_tags_keep_protecting_beside_a_later_candidate(repo: Path) -> None:
+    """In a run for a later candidate, every final tag protects as before: a golden file
+    0.3.0 froze and a snapshot 9.9.9 pinned are both caught; the candidate tag is
+    skipped."""
+    _release_a_snapshot(repo)  # final v9.9.9 pins a snapshot
+    (repo / "README.candidate").write_text("after 9.9.9\n")
+    _commit(repo, "work after the release")
+    _git(repo, "tag", "v10.0.0rc1")
+    assert _check(repo, ci=True).returncode == 0
+    snapshot = repo / SNAPSHOT
+    _ = snapshot.write_text('{"revision": 99}\n')
+    released = _folder(repo) / "semantic-01.json"
+    _ = released.write_text(
+        released.read_text().replace("semantic_v1", "semantic_v2", 1)
+    )
+    _commit(repo, "change what final releases froze")
+    assert _gate(repo, "10.0.0rc2").returncode == 0
+    result = _check(repo, ci=True)
+    assert result.returncode == 1
+    assert "v9.9.9: data function type snapshot" in result.stderr
+    assert "semantic-01.json differs from the released file" in result.stderr
+    assert "v10.0.0rc1: a pre-release, which freezes nothing" in result.stdout
+
+
+def test_the_workflow_normalizes_the_version_once() -> None:
+    """The classify step is the one normalization: it reads the raw input, and every
+    later use of the version is its output (a double ``v`` cannot reach a tag)."""
+    build = _job("build")
+    assert "steps.normalize" not in WORKFLOW.read_text()
+    assert "id: normalize" not in build
+    step, later = _classify_step(build)
+    assert build.count("inputs.version") == 1
+    assert "VERSION: ${{ inputs.version }}" in step
+    uses = re.findall(r"\$\{\{ ([a-z_.]+)\.version \}\}", later)
+    assert uses and set(uses) == {"steps.classify.outputs"}, uses
+    assert "version: ${{ steps.classify.outputs.version }}" in build
+    assert 'git tag "v${{ steps.classify.outputs.version }}"' in build
+    assert 'git push origin "v${{ steps.classify.outputs.version }}"' in build
+    for name in ("publish-pypi", "linear-sync", "linear-complete"):
+        assert '"v${{ needs.build.outputs.version }}"' in _job(name), name
+
+
+@pytest.mark.parametrize(
+    "version", ["vv0.4.0rc1", "V0.4.0rc1", " 0.4.0rc1", "0.4.0rc1\n"]
+)
+def test_classify_refuses_a_raw_input_that_is_not_the_normal_form(version: str) -> None:
+    """The workflow hands the raw input to the classifier: anything but the normal form
+    with at most one leading lowercase ``v`` is refused."""
+    result = _classify(version)
+    assert result.returncode == 1
+    assert result.stdout == ""

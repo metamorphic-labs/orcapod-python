@@ -198,7 +198,7 @@ on origin, and the ruleset `protect-release-tags` forbids deleting a `v*` tag, s
    ```
 
    - Pre-flight: branch validation, then tests on Python 3.11, 3.12 and 3.13 and license check (parallel after validation); the tests are skipped only with `skip_tests`
-   - Build: normalises version (strips a leading `v`), classifies it (`check_golden_tags.py --classify-version`: final or pre-release; a version not in its PEP 440 normal form is refused), checks the golden release step (for a pre-release: that HEAD does not record it) and the release tags, creates the local tag, builds wheel + sdist with `uv build`, aborts if the tag already exists on origin, pushes the tag, uploads `dist/` as an artifact
+   - Build: classifies the version input (`check_golden_tags.py --classify-version`, the one normalization: it strips one leading `v`, says final or pre-release, and refuses a version not in its PEP 440 normal form; every later step uses its output), checks the golden release step (for a pre-release: that HEAD does not record it) and the release tags, creates the local tag, builds wheel + sdist with `uv build`, aborts if the tag already exists on origin, pushes the tag, uploads `dist/` as an artifact
    - TestPyPI: in the `testpypi` environment, `uv publish --publish-url https://test.pypi.org/legacy/ dist/*` with an OIDC token (`id-token: write`) — a staging upload
    - PyPI: in the `pypi` environment, after TestPyPI succeeds and a reviewer approves, `uv publish dist/*` with an OIDC token, then creates the GitHub Release for the tag with generated release notes and the dist files attached; a pre-release is marked as one, and its notes start with a paragraph saying that it freezes nothing
    - Linear: `linear-sync` starts immediately after build (parallel to publish); `linear-complete` runs after both PyPI publish and linear-sync succeed (see *Linear Release System*). Neither runs for a pre-release
@@ -340,16 +340,20 @@ neither `X.Y.Z` (or `X.Y.Z.postN`) nor such a pre-release is refused, never gues
 
 A pre-release goes through the same Release workflow, with four differences (ITL-1329):
 
-- It freezes nothing: the build job requires that HEAD does **not** record it as a release
-  (no golden release step), and it allows data function type snapshots that are not pinned
-  yet. The tag check still runs, so what earlier final releases froze stays protected.
+- It freezes nothing: the build job requires that no release record at HEAD names a
+  pre-release (no `releases` pin, no release revision in the golden history, no data
+  function type snapshot pinned as released in one; so no golden release step, and
+  `data_function_types.py --release` refuses a pre-release too), and it allows data
+  function type snapshots that are not pinned yet. The tag check still runs, so what
+  earlier final releases froze stays protected; it skips every pre-release tag, which
+  protects nothing.
 - The GitHub Release is marked as a pre-release, and its notes begin with a paragraph saying
   that it freezes nothing and that data stored with it is not guaranteed to be valid under
   the final release.
 - `linear-sync` and `linear-complete` do not run: the open Linear release stays open for the
   final version (see *Linear Release System*).
-- The version must be given in its PEP 440 normal form (`0.4.0rc1`, not `0.4.0-rc.1` or
-  `0.4.0RC1`), so that the tag, the package, the GitHub Release and the Linear release name
+- The version must be given in its PEP 440 normal form, with at most one leading lowercase
+  `v` (`0.4.0rc1` or `v0.4.0rc1`; not `0.4.0-rc.1`, `0.4.0RC1` or `vv0.4.0rc1`), so that the tag, the package, the GitHub Release and the Linear release name
   one version; the build job refuses any other spelling and names the normal form.
 
 ### Cutting a release candidate
@@ -432,8 +436,9 @@ being built and `hatch-vcs` reads that tag. The fix those two releases carried i
 | Alpha | `vMAJOR.MINOR.PATCHaN` | `v0.1.0a1` |
 | Beta | `vMAJOR.MINOR.PATCHbN` | `v0.1.0b1` |
 
-The workflow input accepts any of the above, with or without a leading `v`, in its PEP 440
-normal form (`0.1.0rc1`, not `0.1.0-rc.1`): the build job refuses another spelling. The version is
+The workflow input accepts any of the above, with or without one leading lowercase `v`, in
+its PEP 440 normal form (`0.1.0rc1`, not `0.1.0-rc.1`): the build job refuses another
+spelling. The version is
 derived from the git tag by `hatch-vcs` (`dynamic = ["version"]` in `pyproject.toml`) — no
 manual version bump is needed.
 

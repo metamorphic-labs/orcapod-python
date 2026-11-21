@@ -105,7 +105,7 @@ jobs:
     permissions:
       contents: write  # required to push the release tag
     outputs:
-      version: ${{ steps.normalize.outputs.version }}
+      version: ${{ steps.classify.outputs.version }}
       # 'true' for a pre-release (aN, bN, rcN, .devN), 'false' for a final release:
       # decided by scripts/check_golden_tags.py, the one rule (ITL-1329).
       prerelease: ${{ steps.classify.outputs.prerelease }}
@@ -124,13 +124,6 @@ jobs:
             echo "Validation, the license check and the build ran as usual."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Normalize version
-        id: normalize
-        run: |
-          VERSION="${{ inputs.version }}"
-          VERSION="${VERSION#v}"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           fetch-depth: 0  # required: hatch-vcs reads tag to set version
@@ -138,18 +131,21 @@ jobs:
 
       - name: Classify the version
         id: classify
-        # Writes prerelease=true|false. Fails on a version that is not a release version
-        # in its PEP 440 normal form (0.4.0rc1, not 0.4.0-rc.1), so that the tag, the
-        # package, the GitHub Release and the Linear release name one version (ITL-1329).
+        # The one normalization of the version input (ITL-1329): writes version=<X.Y.Z>
+        # (without the leading v) and prerelease=true|false. Fails on anything that is
+        # not a release version in its PEP 440 normal form with at most one leading
+        # lowercase v (0.4.0rc1 or v0.4.0rc1; not 0.4.0-rc.1, V0.4.0 or vv0.4.0), so that
+        # the tag, the package, the GitHub Release and the Linear release name one
+        # version. Every later step uses its version output.
         env:
-          VERSION: ${{ steps.normalize.outputs.version }}
+          VERSION: ${{ inputs.version }}
         run: python3 scripts/check_golden_tags.py --classify-version "$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Check the golden release step
         # A final release: nothing is tagged or published unless the release pull request
         # ran generate_golden_hashes.py --release for this version (ITL-946). A
         # pre-release freezes nothing: HEAD must not record it as a release (ITL-1329).
-        run: python3 scripts/check_golden_tags.py --release-version "${{ steps.normalize.outputs.version }}"
+        run: python3 scripts/check_golden_tags.py --release-version "${{ steps.classify.outputs.version }}"
 
       - name: Check golden files against release tags
         # Every golden file, revision and pin an earlier release tag of the current data
@@ -164,7 +160,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Create local release tag
-        run: git tag "v${{ steps.normalize.outputs.version }}"
+        run: git tag "v${{ steps.classify.outputs.version }}"
 
       - name: Install uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
@@ -174,13 +170,13 @@ jobs:
 
       - name: Guard against duplicate tag
         run: |
-          if git ls-remote --tags origin "refs/tags/v${{ steps.normalize.outputs.version }}" | grep -q .; then
-            echo "::error::Tag v${{ steps.normalize.outputs.version }} already exists on origin. Aborting."
+          if git ls-remote --tags origin "refs/tags/v${{ steps.classify.outputs.version }}" | grep -q .; then
+            echo "::error::Tag v${{ steps.classify.outputs.version }} already exists on origin. Aborting."
             exit 1
           fi
 
       - name: Push release tag
-        run: git push origin "v${{ steps.normalize.outputs.version }}"
+        run: git push origin "v${{ steps.classify.outputs.version }}"
 
       - name: Upload dist artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
