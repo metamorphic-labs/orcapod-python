@@ -657,7 +657,8 @@ audit is `docs/dev/specs/itl-1271-order-invariance-audit.md`.
 
 ```
 src/orcapod/
-├── types.py                    # Schema, ColumnConfig, ContentHash
+├── types/                      # Schema, ColumnConfig, ContentHash (__init__.py);
+│                               # Condition (condition.py)
 ├── system_constants.py         # Column prefixes and separators
 ├── errors.py                   # InputValidationError, DuplicateTagError
 ├── config.py                   # Config dataclass
@@ -1020,10 +1021,10 @@ current data context are the current entries.
 
 ### Schema types and ColumnConfig
 
-`Schema` (`types.py`) — immutable `Mapping[str, DataType]` with `optional_fields` support.
+`Schema` (`types/__init__.py`) — immutable `Mapping[str, DataType]` with `optional_fields` support.
 `output_schema()` always returns `(tag_schema, data_schema)` as a tuple of Schemas.
 
-`ColumnConfig` (`types.py`) — frozen dataclass controlling which column groups are included.
+`ColumnConfig` (`types/__init__.py`) — frozen dataclass controlling which column groups are included.
 Fields: `meta`, `context`, `source`, `system_tags`, `content_hash`, `sort_by_tags`.
 Normalize via `ColumnConfig.handle_config(columns, all_info)` at the top of `output_schema()`
 and `as_table()` methods. `all_info=True` sets everything to True.
@@ -1274,6 +1275,67 @@ data. The rules:
   only after the read succeeded. Without key columns a row's record id is its position: a
   change of row order is a change; with one, only content counts
   (`reload.same_rows(..., ordered=)`, decided by the caller; in doubt, order counts).
+- A restriction is not an operator (developer, November 17, 2026, ITL-1218). It is attached
+  to a source, chooses which of its rows flow, and changes no row, schema, DAG node or
+  identity: `content_hash`, `pipeline_hash`, `source_id`, schema, system-tag column names and
+  every row's record id equal the unrestricted source's (a positional record id is never
+  renumbered). Selecting rows as part of what a pipeline computes is an operator
+  (`SemiJoin`, `PolarsFilter`). The conditions are one public class, `orcapod.types.Condition`
+  (defined in `types/condition.py`; developer, November 18, 2026): row conditions only, no limit, no source, in no hash; a
+  future in-pipeline filter operator is to take the same class (its identity then: ITL-1265).
+  Its factory `Condition.of(mapping=None, /, **columns)` takes `where()`'s arguments and does
+  every check that needs no table (`None`, a value not exactly `bool`/`int`/`float`/`str`/
+  `bytes`/`datetime`/`date`, mapping against keyword); `combined` adds two and refuses a
+  contradiction; equality is by value, order-free, exact types, floats as Orcapod matches them
+  (0.0 equals -0.0, NaN equals NaN), an aware datetime by its instant (`fold` counts, zones do
+  not; never Python's `==`, which ignores `fold` within one tzinfo), with a consistent hash.
+  That equality decides whether two restrictions are one, never which rows a source returns:
+  a condition is pushed down as `column == value` and the table system's equality decides
+  (developer, November 19, 2026: a NaN, an infinity or a signed zero is accepted, pushed down
+  and documented, never filtered on the client or refused; a NaN or infinite value is saved
+  as `{"float": "nan" | "inf" | "-inf"}`); `text()`/`str`, and
+  `to_config`/`from_config` (the saved `where` mapping). Internally terms (column, operator,
+  value), equality only today; the public surface names no operator. Never add a second
+  restriction class: a limit stays the source's own (`limit=`). Today only
+  `SpiralDBTableSource.where(mapping=None, /, **columns)` exists: `Condition.of`, then the
+  source checks it against its table (unknown column, the column's exact Python type and
+  Arrow range, no conversion) and combines it with `where=`'s, applied by SpiralDB in the
+  scan. `where()` is `_copy()` then `_apply_restriction()` in place on the copy, the future
+  public `copy()` and `apply_restriction()`; other source kinds and `limit()` are ITL-1219.
+  A source states its restriction through two read-only members of `SourceProtocol`,
+  `condition` (the empty `Condition` when it reads every row) and `row_limit` (`None`
+  for none): `RootSource` answers the defaults, `SpiralDBTableSource` its own, and a
+  source over another (`CachedSource`, `SourceProxy`) answers for itself only
+  (developer, November 20, 2026: `StreamProtocol` gets them when restrictions reach
+  general streams, ITL-1219). Every rule that reads them is in one module,
+  `pipeline/restrictions.py`, typed, never probing a private attribute.
+  `RunSummary` records each restricted source by slot: `conditions` (slot to `Condition`),
+  `limits` (slot to limit), `restricted_source_ids` (every such slot), filled by one walk;
+  the saved job keeps `where` and `limit` in the source config. A slot's new restriction need not
+  match its previous one (bind does not compare the two), but `bind` refuses, before replacing
+  any binding, a bind after which two slots would read one source identity under different
+  restrictions (below). A job run over a restricted source feeding `GroupBy`, `Batch` or `MergeJoin` issues one `RestrictedAggregationWarning`.
+  A pipeline keeps one restriction (or none) per source identity (a restriction leaves the
+  identity unchanged), so one table restricted two ways (or with and without a restriction) in
+  one pipeline is refused (`restrictions.require_one_restriction`, over the sources the streams
+  read now, `sources_read`; nothing is remembered between checks, since a rebound slot changes
+  what they read) at capture, at compile, by `bind` before it binds and at the start of every
+  run (`refuse_restriction_conflicts`), whatever streams lead there: projections, operator
+  chains, streams built before the capture. A bind's walk matches the job's own slots by object
+  (`Rebinding`), never by name. `RunSummary` keeps one condition and one limit per slot (ITL-1293). Every restriction walk goes through a slot's bound source,
+  a `SourceProxy`'s delegate and a `CachedSource`'s source (`_streams_beneath`); a
+  `DerivedSource` is a root. A `CachedSource`
+  over a restricted source is refused at construction (a cache is kept under the table's
+  identity; developer, November 18, 2026), and so is an operator job node that caches (`LOG` or
+  `REPLAY`) over a restricted source (developer, November 19, 2026: its cache is kept under the
+  node's identity): `restrictions.refuse_restricted_operator_cache(s)`, called where the cache mode
+  is attached, by `bind` before it binds, before a job distributes its databases, by the
+  `upstreams` setter, by `execute` (on the streams it is handed) and `async_execute`, and at
+  the start of `job.run()`, `run_async()` and a job node's `run()`, before any source is
+  checked or anything computed or written; a new way to run or rewire a caching operator node
+  calls it too (it reads the node's public `cache_mode`). `CacheMode.OFF` and function nodes
+  are not concerned. The refusal is for now: how an operator node logs and replays is to be
+  redesigned to load its cache and then apply the restriction (`TODO(ITL-1219)`).
 - Empty data → `ArrowTableSource` raises `ValueError("Table is empty")`.
 - A side-effect job node delivers only when it runs (developer, November 13, 2026, ITL-1091):
   `job.run()`, `node.run()` (state-driven, ITL-1095: a node holding a current run delivers

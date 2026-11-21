@@ -16,13 +16,15 @@ from typing import TYPE_CHECKING, Any
 
 from orcapod.core.result_cache import ResultCache
 from orcapod.pipeline.observer import NoOpLogger
+from orcapod.pipeline.restrictions import restriction_text
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from types import FrameType
 
     from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
-    from orcapod.types import SchemaLike
+    from orcapod.pipeline.restrictions import RestrictedSource
+    from orcapod.types import Condition, SchemaLike
 
 _NOOP_LOGGER = NoOpLogger()
 
@@ -80,6 +82,17 @@ class RunSummary:
             for new data at the start of the run (ITL-1102): each raised in
             ``check_for_new_data``, was reported by a ``SourceCheckFailedWarning``,
             and fed the run with the data it already held.
+        conditions: The ``Condition`` each source of the run read under, by slot
+            name (the name ``bind`` takes; a source read directly by a node's
+            ``run()`` by its label), for the slots whose source has one (ITL-1218).
+            A restriction (a condition and/or a limit) chooses which rows flow and is
+            not part of any identity, so this and ``limits`` are the record of which
+            rows a run saw. In memory only: a run summary is not saved (a saved job
+            keeps each source's ``where`` and ``limit`` in its config).
+        limits: The limit each source of the run read with, by slot name, for the
+            slots whose source has one.
+        restricted_source_ids: The source id of every restricted source (a slot in
+            ``conditions``, ``limits`` or both), by slot name.
         ran_nothing: Whether the run ran no node: every node held a current run
             (ITL-1095). Decided by the run's plan, which counts every kind of node, so a
             run that ran only a side-effect or operator node is not "nothing to do".
@@ -94,6 +107,7 @@ class RunSummary:
         target: str | None = None,
         unchecked_sources: Sequence[str] = (),
         ran_nothing: bool = False,
+        restricted_sources: Mapping[str, RestrictedSource] | None = None,
     ) -> None:
         """Build the summary.
 
@@ -104,6 +118,9 @@ class RunSummary:
             target: The label of the node whose ``run()`` this was, if any.
             unchecked_sources: The sources that could not be checked for new data.
             ran_nothing: Whether the run ran no node (every node held a current run).
+            restricted_sources: Slot name to the source id, the condition (empty
+                for none) and the limit of each restricted source of the run
+                (``restrictions.restrictions_in_force``).
         """
         self.job_name: str = job_name
         self.nodes: Mapping[str, NodeRunSummary] = {node.label: node for node in nodes}
@@ -111,6 +128,21 @@ class RunSummary:
         self.target: str | None = target
         self.unchecked_sources: tuple[str, ...] = tuple(unchecked_sources)
         self.ran_nothing: bool = ran_nothing
+        # One mapping split three ways, so the keys cannot disagree.
+        restricted = dict(restricted_sources or {})
+        self.conditions: Mapping[str, Condition] = {
+            slot: condition
+            for slot, (_, condition, _) in restricted.items()
+            if condition
+        }
+        self.limits: Mapping[str, int] = {
+            slot: limit
+            for slot, (_, _, limit) in restricted.items()
+            if limit is not None
+        }
+        self.restricted_source_ids: Mapping[str, str] = {
+            slot: source_id for slot, (source_id, _, _) in restricted.items()
+        }
 
     @property
     def failed_rows(self) -> int:
@@ -192,6 +224,23 @@ class RunSummary:
             self.unchecked_sources
         )
 
+    def _restrictions_line(self) -> str | None:
+        """The line naming each restricted source and its restriction, if any."""
+        if not self.restricted_source_ids:
+            return None
+        return "restricted sources: " + "; ".join(
+            f"{slot} ({source_id}): "
+            + restriction_text(self.conditions.get(slot), self.limits.get(slot))
+            for slot, source_id in self.restricted_source_ids.items()
+        )
+
+    def _source_lines_html(self) -> str:
+        """The unchecked and restricted source lines as HTML paragraphs, or ``""``."""
+        restricted = self._restrictions_line()
+        return self._unchecked_html() + (
+            "" if restricted is None else f"<p>{html.escape(restricted)}</p>"
+        )
+
     def _unchecked_html(self) -> str:
         """The unchecked-sources line as an HTML paragraph, or ``""``."""
         unchecked = self._unchecked_line()
@@ -203,6 +252,9 @@ class RunSummary:
         unchecked = self._unchecked_line()
         if unchecked is not None:
             lines.append(f"  {unchecked}")
+        restricted = self._restrictions_line()
+        if restricted is not None:
+            lines.append(f"  {restricted}")
         for node in self.nodes.values():
             lines.append(
                 f"  {node.label}: {_rows(node.rows)}: {_counts(node, self.load_only)}"
@@ -248,7 +300,7 @@ class RunSummary:
                 "</tr>"
             )
         return (
-            f"<p>{html.escape(self._headline())}</p>{self._unchecked_html()}"
+            f"<p>{html.escape(self._headline())}</p>{self._source_lines_html()}"
             f"<table><thead><tr>{header}</tr></thead>"
             f"<tbody>{''.join(body)}</tbody></table>"
         )
@@ -268,7 +320,7 @@ class RunSummary:
             for node in self.nodes.values()
         ]
         return (
-            f"<p>{html.escape(self._headline())}</p>{self._unchecked_html()}"
+            f"<p>{html.escape(self._headline())}</p>{self._source_lines_html()}"
             f"<table><thead><tr>{header}</tr></thead>"
             f"<tbody>{''.join(body)}</tbody></table>"
         )

@@ -8,7 +8,7 @@ from orcapod.core.streams.base import StreamBase, typed_zero_row_table
 from orcapod.system_constants import constants
 from orcapod.core.streams.view import StreamView
 from orcapod.protocols.core_protocols import StreamProtocol
-from orcapod.types import ColumnConfig, Schema
+from orcapod.types import ColumnConfig, Condition, Schema
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -119,6 +119,28 @@ class RootSource(StreamBase):
         if self._source_id is None:
             raise ValueError("source_id is not set")
         return self._source_id
+
+    # -------------------------------------------------------------------------
+    # Restriction (ITL-1218)
+    # -------------------------------------------------------------------------
+
+    @property
+    def condition(self) -> Condition:
+        """The row conditions this source reads under (ITL-1218).
+
+        The empty ``Condition``: a source reads every row unless its kind can be
+        restricted (``SpiralDBTableSource.where``). A source that reads through
+        another (``CachedSource``, ``SourceProxy``) answers for itself only; what
+        it reads through is reached by the restriction walk
+        (``orcapod.pipeline.restrictions``).
+        """
+        return Condition()
+
+    @property
+    def row_limit(self) -> int | None:
+        """The most rows this source reads (ITL-1218): ``None``, no limit, unless
+        its kind can be limited (``SpiralDBTableSource(limit=...)``)."""
+        return None
 
     # -------------------------------------------------------------------------
     # Content identity
@@ -326,6 +348,10 @@ class RootSource(StreamBase):
 
         Returns:
             A ``CachedSource`` that caches this source's output.
+
+        Raises:
+            ValueError: If this source is restricted (a condition or a limit): a cache
+                is kept under the table's identity, which a restriction is not part of.
         """
         from orcapod.core.sources.cached_source import CachedSource
 
