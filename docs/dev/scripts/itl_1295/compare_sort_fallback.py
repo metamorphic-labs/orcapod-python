@@ -17,7 +17,12 @@ taken (``arrow_utils._tag_order_by_polars``). Both are computed on the same tabl
 Per call: ``same`` (one permutation), ``moved`` (rows ordered differently: listed with
 the reason found: a null inside a list or struct; for a table Arrow sorts itself,
 whether the new order is Arrow's), ``main raised`` (Polars refused or panicked)
-or ``main wrong`` (main's sort ran but changed values; the order is not compared).
+or ``main wrong`` (main's sort ran but changed a value in ANY column of the table, a
+key or not: the changed columns are listed; the order is not compared). Each call also
+records the test file that made it.
+
+The plugin run selects every test file that sorts, heads or previews:
+``grep -rlE "sort_by_tags|\.head\(|_repr_html_|preview" tests`` (``test_*.py`` files).
 """
 
 from __future__ import annotations
@@ -110,18 +115,27 @@ def compare(table: pa.Table, keys: list[str], new: list[Any]) -> dict[str, Any]:
         restored = arrow_utils.restore_schema_nullability(
             pl.DataFrame(table).to_arrow(), table.schema
         )
-        values_kept = all(
-            _bits(restored.column(k).combine_chunks()).equals(
-                _bits(table.column(k).combine_chunks())
+        # Every column, not only the keys: main's sort carried the whole table through
+        # Polars, so a data column could change while every key stayed equal.
+        changed = [
+            name
+            for name in table.column_names
+            if not _bits(restored.column(name).combine_chunks()).equals(
+                _bits(table.column(name).combine_chunks())
             )
-            for k in keys
-        )
+        ]
     except (KeyboardInterrupt, SystemExit):
         raise
     except BaseException:
-        values_kept = False
-    if not values_kept:
-        return {"types": types, "result": "main wrong", "same order": old == new}
+        changed = list(table.column_names)
+    if changed:
+        return {
+            "types": types,
+            "result": "main wrong",
+            "same order": old == new,
+            "keys changed": any(name in keys for name in changed),
+            "changed columns": changed,
+        }
     if old == new:
         return {"types": types, "result": "same"}
     rows = table.select(keys).to_pylist()
@@ -146,6 +160,11 @@ def compare(table: pa.Table, keys: list[str], new: list[Any]) -> dict[str, Any]:
 # ── the pytest plugin ─────────────────────────────────────────────────────────
 
 _CALLS: list[dict[str, Any]] = []
+_TEST: list[str] = [""]
+
+
+def pytest_runtest_setup(item: Any) -> None:
+    _TEST[0] = item.nodeid
 
 
 def pytest_configure(config: Any) -> None:
@@ -153,7 +172,9 @@ def pytest_configure(config: Any) -> None:
 
     def wrapped(table: pa.Table, keys: list[str]) -> Any:
         new = original(table, keys)
-        _CALLS.append(compare(table, keys, new.to_pylist()))
+        _CALLS.append(
+            {**compare(table, keys, new.to_pylist()), "test": _TEST[0].split("::")[0]}
+        )
         return new
 
     arrow_utils._tag_order_by_polars = wrapped  # pyright: ignore[reportPrivateUsage]
