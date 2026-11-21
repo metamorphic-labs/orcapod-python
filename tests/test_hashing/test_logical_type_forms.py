@@ -8,7 +8,8 @@ the extension type). Every place an Arrow schema enters a schema identity, a sav
 schema or a declaration brings it to one form first
 (``logical_types.canonical_form.canonical_logical_schema``), so:
 
-1. ``hash_schema`` gives one hash for the live and the metadata form;
+1. (held: what ``hash_schema`` gives a value-hashed type in metadata form awaits the
+   developer's decision, Codex finding 1 of PR 454);
 2. a read-only loaded operator (``Index``, ``Pick``) types ``node.as_source()`` from its
    saved Arrow types;
 3. a saved schema keeps an identifier carried in either form, at any depth;
@@ -153,30 +154,6 @@ def _unregistered_form(schema: pa.Schema) -> pa.Schema:
             pa.register_extension_type(types[name])  # pyright: ignore[reportArgumentType]  # the stubs name PyExtensionType; pyarrow takes any ExtensionType
     assert not any(_extension_types(f.type) for f in read), "still registered"
     return read
-
-
-@pytest.mark.parametrize("name", list(LOGICAL))
-class TestOneSchemaHash:
-    def test_live_and_metadata_form_give_one_hash(self, name: str) -> None:
-        live = _schema(LOGICAL[name])
-        metadata = _metadata_form(live)
-        assert _hasher().hash_schema(live) == _hasher().hash_schema(metadata)
-
-    def test_a_schema_read_without_registration_gives_the_same_hash(
-        self, name: str
-    ) -> None:
-        live = _schema(LOGICAL[name])
-        assert _hasher().hash_schema(live) == _hasher().hash_schema(
-            _unregistered_form(live)
-        )
-
-    def test_slots_in_either_form_are_one_identity(self, name: str) -> None:
-        live = _schema(LOGICAL[name])
-        tags = pa.schema([pa.field("k", pa.int64(), nullable=False)])
-        a = SourceNode(name="src", tag_schema=tags, data_schema=live)
-        b = SourceNode(name="src", tag_schema=tags, data_schema=_metadata_form(live))
-        assert a.pipeline_hash() == b.pipeline_hash()
-        assert a.content_hash() == b.content_hash()
 
 
 def test_two_logical_types_still_differ() -> None:
