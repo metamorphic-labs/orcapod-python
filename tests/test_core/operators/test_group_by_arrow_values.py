@@ -563,7 +563,7 @@ def test_a_union_or_list_view_tag_is_refused_when_the_stream_is_built(
 ) -> None:
     with pytest.raises(
         InputValidationError,
-        match=r"union and list-view columns are not supported in Orcapod(.|\n)*"
+        match=r"union, list-view and run-end-encoded columns are not supported(.|\n)*"
         r"tag column 's'",
     ):
         _ = _unorderable_stream(REFUSED_BY_THE_STREAM[name])

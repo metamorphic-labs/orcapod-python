@@ -98,10 +98,11 @@ class ArrowTableStream(StreamBase):
             raise schema_utils.dictionary_columns_error(
                 found, tag_columns, data_tags, system_tag_columns
             )
-        # Nor are union and list-view columns (developer, November 21, 2026, ITL-640):
-        # a stream's identity is its Arrow schema hash, which cannot hold them.
-        if found := schema_utils.union_or_list_view_columns(table.schema):
-            raise schema_utils.union_or_list_view_columns_error(
+        # Nor are columns of a type the schema hash rejects (a union, a list view, a
+        # run-end-encoded type; developer, November 21, 2026, ITL-640): a stream's
+        # identity is its Arrow schema hash, which cannot hold them.
+        if found := schema_utils.schema_hash_rejected_columns(table.schema):
+            raise schema_utils.schema_hash_rejected_columns_error(
                 found, tag_columns, data_tags, system_tag_columns
             )
 

@@ -1176,13 +1176,17 @@ per-operator normalization. Names, nullability (top level and nested), field met
 logical (extension) types are untouched, and large and non-large variants hash identically, so no
 hash or default source id moves. Not covered: what is inside a library value (numpy, pandas,
 polars, torch) keeps its library's own distinction. `list_view` and `large_list_view` are not
-supported (ITL-1129), and neither is a union, dense or sparse: a source and a raw
-`ArrowTableStream` refuse a column whose type is or contains one when they are built
-(developer, November 21, 2026, ITL-640: a stream's identity is its Arrow schema hash, which
-cannot hold them; a raw stream used to hold them as given). One rule beside the dictionary
-refusal, `schema_utils.union_or_list_view_columns` with `union_or_list_view_columns_error`
+supported (ITL-1129), and neither is a union (dense or sparse) or a run-end-encoded type: a
+source and a raw `ArrowTableStream` refuse a column whose type is or contains one when they
+are built (developer, November 21, 2026, ITL-640, for unions and list views; run-end-encoded
+by the same rule, the coordinator the same day: one rule for every type the schema hash
+rejects. A stream's identity is its Arrow schema hash, which cannot hold them; a raw stream
+used to hold them as given). One rule beside the dictionary refusal,
+`schema_utils.schema_hash_rejected_columns` with `schema_hash_rejected_columns_error`
 (`InputValidationError` naming each column with its role and type), applied by
-`ArrowTableStream.__init__` and first by `SourceStreamBuilder.build`.
+`ArrowTableStream.__init__` and first by `SourceStreamBuilder.build`; the rejected kinds are
+one constant, `SCHEMA_HASH_REJECTED_KINDS`, checked by a test against starfix's public schema
+hash.
 
 Dictionary-encoded columns are refused, tags and data alike (developer, November 18, 2026,
 ITL-1264: "Say it is not currently supported in orcapod. We MAY support but not immediately in

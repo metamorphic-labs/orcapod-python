@@ -410,7 +410,7 @@ def test_a_job_node_sorted_read_keeps_every_value(
 )
 def test_a_tag_with_no_order_is_refused_naming_it(tag: "pa.Array[Any]") -> None:
     """A raw stream may hold one; Polars never sees it. (A list view or a union cannot
-    be a stream's column at all since ITL-640: test_union_and_list_view_columns_refused.)"""
+    be a stream's column at all since ITL-640: test_schema_hash_rejected_columns_refused.)"""
     stream = ArrowTableStream(
         pa.table(
             {

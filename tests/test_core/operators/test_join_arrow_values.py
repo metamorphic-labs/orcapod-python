@@ -592,7 +592,8 @@ def test_a_union_column_is_refused_when_the_stream_is_built(role: str) -> None:
     tags = ["n", "k"] if role == "key" else ["n"]
     with pytest.raises(
         InputValidationError,
-        match=r"union and list-view columns are not supported(.|\n)*column 'k' has "
+        match=r"union, list-view and run-end-encoded columns are not supported(.|\n)*"
+        r"column 'k' has "
         r"type dense_union",
     ):
         _ = ArrowTableStream(table, tag_columns=tags)

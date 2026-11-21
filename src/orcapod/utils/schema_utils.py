@@ -901,57 +901,75 @@ def _column_role(
     return "data"
 
 
-UNION_OR_LIST_VIEW_COLUMNS_NOT_SUPPORTED = (
-    "union and list-view columns are not supported in Orcapod"
+SCHEMA_HASH_REJECTED_COLUMNS_NOT_SUPPORTED = (
+    "union, list-view and run-end-encoded columns are not supported in Orcapod"
 )
-"""The start of the error for a union or list-view column (ITL-640)."""
+"""The start of the error for a column whose type the schema hash rejects (ITL-640)."""
+
+SCHEMA_HASH_REJECTED_KINDS: tuple[str, ...] = (
+    "is_union",
+    "is_list_view",
+    "is_large_list_view",
+    "is_run_end_encoded",
+)
+"""The ``pyarrow.types`` predicates of the types the Arrow schema hash rejects (ITL-640).
+
+The kinds starfix refuses in a schema, at any depth (``starfix._format2._is_rejected_type``:
+list views, unions and run-end-encoded types). This is the one list; it is not imported
+from starfix's private module, and ``tests/test_core/sources/
+test_schema_hash_rejected_columns_refused.py`` checks it against starfix's public
+``ArrowDigester.hash_schema`` over a battery of types, so a type starfix starts
+rejecting fails there rather than reaching a stream.
+"""
 
 
-def _holds_union_or_list_view(arrow_type: "pa.DataType") -> bool:
-    """Whether ``arrow_type`` is, or contains at any depth, a union or a list view."""
+def _is_schema_hash_rejected(arrow_type: "pa.DataType") -> bool:
+    return any(
+        getattr(pa.types, name)(arrow_type) for name in SCHEMA_HASH_REJECTED_KINDS
+    )
+
+
+def _holds_schema_hash_rejected(arrow_type: "pa.DataType") -> bool:
+    """Whether ``arrow_type`` is, or contains at any depth, a type the schema hash rejects."""
     if isinstance(arrow_type, pa.BaseExtensionType):
-        return _holds_union_or_list_view(arrow_type.storage_type)
-    if (
-        pa.types.is_union(arrow_type)
-        or pa.types.is_list_view(arrow_type)
-        or pa.types.is_large_list_view(arrow_type)
-    ):
+        return _holds_schema_hash_rejected(arrow_type.storage_type)
+    if _is_schema_hash_rejected(arrow_type):
         return True
     if pa.types.is_dictionary(arrow_type):
-        return _holds_union_or_list_view(arrow_type.value_type)
+        return _holds_schema_hash_rejected(arrow_type.value_type)
     if (
         pa.types.is_list(arrow_type)
         or pa.types.is_large_list(arrow_type)
         or pa.types.is_fixed_size_list(arrow_type)
     ):
-        return _holds_union_or_list_view(arrow_type.value_type)
-    if pa.types.is_run_end_encoded(arrow_type):
-        return _holds_union_or_list_view(arrow_type.value_type)
+        return _holds_schema_hash_rejected(arrow_type.value_type)
     if pa.types.is_struct(arrow_type):
-        return any(_holds_union_or_list_view(child.type) for child in arrow_type)
+        return any(_holds_schema_hash_rejected(child.type) for child in arrow_type)
     if pa.types.is_map(arrow_type):
-        return _holds_union_or_list_view(
+        return _holds_schema_hash_rejected(
             arrow_type.key_type
-        ) or _holds_union_or_list_view(arrow_type.item_type)
+        ) or _holds_schema_hash_rejected(arrow_type.item_type)
     return False
 
 
-def union_or_list_view_columns(
+def schema_hash_rejected_columns(
     arrow_schema: "pa.Schema",
 ) -> "list[tuple[str, pa.DataType]]":
-    """Return every column whose Arrow type is, or contains, a union or a list view.
+    """Return every column whose Arrow type is, or contains, a type the schema hash rejects.
 
-    Developer decision, November 21, 2026 (ITL-640): a stream's identity is its Arrow
-    schema hash, and the Arrow schema hash (starfix) cannot hold a union (dense or
-    sparse) or a list view (``list_view``, ``large_list_view``), so a stream with such
-    a column could not have an identity. Such a type at the top of a column or inside
-    it (a list, large list or fixed-size list item, a struct child, a map key or item,
-    a dictionary's values, the values of a run-end-encoded type, an extension type's
-    storage) counts.
+    Developer decision, November 21, 2026 (ITL-640), for unions and list views, and the
+    same for run-end-encoded types (coordinator, same day: one rule for every type the
+    schema hash rejects): a stream's identity is its Arrow schema hash, and the Arrow
+    schema hash (starfix) cannot hold a union (dense or sparse), a list view
+    (``list_view``, ``large_list_view``) or a run-end-encoded type
+    (``SCHEMA_HASH_REJECTED_KINDS``), so a stream with such a column could not have an
+    identity. Such a type at the top of a column or inside it (a list, large list or
+    fixed-size list item, a struct child, a map key or item, a dictionary's values, an
+    extension type's storage) counts.
 
     ``ArrowTableStream.__init__`` (every source and operator result becomes a stream
     there) and the source builder (first, before its key columns and its hash) refuse
-    what this finds, with ``union_or_list_view_columns_error``, beside the dictionary
+    what this finds, with ``schema_hash_rejected_columns_error``, beside the dictionary
     refusal (``dictionary_columns``).
 
     Args:
@@ -963,22 +981,22 @@ def union_or_list_view_columns(
     return [
         (field.name, field.type)
         for field in arrow_schema
-        if _holds_union_or_list_view(field.type)
+        if _holds_schema_hash_rejected(field.type)
     ]
 
 
-def union_or_list_view_columns_error(
+def schema_hash_rejected_columns_error(
     found: "Sequence[tuple[str, pa.DataType]]",
     tag_columns: Collection[str],
     data_tags: Collection[str],
     system_tag_columns: Collection[str] = (),
 ) -> InputValidationError:
-    """Return the error refusing the union and list-view columns ``found``.
+    """Return the error refusing the columns ``found`` whose types the schema hash rejects.
 
     Its job is the report, so it takes the roles it names.
 
     Args:
-        found: The columns, as ``union_or_list_view_columns`` returns them.
+        found: The columns, as ``schema_hash_rejected_columns`` returns them.
         tag_columns: The stream's tag columns, in tag order.
         data_tags: The tags that are data-tags.
         system_tag_columns: Names the stream will read as system tags beside those with
@@ -999,13 +1017,13 @@ def union_or_list_view_columns_error(
         for name, arrow_type in ordered
     ]
     return InputValidationError(
-        f"{UNION_OR_LIST_VIEW_COLUMNS_NOT_SUPPORTED}: a stream's identity is its Arrow "
+        f"{SCHEMA_HASH_REJECTED_COLUMNS_NOT_SUPPORTED}: a stream's identity is its Arrow "
         "schema hash, which cannot hold them:\n"
         + "\n".join(lines)
         + "\nCast a list view to the large list of the same items "
-        "(column.cast(pa.large_list(item_type))); a union has no Orcapod type: "
-        "split it into one column per member type, or drop it, before building the "
-        "source or stream."
+        "(column.cast(pa.large_list(item_type))); expand a run-end-encoded column "
+        "(pyarrow.compute.run_end_decode); a union has no Orcapod type: split it into "
+        "one column per member type, or drop it, before building the source or stream."
     )
 
 

@@ -624,7 +624,7 @@ def test_a_list_view_without_a_dictionary_is_refused_as_a_list_view(
             _build_nested(build, table, tag_order, roles)
         messages.append(str(info.value))
         assert NOT_SUPPORTED not in messages[-1]
-        assert schema_utils.UNION_OR_LIST_VIEW_COLUMNS_NOT_SUPPORTED in messages[-1]
+        assert schema_utils.SCHEMA_HASH_REJECTED_COLUMNS_NOT_SUPPORTED in messages[-1]
         assert f"column {column!r} has type {kind}" in messages[-1]
 
 
