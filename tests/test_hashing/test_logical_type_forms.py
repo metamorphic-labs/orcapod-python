@@ -51,9 +51,6 @@ from orcapod.pipeline import (
 from orcapod.pipeline.serialization import (
     arrow_schema_from_texts,
     arrow_type_texts,
-    job_type_texts_at_version,
-    pipeline_type_texts_at_version,
-    type_text_at_version,
 )
 from orcapod.types import Cursor
 from orcapod.utils.arrow_utils import normalize_extension_columns
@@ -844,22 +841,6 @@ def test_every_nested_field_name_reads_back_exactly(name: str) -> None:
         assert _hasher().hash_schema(restored) == _hasher().hash_schema(schema), kind
 
 
-def test_an_earlier_files_unquoted_names_still_read() -> None:
-    """Names an earlier file wrote unquoted (an inner space, the empty name)."""
-    restored = arrow_schema_from_texts(
-        {
-            "c": "struct<in ner: int8, : int16 not null>",
-            "d": "large_list<my item: int8>",
-        },
-        _converter(),
-        ["c", "d"],
-    )
-    assert restored.field("c").type == pa.struct(
-        [pa.field("in ner", pa.int8()), pa.field("", pa.int16(), nullable=False)]
-    )
-    assert restored.field("d").type == pa.large_list(pa.field("my item", pa.int8()))
-
-
 @pytest.mark.parametrize("label", list(CONTAINER_TEXTS))
 def test_a_container_text_reads_back_exactly(label: str) -> None:
     """Names, nullability, identifiers and ``keys_sorted`` all survive the text."""
@@ -874,17 +855,6 @@ def test_a_container_text_reads_back_exactly(label: str) -> None:
         assert restored.field(name).equals(schema.field(name), check_metadata=True)
         assert _named(restored.field(name).type) == _named(schema.field(name).type)
     assert _hasher().hash_schema(restored) == _hasher().hash_schema(schema)
-
-
-def test_a_bare_map_text_of_an_earlier_file_still_reads() -> None:
-    """``map<K, V>`` (written before the fields were kept) reads as Arrow's default."""
-    restored = arrow_schema_from_texts(
-        {"c": "map<large_string, int8>", "d": "map<large_string, int8, keys_sorted>"},
-        _converter(),
-        [],
-    )
-    assert restored.field("c").type == pa.map_(pa.large_string(), pa.int8())
-    assert restored.field("d").type == pa.map_(pa.large_string(), pa.int8(), True)
 
 
 @pytest.mark.parametrize("identifier", list(NESTED_IDENTIFIERS))
@@ -925,58 +895,6 @@ def test_a_slot_with_two_map_columns_saves_and_loads_exactly(
     )
 
 
-# ── 7. older saved text reads exactly as the earlier reader read it ─────────────
-#
-# Format 0.4.0 quotes nested field names that are not plain; files of an earlier
-# format wrote every name unquoted, so a quote there is part of the name. A load
-# rewrites such text first (``saved_type_texts_at_version``; fifth Codex review of PR
-# 454), and the reader never guesses.
-
-OLD_NAMES = {
-    "a quoted word": '"x"',
-    "an escape spelled out": '"\\u0000"',
-    "an inner quote": 'a"b',
-    "a lone quote": '"',
-    "two quotes": '""',
-    "a quoted phrase": '"a b"',
-    "a trailing quote": 'x"',
-    "quotes and spaces": ' "y" ',
-    "single quotes": "'q'",
-    "json-looking": '"{}"',
-    "three quotes": '"""',
-    "a quoted item": '"item"',
-    "an escaped quote": '\\"',
-    "plain": "plain",
-}
-
-
-def _old_texts(name: str) -> dict[str, tuple[str, pa.DataType]]:
-    """Text an earlier writer wrote for a nested field ``name``, and what an earlier
-    reader read from it: the name with its surrounding whitespace removed."""
-    read = name.strip()
-    return {
-        "struct": (f"struct<{name}: int8>", pa.struct([pa.field(read, pa.int8())])),
-        "two children": (
-            f"struct<{name}: int8, z: int16 not null>",
-            pa.struct([pa.field(read, pa.int8()), pa.field("z", pa.int16(), False)]),
-        ),
-        "large_list": (
-            f"large_list<{name}: int8 not null>",
-            pa.large_list(pa.field(read, pa.int8(), nullable=False)),
-        ),
-        "fixed_size_list": (
-            f"fixed_size_list<{name}: int8>[2]",
-            pa.list_(pa.field(read, pa.int8()), 2),
-        ),
-        "nested": (
-            f"large_list<item: struct<{name}: list<{name}: int8>>>",
-            pa.large_list(
-                pa.struct([pa.field(read, pa.list_(pa.field(read, pa.int8())))])
-            ),
-        ),
-    }
-
-
 def _named(arrow_type: pa.DataType) -> tuple[pa.DataType, tuple[str, ...]]:
     """``arrow_type`` with every nested field name, in order: Arrow's type equality
     does not compare a list item's name."""
@@ -1001,149 +919,3 @@ def _named(arrow_type: pa.DataType) -> tuple[pa.DataType, tuple[str, ...]]:
 
     walk(arrow_type)
     return arrow_type, tuple(names)
-
-
-@pytest.mark.parametrize("version", ["0.1.0", "0.3.0"])
-@pytest.mark.parametrize("name", list(OLD_NAMES))
-def test_older_type_text_reads_as_the_earlier_reader_read_it(
-    name: str, version: str
-) -> None:
-    for kind, (text, expected) in _old_texts(OLD_NAMES[name]).items():
-        rewritten = {"c": type_text_at_version(text, version)}
-        restored = arrow_schema_from_texts(rewritten, _converter(), ["c"])
-        assert _named(restored.field("c").type) == _named(expected), kind
-
-
-def test_the_format_version_decides_how_a_text_is_read() -> None:
-    """One text, two meanings: the file's version says which, never a guess."""
-    names = {}
-    for version in ("0.3.0", "0.4.0"):
-        texts = {"c": type_text_at_version('struct<"x": int8>', version)}
-        names[version] = arrow_schema_from_texts(texts, _converter(), ["c"]).field("c")
-    assert names["0.3.0"].type.field(0).name == '"x"'
-    assert names["0.4.0"].type.field(0).name == "x"
-
-
-def test_only_the_known_places_of_an_older_file_are_rewritten() -> None:
-    """Node output schemas, slot and source schemas, a CSV schema, nested sources along
-    inner_source and origin; a PollingSource's impl_config, an operator's config and
-    any other value pass through byte for byte (sixth Codex review of PR 454)."""
-    old = 'struct<"x": int8>'
-    new = 'struct<"\\"x\\"": int8>'
-    opaque = {
-        "data_schema": {"request": old},
-        "tag_schema": {"r": old},
-        "output_schema": {"tag": {"t": old}},
-        "schema": {"columns": {"c": old}},
-        "deeper": [{"data_schema": {"q": old}}],
-    }
-    polling = {
-        "source_type": "polling_source",
-        "impl_module": "user.module",
-        "impl_class": "Impl",
-        "impl_config": opaque,
-    }
-    csv = {
-        "source_type": "csv",
-        "tag_schema": {"t": old},
-        "data_schema": {"d": old},
-        "schema": {"columns": {"c": old}, "nullable": []},
-        "description": old,
-    }
-    pipeline: dict[str, Any] = {
-        "orcapod_pipeline_version": "0.3.0",
-        "nodes": {
-            "slot": {
-                "output_schema": {
-                    "tag": {"t": old},
-                    "data": {"d": old},
-                    "nullable": {},
-                },
-                "source_config": {
-                    "source_type": "node",
-                    "tag_schema": {"t": old},
-                    "data_schema": {"d": old},
-                },
-            },
-            "op": {
-                "output_schema": {"tag": {"t": old}, "data": {"d": old}},
-                "config": opaque,
-            },
-        },
-    }
-    job: dict[str, Any] = {
-        "orcapod_pipeline_job_version": "0.3.0",
-        "pipeline": pipeline,
-        "bindings": {
-            "sources": {
-                "a": {
-                    "source_type": "cached",
-                    "inner_source": {"source_type": "derived", "origin": csv},
-                },
-                "b": polling,
-                "c": {"source_type": "delta_table", "schema": {"columns": {"c": old}}},
-            }
-        },
-    }
-    before = json.dumps(job, sort_keys=True)
-    rewritten = pipeline_type_texts_at_version(pipeline, "0.3.0")
-    slot, op = rewritten["nodes"]["slot"], rewritten["nodes"]["op"]
-    assert slot["output_schema"]["tag"] == {"t": new}
-    assert slot["output_schema"]["data"] == {"d": new}
-    assert slot["source_config"]["tag_schema"] == {"t": new}
-    assert op["output_schema"]["tag"] == {"t": new}
-    assert json.dumps(op["config"], sort_keys=True) == json.dumps(
-        opaque, sort_keys=True
-    )
-    sources = job_type_texts_at_version(job, "0.3.0")["bindings"]["sources"]
-    origin = sources["a"]["inner_source"]["origin"]
-    assert origin["tag_schema"] == {"t": new}
-    assert origin["data_schema"] == {"d": new}
-    assert origin["schema"]["columns"] == {"c": new}
-    assert origin["description"] == old
-    assert json.dumps(sources["b"], sort_keys=True) == json.dumps(
-        polling, sort_keys=True
-    )
-    assert sources["c"]["schema"]["columns"] == {"c": old}  # not a CSV source
-    # The embedded pipeline is Pipeline.load's to rewrite, under its own version.
-    assert job_type_texts_at_version(job, "0.3.0")["pipeline"] is pipeline
-    assert json.dumps(job, sort_keys=True) == before  # nothing changed in place
-    assert pipeline_type_texts_at_version(pipeline, "0.4.0") is pipeline
-    assert job_type_texts_at_version(job, "0.4.0") is job
-
-
-def test_an_older_pipeline_file_loads_its_quoted_names_exactly(tmp_path: Path) -> None:
-    """End to end: a 0.3.0 file whose slot names hold quotes loads them as written."""
-    tags = pa.schema([pa.field("k", pa.int64(), nullable=False)])
-    data = pa.schema(
-        [
-            pa.field("s", pa.struct([pa.field('"x"', pa.int8())])),
-            pa.field("w", pa.large_list(pa.field('a"b', pa.int8()))),
-        ]
-    )
-    slot = SourceNode(name="src", tag_schema=tags, data_schema=data)
-    pipeline = Pipeline(name="quotes")
-    with pipeline:
-        MapData({"s": "t"})(slot, label="renamed")
-    path = tmp_path / "pipeline.json"
-    pipeline.save(path)
-    saved = json.loads(path.read_text())
-    assert saved["orcapod_pipeline_version"] == "0.4.0"
-    # The same file as an earlier writer wrote it: names unquoted.
-    old_texts = {"s": 'struct<"x": int8>', "w": 'large_list<a"b: int8>'}
-    for descriptor in saved["nodes"].values():
-        config = descriptor.get("source_config")
-        if config is not None:
-            config["data_schema"].update(old_texts)
-        if "s" in descriptor["output_schema"]["data"]:
-            descriptor["output_schema"]["data"].update(old_texts)
-    saved["orcapod_pipeline_version"] = "0.3.0"
-    old_path = tmp_path / "old.json"
-    old_path.write_text(json.dumps(saved))
-    loaded = Pipeline.load(old_path)
-    assert typed_arrow_schemas(loaded.nodes["src"]) == typed_arrow_schemas(slot)
-    # And a format this library does not know is refused, never guessed.
-    saved["orcapod_pipeline_version"] = "0.5.0"
-    old_path.write_text(json.dumps(saved))
-    with pytest.raises(ValueError, match="Unsupported pipeline format version '0.5.0'"):
-        Pipeline.load(old_path)

@@ -219,20 +219,13 @@ def test_pipeline_load_restores_side_effect_nodes(
 def test_a_file_without_recorded_nullability_restores_side_effect_nodes(
     saved: tuple[PipelineJob, list[int], pathlib.Path], tmp_path: pathlib.Path
 ) -> None:
-    """A job file of format 0.1.0 (v0.2: no ``nullable`` record) restores them too."""
+    """A job file without the ``nullable`` records restores them too."""
     _, _, path = saved
     data = json.loads(path.read_text())
-    data["orcapod_pipeline_job_version"] = "0.1.0"
-    data["pipeline"]["orcapod_pipeline_version"] = "0.1.0"
     for descriptor in data["pipeline"]["nodes"].values():
         del descriptor["output_schema"]["nullable"]
         descriptor.get("source_config", {}).pop("nullable", None)
-        # A 0.1.0 file holds only plain tags and never names them (ITL-1019).
-        descriptor.pop("fall_through_tags", None)
-        descriptor.get("function_config", {}).pop("fall_through_tags", None)
-    for config in data["bindings"]["sources"].values():
-        config.pop("tag_only_columns", None)
-    old = tmp_path / "format_0_1_0.json"
+    old = tmp_path / "unrecorded.json"
     old.write_text(json.dumps(data))
 
     loaded = PipelineJob.load(old)

@@ -411,7 +411,8 @@ def main() -> int:
     for e in common:
         if old_place[e] != new_place[e]:
             failures.append(f"in another kind of file: {e[0]}:{e[1]}")
-    failures += _record_id_moves_unexplained(c_moved, renamed, old, new)
+    record_id_failures = _record_id_moves_unexplained(c_moved, renamed, old, new)
+    failures += record_id_failures
     for e, to in renamed.items():
         if old_place[e] != new_place[to]:
             failures.append(f"renamed into another file kind: {e}")
@@ -462,10 +463,19 @@ def main() -> int:
     )
     print(f"--check: {check_line}")
     if c_moved:
-        print(
-            f"record ids rebuilt: {len(c_moved)} entries; with the system-tag names "
-            "mapped back they are the old pinned ids"
-        )
+        # The claim is printed only when check 5 found it true (CodeRabbit on PR 454):
+        # a failed check is reported as failed, never beside a passing statement.
+        if record_id_failures:
+            print(
+                f"record ids rebuilt: {len(c_moved)} entries; "
+                f"{len(record_id_failures)} not explained by the system-tag names "
+                "(see FAIL below)"
+            )
+        else:
+            print(
+                f"record ids rebuilt: {len(c_moved)} entries; with the system-tag "
+                "names mapped back they are the old pinned ids"
+            )
 
     if args.write and not failures:
         rows = []

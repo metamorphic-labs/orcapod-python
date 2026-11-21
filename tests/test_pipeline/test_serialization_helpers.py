@@ -221,16 +221,10 @@ class TestPipelineFormatVersion:
         assert isinstance(PIPELINE_FORMAT_VERSION, str)
         assert PIPELINE_FORMAT_VERSION == "0.4.0"
 
-    def test_supported_versions_hold_current_and_previous(self):
-        from orcapod.pipeline.serialization import (
-            PIPELINE_JOB_FORMAT_VERSION,
-            SUPPORTED_FORMAT_VERSIONS,
-            SUPPORTED_JOB_FORMAT_VERSIONS,
-        )
+    def test_the_job_format_is_the_pipeline_format(self):
+        from orcapod.pipeline.serialization import PIPELINE_JOB_FORMAT_VERSION
 
-        assert PIPELINE_JOB_FORMAT_VERSION == "0.4.0"
-        both = frozenset({"0.1.0", "0.2.0", "0.3.0", "0.4.0"})
-        assert SUPPORTED_FORMAT_VERSIONS == SUPPORTED_JOB_FORMAT_VERSIONS == both
+        assert PIPELINE_JOB_FORMAT_VERSION == PIPELINE_FORMAT_VERSION == "0.4.0"
 
 
 # ---------------------------------------------------------------------------

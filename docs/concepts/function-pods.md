@@ -1003,17 +1003,10 @@ source was configured. `PipelineJob.load(path)` reads it back, for example in a 
 session, so that you can read the results the job stored. The file also records
 `orcapod_version`, the Orcapod release that wrote it (the same text as `orcapod.__version__`;
 a development checkout gives a development version). It is informational: loading never
-depends on it. Adding the field moved the file format version from `0.1.0` to `0.2.0`, and
-stating every tag binding (data-tags) moved it to `0.3.0`, the version written now. A
-`0.1.0` file, written by v0.2.0, and a `0.2.0` file, written by v0.3.0, still load, with every
-source tag plain as they were written, within the schema limits described below (a file with
-name-only extension type text cannot be loaded); any other version is rejected.
-A job saved before 0.4 names its functions `python.function.v0`; it loads read only (its
-blueprint, with its tables of the older layouts reported and not read), and its functions
-cannot be bound, because 0.4 runs them as `python.function.v1`
-([Data function types](../reference/data-function-types.md)): rebuild the pipeline to run it.
-The reverse does not hold: v0.2.0 cannot load a file saved by v0.3.0, because hashes differ
-between the two releases.
+depends on it. The file format version is `0.4.0`, and a load reads only that version: a
+file saved by an earlier release (format `0.1.0` to `0.3.0`) is refused, with a message
+saying so. Rebuild the pipeline from code and save it again; taking older files to the
+current format is the work of a separate migration tool, not of `load`.
 
 For example:
 
@@ -1094,8 +1087,7 @@ from that database, and no rows under that key is an empty result, not an error.
   bound). The file records which columns may be null (`T | None`), because the Arrow type text
   of a schema cannot say it, and the content hash of each node's run, which the stored rows
   carry. Whether a file has these records is decided by the records themselves, not by the
-  file's format version: a file without them (format `0.1.0`, or a `0.2.0` file written
-  before they existed) still loads, but lossy: its schemas read every column as non-null,
+  file's format version: a file without them still loads, but lossy: its schemas read every column as non-null,
   and a loaded operator node cannot name its run's rows. When the database holds none under the
   content hash the loaded job computes, its stored view (`as_source()`, `get_all_records()`)
   raises and says why, rather than presenting stored rows as none. An empty record is

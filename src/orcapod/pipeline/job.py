@@ -1591,7 +1591,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             results.
 
         Raises:
-            ValueError: If the file's format version is unsupported, or if it was
+            ValueError: If the file's format version is not the one this Orcapod
+                writes (an earlier format is refused, never migrated), or if it was
                 saved before the database key was renamed (``bindings.store``
                 instead of ``bindings.database``) and no ``database`` is given.
                 An explicit ``database`` makes the saved block irrelevant, so
@@ -1605,27 +1606,26 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         from orcapod.core.nodes.source_node import SourceNodeBase
         from orcapod.pipeline.graph import Pipeline
         from orcapod.pipeline.serialization import (
-            SUPPORTED_JOB_FORMAT_VERSIONS,
+            PIPELINE_JOB_FORMAT_VERSION,
             check_saved_source_config,
             check_source_config_binding,
+            require_current_format,
+            require_tag_only_columns,
             resolve_source_from_config,
-            job_type_texts_at_version,
-            source_config_at_version,
         )
 
         path = _Path(path)
         with open(path) as f:
             data = _json.load(f)
 
-        version = data.get("orcapod_pipeline_job_version", "")
-        if version not in SUPPORTED_JOB_FORMAT_VERSIONS:
-            raise ValueError(
-                f"Unsupported PipelineJob format version {version!r}. "
-                f"Supported: {sorted(SUPPORTED_JOB_FORMAT_VERSIONS)}"
+        try:
+            require_current_format(
+                data.get("orcapod_pipeline_job_version", ""),
+                PIPELINE_JOB_FORMAT_VERSION,
             )
-        # Type texts of an earlier format in the 0.4.0 grammar (ITL-640). The embedded
-        # pipeline carries its own version and is rewritten by ``Pipeline.load``.
-        data = job_type_texts_at_version(data, version)
+        except ValueError as exc:
+            exc.add_note(f"Loading the job file {path}")
+            raise
 
         # Reconstruct pipeline from embedded blueprint data
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as tmp:
@@ -1653,10 +1653,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             data.get("bindings", {}).get("sources", {}).items()
         ):
             source_type = src_config.get("source_type")
-            # The file's version decides which tags are plain (ITL-1019): a refusal
-            # is the file's error, not a source that could not be rebuilt.
+            # Every source states its plain tags (ITL-1019): a refusal is the file's
+            # error, not a source that could not be rebuilt.
             try:
-                src_config = source_config_at_version(src_config, version)
+                require_tag_only_columns(src_config)
                 # A tags_as_data source saved without its required source id is an
                 # invalid file, refused here; the best-effort rebuild below would
                 # leave the slot unbound instead (ITL-1313).
@@ -1795,7 +1795,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 continue
 
             if isinstance(bp_node, _SourceNode):
-                # Keeps the loaded slot's saved hashes and pending types (ITL-1138).
+                # Keeps the loaded slot's saved hashes and saved type texts (ITL-1138).
                 sjn = SourceJobNode._from_loaded_slot(  # pyright: ignore[reportPrivateUsage]  # the loader is the one caller
                     bp_node, bound_source=sources.get(bp_node.name)
                 )

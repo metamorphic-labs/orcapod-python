@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextvars
 import hashlib
 import json as _json
 import logging
@@ -35,30 +34,35 @@ logger = logging.getLogger(__name__)
 # Format version
 # ---------------------------------------------------------------------------
 
-# The version a pipeline file is written at, and the versions a load accepts.
-# A format change adds the new version here and to the supported set; the loaders
-# only test membership (``Pipeline.load``).
-#   0.1.0: first format (v0.2.0).
-#   0.2.0: adds ``orcapod_version`` (v0.3.0); a 0.1.0 file loads unchanged.
-#   0.3.0: a source's tags may be data-tags (ITL-1023). A file at 0.1.0 or 0.2.0
-#          holds v0.3 sources: their configs carry no ``tag_only_columns`` and read
-#          back with every declared tag plain, so their saved hashes match.
+# The version a pipeline file is written at, and the only one a load reads.
 #   0.4.0: a nested field name in saved type text that is not plain is JSON-quoted
-#          (ITL-640, ``_nested_field_name_text``). A file at an earlier version holds
-#          the unquoted grammar, where a quote is part of a name: a load rewrites its
-#          type texts in the 0.4.0 grammar first (``type_text_at_version``),
-#          each name exactly as the earlier reader read it.
-# Plain tags are decided by this version, never by a missing key (ITL-1159, ITL-1019):
-# everything in a file at a ``PLAIN_TAG_FORMAT_VERSIONS`` version is plain, and such a
-# file never holds ``tag_only_columns`` or ``fall_through_tags``. From 0.3.0 on,
-# every source config that takes the option writes ``tag_only_columns`` and every
-# function node writes ``fall_through_tags``; a load refuses a file without them.
+#          (ITL-640, ``_nested_field_name_text``); a map's key and item are written as
+#          whole fields. Every source config that takes the option writes
+#          ``tag_only_columns`` and every function node writes ``fall_through_tags``;
+#          a load refuses a file without them (ITL-1159, ITL-1019).
+# A file of an earlier format (0.1.0 to 0.3.0) is refused at load, never read in its
+# old grammar: load and save had not been used in production (developer, 2026-11-21).
+# Taking such files to the current format is the migration tool's work (ITL-1048).
 PIPELINE_FORMAT_VERSION = "0.4.0"
-SUPPORTED_FORMAT_VERSIONS = frozenset({"0.1.0", "0.2.0", "0.3.0", "0.4.0"})
-PLAIN_TAG_FORMAT_VERSIONS = frozenset({"0.1.0", "0.2.0"})
-UNQUOTED_NAME_FORMAT_VERSIONS = frozenset({"0.1.0", "0.2.0", "0.3.0"})
-"""The format versions (pipeline and job files alike) whose type text has unquoted
-nested field names (ITL-640): see ``type_text_at_version``."""
+
+
+def require_current_format(version: str, current: str) -> None:
+    """Refuse a saved file whose format version is not the one this Orcapod writes.
+
+    Args:
+        version: The format version the file records.
+        current: The format version this Orcapod writes and reads.
+
+    Raises:
+        ValueError: If ``version`` is not ``current``.
+    """
+    if version != current:
+        raise ValueError(
+            f"Unsupported format version {version!r}: the file was saved with format "
+            f"{version!r}; this Orcapod reads only format {current}. Save the "
+            "pipeline again with this version of Orcapod."
+        )
+
 
 # ---------------------------------------------------------------------------
 # LoadStatus
@@ -687,9 +691,8 @@ def _nested_field_name_text(name: str) -> str:
     character of the type grammar, whitespace anywhere, a newline, a quote, a
     backslash, a non-ASCII character, the empty name) is written as a JSON string,
     ``"a:b"``, ``"a\\nb"``, ``""``, which the reader takes back exactly. This is
-    the grammar of format 0.4.0; a file of an earlier format, where a quote is part of
-    a name, is rewritten in it at load, each name as the earlier reader read it
-    (``type_text_at_version``), so the reader never guesses.
+    the grammar of format 0.4.0, the only one a load reads
+    (``require_current_format``).
     """
     return name if _PLAIN_FIELD_NAME.fullmatch(name) else _json.dumps(name)
 
@@ -729,9 +732,9 @@ def _serialize_arrow_type(arrow_type: Any) -> str:
         # the saved type is the value type.
         return _serialize_arrow_type(arrow_type.value_type)
     if pa.types.is_map(arrow_type):
-        # The key and the item as whole fields (ITL-640, Codex review 3 of PR 454):
-        # the bare ``map<K, V>`` of earlier files lost the item's name and its
-        # nullability, which are part of the schema's identity.
+        # The key and the item as whole fields (ITL-640, Codex review 3 of PR 454): a
+        # bare ``map<K, V>`` would lose the item's name and its nullability, which are
+        # part of the schema's identity.
         ordered = ", keys_sorted" if arrow_type.keys_sorted else ""
         return (
             f"map<{_serialize_nested_field(arrow_type.key_field)}, "
@@ -1352,9 +1355,9 @@ def parse_arrow_type_string(type_str: str, type_converter: Any | None = None) ->
 
     if outer == "map":
         # "map<key: large_string not null, value: int64 not null, keys_sorted>": the
-        # key and item fields whole. A file written before keeps the bare
-        # "map<large_string, int64>", read as Arrow's default fields (a non-null
-        # "key", a nullable "value").
+        # key and item fields whole, as Orcapod writes a map. Arrow's own text of a
+        # map, the bare "map<large_string, int64>" (``str(type)``), reads as Arrow's
+        # default fields (a non-null "key", a nullable "value").
         parts = _split_top_level(inner, ",")
         keys_sorted = len(parts) == 3 and parts[-1].strip() == "keys_sorted"
         if keys_sorted:
@@ -1491,7 +1494,7 @@ def _parse_arrow_field(text: str, type_converter: Any | None) -> Any:
     import pyarrow as pa
 
     text = text.strip()
-    if text.startswith('"') and _QUOTED_NAMES.get():
+    if text.startswith('"'):
         # A quoted name (``_nested_field_name_text``): exactly the JSON string.
         name, end = _json.JSONDecoder().raw_decode(text)
         rest = text[end:].lstrip()
@@ -1520,7 +1523,7 @@ def _names_a_field(text: str) -> bool:
     A bare type holds a ``:`` only inside its brackets (``list<item: int64>``), so
     the text names a field exactly when a ``:`` comes before any bracket.
     """
-    if text.lstrip().startswith('"') and _QUOTED_NAMES.get():
+    if text.lstrip().startswith('"'):
         return True
     colon = text.find(":")
     if colon == -1:
@@ -1580,225 +1583,8 @@ def _strip_field_name(s: str) -> str:
     return s
 
 
-def _old_grammar_text(type_str: str) -> str:
-    """Rewrite type text of the unquoted grammar in the 0.4.0 grammar, by its text.
-
-    Each nested field name is taken exactly as the earlier reader took it (split at
-    its first ``:``, surrounding whitespace removed, a quote part of the name) and
-    written again by ``_nested_field_name_text``; every type is kept as written. Run
-    with ``_QUOTED_NAMES`` off, so the splitting is the earlier reader's.
-    """
-    import re as _re
-
-    text = type_str.strip()
-    if text.startswith("fixed_size_list<"):
-        match = _re.fullmatch(r"fixed_size_list<(.*)>\[(\d+)\]", text, _re.S)
-        if match is None:
-            return type_str
-        return (
-            f"fixed_size_list<{_old_grammar_field(match.group(1))}>[{match.group(2)}]"
-        )
-    if text.startswith("extension<") or "<" not in text:
-        return type_str
-    bracket = text.index("<")
-    outer, inner = text[:bracket].strip(), text[bracket + 1 : -1].strip()
-    if outer in ("list", "large_list"):
-        return f"{outer}<{_old_grammar_field(inner)}>"
-    if outer == "struct":
-        fields = _split_struct_fields(inner)
-        return "struct<" + ", ".join(_old_grammar_field(f) for f in fields) + ">"
-    if outer == "map":
-        parts = _split_top_level(inner, ",")
-        keys_sorted = len(parts) == 3 and parts[-1].strip() == "keys_sorted"
-        if keys_sorted:
-            parts = parts[:-1]
-        if len(parts) != 2:
-            return type_str
-        if all(_names_a_field(part) for part in parts):
-            texts = [_old_grammar_field(part) for part in parts]
-        else:
-            texts = [_old_grammar_text(part) for part in parts]
-        return f"map<{texts[0]}, {texts[1]}{', keys_sorted' if keys_sorted else ''}>"
-    return type_str
-
-
-def _old_grammar_field(text: str) -> str:
-    """One nested field of the unquoted grammar, in the 0.4.0 grammar."""
-    name, separator, type_text = text.strip().partition(":")
-    if not separator:
-        name, type_text = "item", text
-    type_text = type_text.strip()
-    suffix = ""
-    if type_text.endswith(" not null"):
-        type_text, suffix = type_text[: -len(" not null")], " not null"
-    return f"{_nested_field_name_text(name.strip())}: {_old_grammar_text(type_text)}{suffix}"
-
-
-def type_text_at_version(text: str, version: str) -> str:
-    """Return one saved type text in the 0.4.0 grammar (ITL-640).
-
-    A file at a ``UNQUOTED_NAME_FORMAT_VERSIONS`` version wrote nested field names
-    unquoted, so a quote in its type text is part of a name, as the earlier reader read
-    it; the 0.4.0 grammar reads a quote as the start of a quoted name. Such a text that
-    holds a quote is rewritten by its text (``_old_grammar_text``): its names exactly as
-    the earlier reader took them, quoted where the 0.4.0 grammar needs it. A text
-    without a quote reads the same in both grammars and is returned as it is, as is
-    every text of a file at 0.4.0 or later.
-
-    Args:
-        text: A saved type text.
-        version: The format version of the file it was read from.
-
-    Returns:
-        The text in the 0.4.0 grammar.
-    """
-    if version not in UNQUOTED_NAME_FORMAT_VERSIONS or '"' not in text:
-        return text
-    token = _QUOTED_NAMES.set(False)
-    try:
-        return _old_grammar_text(text)
-    finally:
-        _QUOTED_NAMES.reset(token)
-
-
-# The built-in source kinds that keep a schema of their own in their saved config, and
-# where its type texts are: a ``CSVSource``'s explicit ``schema`` (``columns``).
-SOURCE_CONFIG_SCHEMA_TEXTS: dict[str, tuple[str, str]] = {"csv": ("schema", "columns")}
-
-
-def _texts_at_version(mapping: Any, version: str) -> Any:
-    """A saved ``{column: type text}`` mapping in the 0.4.0 grammar."""
-    if not isinstance(mapping, dict):
-        return mapping
-    return {
-        key: type_text_at_version(value, version) if isinstance(value, str) else value
-        for key, value in cast("dict[str, Any]", mapping).items()
-    }
-
-
-def source_config_type_texts_at_version(config: Any, version: str) -> Any:
-    """Return a saved source config with its type texts in the 0.4.0 grammar (ITL-640).
-
-    Only the places Orcapod writes type texts in a source config are rewritten
-    (``type_text_at_version``): its own ``tag_schema`` and ``data_schema``
-    (``RootSource._identity_config``, a slot's config), the schema a built-in source
-    kind keeps (``SOURCE_CONFIG_SCHEMA_TEXTS``: a ``CSVSource``'s ``schema.columns``),
-    and the source configs nested along ``NESTED_SOURCE_CONFIG_KEYS`` (a cached
-    source's ``inner_source``, a derived source's ``origin``). Every other value is
-    passed through as it is: an implementation's own config (a ``PollingSource``'s
-    ``impl_config``), a filter, anything whose owner is not Orcapod, whatever its keys
-    (sixth Codex review of PR 454).
-
-    Args:
-        config: A saved source config.
-        version: The file's format version.
-
-    Returns:
-        The config (a copy when anything was rewritten; ``config`` is not changed).
-    """
-    if version not in UNQUOTED_NAME_FORMAT_VERSIONS or not isinstance(config, dict):
-        return config
-    out = dict(cast("dict[str, Any]", config))
-    for key in ("tag_schema", "data_schema"):
-        if key in out:
-            out[key] = _texts_at_version(out[key], version)
-    place = SOURCE_CONFIG_SCHEMA_TEXTS.get(out.get("source_type"))  # pyright: ignore[reportArgumentType]  # any saved value
-    if place is not None:
-        entry, texts = place
-        schema = out.get(entry)
-        if isinstance(schema, dict) and texts in schema:
-            schema = dict(cast("dict[str, Any]", schema))
-            schema[texts] = _texts_at_version(schema[texts], version)
-            out[entry] = schema
-    for key in NESTED_SOURCE_CONFIG_KEYS:
-        if key in out:
-            out[key] = source_config_type_texts_at_version(out[key], version)
-    return out
-
-
-def pipeline_type_texts_at_version(
-    saved: dict[str, Any], version: str
-) -> dict[str, Any]:
-    """Return a loaded pipeline file with its type texts in the 0.4.0 grammar (ITL-640).
-
-    The known places only: each node's ``output_schema`` (``tag``, ``data``) and its
-    ``source_config`` (``source_config_type_texts_at_version``). An operator's or a
-    function's config is passed through as it is.
-
-    Args:
-        saved: The loaded pipeline file.
-        version: Its format version.
-
-    Returns:
-        The file (a copy when anything was rewritten; ``saved`` is not changed).
-    """
-    if version not in UNQUOTED_NAME_FORMAT_VERSIONS:
-        return saved
-    out = dict(saved)
-    nodes: dict[str, Any] = {}
-    for label, node in cast("dict[str, Any]", saved.get("nodes", {})).items():
-        if not isinstance(node, dict):
-            nodes[label] = node
-            continue
-        descriptor = dict(cast("dict[str, Any]", node))
-        output = descriptor.get("output_schema")
-        if isinstance(output, dict):
-            output = dict(cast("dict[str, Any]", output))
-            for role in ("tag", "data"):
-                if role in output:
-                    output[role] = _texts_at_version(output[role], version)
-            descriptor["output_schema"] = output
-        if "source_config" in descriptor:
-            descriptor["source_config"] = source_config_type_texts_at_version(
-                descriptor["source_config"], version
-            )
-        nodes[label] = descriptor
-    if "nodes" in saved:
-        out["nodes"] = nodes
-    return out
-
-
-def job_type_texts_at_version(saved: dict[str, Any], version: str) -> dict[str, Any]:
-    """Return a loaded job file with its bindings' type texts in the 0.4.0 grammar.
-
-    The known places only: each bound source's config under ``bindings.sources``
-    (``source_config_type_texts_at_version``). The embedded pipeline carries its own
-    version and is rewritten by ``Pipeline.load`` (``pipeline_type_texts_at_version``).
-
-    Args:
-        saved: The loaded job file.
-        version: Its format version.
-
-    Returns:
-        The file (a copy when anything was rewritten; ``saved`` is not changed).
-    """
-    if version not in UNQUOTED_NAME_FORMAT_VERSIONS:
-        return saved
-    bindings = saved.get("bindings")
-    if not isinstance(bindings, dict) or not isinstance(bindings.get("sources"), dict):
-        return saved
-    sources = {
-        slot: source_config_type_texts_at_version(config, version)
-        for slot, config in cast("dict[str, Any]", bindings["sources"]).items()
-    }
-    return {
-        **saved,
-        "bindings": {**cast("dict[str, Any]", bindings), "sources": sources},
-    }
-
-
-_QUOTED_NAMES: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
-    "orcapod_saved_text_quoted_names", default=True
-)
-"""Whether the type text being read uses the 0.4.0 grammar (quoted names). Only
-``type_text_at_version`` turns it off, while it reads text of an earlier
-format, where a quote is part of a name."""
-
-
 def _quoted_positions(text: str) -> "list[tuple[int, str]]":
     """The positions and characters of ``text`` inside a JSON-quoted field name."""
-    if not _QUOTED_NAMES.get():
-        return []
     inside: list[tuple[int, str]] = []
     position = 0
     while position < len(text):
@@ -1940,11 +1726,9 @@ _BUILTIN_TYPE_MAP: dict[str, type] = {
 # PipelineJob format version
 # ---------------------------------------------------------------------------
 
-# Same scheme as ``PIPELINE_FORMAT_VERSION``: the written version, and the set a
-# load accepts (``PipelineJob.load``). The plain-tag rule stated there holds for a
-# job file too (``PLAIN_TAG_FORMAT_VERSIONS``, ``source_config_at_version``).
+# Same scheme as ``PIPELINE_FORMAT_VERSION``: the written version, the only one a
+# load reads (``PipelineJob.load``, ``require_current_format``).
 PIPELINE_JOB_FORMAT_VERSION = "0.4.0"
-SUPPORTED_JOB_FORMAT_VERSIONS = frozenset({"0.1.0", "0.2.0", "0.3.0", "0.4.0"})
 
 
 # ---------------------------------------------------------------------------
@@ -1956,59 +1740,45 @@ FALL_THROUGH_TAGS_KEY = "fall_through_tags"
 through (a list; empty for a plain pod)."""
 
 
-def saved_fall_through_tags(
-    descriptor: dict[str, Any], version: str
-) -> tuple[str, ...]:
+def saved_fall_through_tags(descriptor: dict[str, Any]) -> tuple[str, ...]:
     """Return the data-tags a saved function node lets fall through.
 
-    The file's format version decides what a file may hold (ITL-1019): at a
-    ``PLAIN_TAG_FORMAT_VERSIONS`` version nothing is a data-tag and the key is never
-    written; from 0.3.0 on the key is always written. The saved output schema is
-    checked against it: its tag and data halves share exactly these names. When the
+    Every function node of a saved file names them (ITL-1019). The saved output schema
+    is checked against it: its tag and data halves share exactly these names. When the
     descriptor holds the pod's config, the config's list must agree too.
 
     Args:
         descriptor: A function node descriptor of a saved pipeline.
-        version: The file's format version.
 
     Returns:
         The data-tags, in the saved order.
 
     Raises:
-        ValueError: If the key is present in a file of a plain-tag version, missing
-            or not a list of names in a later one, or disagrees with the saved output
-            schema or the saved pod config.
+        ValueError: If the key is missing or not a list of names, or disagrees with
+            the saved output schema or the saved pod config.
     """
     from orcapod.core.data_tags import data_tag_names
 
     output_schema = descriptor.get("output_schema") or {}
     shared = data_tag_names(output_schema.get("tag", {}), output_schema.get("data", {}))
-    if version in PLAIN_TAG_FORMAT_VERSIONS:
-        if FALL_THROUGH_TAGS_KEY in descriptor:
-            raise ValueError(
-                f"a file at format {version} holds only plain tags, but it names "
-                f"{FALL_THROUGH_TAGS_KEY} {descriptor[FALL_THROUGH_TAGS_KEY]!r}"
-            )
-        data_tags: tuple[str, ...] = ()
-    else:
-        if FALL_THROUGH_TAGS_KEY not in descriptor:
-            raise ValueError(
-                f"a file at format {version} names the fall-through tags of "
-                f"every function node, but this one has no {FALL_THROUGH_TAGS_KEY}"
-            )
-        saved = descriptor[FALL_THROUGH_TAGS_KEY]
-        if not isinstance(saved, list) or not all(isinstance(n, str) for n in saved):
-            raise ValueError(
-                f"{FALL_THROUGH_TAGS_KEY} must be a list of names, got {saved!r}"
-            )
-        data_tags = tuple(saved)
+    if FALL_THROUGH_TAGS_KEY not in descriptor:
+        raise ValueError(
+            "a saved file names the fall-through tags of every function node, but "
+            f"this one has no {FALL_THROUGH_TAGS_KEY}"
+        )
+    saved = descriptor[FALL_THROUGH_TAGS_KEY]
+    if not isinstance(saved, list) or not all(isinstance(n, str) for n in saved):
+        raise ValueError(
+            f"{FALL_THROUGH_TAGS_KEY} must be a list of names, got {saved!r}"
+        )
+    data_tags = tuple(saved)
     if set(shared) != set(data_tags):
         raise ValueError(
             f"the saved output schema has the data-tags {sorted(shared)}, but "
             f"{FALL_THROUGH_TAGS_KEY} is {sorted(data_tags)}"
         )
     function_config = descriptor.get("function_config")
-    if function_config is not None and version not in PLAIN_TAG_FORMAT_VERSIONS:
+    if function_config is not None:
         configured = function_config.get(FALL_THROUGH_TAGS_KEY, [])
         if set(configured) != set(data_tags):
             raise ValueError(
@@ -2016,45 +1786,6 @@ def saved_fall_through_tags(
                 f"{FALL_THROUGH_TAGS_KEY} is {sorted(data_tags)}"
             )
     return data_tags
-
-
-def check_saved_output_schema_is_plain(
-    descriptor: dict[str, Any], version: str
-) -> None:
-    """Refuse a saved node with a data-tag in a file of a plain-tag version.
-
-    Args:
-        descriptor: A node descriptor of a saved pipeline.
-        version: The file's format version.
-
-    A source node is rebuilt from its source config's ``tag_schema`` and
-    ``data_schema`` when the config holds them, so those are checked too.
-
-    Raises:
-        ValueError: If the version holds only plain tags and the node's saved tag and
-            data halves share a name, in its output schema or in the schemas its
-            source config restores.
-    """
-    from orcapod.core.data_tags import data_tag_names
-
-    if version not in PLAIN_TAG_FORMAT_VERSIONS:
-        return
-    output_schema = descriptor.get("output_schema") or {}
-    if shared := data_tag_names(
-        output_schema.get("tag", {}), output_schema.get("data", {})
-    ):
-        raise ValueError(
-            f"a file at format {version} holds only plain tags, but the saved output "
-            f"schema has the data-tags {list(shared)}"
-        )
-    source_config = descriptor.get("source_config") or {}
-    if shared := data_tag_names(
-        source_config.get("tag_schema") or {}, source_config.get("data_schema") or {}
-    ):
-        raise ValueError(
-            f"a file at format {version} holds only plain tags, but the saved source "
-            f"schema has the data-tags {list(shared)}"
-        )
 
 
 # The fields of a source config that hold a nested source config: a cached source's
@@ -2088,57 +1819,35 @@ def check_saved_source_config(config: dict[str, Any]) -> None:
         check(config)
 
 
-def source_config_at_version(config: dict[str, Any], version: str) -> dict[str, Any]:
-    """Return a saved source config with its ``tag_only_columns`` as its version means.
+def require_tag_only_columns(config: dict[str, Any]) -> None:
+    """Refuse a saved source config that does not state its plain tags.
 
-    A source config of a ``PLAIN_TAG_FORMAT_VERSIONS`` file never holds
-    ``tag_only_columns``: every one of its tags is plain, which the returned config
-    states (``tag_only_columns=True``) for each source in it that takes the option,
-    nested sources (the inner source of a cached source, a derived source's origin)
-    included. A config of a later version holds the option for each such source and
-    is returned as it is.
+    Every source of a saved file that takes ``tag_only_columns`` writes it (ITL-1019,
+    ITL-1159), nested sources (the inner source of a cached source, a derived source's
+    origin) included; a missing key is never read as a default.
 
     Args:
         config: A saved source config.
-        version: The file's format version.
-
-    Returns:
-        The config to rebuild the source from (a copy when anything was added).
 
     Raises:
-        ValueError: If a config of a plain-tag version holds ``tag_only_columns``, or
-            one of a later version lacks it.
+        ValueError: If the config, or a source config nested in it, takes the option
+            and lacks it.
     """
     _ensure_registries()
-    plain_version = version in PLAIN_TAG_FORMAT_VERSIONS
-
-    def upgrade(value: dict[str, Any]) -> dict[str, Any]:
-        # Only the nested source fields hold source configs; any other mapping (a
-        # filter such as ``where``) is the source's own data, whatever its keys.
-        upgraded = dict(value)
-        for key in NESTED_SOURCE_CONFIG_KEYS:
-            if isinstance(upgraded.get(key), dict):
-                upgraded[key] = upgrade(upgraded[key])
-        cls = SOURCE_REGISTRY.get(upgraded.get("source_type"))  # pyright: ignore[reportArgumentType]  # any saved value
-        if cls is None or not getattr(cls, "TAKES_TAG_ONLY_COLUMNS", False):
-            return upgraded
-        if plain_version and "tag_only_columns" in upgraded:
-            raise ValueError(
-                f"a file at format {version} holds only plain tags, but source "
-                f"config {upgraded.get('source_type')!r} names tag_only_columns "
-                f"{upgraded['tag_only_columns']!r}"
-            )
-        if plain_version:
-            upgraded["tag_only_columns"] = True
-        elif "tag_only_columns" not in upgraded:
-            raise ValueError(
-                f"a file at format {version} states the plain tags of every source, "
-                f"but source config {upgraded.get('source_type')!r} has no "
-                "tag_only_columns"
-            )
-        return upgraded
-
-    return upgrade(config)
+    # Only the nested source fields hold source configs; any other mapping (a filter
+    # such as ``where``) is the source's own data, whatever its keys.
+    for key in NESTED_SOURCE_CONFIG_KEYS:
+        nested = config.get(key)
+        if isinstance(nested, dict):
+            require_tag_only_columns(cast("dict[str, Any]", nested))
+    cls = SOURCE_REGISTRY.get(config.get("source_type"))  # pyright: ignore[reportArgumentType]  # any saved value
+    if cls is None or not getattr(cls, "TAKES_TAG_ONLY_COLUMNS", False):
+        return
+    if "tag_only_columns" not in config:
+        raise ValueError(
+            "a saved file states the plain tags of every source, but source config "
+            f"{config.get('source_type')!r} has no tag_only_columns"
+        )
 
 
 def check_source_config_binding(
@@ -2154,8 +1863,7 @@ def check_source_config_binding(
     its tags from the table's keys), is not checked here.
 
     Args:
-        config: A saved source config, as its file version means it
-            (``source_config_at_version``).
+        config: A saved source config (``require_tag_only_columns`` checked).
         tag_names: The slot's saved tag column names.
         data_names: The slot's saved data column names.
 

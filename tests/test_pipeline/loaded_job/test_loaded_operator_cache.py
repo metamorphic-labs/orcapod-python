@@ -6,8 +6,7 @@ or not. A job file records each column's nullability and the run content hash of
 operator node, so the loaded job reproduces each node's pipeline hash, content hash, table
 path and output schema, and the stored view (``as_source()``) of a loaded operator node
 attached in ``CacheMode.REPLAY`` reads the rows its run stored. A loaded node itself is
-empty until it runs (ITL-1095). A file without those fields (``0.1.0``, or a ``0.2.0`` file
-written before them) loads as before, lossy: the operator node still looks under its run's
+empty until it runs (ITL-1095). A file without those fields loads, lossy: the operator node still looks under its run's
 path, and its stored view raises rather than show the stored rows as none.
 """
 
@@ -553,96 +552,6 @@ def test_a_source_proxy_keeps_the_nullability_of_the_source_it_stands_for() -> N
     proxy = resolve_source_from_config(config, fallback_to_proxy=True)
     assert proxy.output_schema() == source.output_schema()
     assert proxy.pipeline_hash() == source.pipeline_hash()
-
-
-# ---------------------------------------------------------------------------
-# A real format 0.1.0 file (tests/test_pipeline/fixtures, written by ITL-1026)
-# ---------------------------------------------------------------------------
-
-FORMAT_0_1_0 = pathlib.Path(__file__).parents[1] / "fixtures" / "job_format_0_1_0.json"
-
-
-def _add_values(value: int, score: int) -> int:
-    """The fixture job's function."""
-    return value + score
-
-
-def _store_the_fixture_join(store: ArrowDatabaseProtocol) -> Any:
-    """Run the fixture's job with today's code, its join stored; the run's join node.
-
-    The fixture was saved before running, with in-memory sources, so no database holds
-    its rows: this run stores them at the path the file's join node names.
-    """
-    from orcapod.core.data_function import PythonDataFunction
-    from orcapod.core.function_pod import FunctionPod
-
-    def source(column: str, values: list[int]) -> ArrowTableSource:
-        """One of the fixture's two sources."""
-        table = pa.table(
-            {
-                "key": pa.array(["a", "b"], type=pa.large_string()),
-                column: pa.array(values, type=pa.int64()),
-            }
-        )
-        return ArrowTableSource(
-            table,
-            tag_columns=["key"],
-            infer_nullable=True,
-            source_id=f"fixture_{column}",
-            tag_only_columns=True,
-        )
-
-    name = json.loads(FORMAT_0_1_0.read_text())["pipeline"]["pipeline"]["name"]
-    job = PipelineJob(name=tuple(name), database=store)
-    with job:
-        joined = Join()(source("value", [10, 20]), source("score", [100, 200]))
-        function = PythonDataFunction(_add_values, output_keys="total")
-        # As in the fixture's generator: a protocol mismatch shared with other tests.
-        pod = FunctionPod(data_function=function)  # pyright: ignore[reportArgumentType]
-        _ = pod(joined)
-    run_join = job.nodes["Join"]
-    # OperatorNode.attach_databases is the public way to turn on LOG / REPLAY mode.
-    run_join.attach_databases(
-        pipeline_database=store.at(*name), cache_mode=CacheMode.LOG
-    )
-    _ = job.run()
-    return run_join
-
-
-# The Join's pipeline hash as the 0.1.0 file records it, and as this build computes it:
-# ITL-640 (a schema enters every pipeline hash as its Arrow schema) moved it, so this
-# build stores the join at another path and the file keeps the one it records.
-FORMAT_0_1_0_JOIN_PIPELINE_HASH = (
-    "semantic_v1:09b483535c0d9c1fc9a3a82b93739225dd44bae3ab51673532ca890bb4e5975d"
-)
-ITL_640_JOIN_PIPELINE_HASH = (
-    "semantic_v1:84d4fb834381a28efa8e41394421cf8663bf0e08bf665d9de54c857b9b1ca833"
-)
-
-
-def test_a_format_0_1_0_file_keeps_its_join_path_and_never_shows_its_rows_as_none() -> (
-    None
-):
-    """The real 0.1.0 file: the path it records; the node has not run (ITL-1095) and
-    its stored view raises."""
-    store = InMemoryArrowDatabase()
-    run_join = _store_the_fixture_join(store)
-    loaded = PipelineJob.load(str(FORMAT_0_1_0), database=store)
-    node = loaded.nodes["Join"]
-    name = json.loads(FORMAT_0_1_0.read_text())["pipeline"]["pipeline"]["name"]
-    node.attach_databases(
-        pipeline_database=store.at(*name), cache_mode=CacheMode.REPLAY
-    )
-    assert node.pipeline_hash().to_string() == FORMAT_0_1_0_JOIN_PIPELINE_HASH
-    assert run_join.pipeline_hash().to_string() == ITL_640_JOIN_PIPELINE_HASH
-    # The same operator; only the schema component of the path moved.
-    assert node.node_identity_path[:-1] == run_join.node_identity_path[:-1]
-    assert node.node_identity_path[-1] == f"schema:{node.pipeline_hash().to_hex()}"
-    assert node.head().status is ViewStatus.NOT_COMPUTED
-    with pytest.raises(
-        RuntimeError, match=r"'Join': the job file does not record .*ITL-1048"
-    ):
-        _ = node.as_source().as_table()
 
 
 # ---------------------------------------------------------------------------
