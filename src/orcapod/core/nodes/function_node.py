@@ -3769,8 +3769,9 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             # The stored row with its stored Arrow types, never Python values: a
             # type inferred again (int8 as int64) would give the tag another hash,
             # and a struct tag could not be read at all (ITL-1298). The columns
-            # keep the stored row's order, tags and system tags.
-            row_table = fetched.empty_taginfo_tables[base_eid]
+            # keep the stored row's order, tags and system tags. The storage-only
+            # data-tag mark is dropped, as for a stored row read into a stream.
+            row_table = without_tag_kind_marks(fetched.empty_taginfo_tables[base_eid])
             tag = Tag(
                 row_table.select(
                     [
