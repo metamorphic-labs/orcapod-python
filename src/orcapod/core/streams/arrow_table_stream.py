@@ -98,6 +98,13 @@ class ArrowTableStream(StreamBase):
             raise schema_utils.dictionary_columns_error(
                 found, tag_columns, data_tags, system_tag_columns
             )
+        # Nor are columns of a type the schema hash rejects (a union, a list view, a
+        # run-end-encoded type; developer, November 21, 2026, ITL-640): a stream's
+        # identity is its Arrow schema hash, which cannot hold them.
+        if found := schema_utils.schema_hash_rejected_columns(table.schema):
+            raise schema_utils.schema_hash_rejected_columns_error(
+                found, tag_columns, data_tags, system_tag_columns
+            )
 
         data_table, data_context_table = arrow_utils.split_by_column_groups(
             table, [constants.CONTEXT_KEY]
@@ -263,8 +270,17 @@ class ArrowTableStream(StreamBase):
         if self._producer is None or not isinstance(
             self._producer, PipelineElementProtocol
         ):
+            # A stream with no pipeline producer is a root: the Arrow schemas of its
+            # Python output schema's columns, from the table it holds (ITL-640).
+            from orcapod.utils.schema_utils import arrow_schema_identity
+
             tag_schema, data_schema = self.output_schema()
-            return (tag_schema, data_schema)
+            held = self._table.schema
+            return arrow_schema_identity(
+                pa.schema([held.field(name) for name in tag_schema]),
+                pa.schema([held.field(name) for name in data_schema]),
+                self.data_context,
+            )
         return super().pipeline_identity_structure()
 
     @property

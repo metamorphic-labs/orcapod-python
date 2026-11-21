@@ -430,14 +430,12 @@ class TestListSourceAdditional:
         assert slots == {0, 1, 2}
 
     def test_identity_structure_is_that_of_every_root_source(self):
-        """Class name, output schema, source id and key columns (ITL-1272)."""
+        """Class name, Arrow schema identity, source id and key columns (ITL-1272)."""
         src = ListSource(name="item", data=["a", "b"])
-        assert src.identity_structure() == (
-            "ListSource",
-            src.output_schema(),
-            src.source_id,
-            (),
-        )
+        identity = src.identity_structure()
+        assert identity == RootSource.identity_structure(src)
+        assert identity[0] == "ListSource"
+        assert identity[2:] == (src.source_id, ())
 
     def test_same_data_same_content_hash(self):
         src1 = ListSource(name="x", data=[1, 2, 3])

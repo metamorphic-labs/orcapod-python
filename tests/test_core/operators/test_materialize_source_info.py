@@ -581,6 +581,10 @@ class TestIdentityPinned:
     id (now ``arrow_table:<label>:<hex>``) moved, and with it the node content hash and
     the record hashes; the pipeline hash did not.
 
+    Re-recorded for ITL-640: the source's Arrow schema enters the node's pipeline and
+    content hash, and the record hashes cover the content hash; the default id did not
+    move.
+
     The node's identity, the output data and the row-0 record hash (whose
     source-info token was already right) are unchanged; only rows whose stored
     source-info token was wrong get a new record hash.
@@ -598,10 +602,10 @@ class TestIdentityPinned:
         _ = node.execute(src)
 
         assert node.pipeline_hash().to_string() == (
-            "semantic_v1:c8cae9378bede79d28f76996ed259870c8d2ca5a098acc6ff51c5e9d1f1ef7f8"
+            "semantic_v1:386901951044b05f46421bac006888fe02778622cbb80011d3ede392dc81a930"
         )
         assert node.content_hash().to_string() == (
-            "semantic_v1:d1aec65936bf8878f51638b2fdc5350d976a46e06eb27f1900e2cf43402d8d87"
+            "semantic_v1:94ccd6889f0ea79a46ae247cfeb7d0b6c35209db4a735ade1eede30bd171d9db"
         )
         ids = _record_ids(node)
         assert ids["a"] == ROW_ZERO_RECORD_ID
@@ -631,20 +635,22 @@ class TestIdentityPinned:
 # every source-info token these record hashes cover. Re-recorded for ITL-1154: a
 # source-info token now holds the row identifier (``row_<n>``) and the full-length
 # default source id. Re-recorded again for ITL-1154 (key columns in a source's
-# identity): the node content hash, which every stored row hash covers, moved.
+# identity): the node content hash, which every stored row hash covers, moved. And for
+# ITL-640 (a schema enters an identity as its Arrow schema): the node content hash moved
+# again; the source's default id did not.
 ROW_ZERO_RECORD_ID = b"arrow_v1:" + bytes.fromhex(
-    "000002bbc126062384bfa4de05339a770b5f3e57180a980b25a58dbbd8b82a699c646e"
+    "000002f107db7ac2b54ac740a522624a714bf9444508dbcba76b1babc480b95577d369"
 )
 PRE_FIX_RECORD_IDS = frozenset(
     {
         ROW_ZERO_RECORD_ID,
         b"arrow_v1:"
         + bytes.fromhex(
-            "000002b8a3da15135dad402dfb5c8743130749eccff27236d54677d4b12fbc2ef656d7"
+            "000002ec1e4e6d5c9675688e2cb78807869a149cb25b7d13bd0cee6a01a9e32aa85267"
         ),
         b"arrow_v1:"
         + bytes.fromhex(
-            "00000222756f5e433bce8378cf38aace9a2d6686ae621241da4ff47ea3936bbd0bb44d"
+            "0000022638c9de42abaf632e8d7c52e3d6af26b499052a3315e6693ca9796aa3244eb5"
         ),
     }
 )

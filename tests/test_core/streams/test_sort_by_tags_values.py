@@ -405,12 +405,12 @@ def test_a_job_node_sorted_read_keeps_every_value(
     [
         pa.array([[("a", 1)], [("b", 2)]], pa.map_(pa.large_string(), pa.int64())),
         pa.array([(1, 2, 3), (0, 1, 2)], pa.month_day_nano_interval()),
-        pa.array([[2], [1]], pa.list_view(pa.int64())),
     ],
-    ids=["map", "interval", "list_view"],
+    ids=["map", "interval"],
 )
 def test_a_tag_with_no_order_is_refused_naming_it(tag: "pa.Array[Any]") -> None:
-    """A raw stream may hold one (a source refuses it); Polars never sees it."""
+    """A raw stream may hold one; Polars never sees it. (A list view or a union cannot
+    be a stream's column at all since ITL-640: test_schema_hash_rejected_columns_refused.)"""
     stream = ArrowTableStream(
         pa.table(
             {

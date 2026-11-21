@@ -11,6 +11,7 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
+from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
@@ -91,6 +92,27 @@ _ZERO_ROW_MEMO: ContextVar[dict[int, tuple[object, pa.Table | None]] | None] = (
 """The zero-row tables derived during one outermost ``typed_zero_row_table`` call."""
 
 
+@contextmanager
+def shared_zero_row_memo() -> Iterator[None]:
+    """Share one zero-row memo across every ``typed_zero_row_table`` call in the block.
+
+    A caller that types many streams of one graph (a saved job writes every node's
+    Arrow types) derives each stream once, instead of once per call. Inside an outer
+    derivation or another such block, the memo already open is used.
+
+    Yields:
+        Nothing; the memo is discarded when the block exits.
+    """
+    if _ZERO_ROW_MEMO.get() is not None:
+        yield
+        return
+    token = _ZERO_ROW_MEMO.set({})
+    try:
+        yield
+    finally:
+        _ZERO_ROW_MEMO.reset(token)
+
+
 def typed_zero_row_table(stream: object) -> pa.Table | None:
     """Return ``stream``'s table with no rows and the Arrow types its rows would have.
 
@@ -166,6 +188,54 @@ def typed_zero_row_input(stream: object) -> pa.Table | None:
                 for field in table.schema
             ]
         ).with_metadata(table.schema.metadata or {})
+    )
+
+
+def typed_arrow_schemas(
+    stream: object, *, own: bool = True
+) -> tuple[pa.Schema, pa.Schema]:
+    """Return the Arrow schemas of ``stream``'s tag and data columns (ITL-640).
+
+    The Arrow types its rows have, from ``typed_zero_row_table`` (never computing,
+    reading or polling a row): the tag schema holds the columns of the stream's Python
+    tag schema, the data schema those of its data schema (a data-tag in both), each in
+    that order. A
+    stream that cannot type itself without rows (an unbound input, a polling source not
+    yet polled) answers with the data context's conversion of its declared Python
+    schema, the Arrow types its identity is then fixed to.
+
+    A source or an input slot states its Arrow schemas itself (``arrow_schemas``),
+    which is what this returns for one.
+
+    Args:
+        stream: The stream, source or node.
+        own: Whether to return the ``arrow_schemas`` the stream states, when it has
+            them; ``False`` derives them (the stream's own derivation).
+
+    Returns:
+        The tag and data Arrow schemas.
+    """
+    if own:
+        stated = getattr(stream, "arrow_schemas", None)
+        if isinstance(stated, tuple):
+            return cast("tuple[pa.Schema, pa.Schema]", stated)
+    typed = cast(StreamProtocol, stream)
+    # The columns are those of the Python output schema, which the identity has always
+    # named; only their types come from the zero-row table.
+    tag_schema, data_schema = typed.output_schema()
+    table = typed_zero_row_table(stream)
+    if table is None:
+        from orcapod.utils.schema_utils import declared_arrow_schema
+
+        converter = cast(Any, stream).data_context.type_converter
+        return (
+            declared_arrow_schema(tag_schema, converter),
+            declared_arrow_schema(data_schema, converter),
+        )
+    schema = table.schema
+    return (
+        pa.schema([schema.field(name) for name in tag_schema]),
+        pa.schema([schema.field(name) for name in data_schema]),
     )
 
 
@@ -335,6 +405,27 @@ class StreamBase(TraceableBase):
         from orcapod.core.operators import Join
 
         return Join()(self, other_stream, label=label)
+
+    def rejoin(
+        self, *other_streams: StreamProtocol, label: str | None = None
+    ) -> StreamBase:
+        """Put this stream back together with other branches of one stream.
+
+        Pairs the rows that come from the same origin row, by matching every system-tag
+        column, and keeps those columns unchanged (``Rejoin``, provisional). For a
+        diamond (one stream split into branches, then put back together); to combine
+        different rows on their tags, use ``join``.
+
+        Args:
+            *other_streams: The other branches, one or more.
+            label: The result's label.
+
+        Returns:
+            The rejoined stream.
+        """
+        from orcapod.core.operators import Rejoin
+
+        return Rejoin()(self, *other_streams, label=label)
 
     def semi_join(
         self,

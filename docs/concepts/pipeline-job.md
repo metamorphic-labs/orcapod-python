@@ -264,9 +264,14 @@ print(job_a.nodes["bmi"].as_table().num_rows, job_b.nodes["bmi"].as_table().num_
 
 `sources` maps a source slot's name (the `source_id` used when the blueprint was recorded)
 to the source to use. A source bound to a slot must have the slot's tag and data columns
-with the same Python types (a column the slot declares `T | None` also accepts `T`); any
-other source raises `SourceSpecMismatchError`, and an unknown slot name raises `ValueError`.
-Binding a source never changes a node's schema or where its results are stored.
+with the same Arrow types (a column the slot declares nullable also accepts a non-null one);
+any other source raises `SourceSpecMismatchError`, and an unknown slot name raises
+`ValueError`. A slot made from a source keeps that source's Arrow types, so an `int32`
+column refuses an `int64` source. A slot declared with Python types (`SourceNode(name,
+tag_schema=Schema({...}), data_schema=Schema({...}))`) means one Arrow type per Python type
+(`int` is `int64`, `datetime` is `timestamp[us, tz=UTC]`); to accept other widths, units or
+zones, declare the slot with Arrow schemas (`tag_schema=pa.schema([...])`). Binding a source
+never changes a node's schema or where its results are stored.
 
 A job made without sources has **unbound** slots. It can still be run: nodes that depend on
 an unbound source are skipped, and `job.unbound_sources` lists what is missing. Bind later
@@ -372,7 +377,10 @@ the **Nodes** table below the picture for each node's columns and status.
 each source was configured. `PipelineJob.load(path)` reads it back, for example in a later
 Python session. An `InMemoryArrowDatabase` has no location to record, so here the database
 is passed again; `PipelineJob.load(path, database=...)` is also how you point a loaded job
-at a database that has moved.
+at a database that has moved. The file records each node's own Arrow types, so saving types
+every node from its inputs' types, as previewing an empty job does, and costs what that
+preview costs: a pipeline whose joins keep many system-tag columns saves as slowly as it
+previews.
 
 ```python
 job_a.save("bmi_job.json")

@@ -406,11 +406,10 @@ print(derived.as_table().column_names)
 In a stream the binding is the shared name, so the marker stays with the stored table:
 the rows of a replay or of a derived source carry none.
 
-A saved job or pipeline (format `0.3.0`) states every binding: each source config writes
+A saved job or pipeline states every binding: each source config writes
 `tag_only_columns` (`True` when every tag is plain), and each function node writes
-`fall_through_tags` (empty for a plain pod). The format version, never a missing
-key, decides what a file means: a file at `0.1.0` or `0.2.0` holds only plain tags, and a
-`0.3.0` file without these keys is refused. A loaded job keeps its hashes and bindings, and
+`fall_through_tags` (empty for a plain pod). A missing key is never read as a default: a
+file without these keys is refused, as is a file of an earlier format version. A loaded job keeps its hashes and bindings, and
 the file is checked against the stored tables when a node reads them.
 
 ## Not supported yet

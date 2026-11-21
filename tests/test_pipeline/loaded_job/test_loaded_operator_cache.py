@@ -6,9 +6,7 @@ or not. A job file records each column's nullability and the run content hash of
 operator node, so the loaded job reproduces each node's pipeline hash, content hash, table
 path and output schema, and the stored view (``as_source()``) of a loaded operator node
 attached in ``CacheMode.REPLAY`` reads the rows its run stored. A loaded node itself is
-empty until it runs (ITL-1095). A file without those fields (``0.1.0``, or a ``0.2.0`` file
-written before them) loads as before, lossy: the operator node still looks under its run's
-path, and its stored view raises rather than show the stored rows as none.
+empty until it runs (ITL-1095). A file without those records is malformed and refused.
 """
 
 from __future__ import annotations
@@ -24,7 +22,6 @@ import pytest
 
 from orcapod import PipelineJob, function_pod
 from orcapod.core.operators import Join
-from orcapod.core.streams import ViewStatus
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.errors import OrcapodDatabaseContentWarning
 from orcapod.pipeline import Pipeline, SyncPipelineOrchestrator
@@ -135,19 +132,6 @@ def _sorted(table: pa.Table) -> pa.Table:
     return table.select(sorted(table.column_names)).sort_by("id")
 
 
-def _drop_saved_nullability(data: dict[str, Any]) -> None:
-    """Remove the recorded nullability, as in a file written before it existed."""
-    for descriptor in data["pipeline"]["nodes"].values():
-        del descriptor["output_schema"]["nullable"]
-        if "source_config" in descriptor:
-            del descriptor["source_config"]["nullable"]
-
-
-def _drop_saved_operator_content_hash(data: dict[str, Any]) -> None:
-    """Remove the join's run content hash, as in a file written before it existed."""
-    del data["run"]["node_job_content_hashes"]["joined"]
-
-
 # ---------------------------------------------------------------------------
 # A file with the fields: every node round-trips, the operator reads its rows
 # ---------------------------------------------------------------------------
@@ -232,80 +216,69 @@ def test_a_pipeline_loaded_and_bound_to_its_sources_reuses_the_operator_cache(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("store_kind", STORES)
-@pytest.mark.parametrize("nullability", list(NULLABILITY))
-def test_without_saved_nullability_the_operator_still_reads_its_runs_table(
-    store_kind: str, nullability: str, tmp_path: pathlib.Path
-) -> None:
-    """The saved pipeline hash, not the lossy schemas, names the operator's table."""
-    store = _store(store_kind, tmp_path)
-    job = _run(store, nullability)
-    saved = _save(job, tmp_path, _drop_saved_nullability)
-    node = _load_replaying(saved, store).nodes["joined"]
-    assert node.pipeline_hash() == job.nodes["joined"].pipeline_hash()
-    assert node.node_identity_path == job.nodes["joined"].node_identity_path
-    assert _sorted(node.as_source().as_table()).equals(
-        _sorted(job.nodes["joined"].as_table())
-    )
+# ---------------------------------------------------------------------------
+# A file without a record is malformed: refused, never loaded lossily
+# ---------------------------------------------------------------------------
 
 
-def _drop_both(data: dict[str, Any]) -> None:
-    """Remove every field this fix adds, as in a file written before them."""
-    _drop_saved_nullability(data)
-    _drop_saved_operator_content_hash(data)
-
-
-UNKNOWN_KEY = (
-    r"'joined': the job file does not record the content hash of this node's run "
-    r".*ITL-1048"
+@pytest.mark.parametrize(
+    ("label", "record"),
+    [
+        ("src_a", "output_schema"),
+        ("src_a", "source_config"),
+        ("src_b", "source_config"),
+        ("inc", "output_schema"),
+        ("joined", "output_schema"),
+    ],
 )
-
-
-@pytest.mark.parametrize("read", ["as_table", "iter_data"])
-@pytest.mark.parametrize("store_kind", STORES)
-@pytest.mark.parametrize("nullability", list(NULLABILITY))
-def test_without_the_run_content_hash_the_loaded_operator_raises(
-    store_kind: str, nullability: str, read: str, tmp_path: pathlib.Path
+def test_a_file_without_a_nullability_record_is_refused(
+    label: str, record: str, tmp_path: pathlib.Path
 ) -> None:
-    """A node that cannot name its run's rows never shows the stored rows as none: its
-    stored view raises."""
-    store = _store(store_kind, tmp_path)
-    job = _run(store, nullability)
-    node = _load_replaying(_save(job, tmp_path, _drop_both), store).nodes["joined"]
-    with pytest.raises(RuntimeError, match=UNKNOWN_KEY) as excinfo:
-        result = getattr(node.as_source(), read)()
-        if read == "iter_data":
-            _ = list(result)
-    assert "holds 2 stored rows, none of them under the content hash" in str(
-        excinfo.value
-    )
+    """A job file, and the pipeline file it embeds, without one node's record (a source
+    slot records it in its output schema and its source config)."""
+    job = _run(InMemoryArrowDatabase(), "nullable_tag_and_data")
+
+    def drop(pipeline: dict[str, Any]) -> None:
+        (descriptor,) = [d for d in pipeline["nodes"].values() if d["label"] == label]
+        del descriptor[record]["nullable"]
+
+    saved = _save(job, tmp_path, lambda data: drop(data["pipeline"]))
+    with pytest.raises(ValueError, match=f"saved node {label!r}") as caught:
+        _ = PipelineJob.load(str(saved))
+    assert f"no {record}.nullable record" in str(caught.value)
+    pipeline_path = tmp_path / "pipeline.json"
+    job.pipeline.save(pipeline_path)
+    data = json.loads(pipeline_path.read_text())
+    drop(data)
+    pipeline_path.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match=f"no {record}.nullable record"):
+        _ = Pipeline.load(pipeline_path)
 
 
-def test_without_the_run_content_hash_an_absent_table_raises_too(
-    tmp_path: pathlib.Path,
+# What a node's entry in run.node_job_content_hashes is replaced with: removed, null, or
+# a value that is not a hash text (CodeRabbit on PR 454).
+RUN_HASH_DEFECTS: dict[str, Callable[[dict[str, Any], str], None]] = {
+    "missing": lambda hashes, label: hashes.pop(label),
+    "null": lambda hashes, label: hashes.__setitem__(label, None),
+    "number": lambda hashes, label: hashes.__setitem__(label, 7),
+}
+
+
+@pytest.mark.parametrize("defect", list(RUN_HASH_DEFECTS))
+@pytest.mark.parametrize("labels", [["joined"], ["inc"], ["inc", "joined"]])
+def test_a_job_file_without_a_run_content_hash_is_refused(
+    labels: list[str], defect: str, tmp_path: pathlib.Path
 ) -> None:
-    """Without its run's content hash, an absent table is no answer either."""
-    saved = _save(_run(InMemoryArrowDatabase(), "non_null"), tmp_path, _drop_both)
-    node = _load_replaying(saved, InMemoryArrowDatabase()).nodes["joined"]
-    with pytest.raises(RuntimeError, match=UNKNOWN_KEY) as excinfo:
-        _ = node.as_source().as_table()
-    assert "is absent from the attached database" in str(excinfo.value)
+    """Every function and operator node records its run's content hash as text."""
 
+    def drop(data: dict[str, Any]) -> None:
+        for label in labels:
+            RUN_HASH_DEFECTS[defect](data["run"]["node_job_content_hashes"], label)
 
-@pytest.mark.parametrize("store_kind", STORES)
-def test_without_the_run_content_hash_head_never_raises_and_the_stored_view_says_why(
-    store_kind: str, tmp_path: pathlib.Path
-) -> None:
-    """``head()`` never raises on a loaded node: it has not run (ITL-1095). Its stored
-    view raises and names the cause."""
-    store = _store(store_kind, tmp_path)
-    job = _run(store, "nullable_tag")
-    node = _load_replaying(_save(job, tmp_path, _drop_both), store).nodes["joined"]
-    head = node.head()
-    assert head.status is ViewStatus.NOT_COMPUTED
-    assert head.table.num_rows == 0
-    with pytest.raises(RuntimeError, match=UNKNOWN_KEY):
-        _ = node.as_source().head()
+    saved = _save(_run(InMemoryArrowDatabase(), "non_null"), tmp_path, drop)
+    with pytest.raises(ValueError, match="have no run content hash") as caught:
+        _ = PipelineJob.load(str(saved))
+    assert f"saved nodes {sorted(labels)}" in str(caught.value)
 
 
 # ---------------------------------------------------------------------------
@@ -527,23 +500,6 @@ def test_saving_a_loaded_job_again_keeps_what_its_file_recorded(
     assert _recorded_fields(resaved) == _recorded_fields(saved)
 
 
-def test_saving_a_lossy_loaded_job_again_records_nothing_it_does_not_know(
-    tmp_path: pathlib.Path,
-) -> None:
-    """Unknown nullability and run hash are not written as facts when re-saving."""
-    store = InMemoryArrowDatabase()
-
-    def drop_both(data: dict[str, Any]) -> None:
-        """Remove every field this fix adds."""
-        _drop_saved_nullability(data)
-        _drop_saved_operator_content_hash(data)
-
-    saved = _save(_run(store, "nullable_tag"), tmp_path, drop_both)
-    resaved = tmp_path / "resaved.json"
-    PipelineJob.load(str(saved), database=store).save(resaved)
-    assert all(value is None for value in _recorded_fields(resaved).values())
-
-
 def test_a_source_proxy_keeps_the_nullability_of_the_source_it_stands_for() -> None:
     """A source rebuilt as a ``SourceProxy`` from its config has the source's schema."""
     from orcapod.pipeline.serialization import resolve_source_from_config
@@ -553,82 +509,6 @@ def test_a_source_proxy_keeps_the_nullability_of_the_source_it_stands_for() -> N
     proxy = resolve_source_from_config(config, fallback_to_proxy=True)
     assert proxy.output_schema() == source.output_schema()
     assert proxy.pipeline_hash() == source.pipeline_hash()
-
-
-# ---------------------------------------------------------------------------
-# A real format 0.1.0 file (tests/test_pipeline/fixtures, written by ITL-1026)
-# ---------------------------------------------------------------------------
-
-FORMAT_0_1_0 = pathlib.Path(__file__).parents[1] / "fixtures" / "job_format_0_1_0.json"
-
-
-def _add_values(value: int, score: int) -> int:
-    """The fixture job's function."""
-    return value + score
-
-
-def _store_the_fixture_join(store: ArrowDatabaseProtocol) -> Any:
-    """Run the fixture's job with today's code, its join stored; the run's join node.
-
-    The fixture was saved before running, with in-memory sources, so no database holds
-    its rows: this run stores them at the path the file's join node names.
-    """
-    from orcapod.core.data_function import PythonDataFunction
-    from orcapod.core.function_pod import FunctionPod
-
-    def source(column: str, values: list[int]) -> ArrowTableSource:
-        """One of the fixture's two sources."""
-        table = pa.table(
-            {
-                "key": pa.array(["a", "b"], type=pa.large_string()),
-                column: pa.array(values, type=pa.int64()),
-            }
-        )
-        return ArrowTableSource(
-            table,
-            tag_columns=["key"],
-            infer_nullable=True,
-            source_id=f"fixture_{column}",
-            tag_only_columns=True,
-        )
-
-    name = json.loads(FORMAT_0_1_0.read_text())["pipeline"]["pipeline"]["name"]
-    job = PipelineJob(name=tuple(name), database=store)
-    with job:
-        joined = Join()(source("value", [10, 20]), source("score", [100, 200]))
-        function = PythonDataFunction(_add_values, output_keys="total")
-        # As in the fixture's generator: a protocol mismatch shared with other tests.
-        pod = FunctionPod(data_function=function)  # pyright: ignore[reportArgumentType]
-        _ = pod(joined)
-    run_join = job.nodes["Join"]
-    # OperatorNode.attach_databases is the public way to turn on LOG / REPLAY mode.
-    run_join.attach_databases(
-        pipeline_database=store.at(*name), cache_mode=CacheMode.LOG
-    )
-    _ = job.run()
-    return run_join
-
-
-def test_a_format_0_1_0_file_finds_its_join_table_and_never_shows_its_rows_as_none() -> (
-    None
-):
-    """The real 0.1.0 file: the run's path; the node has not run (ITL-1095) and its
-    stored view raises."""
-    store = InMemoryArrowDatabase()
-    run_join = _store_the_fixture_join(store)
-    loaded = PipelineJob.load(str(FORMAT_0_1_0), database=store)
-    node = loaded.nodes["Join"]
-    name = json.loads(FORMAT_0_1_0.read_text())["pipeline"]["pipeline"]["name"]
-    node.attach_databases(
-        pipeline_database=store.at(*name), cache_mode=CacheMode.REPLAY
-    )
-    assert node.pipeline_hash() == run_join.pipeline_hash()
-    assert node.node_identity_path == run_join.node_identity_path
-    assert node.head().status is ViewStatus.NOT_COMPUTED
-    with pytest.raises(
-        RuntimeError, match=r"'Join': the job file does not record .*ITL-1048"
-    ):
-        _ = node.as_source().as_table()
 
 
 # ---------------------------------------------------------------------------
@@ -646,46 +526,6 @@ def test_get_cached_output_of_a_loaded_node_reads_its_runs_rows(
     cached = node.get_cached_output()
     assert cached is not None
     assert _sorted(cached.as_table()).equals(_sorted(job.nodes["joined"].as_table()))
-
-
-def test_get_cached_output_of_a_loaded_node_never_caches_unreadable_rows_as_none(
-    tmp_path: pathlib.Path,
-) -> None:
-    """``get_cached_output()`` raises as the stored view does; the node keeps nothing."""
-    store = InMemoryArrowDatabase()
-    job = _run(store, "nullable_tag")
-    node = _load_replaying(_save(job, tmp_path, _drop_both), store).nodes["joined"]
-    with pytest.raises(RuntimeError, match="the job file does not record"):
-        _ = node.get_cached_output()
-    with pytest.raises(RuntimeError, match="the job file does not record"):
-        _ = node.as_source().as_table()
-    assert node.as_table().num_rows == 0
-
-
-# ---------------------------------------------------------------------------
-# A file whose nodes record nullability unevenly (CodeRabbit, PR #352)
-# ---------------------------------------------------------------------------
-
-
-def test_saving_again_drops_only_the_records_its_file_lacked(
-    tmp_path: pathlib.Path,
-) -> None:
-    """A node without a record stays unrecorded; the other nodes keep theirs."""
-    store = InMemoryArrowDatabase()
-
-    def drop_src_a(data: dict[str, Any]) -> None:
-        """Remove the records of source node ``src_a`` only."""
-        for descriptor in data["pipeline"]["nodes"].values():
-            if descriptor["label"] == "src_a":
-                del descriptor["output_schema"]["nullable"]
-                del descriptor["source_config"]["nullable"]
-
-    saved = _save(_run(store, "nullable_tag_and_data"), tmp_path, drop_src_a)
-    resaved = tmp_path / "resaved.json"
-    PipelineJob.load(str(saved), database=store).save(resaved)
-    assert _recorded_fields(resaved) == _recorded_fields(saved)
-    assert _recorded_fields(resaved)["src_a"] is None
-    assert _recorded_fields(resaved)["src_b"] == {"tag": ["id"], "data": ["b"]}
 
 
 # ---------------------------------------------------------------------------
@@ -845,26 +685,3 @@ def test_get_all_records_of_a_loaded_operator_runs_the_advisory_check(
         assert node.get_all_records() is None
         assert node.get_all_records() is None
     assert len([w for w in record if w.category is OrcapodDatabaseContentWarning]) == 1
-
-
-def test_a_source_node_without_its_own_record_takes_its_output_schemas(
-    tmp_path: pathlib.Path,
-) -> None:
-    """A source config without the record restores nullability from the output schema."""
-    store = InMemoryArrowDatabase()
-    job = _run(store, "nullable_tag_and_data")
-
-    def drop_source_config_records(data: dict[str, Any]) -> None:
-        """Remove only the source configs' records, by hand."""
-        for descriptor in data["pipeline"]["nodes"].values():
-            descriptor.get("source_config", {}).pop("nullable", None)
-
-    saved = _save(job, tmp_path, drop_source_config_records)
-    loaded = PipelineJob.load(str(saved), database=store)
-    for label in ("src_a", "src_b"):
-        assert loaded.nodes[label].output_schema() == job.nodes[label].output_schema()
-    resaved = tmp_path / "resaved.json"
-    loaded.save(resaved)
-    fields = _recorded_fields(resaved)
-    assert fields["src_a"] == {"tag": ["id"], "data": ["a"]}
-    assert fields["src_a.source_config"] is None

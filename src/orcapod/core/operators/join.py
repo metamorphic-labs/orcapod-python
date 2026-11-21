@@ -284,7 +284,7 @@ class Join(NonZeroInputOperator):
             for name in sorted(merged):
                 if data_schema[name] != other_data_schema[name]:
                     raise InputValidationError(
-                        f"Join: data-tag {name!r} has type "
+                        f"{type(self).__name__}: data-tag {name!r} has type "
                         f"{data_schema[name]} in one input and "
                         f"{other_data_schema[name]} in another"
                     )
@@ -353,8 +353,7 @@ class Join(NonZeroInputOperator):
         keys = set(tags) & set(other_tags)
         return keys & set(data_tags) & set(other_data_tags)
 
-    @staticmethod
-    def _require_tag_data_roles_agree(streams: Sequence[StreamProtocol]) -> None:
+    def _require_tag_data_roles_agree(self, streams: Sequence[StreamProtocol]) -> None:
         """Raise if a name is a tag in one input and a data column in another.
 
         Every pair of inputs is checked, in call order, so the error does not
@@ -373,7 +372,8 @@ class Join(NonZeroInputOperator):
                 require_tag_data_roles_agree(*keys[i], *keys[j])
             except InputValidationError as exc:
                 raise InputValidationError(
-                    f"Join of input {i + 1} (the first) and input {j + 1} (the "
+                    f"{type(self).__name__} of input {i + 1} (the first) and input "
+                    + f"{j + 1} (the "
                     + f"second): {exc}"
                 ) from exc
 

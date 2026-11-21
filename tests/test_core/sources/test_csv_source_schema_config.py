@@ -321,19 +321,10 @@ def scale(amp: float | None) -> float | None:
 )
 @pytest.mark.parametrize(
     "with_decimal",
-    [
-        False,
-        # A job's saved slot schema holds Python types, and a decimal column has none
-        # yet (its saved type is "null"): the loaded job cannot rebuild the source.
-        pytest.param(
-            True,
-            marks=pytest.mark.xfail(
-                strict=True,
-                raises=AssertionError,
-                reason="ITL-1323: a decimal column has no Python type for the job slot",
-            ),
-        ),
-    ],
+    # A job's saved slot schema holds the slot's own Arrow types (ITL-640), so a
+    # decimal column, which has no Python type, is saved as decimal128(10, 2) and the
+    # loaded job rebuilds the source (ITL-1323).
+    [False, True],
     ids=["no-decimal", "decimal"],
 )
 def test_a_saved_job_reloads_the_source_with_its_schema(

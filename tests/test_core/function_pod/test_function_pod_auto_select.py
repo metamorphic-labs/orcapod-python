@@ -265,10 +265,10 @@ def test_stream_passed_for_its_tags_restricts_the_rows() -> None:
 # moved once since: the function type became ``python.function.v1`` (ITL-1259), the
 # last part of the uri every function pod hashes.
 _JOINED_PIPELINE_HASH = (
-    "258a798139dc3e0707a99d691c5eefb054a3ae063cd4982186325dfcf0ed1a60"
+    "b197f5c813da84cca90d40506df6fe76e83d3749f2f83d76741ac4991eb903cd"
 )
 _JOINED_CONTENT_HASH = (
-    "8a2ea497fe9899b35994dfa562d6d797ab5e5f0378c1fba071e7a144880e4ac9"
+    "8d97c02b38f270d24ff5b55995e41a4e688c6557076264fdbfc51d3b28deb37e"
 )
 
 

@@ -20,8 +20,6 @@ from orcapod.errors import SourceSpecMismatchError
 from orcapod.pipeline.job import PipelineJob
 from orcapod.types import Schema
 
-_FIXTURES = Path(__file__).parent / "fixtures"
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -657,7 +655,7 @@ class TestPipelineJobSerialization:
         path = tmp_path / "completed.json"
         job.save(str(path))
         data = json.loads(path.read_text())
-        assert data["orcapod_pipeline_job_version"] == "0.3.0"
+        assert data["orcapod_pipeline_job_version"] == "0.4.0"
 
     def test_save_stamps_orcapod_version(self, store, tmp_path):
         src_a, src_b = _make_two_sources()
@@ -669,10 +667,10 @@ class TestPipelineJobSerialization:
         data = json.loads(path.read_text())
         assert data["orcapod_version"] == orcapod.__version__
         assert data["pipeline"]["orcapod_version"] == orcapod.__version__
-        assert data["orcapod_pipeline_job_version"] == "0.3.0"
-        assert data["pipeline"]["orcapod_pipeline_version"] == "0.3.0"
+        assert data["orcapod_pipeline_job_version"] == "0.4.0"
+        assert data["pipeline"]["orcapod_pipeline_version"] == "0.4.0"
 
-    def test_format_0_3_0_roundtrip_keeps_stamp_and_nodes(self, store, tmp_path):
+    def test_format_0_4_0_roundtrip_keeps_stamp_and_nodes(self, store, tmp_path):
         src_a, src_b = _make_two_sources()
         job = PipelineJob(database=store)
         with job:
@@ -684,28 +682,8 @@ class TestPipelineJobSerialization:
         resaved = tmp_path / "resaved.json"
         loaded.save(str(resaved))
         data = json.loads(resaved.read_text())
-        assert data["orcapod_pipeline_job_version"] == "0.3.0"
+        assert data["orcapod_pipeline_job_version"] == "0.4.0"
         assert data["orcapod_version"] == orcapod.__version__
-
-    def test_format_0_1_0_fixture_loads_unchanged(self):
-        """A job file written by main before the bump (0.1.0, no stamp) loads.
-
-        The fixture was produced by ``fixtures/make_job_format_0_1_0.py`` run
-        against the source of origin/main commit cdb4f160.
-        """
-        path = _FIXTURES / "job_format_0_1_0.json"
-        data = json.loads(path.read_text())
-        assert data["orcapod_pipeline_job_version"] == "0.1.0"
-        assert "orcapod_version" not in data
-        # The file keeps the pre-ITL-1082 key ``bindings.store``: it loads with an
-        # explicit database (the saved block is ignored).
-        loaded = PipelineJob.load(str(path), database=InMemoryArrowDatabase())
-        # Hashes recomputed on load equal the ones the 0.1.0 writer stored.
-        stored = {n["label"]: n for n in data["pipeline"]["nodes"].values()}
-        assert set(loaded.pipeline.nodes) == set(stored)
-        for label, node in loaded.pipeline.nodes.items():
-            assert node.content_hash().to_string() == stored[label]["content_hash"]
-            assert node.pipeline_hash().to_string() == stored[label]["pipeline_hash"]
 
     def test_saved_file_names_the_database_under_bindings_database(
         self, store, tmp_path
@@ -758,8 +736,13 @@ class TestPipelineJobSerialization:
         loaded = PipelineJob.load(str(path), database=store)
         assert loaded.database is store
 
-    @pytest.mark.parametrize("version", ["9.9.9", "0.4.0", ""])
-    def test_unknown_job_format_version_is_rejected(self, store, tmp_path, version):
+    @pytest.mark.parametrize(
+        "version", ["0.1.0", "0.2.0", "0.3.0", "9.9.9", "0.5.0", ""]
+    )
+    def test_earlier_or_unknown_job_format_version_is_refused(
+        self, store, tmp_path, version
+    ):
+        """Only format 0.4.0 is read: an earlier job file is refused, never migrated."""
         src_a, src_b = _make_two_sources()
         job = PipelineJob(database=store)
         with job:
@@ -769,8 +752,12 @@ class TestPipelineJobSerialization:
         data = json.loads(path.read_text())
         data["orcapod_pipeline_job_version"] = version
         path.write_text(json.dumps(data))
-        with pytest.raises(ValueError, match="Unsupported PipelineJob format version"):
+        with pytest.raises(ValueError) as caught:
             PipelineJob.load(str(path))
+        message = str(caught.value)
+        assert f"the file was saved with format {version!r}" in message
+        assert "this Orcapod reads only format 0.4.0" in message
+        assert str(path) in "".join(caught.value.__notes__)
 
     @pytest.mark.parametrize("variant", ["absent", "0.0.1", "99.0.0"])
     def test_load_ignores_orcapod_version(self, store, tmp_path, variant):
