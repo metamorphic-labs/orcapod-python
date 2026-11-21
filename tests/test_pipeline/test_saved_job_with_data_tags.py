@@ -121,7 +121,7 @@ def test_the_file_states_every_binding(tmp_path: Path) -> None:
     job.run()
     job.save(tmp_path / "job.json")
     data = _saved(tmp_path / "job.json")
-    assert data["orcapod_pipeline_job_version"] == "0.3.0"
+    assert data["orcapod_pipeline_job_version"] == "0.4.0"
     assert data["bindings"]["sources"]["spikes"]["tag_only_columns"] == ["time"]
     descriptors = _function_descriptors(data)
     for label in ("double", "shift"):
@@ -349,7 +349,9 @@ def test_an_older_pipeline_with_a_data_tag_restored_source_schema_is_refused(
         Pipeline.load(path)
 
 
-@pytest.mark.parametrize("version", [*sorted(PLAIN_TAG_FORMAT_VERSIONS), "0.3.0"])
+@pytest.mark.parametrize(
+    "version", [*sorted(PLAIN_TAG_FORMAT_VERSIONS), "0.3.0", "0.4.0"]
+)
 def test_a_mapping_inside_a_source_config_is_not_read_as_a_source(
     version: str,
 ) -> None:

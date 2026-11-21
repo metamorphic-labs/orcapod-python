@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json as _json
 import logging
@@ -42,14 +43,22 @@ logger = logging.getLogger(__name__)
 #   0.3.0: a source's tags may be data-tags (ITL-1023). A file at 0.1.0 or 0.2.0
 #          holds v0.3 sources: their configs carry no ``tag_only_columns`` and read
 #          back with every declared tag plain, so their saved hashes match.
+#   0.4.0: a nested field name in saved type text that is not plain is JSON-quoted
+#          (ITL-640, ``_nested_field_name_text``). A file at an earlier version holds
+#          the unquoted grammar, where a quote is part of a name: a load rewrites its
+#          type texts in the 0.4.0 grammar first (``saved_type_texts_at_version``),
+#          each name exactly as the earlier reader read it.
 # Plain tags are decided by this version, never by a missing key (ITL-1159, ITL-1019):
 # everything in a file at a ``PLAIN_TAG_FORMAT_VERSIONS`` version is plain, and such a
 # file never holds ``tag_only_columns`` or ``fall_through_tags``. From 0.3.0 on,
 # every source config that takes the option writes ``tag_only_columns`` and every
 # function node writes ``fall_through_tags``; a load refuses a file without them.
-PIPELINE_FORMAT_VERSION = "0.3.0"
-SUPPORTED_FORMAT_VERSIONS = frozenset({"0.1.0", "0.2.0", "0.3.0"})
+PIPELINE_FORMAT_VERSION = "0.4.0"
+SUPPORTED_FORMAT_VERSIONS = frozenset({"0.1.0", "0.2.0", "0.3.0", "0.4.0"})
 PLAIN_TAG_FORMAT_VERSIONS = frozenset({"0.1.0", "0.2.0"})
+UNQUOTED_NAME_FORMAT_VERSIONS = frozenset({"0.1.0", "0.2.0", "0.3.0"})
+"""The format versions (pipeline and job files alike) whose type text has unquoted
+nested field names (ITL-640): see ``saved_type_texts_at_version``."""
 
 # ---------------------------------------------------------------------------
 # LoadStatus
@@ -677,8 +686,10 @@ def _nested_field_name_text(name: str) -> str:
     ``element``, ``x_1``, ``a.b``) keeps the text it always had; every other name (a
     character of the type grammar, whitespace anywhere, a newline, a quote, a
     backslash, a non-ASCII character, the empty name) is written as a JSON string,
-    ``"a:b"``, ``"a\\nb"``, ``""``, which the reader takes back exactly. A saved
-    file's unquoted names are read as before.
+    ``"a:b"``, ``"a\\nb"``, ``""``, which the reader takes back exactly. This is
+    the grammar of format 0.4.0; a file of an earlier format, where a quote is part of
+    a name, is rewritten in it at load, each name as the earlier reader read it
+    (``saved_type_texts_at_version``), so the reader never guesses.
     """
     return name if _PLAIN_FIELD_NAME.fullmatch(name) else _json.dumps(name)
 
@@ -1480,7 +1491,7 @@ def _parse_arrow_field(text: str, type_converter: Any | None) -> Any:
     import pyarrow as pa
 
     text = text.strip()
-    if text.startswith('"'):
+    if text.startswith('"') and _QUOTED_NAMES.get():
         # A quoted name (``_nested_field_name_text``): exactly the JSON string.
         name, end = _json.JSONDecoder().raw_decode(text)
         rest = text[end:].lstrip()
@@ -1509,7 +1520,7 @@ def _names_a_field(text: str) -> bool:
     A bare type holds a ``:`` only inside its brackets (``list<item: int64>``), so
     the text names a field exactly when a ``:`` comes before any bracket.
     """
-    if text.lstrip().startswith('"'):
+    if text.lstrip().startswith('"') and _QUOTED_NAMES.get():
         return True
     colon = text.find(":")
     if colon == -1:
@@ -1569,8 +1580,136 @@ def _strip_field_name(s: str) -> str:
     return s
 
 
+def _old_grammar_text(type_str: str) -> str:
+    """Rewrite type text of the unquoted grammar in the 0.4.0 grammar, by its text.
+
+    Each nested field name is taken exactly as the earlier reader took it (split at
+    its first ``:``, surrounding whitespace removed, a quote part of the name) and
+    written again by ``_nested_field_name_text``; every type is kept as written. Run
+    with ``_QUOTED_NAMES`` off, so the splitting is the earlier reader's.
+    """
+    import re as _re
+
+    text = type_str.strip()
+    if text.startswith("fixed_size_list<"):
+        match = _re.fullmatch(r"fixed_size_list<(.*)>\[(\d+)\]", text, _re.S)
+        if match is None:
+            return type_str
+        return (
+            f"fixed_size_list<{_old_grammar_field(match.group(1))}>[{match.group(2)}]"
+        )
+    if text.startswith("extension<") or "<" not in text:
+        return type_str
+    bracket = text.index("<")
+    outer, inner = text[:bracket].strip(), text[bracket + 1 : -1].strip()
+    if outer in ("list", "large_list"):
+        return f"{outer}<{_old_grammar_field(inner)}>"
+    if outer == "struct":
+        fields = _split_struct_fields(inner)
+        return "struct<" + ", ".join(_old_grammar_field(f) for f in fields) + ">"
+    if outer == "map":
+        parts = _split_top_level(inner, ",")
+        keys_sorted = len(parts) == 3 and parts[-1].strip() == "keys_sorted"
+        if keys_sorted:
+            parts = parts[:-1]
+        if len(parts) != 2:
+            return type_str
+        if all(_names_a_field(part) for part in parts):
+            texts = [_old_grammar_field(part) for part in parts]
+        else:
+            texts = [_old_grammar_text(part) for part in parts]
+        return f"map<{texts[0]}, {texts[1]}{', keys_sorted' if keys_sorted else ''}>"
+    return type_str
+
+
+def _old_grammar_field(text: str) -> str:
+    """One nested field of the unquoted grammar, in the 0.4.0 grammar."""
+    name, separator, type_text = text.strip().partition(":")
+    if not separator:
+        name, type_text = "item", text
+    type_text = type_text.strip()
+    suffix = ""
+    if type_text.endswith(" not null"):
+        type_text, suffix = type_text[: -len(" not null")], " not null"
+    return f"{_nested_field_name_text(name.strip())}: {_old_grammar_text(type_text)}{suffix}"
+
+
+def saved_type_texts_at_version(saved: Any, version: str) -> Any:
+    """Return a loaded file's content with its type texts in the 0.4.0 grammar (ITL-640).
+
+    A file at a ``UNQUOTED_NAME_FORMAT_VERSIONS`` version wrote nested field names
+    unquoted, so a quote in its type text is part of a name, as the earlier reader read
+    it; the 0.4.0 grammar reads a quote as the start of a quoted name. So every type text
+    of such a file that holds a quote is rewritten first (``_old_grammar_text``): its
+    names exactly as the earlier reader took them, quoted where the 0.4.0 grammar needs
+    it. A text without a quote reads the same in both grammars and is kept. The type
+    texts are where the writers put them, at any depth: a node's ``output_schema``
+    (``tag``, ``data``), a source or slot config's ``tag_schema`` and ``data_schema``,
+    and a ``schema`` entry's ``columns`` (a ``CSVSource``'s). A file at 0.4.0 or later is
+    returned unchanged.
+
+    Args:
+        saved: The loaded JSON content (a pipeline or a job file, or part of one).
+        version: The file's format version.
+
+    Returns:
+        The content, rewritten where needed (a new object; ``saved`` is not changed).
+    """
+    if version not in UNQUOTED_NAME_FORMAT_VERSIONS:
+        return saved
+
+    def texts(mapping: Any) -> Any:
+        if not isinstance(mapping, dict):
+            return mapping
+        return {
+            key: _old_grammar_text(value)
+            if isinstance(value, str) and '"' in value
+            else value
+            for key, value in cast("dict[str, Any]", mapping).items()
+        }
+
+    def walk(value: Any) -> Any:
+        if isinstance(value, list):
+            return [walk(item) for item in cast("list[Any]", value)]
+        if not isinstance(value, dict):
+            return value
+        out: dict[str, Any] = {}
+        for key, item in cast("dict[str, Any]", value).items():
+            if key == "output_schema" and isinstance(item, dict):
+                schema = dict(cast("dict[str, Any]", item))
+                for role in ("tag", "data"):
+                    if role in schema:
+                        schema[role] = texts(schema[role])
+                out[key] = schema
+            elif key in ("tag_schema", "data_schema"):
+                out[key] = texts(item)
+            elif key == "schema" and isinstance(item, dict) and "columns" in item:
+                schema = dict(cast("dict[str, Any]", item))
+                schema["columns"] = texts(schema["columns"])
+                out[key] = schema
+            else:
+                out[key] = walk(item)
+        return out
+
+    token = _QUOTED_NAMES.set(False)
+    try:
+        return walk(saved)
+    finally:
+        _QUOTED_NAMES.reset(token)
+
+
+_QUOTED_NAMES: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
+    "orcapod_saved_text_quoted_names", default=True
+)
+"""Whether the type text being read uses the 0.4.0 grammar (quoted names). Only
+``saved_type_texts_at_version`` turns it off, while it reads text of an earlier
+format, where a quote is part of a name."""
+
+
 def _quoted_positions(text: str) -> "list[tuple[int, str]]":
     """The positions and characters of ``text`` inside a JSON-quoted field name."""
+    if not _QUOTED_NAMES.get():
+        return []
     inside: list[tuple[int, str]] = []
     position = 0
     while position < len(text):
@@ -1715,8 +1854,8 @@ _BUILTIN_TYPE_MAP: dict[str, type] = {
 # Same scheme as ``PIPELINE_FORMAT_VERSION``: the written version, and the set a
 # load accepts (``PipelineJob.load``). The plain-tag rule stated there holds for a
 # job file too (``PLAIN_TAG_FORMAT_VERSIONS``, ``source_config_at_version``).
-PIPELINE_JOB_FORMAT_VERSION = "0.3.0"
-SUPPORTED_JOB_FORMAT_VERSIONS = frozenset({"0.1.0", "0.2.0", "0.3.0"})
+PIPELINE_JOB_FORMAT_VERSION = "0.4.0"
+SUPPORTED_JOB_FORMAT_VERSIONS = frozenset({"0.1.0", "0.2.0", "0.3.0", "0.4.0"})
 
 
 # ---------------------------------------------------------------------------

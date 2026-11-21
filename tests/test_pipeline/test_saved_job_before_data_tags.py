@@ -50,9 +50,9 @@ def saved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 
 def test_format_versions() -> None:
-    assert PIPELINE_FORMAT_VERSION == PIPELINE_JOB_FORMAT_VERSION == "0.3.0"
-    assert {"0.1.0", "0.2.0", "0.3.0"} == SUPPORTED_FORMAT_VERSIONS
-    assert {"0.1.0", "0.2.0", "0.3.0"} == SUPPORTED_JOB_FORMAT_VERSIONS
+    assert PIPELINE_FORMAT_VERSION == PIPELINE_JOB_FORMAT_VERSION == "0.4.0"
+    assert {"0.1.0", "0.2.0", "0.3.0", "0.4.0"} == SUPPORTED_FORMAT_VERSIONS
+    assert {"0.1.0", "0.2.0", "0.3.0", "0.4.0"} == SUPPORTED_JOB_FORMAT_VERSIONS
 
 
 def test_a_v03_job_loads_with_unchanged_hashes(saved: dict[str, Any]) -> None:

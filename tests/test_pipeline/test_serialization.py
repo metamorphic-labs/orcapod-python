@@ -67,7 +67,7 @@ class TestPipelineBlueprintSave:
         pipeline.save(str(path))
         data = json.loads(path.read_text())
         assert data["orcapod_version"] == orcapod.__version__
-        assert data["orcapod_pipeline_version"] == "0.3.0"
+        assert data["orcapod_pipeline_version"] == "0.4.0"
 
     def test_load_ignores_orcapod_version(self, spec_pipeline):
         """The stamp is informational: absent or unfamiliar, the file loads."""
@@ -293,8 +293,8 @@ class TestNewSerializationFormat:
         with open(save_path) as f:
             data = json.load(f)
 
-        assert data.get("orcapod_pipeline_version") == "0.3.0", (
-            f"Expected version '0.3.0', got {data.get('orcapod_pipeline_version')!r}"
+        assert data.get("orcapod_pipeline_version") == "0.4.0", (
+            f"Expected version '0.4.0', got {data.get('orcapod_pipeline_version')!r}"
         )
 
     def test_format_0_1_0_pipeline_loads_unchanged(self, tmp_path, compiled_pipeline):
