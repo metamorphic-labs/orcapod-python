@@ -79,7 +79,7 @@ What it shows ([Looking at data](streams.md#looking-at-data) states each rule in
   "bold underlined = data-tag (a tag that is also data)". The line names only the marks
   shown: the tags of `units` are all plain. (The pictures were taken before data headers
   were underlined.) When `columns` asks for the hidden column groups, system tags are
-  marked as tags and the source-info, context and content-hash columns are left unmarked.
+  marked as tags and the source-info, context, content-hash and meta columns are left unmarked.
 - **Large cells** are summarised (an array as `ndarray float64 (2, 3)`, bytes as
   `bytes (300 B)`, long text and long lists shortened); `head().table` keeps the full values.
 

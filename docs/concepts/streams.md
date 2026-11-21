@@ -289,8 +289,8 @@ underlined, and a [data-tag](data-tags.md), a tag that is also data, has both; a
 rule separates the tags from the data columns, and a line under the header names each mark
 shown ("bold = tag; underlined = data; bold underlined = data-tag (a tag that is also
 data)"). A data-tag is one column, shown once, among the tags. When `columns` asks for the hidden
-column groups, system tags are marked as tags, and the source-info, context and
-content-hash columns are left unmarked. As text, a plain tag's name starts with `*` ("* = tag") and a data-tag's
+column groups, system tags are marked as tags, and the source-info, context,
+content-hash and meta (`__`) columns are left unmarked. As text, a plain tag's name starts with `*` ("* = tag") and a data-tag's
 with `+` ("+ = data-tag (tag and data)"); a data column's is unmarked. Only the display is
 marked: the view's table and `as_table()` keep the plain names.
 

@@ -686,3 +686,56 @@ def test_job_nodes_show_the_marks(orchestrator: str) -> None:
     _check_display(job.nodes["scaled"].as_source().head())
     # Only the run called the function, once per row.
     assert len(CALLS) == len(ROWS)
+
+
+RAW_LAYOUTS = {
+    "meta_between": ("x", "__debug", "a", "y", "b", "__note"),
+    "meta_first": ("__note", "__debug", "b", "a", "y", "x"),
+}
+
+
+@pytest.mark.parametrize("tag_order", [("a", "b"), ("b", "a")], ids=["ab", "ba"])
+@pytest.mark.parametrize("layout", list(RAW_LAYOUTS))
+def test_meta_columns_of_a_raw_stream_stay_unmarked(
+    layout: str, tag_order: tuple[str, str]
+) -> None:
+    """A raw stream lists its meta columns among its data keys; the display leaves
+    them unmarked and the legend counts them as nothing, while its data columns and
+    its data-tag keep their marks."""
+    values = {"a": [1, 2], "b": [3, 4], "x": [5, 6], "y": [7, 8]}
+    values |= {"__debug": ["d1", "d2"], "__note": ["n1", "n2"]}
+    table = pa.table({name: values[name] for name in RAW_LAYOUTS[layout]})
+    stream = ArrowTableStream(table, tag_columns=list(tag_order), data_tags=["b"])
+    assert {"__debug", "__note"} <= set(stream.keys()[1])
+    meta = [c for c in RAW_LAYOUTS[layout] if c.startswith("__")]
+    data = [c for c in RAW_LAYOUTS[layout] if c in ("x", "y")]
+    for shown in (
+        stream.head(),
+        stream.head(columns={"meta": True}),
+        stream.run(),
+        stream.run().tail(1),
+    ):
+        view = _view(shown)
+        assert view.tag_columns == tag_order
+        assert view.data_tag_columns == ("b",)
+        assert list(view.data_columns) == data
+        html_text = view._repr_html_()
+        header = dict(_cells(html_text)[0])
+        for name in meta:
+            assert header[name] == "", name
+        for name in data:
+            assert header[name] == "font-weight:normal;text-decoration:underline"
+        assert header["a"].startswith("font-weight:bold;color:#2a7fb8")
+        assert header["b"].startswith(
+            "font-weight:bold;text-decoration:underline;color:#2a7fb8"
+        )
+        assert (
+            "<small>bold = tag; underlined = data; "
+            "bold underlined = data-tag (a tag that is also data)</small>"
+        ) in html_text
+        lines = str(view).split("\n")
+        assert lines[1] == "* = tag; + = data-tag (tag and data)"
+        names_line = next(line for line in lines if line.startswith("│"))
+        names = [cell.strip() for cell in names_line.strip("│").split("┆")]
+        tags = [("+" if c == "b" else "*") + c for c in tag_order]
+        assert names == [*tags, *(c for c in RAW_LAYOUTS[layout] if c not in tag_order)]

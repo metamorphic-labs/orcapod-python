@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from typing_extensions import override
 
+from orcapod.system_constants import constants
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -794,7 +795,9 @@ def data_roles_of(
 
     The roles are read from the stream's public ``keys()``: a data-tag is one column in
     both roles, a name among both its tag and its data keys; a data column is a name
-    among its data keys that is not a tag. A view that shows columns has its stream's
+    among its data keys that is not a tag and not a meta column (``META_PREFIX``): a raw
+    ``ArrowTableStream`` lists its meta columns among its data keys, and a meta column
+    is shown unmarked. A view that shows columns has its stream's
     schema already, so reading the keys computes, reads and polls nothing; a view with no
     column (one whose schema would need a poll, ``schema_requires_io``) does not read
     them.
@@ -814,7 +817,11 @@ def data_roles_of(
     data_names = set(data)
     data_tags = tuple(c for c in tag_columns if c in data_names and c in set(tags))
     data_columns = tuple(
-        c for c in column_names if c in data_names and c not in tag_columns
+        c
+        for c in column_names
+        if c in data_names
+        and c not in tag_columns
+        and not c.startswith(constants.META_PREFIX)
     )
     return data_tags, data_columns
 
