@@ -739,3 +739,110 @@ def test_meta_columns_of_a_raw_stream_stay_unmarked(
         names = [cell.strip() for cell in names_line.strip("│").split("┆")]
         tags = [("+" if c == "b" else "*") + c for c in tag_order]
         assert names == [*tags, *(c for c in RAW_LAYOUTS[layout] if c not in tag_order)]
+
+
+STYLES = {
+    "tag": "font-weight:bold;color:#2a7fb8",
+    "data-tag": "font-weight:bold;text-decoration:underline;color:#2a7fb8",
+    "data": "font-weight:normal;text-decoration:underline",
+}
+RULE = "border-right:2px solid currentColor"
+
+
+def _header_cells(html_text: str) -> list[tuple[str, str]]:
+    """The first header row of an HTML display: each cell's text and style."""
+    return _cells(html_text)[0]
+
+
+def _check_rendered_roles(
+    view: StreamView, role_of: dict[str, str], hidden_boundary: bool
+) -> list[str]:
+    """Check every rendered header cell has its own column's mark, the ellipsis none,
+    and the rule after the last tag (on the ellipsis when that tag is left out).
+    Return the names of the rendered cells."""
+    rows = _cells(view._repr_html_())
+    header = rows[0]
+    names = [name for name, _ in header]
+    assert "…" in names, "the table is shown truncated"
+    for name, style in header:
+        if name == "…":
+            assert style == (RULE if hidden_boundary else ""), style
+        else:
+            expected = STYLES[role_of[name]]
+            assert style.removesuffix(";" + RULE) == expected, name
+    ruled = [name for name, style in header if RULE in style]
+    last_tag = view.tag_columns[-1]
+    assert ruled == (["…"] if hidden_boundary else [last_tag])
+    for row in rows[1:]:
+        ruled_cells = [i for i, (_, style) in enumerate(row) if RULE in style]
+        assert ruled_cells == [names.index(ruled[0])]
+    return names
+
+
+@pytest.mark.parametrize("layout", ["tags_first", "data_first"])
+def test_a_wide_table_marks_the_columns_polars_shows(layout: str) -> None:
+    """At Polars' default width a 100-column table is shown truncated: every shown
+    header keeps its own column's mark, never another column's."""
+    plain = [f"p{i}" for i in range(5)]
+    data_tags = [f"t{i}" for i in range(85)]
+    data = [f"d{i}" for i in range(10)]
+    tags = plain + data_tags
+    columns = tags + data if layout == "tags_first" else data[::-1] + tags
+    source = DictSource(
+        [{name: i for i, name in enumerate(columns)}],
+        tag_columns=tags,
+        tag_only_columns=plain,
+        source_id="wide",
+    )
+    role_of = {
+        **dict.fromkeys(plain, "tag"),
+        **dict.fromkeys(data_tags, "data-tag"),
+        **dict.fromkeys(data, "data"),
+    }
+    view = _view(source.run())
+    names = _check_rendered_roles(view, role_of, hidden_boundary=False)
+    assert names[:5] == plain
+    assert any(role_of.get(name) == "data" for name in names)
+
+
+@pytest.mark.parametrize("layout", list(LAYOUTS))
+def test_an_explicit_column_limit_marks_the_columns_polars_shows(layout: str) -> None:
+    """Under ``tbl_cols=4`` the six-column stream shows two columns either side of the
+    ellipsis: each keeps its own mark, the ellipsis none, and the rule moves onto the
+    ellipsis when the last tag is left out; the text form marks the same columns."""
+    import polars as pl
+
+    source = _source(TAG_ORDERS["interleaved"], LAYOUTS[layout])
+    view = _view(source.run())
+    role_of = {"session": "tag", "trial": "tag", "unit": "data-tag", "time": "data-tag"}
+    role_of |= {"amp": "data", "label": "data"}
+    with pl.Config(tbl_cols=4):
+        names = _check_rendered_roles(view, role_of, hidden_boundary=True)
+        text = str(view)
+    assert names[:2] == ["session", "unit"]
+    assert names[3:] == list(view.data_columns)
+    names_line = next(line for line in text.split("\n") if line.startswith("│"))
+    shown = [cell.strip() for cell in names_line.strip("│").split("┆")]
+    assert shown == ["*session", "+unit", "…", *view.data_columns]
+    # Showing more columns than the limit hides none: every mark, by position.
+    with pl.Config(tbl_cols=20):
+        header = _header_cells(view._repr_html_())
+    assert "…" not in [name for name, _ in header]
+    for name, style in header:
+        assert style.removesuffix(";" + RULE) == STYLES[role_of[name]], name
+
+
+def test_an_unmatched_header_marks_nothing() -> None:
+    """When the rendered header cannot be matched to the columns, no cell is marked."""
+    from orcapod.core.streams.view import _mark_columns
+
+    frame = (
+        "<table><thead><tr><th>a</th><th>b</th></tr>"
+        "<tr><td>i64</td><td>i64</td></tr></thead>"
+        "<tbody><tr><td>1</td><td>2</td></tr></tbody></table>"
+    )
+    marked = _mark_columns(frame, [("x", "tag"), ("y", "data")])
+    assert "style=" not in marked
+    matched = _mark_columns(frame, [("a", "tag"), ("b", "data")])
+    assert f'<th style="{STYLES["tag"]};{RULE}">a</th>' in matched
+    assert f'<th style="{STYLES["data"]}">b</th>' in matched

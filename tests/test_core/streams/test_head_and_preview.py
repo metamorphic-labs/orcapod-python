@@ -9,6 +9,7 @@ writes a cache.
 from __future__ import annotations
 
 import io
+import re
 from typing import Any
 from unittest import mock
 
@@ -746,6 +747,75 @@ def test_head_of_adapts_any_head_the_protocol_allows() -> None:
     head = head_of(_PlainHead(), source)
     assert head.status is ViewStatus.ROWS
     assert head.header() == "ArrowTableSource[readings] — all 2 rows"
+    # The roles come from the stream, as for every other view (ITL-1304).
+    assert head.tag_columns == ("id",)
+    assert head.data_tag_columns == ()
+    assert head.data_columns == ("x",)
+    assert "<small>bold = tag; underlined = data</small>" in head._repr_html_()
+
+
+def test_head_of_an_adapted_head_marks_plain_tags_data_tags_and_data() -> None:
+    """A protocol head of a stream with two plain tags, two data-tags and two data
+    columns, in two table layouts, is shown with every column's mark."""
+    from orcapod.core.streams.view import head_of
+
+    class _Wrapped:
+        """A ``StreamViewProtocol`` result that only wraps another head's rows."""
+
+        def __init__(self, inner: Any) -> None:
+            self.table = inner.table
+            self.status = "rows"
+            self.total_rows = inner.table.num_rows
+
+        def header(self) -> str:
+            """Return a fixed header."""
+            return "wrapped"
+
+    styles = {
+        "tag": "font-weight:bold;color:#2a7fb8",
+        "data-tag": "font-weight:bold;text-decoration:underline;color:#2a7fb8",
+        "data": "font-weight:normal;text-decoration:underline",
+    }
+    for layout in (
+        ["amp", "label", "session", "unit", "trial", "time"],
+        ["time", "trial", "label", "unit", "amp", "session"],
+    ):
+        row = {
+            "session": "s",
+            "unit": 1,
+            "trial": 2,
+            "time": 3,
+            "amp": 0.5,
+            "label": "a",
+        }
+        source = DictSource(
+            [{name: row[name] for name in layout}],
+            tag_columns=["session", "unit", "trial", "time"],
+            tag_only_columns=["session", "trial"],
+            source_id="spikes",
+        )
+        head = head_of(_Wrapped(source.head()), source)
+        assert head.tag_columns == ("session", "unit", "trial", "time")
+        assert head.data_tag_columns == ("unit", "time")
+        assert set(head.data_columns) == {"amp", "label"}
+        html_text = head._repr_html_()
+        role = {
+            "session": "tag",
+            "trial": "tag",
+            "unit": "data-tag",
+            "time": "data-tag",
+        }
+        first_row = html_text.split("<thead>", 1)[1].split("</tr>", 1)[0]
+        header = {
+            name: style
+            for style, name in re.findall(
+                r'<th style="([^"]*)">([^<]*)</th>', first_row
+            )
+        }
+        assert list(header) == ["session", "unit", "trial", "time", *head.data_columns]
+        for name, style in header.items():
+            assert style.startswith(styles[role.get(name, "data")]), name
+        assert "+unit" in str(head) and "*session" in str(head)
 
 
 def test_head_of_n_rows_renders_all_n_rows() -> None:

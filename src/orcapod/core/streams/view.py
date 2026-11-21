@@ -628,8 +628,7 @@ class StreamView:
             # Polars shortens strings to its own default length; show up to _MAX_TEXT.
             with pl.Config(fmt_str_lengths=_MAX_TEXT, tbl_rows=self._display_rows()):
                 frame_html = self._display_frame()._repr_html_()
-            roles = [role for _, role in self._display_columns()]
-            parts.append(_mark_columns(frame_html, roles))
+            parts.append(_mark_columns(frame_html, self._display_columns()))
         return "\n".join(parts)
 
     def __str__(self) -> str:
@@ -653,30 +652,108 @@ class StreamView:
         )
 
 
-def _mark_columns(frame_html: str, roles: Sequence[str]) -> str:
+def _mark_columns(frame_html: str, columns: Sequence[tuple[str, str]]) -> str:
     """Return Polars' HTML table ``frame_html`` with its columns styled by role.
 
-    The cells are found by position, never by name, so a name that HTML escapes is
-    handled as Polars wrote it. The header cell of a column gets its role's
-    ``html_style``; every cell of the last column of a group of roles followed by another
-    group gets ``ROLE_BOUNDARY_STYLE``. Everything else is passed on unchanged.
+    Polars may leave columns out of a wide table, showing the first and the last ones
+    around an ellipsis cell, so each rendered header cell is matched to its column by
+    name (``_rendered_roles``), never by its position among all the columns. The header
+    cell of a column gets its role's ``html_style``; every cell of the last column of a
+    group of roles followed by another group gets ``ROLE_BOUNDARY_STYLE`` (the ellipsis
+    cell's when the boundary is among the columns left out). The ellipsis cell gets no
+    mark, and a header Polars wrote in a form that cannot be matched leaves every cell
+    unmarked: no mark is better than a wrong one. Everything else is passed on unchanged.
 
     Args:
-        frame_html: The HTML of the display frame, one column per entry of ``roles``.
-        roles: The role of each column, in display order.
+        frame_html: The HTML of the display frame, one column per entry of ``columns``.
+        columns: The name and the role of each column, in display order.
     """
-    header = [COLUMN_ROLE_MARKS[role].html_style for role in roles]
-    groups = [COLUMN_ROLE_MARKS[role].group for role in roles]
-    boundary = [
-        ROLE_BOUNDARY_STYLE
-        if i + 1 < len(groups) and groups[i + 1] != groups[i]
-        else ""
-        for i in range(len(groups))
+    names = _HeaderNames()
+    names.feed(frame_html)
+    names.close()
+    cells = _rendered_columns(names.cells, [name for name, _ in columns])
+    roles = [role for _, role in columns]
+    header = [
+        "" if column is None else COLUMN_ROLE_MARKS[roles[column]].html_style
+        for column in cells
     ]
+    boundary = [""] * len(cells)
+    groups = [COLUMN_ROLE_MARKS[role].group for role in roles]
+    if cells and any(column is not None for column in cells):
+        for last in range(len(groups) - 1):
+            if groups[last] != groups[last + 1]:
+                # The cell showing the last column of the group, or the ellipsis cell
+                # when that column is left out.
+                shown = [i for i, column in enumerate(cells) if column == last]
+                if not shown:
+                    shown = [i for i, column in enumerate(cells) if column is None]
+                for i in shown:
+                    boundary[i] = ROLE_BOUNDARY_STYLE
     marker = _ColumnMarker(header, boundary)
     marker.feed(frame_html)
     marker.close()
     return "".join(marker.out)
+
+
+_ELLIPSIS = "…"
+
+
+def _rendered_columns(cells: Sequence[str], names: Sequence[str]) -> list[int | None]:
+    """Return, for each rendered header cell, the index of its column in ``names``, or
+    ``None`` for the ellipsis cell (and for every cell when they cannot be matched).
+
+    Polars renders either every column, or a first run and a last run of them around one
+    ellipsis cell; the match is checked by name on both sides of the ellipsis.
+
+    Args:
+        cells: The text of each cell of the first header row, as rendered.
+        names: The names of the columns of the display frame, in order.
+    """
+    if list(cells) == list(names):
+        return list(range(len(names)))
+    left_out = len(names) - (len(cells) - 1)
+    if left_out > 0:
+        for i, cell in enumerate(cells):
+            if (
+                cell == _ELLIPSIS
+                and list(cells[:i]) == list(names[:i])
+                and list(cells[i + 1 :]) == list(names[i + left_out :])
+            ):
+                return [*range(i), None, *range(i + left_out, len(names))]
+    return [None] * len(cells)
+
+
+class _HeaderNames(HTMLParser):
+    """Collects the text of each cell of the first header row of an HTML table."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.cells: list[str] = []
+        self._rows: int = 0
+        self._in_thead: bool = False
+        self._cell: list[str] | None = None
+
+    @override
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "thead":
+            self._in_thead = True
+        elif tag == "tr" and self._in_thead:
+            self._rows += 1
+        elif tag in ("th", "td") and self._in_thead and self._rows == 1:
+            self._cell = []
+
+    @override
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "thead":
+            self._in_thead = False
+        elif tag in ("th", "td") and self._cell is not None:
+            self.cells.append("".join(self._cell))
+            self._cell = None
+
+    @override
+    def handle_data(self, data: str) -> None:
+        if self._cell is not None:
+            self._cell.append(data)
 
 
 class _ColumnMarker(HTMLParser):
@@ -850,8 +927,9 @@ def head_of(
     """Return ``head`` (another stream's) shown as ``stream``.
 
     A ``StreamView`` keeps every field. Any other result of ``head`` (a
-    ``StreamViewProtocol``) is adapted from what that protocol gives: its rows, status
-    and total.
+    ``StreamViewProtocol``) is adapted from what that protocol gives (its rows, status
+    and total), with the columns' roles read from ``stream``'s ``keys()``, as every other
+    view gets them (``data_roles_of``).
 
     Args:
         head: What another stream's ``head`` returned.
@@ -860,11 +938,19 @@ def head_of(
         note: Another note, if given.
     """
     if not isinstance(head, StreamView):
+        table: pa.Table = head.table
+        names = table.column_names
+        # A table with no column needs no keys (``data_roles_of``).
+        tags = tuple(c for c in stream.keys()[0] if c in names) if names else ()
+        data_tags, data = data_roles_of(stream, tags, names)
         head = StreamView(
-            table=head.table,
+            table=table,
             status=ViewStatus(head.status),
             kind=type(stream).__name__,
             label=display_name(stream),
+            tag_columns=tags,
+            data_tag_columns=data_tags,
+            data_columns=data,
             total_rows=head.total_rows,
         )
     return head.for_stream(stream, origin=origin, note=note)
