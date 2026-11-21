@@ -1107,9 +1107,12 @@ data. The rules:
 
 - `-> datetime` is an instant, stored as `timestamp[us, tz=UTC]` (developer, November 21,
   2026, ITL-1268; the mapping does not change in data context v1). Every Arrow timestamp
-  type reads as `datetime`. One rule stores a Python `datetime`, for sources and function
-  outputs at any depth: `universal_converter.storable_instant`. An aware value of any zone
-  is stored as its instant; a naive value raises `NaiveDatetimeError` (strict policy); a
+  type reads as `datetime`. One rule stores a Python `datetime` the type converter
+  converts (function outputs at any depth, `DictSource` and `ListSource` values; not a
+  `DataFrameSource` over a plain dict or list, ITL-1330): `universal_converter.storable_instant`.
+  An aware value of any zone is stored as its exact instant (an offset with a part below
+  one second is converted to UTC first: Arrow drops that part; any other value is handed to
+  Arrow as before, so no stored value moves); a naive value raises `NaiveDatetimeError` (strict policy); a
   value with a part below one microsecond (a `pandas.Timestamp` with nanoseconds) raises
   `SubMicrosecondDatetimeError`, never truncated. A function output shows the error's
   `reason` and `hint` (no value). No unzoned or nanosecond output exists yet (ITL-1325).

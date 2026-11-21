@@ -8,8 +8,10 @@ column, and a ``pandas.Timestamp`` for an ``ns`` column. ``-> datetime`` declare
 instant, ``timestamp[us, tz=UTC]`` (developer, November 21, 2026: the mapping does not
 change). An aware value of any zone is stored as its instant; a naive value is refused,
 with a message that names the time zone and how to attach one; a value with a part
-below one microsecond is refused, never truncated. One rule decides it for every path
-that stores a Python ``datetime``: sources and function outputs alike.
+below one microsecond is refused, never truncated. One rule decides it for what the type
+converter stores: function outputs at any depth and the Python values of ``DictSource`` and
+``ListSource``. A ``DataFrameSource`` over a plain dict or list is not covered yet
+(ITL-1330, a strict expected failure below).
 
 The streams here have two timestamp columns (``a``, ``b``) and two tags, in two table
 layouts.
@@ -25,6 +27,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 import pytest
 
 from orcapod import function_pod
@@ -477,3 +480,192 @@ def test_the_errors_pickle_and_keep_reason_and_hint(
     assert str(copy) == str(error)
     assert "2026" not in error.reason + error.hint
     assert "2023" not in error.reason + error.hint
+
+
+# ---------------------------------------------------------------------------
+# The stored instant is exact (Codex review of PR 468)
+# ---------------------------------------------------------------------------
+
+EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+LOS_ANGELES = ZoneInfo("America/Los_Angeles")
+INSTANTS = {
+    "utc": datetime(2026, 1, 2, 3, 4, 5, 123456, tzinfo=timezone.utc),
+    "los_angeles_fold_0": datetime(2026, 11, 1, 1, 30, tzinfo=LOS_ANGELES, fold=0),
+    "los_angeles_fold_1": datetime(2026, 11, 1, 1, 30, tzinfo=LOS_ANGELES, fold=1),
+    "kolkata": datetime(2026, 1, 2, 3, 4, 5, 999999, tzinfo=ZoneInfo("Asia/Kolkata")),
+    "kathmandu": datetime(2026, 1, 2, 3, 4, 5, 7, tzinfo=ZoneInfo("Asia/Kathmandu")),
+    "plus_2h": datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone(timedelta(hours=2))),
+    "far_past": datetime(1, 1, 1, 3, tzinfo=timezone(timedelta(hours=2))),
+    "far_future": datetime(9999, 12, 31, 12, tzinfo=timezone(-timedelta(hours=5))),
+    # Offsets with a part below one second: Arrow drops that part of an offset.
+    "plus_1_5s": datetime(2026, 1, 2, tzinfo=timezone(timedelta(seconds=1.5))),
+    "minus_1us": datetime(2026, 1, 2, tzinfo=timezone(timedelta(microseconds=-1))),
+    "minus_0_25s": datetime(
+        2026, 1, 2, 3, 4, 5, 6, tzinfo=timezone(-timedelta(milliseconds=250))
+    ),
+}
+
+
+def _utc_micros(value: datetime) -> int:
+    """The exact instant of ``value``, in microseconds since the epoch."""
+    return (value - EPOCH) // timedelta(microseconds=1)
+
+
+def _stored_micros(table: pa.Table, column: str) -> list[int]:
+    return [
+        value
+        for value in table.column(column).cast(pa.int64()).to_pylist()
+        if value is not None
+    ]
+
+
+@pytest.mark.parametrize("name", list(INSTANTS))
+@pytest.mark.parametrize("function", ["sync", "async"])
+def test_the_stored_instant_is_exact(name: str, function: str) -> None:
+    """Every aware value, an offset with a part below one second included, is stored
+    as its exact instant: the UTC microseconds Python computes."""
+    value = INSTANTS[name]
+
+    if function == "sync":
+
+        @function_pod(output_keys=["at", "many"])
+        def give(a: datetime, b: datetime) -> tuple[datetime, list[datetime]]:
+            return value, [value, value]
+
+    else:
+
+        @function_pod(output_keys=["at", "many"])
+        async def give(a: datetime, b: datetime) -> tuple[datetime, list[datetime]]:
+            return value, [value, value]
+
+    table = give.pod(_source("us", "UTC")).as_table()
+    assert _stored_micros(table, "at") == [_utc_micros(value)] * 2
+    many = pc.list_flatten(table.column("many")).cast(pa.int64())
+    assert many.to_pylist() == [_utc_micros(value)] * 4
+
+
+@pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
+def test_a_job_stores_the_exact_instant_of_a_fractional_offset(
+    orchestrator: str,
+) -> None:
+    """In a job, on either orchestrator, a stored result read back holds the exact
+    instant of an offset with a part below one second."""
+    values = [INSTANTS["plus_1_5s"], INSTANTS["minus_1us"]]
+
+    @function_pod(output_keys=["first", "second"])
+    def give(a: datetime, b: datetime) -> tuple[datetime, datetime]:
+        return values[0], values[1]
+
+    job = PipelineJob(name="itl1268", database=InMemoryArrowDatabase())
+    with job:
+        _ = give.pod(_source("us", "UTC"), label="give")
+    _ = job.run(orchestrator=ORCHESTRATORS[orchestrator]())
+    stored = job.nodes["give"].as_source().as_table()
+    assert _stored_micros(stored, "first") == [_utc_micros(values[0])] * 2
+    assert _stored_micros(stored, "second") == [_utc_micros(values[1])] * 2
+
+
+def test_a_source_stores_the_exact_instant_of_a_fractional_offset() -> None:
+    """A source over Python values declared ``datetime`` stores the exact instant."""
+    first, second = INSTANTS["plus_1_5s"], INSTANTS["minus_0_25s"]
+    source = DictSource(
+        [{"k": 1, "a": first, "b": second}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        data_schema={"k": int, "a": datetime, "b": datetime},
+    )
+    table = source.as_table()
+    assert _stored_micros(table, "a") == [_utc_micros(first)]
+    assert _stored_micros(table, "b") == [_utc_micros(second)]
+
+
+class ExactTypeDatetime(datetime):
+    """A ``datetime`` subclass equal only to its own class: whole microseconds only."""
+
+    def __eq__(self, other: object) -> bool:
+        return type(other) is type(self) and datetime.__eq__(self, other)
+
+    def __ne__(self, other: object) -> bool:
+        return not self.__eq__(other)
+
+    __hash__ = datetime.__hash__
+
+
+def test_a_subclass_without_finer_precision_is_stored_exactly() -> None:
+    """Precision is read from the value's own fields, not from its equality: a
+    subclass whose equality depends on the class holds whole microseconds."""
+    value = ExactTypeDatetime(2026, 1, 2, 3, 4, 5, 6, tzinfo=timezone.utc)
+    other = ExactTypeDatetime(2026, 1, 2, tzinfo=ZoneInfo("Asia/Kathmandu"))
+
+    @function_pod(output_keys=["first", "second"])
+    def give(a: datetime, b: datetime) -> tuple[datetime, datetime]:
+        return value, other
+
+    table = give.pod(_source("us", "UTC")).as_table()
+    assert _stored_micros(table, "first") == [_utc_micros(value)] * 2
+    assert _stored_micros(table, "second") == [_utc_micros(other)] * 2
+
+
+# ---------------------------------------------------------------------------
+# DataFrameSource: a data frame keeps its types; plain values are ITL-1330
+# ---------------------------------------------------------------------------
+
+
+def test_a_data_frame_source_keeps_its_timestamp_columns_as_given() -> None:
+    """Over a real data frame, timestamp columns keep their unit and zone."""
+    from orcapod.core.sources import DataFrameSource
+
+    frame = pd.DataFrame(
+        {
+            "k": [1, 2],
+            "zoned": pd.to_datetime(
+                ["2023-11-14 22:13:20.123456789", "2020-09-13 12:26:40.000000000"],
+                utc=True,
+            ),
+            "naive": pd.to_datetime(
+                ["2023-11-14 22:13:20.500000", "2020-09-13 12:26:40.000000"]
+            ),
+        }
+    )
+    table = DataFrameSource(
+        frame, tag_columns=["k"], tag_only_columns=True, source_id="frame"
+    ).as_table()
+    assert table.column("zoned").type == pa.timestamp("ns", tz="UTC")
+    assert table.column("naive").type == pa.timestamp("ns")
+    assert (
+        table.column("zoned").cast(pa.int64())[0].as_py() == 1_700_000_000_123_456_789
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "ITL-1330: DataFrameSource builds a Polars frame from plain Python values "
+        "before the converter sees them, so the datetime rule does not apply"
+    ),
+)
+@pytest.mark.parametrize(
+    ("value", "error"),
+    [
+        (datetime(2026, 1, 2, 3, 4, 5), NaiveDatetimeError),
+        (
+            pd.Timestamp("2023-11-14 22:13:20.123456789", tz="UTC"),
+            SubMicrosecondDatetimeError,
+        ),
+    ],
+    ids=["naive", "sub_microsecond"],
+)
+def test_a_data_frame_source_over_plain_values_follows_the_rule(
+    value: Any, error: type[Exception]
+) -> None:
+    """A DataFrameSource given a dict of plain values should refuse what a
+    DictSource declared ``datetime`` refuses; today it stores the value (ITL-1330)."""
+    from orcapod.core.sources import DataFrameSource
+
+    with pytest.raises(error):
+        _ = DataFrameSource(
+            {"k": [1], "a": [value], "b": [value]},
+            tag_columns=["k"],
+            tag_only_columns=True,
+            source_id="plain",
+        ).as_table()

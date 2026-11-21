@@ -175,13 +175,21 @@ def _is_optional_type(python_type: DataType) -> bool:
 def storable_instant(value: datetime, timezone_policy: str) -> datetime:
     """Return ``value`` as a ``datetime`` column holds it, or refuse it (ITL-1268).
 
-    The one rule for storing a Python ``datetime`` (or a subclass, such as a
-    ``pandas.Timestamp``) under the type ``datetime``, which the converter maps to an
-    instant at microsecond precision (``timestamp[us, tz=UTC]``). Every path that
-    stores such a value goes through it: a source's Python values and a function's
-    outputs, at any depth. An aware value of any zone is the instant it names (Arrow
-    stores it in UTC). A naive value names no instant: refused under the ``strict``
-    time zone policy, read as UTC under ``coerce_utc``. A value with a part below one
+    The one rule for the type converter's conversion of a Python ``datetime`` (or a
+    subclass, such as a ``pandas.Timestamp``) to the type ``datetime``, which the
+    converter maps to an instant at microsecond precision (``timestamp[us, tz=UTC]``).
+    It covers what the converter converts: a function's outputs at any depth, and the
+    Python values of a source that converts them through the converter (``DictSource``,
+    ``ListSource``). A ``DataFrameSource`` given a plain dict or list hands the values to
+    Polars first and is not covered (ITL-1330).
+
+    An aware value of any zone is stored as the instant it names. Arrow computes the
+    instant from the value's UTC offset but drops the part of an offset below one
+    second, so a value whose offset has such a part is handed to Arrow in UTC, computed
+    here; any other value is handed as it is, as before (Arrow's instant is then exact,
+    also for an instant just outside the years Python can hold in UTC). A naive value
+    names no instant: refused under the ``strict`` time
+    zone policy, read as UTC under ``coerce_utc``. A value with a part below one
     microsecond is refused, never truncated.
 
     Args:
@@ -190,8 +198,8 @@ def storable_instant(value: datetime, timezone_policy: str) -> datetime:
             ``"coerce_utc"`` (its ``datetime_timezone``).
 
     Returns:
-        The value to hand to Arrow: ``value`` itself, or with UTC attached under
-        ``coerce_utc``.
+        The value to hand to Arrow: ``value``, with UTC attached under ``coerce_utc``,
+        or the same instant in UTC when its offset has a part below one second.
 
     Raises:
         NaiveDatetimeError: If ``value`` has no time zone under the ``strict`` policy.
@@ -202,21 +210,14 @@ def storable_instant(value: datetime, timezone_policy: str) -> datetime:
             raise NaiveDatetimeError(value)
         # coerce_utc: attach UTC so the value is treated as UTC.
         value = value.replace(tzinfo=timezone.utc)
-    # A plain datetime has whole microseconds. A subclass may hold more (a
-    # pandas.Timestamp holds nanoseconds); it equals its whole-microsecond part only
-    # when it has nothing below one microsecond.
-    if type(value) is not datetime and value != datetime(
-        value.year,
-        value.month,
-        value.day,
-        value.hour,
-        value.minute,
-        value.second,
-        value.microsecond,
-        tzinfo=value.tzinfo,
-        fold=value.fold,
-    ):
+    # A datetime holds whole microseconds. Precision below one microsecond is a field
+    # of the value's own type (a pandas.Timestamp's nanosecond); a subclass without such
+    # a field holds none, whatever its equality says.
+    if getattr(value, "nanosecond", 0):
         raise SubMicrosecondDatetimeError(value)
+    offset = value.utcoffset()
+    if offset is not None and offset.microseconds:
+        return value.astimezone(timezone.utc)
     return value
 
 
