@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, cast
 from orcapod.core.sources.source_ids import hash_source_id
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.errors import RowIdentifierError
+from orcapod.logical_types.identifier import LogicalTypeIdentifierError
 from orcapod.system_constants import constants
 from orcapod.types import ContentHash
 from orcapod.utils import arrow_utils, schema_utils
@@ -336,8 +337,12 @@ def _unhashable_table_error(
 
     Returns:
         A ``ValueError`` naming every column the hasher refuses with its type, or
-        ``None`` when no single column is refused (the caller re-raises ``exc``).
+        ``None`` when no single column is refused, or when ``exc`` is a logical type
+        identifier this installation cannot read, which names its column already
+        (the caller re-raises ``exc``).
     """
+    if isinstance(exc, LogicalTypeIdentifierError):
+        return None
     unhashable = _unhashable_columns(hasher, table)
     if not unhashable:
         return None
@@ -464,6 +469,12 @@ class SourceStreamBuilder:
         # system-tag column holding a dictionary is refused, not dropped silently.
         if found := schema_utils.dictionary_columns(table.schema):
             raise schema_utils.dictionary_columns_error(
+                found, tag_columns_tuple, data_tags_tuple, system_tag_columns_tuple
+            )
+        # Nor are union and list-view columns (ITL-640): refused here first, as the
+        # stream refuses them, with the same message.
+        if found := schema_utils.union_or_list_view_columns(table.schema):
+            raise schema_utils.union_or_list_view_columns_error(
                 found, tag_columns_tuple, data_tags_tuple, system_tag_columns_tuple
             )
 

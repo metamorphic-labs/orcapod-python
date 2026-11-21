@@ -486,11 +486,6 @@ NO_RULE: dict[str, Column] = {
     "month_day_nano_interval": pa.array(
         [(1, 2, 3), (4, 5, 6)], pa.month_day_nano_interval()
     ),
-    "dense_union": pa.UnionArray.from_dense(
-        pa.array([0, 1], pa.int8()),
-        pa.array([0, 0], pa.int32()),
-        [pa.array([1], pa.int64()), pa.array(["a"], pa.large_string())],
-    ),
     "large_list<map>": _list_of(
         pa.array([[("a", 1)], [("b", 2)]], pa.map_(pa.large_string(), pa.int64()))
     ),
@@ -579,6 +574,28 @@ def test_a_data_column_of_a_type_with_no_rule_passes_through(
     assert [repr(_exact(d.as_table().column("x"))) for _, d in rows] == [
         repr(_exact(column.slice(i, 1))) for i in range(2)
     ]
+
+
+@pytest.mark.parametrize("role", ["key", "data"])
+def test_a_union_column_is_refused_when_the_stream_is_built(role: str) -> None:
+    """A union cannot be a stream's column (developer, November 21, 2026, ITL-640):
+    refused at construction, before any join, as a key or as data."""
+    union = pa.UnionArray.from_dense(
+        pa.array([0, 1], pa.int8()),
+        pa.array([0, 0], pa.int32()),
+        [pa.array([1], pa.int64()), pa.array(["a"], pa.large_string())],
+    )
+    table = pa.Table.from_arrays(
+        [pa.array([1, 2], pa.int64()), union, pa.array([0, 1], pa.int64())],
+        names=["n", "k", "x"],
+    )
+    tags = ["n", "k"] if role == "key" else ["n"]
+    with pytest.raises(
+        InputValidationError,
+        match=r"union and list-view columns are not supported(.|\n)*column 'k' has "
+        r"type dense_union",
+    ):
+        _ = ArrowTableStream(table, tag_columns=tags)
 
 
 # ── the preparation itself ───────────────────────────────────────────────────

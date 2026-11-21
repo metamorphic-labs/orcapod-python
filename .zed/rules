@@ -1083,7 +1083,8 @@ types are in no schema hash.
 - Which Arrow schema: a source's or node's typed zero-row table (never computed from rows),
   cached per source (RootSource.arrow_schemas); a DerivedSource takes its origin's and
   refuses a stored read of another type (top-level nullability aside); a CachedSource its
-  source's; a slot made from a stream, that stream's (SourceNodeBase.arrow_schemas); a
+  source's, and refuses a cache read of another type by the same rule
+  (schema_utils.stored_type_mismatch); a slot made from a stream, that stream's (SourceNodeBase.arrow_schemas); a
   saved job writes each slot's own Arrow types and a load rebuilds them; an unbound slot with
   known Arrow types types its zero-row table from them; a loaded function node types its
   zero-row output from its saved Arrow text.
@@ -1131,8 +1132,13 @@ per-operator normalization. Names, nullability (top level and nested), field met
 logical (extension) types are untouched, and large and non-large variants hash identically, so no
 hash or default source id moves. Not covered: what is inside a library value (numpy, pandas,
 polars, torch) keeps its library's own distinction. list_view and large_list_view are not
-supported: a source refuses them (the Arrow hasher cannot hash them) and a raw ArrowTableStream
-holds them as given (ITL-1129).
+supported (ITL-1129), and neither is a union, dense or sparse: a source and a raw
+ArrowTableStream refuse a column whose type is or contains one when they are built
+(developer, November 21, 2026, ITL-640: a stream's identity is its Arrow schema hash, which
+cannot hold them; a raw stream used to hold them as given). One rule beside the dictionary
+refusal, schema_utils.union_or_list_view_columns with union_or_list_view_columns_error
+(InputValidationError naming each column with its role and type), applied by
+ArrowTableStream.__init__ and first by SourceStreamBuilder.build.
 
 Dictionary-encoded columns are refused, tags and data alike (developer, November 18, 2026,
 ITL-1264: "Say it is not currently supported in orcapod. We MAY support but not immediately in

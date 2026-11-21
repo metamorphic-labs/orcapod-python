@@ -533,6 +533,39 @@ def _hash_schema(schema: "pa.Schema", data_context: Any) -> ContentHash:
         raise
 
 
+def stored_type_mismatch(
+    expected: "pa.Schema", stored: "pa.Schema", hasher: Any
+) -> "tuple[pa.Field[Any], pa.Field[Any]] | None":
+    """The first column whose stored Arrow type is not the expected one (ITL-640).
+
+    The rule for every read of stored rows that must present a source's declared types
+    (a ``DerivedSource``'s stored read, a ``CachedSource``'s cache read): a store that
+    gives a column back as another type (Delta reads a fixed-size list back as a list,
+    ITL-1275) would present rows of another schema under the source's identity. Types
+    are compared as ``hash_schema`` compares them (one field each), so a large and a
+    non-large variant agree. A column's top-level nullability is not compared: the
+    stored rows say it. Columns missing from either side are not compared.
+
+    Args:
+        expected: The declared Arrow schema.
+        stored: The Arrow schema of the stored rows.
+        hasher: The data context's Arrow hasher.
+
+    Returns:
+        The expected and the stored field of the first column that differs, or
+        ``None`` when every shared column agrees.
+    """
+    for field in expected:
+        if field.name not in stored.names:
+            continue
+        given = stored.field(field.name)
+        if hasher.hash_schema(pa.schema([given.with_nullable(True)])) != (
+            hasher.hash_schema(pa.schema([field.with_nullable(True)]))
+        ):
+            return field, given
+    return None
+
+
 def declared_arrow_schema(schema: SchemaLike, converter: Any) -> "pa.Schema":
     """The Arrow schema a declared Python schema stands for: the converter's (ITL-640).
 
@@ -817,33 +850,14 @@ def dictionary_columns_error(
         the others in table order) with its role, its type and the type it decodes to,
         and how to decode it.
     """
-    from orcapod.system_constants import constants
-
     tags = list(tag_columns)
-    refs = set(data_tags)
-    system = set(system_tag_columns)
-
-    def role(name: str) -> str:
-        if name in refs:
-            return "data-tag"
-        if name in tags:
-            return "tag"
-        if name in system or name.startswith(constants.SYSTEM_TAG_PREFIX):
-            return "system-tag"
-        if name.startswith(constants.SOURCE_PREFIX):
-            return "source-info"
-        if name == constants.CONTEXT_KEY:
-            return "data context"
-        if name.startswith(constants.META_PREFIX):
-            return "meta"
-        return "data"
-
     ordered = sorted(
         found,
         key=lambda item: (0, tags.index(item[0])) if item[0] in tags else (1, 0),
     )
     lines = [
-        f"  - {role(name)} column {name!r} has type {arrow_type} (decoded: {decoded})"
+        f"  - {_column_role(name, tag_columns, data_tags, system_tag_columns)} column "
+        f"{name!r} has type {arrow_type} (decoded: {decoded})"
         for name, arrow_type, decoded in ordered
     ]
     return InputValidationError(
@@ -860,6 +874,138 @@ def dictionary_columns_error(
         "troubleshooting page gives each call. With polars, "
         "df = df.with_columns(pl.col(name).cast(pl.String)) decodes a Categorical or "
         "Enum column."
+    )
+
+
+def _column_role(
+    name: str,
+    tag_columns: Collection[str],
+    data_tags: Collection[str],
+    system_tag_columns: Collection[str],
+) -> str:
+    """The role a stream gives the column ``name``, for an error that names it."""
+    from orcapod.system_constants import constants
+
+    if name in data_tags:
+        return "data-tag"
+    if name in tag_columns:
+        return "tag"
+    if name in system_tag_columns or name.startswith(constants.SYSTEM_TAG_PREFIX):
+        return "system-tag"
+    if name.startswith(constants.SOURCE_PREFIX):
+        return "source-info"
+    if name == constants.CONTEXT_KEY:
+        return "data context"
+    if name.startswith(constants.META_PREFIX):
+        return "meta"
+    return "data"
+
+
+UNION_OR_LIST_VIEW_COLUMNS_NOT_SUPPORTED = (
+    "union and list-view columns are not supported in Orcapod"
+)
+"""The start of the error for a union or list-view column (ITL-640)."""
+
+
+def _holds_union_or_list_view(arrow_type: "pa.DataType") -> bool:
+    """Whether ``arrow_type`` is, or contains at any depth, a union or a list view."""
+    if isinstance(arrow_type, pa.BaseExtensionType):
+        return _holds_union_or_list_view(arrow_type.storage_type)
+    if (
+        pa.types.is_union(arrow_type)
+        or pa.types.is_list_view(arrow_type)
+        or pa.types.is_large_list_view(arrow_type)
+    ):
+        return True
+    if pa.types.is_dictionary(arrow_type):
+        return _holds_union_or_list_view(arrow_type.value_type)
+    if (
+        pa.types.is_list(arrow_type)
+        or pa.types.is_large_list(arrow_type)
+        or pa.types.is_fixed_size_list(arrow_type)
+    ):
+        return _holds_union_or_list_view(arrow_type.value_type)
+    if pa.types.is_run_end_encoded(arrow_type):
+        return _holds_union_or_list_view(arrow_type.value_type)
+    if pa.types.is_struct(arrow_type):
+        return any(_holds_union_or_list_view(child.type) for child in arrow_type)
+    if pa.types.is_map(arrow_type):
+        return _holds_union_or_list_view(
+            arrow_type.key_type
+        ) or _holds_union_or_list_view(arrow_type.item_type)
+    return False
+
+
+def union_or_list_view_columns(
+    arrow_schema: "pa.Schema",
+) -> "list[tuple[str, pa.DataType]]":
+    """Return every column whose Arrow type is, or contains, a union or a list view.
+
+    Developer decision, November 21, 2026 (ITL-640): a stream's identity is its Arrow
+    schema hash, and the Arrow schema hash (starfix) cannot hold a union (dense or
+    sparse) or a list view (``list_view``, ``large_list_view``), so a stream with such
+    a column could not have an identity. Such a type at the top of a column or inside
+    it (a list, large list or fixed-size list item, a struct child, a map key or item,
+    a dictionary's values, the values of a run-end-encoded type, an extension type's
+    storage) counts.
+
+    ``ArrowTableStream.__init__`` (every source and operator result becomes a stream
+    there) and the source builder (first, before its key columns and its hash) refuse
+    what this finds, with ``union_or_list_view_columns_error``, beside the dictionary
+    refusal (``dictionary_columns``).
+
+    Args:
+        arrow_schema: The Arrow schema of a table about to become a stream.
+
+    Returns:
+        ``(name, type)`` for each such column, in schema order.
+    """
+    return [
+        (field.name, field.type)
+        for field in arrow_schema
+        if _holds_union_or_list_view(field.type)
+    ]
+
+
+def union_or_list_view_columns_error(
+    found: "Sequence[tuple[str, pa.DataType]]",
+    tag_columns: Collection[str],
+    data_tags: Collection[str],
+    system_tag_columns: Collection[str] = (),
+) -> InputValidationError:
+    """Return the error refusing the union and list-view columns ``found``.
+
+    Its job is the report, so it takes the roles it names.
+
+    Args:
+        found: The columns, as ``union_or_list_view_columns`` returns them.
+        tag_columns: The stream's tag columns, in tag order.
+        data_tags: The tags that are data-tags.
+        system_tag_columns: Names the stream will read as system tags beside those with
+            the system-tag prefix.
+
+    Returns:
+        An ``InputValidationError`` naming each column (tags first, in tag order, then
+        the others in table order) with its role and its type, and what to do.
+    """
+    tags = list(tag_columns)
+    ordered = sorted(
+        found,
+        key=lambda item: (0, tags.index(item[0])) if item[0] in tags else (1, 0),
+    )
+    lines = [
+        f"  - {_column_role(name, tag_columns, data_tags, system_tag_columns)} column "
+        f"{name!r} has type {arrow_type}"
+        for name, arrow_type in ordered
+    ]
+    return InputValidationError(
+        f"{UNION_OR_LIST_VIEW_COLUMNS_NOT_SUPPORTED}: a stream's identity is its Arrow "
+        "schema hash, which cannot hold them:\n"
+        + "\n".join(lines)
+        + "\nCast a list view to the large list of the same items "
+        "(column.cast(pa.large_list(item_type))); a union has no Orcapod type: "
+        "split it into one column per member type, or drop it, before building the "
+        "source or stream."
     )
 
 

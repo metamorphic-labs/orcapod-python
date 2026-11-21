@@ -92,8 +92,10 @@ Every source gives the large variants of string, binary and list types (`large_s
 a data frame, a CSV file or a database table. A `string` column you give comes back as
 `large_string`. Only the layout changes: names, nullability, widths (`int8` stays `int8`) and
 logical types are kept, and the two variants hash identically, so no hash depends on which
-one you gave. The Arrow `list_view` and `large_list_view` types are not supported: a source
-refuses a column of either type.
+one you gave. The Arrow `list_view` and `large_list_view` types and unions (dense or sparse)
+are not supported: a source, and a stream built from an Arrow table of your own, refuses a
+column whose type is or holds one, naming it (a stream's identity is its Arrow schema hash,
+which cannot hold them). Cast a list view to the large list of the same items.
 
 Dictionary-encoded columns are not currently supported in Orcapod, tags and data alike. A
 column whose Arrow type is a `dictionary`, or holds one inside it (a list of dictionary values,

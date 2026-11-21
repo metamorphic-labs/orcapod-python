@@ -935,17 +935,29 @@ class PollingSource(RootSource, Generic[T]):
         The declared schema fixed this source's identity (pipeline hash, system-tag
         column names) when it was built, so a batch of another Arrow type (``int32``
         where ``int`` means ``int64``, naive timestamps where ``datetime`` means
-        ``timestamp[us, tz=UTC]``) is refused, never converted. Column order, large
-        and non-large variants and field metadata are not compared.
+        ``timestamp[us, tz=UTC]``) is refused, never converted, and so is a batch
+        with a column the declaration does not name: the rows' system-tag names
+        would be hashed from columns the declared identity does not have. Column
+        order, large and non-large variants and field metadata are not compared.
 
         Raises:
-            SchemaInconsistencyError: Naming the column and both types, before
-                anything is committed.
+            SchemaInconsistencyError: Naming each undeclared column, or the column and
+                both types, before anything is committed.
         """
         if self._declared_arrow is None:
             return
-        hasher = self.data_context.arrow_hasher
         given = arrow_table.schema
+        undeclared = [
+            name for name in given.names if name not in self._declared_arrow.names
+        ]
+        if undeclared:
+            raise SchemaInconsistencyError(
+                f"PollingSource {self._source_id!r}: the fetched columns {undeclared} "
+                f"are not in the declared schema {self._declared_arrow.names} (its "
+                "identity was fixed by the declared schema; declare them in "
+                "impl.schema(), or fetch only the declared columns)."
+            )
+        hasher = self.data_context.arrow_hasher
         for declared in self._declared_arrow:
             if declared.name not in given.names:
                 continue

@@ -11,6 +11,7 @@ from orcapod.hashing.schema_cleaner import (
     has_extension_type,
 )
 from orcapod.errors import MissingOptionalDependencyError
+from orcapod.logical_types.identifier import LogicalTypeIdentifierError
 from orcapod.hashing.visitors import SemanticHashingVisitor
 from orcapod.logical_types.canonical_form import storage_form_schema
 from orcapod.utils.arrow_utils import normalize_extension_columns
@@ -166,6 +167,10 @@ class StarfixArrowHasher:
                 # naming the type and the package (the schema hash looks nothing up
                 # since ITL-640, so this is where such a column is first met).
                 raise
+            except LogicalTypeIdentifierError as exc:
+                # An identifier this installation cannot read: raised as itself,
+                # naming the column (met here first, as above).
+                raise exc.for_column(field.name) from exc
             except Exception as exc:
                 raise RuntimeError(
                     f"Failed to process column '{field.name}': {exc}"

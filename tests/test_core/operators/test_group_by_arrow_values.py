@@ -533,12 +533,6 @@ UNORDERABLE_TAGS: dict[str, Column] = {
         [(1, 0, 0), (0, 31, 0), None],
         pa.month_day_nano_interval(),
     ),
-    "dense_union": pa.UnionArray.from_dense(
-        pa.array([0, 1, 0], pa.int8()),
-        pa.array([0, 0, 1], pa.int32()),
-        [pa.array([1, 2], pa.int64()), pa.array(["a"], pa.large_string())],
-    ),
-    "large_list_view": pa.array([[1], [2], None], pa.large_list_view(pa.int64())),
     "large_list<map>": pa.array(
         [[[("a", 1)]], [[("b", 2)]], []],
         pa.large_list(pa.map_(pa.large_string(), pa.int64())),
@@ -548,6 +542,31 @@ UNORDERABLE_TAGS: dict[str, Column] = {
         1,
     ),
 }
+
+
+# A union or a list view cannot be a stream's column at all (developer, November 21,
+# 2026, ITL-640): the stream refuses it when it is built, before any operator.
+DENSE_UNION: Column = pa.UnionArray.from_dense(
+    pa.array([0, 1, 0], pa.int8()),
+    pa.array([0, 0, 1], pa.int32()),
+    [pa.array([1, 2], pa.int64()), pa.array(["a"], pa.large_string())],
+)
+REFUSED_BY_THE_STREAM: dict[str, Column] = {
+    "dense_union": DENSE_UNION,
+    "large_list_view": pa.array([[1], [2], None], pa.large_list_view(pa.int64())),
+}
+
+
+@pytest.mark.parametrize("name", list(REFUSED_BY_THE_STREAM))
+def test_a_union_or_list_view_tag_is_refused_when_the_stream_is_built(
+    name: str,
+) -> None:
+    with pytest.raises(
+        InputValidationError,
+        match=r"union and list-view columns are not supported in Orcapod(.|\n)*"
+        r"tag column 's'",
+    ):
+        _ = _unorderable_stream(REFUSED_BY_THE_STREAM[name])
 
 
 def _unorderable_stream(tag: Column) -> ArrowTableStream:
@@ -714,7 +733,7 @@ AGREEMENT_TYPES: dict[str, Column] = {
     ),
     "map": pa.array([[("a", 1)], None, []], pa.map_(pa.large_string(), pa.int64())),
     "interval": pa.array([(1, 0, 0), None, (0, 31, 0)], pa.month_day_nano_interval()),
-    "dense_union": UNORDERABLE_TAGS["dense_union"],
+    "dense_union": DENSE_UNION,
     "large_list_view": pa.array([[1], None, [2]], pa.large_list_view(pa.int64())),
     "large_list<struct>": pa.array(
         [[{"x": 1}], None, []], pa.large_list(pa.struct([("x", pa.int64())]))

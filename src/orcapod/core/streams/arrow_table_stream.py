@@ -98,6 +98,12 @@ class ArrowTableStream(StreamBase):
             raise schema_utils.dictionary_columns_error(
                 found, tag_columns, data_tags, system_tag_columns
             )
+        # Nor are union and list-view columns (developer, November 21, 2026, ITL-640):
+        # a stream's identity is its Arrow schema hash, which cannot hold them.
+        if found := schema_utils.union_or_list_view_columns(table.schema):
+            raise schema_utils.union_or_list_view_columns_error(
+                found, tag_columns, data_tags, system_tag_columns
+            )
 
         data_table, data_context_table = arrow_utils.split_by_column_groups(
             table, [constants.CONTEXT_KEY]

@@ -27,11 +27,13 @@ class TestSourceNodeHashStability:
     Hash values below were verified to be bit-identical to SourceSpec
     with the same arguments during the SourceSpec→SourceNode migration (ENG-493).
     SourceSpec has since been deleted; these values serve as the stability anchor.
+    Re-recorded for ITL-640: a slot's identity holds its Arrow schemas (here the
+    converter's, ``int64`` and ``double``).
 
     For tag_schema=Schema({"id": int}), data_schema=Schema({"value": float}),
     name="slot_a":
-      content_hash  = semantic_v1:bc46ec2ad863ec701368caf0be5f548a59fe53c0ccc0820e45d38e21c06761e7
-      pipeline_hash = semantic_v1:196ea4256aa0a44bcb4340c3bad22b0ed811337d9636e9fbe386ab7d47785aaf
+      content_hash  = semantic_v1:f592d8db11dd79a9ce34502338df4262002079a573dd33a006d7f971e5cd4bd1
+      pipeline_hash = semantic_v1:58ec9593e8ccbc9e69c3a6b959932ae2a2f7c5d6705bec0a7edef9a1bf763b3b
     """
 
     def test_content_hash_is_deterministic(self, tag_schema, data_schema):
@@ -48,7 +50,7 @@ class TestSourceNodeHashStability:
     def test_content_hash_stable_value(self, tag_schema, data_schema):
         """content_hash must match the value anchored at migration time.
 
-        Digest (hex): bc46ec2ad863ec701368caf0be5f548a59fe53c0ccc0820e45d38e21c06761e7
+        Digest (hex): f592d8db11dd79a9ce34502338df4262002079a573dd33a006d7f971e5cd4bd1
 
         Note: hash changed in ENG-493 when identity_structure() prefix was updated
         from ``"SourceSpec"`` to ``"source_node"`` to better reflect the node type.
@@ -60,7 +62,7 @@ class TestSourceNodeHashStability:
         expected = ContentHash(
             method="semantic_v1",
             digest=bytes.fromhex(
-                "bc46ec2ad863ec701368caf0be5f548a59fe53c0ccc0820e45d38e21c06761e7"
+                "f592d8db11dd79a9ce34502338df4262002079a573dd33a006d7f971e5cd4bd1"
             ),
         )
         assert node.content_hash() == expected
@@ -79,7 +81,7 @@ class TestSourceNodeHashStability:
     def test_pipeline_hash_stable_value(self, tag_schema, data_schema):
         """pipeline_hash must match the value anchored at migration time.
 
-        Digest (hex): 196ea4256aa0a44bcb4340c3bad22b0ed811337d9636e9fbe386ab7d47785aaf
+        Digest (hex): 58ec9593e8ccbc9e69c3a6b959932ae2a2f7c5d6705bec0a7edef9a1bf763b3b
         """
         from orcapod.core.nodes.source_node import SourceNode
         from orcapod.types import ContentHash
@@ -88,7 +90,7 @@ class TestSourceNodeHashStability:
         expected = ContentHash(
             method="semantic_v1",
             digest=bytes.fromhex(
-                "196ea4256aa0a44bcb4340c3bad22b0ed811337d9636e9fbe386ab7d47785aaf"
+                "58ec9593e8ccbc9e69c3a6b959932ae2a2f7c5d6705bec0a7edef9a1bf763b3b"
             ),
         )
         assert node.pipeline_hash() == expected

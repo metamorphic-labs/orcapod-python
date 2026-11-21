@@ -407,6 +407,12 @@ class TestDerivedSource:
             Schema({"data_col": int}),
         )
         mock_origin.keys.return_value = (("tag_col",), ("data_col",))
+        # An origin states the Arrow types of its rows (ITL-640): the source takes
+        # them, so its identity does not change when the origin stores rows.
+        mock_origin.arrow_schemas = (
+            pa.schema([pa.field("tag_col", pa.large_string(), nullable=False)]),
+            pa.schema([pa.field("data_col", pa.int64(), nullable=False)]),
+        )
         mock_origin.get_all_records.return_value = records
         return mock_origin
 

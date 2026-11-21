@@ -19,7 +19,9 @@ import pyarrow as pa
 import pytest
 
 from orcapod import PipelineJob, SourceNode, function_pod
+from orcapod.core.sources.cached_source import CachedSource
 from orcapod.core.sources.polling_source import PollingSource
+from orcapod.core.streams.base import typed_arrow_schemas
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.errors import (
     InputValidationError,
@@ -381,6 +383,33 @@ class TestPollingSource:
             source.as_table()
         assert source.pipeline_hash() == before
 
+    @pytest.mark.parametrize("form", ["python", "arrow"])
+    def test_a_batch_with_undeclared_columns_is_refused(self, form: str) -> None:
+        """A column the declaration does not name would move the system-tag names."""
+        table = _table(pa.array([1, 2], pa.int64()))
+        extra = table.append_column("y", pa.array([3, 4], pa.int64())).append_column(
+            "z", pa.array(["a", "b"], pa.large_string())
+        )
+        declared: Any = (
+            Schema({"k": str, "g": int, "x": int | None, "w": float})
+            if form == "python"
+            else table.schema
+        )
+        source = PollingSource(
+            _Impl(extra, declared), tag_columns=["k", "g"], record_id_columns="k"
+        )
+        before = source.pipeline_hash()
+        with pytest.raises(
+            SchemaInconsistencyError,
+            match=r"the fetched columns \['y', 'z'\] are not in the declared schema",
+        ):
+            source.as_table()
+        assert source.pipeline_hash() == before
+        matching = PollingSource(
+            _Impl(table, declared), tag_columns=["k", "g"], record_id_columns="k"
+        )
+        assert matching.as_table().num_rows == 2
+
     def test_an_arrow_declaration_is_the_identity_exactly(self) -> None:
         table = _table(pa.array([1, 2], pa.int32()))
         source = PollingSource(
@@ -521,3 +550,45 @@ def test_as_source_has_its_origins_types_before_and_after_a_run(
     assert node.as_table().schema.field(name).type == column.type
     assert before.pipeline_hash() == after.pipeline_hash()
     assert before.content_hash() == after.content_hash()
+
+
+# CodeRabbit on PR 454: a CachedSource presents its source's declared Arrow types; a
+# cache store that gives a column back as another type is refused, never converted, so
+# an empty and a filled cache can never differ.
+FIXED_SIZE = pa.array([[1, 2], [3, 4]], pa.list_(pa.int8(), 2))
+
+
+def _cached(table: pa.Table, database: Any) -> CachedSource:
+    return CachedSource(_source(table), cache_database=database)
+
+
+@pytest.mark.parametrize("kind", ["memory", "delta"])
+def test_a_cached_source_reads_its_declared_types(kind: str, tmp_path: Path) -> None:
+    table = _table(pa.array([1, 2], pa.int8()), order="gxkw")
+    database = _databases(tmp_path)[kind]
+    first = _cached(table, database)
+    rows = first.as_table()
+    again = _cached(table, database).as_table()
+    for read in (rows, again):
+        assert read.schema.field("x").type == pa.int8()
+    assert first.arrow_schemas == typed_arrow_schemas(_source(table))
+
+
+def test_a_cached_read_of_another_type_is_refused(tmp_path: Path) -> None:
+    """Delta reads a fixed-size list back as a list (ITL-1275): refused, naming it."""
+    table = _table(FIXED_SIZE)
+    database = _databases(tmp_path)["delta"]
+    with pytest.raises(
+        InputValidationError,
+        match=r"the cached column 'x' reads back as large_list<.*>, but the source's "
+        r"rows have fixed_size_list<.*>\[2\]",
+    ):
+        _cached(table, database).as_table()
+
+
+def test_a_cached_fixed_size_list_in_memory_is_exact(tmp_path: Path) -> None:
+    table = _table(FIXED_SIZE)
+    database = _databases(tmp_path)["memory"]
+    for _ in range(2):
+        read = _cached(table, database).as_table()
+        assert read.schema.field("x").type == pa.list_(pa.int8(), 2)

@@ -12,7 +12,7 @@ from orcapod import contexts
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.config import OrcapodConfig
 from orcapod.core.sources.base import RootSource
-from orcapod.errors import UnstorableColumnError
+from orcapod.errors import InputValidationError, UnstorableColumnError
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
     typed_arrow_schemas,
@@ -39,6 +39,7 @@ from orcapod.protocols.core_protocols import DataProtocol, SourceProtocol, TagPr
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.system_constants import SOURCE_DB_SCHEMA_VERSION, constants
 from orcapod.types import ColumnConfig, Schema
+from orcapod.utils import schema_utils
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -518,6 +519,7 @@ class CachedSource(RootSource):
             all_records = stored.drop(
                 [self.HASH_COLUMN_NAME, constants.DATA_CONTEXT_COL]
             )
+            self._require_declared_types(all_records)
 
         tag_keys = self._source.keys()[0]
         # Cached rows are this source's: give them its data context, not the default.
@@ -527,6 +529,33 @@ class CachedSource(RootSource):
             data_context=self.data_context,
             data_tags=stream_data_tags(self._source),
         )
+
+    def _require_declared_types(self, records: pa.Table) -> None:
+        """Refuse cached rows whose Arrow types are not the source's (ITL-640).
+
+        This source's identity is built from the wrapped source's Arrow types
+        (``_compute_arrow_schemas``); a cache store that gives a column back as
+        another type (Delta reads a fixed-size list back as a list, ITL-1275) would
+        present rows of another schema under that identity, and an empty and a
+        filled cache would differ. So nothing is read; nothing is converted. The rule
+        is ``schema_utils.stored_type_mismatch``, as for a ``DerivedSource``.
+
+        Raises:
+            InputValidationError: Naming the column and both types.
+        """
+        tag_schema, data_schema = self.arrow_schemas
+        mismatch = schema_utils.stored_type_mismatch(
+            pa.schema([*tag_schema, *data_schema]),
+            records.schema,
+            self.data_context.arrow_hasher,
+        )
+        if mismatch is not None:
+            field, stored = mismatch
+            raise InputValidationError(
+                f"CachedSource over {self._source.source_id!r}: the cached column "
+                f"{field.name!r} reads back as {stored.type}, but the source's rows "
+                f"have {field.type}; nothing was read."
+            )
 
     def _empty_table(self) -> pa.Table:
         """Build an empty Arrow table matching the source's output schema.

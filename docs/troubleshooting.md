@@ -59,8 +59,8 @@ first (each recipe is tested in `tests/test_core/sources/test_dictionary_columns
 - A dictionary whose values hold a dictionary: decode the top level of each chunk first,
   `pa.chunked_array([chunk.dictionary_decode() for chunk in column.chunks]).cast(decoded)`.
 - A list view: cast it to a large list of the decoded items,
-  `column.cast(pa.large_list(<decoded item type>))` (a source refuses list views whatever they
-  hold).
+  `column.cast(pa.large_list(<decoded item type>))` (a source or stream refuses list views
+  whatever they hold).
 - A run-end-encoded column: cast its values, then expand its runs, chunk by chunk:
   `pc.run_end_decode(pa.RunEndEncodedArray.from_arrays(chunk.run_ends, chunk.values.cast(<decoded value type>)))`.
 

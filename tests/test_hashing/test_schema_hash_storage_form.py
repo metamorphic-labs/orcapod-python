@@ -12,10 +12,12 @@ So one logical type has one schema hash in its three forms:
   passed through ``normalize_extension_columns`` carries it;
 - unregistered: what a process reads when pyarrow has not registered the type.
 
-The types are not a hand list: every logical type the default data context registers is
-enumerated from its converter (``registered_logical_type_names``,
-``logical_type_factory_categories``), so a new type is tested as soon as it is
-registered. ``hash_table`` is a separate procedure and is unchanged.
+The types are not a hand list: every built-in logical type of the default data context
+is enumerated from a converter built fresh from the shipped registration
+(``create_registry().get_context()``: ``registered_logical_type_names``,
+``logical_type_factory_categories``), so a new built-in type is tested as soon as it is
+registered, and what other code registers in this process (a native container made on
+first use, a user class) never changes the set. ``hash_table`` is a separate procedure and is unchanged.
 """
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ import pytest
 
 import orcapod as op
 from orcapod import PipelineJob, function_pod
-from orcapod.contexts import get_default_context
+from orcapod.contexts import create_registry, get_default_context
 from orcapod.core.nodes.source_node import SourceNode
 from orcapod.core.operators import MapData
 from orcapod.core.streams.base import typed_arrow_schemas
@@ -67,8 +69,11 @@ def _hasher() -> Any:
 
 # ── the logical types, from the registry ─────────────────────────────────────
 
-NAMED: tuple[str, ...] = _converter().registered_logical_type_names()
-"""Every logical type with a fixed extension name the default data context knows."""
+_BUILT_IN: Any = create_registry().get_context().type_converter
+"""A converter built fresh from the shipped registration: the built-in types only."""
+
+NAMED: tuple[str, ...] = _BUILT_IN.registered_logical_type_names()
+"""Every built-in logical type with a fixed extension name."""
 
 # Whether a column of the type is hashed by value in ``hash_table``. Only one test reads
 # this pin: it makes a newly registered type, or a changed value handler, visible in
@@ -413,7 +418,7 @@ def test_every_registered_type_is_classified() -> None:
 
 def test_every_logical_type_factory_has_an_example() -> None:
     """Each factory category is tested through ``FACTORY_EXAMPLES``."""
-    assert set(_converter().logical_type_factory_categories()) == set(FACTORY_EXAMPLES)
+    assert set(_BUILT_IN.logical_type_factory_categories()) == set(FACTORY_EXAMPLES)
 
 
 def test_the_cases_are_every_registered_type() -> None:

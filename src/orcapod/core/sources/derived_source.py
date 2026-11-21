@@ -34,6 +34,7 @@ from orcapod.core.streams.base import (
 from orcapod.errors import InputValidationError
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
+from orcapod.utils import schema_utils
 from orcapod.utils.lazy_module import LazyModule
 from orcapod.utils.provisional import provisional_class_name
 
@@ -499,23 +500,21 @@ class DerivedSource(RootSource):
         Raises:
             InputValidationError: Naming the column and both types.
         """
-        expected = self._empty_origin_table().schema
-        hasher = self.data_context.arrow_hasher
-        for field in expected:
-            if field.name not in records.column_names:
-                continue
-            stored = records.schema.field(field.name)
-            # The column's own nullability is the stored rows' (a job saved without
-            # its nullability record reads its columns as non-null); every type, and
-            # nullability below the top level, must be the origin's.
-            if hasher.hash_schema(
-                pa.schema([stored.with_nullable(True)])
-            ) != hasher.hash_schema(pa.schema([field.with_nullable(True)])):
-                raise InputValidationError(
-                    f"DerivedSource over {self._origin.label!r}: the stored column "
-                    f"{field.name!r} reads back as {_field_text(stored)}, but the "
-                    f"origin's rows have {_field_text(field)}; nothing was read."
-                )
+        # The column's own nullability is the stored rows' (a job saved without its
+        # nullability record reads its columns as non-null); every type, and
+        # nullability below the top level, must be the origin's.
+        mismatch = schema_utils.stored_type_mismatch(
+            self._empty_origin_table().schema,
+            records.schema,
+            self.data_context.arrow_hasher,
+        )
+        if mismatch is not None:
+            field, stored = mismatch
+            raise InputValidationError(
+                f"DerivedSource over {self._origin.label!r}: the stored column "
+                f"{field.name!r} reads back as {_field_text(stored)}, but the "
+                f"origin's rows have {_field_text(field)}; nothing was read."
+            )
 
     def _empty_origin_table(self) -> "pa.Table":
         """Return a zero-row table with the origin's tag and data columns.
