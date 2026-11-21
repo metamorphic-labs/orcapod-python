@@ -475,6 +475,55 @@ _PRECISE_SCRIPT = textwrap.dedent(
         slot = job.nodes["s"]
         print(json.dumps({"pipeline_hash": slot.pipeline_hash().to_string(),
                           "arrow": describe(slot)}))
+    elif mode in ("resave_job", "resave_pipeline"):
+        # Saved again while the class is still not registered (CodeRabbit on PR 454).
+        job = PipelineJob.load(work + "/job.json", database=InMemoryArrowDatabase())
+        if mode == "resave_job":
+            job.save(work + "/job.json")
+        else:
+            job.pipeline.save(work + "/pipeline.json")
+        print(json.dumps({"saved": True}))
+    elif mode == "reload_pipeline":
+        from orcapod import Pipeline
+
+        import classes
+
+        get_default_context().type_converter.register_python_class(classes.Exact)
+        slot = Pipeline.load(work + "/pipeline.json").nodes["s"]
+        out = {"arrow": describe(slot)}
+        for label, how in (("original", ""), ("widened", widen)):
+            try:
+                slot.validate(source(classes.Exact, how))
+                out[label] = "accepted"
+            except Exception as exc:
+                out[label] = f"{type(exc).__name__}: {exc}"
+        print(json.dumps(out))
+    elif mode == "copies":
+        # Copies of the unresolved slot, made before the class is registered.
+        from orcapod.core.nodes.source_node import SourceJobNode, SourceNode
+
+        job = PipelineJob.load(work + "/job.json", database=InMemoryArrowDatabase())
+        slot = job.nodes["s"]
+        copies = {
+            "SourceNode.from_stream": SourceNode.from_stream(slot, name="s"),
+            "SourceNode.from_stream renamed": SourceNode.from_stream(slot, name="t"),
+            "SourceJobNode.from_stream": SourceJobNode.from_stream(slot),
+            "as_node": slot.as_node(),
+        }
+        import classes
+
+        get_default_context().type_converter.register_python_class(classes.Exact)
+        out = {}
+        for name, copy in copies.items():
+            result = {"arrow": describe(copy)}
+            for label, how in (("original", ""), ("widened", widen)):
+                try:
+                    copy.validate(source(classes.Exact, how))
+                    result[label] = "accepted"
+                except Exception as exc:
+                    result[label] = f"{type(exc).__name__}: {exc}"
+            out[name] = result
+        print(json.dumps(out))
     else:
         job = PipelineJob.load(work + "/job.json", database=InMemoryArrowDatabase())
         slot = job.nodes["s"]
@@ -536,3 +585,52 @@ def test_a_wider_replacement_is_refused_after_the_class_is_registered(
     error = loaded["bind_error"]
     assert error.startswith("SourceSpecMismatchError: ")
     assert f"column {widened!r} has the Arrow type" in error
+
+
+@pytest.mark.parametrize("widened", ["n", "m"])
+def test_a_job_saved_again_while_unresolved_keeps_its_precise_types(
+    tmp_path: Path, precise_job: dict[str, Any], widened: str
+) -> None:
+    """Load with the class unregistered, save again, then register and load the new
+    file: the saved Arrow types are the first file's (CodeRabbit on PR 454)."""
+    assert _run(tmp_path, "resave_job", str(tmp_path / "work"), "") == {"saved": True}
+    saved = json.loads((tmp_path / "work" / "job.json").read_text())
+    (slot,) = [
+        d["source_config"]
+        for d in saved["pipeline"]["nodes"].values()
+        if "source_config" in d
+    ]
+    assert (slot["data_schema"]["n"], slot["data_schema"]["m"]) == ("int32", "int16")
+    loaded = _run(tmp_path, "load", str(tmp_path / "work"), "")
+    assert loaded["arrow"] == precise_job["arrow"]
+    assert loaded["pipeline_hash"] == precise_job["pipeline_hash"]
+    refused = _run(tmp_path, "load", str(tmp_path / "work"), widened)
+    assert f"column {widened!r} has the Arrow type" in refused["bind_error"]
+
+
+@pytest.mark.parametrize("widened", ["n", "m"])
+def test_a_pipeline_saved_again_while_unresolved_keeps_its_precise_types(
+    tmp_path: Path, precise_job: dict[str, Any], widened: str
+) -> None:
+    """The same through Pipeline.save and Pipeline.load."""
+    assert _run(tmp_path, "resave_pipeline", str(tmp_path / "work"), "") == {
+        "saved": True
+    }
+    loaded = _run(tmp_path, "reload_pipeline", str(tmp_path / "work"), widened)
+    assert loaded["arrow"] == precise_job["arrow"]
+    assert loaded["original"] == "accepted"
+    assert f"column {widened!r} has the Arrow type" in loaded["widened"]
+
+
+@pytest.mark.parametrize("widened", ["n", "m"])
+def test_every_copy_of_an_unresolved_slot_keeps_its_precise_types(
+    tmp_path: Path, precise_job: dict[str, Any], widened: str
+) -> None:
+    """from_stream (to a SourceNode, also renamed, and to a SourceJobNode) and
+    as_node, made before the class is registered (CodeRabbit on PR 454)."""
+    copies = _run(tmp_path, "copies", str(tmp_path / "work"), widened)
+    assert len(copies) == 4
+    for name, result in copies.items():
+        assert result["arrow"] == precise_job["arrow"], name
+        assert result["original"] == "accepted", name
+        assert f"column {widened!r} has the Arrow type" in result["widened"], name

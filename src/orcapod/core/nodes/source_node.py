@@ -563,9 +563,12 @@ class SourceNodeBase(TraceableBase, ABC):
     def _take_saved_state_of(self, other: "SourceNodeBase") -> None:
         """Keep the saved state of *other*, a slot of the same schema.
 
-        The pending types and the saved pipeline hash, which does not depend on the
-        slot's name, are always kept. The saved content hash covers the name too, so
-        it is kept only when this slot has *other*'s name.
+        The one way a copy of a slot takes it (``from_stream`` over a slot,
+        ``from_slot``, ``as_node``, ...), so no copy drops a piece: the given Arrow
+        schemas, the pending types, the saved Arrow type texts of an unresolved slot
+        (ITL-640) and the saved pipeline hash, which does not depend on the slot's
+        name, are always kept. The saved content hash covers the name too, so it is
+        kept only when this slot has *other*'s name.
         """
         self._saved_pipeline_hash = other._saved_pipeline_hash
         self._given_arrow_schemas = other._given_arrow_schemas
@@ -585,6 +588,40 @@ class SourceNodeBase(TraceableBase, ABC):
             if pending.nullable:
                 names[pending.role].append(name)
         return names
+
+    def _is_unresolved(self) -> bool:
+        """Whether this loaded slot's Arrow types cannot be rebuilt yet (ITL-640).
+
+        A slot loaded with a column whose class is not registered: its saved Arrow
+        texts are kept (``_saved_arrow_texts``) until they can be read.
+        """
+        if self._given_arrow_schemas is None and self._saved_arrow_texts is not None:
+            self._rebuild_saved_arrow_schemas()
+        return self._given_arrow_schemas is None and (
+            bool(self._pending_types) or self._saved_arrow_texts is not None
+        )
+
+    def _saved_type_texts(self) -> dict[str, Any] | None:
+        """The saved Arrow type texts of an unresolved slot, as a saved file holds them.
+
+        ``{"tag": {...}, "data": {...}, "nullable": {...}}`` (``nullable`` only when
+        the file recorded it), for a job saved again while the slot is unresolved: its
+        columns keep their saved Arrow types, never a conversion of their Python types
+        (an ``int32`` column stays ``int32``; CodeRabbit on PR 454). ``None`` when the
+        slot is resolved or kept no texts.
+        """
+        texts = self._saved_arrow_texts
+        if texts is None or not self._is_unresolved():
+            return None
+        saved: dict[str, Any] = {
+            "tag": dict(texts["tag"]),
+            "data": dict(texts["data"]),
+        }
+        if texts["nullable"] is not None:
+            saved["nullable"] = {
+                role: list(names) for role, names in texts["nullable"].items()
+            }
+        return saved
 
     def _rebuild_saved_arrow_schemas(self) -> None:
         """Rebuild the slot's Arrow pair from its saved texts, once all can be read.
@@ -1399,11 +1436,9 @@ class SourceNode(SourceNodeBase):
             ),
         )
         if isinstance(stream, SourceNodeBase):
-            # A loaded job's slot keeps its pending types and its saved pipeline hash,
-            # which does not depend on the name (ITL-1138); its saved content hash
-            # covers the name, and the new slot has another name.
-            node._pending_types = dict(stream._pending_types)
-            node._saved_pipeline_hash = stream._saved_pipeline_hash
+            # A loaded job's slot keeps all its saved state (ITL-1138, ITL-640),
+            # through the one method every copy of a slot uses.
+            node._take_saved_state_of(stream)
         return node
 
 
