@@ -863,6 +863,36 @@ def arrow_nullable_names(schema: "pa.Schema") -> list[str]:
     return [field.name for field in schema if field.nullable]
 
 
+def serialize_arrow_schemas(
+    tag_schema: "pa.Schema", data_schema: "pa.Schema"
+) -> dict[str, Any]:
+    """Return the saved entry of a tag and data Arrow schema pair (ITL-640).
+
+    The one writer of a saved schema pair, for a slot's ``source_config`` and for
+    every node's ``output_schema``: ``{"tag": {...}, "data": {...}, "nullable":
+    {"tag": [...], "data": [...]}}``, the type text of each field's own Arrow type
+    (``serialize_arrow_schema``: exact widths, units, zones, precision, nested
+    nullability, logical type identifiers) and the nullable top-level fields. The
+    text is read back by the readers of the Python form (``deserialize_output_schema``)
+    and of the Arrow form (``deserialize_arrow_schema``) alike.
+
+    Args:
+        tag_schema: The Arrow schema of the tag columns.
+        data_schema: The Arrow schema of the data columns (data-tags included).
+
+    Returns:
+        The entry, ready for JSON.
+    """
+    return {
+        "tag": serialize_arrow_schema(tag_schema),
+        "data": serialize_arrow_schema(data_schema),
+        "nullable": {
+            "tag": arrow_nullable_names(tag_schema),
+            "data": arrow_nullable_names(data_schema),
+        },
+    }
+
+
 def deserialize_arrow_schema(
     schema_dict: dict[str, str],
     type_converter: Any,
@@ -1210,8 +1240,8 @@ def _parse_parameterized_type(type_str: str) -> Any | None:
 
     Handles the canonical ``str()`` forms of ``timestamp[us]``,
     ``timestamp[us, tz=UTC]``, ``duration[us]``, ``time32[ms]``,
-    ``time64[us]``, ``date64[ms]``, ``decimal128(10, 2)`` and
-    ``decimal256(40, 2)``.
+    ``time64[us]``, ``date64[ms]``, ``decimal128(10, 2)``,
+    ``decimal256(40, 2)`` and ``fixed_size_binary[3]``.
 
     Args:
         type_str: Arrow type string, stripped of surrounding whitespace.
@@ -1240,6 +1270,8 @@ def _parse_parameterized_type(type_str: str) -> Any | None:
     if match := re.fullmatch(r"decimal(128|256)\((\d+), (-?\d+)\)", type_str):
         factory = pa.decimal128 if match.group(1) == "128" else pa.decimal256
         return factory(int(match.group(2)), int(match.group(3)))
+    if match := re.fullmatch(r"fixed_size_binary\[(\d+)\]", type_str):
+        return pa.binary(int(match.group(1)))
     return None
 
 

@@ -362,7 +362,10 @@ the **Nodes** table below the picture for each node's columns and status.
 each source was configured. `PipelineJob.load(path)` reads it back, for example in a later
 Python session. An `InMemoryArrowDatabase` has no location to record, so here the database
 is passed again; `PipelineJob.load(path, database=...)` is also how you point a loaded job
-at a database that has moved.
+at a database that has moved. The file records each node's own Arrow types, so saving types
+every node from its inputs' types, as previewing an empty job does, and costs what that
+preview costs: a pipeline whose joins keep many system-tag columns saves as slowly as it
+previews.
 
 ```python
 job_a.save("bmi_job.json")

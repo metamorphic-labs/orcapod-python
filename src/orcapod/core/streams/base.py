@@ -11,6 +11,7 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
+from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
@@ -89,6 +90,27 @@ _ZERO_ROW_MEMO: ContextVar[dict[int, tuple[object, pa.Table | None]] | None] = (
     ContextVar("_ZERO_ROW_MEMO", default=None)
 )
 """The zero-row tables derived during one outermost ``typed_zero_row_table`` call."""
+
+
+@contextmanager
+def shared_zero_row_memo() -> Iterator[None]:
+    """Share one zero-row memo across every ``typed_zero_row_table`` call in the block.
+
+    A caller that types many streams of one graph (a saved job writes every node's
+    Arrow types) derives each stream once, instead of once per call. Inside an outer
+    derivation or another such block, the memo already open is used.
+
+    Yields:
+        Nothing; the memo is discarded when the block exits.
+    """
+    if _ZERO_ROW_MEMO.get() is not None:
+        yield
+        return
+    token = _ZERO_ROW_MEMO.set({})
+    try:
+        yield
+    finally:
+        _ZERO_ROW_MEMO.reset(token)
 
 
 def typed_zero_row_table(stream: object) -> pa.Table | None:

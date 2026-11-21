@@ -350,6 +350,85 @@ def _data_tag_role_hint(
     return None
 
 
+def _columns_without_arrow_type(
+    tag_schema: Mapping[str, Any], data_schema: Mapping[str, Any], converter: Any
+) -> list[tuple[str, Any]]:
+    """The declared columns whose Python type has no Arrow type (ITL-640).
+
+    A slot's identity is its Arrow schema, so every column a slot declares in Python
+    needs the Arrow type the data context's converter gives it. A column whose saved
+    type is still text (a class this process has not registered, ITL-1138) is left out.
+
+    Args:
+        tag_schema: The declared tag schema.
+        data_schema: The declared data schema.
+        converter: The data context's type converter.
+
+    Returns:
+        ``(column, declared type)`` for every column the converter cannot map, tag
+        columns first, each group in declared order.
+    """
+    missing: list[tuple[str, Any]] = []
+    seen: set[str] = set()
+    for schema in (tag_schema, data_schema):
+        for name, python_type in schema.items():
+            if name in seen or isinstance(python_type, str):
+                continue
+            seen.add(name)
+            try:
+                declared_arrow_schema({name: python_type}, converter)
+            except (ValueError, TypeError):
+                missing.append((name, python_type))
+    return missing
+
+
+def _no_arrow_type_error(slot: str, missing: list[tuple[str, Any]]) -> ValueError:
+    """The error for a slot declaring columns that have no Arrow type (ITL-640).
+
+    Args:
+        slot: The slot's name, which the error reports.
+        missing: ``(column, declared type)`` of each such column
+            (``_columns_without_arrow_type``).
+
+    Returns:
+        The ``ValueError`` naming the slot, each column and its declared type.
+    """
+    described = ", ".join(f"{column!r} is declared {kind}" for column, kind in missing)
+    verb = "has" if len(missing) == 1 else "have"
+    return ValueError(
+        f"slot {slot!r}: {described}, which {verb} no Arrow type. A slot's types "
+        "need an Arrow type: its identity is its Arrow schema (ITL-640). Declare "
+        "the column with a type Orcapod stores, or declare the slot with a "
+        "pa.Schema or from a stream."
+    )
+
+
+def _require_stream_arrow_types(stream: Any, slot: str) -> None:
+    """Refuse a slot made from a stream whose declared columns have no Arrow type.
+
+    A stream that types its zero-row table gives the slot its Arrow types; one that
+    cannot (``typed_zero_row_table`` is ``None``) gives the converter's types of its
+    Python schema, which must exist, as for a slot declared in Python (ITL-640).
+
+    Args:
+        stream: The stream the slot is made from.
+        slot: The slot's name, which the error reports.
+
+    Raises:
+        ValueError: If a declared column of ``stream`` has no Arrow type.
+    """
+    if isinstance(getattr(stream, "arrow_schemas", None), tuple):
+        return
+    if typed_zero_row_table(stream) is not None:
+        return
+    tag_schema, data_schema = stream.output_schema()
+    missing = _columns_without_arrow_type(
+        tag_schema, data_schema, stream.data_context.type_converter
+    )
+    if missing:
+        raise _no_arrow_type_error(slot, missing)
+
+
 class SourceNodeBase(TraceableBase, ABC):
     """Abstract base for SourceNode and SourceJobNode.
 
@@ -415,6 +494,12 @@ class SourceNodeBase(TraceableBase, ABC):
         self._saved_pipeline_hash: ContentHash | None = None
         self._saved_content_hash: ContentHash | None = None
         self._pending_types: dict[str, _PendingType] = {}
+        if arrow_schemas is None:
+            missing = _columns_without_arrow_type(
+                tag_schema, data_schema, self.data_context.type_converter
+            )
+            if missing:
+                raise _no_arrow_type_error(name, missing)
 
     # ------------------------------------------------------------------
     # Rebuilt from a saved job
@@ -1100,6 +1185,31 @@ class SourceNodeBase(TraceableBase, ABC):
             f"data_schema={dict(self._data_schema)!r})"
         )
 
+    def _declared_zero_row_table(self) -> "pa.Table | None":
+        """A slot's zero-row table, typed by the slot's own Arrow schemas.
+
+        A slot made from a stream, or rebuilt from a saved job, holds the Arrow types
+        of its columns (ITL-640): its rows will have them, since a bind accepts only a
+        source of those types. A slot declared with Python types only, or one with a
+        column whose class is not registered, answers ``None`` (the declared Python
+        schema stands in, ITL-1089).
+        """
+        if self._given_arrow_schemas is None or self._pending_types:
+            return None
+        tag_schema, data_schema = self.output_schema(columns=ZERO_ROW_INPUT_COLUMNS)
+        own = {field.name: field for schema in self.arrow_schemas for field in schema}
+        fields = []
+        for name, python_type in {**tag_schema, **data_schema}.items():
+            if name in own:
+                fields.append(own[name])
+            else:
+                fields.append(
+                    declared_arrow_schema(
+                        {name: python_type}, self.data_context.type_converter
+                    ).field(name)
+                )
+        return pa.Table.from_batches([], schema=pa.schema(fields))
+
 
 class SourceNode(SourceNodeBase):
     """Schema-only input-slot declaration for ``Pipeline`` recording.
@@ -1121,6 +1231,16 @@ class SourceNode(SourceNodeBase):
         ``identity_structure()`` returns ``("SourceSpec", name, tag_schema, data_schema)``
         — identical to the old ``SourceSpec`` — so existing DB paths remain valid.
     """
+
+    def _typed_zero_row_table(self) -> "pa.Table | None":
+        """The slot's zero-row table from its own Arrow schemas (ITL-640).
+
+        A slot made from a stream or rebuilt from a saved job types its zero-row table
+        from the Arrow types it holds, so the nodes over it type theirs too (a saved
+        job writes those types); a slot declared with Python types only answers
+        ``None``. See ``_declared_zero_row_table``.
+        """
+        return self._declared_zero_row_table()
 
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         """Raise ``UnboundSourceError`` — ``SourceNode`` carries no data.
@@ -1174,6 +1294,8 @@ class SourceNode(SourceNodeBase):
                 slot_name = stream.source_id
             else:
                 slot_name = f"{stream.label}:{stream.content_hash().to_hex()}"
+        if not isinstance(stream, SourceNodeBase):
+            _require_stream_arrow_types(stream, slot_name)
         node = cls(
             name=slot_name,
             tag_schema=tag_schema,
@@ -1501,31 +1623,6 @@ class SourceJobNode(SourceNodeBase):
             return table
         return self._declared_form.apply(table)
 
-    def _declared_zero_row_table(self) -> "pa.Table | None":
-        """An unbound slot's zero-row table, typed by the slot's own Arrow schemas.
-
-        A slot made from a stream, or rebuilt from a saved job, holds the Arrow types
-        of its columns (ITL-640): its rows will have them, since a bind accepts only a
-        source of those types. A slot declared with Python types only, or one with a
-        column whose class is not registered, answers ``None`` (the declared Python
-        schema stands in, ITL-1089).
-        """
-        if self._given_arrow_schemas is None or self._pending_types:
-            return None
-        tag_schema, data_schema = self.output_schema(columns=ZERO_ROW_INPUT_COLUMNS)
-        own = {field.name: field for schema in self.arrow_schemas for field in schema}
-        fields = []
-        for name, python_type in {**tag_schema, **data_schema}.items():
-            if name in own:
-                fields.append(own[name])
-            else:
-                fields.append(
-                    declared_arrow_schema(
-                        {name: python_type}, self.data_context.type_converter
-                    ).field(name)
-                )
-        return pa.Table.from_batches([], schema=pa.schema(fields))
-
     def _schema_requires_io(self, config: ColumnConfig) -> bool:
         """Whether reading the schema with ``config`` would poll: as for the bound source."""
         return self._bound_source is not None and schema_requires_io(
@@ -1753,6 +1850,7 @@ class SourceJobNode(SourceNodeBase):
                         slot_name = stream.source_id
                     else:
                         slot_name = f"{stream.label}:{stream.content_hash().to_hex()}"
+                _require_stream_arrow_types(stream, slot_name)
                 return cls(
                     name=slot_name,
                     tag_schema=tag_schema,
@@ -1782,6 +1880,7 @@ class SourceJobNode(SourceNodeBase):
             name=slot.name,
             tag_schema=slot.tag_schema,
             data_schema=slot.data_schema,
+            arrow_schemas=slot._given_arrow_schemas,  # pyright: ignore[reportPrivateUsage]  # one slot copied into another
         )
         node._take_saved_state_of(slot)
         if bound_source is not None:
@@ -1798,6 +1897,7 @@ class SourceJobNode(SourceNodeBase):
             name=self._name,
             tag_schema=self._tag_schema,
             data_schema=self._data_schema,
+            arrow_schemas=self._given_arrow_schemas,
         )
         node._take_saved_state_of(self)
         return node

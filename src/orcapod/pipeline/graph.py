@@ -158,15 +158,23 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         from orcapod.pipeline.serialization import (
             FALL_THROUGH_TAGS_KEY,
             PIPELINE_FORMAT_VERSION,
-            arrow_nullable_names,
-            serialize_arrow_schema,
+            serialize_arrow_schemas,
             serialize_nullability,
             serialize_output_schema,
             serialize_schema,
         )
         from orcapod.core.nodes import OperatorNode, FunctionNode
         from orcapod.core.nodes.source_node import SourceNode as SourceNodeClass
+        from orcapod.core.streams.base import shared_zero_row_memo, typed_arrow_schemas
 
+        # Every node's own Arrow types, derived in one walk: an upstream that several
+        # nodes share is typed once (ITL-640).
+        with shared_zero_row_memo():
+            arrow_types = {
+                key: typed_arrow_schemas(node)
+                for key, node in self._persistent_node_map.items()
+                if not (isinstance(node, SourceNodeClass) and node._pending_types)  # pyright: ignore[reportPrivateUsage]  # the saver is the one caller
+            }
         nodes: dict[str, Any] = {}
         for content_hash_str, node in self._persistent_node_map.items():
             tag_schema, data_schema = node.output_schema()
@@ -201,8 +209,17 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                 "label": node.label,
                 "content_hash": node.content_hash().to_string(),
                 "pipeline_hash": node.pipeline_hash().to_string(),
-                "output_schema": serialize_output_schema(
-                    tag_schema, data_schema, type_converter
+                # A node's own Arrow types are the saved authority (ITL-640): the
+                # types its rows have, from its typed zero-row table, never types
+                # re-derived from Python ones (which lose time64[ns] or a decimal's
+                # precision). A slot whose class is not registered keeps its saved
+                # text below (ITL-1138).
+                "output_schema": (
+                    serialize_arrow_schemas(*arrow_types[content_hash_str])
+                    if content_hash_str in arrow_types
+                    else serialize_output_schema(
+                        tag_schema, data_schema, type_converter
+                    )
                 ),
                 "node_uri": list(node.node_uri),
                 "data_context_key": data_context_key,
@@ -213,16 +230,13 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                 case SourceNodeClass() if not node._pending_types:  # pyright: ignore[reportPrivateUsage]  # the saver is the one caller
                     # The slot's own Arrow types are the saved authority (ITL-640):
                     # its identity is built from them, and a load rebuilds them.
-                    arrow_tag, arrow_data = node.arrow_schemas
+                    saved = serialize_arrow_schemas(*node.arrow_schemas)
                     descriptor["source_config"] = {
                         "source_type": "node",
                         "name": node.name,
-                        "tag_schema": serialize_arrow_schema(arrow_tag),
-                        "data_schema": serialize_arrow_schema(arrow_data),
-                        "nullable": {
-                            "tag": arrow_nullable_names(arrow_tag),
-                            "data": arrow_nullable_names(arrow_data),
-                        },
+                        "tag_schema": saved["tag"],
+                        "data_schema": saved["data"],
+                        "nullable": saved["nullable"],
                     }
                     descriptor["reconstructable"] = True
                 case SourceNodeClass():
