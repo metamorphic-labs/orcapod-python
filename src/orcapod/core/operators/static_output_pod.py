@@ -696,7 +696,9 @@ class StaticOutputOperatorPod(TraceableBase):
         that names system-tag columns after its input's pipeline hash
         (``MergeJoin``, ``Batch``, ``GroupBy``) names them as the sync path
         does (ITL-906). Every row keeps its own source info (see
-        ``_rows_to_table``).
+        ``_rows_to_table``) and its own data context, taken from its datagrams; the
+        stream is in the first row's data context (without them, the stream would
+        fill in the default context's key).
 
         Args:
             rows: Non-empty sequence of (Tag, Data) pairs.
@@ -708,12 +710,19 @@ class StaticOutputOperatorPod(TraceableBase):
         Raises:
             ValueError: If ``rows`` is empty.
         """
+        from orcapod.system_constants import constants
+
         table, tag_keys, data_tags = StaticOutputOperatorPod._rows_to_table(rows)
+        table = table.append_column(
+            pa.field(constants.CONTEXT_KEY, pa.large_string(), nullable=False),
+            pa.array([data.data_context_key for _, data in rows], pa.large_string()),
+        )
         return _RowsOfStream(
             table,
             tag_columns=tag_keys,
             pipeline_hash=pipeline_hash,
             data_tags=data_tags,
+            data_context=contexts.resolve_context(rows[0][1].data_context_key),
         )
 
     async def async_execute(

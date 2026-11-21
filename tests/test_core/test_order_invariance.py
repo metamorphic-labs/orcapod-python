@@ -71,6 +71,7 @@ from orcapod.operators import (
     MapData,
     MapTags,
     MergeJoin,
+    Rejoin,
     Pick,
     PolarsFilter,
     SelectColumns,
@@ -342,6 +343,21 @@ def _plain(make: Callable[[], Any]) -> Callable[[Any], Any]:
     return lambda _items: make()
 
 
+def _rejoin_branches(_items: Any) -> Any:
+    """Rejoin two branches of one source (ITL-1336): ``d1`` and ``d3`` in one, ``d2`` in
+    the other, its data-tags in both."""
+
+    def apply(source: Any) -> Any:
+        tags, data = source.keys()
+        data_tags = [name for name in data if name in tags]
+        return Rejoin()(
+            source.select_data_columns([*data_tags, "d1", "d3"]),
+            source.select_data_columns([*data_tags, "d2"]),
+        )
+
+    return apply
+
+
 # Every name of ``orcapod.operators`` that is an operator: one or more cases each.
 OPERATOR_CASES: dict[str, tuple[OperatorCase, ...]] = {
     "Join": (OperatorCase("join", _plain(Join), inputs=(MAIN, P, Q)),),
@@ -354,6 +370,7 @@ OPERATOR_CASES: dict[str, tuple[OperatorCase, ...]] = {
         ),
     ),
     "SemiJoin": (OperatorCase("semi_join", _plain(SemiJoin), inputs=(MAIN, P)),),
+    "Rejoin": (OperatorCase("rejoin_branches", _rejoin_branches),),
     "MapTags": (
         OperatorCase(
             "map_tags", _mapping(MapTags), (("t1", "u1"), ("t2", "u2"), ("t3", "u3"))

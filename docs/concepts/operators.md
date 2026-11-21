@@ -131,6 +131,121 @@ print(joined.as_table().to_pandas())
 # 1   mouse_02    22.1    8
 ```
 
+### Rejoin
+
+`Rejoin` puts the branches of one stream back together, row by origin row. A **diamond** is
+a pipeline that splits one stream into branches (a filter in one, a function pod or a
+rename in another) and then puts the branches back together: Rejoin is the operator a
+diamond is expected to use.
+
+`Join` is not wrong on a diamond, it is the wrong tool. Join combines rows on their user
+tags, and rows with equal tags may come from different origins, so Join keeps every
+input's system-tag columns, each renamed for its input (see
+[System tags](../reference/hashing.md)). On a diamond that doubles the system-tag columns at
+every Join, and stacked diamonds grow them exponentially. Rejoin pairs the rows of the
+branches that come from the **same origin row**, by matching every system-tag column, and
+keeps those columns as they are: a result row has its origin row's provenance, and the
+number of system-tag columns stays constant.
+
+```python
+import polars as pl
+
+rows = [
+    {"subject_id": "mouse_01", "unit": 1, "rate": 4.0, "depth": 150},
+    {"subject_id": "mouse_01", "unit": 2, "rate": 9.5, "depth": 320},
+    {"subject_id": "mouse_02", "unit": 3, "rate": 2.5, "depth": 410},
+]
+units = DictSource(
+    data=rows, tag_columns=["subject_id", "unit"], tag_only_columns=True, source_id="units"
+)
+
+# Two branches of one stream: a filter in one, a rename in the other.
+fast = units.select_data_columns(["rate"]).polars_filter(pl.col("rate") > 3)
+deep = units.select_data_columns(["depth"]).map_data({"depth": "depth_um"})
+
+rejoined = fast.rejoin(deep)
+for row in sorted(rejoined.as_table().to_pylist(), key=lambda row: row["unit"]):
+    print(row["unit"], row["rate"], row["depth_um"])
+# 1 4.0 150
+# 2 9.5 320
+
+
+def system_tags(stream):
+    return [
+        name
+        for name in stream.as_table(all_info=True).column_names
+        if name.startswith("_tag")
+    ]
+
+
+print(len(system_tags(units)), len(system_tags(rejoined)), len(system_tags(fast.join(deep))))
+# 2 2 4
+
+
+def diamond(stream, put_back):
+    """Split ``stream`` into two branches and put them back together."""
+    left = stream.select_data_columns(["rate"])
+    right = stream.select_data_columns(["rate"]).map_data({"rate": "rate_copy"})
+    return put_back(left, right).select_data_columns(["rate"])
+
+
+by_join = by_rejoin = units
+for _ in range(3):
+    by_join = diamond(by_join, lambda a, b: a.join(b))
+    by_rejoin = diamond(by_rejoin, lambda a, b: a.rejoin(b))
+print(len(system_tags(by_join)), len(system_tags(by_rejoin)))
+# 16 2
+```
+
+The rules:
+
+- **Branches of one stream.** Every input has the same system-tag columns, which it keeps
+  when each branch goes only through operators that keep system tags: filters, column
+  selection and renaming, `AddTags` and function pods. A branch that went through `Join`,
+  `GroupBy` or `Batch` has other system-tag columns, and Rejoin refuses it
+  (`InputValidationError`, naming each input's system-tag columns and pointing to `Join`).
+  The inputs that state their system-tag columns are compared when the rejoin is built; an
+  input whose schema states none (a raw stream without system tags, or a node of a loaded
+  job downstream of a function node, whose saved schema holds none) is checked when the
+  rejoin is computed, on its rows, by the same rule.
+- **One row per origin row.** Rows are matched on every system-tag column. A first rule,
+  deliberate and open to relaxing later: each input holds at most one row of an origin row,
+  so pairing is one to one; an input with two rows of one origin row is refused, naming the
+  input and the system-tag values. No operator that keeps system tags duplicates rows today.
+- **Shared tags agree, bit for bit.** A user tag present in several inputs must hold the
+  same value on matched rows, bit for bit (`-0.0` is not `0.0`, NaNs of different payloads
+  differ), so the result never depends on the order of the inputs; otherwise Rejoin refuses,
+  naming the tag. A tag of one input only is kept.
+- **Provenance is never null, and exact.** An input with a null in a system-tag column is
+  refused, naming the column. Matched system-tag values are compared bit for bit too, like
+  shared tags.
+- **One data context.** The inputs' rows must be of one data context; the result keeps
+  it, and rows of different data contexts are refused. Only the default data context
+  ships, so this matters only for a stream built in another one. A known limitation
+  (ITL-1339): some operators (`PolarsFilter` and `MergeJoin`, likely `Join` and
+  `SemiJoin` too) return their rows in the default data context whatever their input's,
+  so in another data context a branch through one of them is refused beside a branch
+  that kept its context.
+- **Data columns are disjoint**, as in `Join`; a data-tag present in several inputs is one
+  column.
+- **Different sources give nothing.** Two sources with the same schema have the same
+  system-tag column names but no origin row in common: their rejoin is empty, not an error.
+- **Symmetric.** Like `Join`, Rejoin takes two or more inputs (one input passes through) in
+  any order, with the same result, hashes and columns. Its async path gives the same rows.
+
+```python
+other = DictSource(
+    data=rows, tag_columns=["subject_id", "unit"], tag_only_columns=True, source_id="other"
+)
+print(units.select_data_columns(["rate"]).rejoin(other.select_data_columns(["depth"])).as_table().num_rows)
+# 0
+```
+
+!!! note "Provisional"
+    `Rejoin` is a provisional operator (ITL-1336): building one issues a
+    `ProvisionalHashWarning`, and its identity, so the hashes and stored paths of its
+    results, may still change in a later release. `Join` is unchanged.
+
 ### MergeJoin
 
 Binary join that handles colliding data columns by merging their values into `list[T]`.
@@ -838,7 +953,7 @@ The provisional operators are listed in one place:
 from orcapod.operators import PROVISIONAL_OPERATORS
 
 print(sorted(PROVISIONAL_OPERATORS))
-# ['AddTags', 'Batch', 'GroupBy', 'Index', 'MapColumns', 'MapTags', 'MergeJoin', 'Pick', 'PolarsFilter', 'TagBy']
+# ['AddTags', 'Batch', 'GroupBy', 'Index', 'MapColumns', 'MapTags', 'MergeJoin', 'Pick', 'PolarsFilter', 'Rejoin', 'TagBy']
 ```
 
 They are the operators whose identity choice is not yet obvious and solid (developer,
@@ -853,6 +968,7 @@ November 19, 2026). Each name maps to the issue that decides its identity or out
 | `Pick`, `Index` | the policy for a miss, which changes the output (ITL-439) |
 | `PolarsFilter` | whether the order of its predicates belongs to its identity (ITL-1247) |
 | `TagBy`, `AddTags` | days old, their identities just changed: the review of the tag operators (ITL-1290) |
+| `Rejoin` | new: puts the branches of one stream back together by matching system tags (ITL-1336) |
 
 Every other operator is frozen with data context v1: `Join`, `SemiJoin`, `MapData`, the
 column selections (`SelectTagColumns`, `SelectDataColumns`, `DropTagColumns`,

@@ -56,6 +56,9 @@ PROVISIONAL_OPERATORS: Mapping[str, str] = MappingProxyType(
         # Days old, its identity just changed (ITL-1269), a function form is future: the
         # review of the tag operators (ITL-1290).
         "AddTags": "ITL-1290",
+        # New (developer, November 21, 2026): puts the branches of one stream back
+        # together by matching every system-tag column (ITL-1336).
+        "Rejoin": "ITL-1336",
     }
 )
 """The provisional operators: class name to the issue that decides its identity."""
