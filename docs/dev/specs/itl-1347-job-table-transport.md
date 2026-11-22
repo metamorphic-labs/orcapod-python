@@ -521,9 +521,11 @@ node, a node whose output is still its rows), the node hands on its rows and the
 built from them by `main`'s row path where a successor reads them (`RowsOnRead`,
 `at_edge`): `main`'s order, error and moment by construction (Codex on PR #485, round 3).
 "Provably" is one precondition, positive and exact, never an inspection of overrides
-(Codex on PR #485, final check): **the stream that holds the rows is exactly a class whose
-whole-table read is its rows, and nothing on the instance shadows one of that class's
-methods or properties** (`reads_as_its_class`). It is applied in two places:
+(Codex on PR #485, final check and round 7): **the stream that holds the rows is exactly a
+class whose whole-table read is its rows, nothing on the instance shadows one of that
+class's methods or properties** (`reads_as_its_class`), **its rows report the node's data
+context, and every system-tag field of its table is what the rows give, non-null
+`large_string`** (`system_tags_as_rows_give`). It is applied in two places:
 
 - a bound source: its class is a library source kind that itself declares
   `TABLE_IS_ROWS` (`table_is_rows`);
@@ -533,7 +535,10 @@ methods or properties** (`reads_as_its_class`). It is applied in two places:
   context (its rows report that context, as `main`'s rows did), and its own `keys()` (the
   keys `iter_data` reads its rows with, tags in its tag-column order) give the order.
 
-Any subclass, replaced reader or other stream kind takes `main`'s row path.
+Any subclass, replaced reader, other stream kind, other data context or other system-tag
+type takes `main`'s row path. A retained output held as its rows (`RowsOnRead`) keeps
+only its rows once every successor has read it (`release_built`), as `main` retained
+only the rows.
 
 | # | What differs | On `main` today | On the branch | Why `main` is wrong (bug, reproducer) | Approval needed |
 |---|---|---|---|---|---|

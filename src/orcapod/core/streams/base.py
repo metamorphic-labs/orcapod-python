@@ -81,6 +81,28 @@ def reads_as_its_class(obj: object, cls: type) -> bool:
     return True
 
 
+def system_tags_as_rows_give(schema: pa.Schema) -> bool:
+    """Whether every system-tag field is what the row rebuild gives: non-null text.
+
+    ``main`` rebuilt a node's table from its rows, whose system tags are typed from
+    their values: a ``large_string`` field, non-nullable (the only kind library code
+    makes). A whole table is its rows only when its system tags are already so; a
+    narrow integer, a nullable field or any other type is decided by the rows
+    (ITL-1347).
+
+    Args:
+        schema: The table's schema.
+
+    Returns:
+        Whether every system-tag field is non-nullable ``large_string``.
+    """
+    return all(
+        field.type == pa.large_string() and not field.nullable
+        for field in schema
+        if field.name.startswith(constants.SYSTEM_TAG_PREFIX)
+    )
+
+
 def schema_requires_io(stream: object, config: ColumnConfig) -> bool:
     """Whether reading ``stream``'s schema with ``config`` would read or poll a source.
 

@@ -95,6 +95,16 @@ class SyncPipelineOrchestrator:
         current: Any = None
         try:
             topo_order = list(graph.topological_sort())
+            # Taken before any node runs: an observer may rebind a source, which
+            # changes how the graph finds that node afterwards.
+            neighbours = (
+                {
+                    id(n): (list(graph.predecessors(n)), list(graph.successors(n)))
+                    for n in topo_order
+                }
+                if materialize_results
+                else {}
+            )
             outputs: dict[Any, StreamProtocol] = {}
             processed: set[Any] = set()
 
@@ -137,6 +147,8 @@ class SyncPipelineOrchestrator:
 
                 if not materialize_results:
                     self._gc_outputs(node, graph, outputs, processed)
+                else:
+                    self._release_built_inputs(node, neighbours, outputs, processed)
 
             if not materialize_results:
                 outputs.clear()
@@ -190,6 +202,35 @@ class SyncPipelineOrchestrator:
         from orcapod.core.operators.static_output_pod import at_edge
 
         return [at_edge(outputs[p]) for p in sorted_preds]
+
+    @staticmethod
+    def _release_built_inputs(
+        current_node: Any,
+        neighbours: dict[int, tuple[list[Any], list[Any]]],
+        outputs: dict[Any, StreamProtocol],
+        processed: set[Any],
+    ) -> None:
+        """Keep a retained output read by all its successors as its rows only.
+
+        A ``RowsOnRead`` output builds its table at each successor's edge; once every
+        successor has run, the retained output drops the built stream and keeps the
+        rows, which is all ``main`` retained (ITL-1347). A later read builds it again.
+
+        Args:
+            current_node: The node that just ran.
+            neighbours: Each node's predecessors and successors, by ``id``, taken
+                before the run.
+            outputs: The retained outputs.
+            processed: The nodes that ran.
+        """
+        from orcapod.core.operators.static_output_pod import RowsOnRead
+
+        for pred in neighbours[id(current_node)][0]:
+            output = outputs.get(pred)
+            if isinstance(output, RowsOnRead) and all(
+                succ in processed for succ in neighbours[id(pred)][1]
+            ):
+                output.release_built()
 
     @staticmethod
     def _gc_outputs(

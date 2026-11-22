@@ -31,6 +31,7 @@ from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
     keys_of_rows,
+    system_tags_as_rows_give,
     row_built_columns,
     stream_arrow_schema,
     schema_requires_io,
@@ -1837,12 +1838,20 @@ class SourceJobNode(SourceNodeBase):
             )
         if self._declared_form is not None:
             return None
-        if not table_is_rows(self._bound_source):
+        if (
+            not table_is_rows(self._bound_source)
+            or self._bound_source.data_context_key != self.data_context_key
+        ):
             # Not a library source kind whose table is its rows (a side-effect or
-            # function pod stream, an operator's result, a raw stream, a poller): its
-            # rows, as main iterated them.
+            # function pod stream, an operator's result, a raw stream, a poller), or
+            # one whose rows report another data context than the node's: its rows,
+            # as main iterated them (the edge table is built in the node's context).
             return None
         table = self._bound_source.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+        if not system_tags_as_rows_give(table.schema):
+            # System tags the rows would type otherwise (a narrow integer, a
+            # nullable field): the rows decide, as on main.
+            return None
         return table, keys_of_rows(table, self._bound_source.keys())
 
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:

@@ -819,6 +819,210 @@ def test_a_result_in_another_data_context_hands_on_its_own_rows(
     assert kept.to_pylist() == [node.data_context_key] * 2
 
 
+# ── Codex round 7: the source's data context, system tags, retained lifetime ───
+
+
+def test_a_source_in_another_data_context_hands_on_its_own_rows() -> None:
+    """An exact ``CachedSource`` with its own data context: the rows a sync run returns
+    report the source's context, as ``main`` returned them, and the edge table is built
+    in the slot's context, as ``main`` rebuilt it."""
+    import dataclasses
+
+    from orcapod.contexts import get_default_context
+    from orcapod.core.nodes.source_node import SourceJobNode
+    from orcapod.core.operators.static_output_pod import at_edge
+    from orcapod.sources import CachedSource
+    from orcapod.system_constants import constants
+
+    custom = dataclasses.replace(get_default_context(), context_key="review:custom")
+    inner = DictSource(
+        [{"k": 1, "x": 10}, {"k": 2, "x": 20}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="s",
+        data_context=custom,
+    )
+    source = CachedSource(
+        inner,
+        cache_database=InMemoryArrowDatabase(),
+        source_id="cached",
+        data_context=custom,
+    )
+    slot = SourceJobNode.from_stream(source)
+    dag: OrcaDAG[Any] = OrcaDAG()
+    dag.add_node(slot)
+    output: Any = SyncPipelineOrchestrator().run(dag).node_outputs[slot]
+    assert [
+        (tag.data_context_key, data.data_context_key)
+        for tag, data in output.iter_data()
+    ] == [("review:custom", "review:custom")] * 2
+    edge = at_edge(output).as_table(columns={"context": True})
+    assert edge[constants.CONTEXT_KEY].to_pylist() == [slot.data_context_key] * 2
+
+
+class _AddSystemTag:
+    """``SelectDataColumns`` whose result carries one more system tag, ``int16``."""
+
+    @staticmethod
+    def operator(values: list[int | None], exact: bool) -> Any:
+        from orcapod.operators import SelectDataColumns
+        from orcapod.system_constants import constants
+
+        class Unproven(ArrowTableStream):
+            """Reads as ``ArrowTableStream``; not proven: ``main``'s row path."""
+
+        kind = ArrowTableStream if exact else Unproven
+
+        class AddSystemTag(SelectDataColumns):
+            def unary_static_process(self, stream: Any) -> Any:
+                out: Any = super().unary_static_process(stream)
+                table = out.as_table(columns={"source": True, "system_tags": True})
+                table = table.append_column(
+                    f"{constants.SYSTEM_TAG_PREFIX}region",
+                    pa.array(values[: table.num_rows], pa.int16()),
+                )
+                return kind(table, tag_columns=["k"])
+
+        return AddSystemTag(["x"])
+
+
+def _system_tag_job(values: list[int | None], exact: bool) -> tuple[Any, Any]:
+    database = InMemoryArrowDatabase()
+    job = PipelineJob(name="system_tag", database=database)
+    with job:
+        source = DictSource(
+            [{"k": 1, "x": 1}, {"k": 2, "x": 2}],
+            tag_columns=["k"],
+            tag_only_columns=True,
+            source_id="s",
+        )
+        _AddSystemTag.operator(values, exact)(source, label="marked")
+    job.nodes["marked"].attach_databases(
+        pipeline_database=database.at("log"), cache_mode=CacheMode.LOG
+    )
+    return job, database
+
+
+def test_a_narrow_system_tag_is_stored_as_the_rows_give() -> None:
+    """A result over an exact ``ArrowTableStream`` with an ``int16`` system tag: kept,
+    stored and record-hashed as ``main``'s rows give it (``int64``, non-null), the
+    same as ``main``'s own row path (an unproven stream) gives."""
+    from orcapod.system_constants import constants
+
+    name = f"{constants.SYSTEM_TAG_PREFIX}region"
+    stored: dict[bool, Any] = {}
+    for exact in (True, False):
+        job, database = _system_tag_job([1, 2], exact)
+        job.run()
+        node: Any = job.nodes["marked"]
+        kept = node.as_table(columns={"system_tags": True}).schema.field(name)
+        assert (kept.type, kept.nullable) == (pa.int64(), False)
+        stored[exact] = database.at("log").get_all_records(
+            node._stored_table_path,  # pyright: ignore[reportPrivateUsage]  # the raw LOG table
+            record_id_column="_record_hash",
+        )
+    for table in stored.values():
+        field = table.schema.field(name)
+        assert (field.type, field.nullable) == (pa.int64(), False)
+    assert (
+        stored[True]["_record_hash"].to_pylist()
+        == stored[False]["_record_hash"].to_pylist()
+    )
+
+
+def test_a_null_system_tag_raises_at_the_operator_as_main_does() -> None:
+    """With a null among its values, ``main``'s rows cannot make one table: the
+    operator raises ``ArrowInvalid`` before its end event, as on ``main``."""
+    job, _ = _system_tag_job([None, 2], exact=True)
+    observer = _NodeEvents()
+    with pytest.raises(pa.ArrowInvalid):
+        job.run(observer=observer)
+    assert ("start", "marked") in observer.events
+    assert ("end", "marked") not in observer.events
+
+
+def test_a_source_table_with_other_system_tags_is_not_its_rows() -> None:
+    """The source route's guard: an exact ``ArrowTableSource`` whose system tag is a
+    narrow integer has a table that is not its rows (they give ``int64``); a stock
+    source's system tags are what the rows give."""
+    from orcapod.core.streams.base import system_tags_as_rows_give
+
+    schema = pa.schema(
+        [
+            pa.field("k", pa.int64(), nullable=False),
+            pa.field("x", pa.int64(), nullable=False),
+            pa.field("region", pa.int16(), nullable=False),
+        ]
+    )
+    narrow = ArrowTableSource(
+        pa.Table.from_pylist(
+            [{"k": 1, "x": 10, "region": 1}, {"k": 2, "x": 20, "region": 2}],
+            schema=schema,
+        ),
+        tag_columns=["k"],
+        tag_only_columns=True,
+        system_tag_columns=["region"],
+        source_id="s",
+    )
+    assert not system_tags_as_rows_give(
+        narrow.as_table(columns={"system_tags": True}).schema
+    )
+    stock = _plain()
+    assert system_tags_as_rows_give(
+        stock.as_table(columns={"system_tags": True}).schema
+    )
+
+
+def test_a_retained_output_keeps_only_its_rows_once_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With results retained, an output held as its rows drops its built stream once
+    every successor has read it (``main`` retained only the rows): no built stream
+    outlives the run, its rows are its own, and a later read builds the table again."""
+    import gc
+    import weakref
+
+    from orcapod import function_pod
+    from orcapod.core.operators.static_output_pod import (
+        RowsOnRead,
+        StaticOutputOperatorPod,
+    )
+
+    @function_pod(output_keys="y")
+    def plus_one(x: int) -> int:
+        return x + 1
+
+    job = PipelineJob(name="retained", database=InMemoryArrowDatabase())
+    with job:
+        computed: Any = plus_one.pod(
+            _plain().select_data_columns(["x"]), label="computed"
+        )
+        computed.select_data_columns(["y"], label="second")
+        computed.select_data_columns(["y"], label="third")
+
+    built: list[weakref.ref[Any]] = []
+    original = StaticOutputOperatorPod._materialize_upstream  # pyright: ignore[reportPrivateUsage]  # the row path, watched
+
+    def watched(*args: Any, **kwargs: Any) -> Any:
+        stream = original(*args, **kwargs)
+        built.append(weakref.ref(stream))
+        return stream
+
+    monkeypatch.setattr(
+        StaticOutputOperatorPod, "_materialize_upstream", staticmethod(watched)
+    )
+    graph = job._node_graph  # pyright: ignore[reportPrivateUsage]  # the job's graph
+    assert graph is not None
+    result = SyncPipelineOrchestrator().run(graph)
+    output: Any = result.node_outputs[job.nodes["computed"]]
+    assert isinstance(output, RowsOnRead)
+    gc.collect()
+    assert built
+    assert all(ref() is None for ref in built)
+    assert len(list(output.iter_data())) == 2
+    assert output.as_table().num_rows == 2
+
+
 @pytest.mark.parametrize(
     "kind",
     [pa.time64("ns"), pa.decimal256(76, 40)],
