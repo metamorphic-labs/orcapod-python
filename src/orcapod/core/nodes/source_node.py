@@ -27,10 +27,12 @@ from orcapod.core.operators.drop_nulls import _without_none  # pyright: ignore[r
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
+    CompleteStreamFeed,
     schema_requires_io,
     typed_arrow_schemas,
     typed_zero_row_table,
 )
+from orcapod.core.streams.record_batch_input import InputChannel
 from orcapod.core.streams.view import (
     ViewStatus,
     StreamView,
@@ -57,6 +59,9 @@ from orcapod.utils.schema_utils import (
 if TYPE_CHECKING:
     from orcapod.channels import WritableChannel
     from orcapod.protocols.core_protocols import StreamProtocol
+    from orcapod.protocols.core_protocols.record_batch_channels import (
+        RecordBatchInput,
+    )
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
 
 logger = logging.getLogger(__name__)
@@ -1162,6 +1167,18 @@ class SourceNodeBase(TraceableBase, ABC):
             total_rows=table.num_rows,
             display_all_rows=False,
         )
+
+    def open_channel(self) -> RecordBatchInput:
+        """Open an input channel on this node's rows, for async computation (ITL-1347).
+
+        As ``StreamBase.open_channel()``: the rows as Arrow record batches in the
+        row-built form, read on the first read; the description is this node, and
+        ``to_stream()`` is this node.
+
+        Returns:
+            The input channel.
+        """
+        return InputChannel(self, CompleteStreamFeed(self))
 
     async def async_iter_data(self):
         """Asynchronous iterator over (tag, data) pairs.

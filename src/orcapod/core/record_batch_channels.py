@@ -1,22 +1,21 @@
-"""Channels of Arrow record batches (ITL-1347).
+"""The output channel of Arrow record batches (ITL-1347).
 
-``InputChannel`` and ``OutputChannel`` carry a stream's rows as Arrow record batches; they
-implement ``RecordBatchInput`` and ``RecordBatchOutput``
-(``orcapod.protocols.core_protocols.record_batch_channels``). The
+``OutputChannel`` implements ``RecordBatchOutput``
+(``orcapod.protocols.core_protocols.record_batch_channels``): the producer side of a
+node's async output. Each consumer reads through its own ``InputChannel``
+(``open_reader``, ``orcapod.core.streams.record_batch_input``), which is the fan-out. The
 stream is primary and owns the description (keys, schemas, data context, pipeline hash); a
-channel refers to its stream and restates nothing. An input channel is opened from a
-stream (``channel_from_stream``) or from an output channel (``OutputChannel.open_reader``);
-an output channel, once closed, gives its rows back as a stream (``OutputChannel.result``).
-A stream is made from record batches by one function, ``stream_from_batches`` of
-``orcapod.core.operators.static_output_pod``.
+channel refers to its stream and restates nothing. Once closed, an output channel gives its
+rows back as a stream (``OutputChannel.result``). A stream is made from record batches by
+one function, ``stream_from_batches`` of ``orcapod.core.operators.static_output_pod``; a
+channel is opened on a complete stream by ``stream.open_channel()``.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections import deque
-from collections.abc import AsyncIterator
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -26,77 +25,20 @@ from orcapod.core.operators.static_output_pod import (
     stream_from_batches,
     transport_schema,
 )
-from orcapod.core.streams.base import (
-    ZERO_ROW_INPUT_COLUMNS,
-    row_built_columns,
-    row_built_names,
-)
+from orcapod.core.streams.base import row_built_names
+from orcapod.core.streams.record_batch_input import InputChannel
 from orcapod.errors import UpstreamFailedError
 from orcapod.system_constants import constants
 from orcapod.utils import arrow_utils
 
 if TYPE_CHECKING:
     from orcapod.protocols.core_protocols import StreamProtocol
-
-SOURCE_BATCH_ROWS = 65_536
-"""The most rows of one Arrow record batch a complete stream is read in.
-
-Developer decision, November 22, 2026 (ITL-1347, question 6): a source sends record
-batches of at most 65,536 rows; an operator sends its result's own record batches.
-"""
+    from orcapod.protocols.core_protocols.record_batch_channels import (
+        RecordBatchInput,
+    )
 
 BATCH_BUFFER_SIZE = 8
 """How many Arrow record batches an input channel queues before its producer waits."""
-
-
-class _BatchFeed(Protocol):
-    """Where an input channel's record batches come from."""
-
-    async def next(self) -> pa.RecordBatch | None:
-        """Return the next record batch, or ``None`` at the end."""
-        ...
-
-    def close(self) -> None:
-        """Stop reading: nothing waits for this reader any more."""
-        ...
-
-
-class _StreamFeed:
-    """The record batches of a complete stream, read at this reader's own position."""
-
-    def __init__(self, stream: StreamProtocol) -> None:
-        """Make a feed of ``stream``'s rows; nothing is read until the first ``next``.
-
-        Args:
-            stream: The complete stream to read.
-        """
-        self._stream = stream
-        self._batches: deque[pa.RecordBatch] | None = None
-
-    async def next(self) -> pa.RecordBatch | None:
-        """Return the stream's next record batch, or ``None`` at the end.
-
-        The stream's table is read on the first call, not when the feed is made, in
-        the row-built form (``row_built_columns``) and cut into batches of at most
-        ``SOURCE_BATCH_ROWS`` rows; batches with no rows are skipped.
-        """
-        if self._batches is None:
-            # On the first read, not when the channel is opened: opening computes
-            # nothing.
-            table = row_built_columns(
-                self._stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS),
-                self._stream.keys(),
-            )
-            self._batches = deque(
-                batch
-                for batch in table.to_batches(max_chunksize=SOURCE_BATCH_ROWS)
-                if batch.num_rows
-            )
-        return self._batches.popleft() if self._batches else None
-
-    def close(self) -> None:
-        """Stop reading: the batches not read are dropped. No producer waits on it."""
-        self._batches = deque()
 
 
 class _OutputFeed:
@@ -142,6 +84,22 @@ class _OutputFeed:
             await output._changed.wait()  # pyright: ignore[reportPrivateUsage]
         return None
 
+    async def to_stream(self, channel: RecordBatchInput) -> StreamProtocol:
+        """Read ``channel`` to its end and return what it delivered, as a stream.
+
+        The record batches in arrival order, with the identity of ``channel.stream``
+        (``stream_from_batches``, which settles the provenance fields on the complete
+        table).
+
+        Args:
+            channel: The input channel this feed serves, not read yet.
+
+        Raises:
+            ChannelClosed: If the channel is closed before its producer completed.
+            UpstreamFailedError: If the output failed.
+        """
+        return stream_from_batches(channel.stream, await channel.collect())
+
     def close(self) -> None:
         """Stop reading and unregister from the output.
 
@@ -155,132 +113,6 @@ class _OutputFeed:
         if self in readers:
             readers.remove(self)  # a send no longer walks it
         output._notify()  # pyright: ignore[reportPrivateUsage]  # the producer stops waiting
-
-
-class InputChannel:
-    """A single-pass, back-pressured reader of a stream's Arrow record batches.
-
-    The Arrow-record-batch form of ``ReadableChannel``. The description of what it
-    delivers is its ``stream``, known before the first batch: the producing node, or
-    the stream it was opened from. A channel has no identity of its own and is read
-    once; to read again, go back to a stream (the one it was opened from, or the one
-    ``to_stream`` gives).
-
-    Made by ``channel_from_stream`` or by ``OutputChannel.open_reader``, never
-    directly.
-    """
-
-    def __init__(self, stream: StreamProtocol, feed: _BatchFeed) -> None:
-        """Make an input channel; use ``channel_from_stream`` or ``open_reader``.
-
-        Args:
-            stream: The stream whose rows the channel delivers: its description.
-            feed: Where the record batches come from.
-        """
-        self._stream = stream
-        self._feed = feed
-        self._received = 0
-        self._ended = False
-        # Closed by its consumer before the producer completed.
-        self._closed = False
-
-    @property
-    def stream(self) -> StreamProtocol:
-        """The stream whose rows this channel delivers: the description."""
-        return self._stream
-
-    async def receive(self) -> pa.RecordBatch:
-        """Return the next Arrow record batch.
-
-        A read that is cancelled while it waits closes the channel, as ``close`` does:
-        a consumer that stops reading never holds its producer.
-
-        Raises:
-            ChannelClosed: At the end, and after ``close``. After a ``close`` that came
-                before the producer completed, the error says so, and iteration
-                (``async for``) raises it instead of ending: no consumer loop takes
-                part of an input for all of it.
-            UpstreamFailedError: If the producer failed or was cancelled.
-        """
-        if self._closed:
-            raise self._closed_early()
-        if self._ended:
-            raise ChannelClosed()
-        try:
-            batch = await self._feed.next()
-        except asyncio.CancelledError:
-            await self.close()
-            raise
-        if batch is None:
-            if self._closed:  # woken by its own early close
-                raise self._closed_early()
-            self._ended = True
-            raise ChannelClosed()
-        self._received += 1
-        return batch
-
-    def __aiter__(self) -> AsyncIterator[pa.RecordBatch]:
-        """Iterate over the remaining record batches, in arrival order."""
-        return self
-
-    async def __anext__(self) -> pa.RecordBatch:
-        """Return the next record batch; end the iteration at the producer's end.
-
-        A channel closed before its producer completed does not end the iteration:
-        its ``ChannelClosed`` is raised, so a loop never takes part of an input for
-        all of it.
-        """
-        try:
-            return await self.receive()
-        except ChannelClosed:
-            if self._closed:
-                raise  # closed before its producer completed: not the end
-            raise StopAsyncIteration
-
-    def _closed_early(self) -> ChannelClosed:
-        """The error of a read after a close that came before the producer completed."""
-        return ChannelClosed(
-            f"The input channel of {_named(self._stream)} was closed before its "
-            + "producer completed; it has no complete input to give."
-        )
-
-    async def collect(self) -> list[pa.RecordBatch]:
-        """Read to the end and return every remaining record batch, in arrival order.
-
-        Raises:
-            ChannelClosed: If the channel was closed before its producer completed:
-                what was read is part of the input, never returned as all of it.
-            UpstreamFailedError: If the producer failed or was cancelled.
-        """
-        return [batch async for batch in self]
-
-    async def to_stream(self) -> StreamProtocol:
-        """Read to the end and return what the channel delivered, as a stream.
-
-        The stream holds the record batches in arrival order, with the identity of
-        ``stream`` (``stream_from_batches``). It is how an operator that needs all of
-        an input reads it. Called on a channel not read yet: a stream of part of an
-        input is never made.
-
-        Raises:
-            RuntimeError: If a record batch has already been received.
-            ChannelClosed: If the channel was closed before its producer completed.
-            UpstreamFailedError: If the producer failed or was cancelled.
-        """
-        if self._received:
-            raise RuntimeError(
-                "to_stream() gives everything an input channel delivers, as a stream; "
-                + f"{self._received} record batch(es) of this one have been received "
-                + "already."
-            )
-        return stream_from_batches(self._stream, await self.collect())
-
-    async def close(self) -> None:
-        """Stop reading. The producer no longer waits for this reader."""
-        if not self._ended:
-            self._closed = True
-        self._ended = True
-        self._feed.close()
 
 
 class OutputChannel:
@@ -529,23 +361,6 @@ class OutputChannel:
         if self._result is None:
             self._result = stream_from_batches(self._stream, self._batches)
         return self._result
-
-
-def channel_from_stream(stream: StreamProtocol) -> InputChannel:
-    """Open an input channel on a complete stream.
-
-    The channel delivers the stream's rows in the row-built form (``row_built_columns``) as
-    Arrow record batches of at most ``SOURCE_BATCH_ROWS`` rows. Several channels may be
-    opened on one stream, each with its own position; nothing is computed until the
-    first read, and nothing is queued, since the stream is complete.
-
-    Args:
-        stream: The stream to read; it is the channel's description.
-
-    Returns:
-        The input channel.
-    """
-    return InputChannel(stream, _StreamFeed(stream))
 
 
 def _named(stream: Any) -> str:  # pyright: ignore[reportExplicitAny]  # any stream or node

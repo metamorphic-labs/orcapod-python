@@ -21,6 +21,7 @@ import polars as pl
 import pyarrow as pa
 
 from orcapod.core.base import TraceableBase
+from orcapod.core.streams.record_batch_input import SOURCE_BATCH_ROWS, InputChannel
 from orcapod.core.streams.view import (
     SCHEMA_NEEDS_POLL_NOTE,
     ViewStatus,
@@ -34,6 +35,7 @@ from orcapod.protocols.core_protocols import (
     StreamProtocol,
     TagProtocol,
 )
+from orcapod.protocols.core_protocols.record_batch_channels import RecordBatchInput
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
 from orcapod.utils import arrow_utils
@@ -331,6 +333,64 @@ def row_built_names(
         if f"{constants.SOURCE_PREFIX}{n}" in present
     ]
     return [*tag_keys, *system_tags, *data, *source_info]
+
+
+class CompleteStreamFeed:
+    """The record batches of a complete stream, read at one reader's own position.
+
+    The feed of a channel opened on a stream (``StreamBase.open_channel()``). Nothing
+    is read until the first ``next``; then the stream's table is read once, in the
+    row-built form (``row_built_columns``), and cut into record batches of at most
+    ``SOURCE_BATCH_ROWS`` rows. The stream is complete, so nothing is queued and no
+    producer waits on a reader.
+    """
+
+    def __init__(self, stream: StreamProtocol) -> None:
+        """Make a feed of ``stream``'s rows; nothing is read until the first ``next``.
+
+        Args:
+            stream: The complete stream to read.
+        """
+        self._stream = stream
+        self._batches: list[pa.RecordBatch] | None = None
+        self._position = 0
+
+    async def next(self) -> pa.RecordBatch | None:
+        """Return the stream's next record batch, or ``None`` at the end.
+
+        The stream's table is read on the first call, not when the channel is opened;
+        batches with no rows are skipped.
+        """
+        if self._batches is None:
+            table = row_built_columns(
+                self._stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS),
+                self._stream.keys(),
+            )
+            self._batches = [
+                batch
+                for batch in table.to_batches(max_chunksize=SOURCE_BATCH_ROWS)
+                if batch.num_rows
+            ]
+        if self._position >= len(self._batches):
+            return None
+        self._position += 1
+        return self._batches[self._position - 1]
+
+    def close(self) -> None:
+        """Stop reading: the batches not read are dropped."""
+        self._batches = []
+        self._position = 0
+
+    async def to_stream(self, channel: RecordBatchInput) -> StreamProtocol:
+        """Return the stream itself: all of the input, read by nobody yet.
+
+        It is exactly what the sync path gives an operator over that stream, identity
+        and rows; nothing is read or rebuilt.
+
+        Args:
+            channel: The input channel this feed serves.
+        """
+        return self._stream
 
 
 def typed_arrow_schemas(
@@ -1145,6 +1205,21 @@ class StreamBase(TraceableBase):
     def iter_data(
         self,
     ) -> Iterator[tuple[TagProtocol, DataProtocol]]: ...
+
+    def open_channel(self) -> RecordBatchInput:
+        """Open an input channel on this stream, for async computation (ITL-1347).
+
+        The channel delivers this stream's rows as Arrow record batches of at most
+        ``SOURCE_BATCH_ROWS`` rows, in the row-built form, read once and in order; its
+        description is this stream (``channel.stream``). Several channels may be
+        opened on one stream, each with its own position, and the stream stays as it
+        is. Nothing is read until the channel is first read, and its ``to_stream()`` is
+        this stream.
+
+        Returns:
+            The input channel.
+        """
+        return InputChannel(self, CompleteStreamFeed(self))
 
     async def async_iter_data(
         self,

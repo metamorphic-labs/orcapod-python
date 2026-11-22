@@ -33,11 +33,8 @@ from orcapod.core.operators.static_output_pod import (
     StaticOutputOperatorPod,
     stream_from_batches,
 )
-from orcapod.core.record_batch_channels import (
-    InputChannel,
-    OutputChannel,
-    channel_from_stream,
-)
+from orcapod.core.record_batch_channels import OutputChannel
+from orcapod.protocols.core_protocols.record_batch_channels import RecordBatchInput
 from orcapod.channels import ChannelClosed
 from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import UpstreamFailedError
@@ -83,11 +80,11 @@ def _cut(table: pa.Table, sizes: tuple[int, ...] | None) -> list[pa.RecordBatch]
 
 async def _channel(
     stream: StreamProtocol, sizes: tuple[int, ...] | None
-) -> InputChannel:
+) -> RecordBatchInput:
     """An input channel delivering ``stream``'s rows in record batches of ``sizes``."""
-    batches = await channel_from_stream(stream).collect()
+    batches = await stream.open_channel().collect()
     if sizes is None or not batches:
-        return channel_from_stream(stream)
+        return stream.open_channel()
     rows = pa.Table.from_batches(batches)
     feed = OutputChannel(stream)
     for batch in _cut(rows, sizes):
@@ -263,7 +260,7 @@ def test_a_row_by_row_operator_sends_each_batch_as_it_arrives(case: Case) -> Non
     assert expected is not None
 
     async def go() -> list[pa.RecordBatch]:
-        rows = pa.Table.from_batches(await channel_from_stream(source).collect())
+        rows = pa.Table.from_batches(await source.open_channel().collect())
         inputs = _cut(rows, (1,))
         wanted = [
             case.make_op()(stream_from_batches(source, [batch])).as_table().num_rows
@@ -321,7 +318,7 @@ def test_batch_sends_each_full_batch_before_the_input_ends() -> None:
         output = OutputChannel(op(source))
         results = output.open_reader()
         task = asyncio.ensure_future(op.async_execute_batches([reader], output))
-        rows = pa.Table.from_batches(await channel_from_stream(source).collect())
+        rows = pa.Table.from_batches(await source.open_channel().collect())
         one_row = _cut(rows, (1,))
         await feed.send(one_row[0])
         await feed.send(one_row[1])
@@ -384,30 +381,34 @@ BARRIER_ORACLE_CASES: dict[
 
 @pytest.mark.parametrize("label", list(BARRIER_ORACLE_CASES))
 def test_a_barrier_operator_sees_its_input_as_a_job_gives_it(label: str) -> None:
-    """The record-batch form is held to what a job's sync path gives an operator: the
-    upstream rebuilt from its rows (``_materialize_upstream``: ``null`` as
-    ``large_string``, the columns in row order), not the raw stream it came from. A
-    predicate that reads a ``null`` column's type or the column order follows that
-    form (documented behaviour, e5); in a job neither case reaches an operator: a
-    source refuses a ``null`` column, and a job refuses an expression that selects
-    columns by position."""
+    """Two oracles, which coincide in a job. A channel opened on a complete stream gives
+    the operator that stream (``to_stream()`` is the stream itself), so the result is
+    the sync result over it. Record batches that travelled through an output channel
+    give the stream rebuilt from them in the row-built form, which is what a job's
+    sync path gives an operator (``_materialize_upstream``: ``null`` as
+    ``large_string``, the columns in row order). In a job every node's output stream
+    is already in that form, so both are the job's; on a raw stream they differ, and
+    a predicate that reads a ``null`` column's type or the column order follows the
+    form it is given (documented behaviour, e5). In a job neither case reaches an
+    operator: a source refuses a ``null`` column, and a job refuses an expression that
+    selects columns by position."""
     make_stream, make_op = BARRIER_ORACLE_CASES[label]
     stream = make_stream()
-    oracle = _outcome(
+    job_sync = _outcome(
         lambda: make_op()(
             StaticOutputOperatorPod._materialize_upstream(  # pyright: ignore[reportPrivateUsage]  # the job's sync input
                 list(stream.iter_data()), stream
             )
         )
     )
-    assert _outcome(lambda: run_on_channels(make_op(), [stream], None)) == oracle
+    raw_sync = _outcome(lambda: make_op()(stream))
+    assert raw_sync != job_sync  # the case tells the two oracles apart
+    assert _outcome(lambda: run_on_channels(make_op(), [stream], None)) == raw_sync
     for layout in ("one_row_per_batch", "mixed_sizes"):
         assert (
             _outcome(lambda: run_on_channels(make_op(), [stream], LAYOUTS[layout]))
-            == oracle
+            == job_sync
         )
-    # The raw stream gives another outcome: the case tells the two oracles apart.
-    assert _outcome(lambda: make_op()(stream)) != oracle
 
 
 # --- Arrivals from another producer -------------------------------------------------------
@@ -519,7 +520,7 @@ def test_a_meta_column_does_not_travel() -> None:
     assert expected is not None
 
     async def go() -> tuple[list[str], StreamProtocol]:
-        batches = await channel_from_stream(raw).collect()
+        batches = await raw.open_channel().collect()
         output = OutputChannel(raw)
         for batch in batches:
             await output.send(batch)
@@ -549,7 +550,7 @@ def test_an_input_closed_early_fails_a_streaming_operator(
     op = make_op()
 
     async def go() -> None:
-        rows = pa.Table.from_batches(await channel_from_stream(source).collect())
+        rows = pa.Table.from_batches(await source.open_channel().collect())
         first, second = _cut(rows, (1,))[:2]
         feed = OutputChannel(source, retain=False, buffer_size=4)
         reader = feed.open_reader()
@@ -670,7 +671,7 @@ def test_a_failing_close_of_the_output_fails_it() -> None:
         output = _FailingClose(op(source))
         results = output.open_reader()
         with pytest.raises(OSError, match="flush failed"):
-            await op.async_execute_batches([channel_from_stream(source)], output)
+            await op.async_execute_batches([source.open_channel()], output)
         with pytest.raises(UpstreamFailedError):
             _ = await asyncio.wait_for(results.collect(), TIMEOUT)
 
@@ -684,7 +685,7 @@ def test_every_input_is_closed_when_one_close_fails() -> None:
     op = operators.SemiJoin()
 
     async def go() -> None:
-        first, second = channel_from_stream(left), channel_from_stream(right)
+        first, second = left.open_channel(), right.open_channel()
 
         async def failing_close() -> None:
             raise OSError("cannot close")

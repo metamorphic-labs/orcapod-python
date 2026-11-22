@@ -2,7 +2,7 @@
 
 A stream is primary and owns the description; a channel is a separate, single-pass
 carrier of the stream's rows as Arrow record batches. An input channel is opened from a
-complete stream (``channel_from_stream``) or from an output channel
+complete stream (``stream.open_channel()``) or from an output channel
 (``OutputChannel.open_reader``); an output channel, once closed, gives its rows back as
 an ordinary stream (``result()``), and so does an input channel that is read to its end
 (``to_stream()``). One test per rule of the design's table "The hard semantics".
@@ -38,14 +38,14 @@ from orcapod.core.operators.static_output_pod import (
 )
 from orcapod.core.record_batch_channels import (
     BATCH_BUFFER_SIZE,
-    SOURCE_BATCH_ROWS,
-    InputChannel,
     OutputChannel,
     _schema_mismatch,  # pyright: ignore[reportPrivateUsage]  # the check itself is tested
-    channel_from_stream,
 )
+from orcapod.core.streams.record_batch_input import SOURCE_BATCH_ROWS, InputChannel
+from orcapod.core.nodes.source_node import SourceJobNode, SourceNode
 from orcapod.core.streams import ArrowTableStream
-from orcapod.errors import UpstreamFailedError
+from orcapod.errors import UnboundSourceError, UpstreamFailedError
+from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.sources import ArrowTableSource
 
 T = TypeVar("T")
@@ -97,7 +97,7 @@ def batches_of(stream: Any, rows: int = SOURCE_BATCH_ROWS) -> list[pa.RecordBatc
     """``stream``'s record batches, cut every ``rows`` rows."""
 
     async def read() -> list[pa.RecordBatch]:
-        return await channel_from_stream(stream).collect()
+        return await stream.open_channel().collect()
 
     return pa.Table.from_batches(run(read)).to_batches(max_chunksize=rows)
 
@@ -106,20 +106,39 @@ def batches_of(stream: Any, rows: int = SOURCE_BATCH_ROWS) -> list[pa.RecordBatc
 
 
 def test_a_channel_opened_on_a_stream_delivers_its_rows_and_refers_to_it() -> None:
-    """The record batches are the stream's rows; the description is the stream."""
+    """The record batches are the stream's rows in the row-built form; the description
+    is the stream, and ``to_stream()`` is the stream itself (all of the input, nothing
+    rebuilt)."""
     stream = source()
-    channel = channel_from_stream(stream)
+    channel = stream.open_channel()
 
     assert isinstance(channel, InputChannel)
     assert isinstance(channel, ReadableChannel)
     as_protocol: RecordBatchInput = channel  # what an operator reads (type-checked)
     assert as_protocol.stream is stream
-    delivered = run(channel.to_stream)
-    assert same(delivered.as_table(columns=ALL), R(stream))
-    assert delivered.keys() == stream.keys()
-    assert delivered.output_schema() == stream.output_schema()
-    assert delivered.data_context_key == stream.data_context_key
-    assert delivered.pipeline_hash() == stream.pipeline_hash()
+    batches = run(stream.open_channel().collect)
+    assert same(pa.Table.from_batches(batches), R(stream))
+    assert run(channel.to_stream) is stream
+    with pytest.raises(ChannelClosed):
+        _ = run(channel.receive)  # read to its end by to_stream()
+
+
+def test_a_source_node_opens_a_channel_on_its_rows() -> None:
+    """A source node is a stream too. A job's source node delivers its source's rows in
+    the row-built form, and ``to_stream()`` is the node itself. An unbound slot opens a
+    channel (opening reads nothing), and its first read raises."""
+    stream = source()
+    node = SourceJobNode.from_stream(stream, name="events")
+    assert isinstance(node, StreamProtocol)
+    batches = run(node.open_channel().collect)
+    assert same(pa.Table.from_batches(batches), R(node))
+    assert run(node.open_channel().to_stream) is node
+
+    slot = SourceNode.from_stream(stream, name="events")
+    assert isinstance(slot, StreamProtocol)
+    channel = slot.open_channel()
+    with pytest.raises(UnboundSourceError):
+        _ = run(channel.receive)
 
 
 def test_opening_a_channel_computes_nothing() -> None:
@@ -131,7 +150,7 @@ def test_opening_a_channel_computes_nothing() -> None:
         autospec=True,
         side_effect=ArrowTableSource.as_table,
     ) as read:
-        channel = channel_from_stream(stream)
+        channel = stream.open_channel()
         assert read.call_count == 0
         _ = run(channel.receive)
         assert read.call_count == 1
@@ -142,7 +161,7 @@ def test_two_channels_on_one_stream_have_their_own_positions() -> None:
     stream = source()
 
     async def read() -> tuple[int, int, int]:
-        first, second = channel_from_stream(stream), channel_from_stream(stream)
+        first, second = stream.open_channel(), stream.open_channel()
         one = await first.receive()
         rest = await second.collect()
         return one.num_rows, sum(b.num_rows for b in rest), len(await first.collect())
@@ -160,7 +179,7 @@ def test_a_stream_is_read_in_record_batches_of_bounded_size() -> None:
         tag_only_columns=True,
         source_id="many",
     )
-    sizes = [batch.num_rows for batch in run(channel_from_stream(stream).collect)]
+    sizes = [batch.num_rows for batch in run(stream.open_channel().collect)]
     assert sizes == [SOURCE_BATCH_ROWS, 10]
 
 
@@ -168,7 +187,7 @@ def test_a_channel_is_read_once_and_the_stream_again() -> None:
     """A channel is single-pass; to read again, go back to a stream."""
 
     async def read() -> tuple[int, int]:
-        channel = channel_from_stream(source())
+        channel = source().open_channel()
         first = await channel.collect()
         with pytest.raises(ChannelClosed):
             _ = await channel.receive()
@@ -1044,7 +1063,7 @@ def test_fail_after_close_changes_nothing() -> None:
 def execute(
     op: StaticOutputOperatorPod,
     streams: Sequence[Any],
-    inputs: Callable[[], Awaitable[list[InputChannel]]],
+    inputs: Callable[[], Awaitable[list[RecordBatchInput]]],
 ) -> OutputChannel:
     """Run ``op`` over input channels; return its output channel."""
 
@@ -1074,7 +1093,7 @@ def test_an_operator_fails_its_output_when_its_input_failed(
     batches = batches_of(stream, 2)
     op = make_op()
 
-    async def inputs() -> list[InputChannel]:
+    async def inputs() -> list[RecordBatchInput]:
         feed = OutputChannel(stream)
         await feed.send(batches[0])
         feed.fail(OSError("disk gone"))
@@ -1134,8 +1153,8 @@ def test_an_operator_reads_its_input_to_the_end_and_closes_its_output() -> None:
     stream = source()
     op = SelectDataColumns(["subject", "trial", "note"])
 
-    async def inputs() -> list[InputChannel]:
-        return [channel_from_stream(stream)]
+    async def inputs() -> list[RecordBatchInput]:
+        return [stream.open_channel()]
 
     output = execute(op, [stream], inputs)
     assert same(output.result().as_table(columns=ALL), R(op(stream)))
