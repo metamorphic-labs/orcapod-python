@@ -287,7 +287,10 @@ def row_built_provenance(table: pa.Table) -> pa.Table:
     if not changed:
         return table
     return pa.Table.from_arrays(
-        columns, schema=pa.schema(fields, table.schema.metadata)
+        columns,
+        schema=pa.schema(
+            fields, cast("dict[bytes | str, bytes | str] | None", table.schema.metadata)
+        ),
     )
 
 
