@@ -57,6 +57,36 @@ def _arrow_schema_to_column_infos(schema: pa.Schema) -> list[ColumnInfo]:
     ]
 
 
+def _alike(parts: list[pa.Table]) -> list[pa.Table]:
+    """Stored and queued rows under one schema when they differ only in a column's
+    nullability: a store may read a column back ``NOT NULL`` (PostgreSQL's primary
+    key) that the queued rows declare nullable. Each such field is nullable when
+    either side's is, and the arrays are re-wrapped under it, never cast. Any other
+    difference is left for ``pa.concat_tables`` to refuse, as before."""
+    first = parts[0].schema
+    if any(part.schema.names != first.names for part in parts):
+        return parts
+    fields = []
+    for i, field in enumerate(first):
+        others = [part.schema.field(i) for part in parts[1:]]
+        loose = field.with_nullable(True)
+        if not all(
+            other.with_nullable(True).equals(loose, check_metadata=True)
+            for other in others
+        ):
+            return parts
+        fields.append(
+            field.with_nullable(field.nullable or any(o.nullable for o in others))
+        )
+    schema = pa.schema(fields, metadata=cast(Any, first.metadata))
+    return [
+        part
+        if part.schema.equals(schema, check_metadata=True)
+        else pa.Table.from_arrays(part.columns, schema=schema)
+        for part in parts
+    ]
+
+
 class ConnectorArrowDatabase:
     """Generic ``ArrowDatabaseProtocol`` implementation backed by a ``DBConnectorProtocol``.
 
@@ -701,7 +731,7 @@ class ConnectorArrowDatabase:
 
         if not parts:
             return None
-        table = parts[0] if len(parts) == 1 else pa.concat_tables(parts)
+        table = parts[0] if len(parts) == 1 else pa.concat_tables(_alike(parts))
         return self._handle_record_id_column(table, record_id_column)
 
     def get_records_by_ids(

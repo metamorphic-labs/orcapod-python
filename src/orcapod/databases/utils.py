@@ -283,12 +283,38 @@ def _same_field(given: "pa.Field[Any]", held: "pa.Field[Any]") -> bool:
     """Whether rows of ``given`` would be held as ``held`` holds them: the same type at
     every depth, in the large variants (a logical type is equal only to itself: its
     name, metadata and storage), and no change ``appended_field_change`` reports."""
+    # Eligibility is decided on the types as given, before normalization turns a
+    # view type into its large variant.
+    if not (_handled(given.type) and _handled(held.type)):
+        return False
     large = arrow_utils.normalize_to_large_types
     if not _same_type(
         large(given.type, keep_null=True), large(held.type, keep_null=True)
     ):
         return False
     return appended_field_change(held, given) is None
+
+
+def _handled(arrow_type: Any) -> bool:
+    """Whether every type in ``arrow_type``'s tree is one the comparison handles
+    (``_same_type``): a leaf kind of ``_LEAF_KINDS``, a struct, a map, a list, large
+    list or fixed-size list, or an extension type over those."""
+    t = pa.types
+    if isinstance(arrow_type, pa.ExtensionType):
+        return _handled(arrow_type.storage_type)
+    if t.is_struct(arrow_type):
+        return all(
+            _handled(arrow_type.field(i).type) for i in range(arrow_type.num_fields)
+        )
+    if t.is_map(arrow_type):
+        return _handled(arrow_type.key_type) and _handled(arrow_type.item_type)
+    if (
+        t.is_list(arrow_type)
+        or t.is_large_list(arrow_type)
+        or t.is_fixed_size_list(arrow_type)
+    ):
+        return _handled(cast(Any, arrow_type).value_type)
+    return any(getattr(t, kind)(arrow_type) for kind in _LEAF_KINDS)
 
 
 _LEAF_KINDS = (

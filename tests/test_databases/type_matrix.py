@@ -1064,7 +1064,9 @@ flushed in between or not. The in-memory database matches them to the rows still
 else the stored table; Delta to the rows still pending (it matches a stored table by name
 itself); a connector database (SQLite, PostgreSQL, SpiralDB) to the rows it has pending,
 and to the stored table when it writes or reads them, checking them first against the
-table as it is then, by exact name and type. A new table is written in the canonical
+table as it is then, by exact name and type (a column with field metadata stays in its
+queued order at a flush; SpiralDB, which keeps field metadata, matches a write by name
+itself). A new table is written in the canonical
 column order, in every database: the record id, then every other column sorted by name
 (by code point, so upper case before `_` before lower case). It is the order SpiralDB
 stores and reads every table in, whatever the order written (measured on SpiralDB

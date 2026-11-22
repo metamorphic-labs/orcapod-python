@@ -508,6 +508,20 @@ def test_swapped_same_typed_keys_store_different_signature_hashes(
     contents = stored.column("__pf_var_function_content_hash").to_pylist()
     assert len(signatures) == len(orders) and len(set(signatures)) == len(orders)
     assert len(set(contents)) == 1
+    # Each row is its own order's: matched by that order's signature hash, it holds
+    # the function's values, for that order's input, under that order's keys. A row
+    # that took another row's signature, or an append that swapped two same-typed
+    # output columns, would fail here.
+    by_signature = {
+        row["__pf_var_function_signature_hash"]: row for row in stored.to_pylist()
+    }
+    for index, order in enumerate(orders):
+        expected_signature = _record(_build("from_fn", fn, list(order)))[
+            "function_signature_hash"
+        ]
+        row = by_signature[expected_signature]
+        values = fn(index + 1, 2)
+        assert {key: row[key] for key in order} == dict(zip(order, values)), order
 
 
 _PRINT_RECORD = """
