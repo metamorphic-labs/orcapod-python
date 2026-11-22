@@ -8,7 +8,12 @@ from .operator_pod import OperatorPodProtocol
 from .data_function import DataFunctionProtocol
 from .pod import ArgumentGroup, PodProtocol
 from .sources import DynamicSourceProtocol, SourceProtocol
-from .streams import StreamViewProtocol, StreamProtocol
+from .streams import (
+    RecordBatchInput,
+    RecordBatchOutput,
+    StreamProtocol,
+    StreamViewProtocol,
+)
 from .side_effect_pod import SideEffectPodProtocol
 from .trackers import TrackerProtocol, TrackerManagerProtocol
 
@@ -21,6 +26,8 @@ __all__ = [
     "SourceProtocol",
     "StreamViewProtocol",
     "StreamProtocol",
+    "RecordBatchInput",
+    "RecordBatchOutput",
     "PodProtocol",
     "ArgumentGroup",
     "PipelineElementProtocol",

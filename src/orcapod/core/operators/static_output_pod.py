@@ -3,13 +3,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from abc import abstractmethod
-from collections.abc import Collection, Iterable, Iterator, Sequence
+from collections.abc import Collection, Coroutine, Iterable, Iterator, Sequence
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, cast
 
 import pyarrow as pa
 
-from orcapod.protocols.core_protocols.record_batch_channels import (
+from orcapod.protocols.core_protocols.streams import (
     RecordBatchInput,
     RecordBatchOutput,
 )
@@ -842,6 +842,8 @@ class StaticOutputOperatorPod(TraceableBase):
             )
         typed = StaticOutputOperatorPod._zero_row_input(upstream)
         if typed is not None:
+            # A complete output with no row, in the row-built form (``ROW_BUILT_OUTPUT``).
+            setattr(typed, ROW_BUILT_OUTPUT, True)
             return typed
         # Build an empty table preserving declared field nullability.
         tag_schema, data_schema = upstream.output_schema(
@@ -900,7 +902,7 @@ class StaticOutputOperatorPod(TraceableBase):
             # otherwise it would fall back to a root's schema-only hash and an
             # operator would name its system tags after that. A source's pipeline
             # hash is that schema-only hash already.
-            return _RowsOfStream(
+            stream: StreamProtocol = _RowsOfStream(
                 table,
                 tag_columns=tag_keys,
                 pipeline_hash=upstream.pipeline_hash(),
@@ -908,16 +910,23 @@ class StaticOutputOperatorPod(TraceableBase):
                 upstreams=upstream.upstreams,
                 data_context=context,
             )
-        # No ``source_info`` argument: the table's own ``_source_*`` columns
-        # pass through, one value per row.
-        return ArrowTableStream(
-            table,
-            tag_columns=tag_keys,
-            data_tags=data_tags,
-            producer=upstream.producer,
-            upstreams=upstream.upstreams,
-            data_context=context,
-        )
+        else:
+            # No ``source_info`` argument: the table's own ``_source_*`` columns
+            # pass through, one value per row.
+            stream = ArrowTableStream(
+                table,
+                tag_columns=tag_keys,
+                data_tags=data_tags,
+                producer=upstream.producer,
+                upstreams=upstream.upstreams,
+                data_context=context,
+            )
+        # Every complete node output in the row-built form ends here (the rows'
+        # rebuild, F's output, a stored-table output) or, with no row, in
+        # ``_materialize_upstream``'s zero-row input: the places that mark it
+        # (ITL-1347): ``channel_to_stream`` may give it as it is.
+        setattr(stream, ROW_BUILT_OUTPUT, True)
+        return stream
 
     @staticmethod
     def _materialize_input_stream(
@@ -1026,7 +1035,7 @@ class StaticOutputOperatorPod(TraceableBase):
 
         A row-by-row operator (``ROW_BY_ROW``) is applied to each record batch as it
         arrives and sends that batch's result at once. Every other operator reads
-        all of its inputs first (``InputChannel.to_stream``) and then runs exactly
+        all of its inputs first (``channel_to_stream``) and then runs exactly
         the sync call, so an input with no rows gives the typed zero-row result of
         the sync path, with no row to send.
 
@@ -1138,12 +1147,17 @@ async def _streams_of(inputs: Sequence[RecordBatchInput]) -> list[StreamProtocol
         UpstreamFailedError: If an input's producer failed; the other inputs are no
             longer read.
     """
-    tasks = [asyncio.ensure_future(channel.to_stream()) for channel in inputs]
+    tasks: list[asyncio.Future[StreamProtocol]] = []
     try:
+        for channel in inputs:
+            tasks.append(asyncio.ensure_future(channel_to_stream(channel)))
         return list(await asyncio.gather(*tasks))
     except BaseException:
+        # Every conversion already started is cancelled and awaited: none is left
+        # running, or raising with nobody to hear it.
         for task in tasks:
             _ = task.cancel()
+        _ = await asyncio.gather(*tasks, return_exceptions=True)
         raise
 
 
@@ -1191,6 +1205,69 @@ def transport_schema(stream: StreamProtocol) -> pa.Schema | None:
     return row_built_provenance(zero_rows.select(names)).schema
 
 
+ROW_BUILT_OUTPUT = "_orcapod_row_built_output"
+"""The attribute that marks a complete node output in the row-built form (ITL-1347).
+
+Set where every such output is made (``_as_upstream_stream``, and the zero-row input
+of ``_materialize_upstream``), never inferred from a class: such a stream is a
+complete, immutable output already in the row-built form, so a consumer of its record
+batches would rebuild exactly it, and ``channel_to_stream`` may give it without
+reading.
+"""
+
+
+def channel_to_stream(
+    channel: RecordBatchInput,
+) -> Coroutine[Any, Any, StreamProtocol]:
+    """Return what an input channel delivers, as a stream: the one such conversion.
+
+    It reads the channel to its end (one pass; every error of the read, such as an
+    unbound source's or a failed producer's, is raised here, before any operator runs)
+    and builds a fixed snapshot of what was delivered through the one settlement path
+    (``stream_from_batches``). The only shortcut: a channel opened on a complete
+    complete node output in the row-built form (``ROW_BUILT_OUTPUT``), not read yet, gives
+    that stream, which is exactly what its batches would rebuild; the channel is then
+    closed. A reader of an output channel always collects, whatever its description.
+
+    The channel is reserved when this function is called, before the returned
+    coroutine is awaited, so nothing can read it in between; the task that runs the
+    coroutine takes the channel over, and any other task's read is refused.
+
+    Args:
+        channel: The input channel, not read yet.
+
+    Returns:
+        The conversion to await: a complete, re-readable stream of the channel's
+        input.
+
+    Raises:
+        RuntimeError: If a read of the channel was already called (a batch received,
+            its end reached, or another consumer still waiting): a stream of part of
+            an input is never made, and a channel is never read again.
+        ChannelClosed: If the channel was closed, before or during the read.
+        UpstreamFailedError: If the producer failed or was cancelled.
+    """
+    claim = channel.reserve()  # at call time: nothing can read it before the await
+    return _channel_to_stream(channel, claim)
+
+
+async def _channel_to_stream(
+    channel: RecordBatchInput, claim: object
+) -> StreamProtocol:
+    """Read a reserved channel and return its input as a stream (``channel_to_stream``).
+
+    Args:
+        channel: The channel ``channel_to_stream`` reserved.
+        claim: Its claim, which the task running this conversion takes over.
+    """
+    channel.reserve(claim)
+    opened_on = channel.opened_on
+    if opened_on is not None and getattr(opened_on, ROW_BUILT_OUTPUT, False):
+        await channel.close()
+        return opened_on
+    return stream_from_batches(channel.stream, await channel.collect())
+
+
 def stream_from_batches(
     stream: StreamProtocol, batches: Sequence[pa.RecordBatch]
 ) -> StreamProtocol:
@@ -1198,7 +1275,7 @@ def stream_from_batches(
 
     The one place a stream is made from Arrow record batches: what an output channel
     gives once closed (``OutputChannel.result``), what an input channel delivered
-    (``InputChannel.to_stream``), and the record batches a row-by-row operator is
+    (``channel_to_stream``), and the record batches a row-by-row operator is
     applied to. The batches are put under one another in the order given, and the
     table is handed on as a node hands its rows to its successors
     (``_output_stream``): in the row-built form, each system-tag and source-info field
@@ -1217,7 +1294,39 @@ def stream_from_batches(
     if not batches:
         return StaticOutputOperatorPod._materialize_upstream([], stream)  # pyright: ignore[reportPrivateUsage]  # the zero-row input of an operator
     table = pa.Table.from_batches([with_open_provenance_flags(b) for b in batches])
-    return StaticOutputOperatorPod._output_stream(table, stream.keys(), stream)  # pyright: ignore[reportPrivateUsage]  # F and the identity, stage 2's
+    return StaticOutputOperatorPod._output_stream(  # pyright: ignore[reportPrivateUsage]  # F and the identity, stage 2's
+        table, _keys_in_delivered_order(stream.keys(), table.column_names), stream
+    )
+
+
+def _keys_in_delivered_order(
+    keys: tuple[Sequence[str], Sequence[str]], names: Sequence[str]
+) -> tuple[list[str], list[str]]:
+    """The description's tag and data keys, in the order the delivered rows have them.
+
+    The roles come from the description; the order from the batches, so a stream
+    made from them keeps the columns as they were delivered. They agree for every
+    stream whose description follows its rows (an operator's or a function's);
+    a source node whose plain tags are declared in another order than its columns
+    describes itself in the slot's order (ITL-1365) while its rows are not.
+
+    Args:
+        keys: The describing stream's tag keys and data keys.
+        names: The delivered table's column names.
+
+    Returns:
+        The tag keys and the data keys, data-tags first in tag order.
+    """
+    tag_keys, data_keys = keys
+    tags, data = set(tag_keys), set(data_keys)
+    position = {name: i for i, name in enumerate(names)}
+    ordered_tags = sorted(tag_keys, key=lambda n: position.get(n, len(names)))
+    data_tags = [n for n in ordered_tags if n in data]
+    plain = sorted(
+        (n for n in data_keys if n not in tags),
+        key=lambda n: position.get(n, len(names)),
+    )
+    return ordered_tags, data_tags + plain
 
 
 def with_open_provenance_flags(batch: pa.RecordBatch) -> pa.RecordBatch:

@@ -1346,21 +1346,26 @@ data. The rules:
   context from those datagrams (`data_context_key`). Add new async operators to
   `tests/test_core/operators/test_async_sync_equivalence.py`.
 - Record-batch channels (ITL-1347, ITL-1362; not wired into nodes or orchestrators yet):
-  `orcapod.core.record_batch_channels.InputChannel` / `OutputChannel` carry a stream's rows as
-  Arrow record batches; operators see them only through the protocols `RecordBatchInput` /
-  `RecordBatchOutput` of `protocols/core_protocols/record_batch_channels.py`, which imports no
-  concrete core module (keep modules interacting through protocols: basedpyright counts local
-  and `TYPE_CHECKING` imports as import cycles). A channel owns no description: an input
-  channel refers to its stream (`channel_from_stream(stream)`), an output channel to the
-  stream it produces, and `OutputChannel.result()` closes it into that stream. The conversions
-  are in one place, `core/operators/static_output_pod.py` (`stream_from_batches`,
-  `transport_schema`, and F, `_row_built_form`); never build a stream from record batches
-  elsewhere. An operator's record-batch form (`async_execute_batches`, renamed `async_execute`
-  when wired) applies its one `static_process` body: per record batch when the class declares
-  `ROW_BY_ROW = True` (each output row comes from one input row), otherwise as a barrier over
-  the whole input (`to_stream()`); `Batch` with a size has its own form, grouping rows by
-  arrival. A new operator whose output rows each come from one input row declares
-  `ROW_BY_ROW`; write no other per-operator batch code.
+  `InputChannel` (`core/streams/record_batch_input.py`) and `OutputChannel`
+  (`core/record_batch_channels.py`) carry a stream's rows as Arrow record batches; operators
+  see them only through the protocols `RecordBatchInput` / `RecordBatchOutput` of
+  `protocols/core_protocols/streams.py` (beside `StreamProtocol`), which imports no concrete
+  core module (keep modules interacting through protocols: basedpyright counts local and
+  `TYPE_CHECKING` imports as import cycles). A channel owns no description: an input channel
+  refers to its stream (`stream.open_channel()`), an output channel to the stream it produces,
+  and `OutputChannel.result()` closes it into that stream. The conversions are in one place,
+  `core/operators/static_output_pod.py` (`stream_from_batches`, `transport_schema`, and F,
+  `_row_built_form`); never build a stream from record batches elsewhere.
+  `channel_to_stream(channel)` is the one conversion from an input channel to a stream: it
+  reads the channel to its end (one pass, every read error raised before an operator runs) and
+  rebuilds a fixed snapshot through `stream_from_batches`; only an unread channel whose stream
+  `_output_stream` built (`ROW_BUILT_OUTPUT`, set there only) gives that stream as it is. An
+  operator's record-batch form (`async_execute_batches`, renamed `async_execute` when wired)
+  applies its one `static_process` body: per record batch when the class declares `ROW_BY_ROW
+  = True` (each output row comes from one input row), otherwise as a barrier over the whole
+  input (`channel_to_stream`); `Batch` with a size has its own form, grouping rows by arrival.
+  A new operator whose output rows each come from one input row declares `ROW_BY_ROW`; write
+  no other per-operator batch code.
 - The type converter keys synthesized struct classes by the large-normalized struct, so
   `struct<b: string>` and `struct<b: large_string>` are one Python type (a workaround,
   `TODO(ITL-841)`).

@@ -7,7 +7,7 @@ import numpy as np
 import pyarrow as pa
 
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
-from orcapod.protocols.core_protocols.record_batch_channels import (
+from orcapod.protocols.core_protocols.streams import (
     RecordBatchInput,
     RecordBatchOutput,
 )
