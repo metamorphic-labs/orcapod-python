@@ -268,7 +268,10 @@ def test_store_read_back_keeps_tag_type(
 def _as_written_before_the_fix(root: pathlib.Path) -> None:
     """Rewrite every Delta table under ``root`` as a build before ITL-928 left it.
 
-    Such a build stored a ``uint32`` column as Delta's ``int32`` with no recorded type.
+    Such a build stored a ``uint32`` column as Delta's ``int32`` with no recorded type:
+    the record is removed from the tag ``k`` only. (Every other column keeps its record:
+    an append to a list column stored without one is refused, ITL-1334, which is not
+    what this test is about.)
     """
     import deltalake
 
@@ -281,6 +284,8 @@ def _as_written_before_the_fix(root: pathlib.Path) -> None:
             f.with_metadata(
                 {k: v for k, v in (f.metadata or {}).items() if k != ARROW_TYPE_KEY}
             )
+            if f.name == "k"
+            else f
             for f in table.schema
         ]
         deltalake.write_deltalake(
