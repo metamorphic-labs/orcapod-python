@@ -273,6 +273,36 @@ def test_a_rebind_before_the_first_read_is_read_whole() -> None:
     assert same(pa.Table.from_batches(batches), R(expected))
 
 
+def test_a_source_nodes_conversion_keeps_the_delivered_column_order() -> None:
+    """Plain tags declared ``k, j`` over physical columns ``x, j, k, y``: the stream
+    ``channel_to_stream`` makes keeps the columns in the order they were delivered
+    (the node's rows), though the node describes itself in the slot's order."""
+    stream = ArrowTableSource(
+        pa.table(
+            {
+                "x": pa.array([1, 2], pa.int64()),
+                "j": pa.array([3, 4], pa.int64()),
+                "k": pa.array([5, 6], pa.int64()),
+                "y": pa.array([7.5, 8.5], pa.float64()),
+            }
+        ),
+        tag_columns=["k", "j"],
+        tag_only_columns=True,
+        source_id="ordered",
+    )
+    node = SourceJobNode.from_stream(stream, name="ordered")
+    assert node.keys()[0] == ("j", "k")  # the slot's order
+
+    async def read() -> tuple[list[str], list[str]]:
+        batches = await node.open_channel().collect()
+        rebuilt = await channel_to_stream(node.open_channel())
+        return batches[0].schema.names, rebuilt.as_table(columns=ALL).column_names
+
+    delivered, rebuilt = run(read)
+    assert delivered[:2] == ["k", "j"]
+    assert rebuilt == delivered
+
+
 @pytest.mark.xfail(
     strict=True,
     raises=ValueError,
@@ -473,6 +503,129 @@ def test_a_conversion_reserves_the_reader_when_it_is_created(retain: bool) -> No
     assert run(read) == 2
 
 
+def test_a_claim_is_taken_over_once() -> None:
+    """A redeemed claim cannot be redeemed again: the channel stays with the task that
+    took it over."""
+    stream = source(2)
+    batches = batches_of(stream, 1)
+
+    async def read() -> int:
+        output = OutputChannel(stream)
+        reader = output.open_reader()
+        for batch in batches:
+            await output.send(batch)
+        await output.close()
+        claim = reader.reserve()
+        _ = reader.reserve(claim)
+
+        async def thief() -> None:
+            _ = reader.reserve(claim)
+
+        with pytest.raises(RuntimeError, match="claimed by another consumer"):
+            await asyncio.ensure_future(thief())
+        return len(await reader.collect())
+
+    assert run(read) == 2
+
+
+def test_a_reader_releases_its_consumer_task_at_its_end_and_on_close() -> None:
+    """The consumer task is not kept by the reader once it has nothing left to read:
+    after the end, or after ``close()``."""
+    stream = source(2)
+    batches = batches_of(stream, 1)
+
+    async def read() -> tuple[bool, bool]:
+        released: list[bool] = []
+        for ending in ("end", "close"):
+            output = OutputChannel(stream)
+            reader = output.open_reader()
+            for batch in batches:
+                await output.send(batch)
+            await output.close()
+
+            async def consume() -> None:
+                if ending == "end":
+                    _ = await reader.collect()
+                else:
+                    _ = await reader.receive()
+                    await reader.close()
+
+            task = asyncio.ensure_future(consume())
+            await task
+            reference = weakref.ref(task)
+            del task
+            await asyncio.sleep(0)  # the loop drops its own references to the task
+            gc.collect()
+            released.append(reference() is None)
+        return released[0], released[1]
+
+    assert run(read) == (True, True)
+
+
+class _StoppingFeed:
+    """A feed whose second read raises ``StopAsyncIteration`` instead of returning
+    ``None``: a broken feed, not the end of its input."""
+
+    def __init__(self, batch: pa.RecordBatch) -> None:
+        self._batch: pa.RecordBatch | None = batch
+
+    async def next(self) -> pa.RecordBatch | None:
+        """Return the one batch, then raise ``StopAsyncIteration``."""
+        if self._batch is None:
+            raise StopAsyncIteration
+        batch, self._batch = self._batch, None
+        return batch
+
+    def close(self) -> None:
+        """Nothing to release."""
+
+    @property
+    def opened_on(self) -> None:
+        """Not a complete stream's feed."""
+        return None
+
+
+def test_a_feed_raising_stop_async_iteration_is_a_read_error() -> None:
+    """Only a feed returning ``None`` ends a channel: a raised ``StopAsyncIteration``
+    is a read error, so ``collect()`` and a barrier never take one batch for all."""
+    stream = source(2)
+    (first, _) = batches_of(stream, 1)
+
+    async def read() -> None:
+        with pytest.raises(RuntimeError, match="StopAsyncIteration"):
+            _ = await InputChannel(stream, _StoppingFeed(first)).collect()
+        with pytest.raises(RuntimeError, match="StopAsyncIteration"):
+            _ = await channel_to_stream(InputChannel(stream, _StoppingFeed(first)))
+
+    run(read)
+
+
+def test_a_barrier_leaves_no_conversion_behind_when_an_input_was_read() -> None:
+    """A barrier whose second input was read already: its setup fails, and the first
+    input's conversion, already started, is cancelled and awaited, so no task fails
+    later with nobody to hear it."""
+    left = source(2)
+    right = source(2, source_id="other")
+    unheard: list[Any] = []
+
+    async def read() -> None:
+        asyncio.get_running_loop().set_exception_handler(
+            lambda _loop, context: unheard.append(context)
+        )
+        first, second = left.open_channel(), right.open_channel()
+        _ = await second.receive()
+        op = SemiJoin()
+        output = OutputChannel(op(left, right))
+        with pytest.raises(RuntimeError, match="read already"):
+            await op.async_execute_batches([first, second], output)
+        gc.collect()
+        await asyncio.sleep(0.01)
+
+    run(read)
+    gc.collect()
+    assert unheard == []
+
+
 def test_a_closed_reader_cannot_be_converted() -> None:
     """A reader closed before any read: ``channel_to_stream`` raises ``ChannelClosed``,
     as documented, not the error of a channel already read."""
@@ -492,6 +645,7 @@ class _ClosingFetch(FakeDynamicSource):
     early); its schema is declared, so nothing before the read fetches."""
 
     async def fetch(self, cursor: Any = None) -> Any:
+        """Record the fetch, then fail it as a source whose own input closed."""
         self.fetch_cursors.append(cursor)
         raise ChannelClosed("underlying input closed early")
 
@@ -547,10 +701,11 @@ def test_a_delivered_batch_is_not_kept_by_the_feed() -> None:
         first = await channel.receive()
         reference = weakref.ref(first)
         del first
+        gc.collect()
+        released_while_open = reference() is None  # before the channel is drained
         rest = await channel.collect()
         assert sum(batch.num_rows for batch in rest) == 3
-        gc.collect()
-        return reference() is None
+        return released_while_open
 
     assert run(read)
 
@@ -1298,6 +1453,8 @@ def test_overlapping_sends_reach_every_reader_in_one_order() -> None:
             return got
 
         async def close_after_sends() -> None:
+            """Close the output once both sends are done (they wait for the slow
+            reader's room, which its own consumer task frees)."""
             _ = await asyncio.gather(*sending)
             await output.close()
 
@@ -1442,6 +1599,8 @@ def test_without_retain_send_waits_for_room_in_every_reader() -> None:
         three_read = asyncio.Event()
 
         async def fast_consumer() -> int:
+            """The fast reader's one consumer: read three batches, signal, then wait
+            for the rest, which come only as the slow reader makes room."""
             got = [await fast.receive() for _ in range(3)]
             three_read.set()
             return len(got) + len(await fast.collect())
@@ -1535,7 +1694,8 @@ def test_a_failed_producer_is_never_a_normal_end(retain: bool) -> None:
         first_read = asyncio.Event()
 
         async def waiting_consumer() -> Any:
-            # One consumer for the reader: it reads a batch, then waits for the next.
+            """The reader's one consumer: read a batch, signal, then wait for the next,
+            which the producer's failure ends."""
             _ = await waiting.receive()
             first_read.set()
             return await waiting.receive()

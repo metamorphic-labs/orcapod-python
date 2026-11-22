@@ -282,11 +282,15 @@ def test_a_row_by_row_operator_sends_each_batch_as_it_arrives(case: Case) -> Non
             await asyncio.wait_for(feed.send(batch), TIMEOUT)
             if rows_wanted:
                 # This row's result arrives before the next row is sent.
-                result = await asyncio.wait_for(results.receive(), TIMEOUT)
+                # asyncio.timeout, not wait_for: on Python 3.11 wait_for reads in
+                # another task, and a reader has one consumer.
+                async with asyncio.timeout(TIMEOUT):
+                    result = await results.receive()
                 assert result.num_rows == rows_wanted
                 received.append(result)
         await feed.close()
-        assert await asyncio.wait_for(results.collect(), TIMEOUT) == []
+        async with asyncio.timeout(TIMEOUT):
+            assert await results.collect() == []
         await asyncio.wait_for(task, TIMEOUT)
         return received
 
@@ -328,11 +332,13 @@ def test_batch_sends_each_full_batch_before_the_input_ends() -> None:
         one_row = _cut(rows, (1,))
         await feed.send(one_row[0])
         await feed.send(one_row[1])
-        first = await asyncio.wait_for(results.receive(), TIMEOUT)
+        async with asyncio.timeout(TIMEOUT):
+            first = await results.receive()
         assert not task.done()
         await feed.send(one_row[2])
         await feed.close()
-        rest = await asyncio.wait_for(results.collect(), TIMEOUT)
+        async with asyncio.timeout(TIMEOUT):
+            rest = await results.collect()
         await task
         return first.num_rows, sum(batch.num_rows for batch in rest)
 
@@ -675,7 +681,8 @@ def test_a_failing_close_of_the_output_fails_it() -> None:
         with pytest.raises(OSError, match="flush failed"):
             await op.async_execute_batches([source.open_channel()], output)
         with pytest.raises(UpstreamFailedError):
-            _ = await asyncio.wait_for(results.collect(), TIMEOUT)
+            async with asyncio.timeout(TIMEOUT):
+                _ = await results.collect()
 
     asyncio.run(go())
 

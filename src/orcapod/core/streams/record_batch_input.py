@@ -94,7 +94,10 @@ class InputChannel:
 
     @property
     def unread(self) -> bool:
-        """Whether no read was called and the channel is not closed."""
+        """Whether no read was called and the channel is not closed.
+
+        A reserved channel (``reserve()``) is not unread, even before its first read.
+        """
         return not self._started and not self._ended and not self._closed
 
     @property
@@ -135,6 +138,7 @@ class InputChannel:
                     + "another consumer."
                 )
             self._owner = _current_task()
+            self._claim = None  # redeemed: a later reserve(claim) is refused
             return claim
         if self._started or self._ended or self._owner is not None:
             raise RuntimeError(
@@ -200,12 +204,20 @@ class InputChannel:
         except asyncio.CancelledError:
             await self.close()
             raise
+        except StopAsyncIteration as error:
+            # Only ``None`` is the feed's end: a raised StopAsyncIteration would end
+            # an ``async for`` over part of the input.
+            raise RuntimeError(
+                f"The read of the input channel of {_named(self._stream)} raised "
+                + "StopAsyncIteration; a feed ends by returning None."
+            ) from error
         finally:
             self._reading = False
         if batch is None:
             if self._closed:  # woken by its own early close
                 raise self._closed_early()
             self._ended = True
+            self._owner = None  # nothing left to read: the consumer is released
             raise ChannelClosed()
         self._received += 1
         return batch
@@ -248,10 +260,16 @@ class InputChannel:
         return [batch async for batch in self]
 
     async def close(self) -> None:
-        """Stop reading. The producer no longer waits for this reader."""
+        """Stop reading. The producer no longer waits for this reader.
+
+        Callable from any task. The consumer task is released: no read is taken
+        after a close, from any task.
+        """
         if not self._ended:
             self._closed = True
         self._ended = True
+        self._owner = None
+        self._claim = None
         self._feed.close()
 
 

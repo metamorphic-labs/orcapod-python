@@ -620,7 +620,10 @@ class RecordBatchInput(Protocol):
 
     @property
     def unread(self) -> bool:
-        """Whether no read was called and the channel is not closed."""
+        """Whether no read was called and the channel is not closed.
+
+        A reserved channel (``reserve()``) is not unread, even before its first read.
+        """
         ...
 
     @property
@@ -632,8 +635,10 @@ class RecordBatchInput(Protocol):
     def reserve(self, claim: object | None = None) -> object:
         """Take the channel for one consumer that will read all of it.
 
-        Without ``claim``, the calling task takes the unread channel and gets a claim;
-        with that claim, another task (the one that will read it) takes it over.
+        Without ``claim``, the unread channel is held for the returned claim, not for
+        the calling task: no task, the reserving one included, can read it until a
+        task takes it over with that claim (``reserve(claim)``), after which only
+        that task reads it. A claim is taken over once.
 
         Raises:
             RuntimeError: If a read was called on it already, or ``claim`` is not its

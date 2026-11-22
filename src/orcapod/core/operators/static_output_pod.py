@@ -1017,12 +1017,17 @@ async def _streams_of(inputs: Sequence[RecordBatchInput]) -> list[StreamProtocol
         UpstreamFailedError: If an input's producer failed; the other inputs are no
             longer read.
     """
-    tasks = [asyncio.ensure_future(channel_to_stream(channel)) for channel in inputs]
+    tasks: list[asyncio.Future[StreamProtocol]] = []
     try:
+        for channel in inputs:
+            tasks.append(asyncio.ensure_future(channel_to_stream(channel)))
         return list(await asyncio.gather(*tasks))
     except BaseException:
+        # Every conversion already started is cancelled and awaited: none is left
+        # running, or raising with nobody to hear it.
         for task in tasks:
             _ = task.cancel()
+        _ = await asyncio.gather(*tasks, return_exceptions=True)
         raise
 
 
@@ -1157,7 +1162,39 @@ def stream_from_batches(
     if not batches:
         return StaticOutputOperatorPod._materialize_upstream([], stream)  # pyright: ignore[reportPrivateUsage]  # the zero-row input of an operator
     table = pa.Table.from_batches([with_open_provenance_flags(b) for b in batches])
-    return StaticOutputOperatorPod._output_stream(table, stream.keys(), stream)  # pyright: ignore[reportPrivateUsage]  # F and the identity, stage 2's
+    return StaticOutputOperatorPod._output_stream(  # pyright: ignore[reportPrivateUsage]  # F and the identity, stage 2's
+        table, _keys_in_delivered_order(stream.keys(), table.column_names), stream
+    )
+
+
+def _keys_in_delivered_order(
+    keys: tuple[Sequence[str], Sequence[str]], names: Sequence[str]
+) -> tuple[list[str], list[str]]:
+    """The description's tag and data keys, in the order the delivered rows have them.
+
+    The roles come from the description; the order from the batches, so a stream
+    made from them keeps the columns as they were delivered. They agree for every
+    stream whose description follows its rows (an operator's or a function's);
+    a source node whose plain tags are declared in another order than its columns
+    describes itself in the slot's order (ITL-1365) while its rows are not.
+
+    Args:
+        keys: The describing stream's tag keys and data keys.
+        names: The delivered table's column names.
+
+    Returns:
+        The tag keys and the data keys, data-tags first in tag order.
+    """
+    tag_keys, data_keys = keys
+    tags, data = set(tag_keys), set(data_keys)
+    position = {name: i for i, name in enumerate(names)}
+    ordered_tags = sorted(tag_keys, key=lambda n: position.get(n, len(names)))
+    data_tags = [n for n in ordered_tags if n in data]
+    plain = sorted(
+        (n for n in data_keys if n not in tags),
+        key=lambda n: position.get(n, len(names)),
+    )
+    return ordered_tags, data_tags + plain
 
 
 def with_open_provenance_flags(batch: pa.RecordBatch) -> pa.RecordBatch:
