@@ -20,6 +20,7 @@ from orcapod import PipelineJob, function_pod
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import ProvisionalHashWarning
+from orcapod.pipeline.observer import NoOpObserver
 from tests.test_core.operators.several_items import MAIN, arrangements, make_source
 from tests.test_pipeline.test_stream_transport_equivalence import (
     _rebuilt,  # pyright: ignore[reportPrivateUsage]  # the row rebuild these tests share
@@ -115,3 +116,37 @@ def test_duplicate_inputs_give_one_row_each(compared: list[int]) -> None:
     _job(source, tripled, database).run()
     _job(source, tripled, database).run()
     assert compared == [4, 4]
+
+
+class _ReadsRows(NoOpObserver):
+    """Records every input row an observer is shown, as its values."""
+
+    def __init__(self) -> None:
+        self.rows: list[tuple[Any, Any]] = []
+
+    def contextualize(self, *identity_path: str) -> _ReadsRows:
+        return self
+
+    def on_data_start(self, node_label: str, tag: Any, data: Any) -> None:
+        self.rows.append(
+            (tag.as_dict(all_info=True), data.as_dict(columns={"source": True}))
+        )
+
+
+def test_an_observer_reading_the_input_rows_sees_them(compared: list[int]) -> None:
+    """On a run over stored results, the rows an observer reads are the input's rows.
+
+    The node shows its observers views of its input rows (``_RowView``), made when
+    read; their values are the rows' own.
+    """
+    database = InMemoryArrowDatabase()
+    source = _keyed(list(range(6)))
+    _job(source, tripled, database).run()
+    job = _job(source, tripled, database)
+    observer = _ReadsRows()
+    job.run(observer=observer)
+    expected = [
+        (tag.as_dict(all_info=True), data.as_dict(columns={"source": True}))
+        for tag, data in source.select_data_columns(["d1"]).iter_data()
+    ]
+    assert observer.rows == expected
