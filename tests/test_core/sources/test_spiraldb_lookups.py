@@ -119,6 +119,16 @@ def _sync_and_async_rows(source: SpiralDBTableSource) -> tuple[list[Any], list[A
     return sync, asyncio.run(collect())
 
 
+def _expected_rows(ks: list[int]) -> list[Any]:  # pyright: ignore[reportExplicitAny]  # rows
+    """The rows of ``_rows(..., ks)``, written out independently, tags and data merged."""
+    return sorted(
+        tuple(
+            sorted({"subject": f"s{k % 2}", "k": k, "x": 10 * k, "y": f"v{k}"}.items())
+        )
+        for k in ks
+    )
+
+
 @pytest.mark.parametrize("role", sorted(ROLES))
 def test_a_source_looks_its_table_up_once_to_build(
     calls: collections.Counter[str], role: str
@@ -138,8 +148,7 @@ def test_a_source_looks_its_table_up_once_to_build(
     assert {"x", "y"} <= set(data)
     assert (set(tags) <= set(data)) == (role == "data_tags")
     sync, async_ = _sync_and_async_rows(source)
-    assert len(sync) == 3
-    assert sorted(async_) == sorted(sync)
+    assert sorted(sync) == sorted(async_) == _expected_rows([0, 1, 2])
 
 
 @pytest.mark.parametrize("role", sorted(ROLES))
@@ -162,7 +171,7 @@ def test_each_check_looks_the_table_up_once(
         # Before ITL-1350: 3 lookups (id, schema, version).
         assert calls == {"lookup": 1, "schema": 1, "metadata": 1, "version": 1}
     sync, async_ = _sync_and_async_rows(source)
-    assert len(sync) == 3 and sorted(async_) == sorted(sync)
+    assert sorted(sync) == sorted(async_) == _expected_rows([0, 1, 2])
 
 
 @pytest.mark.parametrize("role", sorted(ROLES))
@@ -196,3 +205,28 @@ def test_the_connector_getters_answer_as_the_handle_does(
         )
         assert table.arrow_schema().names == _ARRANGED["layout"]
         assert connector.get_table_version("t") == table.version()
+
+
+@pytest.mark.parametrize("role", sorted(ROLES))
+def test_the_arrangements_give_the_same_rows_and_pipeline_hash(
+    tmp_path: Path, role: str
+) -> None:
+    """Two tables holding the same rows in the two arrangements: the same rows and the
+    same pipeline hash (a schema, in no column order); different content hashes, since
+    they are two tables (two table ids) and the key order is part of a row's record id."""
+    with fake_pyspiral.install(tmp_path / "spiral"):
+        project = fake_pyspiral.FakeSpiral().project(_PROJECT)
+        sources = {}
+        for name, (keys, layout) in ARRANGEMENTS.items():
+            table = project.create_table(f"default.{name}", key_schema=_keys(keys))
+            table.write(_rows(layout, [0, 1, 2]))
+            write_nullability_record(table, _schema(layout))
+            sources[name] = SpiralDBTableSource(
+                project_id=_PROJECT, table_name=name, tag_only_columns=ROLES[role]
+            )
+        first, second = sources.values()
+        for source in (first, second):
+            sync, async_ = _sync_and_async_rows(source)
+            assert sorted(sync) == sorted(async_) == _expected_rows([0, 1, 2])
+        assert first.pipeline_hash() == second.pipeline_hash()
+        assert first.content_hash() != second.content_hash()
