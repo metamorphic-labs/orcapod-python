@@ -191,3 +191,78 @@ def test_row_built_form_of_a_raw_stream(make: Any) -> None:
     assert formed.column_names == built.column_names
     assert formed.schema.equals(built.schema, check_metadata=True)
     assert_same_values(formed, built)
+
+
+def _source_table() -> pa.Table:
+    """A source's table with its system tags and source info (one tag, one data)."""
+    from orcapod.sources import DictSource
+
+    source = DictSource(
+        [{"k": 1, "x": 1}, {"k": 2, "x": 2}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="s",
+    )
+    return source.as_table(columns={"source": True, "system_tags": True})
+
+
+def test_empty_source_info_lists_are_outside_the_domain_of_the_row_built_form() -> None:
+    """F's one named exception: source-info tokens that are only empty lists.
+
+    No source or operator makes an empty token list. A hand-built raw stream can:
+    ``_rows_to_table`` types the tokens from their values (one list level, the empty
+    lists show no more), while F keeps the column's two levels. Pinned so that a
+    change to either side is seen (the refusal of such a stream is the developer's
+    decision).
+    """
+    table = _source_table()
+    position = table.schema.get_field_index("_source_x")
+    empty = pa.array([[], []], pa.large_list(pa.large_list(pa.large_string())))
+    stream = ArrowTableStream(
+        table.set_column(position, "_source_x", empty), tag_columns=["k"]
+    )
+    built, _, _ = StaticOutputOperatorPod._rows_to_table(list(stream.iter_data()))  # pyright: ignore[reportPrivateUsage]  # R, the oracle
+    formed = StaticOutputOperatorPod._row_built_form(  # pyright: ignore[reportPrivateUsage]  # F, under test
+        stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS), stream.keys()
+    )
+    assert built.schema.field("_source_x").type == pa.large_list(pa.large_string())
+    assert formed.schema.field("_source_x").type == pa.large_list(
+        pa.large_list(pa.large_string())
+    )
+
+
+def test_a_source_with_a_nullable_system_tag_is_not_bound() -> None:
+    """A system-tag field with a null never reaches a job: a slot refuses the source.
+
+    So F never meets one; ``_rows_to_table`` could not build its rows (two rows would
+    give the field two nullability flags).
+    """
+    from orcapod import PipelineJob
+    from orcapod.databases import InMemoryArrowDatabase
+    from orcapod.errors import SourceSpecMismatchError
+    from orcapod.sources import DictSource
+
+    source = DictSource(
+        [{"k": 1, "x": 1}, {"k": 2, "x": 2}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="s",
+    )
+    job = PipelineJob(name="nullable_system_tag", database=InMemoryArrowDatabase())
+    with job:
+        source.select_data_columns(["x"], label="selected")
+    table = _source_table()
+    record_id = next(
+        name
+        for name in table.column_names
+        if name.startswith(constants.SYSTEM_TAG_PREFIX) and "record_id" in name
+    )
+    position = table.schema.get_field_index(record_id)
+    with_null = table.set_column(
+        position,
+        pa.field(record_id, pa.large_string(), nullable=True),
+        pa.array(["row_0", None], pa.large_string()),
+    )
+    slot = next(label for label in job.nodes if label != "selected")
+    with pytest.raises(SourceSpecMismatchError, match="record_id"):
+        job.bind(sources={slot: ArrowTableStream(with_null, tag_columns=["k"])})
