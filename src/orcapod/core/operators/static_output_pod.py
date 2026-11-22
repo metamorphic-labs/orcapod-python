@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import logging
 from abc import abstractmethod
-from collections.abc import Collection, Iterator, Sequence
+from collections.abc import Collection, Iterable, Iterator, Sequence
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, cast
 
 import pyarrow as pa
 
@@ -64,6 +64,15 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from orcapod.protocols.hashing_protocols import SemanticHasherProtocol
+
+
+class SourceInfoTypesDisagree(ValueError):
+    """Two rows give one source-info column different types (``_row_built_form``).
+
+    A table built from such rows cannot be concatenated: the caller builds the rows
+    (``StaticOutputOperatorPod._rows_to_table``), which raises the error a table built
+    from rows raises, so the run fails as it does when rows are handed on.
+    """
 
 
 class StaticOutputOperatorPod(TraceableBase):
@@ -494,26 +503,80 @@ class StaticOutputOperatorPod(TraceableBase):
         return pa.Table.from_arrays(table.columns, schema=pa.schema(fields))
 
     @staticmethod
+    def _type_source_info_by_values(table: pa.Table) -> pa.Table:
+        """Type each source-info column from its tokens, as the rows of a table built from rows do.
+
+        A step of F (``_row_built_form``) on the complete table, beside
+        ``_flag_by_values``. A row's ``Data`` types each source-info token from its
+        value (``arrow_utils.source_info_arrow_type``, the one rule): a string or
+        ``None`` as ``large_string``, a list as ``large_list`` of its first informative
+        element's type, so a list of ``None`` or of empty lists shows fewer levels than
+        its column may declare. The rows' tables are then concatenated, which needs
+        every row to give a column one type. This step gives each column that type,
+        built from the same values. A ``large_string`` column is every row's type
+        already and is left as it is.
+
+        Args:
+            table: A table of user tags, system tags, data and source info, after the
+                per-slice steps (``streams.base.row_built_columns``).
+
+        Returns:
+            The table with each source-info column of the type its tokens give.
+
+        Raises:
+            SourceInfoTypesDisagree: If two rows give one source-info column different
+                types, where the rows' tables cannot be concatenated. The caller builds
+                the rows (``_rows_to_table``), which raises the error a table built from
+                rows raises.
+        """
+        from orcapod.system_constants import constants
+        from orcapod.utils import arrow_utils
+
+        columns = list(table.columns)
+        fields = list(table.schema)
+        changed = False
+        for index, field in enumerate(fields):
+            if not field.name.startswith(constants.SOURCE_PREFIX):
+                continue
+            if pa.types.is_large_string(field.type):
+                continue
+            values = table.column(index).to_pylist()
+            kinds = {arrow_utils.source_info_arrow_type(value) for value in values}
+            if len(kinds) != 1:
+                raise SourceInfoTypesDisagree(field.name)
+            (kind,) = kinds
+            if kind == field.type:
+                continue
+            columns[index] = pa.chunked_array([pa.array(values, type=kind)])
+            fields[index] = pa.field(field.name, kind, nullable=field.nullable)
+            changed = True
+        if not changed:
+            return table
+        return pa.Table.from_arrays(
+            columns,
+            schema=pa.schema(
+                fields,
+                cast("dict[bytes | str, bytes | str] | None", table.schema.metadata),
+            ),
+        )
+
+    @staticmethod
     def _row_built_form(
         table: pa.Table, keys: tuple[Sequence[str], Sequence[str]]
     ) -> pa.Table:
         """Return ``table`` as ``_rows_to_table`` builds it from the table's own rows.
 
-        F in the ITL-1347 spec: the same table, without making the rows. The columns,
-        their order and their types are decided row by row
-        (``streams.base.row_built_columns``), the system-tag and source-info field flags
-        by their values over the whole table (``_flag_by_values``). The equality with
-        ``_rows_to_table`` is tested over every operator, source kind and column role
-        (ITL-1347, L0-L2).
+        F in the ITL-1347 spec: the same table, without making the rows. Two steps:
 
-        Its domain: F equals ``_rows_to_table`` for every stream whose source-info tokens
-        are strings or non-empty lists of tokens, which is every stream a source or an
-        operator makes (a token list has one element per member of a batch, group or
-        merge). The one exception is a hand-built raw ``ArrowTableStream`` whose
-        source-info column is a list type holding only empty lists: a row types its
-        tokens from their values, so ``_rows_to_table`` loses the list levels the
-        empty lists do not show, while F keeps the column's type. Such a stream reaches
-        a job only when bound to a slot with a copied source-id and record-id pair.
+        - per slice (``streams.base.row_built_columns``), what each row decides on its
+          own: the columns, their order, their large types, and the provenance fields'
+          form (no system-tag field metadata, source-info lists of nullable items);
+        - on the complete table, what depends on the values of every row: each
+          source-info column's type, from its tokens (``_type_source_info_by_values``),
+          then the system-tag and source-info field flags (``_flag_by_values``).
+
+        The equality with ``_rows_to_table`` is tested over every operator, source kind,
+        column role and raw-stream provenance shape (ITL-1347, L0-L2).
 
         Args:
             table: A table of user tags, system tags, data and source info, with rows.
@@ -522,8 +585,38 @@ class StaticOutputOperatorPod(TraceableBase):
 
         Returns:
             The table ``_rows_to_table`` would build from its rows.
+
+        Raises:
+            SourceInfoTypesDisagree: If the rows' tokens give a source-info column two
+                types (``_type_source_info_by_values``).
         """
-        return StaticOutputOperatorPod._flag_by_values(row_built_columns(table, keys))
+        return StaticOutputOperatorPod._flag_by_values(
+            StaticOutputOperatorPod._type_source_info_by_values(
+                row_built_columns(table, keys)
+            )
+        )
+
+    @staticmethod
+    def _raise_as_rows_do(
+        rows: Iterable[tuple[TagProtocol, DataProtocol]],
+        error: SourceInfoTypesDisagree,
+    ) -> NoReturn:
+        """Build ``rows`` into a table to raise the error a table built from them raises.
+
+        Called when ``_row_built_form`` finds rows whose source-info tokens cannot make
+        one table (``SourceInfoTypesDisagree``): the rows' own concatenation
+        (``_rows_to_table``) raises exactly what a run that hands rows on raises.
+
+        Args:
+            rows: The rows of the table F was given, in order.
+            error: The disagreement F found, raised if the rows do concatenate.
+
+        Raises:
+            pyarrow.ArrowInvalid: As ``_rows_to_table`` raises it.
+            SourceInfoTypesDisagree: ``error``, if the rows concatenate after all.
+        """
+        StaticOutputOperatorPod._rows_to_table(list(rows))
+        raise error
 
     @staticmethod
     def _output_stream(

@@ -1235,7 +1235,10 @@ class SourceNodeBase(TraceableBase, ABC):
         Raises:
             UnboundSourceError: When no concrete data is available.
         """
-        from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+        from orcapod.core.operators.static_output_pod import (
+            SourceInfoTypesDisagree,
+            StaticOutputOperatorPod,
+        )
 
         node_label = self.label
         node_hash = self.content_hash().to_string()
@@ -1244,7 +1247,15 @@ class SourceNodeBase(TraceableBase, ABC):
         # The table and keys of this node's rows: a slot's own key order can differ
         # from its source's.
         table, keys = self._rows_table()
-        result = StaticOutputOperatorPod._output_stream(table, keys, self)
+        try:
+            result = StaticOutputOperatorPod._output_stream(table, keys, self)
+        except SourceInfoTypesDisagree as error:
+            # Rows whose source-info tokens cannot make one table: the node has read
+            # its rows, and the run fails where its rows are handed on, raising what
+            # their concatenation raises.
+            if observer is not None:
+                observer.on_node_end(node_label, node_hash)
+            StaticOutputOperatorPod._raise_as_rows_do(self.iter_data(), error)
         if observer is not None:
             observer.on_node_end(node_label, node_hash)
         return result

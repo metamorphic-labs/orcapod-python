@@ -38,7 +38,10 @@ from orcapod.core.data_tags import (
 )
 from orcapod.channels import Channel, ChannelClosed, ReadableChannel, WritableChannel
 from orcapod.config import OrcapodConfig
-from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+from orcapod.core.operators.static_output_pod import (
+    SourceInfoTypesDisagree,
+    StaticOutputOperatorPod,
+)
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
@@ -1688,11 +1691,16 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             # Check REPLAY cache first
             cached_output = self.get_cached_output()
             if cached_output is not None:
-                output = StaticOutputOperatorPod._output_stream(
-                    cached_output.as_table(columns=ZERO_ROW_INPUT_COLUMNS),
-                    cached_output.keys(),
-                    self,
-                )
+                try:
+                    output = StaticOutputOperatorPod._output_stream(
+                        cached_output.as_table(columns=ZERO_ROW_INPUT_COLUMNS),
+                        cached_output.keys(),
+                        self,
+                    )
+                except SourceInfoTypesDisagree as error:
+                    StaticOutputOperatorPod._raise_as_rows_do(
+                        cached_output.iter_data(), error
+                    )
                 ctx_obs.on_node_end(node_label, node_hash)
                 return output
 
@@ -1708,7 +1716,14 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
 
             # Cache, in row order with or without rows (ITL-1131, ITL-1133).
             if result_table.num_rows:
-                kept_table = StaticOutputOperatorPod._row_built_form(result_table, keys)
+                try:
+                    kept_table = StaticOutputOperatorPod._row_built_form(
+                        result_table, keys
+                    )
+                except SourceInfoTypesDisagree as error:
+                    StaticOutputOperatorPod._raise_as_rows_do(
+                        result_stream.iter_data(), error
+                    )
                 self._cached_output_stream = ArrowTableStream(
                     kept_table, tag_columns=tag_keys, data_tags=data_tags
                 )
