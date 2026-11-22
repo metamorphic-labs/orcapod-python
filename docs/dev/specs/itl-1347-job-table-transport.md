@@ -194,9 +194,13 @@ A run checks its sources first (ITL-1102), which polls them.
 **ITL-1307 later.** When `Schema` carries its Arrow schema, `arrow_schema()` reads the two
 schemas plus the system-tag and source-info fields, in one place (`StreamBase`).
 
-Two exceptions keep today's bytes:
-- **Source-info nullability** is decided by a complete Arrow table's values (F step 5).
-  `arrow_schema()` states those fields nullable (question 5).
+Three exceptions keep today's bytes:
+- **Source-info and system-tag nullability** is decided by a complete Arrow table's values
+  (F step 5). `arrow_schema()` states those fields nullable (question 5).
+- **Source-info types** are decided by a complete Arrow table's tokens, as each row types
+  its tokens from their values (`_type_source_info_by_values`): a list of `None` or of
+  empty lists shows fewer list levels than its column declares. `arrow_schema()` states the
+  declared token type; consumers must not rely on it (Codex on PR #485).
 - **`null` columns.** Rows carry `large_string`, and a zero-row Arrow table carries `null`, as
   today (ITL-1319).
 

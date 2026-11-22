@@ -23,14 +23,15 @@ from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.core.base import TraceableBase
 from orcapod.core.datagrams import Data, Tag
-from orcapod.core.data_tags import data_tag_names
 from orcapod.core.operators.drop_nulls import _without_none  # pyright: ignore[reportPrivateUsage]  # DropNulls' rule for removing None from a type, shared, never copied
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
+    keys_of_rows,
     stream_arrow_schema,
     schema_requires_io,
     typed_arrow_schemas,
+    typed_zero_row_input,
     typed_zero_row_table,
 )
 from orcapod.core.streams.view import (
@@ -154,6 +155,24 @@ class _DeclaredForm:
             source-info columns in declared order within the positions each group
             holds.
         """
+        table = self.retype(table)
+        return table.select(self._declared_positions(table.column_names))
+
+    def retype(self, table: pa.Table) -> pa.Table:
+        """Return *table*'s arrays under the declared fields, in *table*'s column order.
+
+        The fields ``apply`` gives (the columns in ``nullable`` flagged nullable, the
+        columns in ``renames`` renamed), without placing the columns: a table whose
+        columns are then selected by the rows' keys (the row-built form, ITL-1347)
+        needs no placement, and a table holding a data-tag once, among the tags, would
+        lose a column to a placement made for a row's separate tag and data tables.
+
+        Args:
+            table: Rows read from the bound source.
+
+        Returns:
+            The same arrays under the declared fields.
+        """
         schema = table.schema
         for position, field in enumerate(table.schema):
             if field.name in self.nullable:
@@ -162,8 +181,7 @@ class _DeclaredForm:
                 field = field.with_name(self.renames[field.name])
             schema = schema.set(position, field)  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
         # Same arrays under the declared fields: no cast, so no value or type changes.
-        table = pa.Table.from_arrays(table.columns, schema=schema)
-        return table.select(self._declared_positions(table.column_names))
+        return pa.Table.from_arrays(table.columns, schema=schema)
 
     def _declared_positions(self, names: list[str]) -> list[int]:
         """Return the column positions of *names* with each group in declared order.
@@ -185,30 +203,16 @@ class _DeclaredForm:
         return order
 
 
-def _keys_of_rows(
-    table: pa.Table, keys: tuple[Sequence[str], Sequence[str]]
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Return the tag and data keys a source's rows have, given its table and ``keys()``.
+def _each_once(order: Sequence[str], names: Sequence[str]) -> tuple[str, ...]:
+    """``order`` with each of ``names`` once: repeats dropped, missing names appended.
 
-    A source's rows come from a stream over its table (``ArrowTableStream``), whose rows
-    list their tags in the stream's tag order and their data with the data-tags first,
-    in tag order, then the other data columns in the table's order. A source whose
-    ``keys()`` states its declared order (a ``PollingSource`` whose fetched table has
-    another column order) has rows in the table's order all the same, as a table built
-    from its rows does (Codex on PR #485).
-
-    Args:
-        table: The source's table, as its rows are read from it.
-        keys: The source's ``keys()``.
-
-    Returns:
-        The tag keys, and the data keys in the order of the rows.
+    ``_DeclaredForm.apply`` places a row's columns; with one data-tag among two tags it
+    can place a column twice and lose another (ITL-1366, where ``main`` then fails to
+    build the rows). The keys keep its order and hold each name once (spec row e10).
     """
-    tag_keys, data_keys = (tuple(keys[0]), tuple(keys[1]))
-    data_tags = data_tag_names(tag_keys, data_keys)
-    data = set(data_keys) - set(tag_keys)
-    in_table = tuple(name for name in table.column_names if name in data)
-    return tag_keys, (*data_tags, *in_table)
+    wanted = set(names)
+    kept = tuple(dict.fromkeys(n for n in order if n in wanted))
+    return (*kept, *(n for n in names if n not in kept))
 
 
 def _system_tag_columns(
@@ -1220,7 +1224,7 @@ class SourceNodeBase(TraceableBase, ABC):
         """
         stream = cast("StreamProtocol", self)
         table = stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
-        return table, _keys_of_rows(table, stream.keys())
+        return table, keys_of_rows(table, stream.keys())
 
     def arrow_schema(self) -> pa.Schema:
         """The Arrow schema of the columns this stream passes between job nodes.
@@ -1742,23 +1746,54 @@ class SourceJobNode(SourceNodeBase):
             return self._bound_source.identity_structure()
         return super().identity_structure()
 
-    def _row_keys(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        """The tag and data keys of this node's rows, known without reading a row.
+    def _row_keys(
+        self, table: pa.Table | None = None
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """The tag and data keys of this node's rows, as ``iter_data`` gives them.
 
-        The bound source's keys; for a narrower source given as the declared schema
-        (``_DeclaredForm``), the declared order with the data-tags first among the data
-        keys, as the stream over its table lists them (``_declared_stream``); the slot's
-        own when unbound.
+        The bound source's rows have the keys of its table (``keys_of_rows``). A
+        narrower source's rows are given as the declared schema one by one
+        (``_declared_row``: its tag table and its data table each through
+        ``_DeclaredForm.apply``), so their keys are those of a zero-row tag table and a
+        zero-row data table of the bound source through the same ``apply``: a tag that
+        is also data takes its place from the declared data order, as on ``main``.
+
+        Args:
+            table: The bound source's table (``ZERO_ROW_INPUT_COLUMNS``, with or
+                without rows). Default: its typed zero-row table, which reads no row;
+                the declared keys when it cannot say its types without rows.
+
+        Returns:
+            The tag keys and the data keys of the rows.
         """
         if self._bound_source is None:
             return self.keys()
+        bound_keys = self._bound_source.keys()
+        if table is None:
+            table = typed_zero_row_input(self._bound_source)
+            if table is None:
+                return self.keys()
+        rows_keys = keys_of_rows(table, bound_keys)
         form = self._declared_form
-        if form is not None:
-            data_tags = data_tag_names(form.tag_order, form.data_order)
-            others = tuple(n for n in form.data_order if n not in data_tags)
-            return form.tag_order, (*data_tags, *others)
-        tag_keys, data_keys = self._bound_source.keys()
-        return tuple(tag_keys), tuple(data_keys)
+        if form is None:
+            return rows_keys
+        tag_keys, data_keys = rows_keys
+        names = table.column_names
+        system_tags = [n for n in names if n.startswith(constants.SYSTEM_TAG_PREFIX)]
+        source_info = [n for n in names if n.startswith(constants.SOURCE_PREFIX)]
+        empty = table.slice(0, 0)
+        tag_order = form.apply(empty.select([*tag_keys, *system_tags])).column_names
+        data_order = form.apply(empty.select([*data_keys, *source_info])).column_names
+        return (
+            _each_once(
+                [n for n in tag_order if not n.startswith(constants.SYSTEM_TAG_PREFIX)],
+                tag_keys,
+            ),
+            _each_once(
+                [n for n in data_order if not n.startswith(constants.SOURCE_PREFIX)],
+                data_keys,
+            ),
+        )
 
     def _rows_table(self) -> tuple[pa.Table, tuple[tuple[str, ...], tuple[str, ...]]]:
         """The table of this node's rows (``iter_data``) and the rows' keys.
@@ -1778,9 +1813,10 @@ class SourceJobNode(SourceNodeBase):
                 "Call job.bind(sources={'<name>': source}) before running."
             )
         table = self._bound_source.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+        keys = self._row_keys(table)
         if self._declared_form is None:
-            return table, _keys_of_rows(table, self._bound_source.keys())
-        return self._declared_form.apply(table), self._row_keys()
+            return table, keys
+        return self._declared_form.retype(table), keys
 
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         """Delegate to concrete source, or raise if unbound.
