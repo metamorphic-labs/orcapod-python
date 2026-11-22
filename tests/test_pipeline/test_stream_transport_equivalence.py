@@ -40,7 +40,7 @@ from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.streams.base import ZERO_ROW_INPUT_COLUMNS
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import ProvisionalHashWarning
-from orcapod.operators import MergeJoin, Rejoin
+from orcapod.operators import MergeJoin, Rejoin, SelectDataColumns
 from orcapod.side_effects import SideEffectJobNode
 from orcapod.system_constants import constants
 from orcapod.types import CacheMode
@@ -318,3 +318,75 @@ def test_a_loaded_job_describes_its_nodes(
             output.schema
         ), label
         assert node.arrow_types_declared, label
+
+
+def _poller(fetched_order: tuple[str, ...]) -> Any:
+    """A ``PollingSource`` declaring tags ``k, j`` and data ``b, a``.
+
+    It fetches a table with its columns in ``fetched_order``: a valid source whose
+    declared order is not its rows' (Codex on PR #485).
+    """
+    from orcapod.core.sources import PollingSource
+    from tests.test_hashing.test_logical_type_forms import (
+        _TableImpl,  # pyright: ignore[reportPrivateUsage]  # the one test polling implementation
+    )
+
+    columns = {
+        "k": pa.array(["1", "2"], pa.large_string()),
+        "j": pa.array(["x", "y"], pa.large_string()),
+        "a": pa.array([1, 2], pa.int64()),
+        "b": pa.array([3, 4], pa.int64()),
+    }
+    declared = pa.schema(
+        [pa.field(name, columns[name].type, False) for name in ("k", "j", "b", "a")]
+    )
+    fetched = pa.table({name: columns[name] for name in fetched_order})
+    fetched = fetched.cast(pa.schema([f.with_nullable(False) for f in fetched.schema]))
+    return PollingSource(
+        _TableImpl(fetched, declared),
+        tag_columns=["k", "j"],
+        record_id_columns=["k", "j"],
+        source_id="poller",
+    )
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
+@pytest.mark.parametrize(
+    "fetched_order",
+    [("j", "k", "a", "b"), ("k", "j", "b", "a"), ("k", "b", "j", "a")],
+    ids="-".join,
+)
+def test_a_poller_fetching_in_another_order_hands_on_its_rows(
+    fetched_order: tuple[str, ...], outputs: dict[str, Any]
+) -> None:
+    """L2 for a poller whose fetched column order differs from its declared order.
+
+    The source node's output equals its rows rebuilt (checked by ``outputs``), and the
+    operator after it keeps and stores its columns in the rows' order, as on ``main``.
+    """
+    # Built before the job captures: importing the polling implementation's module
+    # inside ``with job`` would capture the sources that module builds.
+    poller = _poller(fetched_order)
+    database = InMemoryArrowDatabase()
+    job = PipelineJob(name="poller_order", database=database)
+    with job:
+        SelectDataColumns(["a", "b"])(poller, label="selected")
+    job.nodes["selected"].attach_databases(
+        pipeline_database=database.at("log"), cache_mode=CacheMode.LOG
+    )
+    _run(job)
+    node = job.nodes["selected"]
+    rows_order = [
+        *job.nodes["selected"].keys()[0],
+        *(name for name in fetched_order if name in ("a", "b")),
+    ]
+    source_order = [f"{constants.SOURCE_PREFIX}{n}" for n in rows_order[2:]]
+    kept = node.as_table(columns={"source": True}).column_names
+    assert kept == [*rows_order, *source_order]
+    stored = node.get_all_records(columns={"source": True})
+    assert stored is not None
+    assert [name for name in stored.column_names if not name.startswith("__")] == [
+        *rows_order,
+        *source_order,
+    ]
+    assert "poller" in outputs
