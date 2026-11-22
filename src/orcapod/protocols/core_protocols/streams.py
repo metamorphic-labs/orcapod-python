@@ -197,9 +197,13 @@ class StreamProtocol(TraceableProtocol, PipelineElementProtocol, Protocol):
 
         ``False`` when the stream cannot type itself without rows (an unbound slot, a
         ``PollingSource`` never polled; ITL-1089), or its rows decide its types (a
-        narrower bind, an output held as its rows): its schema is then converted from
-        the Python schema, and its names come in no guaranteed order; no consumer
-        relies on their order (ITL-1347).
+        narrower bind, an output held as its rows). Its schema is then the best
+        description available without reading a row: a slot's or source's explicit
+        Arrow declaration when it states one, otherwise its Python schema converted;
+        a source whose schema is known only by polling, and which has not polled, has
+        an empty schema. So a ``False`` description is not guaranteed to hold the
+        stream's column names, and the names it holds come in no guaranteed order; no
+        consumer relies on either (ITL-1347).
         """
         ...
 

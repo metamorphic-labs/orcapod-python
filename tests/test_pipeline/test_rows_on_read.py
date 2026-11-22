@@ -20,7 +20,6 @@ from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.operators import Batch
 from orcapod.pipeline.dag import OrcaDAG
-from orcapod.pipeline.observer import NoOpObserver
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 from orcapod.sources import ArrowTableSource, DictSource
 from orcapod.types import CacheMode
@@ -49,27 +48,30 @@ def _plain() -> DictSource:
 
 
 def test_a_fallback_source_reads_its_rows_once() -> None:
-    """A rebind after the source node ended does not change what it handed on.
-
-    Its rows were read once, when it ran: the successor's edge raises the original
-    rows' ``ArrowTypeError``, as on ``main``.
-    """
+    """A source whose whole-table build is unavailable: its rows are read once, when it
+    runs, and the successor's edge raises the rows' ``ArrowTypeError`` after the
+    source's end and before the successor starts, as on ``main``."""
     job = PipelineJob(name="read_once", database=InMemoryArrowDatabase())
     with job:
-        Batch(batch_size=2)(_plain().select_data_columns(["x"]), label="batched")
-    job.bind(sources={"s": _unconvertible()})
-    node = job.nodes["s"]
+        Batch(batch_size=2)(
+            _plain().select_data_columns(["x"], label="selected"), label="batched"
+        )
+    source: Any = _unconvertible()
+    reads: list[int] = []
+    read = source.iter_data
 
-    class RebindsAtEnd(NoOpObserver):
-        def contextualize(self, *identity_path: str) -> RebindsAtEnd:
-            return self
+    def counted() -> Any:
+        reads.append(1)
+        return read()
 
-        def on_node_end(self, node_label: str, node_hash: str) -> None:
-            if node_label == "s":
-                node.bound_source = _plain()
-
+    source.iter_data = counted
+    job.bind(sources={"s": source})
+    observer = _NodeEvents()
     with pytest.raises(pa.ArrowTypeError, match="Expected bytes"):
-        job.run(observer=RebindsAtEnd())
+        job.run(observer=observer)
+    assert len(reads) == 1
+    assert ("end", "s") in observer.events
+    assert ("start", "selected") not in observer.events
 
 
 def test_a_fallback_source_nobody_reads_completes() -> None:
@@ -323,39 +325,40 @@ def test_a_library_source_kind_is_eager() -> None:
     assert not isinstance(job.nodes["s"].execute(), RowsOnRead)
 
 
-def test_an_empty_output_is_derived_at_the_edge() -> None:
-    """A source with no row: its zero-row output is derived where the successor reads.
+def test_an_empty_output_is_derived_at_the_edge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A source with no row: its zero-row input is built where the successor reads it,
+    after the source has ended and before the successor starts, as ``main`` rebuilt
+    it (Codex on PR #485, round 4)."""
+    from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 
-    An observer that rebinds the source when it ends changes what the successor
-    receives, as on ``main`` (Codex on PR #485, round 4).
-    """
-
-    def empty(mark: str) -> ArrowTableSource:
-        field = pa.field("x", pa.int64(), nullable=False, metadata={"mark": mark})
-        table = pa.table({"k": pa.array([], pa.int64()), "x": pa.array([], pa.int64())})
-        table = pa.Table.from_arrays(
-            table.columns,
-            schema=pa.schema([pa.field("k", pa.int64(), nullable=False), field]),
-        )
-        return ArrowTableSource(table, tag_columns=["k"], source_id="s")
-
+    field = pa.field("x", pa.int64(), nullable=False)
+    table = pa.Table.from_arrays(
+        [pa.array([], pa.int64()), pa.array([], pa.int64())],
+        schema=pa.schema([pa.field("k", pa.int64(), nullable=False), field]),
+    )
     job = PipelineJob(name="empty_edge", database=InMemoryArrowDatabase())
     with job:
-        empty("before").select_data_columns(["x"], label="selected")
+        ArrowTableSource(table, tag_columns=["k"], source_id="s").select_data_columns(
+            ["x"], label="selected"
+        )
     slot = next(label for label in job.nodes if label != "selected")
-    node = job.nodes[slot]
+    observer = _NodeEvents()
+    original = StaticOutputOperatorPod._materialize_upstream  # pyright: ignore[reportPrivateUsage]  # the row path, watched
 
-    class RebindsAtEnd(NoOpObserver):
-        def contextualize(self, *identity_path: str) -> RebindsAtEnd:
-            return self
+    def watched(rows: Any, upstream: Any) -> Any:
+        observer.events.append(("build", str(upstream.label)))
+        return original(rows, upstream)
 
-        def on_node_end(self, node_label: str, node_hash: str) -> None:
-            if node_label == slot:
-                node.bound_source = empty("after")
-
-    job.run(observer=RebindsAtEnd())
-    kept = job.nodes["selected"].as_table()
-    assert kept.schema.field("x").metadata == {b"mark": b"after"}
+    monkeypatch.setattr(
+        StaticOutputOperatorPod, "_materialize_upstream", staticmethod(watched)
+    )
+    job.run(observer=observer)
+    events = observer.events
+    built = events.index(("build", slot))
+    assert events.index(("end", slot)) < built < events.index(("start", "selected"))
+    assert job.nodes["selected"].as_table().num_rows == 0
 
 
 def test_an_operator_with_an_empty_result_is_not_called_again() -> None:
