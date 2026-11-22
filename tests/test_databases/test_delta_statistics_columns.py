@@ -198,7 +198,10 @@ class TestStatisticsRule:
 
 
 class TestNewTableWritePaths:
-    """Every write path on a new table logs no statistics warning."""
+    """Every write path on a new table logs no statistics warning.
+
+    The property lists the columns in the table's column order, the canonical order
+    of a new table (ITL-1370): ``__data_context`` before ``v``."""
 
     def test_create_append_merge_and_schema_evolution(
         self, tmp_path: Path, capfd: pytest.CaptureFixture[str]
@@ -209,7 +212,7 @@ class TestNewTableWritePaths:
         db.add_records(PATH, rows(range(0, 10)), flush=True)
         assert stats_warnings(capfd) == [], "create"
         assert configuration(tmp_path / "t") == {
-            STATS_COLUMNS_PROPERTY: "`v`,`__data_context`"
+            STATS_COLUMNS_PROPERTY: "`__data_context`,`v`"
         }
 
         db.add_records(PATH, rows(range(10, 20)), flush=True)
@@ -228,7 +231,7 @@ class TestNewTableWritePaths:
 
         # The property is never changed: a column added later has no statistics.
         assert configuration(tmp_path / "t") == {
-            STATS_COLUMNS_PROPERTY: "`v`,`__data_context`"
+            STATS_COLUMNS_PROPERTY: "`__data_context`,`v`"
         }
         assert all(
             stats == {"v", "__data_context"}
@@ -390,7 +393,7 @@ class TestEveryColumnKind:
         db.add_records(PATH, table(range(3, 6)), flush=True)
         assert stats_warnings(capfd) == []
         assert configuration(tmp_path / "t") == {
-            STATS_COLUMNS_PROPERTY: "`v`,`__data_context`"
+            STATS_COLUMNS_PROPERTY: "`__data_context`,`v`"
         }
         assert len(stored_ids(db)) == 6
 
@@ -485,5 +488,5 @@ class TestTablesCreatedElsewhere:
             f"id{i}".encode() for i in range(20)
         )
         assert configuration(tmp_path / "t") == {
-            STATS_COLUMNS_PROPERTY: "`v`,`__data_context`"
+            STATS_COLUMNS_PROPERTY: "`__data_context`,`v`"
         }
