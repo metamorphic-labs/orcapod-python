@@ -1386,7 +1386,7 @@ def test_the_repository_cases_declare_exactly_the_measured_cases() -> None:
     """The cases that depend on a provisional operator, source or library value type,
     measured for ITL-1266, ITL-1279, ITL-1324 and ITL-1331
     (docs/dev/scripts/itl_1279/measure_relocation.py), plus the two canonical schema
-    form cases of ITL-640 and the two ``Rejoin`` cases of ITL-1336, and no other. A split case is
+    form cases of ITL-640 and the ``Rejoin`` cases of ITL-1336, and no other. A split case is
     listed once: its provisional part. No case declares a ``PollingSource`` (ITL-1314)."""
     declared = {
         (group, name): names
@@ -1438,6 +1438,8 @@ def test_the_repository_cases_declare_exactly_the_measured_cases() -> None:
         # Rejoin, pinned once PR 454 and PR 456 had set the golden files (ITL-1336).
         ("pipeline", "rejoin"): ("PolarsFilter", "Rejoin"),
         ("pipeline", "rejoin_job"): ("Rejoin",),
+        ("pipeline", "rejoin_job_async"): ("Rejoin",),
+        ("pipeline", "rejoin_arrangement"): ("Rejoin",),
     }
 
 
