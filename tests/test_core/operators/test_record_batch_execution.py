@@ -182,7 +182,10 @@ def test_inputs_with_no_rows_give_the_typed_zero_row_result(case: Case) -> None:
         return
     assert table.num_rows == 0
     assert result.keys() == sync.keys()
-    assert result.output_schema(columns=ALL) == sync.output_schema(columns=ALL)
+    # Arrow types are compared, not the Python schemas: the sync stream's Python schema
+    # is its operator's prediction, which can differ from the Python reading of the
+    # same Arrow types (``large_list<item: int16>`` predicted ``list[int | None]``, read
+    # ``list[int]``), with rows as without them; a stream rebuilt from Arrow reads them.
     assert result.pipeline_hash() == sync.pipeline_hash()
     # The Arrow types are those of the sync result with no rows, column for column.
     sync_table = sync.as_table(columns=ALL)

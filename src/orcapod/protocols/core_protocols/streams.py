@@ -16,7 +16,6 @@ from orcapod.protocols.hashing_protocols import PipelineElementProtocol
 from orcapod.types import ColumnConfig, Schema
 
 if TYPE_CHECKING:
-    from orcapod.channels import InputChannel
     import pandas as pd
     import polars as pl
     import pyarrow as pa
@@ -181,18 +180,6 @@ class StreamProtocol(TraceableProtocol, PipelineElementProtocol, Protocol):
 
         Yields:
             tuple[TagProtocol, DataProtocol]: Sequential (tag, data) pairs
-        """
-        ...
-
-    def open_channel(self) -> "InputChannel":
-        """Open an input channel on this stream, for async computation (ITL-1347).
-
-        The channel delivers the stream's rows as Arrow record batches, read once and
-        in order; its description is this stream. Several channels may be opened on
-        one stream, each with its own position.
-
-        Returns:
-            The input channel.
         """
         ...
 
