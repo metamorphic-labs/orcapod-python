@@ -747,8 +747,10 @@ class OutputChannel:
     def fail(self, error: BaseException) -> None:
         """End the output with the producer's failure or cancellation.
 
-        Every reader's next read raises ``UpstreamFailedError``, never a normal end.
-        Does nothing on a channel already closed or failed.
+        Every reader's next read raises ``UpstreamFailedError`` (its cause is
+        ``error``), never a normal end. The failure is seen at once: record batches a
+        reader has not yet read are not delivered first, so no consumer acts on part of
+        a failed output. Does nothing on a channel already closed or failed.
 
         Args:
             error: The producer's error.
