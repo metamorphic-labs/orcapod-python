@@ -1665,16 +1665,9 @@ class DeltaTableDatabase:
         """
         if pending is None:
             pending = self._pending_batches.get(self._get_record_key(record_path))
+        self._refuse_declared_nulls(record_path, records)
         refusal = None
-        # The rows' own declaration: a column they declare non-nullable and hold a
-        # null in fails the write, a first one included.
-        own = _non_null_violation({f.name: f for f in records.schema}, records)
-        if own is not None:
-            refusal = (
-                own[0],
-                f"{own[0]} is declared non-nullable, and the rows hold a null",
-            )
-        if refusal is None and pending is not None:
+        if pending is not None:
             held = {f.name: f for f in pending.schema}
             refusal = next(
                 (
@@ -1708,6 +1701,33 @@ class DeltaTableDatabase:
                 f"Cannot append to the stored table "
                 f"{self._get_table_uri(record_path)!r}: column {column!r}: {reason}. "
                 "The stored rows are unchanged and nothing was written."
+            )
+
+    def _refuse_declared_nulls(
+        self, record_path: tuple[str, ...], rows: pa.Table
+    ) -> None:
+        """Refuse rows holding a null in a column they declare non-nullable (ITL-1334).
+
+        Delta's writer refuses such a batch, a first one included, so every row
+        queued with them would fail. ``add_records`` checks the rows as given, before
+        any ``schema_handling`` casts them (a cast to a nullable pending column would
+        hide the declaration), and again as they will be queued.
+
+        Args:
+            record_path: The table the rows are for.
+            rows: The rows.
+
+        Raises:
+            InputValidationError: For the first such column, naming it.
+        """
+        violation = _non_null_violation({f.name: f for f in rows.schema}, rows)
+        if violation is not None:
+            name = violation[0]
+            raise InputValidationError(
+                f"Cannot append to the stored table "
+                f"{self._get_table_uri(record_path)!r}: column {name!r}: {name} is "
+                "declared non-nullable, and the rows hold a null. The stored rows are "
+                "unchanged and nothing was written."
             )
 
     def _refuse_changed_attributes(
@@ -1876,6 +1896,7 @@ class DeltaTableDatabase:
         # coercion casts them to the pending batch's schema, which would give them
         # its field metadata and nested attributes instead (ITL-1334).
         self._refuse_changed_attributes(record_path, filtered_table.schema)
+        self._refuse_declared_nulls(record_path, filtered_table)
 
         # Step 5: Handle schema compatibility (the pending batch is only staged)
         schema_compatible_table, staged_pending = self._handle_schema_compatibility(

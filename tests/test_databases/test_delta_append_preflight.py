@@ -616,3 +616,52 @@ def test_a_first_batch_holding_a_null_it_declares_non_nullable_is_refused(
     assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
     db.flush()
     assert db.get_all_records(PATH, record_id_column="id") is None
+
+
+@pytest.mark.parametrize(
+    "pending_nullable", [True, False], ids=["pending nullable", "pending non-nullable"]
+)
+@pytest.mark.parametrize("column", ["x", "y"])
+@pytest.mark.parametrize("mode", ["coerce", "merge"])
+def test_the_rows_own_non_nullable_declaration_is_checked_before_schema_handling(
+    tmp_path: Path, mode: str, column: str, pending_nullable: bool
+) -> None:
+    """A ``"coerce"`` or ``"merge"`` casts the rows to the pending batch's schema; a
+    nullable pending column then hid that the rows declare theirs non-nullable and hold
+    a null (CodeRabbit on PR 471). The rows are checked as given, so they are refused
+    in both modes, whatever the pending batch declares, and the queue is unchanged."""
+    pending_schema = pa.schema(
+        [
+            pa.field("id", pa.large_binary()),
+            pa.field("x", I64, nullable=pending_nullable),
+            pa.field("y", I64, nullable=pending_nullable),
+        ]
+    )
+    queued = pa.Table.from_arrays(
+        [pa.array([b"1", b"2"], pa.large_binary()), pa.array([1, 2]), pa.array([1, 2])],
+        schema=pending_schema,
+    )
+    db = DeltaTableDatabase(tmp_path)
+    db.add_records(PATH, queued, record_id_column="id")
+    x, y = ([None, 3], [3, 4]) if column == "x" else ([3, 4], [3, None])
+    with pytest.raises(
+        InputValidationError, match=f"'{column}': {column} is declared non-nullable"
+    ):
+        db.add_records(
+            PATH,
+            _not_null_rows([b"3", b"4"], x, y),
+            record_id_column="id",
+            schema_handling=cast(Any, mode),  # one of the two literals
+        )
+    pending = db._pending_batches["t"]  # pyright: ignore[reportPrivateUsage]
+    assert (
+        pending.select(["x", "y"]).to_pylist() == queued.select(["x", "y"]).to_pylist()
+    )
+    assert pending.schema.field("x").nullable is pending_nullable
+    db.flush()
+    back = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="id")
+    assert back is not None
+    assert back.sort_by("id").select(["x", "y"]).to_pylist() == [
+        {"x": 1, "y": 1},
+        {"x": 2, "y": 2},
+    ]
