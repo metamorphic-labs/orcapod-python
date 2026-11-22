@@ -33,6 +33,25 @@ def _read(path: Path) -> pa.Table:
         return pa.ipc.open_file(source).read_all().combine_chunks()
 
 
+# Columns whose value depends on the environment, not on the code under test: the git
+# state of the file a function is defined in (``-dirty``, ``-untracked``), which changes
+# whenever a file is added to the checkout during a run. Left out like volatile columns.
+ENVIRONMENT_COLUMNS = frozenset({"__pf_var_git_hash"})
+
+
+def _events_by_node(events: list[Any]) -> dict[str, list[str]]:
+    """Each node's events, in order; run-level events under ``""``.
+
+    The order in which ``main`` starts independent nodes (two sources, say) varies from one
+    process to the next, so only each node's own sequence of events is a result.
+    """
+    grouped: dict[str, list[str]] = {}
+    for event in events:
+        label = event[1] if len(event) > 1 else ""
+        grouped.setdefault(label, []).append(json.dumps(event))
+    return grouped
+
+
 def _tables(dump: Path) -> dict[str, pa.Table]:
     manifest = json.loads((dump / "manifest.json").read_text())
     found: dict[str, pa.Table] = {}
@@ -59,6 +78,41 @@ def _schema_differences(key: str, a: pa.Table, b: pa.Table) -> list[str]:
     return lines
 
 
+_FLOAT_BITS = {16: pa.uint16(), 32: pa.uint32(), 64: pa.uint64()}
+
+
+def _bits(array: Any) -> Any:
+    """``array`` with every float as its integer bits, so equality is bit for bit.
+
+    Arrow's ``equals`` holds NaN unequal to itself; two tables with the same NaN bits must
+    compare equal, and ``0.0`` must stay distinct from ``-0.0``. Lists, fixed-size lists
+    and structs are rebuilt over their converted children, keeping their validity.
+    """
+    kind = array.type
+    if pa.types.is_floating(kind):
+        return array.view(_FLOAT_BITS[kind.bit_width])
+    if pa.types.is_list(kind) or pa.types.is_large_list(kind):
+        cls = pa.LargeListArray if pa.types.is_large_list(kind) else pa.ListArray
+        return cls.from_arrays(array.offsets, _bits(array.values), mask=array.is_null())
+    if pa.types.is_fixed_size_list(kind):
+        return pa.FixedSizeListArray.from_arrays(
+            _bits(array.values), kind.list_size, mask=array.is_null()
+        )
+    if pa.types.is_struct(kind):
+        return pa.StructArray.from_arrays(
+            [_bits(array.field(i)) for i in range(kind.num_fields)],
+            fields=[kind.field(i) for i in range(kind.num_fields)],
+            mask=array.is_null(),
+        )
+    return array
+
+
+def _bitwise(table: pa.Table) -> pa.Table:
+    """``table`` with every column through ``_bits`` (names kept)."""
+    columns = [_bits(column.combine_chunks()) for column in table.columns]
+    return pa.Table.from_arrays(columns, names=table.column_names)
+
+
 def _without(table: pa.Table, volatile: set[str]) -> pa.Table:
     return table.drop_columns([c for c in table.column_names if c in volatile])
 
@@ -81,10 +135,11 @@ def compare(
     for field in ("error", "summary", "warnings"):
         if ma[field] != mb[field]:
             problems.append(f"{field}: {ma[field]!r} != {mb[field]!r}")
-    events_a, events_b = ma["events"], mb["events"]
+    events_a: Any = _events_by_node(ma["events"])
+    events_b: Any = _events_by_node(mb["events"])
     if mode == "set":
-        events_a = sorted(json.dumps(e) for e in events_a)
-        events_b = sorted(json.dumps(e) for e in events_b)
+        events_a = sorted(json.dumps(e) for e in ma["events"])
+        events_b = sorted(json.dumps(e) for e in mb["events"])
     if events_a != events_b:
         problems.append("observer events differ")
     for name in sorted(set(ma["stored"]) | set(mb["stored"])):
@@ -98,7 +153,7 @@ def compare(
             problems.append(f"{key}: only in one dump")
             continue
         x, y = ta[key], tb[key]
-        volatile = set(volatile_by_table.get(key, []))
+        volatile = set(volatile_by_table.get(key, [])) | ENVIRONMENT_COLUMNS
         if mode == "exact":
             problems += _schema_differences(key, x, y)
         else:
@@ -114,7 +169,7 @@ def compare(
                 problems.append(f"{key}: null pattern of volatile {name!r} differs")
         xs, ys = _without(x, volatile), _without(y, volatile)
         if mode == "exact":
-            if not xs.equals(ys, check_metadata=True):
+            if not _bitwise(xs).equals(_bitwise(ys)):
                 problems.append(f"{key}: values differ")
         elif _rows_as_multiset(xs) != _rows_as_multiset(ys):
             problems.append(f"{key}: rows differ as sets")
@@ -130,7 +185,13 @@ def calibrate(a: Path, b: Path) -> dict[str, list[str]]:
         if x.num_rows != y.num_rows:
             continue
         names = [n for n in x.column_names if n in y.column_names]
-        differing = [n for n in names if not x.column(n).equals(y.column(n))]
+        differing = [
+            n
+            for n in names
+            if not _bits(x.column(n).combine_chunks()).equals(
+                _bits(y.column(n).combine_chunks())
+            )
+        ]
         if differing:
             volatile[key] = differing
     return volatile

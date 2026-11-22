@@ -105,16 +105,27 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--branch", required=True)
     parser.add_argument("--fixtures", default="tutorial,spikes")
     parser.add_argument("--threads", default="1,default")
+    parser.add_argument(
+        "--compare-only",
+        action="store_true",
+        help="redo the comparisons on the dumps already in OUT; run nothing",
+    )
     args = parser.parse_args(argv)
     out: Path = args.out
-    out.mkdir(parents=True, exist_ok=False)
+    out.mkdir(parents=True, exist_ok=args.compare_only)
     pythons = {"base": args.base, "branch": args.branch}
+
+    def dump_fn(*dump_args: Any) -> dict[str, Any]:
+        if args.compare_only:
+            return {"dump": str(dump_args[-1]), "returncode": 0, "skipped": True}
+        return _dump(*dump_args)
+
     report: dict[str, Any] = {"runs": [], "comparisons": [], "load": []}
     for fixture in args.fixtures.split(","):
         calib = [out / fixture / f"calibrate_{i}" for i in (1, 2)]
         for i, dump in enumerate(calib, start=1):
             report["runs"].append(
-                _dump(
+                dump_fn(
                     pythons["base"],
                     fixture,
                     "cold",
@@ -146,7 +157,7 @@ def main(argv: list[str]) -> int:
                     for mode in MODES:
                         report["load"].append(os.getloadavg()[0])
                         report["runs"].append(
-                            _dump(
+                            dump_fn(
                                 python,
                                 fixture,
                                 mode,
@@ -189,6 +200,8 @@ def main(argv: list[str]) -> int:
                 ]
     (out / "report.json").write_text(json.dumps(report, indent=1))
     failed_runs = [r for r in report["runs"] if r["returncode"] != 0]
+    if args.compare_only:
+        (out / "report.json").rename(out / "report_compare_only.json")
     for c in report["comparisons"]:
         status = "EQUAL" if c["equal"] else "DIFFERENT"
         print(f"{status:9} {c['fixture']:8} t={c['threads']:7} {c['check']}")

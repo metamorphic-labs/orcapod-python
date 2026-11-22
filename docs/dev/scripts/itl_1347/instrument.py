@@ -101,6 +101,22 @@ def counting() -> Iterator[Counts]:
 
     undo.append(_patch(Datagram, "__init__", wrap_init))
 
+    # ITL-1348 builds the rows of a table without ``__init__``: count those too.
+    if "_rows_of_table" in Datagram.__dict__:
+
+        def wrap_rows_of_table(original: Any) -> Any:
+            func = original.__func__
+
+            @functools.wraps(func)
+            def _rows_of_table(cls: Any, *args: Any, **kwargs: Any) -> Iterator[Any]:
+                for item in func(cls, *args, **kwargs):
+                    counts.datagrams[(_NODE_KIND.get(), cls.__name__)] += 1
+                    yield item
+
+            return classmethod(_rows_of_table)
+
+        undo.append(_patch(Datagram, "_rows_of_table", wrap_rows_of_table))
+
     def wrap_rows_to_table(original: Any) -> Any:
         func = original.__func__
 
