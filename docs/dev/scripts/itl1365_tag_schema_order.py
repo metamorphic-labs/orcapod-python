@@ -74,33 +74,40 @@ def _sources(root: Path) -> dict[str, Any]:
     write_deltalake(str(root / "delta"), TABLE)
     db = root / "t.sqlite"
     with sqlite3.connect(db) as conn:
-        conn.execute(
+        _ = conn.execute(
             "CREATE TABLE t (a INTEGER PRIMARY KEY, b TEXT, c INTEGER, x REAL, y TEXT)"
         )
-        conn.executemany("INSERT INTO t VALUES (:a,:b,:c,:x,:y)", TABLE.to_pylist())
-    common = {"tag_only_columns": TAG_ONLY}
+        _ = conn.executemany("INSERT INTO t VALUES (:a,:b,:c,:x,:y)", TABLE.to_pylist())
     return {
         "raw_stream": ArrowTableStream(TABLE, tag_columns=TAGS, data_tags=["a", "b"]),
         "arrow_table": ArrowTableSource(
-            TABLE, tag_columns=TAGS, source_id="s", **common
+            TABLE, tag_columns=TAGS, source_id="s", tag_only_columns=TAG_ONLY
         ),
         "dict": DictSource(
-            TABLE.to_pylist(), tag_columns=TAGS, source_id="s", **common
+            TABLE.to_pylist(),
+            tag_columns=TAGS,
+            source_id="s",
+            tag_only_columns=TAG_ONLY,
         ),
         "data_frame": DataFrameSource(
-            pl.from_arrow(TABLE), tag_columns=TAGS, source_id="s", **common
+            pl.from_arrow(TABLE),
+            tag_columns=TAGS,
+            source_id="s",
+            tag_only_columns=TAG_ONLY,
         ),
         "csv": CSVSource(
             str(root / "t.csv"),
             tag_columns=TAGS,
             source_id="s",
             schema=TABLE.schema,
-            **common,
+            tag_only_columns=TAG_ONLY,
         ),
         "delta": DeltaTableSource(
-            root / "delta", tag_columns=TAGS, source_id="s", **common
+            root / "delta", tag_columns=TAGS, source_id="s", tag_only_columns=TAG_ONLY
         ),
-        "sqlite": SQLiteTableSource(db, "t", tag_columns=TAGS, source_id="s", **common),
+        "sqlite": SQLiteTableSource(
+            db, "t", tag_columns=TAGS, source_id="s", tag_only_columns=TAG_ONLY
+        ),
     }
 
 
