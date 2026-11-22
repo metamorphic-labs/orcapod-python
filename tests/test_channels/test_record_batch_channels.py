@@ -34,12 +34,14 @@ from orcapod.core.operators import MapData, PolarsFilter, SelectDataColumns
 from orcapod.core.operators.static_output_pod import (
     StaticOutputOperatorPod,
     stream_from_batches,
+    transport_schema,
 )
 from orcapod.core.record_batch_channels import (
     BATCH_BUFFER_SIZE,
     SOURCE_BATCH_ROWS,
     InputChannel,
     OutputChannel,
+    _schema_mismatch,  # pyright: ignore[reportPrivateUsage]  # the check itself is tested
     channel_from_stream,
 )
 from orcapod.core.streams import ArrowTableStream
@@ -438,7 +440,9 @@ def test_a_batch_with_no_rows_is_checked_and_not_kept() -> None:
 @pytest.mark.parametrize("ending", ["close", "fail"])
 def test_a_waiting_send_ends_when_the_channel_ends(ending: str) -> None:
     """A send waiting for a reader's room when the channel is closed or failed raises
-    at once (``ChannelClosed``, or the failure) and its batch is never delivered."""
+    at once (``ChannelClosed``, or the failure) and its batch is never delivered. A
+    close during a send does not complete the channel: it fails, so the reader's next
+    read raises, with a ``ChannelClosed`` as the cause."""
     stream = source(2)
     first, second = batches_of(stream, 1)
     boom = OSError("disk gone")
@@ -458,20 +462,16 @@ def test_a_waiting_send_ends_when_the_channel_ends(ending: str) -> None:
             asyncio.gather(waiting, return_exceptions=True), 1
         )
         delivered: list[int] = []
-        try:
+        with pytest.raises(UpstreamFailedError) as failed:
             async for batch in reader:
                 delivered.append(batch.num_rows)
-        except UpstreamFailedError:
-            pass
+        cause = failed.value.__cause__
+        assert isinstance(cause, ChannelClosed if ending == "close" else OSError)
         return type(raised[0]), delivered
 
     raised, delivered = run(write)
-    if ending == "close":
-        assert raised is ChannelClosed
-        assert delivered == [1]  # the batch sent before the close, not the waiting one
-    else:
-        assert raised is UpstreamFailedError
-        assert delivered == []  # a failure is seen at once
+    assert raised is (ChannelClosed if ending == "close" else UpstreamFailedError)
+    assert delivered == []  # a failure is seen at once
 
 
 @pytest.mark.parametrize("ending", ["close", "fail"])
@@ -565,6 +565,148 @@ def test_a_closed_reader_is_unregistered() -> None:
         return len(output._readers)  # pyright: ignore[reportPrivateUsage]  # registration is what is tested
 
     assert run(write) == 1
+
+
+def test_a_close_during_a_send_that_reached_one_reader_fails_both() -> None:
+    """Two readers with one slot each: a send has queued its batch for the fast reader
+    and waits for the slow one when the channel is closed. The send raises
+    ``ChannelClosed``; neither reader completes normally (their inputs would differ):
+    each next read raises ``UpstreamFailedError`` caused by a ``ChannelClosed``."""
+    stream = source(2)
+    first, second = batches_of(stream, 1)
+
+    async def write() -> list[BaseException]:
+        output = OutputChannel(stream, retain=False, buffer_size=1)
+        fast, slow = output.open_reader(), output.open_reader()
+        await output.send(first)
+        _ = await fast.receive()
+        sending = asyncio.ensure_future(output.send(second))
+        await asyncio.sleep(0)
+        assert not sending.done()  # queued for fast, waiting for slow
+        await output.close()
+        with pytest.raises(ChannelClosed):
+            await sending
+        failures: list[BaseException] = []
+        for reader in (fast, slow):
+            with pytest.raises(UpstreamFailedError) as failed:
+                _ = await reader.collect()
+            failures.append(failed.value)
+        with pytest.raises(RuntimeError, match="has no result"):
+            _ = output.result()
+        return failures
+
+    for failure in run(write):
+        assert isinstance(failure.__cause__, ChannelClosed)
+
+
+def test_metadata_is_compared_at_every_depth() -> None:
+    """A user field's nested field metadata must be the description's; a provenance
+    field (system tag, source info) carries none, as a row builds it."""
+    stream = source()
+    (batch,) = batches_of(stream)
+    trace = batch.schema.get_field_index("trace")
+    trace_type = batch.schema.field(trace).type
+    tagged_item = pa.large_list(trace_type.value_field.with_metadata({"units": "b"}))
+    nested = batch.set_column(
+        trace,
+        batch.schema.field(trace).with_type(tagged_item),
+        batch.column(trace).cast(tagged_item),
+    )
+    system_tag = next(
+        i for i, name in enumerate(batch.schema.names) if name.startswith("_tag")
+    )
+    provenance = pa.RecordBatch.from_arrays(
+        batch.columns,
+        schema=batch.schema.set(
+            system_tag, batch.schema.field(system_tag).with_metadata({"m": "1"})
+        ),
+    )
+
+    async def write() -> None:
+        output = OutputChannel(stream)
+        with pytest.raises(ValueError, match="column 'trace' has field metadata"):
+            await output.send(nested)
+        with pytest.raises(ValueError, match="carries field metadata"):
+            await output.send(provenance)
+        await output.send(batch)
+
+    run(write)
+
+
+def test_nulls_are_judged_on_the_values_sent() -> None:
+    """A struct row that is null may hold a value in its child's buffer, and a slice of
+    a map shares its backing array with rows outside it: neither is a value sent."""
+    stream = ArrowTableStream(
+        pa.table(
+            {
+                "k": pa.array([1, 2], pa.int64()),
+                "s": pa.array(
+                    [None, {"a": None}], pa.struct([pa.field("a", pa.null())])
+                ),
+            }
+        ),
+        tag_columns=["k"],
+    )
+    (batch,) = batches_of(stream)
+    index = batch.schema.get_field_index("s")
+    carried = batch.schema.field(index).type
+    masked = pa.StructArray.from_arrays(
+        [pa.array(["in the buffer", None], pa.large_string())],
+        fields=[carried.field(0)],
+        mask=pa.array([True, False]),
+    )
+    assert masked.to_pylist() == [None, {"a": None}]
+    buffered = batch.set_column(index, batch.schema.field(index), masked)
+
+    async def write() -> None:
+        output = OutputChannel(stream)
+        await output.send(buffered)
+        await output.close()
+
+    run(write)
+
+    # A map column declared map<large_string, null>, sent as one row of a longer map
+    # array whose other row holds a value.
+    declared = pa.schema([pa.field("m", pa.map_(pa.large_string(), pa.null()))])
+    whole = pa.array(
+        [[("a", None)], [("b", "a value")]],
+        pa.map_(pa.large_string(), pa.large_string()),
+    )
+    sent = pa.RecordBatch.from_arrays([whole.slice(0, 1)], names=["m"])
+    assert _schema_mismatch(declared, sent) is None
+    other = pa.RecordBatch.from_arrays([whole.slice(1, 1)], names=["m"])
+    assert "holds values" in str(_schema_mismatch(declared, other))
+
+
+class _UntypedStream(ArrowTableStream):
+    """A stream that cannot say its Arrow types without rows."""
+
+    def _typed_zero_row_table(self) -> pa.Table | None:
+        return None
+
+
+def test_without_arrow_types_the_names_are_still_the_streams() -> None:
+    """A stream with no typed zero-row table: the first record batch gives the Arrow
+    types, but a batch whose columns contradict the stream's keys is refused."""
+    table = source().as_table(columns=ALL)
+    stream = _UntypedStream(
+        table, tag_columns=["subject", "trial"], data_tags=["trial"]
+    )
+    assert transport_schema(stream) is None
+    (batch,) = batches_of(stream)
+    renamed = batch.rename_columns(
+        ["other" if name == "note" else name for name in batch.schema.names]
+    )
+
+    async def write() -> int:
+        output = OutputChannel(stream)
+        with pytest.raises(ValueError, match="the stream's keys are"):
+            await output.send(renamed)
+        await output.send(batch)
+        await output.close()
+        return output.result().as_table().num_rows
+
+    assert run(write) == 7
 
 
 # --- Retained output: readers at their own position, send never waits -------------------

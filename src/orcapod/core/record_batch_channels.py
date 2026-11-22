@@ -19,13 +19,18 @@ from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any, Protocol
 
 import pyarrow as pa
+import pyarrow.compute as pc
 
 from orcapod.channels import ChannelClosed
 from orcapod.core.operators.static_output_pod import (
     stream_from_batches,
     transport_schema,
 )
-from orcapod.core.streams.base import ZERO_ROW_INPUT_COLUMNS, row_built_columns
+from orcapod.core.streams.base import (
+    ZERO_ROW_INPUT_COLUMNS,
+    row_built_columns,
+    row_built_names,
+)
 from orcapod.errors import UpstreamFailedError
 from orcapod.system_constants import constants
 from orcapod.utils import arrow_utils
@@ -154,9 +159,14 @@ class InputChannel:
         a consumer that stops reading never holds its producer.
 
         Raises:
-            ChannelClosed: At the end, and after ``close``.
+            ChannelClosed: At the end, and after ``close``. After a ``close`` that came
+                before the producer completed, the error says so, and iteration
+                (``async for``) raises it instead of ending: no consumer loop takes
+                part of an input for all of it.
             UpstreamFailedError: If the producer failed or was cancelled.
         """
+        if self._closed:
+            raise self._closed_early()
         if self._ended:
             raise ChannelClosed()
         try:
@@ -165,6 +175,8 @@ class InputChannel:
             await self.close()
             raise
         if batch is None:
+            if self._closed:  # woken by its own early close
+                raise self._closed_early()
             self._ended = True
             raise ChannelClosed()
         self._received += 1
@@ -177,7 +189,16 @@ class InputChannel:
         try:
             return await self.receive()
         except ChannelClosed:
+            if self._closed:
+                raise  # closed before its producer completed: not the end
             raise StopAsyncIteration
+
+    def _closed_early(self) -> ChannelClosed:
+        """The error of a read after a close that came before the producer completed."""
+        return ChannelClosed(
+            f"The input channel of {_named(self._stream)} was closed before its "
+            + "producer completed; it has no complete input to give."
+        )
 
     async def collect(self) -> list[pa.RecordBatch]:
         """Read to the end and return every remaining record batch, in arrival order.
@@ -187,13 +208,7 @@ class InputChannel:
                 what was read is part of the input, never returned as all of it.
             UpstreamFailedError: If the producer failed or was cancelled.
         """
-        batches = [batch async for batch in self]
-        if self._closed:
-            raise ChannelClosed(
-                f"The input channel of {_named(self._stream)} was closed before its "
-                + "producer completed; it has no complete input to give."
-            )
-        return batches
+        return [batch async for batch in self]
 
     async def to_stream(self) -> StreamProtocol:
         """Read to the end and return what the channel delivered, as a stream.
@@ -258,6 +273,8 @@ class OutputChannel:
         self._batches: list[pa.RecordBatch] = []
         self._readers: list[_OutputFeed] = []
         self._sent = 0
+        # Sends waiting for a reader's room (``retain=False`` only).
+        self._sending = 0
         self._closed = False
         self._error: BaseException | None = None
         self._result: StreamProtocol | None = None
@@ -289,6 +306,8 @@ class OutputChannel:
 
     def _raise_if_ended(self) -> None:
         """Raise what a send meets on an ended channel: closed, or failed."""
+        if isinstance(self._error, _ClosedDuringSend):
+            raise ChannelClosed(str(self._error))
         if self._error is not None:
             raise self._upstream_failed()
         if self._closed:
@@ -300,8 +319,15 @@ class OutputChannel:
             self._schema = transport_schema(self._stream)
             self._schema_known = True
         if self._schema is None:
-            # No description to check against: the first batch sets the schema,
-            # which must itself be in the large variants.
+            # No Arrow types in the description: the first batch sets them (they must
+            # be in the large variants), but the names are still the stream's.
+            names = batch.schema.names
+            if names != row_built_names(names, self._stream.keys()):
+                raise ValueError(
+                    f"A record batch sent as {_named(self._stream)} does not have that "
+                    + f"stream's columns: it has {names}, the stream's keys are "
+                    + f"{self._stream.keys()}."
+                )
             self._schema = batch.schema
         mismatch = _schema_mismatch(self._schema, batch)
         if mismatch is not None:
@@ -332,22 +358,40 @@ class OutputChannel:
             self._batches.append(batch)
             self._notify()
             return
-        for reader in list(self._readers):
-            # The slowest reader sets the pace; one that closed is not waited for.
-            while reader.open and len(reader.queue) >= self._buffer_size:
-                await self._changed.wait()
-                self._raise_if_ended()
-            if reader.open:
-                reader.queue.append(batch)
-                # At once, not after the last reader: this reader may be waiting for
-                # the batch while the send waits for another reader's room.
-                self._notify()
+        self._sending += 1
+        try:
+            for reader in list(self._readers):
+                # The slowest reader sets the pace; one that closed is not waited for.
+                while reader.open and len(reader.queue) >= self._buffer_size:
+                    await self._changed.wait()
+                    self._raise_if_ended()
+                if reader.open:
+                    reader.queue.append(batch)
+                    # At once, not after the last reader: this reader may be waiting
+                    # for the batch while the send waits for another reader's room.
+                    self._notify()
+        finally:
+            self._sending -= 1
 
     async def close(self) -> None:
-        """Complete the output. A second close does nothing; never waits."""
-        if not self._closed and self._error is None:
+        """Complete the output. A second close does nothing; never waits.
+
+        A close that comes while a send is waiting for a reader's room does not
+        complete the output: that send may have reached some readers and not others,
+        and readers never complete normally with different inputs. The channel fails
+        instead: the waiting send raises ``ChannelClosed``, and every reader's next
+        read raises ``UpstreamFailedError`` whose cause is a ``ChannelClosed``.
+        """
+        if self._closed or self._error is not None:
+            return
+        if self._sending:
+            self._error = _ClosedDuringSend(
+                f"The output of {_named(self._stream)} was closed while a record "
+                + "batch was being sent to its readers."
+            )
+        else:
             self._closed = True
-            self._notify()
+        self._notify()
 
     def fail(self, error: BaseException) -> None:
         """End the output with the producer's failure or cancellation.
@@ -462,6 +506,11 @@ def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:
                 + f"{expected.type} holds only nulls"
             )
         if column.name.startswith(provenance):
+            # A row builds these from its values: no field metadata at any depth.
+            if column.metadata or not column.type.equals(
+                _without_metadata(column.type), check_metadata=True
+            ):
+                return f"column {column.name!r} carries field metadata"
             continue
         if expected.nullable != column.nullable:
             flags = {True: "nullable", False: "not nullable"}
@@ -469,16 +518,40 @@ def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:
                 f"column {column.name!r} is {flags[column.nullable]}, the stream's is "
                 + flags[expected.nullable]
             )
-        if (expected.metadata or None) != (column.metadata or None):
+        if (expected.metadata or None) != (column.metadata or None) or not (
+            column.type.equals(carried, check_metadata=True)
+        ):
             return (
-                f"column {column.name!r} has field metadata {column.metadata}, the "
-                + f"stream's is {expected.metadata}"
+                f"column {column.name!r} has field metadata {column.metadata} (or in "
+                + f"its type {column.type}), the stream's is {expected.metadata}"
             )
     return None
 
 
+def _without_metadata(kind: pa.DataType) -> pa.DataType:
+    """``kind`` with the field metadata of every nested field removed."""
+    if isinstance(kind, pa.LargeListType):
+        return pa.large_list(_field_without_metadata(kind.value_field))  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
+    if isinstance(kind, pa.ListType):
+        return pa.list_(_field_without_metadata(kind.value_field))  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
+    if isinstance(kind, pa.FixedSizeListType):
+        return pa.list_(_field_without_metadata(kind.value_field), kind.list_size)  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
+    if isinstance(kind, pa.StructType):
+        return pa.struct(
+            [_field_without_metadata(kind.field(i)) for i in range(kind.num_fields)]
+        )  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
+    return kind
+
+
+def _field_without_metadata(field: pa.Field[Any]) -> pa.Field[Any]:  # pyright: ignore[reportExplicitAny]  # any field
+    return pa.field(field.name, _without_metadata(field.type), nullable=field.nullable)
+
+
 def _holds_only_nulls(array: pa.Array[Any], declared: pa.DataType) -> bool:  # pyright: ignore[reportExplicitAny]  # any column
-    """Whether ``array`` is null wherever ``declared`` has the ``null`` type.
+    """Whether ``array``'s values are null wherever ``declared`` has the ``null`` type.
+
+    Judged on the logical values of ``array`` as sent: a slice's own rows only, and
+    nothing under a null list or struct (its children's buffers are not read).
 
     Args:
         array: A column as carried (``null`` as ``large_string``).
@@ -486,16 +559,30 @@ def _holds_only_nulls(array: pa.Array[Any], declared: pa.DataType) -> bool:  # p
     """
     if pa.types.is_null(declared):
         return array.null_count == len(array)
-    if isinstance(declared, (pa.ListType, pa.LargeListType, pa.FixedSizeListType)):
-        return _holds_only_nulls(array.flatten(), declared.value_type)  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownArgumentType]
+    if isinstance(
+        declared, (pa.ListType, pa.LargeListType, pa.FixedSizeListType, pa.MapType)
+    ):
+        if isinstance(array.type, pa.MapType):
+            # A map's entries as a list of structs, which list_flatten reads.
+            entries = pa.struct([array.type.key_field, array.type.item_field])  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownArgumentType]
+            array = array.cast(pa.large_list(entries))  # pyright: ignore[reportUnknownMemberType]
+        # The values of the non-null lists of the slice, in order.
+        values = pc.list_flatten(array)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+        if isinstance(declared, pa.MapType):
+            return _holds_only_nulls(
+                values.field(0),
+                declared.key_type,  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+            ) and _holds_only_nulls(values.field(1), declared.item_type)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+        return _holds_only_nulls(values, declared.value_type)  # pyright: ignore[reportUnknownArgumentType]
     if isinstance(declared, pa.StructType):
+        # Each child with the struct's validity applied, for the slice's rows.
+        children = array.flatten()  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
         return all(
-            _holds_only_nulls(array.field(i), declared.field(i).type)  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownArgumentType]
-            for i in range(declared.num_fields)
-        )
-    if isinstance(declared, pa.MapType):
-        return _holds_only_nulls(array.keys, declared.key_type) and _holds_only_nulls(  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownArgumentType]
-            array.items,  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownArgumentType]
-            declared.item_type,
+            _holds_only_nulls(child, declared.field(i).type)  # pyright: ignore[reportUnknownArgumentType]
+            for i, child in enumerate(children)  # pyright: ignore[reportUnknownArgumentType, reportUnknownVariableType]
         )
     return True
+
+
+class _ClosedDuringSend(ChannelClosed):
+    """The failure of an output channel closed while a send was in flight."""

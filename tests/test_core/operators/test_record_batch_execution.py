@@ -35,7 +35,9 @@ from orcapod.core.record_batch_channels import (
     OutputChannel,
     channel_from_stream,
 )
+from orcapod.channels import ChannelClosed
 from orcapod.core.streams import ArrowTableStream
+from orcapod.errors import UpstreamFailedError
 from orcapod.protocols.core_protocols import StreamProtocol
 from tests.test_core.operators.test_async_sync_equivalence import (
     AFTER_OPERATOR_CASES,
@@ -516,3 +518,118 @@ def test_a_meta_column_does_not_travel() -> None:
     wire, rebuilt = asyncio.run(go())
     assert wire == expected.schema.names
     assert rebuilt.as_table(columns=ALL).schema.names == expected.schema.names
+
+
+# --- An input closed before its producer completed --------------------------------------
+
+
+@pytest.mark.parametrize(
+    "make_op",
+    [lambda: SelectDataColumns(["i8", "s"]), lambda: Batch(batch_size=1)],
+    ids=["row_by_row", "batch_by_arrival"],
+)
+def test_an_input_closed_early_fails_a_streaming_operator(
+    make_op: Callable[[], StaticOutputOperatorPod],
+) -> None:
+    """A streaming loop takes an input reader closed before its producer completed for
+    a failure, never for the end of its input: the operator fails its output instead
+    of completing it with part of the rows."""
+    source = source_a()
+    op = make_op()
+
+    async def go() -> None:
+        rows = pa.Table.from_batches(await channel_from_stream(source).collect())
+        first, second = _cut(rows, (1,))[:2]
+        feed = OutputChannel(source, retain=False, buffer_size=4)
+        reader = feed.open_reader()
+        output = OutputChannel(op(source))
+        task = asyncio.ensure_future(op.async_execute_batches([reader], output))
+        await feed.send(first)
+        await asyncio.sleep(0.01)
+        await reader.close()
+        await feed.send(second)
+        await feed.close()
+        with pytest.raises(ChannelClosed, match="closed before its producer"):
+            await asyncio.wait_for(task, TIMEOUT)
+        with pytest.raises(UpstreamFailedError):
+            _ = await output.open_reader().collect()
+        with pytest.raises(RuntimeError, match="has no result"):
+            _ = output.result()
+
+    asyncio.run(go())
+
+
+# --- F on the edges of a raw stream's provenance (stage 2, ITL-1360) ----------------------
+
+
+def _job_sync(op: StaticOutputOperatorPod, stream: StreamProtocol) -> StreamProtocol:
+    """``op`` over ``stream`` as a job's sync path gives it its input."""
+    return op(
+        StaticOutputOperatorPod._materialize_upstream(  # pyright: ignore[reportPrivateUsage]  # the job's sync input
+            list(stream.iter_data()), stream
+        )
+    )
+
+
+def _schema_outcome(make: Callable[[], StreamProtocol]) -> tuple[str, Any]:
+    """The schema and rows of a stream's table, or the kind of error that refuses it."""
+    try:
+        table = make().as_table(columns=ALL)
+        return ("table", (table.schema, table.to_pylist()))
+    except Exception as error:  # noqa: BLE001  # the refusal is the outcome compared
+        return ("refused", type(error).__name__)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="TODO(ITL-1360): F (stage 2's row_built_provenance) keeps both list levels "
+    "of an all-empty nested source-info column, where a row types each token [] as "
+    "large_list<large_string>",
+)
+@pytest.mark.parametrize("layout", ["one_batch", "one_row_per_batch"])
+def test_empty_nested_source_info_lists_take_the_row_built_type(layout: str) -> None:
+    """Source info of type ``large_list<large_list<large_string>>`` whose tokens are all
+    ``[]``: the channel result has the types the job's sync path builds from the
+    rows."""
+    raw = ArrowTableStream(
+        pa.table(
+            {
+                "k": pa.array([1, 2], pa.int64()),
+                "x": pa.array([1, 2], pa.int64()),
+                "z": pa.array([3, 4], pa.int64()),
+                "_source_x": pa.array(
+                    [[], []], pa.large_list(pa.large_list(pa.large_string()))
+                ),
+            }
+        ),
+        tag_columns=["k"],
+    )
+    assert _schema_outcome(
+        lambda: run_on_channels(SelectDataColumns(["x"]), [raw], LAYOUTS[layout])
+    ) == _schema_outcome(lambda: _job_sync(SelectDataColumns(["x"]), raw))
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="TODO(ITL-1360): the job's sync path refuses (ArrowInvalid: two field flags) "
+    "a system-tag column with a string and a null, while F gives both rows",
+)
+def test_a_system_tag_with_a_null_among_strings_has_the_job_sync_outcome() -> None:
+    """A raw stream whose system-tag column holds a string and a null: the channel
+    result is the job's sync outcome, rows or refusal."""
+    raw = ArrowTableStream(
+        pa.table(
+            {
+                "k": pa.array([1, 2], pa.int64()),
+                SYSTEM_TAG: pa.array(["s", None], pa.large_string()),
+                "x": pa.array([1, 2], pa.int64()),
+                "z": pa.array([3, 4], pa.int64()),
+            }
+        ),
+        tag_columns=["k"],
+    )
+    assert _schema_outcome(
+        lambda: run_on_channels(SelectDataColumns(["x"]), [raw], None)
+    ) == _schema_outcome(lambda: _job_sync(SelectDataColumns(["x"]), raw))
