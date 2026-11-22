@@ -12,6 +12,8 @@ from orcapod.core.operators.base import (
 from orcapod.core.operators.join import (
     _MERGED_SOURCE_PREFIX,  # pyright: ignore[reportPrivateUsage]  # one definition, shared with Join
     _inner_join,  # pyright: ignore[reportPrivateUsage]  # one definition, shared with Join
+    _COMMON_JOIN_KEY,  # pyright: ignore[reportPrivateUsage]  # one definition, shared with Join
+    _with_common_key,  # pyright: ignore[reportPrivateUsage]  # one definition, shared with Join
     Join,
 )
 from orcapod.core.operators.key_nullability import (
@@ -476,24 +478,19 @@ class MergeJoin(BinaryOperator):
         # Inner join on the shared tag keys. A constant key makes the join a
         # cartesian product when the inputs share no tag; int8 explicitly, so a
         # zero-row table doesn't produce a null-typed column (same as Join).
-        COMMON_JOIN_KEY = "_common"
-        output_nullable.pop(COMMON_JOIN_KEY, None)
-        left_table = left_table.add_column(
-            0, COMMON_JOIN_KEY, pa.array([0] * len(left_table), type=pa.int8())
-        )
-        right_table = right_table.add_column(
-            0, COMMON_JOIN_KEY, pa.array([0] * len(right_table), type=pa.int8())
-        )
-        join_keys = sorted(shared_tag_keys | {COMMON_JOIN_KEY})
+        output_nullable.pop(_COMMON_JOIN_KEY, None)
+        left_table = _with_common_key(left_table)
+        right_table = _with_common_key(right_table)
+        join_keys = sorted(shared_tag_keys | {_COMMON_JOIN_KEY})
 
         # The right-table columns the join suffixes with ``_right``: those the
         # left table also has, other than the keys.
-        left_col_set = set(left_table.column_names) - {COMMON_JOIN_KEY}
-        right_col_set = set(right_table.column_names) - {COMMON_JOIN_KEY}
+        left_col_set = set(left_table.column_names) - {_COMMON_JOIN_KEY}
+        right_col_set = set(right_table.column_names) - {_COMMON_JOIN_KEY}
         suffixed_bases = (right_col_set & left_col_set) - set(join_keys)
 
         joined = _inner_join(left_table, right_table, join_keys)
-        joined = joined.drop(COMMON_JOIN_KEY)
+        joined = joined.drop(_COMMON_JOIN_KEY)
         for left_name, right_name in right_source.items():
             joined = Join._merge_source_columns(joined, left_name, right_name)  # pyright: ignore[reportPrivateUsage]  # Join's one rule
             joined = Join._fold_source_column(joined, left_name)  # pyright: ignore[reportPrivateUsage]  # Join's one rule

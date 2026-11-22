@@ -5,6 +5,7 @@ import json
 from collections.abc import Callable, Collection, Mapping, Sequence
 from typing import Any, ClassVar
 
+import polars as pl
 import pyarrow as pa
 
 from orcapod.core.operators.meta_columns import (
@@ -63,6 +64,44 @@ _MERGED_SOURCE_PREFIX = "__join_merged_source__"
 _PENDING_MEMBERS = "\x00join-pending-members\x00"
 
 
+# The constant key every join adds to both sides' keys (``_with_common_key``): with it,
+# inputs that share no tag give every pair, and Polars applies its multi-key rule, under
+# which a row whose key holds a top-level null matches nothing (a null list, struct or
+# ``decimal256`` key too, which a single-key Polars join would match with another null).
+_COMMON_JOIN_KEY = "_common"
+
+
+def _with_common_key(table: "pa.Table") -> "pa.Table":
+    """Return ``table`` with the constant join key ``_COMMON_JOIN_KEY`` as its first column.
+
+    ``int8`` explicitly, so a zero-row table gets no ``null``-typed column, which Polars
+    refuses in a join.
+    """
+    return table.add_column(
+        0, _COMMON_JOIN_KEY, pa.array([0] * len(table), type=pa.int8())
+    )
+
+
+def _matched_pairs(
+    left: "pl.DataFrame", right: "pl.DataFrame", keys: Sequence[str]
+) -> "pl.DataFrame":
+    """The pairs of rows a join matches: Polars' inner join of two key frames.
+
+    The one statement of which rows a join pairs, for the sync join (``_inner_join``)
+    and the streaming kernels. ``keys`` holds ``_COMMON_JOIN_KEY`` and both frames hold
+    it (``_with_common_key``); the frames are ``arrow_keys.polars_key_frame``'s.
+
+    Args:
+        left: The left key frame, with its row-number column.
+        right: The right key frame, with its row-number column.
+        keys: The key columns, ``_COMMON_JOIN_KEY`` among them.
+
+    Returns:
+        One row per matched pair, holding both row-number columns.
+    """
+    return left.join(right, on=list(keys), how="inner")
+
+
 def _inner_join(left: "pa.Table", right: "pa.Table", keys: list[str]) -> "pa.Table":
     """Inner-join two tables on their key columns, every value taken from the tables.
 
@@ -84,8 +123,10 @@ def _inner_join(left: "pa.Table", right: "pa.Table", keys: list[str]) -> "pa.Tab
         The joined table. Its fields carry no flags of the inputs (every field
         nullable); the caller restores them.
     """
-    pairs = polars_key_frame(left, keys, _LEFT_ROW).join(
-        polars_key_frame(right, keys, _RIGHT_ROW), on=keys, how="inner"
+    pairs = _matched_pairs(
+        polars_key_frame(left, keys, _LEFT_ROW),
+        polars_key_frame(right, keys, _RIGHT_ROW),
+        keys,
     )
     left_rows = pairs.get_column(_LEFT_ROW).to_arrow()
     right_rows = pairs.get_column(_RIGHT_ROW).to_arrow()
@@ -413,8 +454,6 @@ class Join(NonZeroInputOperator):
         # data column (meta columns are dropped, so they never collide).
         tag_schema, data_schema = self._joined_user_schemas(*streams)
 
-        COMMON_JOIN_KEY = "_common"
-
         n_char = self.orcapod_config.hashing.system_tag_n_char
 
         stream = ordered_streams[0]
@@ -428,9 +467,7 @@ class Join(NonZeroInputOperator):
         )
         # trick to get cartesian product; use int8 explicitly so that zero-row
         # tables don't produce a null-typed column that Polars rejects on join
-        table = table.add_column(
-            0, COMMON_JOIN_KEY, pa.array([0] * len(table), type=pa.int8())
-        )
+        table = _with_common_key(table)
         table = arrow_utils.append_to_system_tags(
             table,
             f"{stream.pipeline_hash().to_hex(n_char)}:0",
@@ -448,9 +485,7 @@ class Join(NonZeroInputOperator):
             )
             # trick to ensure that there will always be at least one shared key
             # this ensure that no overlap in keys lead to full caretesian product
-            next_table = next_table.add_column(
-                0, COMMON_JOIN_KEY, pa.array([0] * len(next_table), type=pa.int8())
-            )
+            next_table = _with_common_key(next_table)
 
             common_tag_keys = tag_keys.intersection(next_tag_keys)
             next_data_tags = set(stream_data_tags(next_stream))
@@ -482,7 +517,7 @@ class Join(NonZeroInputOperator):
                     arrow_utils.column_arrow_type(next_table.schema, key),
                 )
                 require_matchable_key("Join", key, key_type)
-            common_tag_keys.add(COMMON_JOIN_KEY)
+            common_tag_keys.add(_COMMON_JOIN_KEY)
 
             table_ref_schema = table.schema
             table = _inner_join(table, next_table, list(common_tag_keys))
@@ -501,7 +536,7 @@ class Join(NonZeroInputOperator):
 
         # reorder columns to bring tag columns to the front
         # TODO: come up with a better algorithm
-        table = table.drop(COMMON_JOIN_KEY)
+        table = table.drop(_COMMON_JOIN_KEY)
         for name in sorted(merged_source):
             table = self._fold_source_column(table, name)
 
