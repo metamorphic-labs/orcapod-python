@@ -371,7 +371,9 @@ def stream_arrow_schema(
     (``row_built_names``: user tags, system tags, data, source
     info, data and source info in data-key order), with no context and no meta column. A
     stream that cannot type itself without rows answers with its Python schema
-    converted by its data context (``arrow_types_declared`` is then false). Each
+    converted by its data context (``arrow_types_declared`` is then false), and one
+    whose schema is known only by polling (nothing declared, nothing polled:
+    ``schema_requires_io``) answers with no column. Each
     system-tag and source-info field is stated nullable: a table decides its flag from
     its values (F's last step). A source-info field's type is stated as the declared
     token type; a complete table decides it from its tokens
@@ -393,6 +395,11 @@ def stream_arrow_schema(
     typed = cast(StreamProtocol, stream)
     given_keys = keys
     table = typed_zero_row_input(stream)
+    if table is None and schema_requires_io(stream, ColumnConfig(system_tags=True)):
+        # Nothing declared, nothing polled (a poller with no declared schema): the
+        # columns are known only from rows, and a description never polls. No column,
+        # as a head says (``SCHEMA_NEEDS_POLL_NOTE``); ``arrow_types_declared`` is false.
+        return pa.schema([])
     if table is None:
         # Only what the stream declares: asking for its source-info columns would make
         # a source that has not polled poll (a description never computes, polls or

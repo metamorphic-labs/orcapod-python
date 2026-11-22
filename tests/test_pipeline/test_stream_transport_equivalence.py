@@ -598,3 +598,42 @@ def test_a_value_decided_source_info_depth_is_a_named_exception() -> None:
     declared = batched.arrow_schema()
     assert declared.field("_source_x").type != built.schema.field("_source_x").type
     assert _without_exceptions(declared) == _without_exceptions(built.schema)
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
+def test_describing_an_undeclared_poller_that_has_not_polled_reads_nothing() -> None:
+    """L7: a poller with no declared schema is described with no column, and not polled.
+
+    Its columns are known only from rows; the description never fetches, its modified
+    time does not move and ``arrow_types_declared`` stays false (Codex on PR #485).
+    """
+    from orcapod.core.sources import PollingSource
+    from tests.test_hashing.test_logical_type_forms import (
+        _TableImpl,  # pyright: ignore[reportPrivateUsage]  # the one test polling implementation
+    )
+
+    fetches: list[int] = []
+
+    class Undeclared(_TableImpl):
+        async def fetch(self, cursor: Any = None) -> Any:
+            fetches.append(1)
+            return await super().fetch(cursor)
+
+        def schema(self) -> Any:
+            return None
+
+    table = pa.table(
+        {"k": pa.array(["1"], pa.large_string()), "a": pa.array([1], pa.int64())}
+    )
+    poller = PollingSource(
+        Undeclared(table, table.schema),
+        tag_columns=["k"],
+        record_id_columns=["k"],
+        source_id="undeclared",
+    )
+    modified = poller.last_modified
+    assert poller.arrow_schema() == pa.schema([])
+    assert poller.arrow_schema() == pa.schema([])
+    assert fetches == []
+    assert poller.last_modified == modified
+    assert not poller.arrow_types_declared
