@@ -491,11 +491,10 @@ def warn_restricted_aggregation(dag: OrcaDAG[StreamProtocol]) -> None:
         dag: The job's graph of the run.
     """
     import sys
-    import warnings
 
     from orcapod.core.operators import Batch, GroupBy, MergeJoin
     from orcapod.errors import RestrictedAggregationWarning
-    from orcapod.utils.warning_utils import outside_orcapod_stacklevel
+    from orcapod.utils.warning_utils import outside_orcapod_stacklevel, warn_at_frame
 
     pairs: list[str] = []
     for node in dag.topological_sort():
@@ -510,15 +509,11 @@ def warn_restricted_aggregation(dag: OrcaDAG[StreamProtocol]) -> None:
     if not pairs:
         return
     caller = sys._getframe(outside_orcapod_stacklevel() - 1)  # pyright: ignore[reportPrivateUsage]  # as the warnings module does
-    warnings.warn_explicit(
+    warn_at_frame(
         "A restricted source feeds an aggregating step: "
         + "; ".join(pairs)
         + ". Its groups are built from the rows the restriction lets through only "
         "(each aggregated row lists its members).",
         RestrictedAggregationWarning,
-        caller.f_code.co_filename,
-        caller.f_lineno,
-        module=caller.f_globals.get("__name__"),
-        registry=None,
-        module_globals=caller.f_globals,
+        caller,
     )
