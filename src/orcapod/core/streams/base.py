@@ -35,7 +35,7 @@ from orcapod.protocols.core_protocols import (
     StreamProtocol,
     TagProtocol,
 )
-from orcapod.protocols.core_protocols.record_batch_channels import RecordBatchInput
+from orcapod.protocols.core_protocols.streams import RecordBatchInput
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
 from orcapod.utils import arrow_utils

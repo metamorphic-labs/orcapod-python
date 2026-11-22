@@ -21,7 +21,7 @@ from unittest import mock
 import pyarrow as pa
 import pytest
 
-from orcapod.protocols.core_protocols.record_batch_channels import (
+from orcapod.protocols.core_protocols.streams import (
     RecordBatchInput,
     RecordBatchOutput,
 )

@@ -1,7 +1,7 @@
 """The output channel of Arrow record batches (ITL-1347).
 
 ``OutputChannel`` implements ``RecordBatchOutput``
-(``orcapod.protocols.core_protocols.record_batch_channels``): the producer side of a
+(``orcapod.protocols.core_protocols.streams``): the producer side of a
 node's async output. Each consumer reads through its own ``InputChannel``
 (``open_reader``, ``orcapod.core.streams.record_batch_input``), which is the fan-out. The
 stream is primary and owns the description (keys, schemas, data context, pipeline hash); a
@@ -33,7 +33,7 @@ from orcapod.utils import arrow_utils
 
 if TYPE_CHECKING:
     from orcapod.protocols.core_protocols import StreamProtocol
-    from orcapod.protocols.core_protocols.record_batch_channels import (
+    from orcapod.protocols.core_protocols.streams import (
         RecordBatchInput,
     )
 

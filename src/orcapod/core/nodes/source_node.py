@@ -59,7 +59,7 @@ from orcapod.utils.schema_utils import (
 if TYPE_CHECKING:
     from orcapod.channels import WritableChannel
     from orcapod.protocols.core_protocols import StreamProtocol
-    from orcapod.protocols.core_protocols.record_batch_channels import (
+    from orcapod.protocols.core_protocols.streams import (
         RecordBatchInput,
     )
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol

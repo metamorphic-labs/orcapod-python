@@ -16,9 +16,6 @@ from orcapod.protocols.hashing_protocols import PipelineElementProtocol
 from orcapod.types import ColumnConfig, Schema
 
 if TYPE_CHECKING:
-    from orcapod.protocols.core_protocols.record_batch_channels import (
-        RecordBatchInput,
-    )
     import pandas as pd
     import polars as pl
     import pyarrow as pa
@@ -583,4 +580,78 @@ class StreamWithOperationsProtocol(StreamProtocol, Protocol):
         Returns:
             Self: New stream containing batched (tag, data) pairs.
         """
+        ...
+
+
+# ---------------------------------------------------------------------------
+# Channels of Arrow record batches (ITL-1347): the stream is the description
+# ---------------------------------------------------------------------------
+
+
+class RecordBatchInput(Protocol):
+    """A single-pass reader of a stream's Arrow record batches.
+
+    The Arrow-record-batch form of ``ReadableChannel`` (``orcapod.channels``); ``InputChannel`` of
+    ``orcapod.core.streams.record_batch_input`` is the implementation. Its description is
+    its ``stream``, known before the first batch.
+    """
+
+    @property
+    def stream(self) -> StreamProtocol:
+        """The stream whose rows this channel delivers: the description."""
+        ...
+
+    async def receive(self) -> pa.RecordBatch:
+        """Return the next Arrow record batch.
+
+        Raises:
+            ChannelClosed: At the end, and after ``close``.
+            UpstreamFailedError: If the producer failed or was cancelled.
+        """
+        ...
+
+    def __aiter__(self) -> AsyncIterator[pa.RecordBatch]:
+        """Iterate over the remaining record batches, in arrival order."""
+        ...
+
+    async def collect(self) -> list[pa.RecordBatch]:
+        """Read to the end and return every remaining record batch, in arrival order."""
+        ...
+
+    async def to_stream(self) -> StreamProtocol:
+        """Read to the end and return what the channel delivered, as a stream.
+
+        All of the input or nothing: it needs a channel not read yet. ``collect``
+        drains the batches that remain; ``to_stream`` never makes a stream of part of
+        an input.
+
+        Raises:
+            RuntimeError: If a record batch has already been received.
+            ChannelClosed: If the channel was closed before its producer completed.
+            UpstreamFailedError: If the producer failed or was cancelled.
+        """
+        ...
+
+    async def close(self) -> None:
+        """Stop reading. The producer no longer waits for this reader."""
+        ...
+
+
+class RecordBatchOutput(Protocol):
+    """The producer side of a stream's Arrow record batches.
+
+    The Arrow-record-batch form of ``WritableChannel`` (``orcapod.channels``); ``OutputChannel`` of
+    ``orcapod.core.record_batch_channels`` is the implementation.
+    """
+
+    async def send(self, batch: pa.RecordBatch) -> None:
+        """Send one Arrow record batch of the stream's transport columns."""
+        ...
+
+    async def close(self) -> None:
+        """Complete the output."""
+        ...
+
+    def fail(self, error: BaseException) -> None:
+        """End the output with the producer's failure or cancellation."""
         ...

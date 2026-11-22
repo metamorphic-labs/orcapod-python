@@ -1,7 +1,7 @@
 """The input channel of Arrow record batches (ITL-1347).
 
 ``InputChannel`` implements ``RecordBatchInput``
-(``orcapod.protocols.core_protocols.record_batch_channels``): a single-pass,
+(``orcapod.protocols.core_protocols.streams``): a single-pass,
 back-pressured reader of a stream's Arrow record batches. The stream is primary and owns
 the description (keys, schemas, data context, pipeline hash); a channel refers to its
 stream and restates nothing.
@@ -24,10 +24,10 @@ from orcapod.channels import ChannelClosed
 if TYPE_CHECKING:
     import pyarrow as pa
 
-    from orcapod.protocols.core_protocols.record_batch_channels import (
+    from orcapod.protocols.core_protocols.streams import (
         RecordBatchInput,
+        StreamProtocol,
     )
-    from orcapod.protocols.core_protocols.streams import StreamProtocol
 
 SOURCE_BATCH_ROWS = 65_536
 """The most rows of one Arrow record batch a complete stream is read in.

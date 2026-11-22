@@ -34,7 +34,7 @@ from orcapod.core.operators.static_output_pod import (
     stream_from_batches,
 )
 from orcapod.core.record_batch_channels import OutputChannel
-from orcapod.protocols.core_protocols.record_batch_channels import RecordBatchInput
+from orcapod.protocols.core_protocols.streams import RecordBatchInput
 from orcapod.channels import ChannelClosed
 from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import UpstreamFailedError
