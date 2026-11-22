@@ -103,7 +103,8 @@ class TestJobRefusesUpFront:
         assert "SQLiteConnector" in message
         assert EXECUTOR_INFO in message
         assert "InMemoryArrowDatabase" in message
-        assert "DeltaTableDatabase" in message
+        # Only the database that keeps every type is suggested (CodeRabbit on PR 471).
+        assert "docs/reference/database-types.md" in message
         # Nothing ran and nothing was written.
         assert CALLS == []
         assert database.list_table_paths() == []
@@ -384,7 +385,7 @@ class TestSpiralDBRefusesReservedNames:
         assert err.database_kind == "SpiralDBConnector"
         assert err.column == "__input_data_hash"
         assert "'__' prefix" in err.reason
-        assert "DeltaTableDatabase" in str(err)
+        assert "InMemoryArrowDatabase" in str(err)
         assert CALLS == []
         assert spiral_database.list_table_paths() == []
 

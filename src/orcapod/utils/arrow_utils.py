@@ -2185,3 +2185,30 @@ def _tag_order_by_polars(table: "pa.Table", keys: list[str]) -> "pa.Array[Any]":
 
 if __name__ == "__main__":
     test_schema_normalization()
+
+
+def holds_renamed_map(arrow_type: "pa.DataType") -> bool:
+    """Whether ``arrow_type`` is or nests a map whose key or item field is not named
+    ``key`` / ``value``.
+
+    Arrow IPC gives a map's key and item fields back under those names, so a store that
+    goes through IPC (SpiralDB, and Delta's recorded types) cannot keep other names; it
+    refuses such a column (ITL-1334).
+
+    Args:
+        arrow_type: A column's Arrow type.
+
+    Returns:
+        ``True`` for such a map at any depth of lists, structs, maps and extension
+        storage.
+    """
+    if isinstance(arrow_type, pa.ExtensionType):
+        return holds_renamed_map(arrow_type.storage_type)
+    if pa.types.is_map(arrow_type) and (
+        arrow_type.key_field.name != "key" or arrow_type.item_field.name != "value"
+    ):
+        return True
+    return any(
+        holds_renamed_map(arrow_type.field(i).type)
+        for i in range(arrow_type.num_fields)
+    )

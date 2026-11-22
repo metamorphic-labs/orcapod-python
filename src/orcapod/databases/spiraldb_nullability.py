@@ -388,6 +388,28 @@ def check_no_nulls(
             raise NullInNonNullableColumnError(render_path(path))
 
 
+def cast_changed_columns(batch: pa.RecordBatch, target: pa.Schema) -> pa.RecordBatch:
+    """Return ``batch`` under ``target``, casting only the columns whose type changes.
+
+    A column whose type is already the target's keeps its array: pyarrow refuses to
+    cast (view) a fixed-size list with non-null items to its own type when a null row
+    hides null item slots (ITL-1334), and a field's nullability or metadata needs no
+    cast.
+
+    Args:
+        batch: Rows as read.
+        target: The schema to give them, column for column.
+
+    Returns:
+        The rows with ``target``'s schema.
+    """
+    arrays = [
+        column if column.type == field.type else column.cast(field.type)
+        for column, field in zip(batch.columns, target)
+    ]
+    return pa.RecordBatch.from_arrays(arrays, schema=target)
+
+
 def enforce_nullability_record(
     batch: pa.RecordBatch, paths: frozenset[ColumnPath]
 ) -> pa.RecordBatch:
@@ -404,4 +426,4 @@ def enforce_nullability_record(
     check_no_nulls(batch, paths)
     if target.equals(batch.schema, check_metadata=True):
         return batch
-    return batch.cast(target)
+    return cast_changed_columns(batch, target)
