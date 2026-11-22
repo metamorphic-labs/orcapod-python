@@ -1099,7 +1099,10 @@ def channel_to_stream(
 
     The channel is reserved when this function is called, before the returned
     coroutine is awaited, so nothing can read it in between; the task that runs the
-    coroutine takes the channel over, and any other task's read is refused.
+    coroutine takes the channel over, and any other task's read is refused. If the
+    coroutine never starts (its task is cancelled first, or it is never awaited),
+    the reservation's claim is freed with it and the channel is closed, so no
+    producer waits on it.
 
     Args:
         channel: The input channel, not read yet.
