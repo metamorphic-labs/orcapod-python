@@ -291,27 +291,45 @@ def _as_written_before_the_fix(root: pathlib.Path) -> None:
         )
 
 
+@pytest.mark.parametrize("chained", [False, True], ids=["leaf", "with_successor"])
 def test_new_rows_over_a_store_written_before_the_fix_raise_naming_the_column(
-    tmp_path: pathlib.Path,
+    chained: bool, tmp_path: pathlib.Path
 ) -> None:
     """Rows of one node never make a column of a type none of them has.
 
     A Delta database written before ITL-928 gives a ``uint32`` tag back as ``int32``:
     rows served from it and rows computed now disagree, and the node says so instead
     of picking a type. Such a database must be rebuilt.
+
+    The run fails at the node, with the error ``as_table`` raises for such rows (main
+    raised it only on a later read of a node with no successor, and a bare
+    ``ArrowInvalid`` in the run of one with a successor; ITL-1360, difference e9). The
+    node then holds no run.
     """
-    _build(DeltaTableDatabase(tmp_path), _source_table("uint32").slice(0, 2)).run()
+    _build(
+        DeltaTableDatabase(tmp_path),
+        _source_table("uint32").slice(0, 2),
+        chained=chained,
+    ).run()
     _as_written_before_the_fix(tmp_path)
-    job = _build(DeltaTableDatabase(tmp_path), _source_table("uint32"))
-    job.run()
+    job = _build(DeltaTableDatabase(tmp_path), _source_table("uint32"), chained=chained)
 
     with pytest.raises(InputValidationError) as raised:
-        job.nodes["double"].as_table()
+        job.run()
 
     message = str(raised.value)
+    assert message.startswith("Function node 'double': ")
     assert "'k'" in message
     assert "int32" in message
     assert "uint32" in message
+    # A run that raised defines no rows.
+    assert job.nodes["double"].as_table().num_rows == 0
+    # What is stored is what main stores: the row computed before the disagreement
+    # could be seen stays written, as after any failure, next to the two old rows.
+    stored = _build(DeltaTableDatabase(tmp_path), _source_table("uint32"))
+    records = stored.nodes["double"].get_all_records()
+    assert records is not None
+    assert records.num_rows == 3
 
 
 def test_new_rows_over_a_store_written_after_the_fix_keep_the_tag_type(

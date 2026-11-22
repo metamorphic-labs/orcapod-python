@@ -2467,7 +2467,14 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         """
         from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 
-        return StaticOutputOperatorPod._materialize_upstream(rows, self)
+        try:
+            return StaticOutputOperatorPod._materialize_upstream(rows, self)
+        except pa.ArrowInvalid:
+            # Rows that disagree on a column's Arrow type (cached rows of a store
+            # written before ITL-928): raise what ``as_table`` raises for them, naming
+            # the node, the column and both types (ITL-1360, e9).
+            self._table_from_pairs(rows)
+            raise
 
     def execute_data(
         self,
@@ -2649,6 +2656,13 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                     self._row_processed, ctx_obs, node_label, node_hash
                 )
 
+            # The output stream, built before the run is committed: rows that cannot
+            # make one table fail the run (ITL-1360, e9).
+            try:
+                result_stream = self._output_stream(output)
+            except InputValidationError:
+                ctx_obs.on_node_end(node_label, node_hash)
+                raise
             self._commit_or_end_node(
                 self._commit_at_node_end, ctx_obs, node_label, node_hash
             )
@@ -2668,7 +2682,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             self.clear_cache()
             raise
 
-        return self._output_stream(output)
+        return result_stream
 
     def _empty_data_cache_hit(
         self, tag: TagProtocol, data: EmptyData, base_entry_id: bytes
