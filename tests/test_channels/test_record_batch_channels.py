@@ -626,6 +626,37 @@ def test_a_barrier_leaves_no_conversion_behind_when_an_input_was_read() -> None:
     assert unheard == []
 
 
+@pytest.mark.parametrize("never", ["cancelled", "dropped"])
+def test_a_conversion_that_never_starts_releases_its_reader(never: str) -> None:
+    """``channel_to_stream`` reserves at call time. If its conversion never starts (its
+    task is cancelled before the first step, or it is dropped unawaited), the
+    reservation is released: the reader is closed and a bounded producer no longer
+    waits on it."""
+    stream = source(4)
+    batches = batches_of(stream, 1)
+
+    async def read() -> None:
+        output = OutputChannel(stream, retain=False, buffer_size=1)
+        reader = output.open_reader()
+        if never == "cancelled":
+            task = asyncio.ensure_future(channel_to_stream(reader))
+            _ = task.cancel()
+            _ = await asyncio.gather(task, return_exceptions=True)
+            del task
+        else:
+            pending = channel_to_stream(reader)
+            pending.close()  # what dropping an unawaited coroutine does
+            del pending
+        gc.collect()
+        for batch in batches:  # would wait forever on a held reader of one slot
+            await asyncio.wait_for(output.send(batch), 1)
+        await output.close()
+        with pytest.raises(ChannelClosed):
+            _ = await reader.receive()
+
+    run(read)
+
+
 def test_a_closed_reader_cannot_be_converted() -> None:
     """A reader closed before any read: ``channel_to_stream`` raises ``ChannelClosed``,
     as documented, not the error of a channel already read."""

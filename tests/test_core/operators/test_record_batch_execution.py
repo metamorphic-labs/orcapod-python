@@ -87,14 +87,16 @@ def _cut(table: pa.Table, sizes: tuple[int, ...] | None) -> list[pa.RecordBatch]
 async def _channel(
     stream: StreamProtocol, sizes: tuple[int, ...] | None
 ) -> RecordBatchInput:
-    """An input channel delivering ``stream``'s rows in record batches of ``sizes``."""
-    batches = await stream.open_channel().collect()
-    if sizes is None or not batches:
+    """An input channel delivering ``stream``'s rows in record batches of ``sizes``:
+    the stream's own channel for ``None``, else one read of it, cut and re-sent
+    through an output channel (never a second read of the stream)."""
+    if sizes is None:
         return stream.open_channel()
-    rows = pa.Table.from_batches(batches)
+    batches = await stream.open_channel().collect()
     feed = OutputChannel(stream)
-    for batch in _cut(rows, sizes):
-        await feed.send(batch)
+    if batches:
+        for batch in _cut(pa.Table.from_batches(batches), sizes):
+            await feed.send(batch)
     await feed.close()
     return feed.open_reader()
 

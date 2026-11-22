@@ -16,6 +16,7 @@ import cycle.
 from __future__ import annotations
 
 import asyncio
+import weakref
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -84,8 +85,12 @@ class InputChannel:
         self._reading = False
         # The consumer: the asyncio task the channel belongs to, for its whole life,
         # and the claim a conversion holds while it moves to the task that runs it.
+        # The claim is held weakly: a claim freed before a task took it over (its
+        # conversion cancelled before it started, or never awaited) closes the
+        # channel, so no producer waits on a reader nobody will read.
         self._owner: asyncio.Task[Any] | None = None
-        self._claim: object | None = None
+        self._claim: weakref.ref[_Claim] | None = None
+        self._claim_release: weakref.finalize[Any, Any] | None = None
 
     @property
     def stream(self) -> StreamProtocol:
@@ -132,13 +137,14 @@ class InputChannel:
         if self._closed:
             raise self._closed_early()
         if claim is not None:
-            if claim is not self._claim:
+            held = self._claim() if self._claim is not None else None
+            if held is None or claim is not held:
                 raise RuntimeError(
                     f"The input channel of {_named(self._stream)} is claimed by "
                     + "another consumer."
                 )
             self._owner = _current_task()
-            self._claim = None  # redeemed: a later reserve(claim) is refused
+            self._drop_claim()  # redeemed: a later reserve(claim) is refused
             return claim
         if self._started or self._ended or self._owner is not None:
             raise RuntimeError(
@@ -148,8 +154,32 @@ class InputChannel:
             )
         self._started = True
         self._owner = None  # held for the claim until a task takes it over
-        self._claim = object()
-        return self._claim
+        new_claim = _Claim()
+        self._claim = weakref.ref(new_claim)
+        self._claim_release = weakref.finalize(
+            new_claim, _abandon_channel, weakref.ref(self)
+        )
+        return new_claim
+
+    def _drop_claim(self) -> None:
+        """Forget the claim: taken over, or the channel closed."""
+        if self._claim_release is not None:
+            _ = self._claim_release.detach()
+        self._claim_release = None
+        self._claim = None
+
+    def _abandon(self) -> None:
+        """Close the channel whose claim was freed before any task took it over.
+
+        Synchronous (it runs when the claim is freed): what ``close`` does.
+        """
+        self._claim_release = None
+        self._claim = None
+        if not self._ended:
+            self._closed = True
+        self._ended = True
+        self._owner = None
+        self._feed.close()
 
     def _belong_to_caller(self) -> None:
         """Bind the channel to the calling task on its first read; refuse any other.
@@ -269,8 +299,26 @@ class InputChannel:
             self._closed = True
         self._ended = True
         self._owner = None
-        self._claim = None
+        self._drop_claim()
         self._feed.close()
+
+
+class _Claim:
+    """The claim ``reserve()`` returns; the channel is held for it while it lives.
+
+    A plain class, so that the channel can hold it weakly.
+    """
+
+
+def _abandon_channel(channel_ref: weakref.ref[InputChannel]) -> None:
+    """Close a channel whose claim was freed before any task took it over.
+
+    Args:
+        channel_ref: The channel, held weakly.
+    """
+    channel = channel_ref()
+    if channel is not None:
+        channel._abandon()  # pyright: ignore[reportPrivateUsage]  # the claim's release
 
 
 def _current_task() -> asyncio.Task[Any] | None:
