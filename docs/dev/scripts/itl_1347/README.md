@@ -31,3 +31,23 @@ internals for the duration of a block.
    Only the differences the spec lists by name may remain.
 
 Outputs are raw records: keep them outside the repository.
+
+## What stage 5 adds to the differential
+
+The spec's gate (section "Proof", item 3) is complete. This harness implements what stages
+1–4 need: sync against pinned `main` byte for byte, async against sync and against `main`'s
+async as multisets. Stage 5, where `Batch` and order-dependent `PolarsFilter` see arrival
+orders the sync run never produces, adds the recorded-arrival checks:
+
+1. **The arrival-dependent set**: every `Batch`, or `PolarsFilter` with an order-dependent
+   predicate, whose input arrived in another order than on sync in either async run (the
+   branch's or `main`'s), together with all its descendants in the job's graph.
+2. **Recorded arrivals**: for each node in the set, the rows of each input in the order the
+   node received them. Record them by wrapping the node's input channels, with no library
+   change.
+3. **Per-node consistency**: recompute the node with pinned `main`'s operator, on the sync
+   path, over those recorded inputs in that order. The node's async output must equal the
+   recomputation as a multiset, apart from the spec's named differences.
+4. **Edge conservation**: on every edge into or inside the set, the recorded input rows
+   equal the producer's output rows in the same run, as a multiset with multiplicity.
+5. **Everything outside the set** is compared as above.
