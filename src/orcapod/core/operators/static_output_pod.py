@@ -5,6 +5,7 @@ import logging
 from abc import abstractmethod
 from collections.abc import (
     AsyncIterator,
+    Callable,
     Collection,
     Coroutine,
     Iterable,
@@ -1396,23 +1397,34 @@ class RowsOnRead:
     _orcapod_row_built_output = False
 
     def __init__(
-        self, rows: Iterable[tuple[TagProtocol, DataProtocol]], node: StreamProtocol
+        self,
+        rows: Iterable[tuple[TagProtocol, DataProtocol]],
+        node: StreamProtocol,
+        build: Callable[[], StreamProtocol] | None = None,
     ) -> None:
         """Hold ``node``'s rows; nothing is built.
 
         Args:
             rows: The rows ``main`` would hold, in order (read once, here).
             node: The node (or stream) whose output they are.
+            build: Builds the table another way that gives ``main``'s row path's
+                result (a function node's stored-table output, ITL-1361); default
+                the row path itself.
         """
         self._rows: list[tuple[TagProtocol, DataProtocol]] = list(rows)
         self._node = node
+        self._build = build
         self._stream: StreamProtocol | None = None
 
     def built(self) -> StreamProtocol:
-        """The stream, built from the rows on the first call (``main``'s row path)."""
+        """The stream, built on the first call (``build``, or ``main``'s row path)."""
         if self._stream is None:
-            self._stream = StaticOutputOperatorPod._materialize_upstream(
-                self._rows, self._node
+            self._stream = (
+                self._build()
+                if self._build is not None
+                else StaticOutputOperatorPod._materialize_upstream(
+                    self._rows, self._node
+                )
             )
         return self._stream
 
@@ -1520,20 +1532,24 @@ for _name in _stream_protocol_members():
 
 
 def rows_on_read(
-    rows: Iterable[tuple[TagProtocol, DataProtocol]], node: StreamProtocol
+    rows: Iterable[tuple[TagProtocol, DataProtocol]],
+    node: StreamProtocol,
+    build: Callable[[], StreamProtocol] | None = None,
 ) -> StreamProtocol:
     """``RowsOnRead`` of ``rows`` as a stream (it delegates every member to the built one).
 
     Args:
         rows: The rows ``main`` would hold, in order (read once, here).
         node: The node (or stream) whose output they are.
+        build: Builds the table another way that gives ``main``'s row path's result;
+            default the row path itself.
 
     Returns:
-        The output, built from the rows when first read.
+        The output, built when first read.
     """
     # ``RowsOnRead`` stands for the stream it builds; the checker cannot see that
     # through its delegation, so the cast goes through object.
-    return cast(StreamProtocol, cast(object, RowsOnRead(rows, node)))
+    return cast(StreamProtocol, cast(object, RowsOnRead(rows, node, build)))
 
 
 def at_edge(stream: StreamProtocol) -> StreamProtocol:

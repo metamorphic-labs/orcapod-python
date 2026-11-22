@@ -358,11 +358,17 @@ def passed_rows_output_stream(
     table = input_stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
     if passed is not None:
         table = table.take(pa.array(passed, type=pa.int64()))
-    try:
-        return StaticOutputOperatorPod._output_stream(table, input_stream.keys(), node)  # pyright: ignore[reportPrivateUsage]  # F with the node's identity
-    except RowBuiltFormUnavailable:
-        # The rows decide, built where a successor reads them (``RowsOnRead``).
-        return rows_on_read(rows, node)
+    keys = input_stream.keys()
+
+    def build() -> StreamProtocol:
+        try:
+            return StaticOutputOperatorPod._output_stream(table, keys, node)  # pyright: ignore[reportPrivateUsage]  # F with the node's identity
+        except RowBuiltFormUnavailable:
+            # The rows decide, by main's row path.
+            return StaticOutputOperatorPod._materialize_upstream(rows, node)  # pyright: ignore[reportPrivateUsage]
+
+    # The rows passed on, unchanged; the table built when read (``RowsOnRead``).
+    return rows_on_read(rows, node, build)
 
 
 class _LazyRows:
@@ -2646,12 +2652,20 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         (``RowsOnRead``): the sync orchestrator builds it where a successor reads it,
         as ``main`` rebuilt the rows there, and a leaf's is never built (ITL-1347).
         """
-        from orcapod.core.operators.static_output_pod import rows_on_read
+        from orcapod.core.operators.static_output_pod import (
+            StaticOutputOperatorPod,
+            rows_on_read,
+        )
 
-        output = self._output_from_stored_tables(rows)
-        if output is not None:
-            return output
-        return rows_on_read(rows, self)
+        def build() -> StreamProtocol:
+            # The stored results' table where it serves (L3), else the row path.
+            output = self._output_from_stored_tables(rows)
+            if output is not None:
+                return output
+            return StaticOutputOperatorPod._materialize_upstream(rows, self)  # pyright: ignore[reportPrivateUsage]  # main's row path
+
+        # The rows themselves, unchanged, its table built when read (``RowsOnRead``).
+        return rows_on_read(rows, self, build)
 
     def _output_from_stored_tables(
         self, rows: list[tuple[TagProtocol, DataProtocol]]
