@@ -463,10 +463,15 @@ def first_column_out_of_stored_range(
         if index < 0:
             continue
         arrow_type = table.schema.field(index).type
+        column = table.column(index)
+        if pa.types.is_dictionary(arrow_type):
+            # The writer decodes a dictionary: its values are what is written.
+            arrow_type = arrow_type.value_type
+            column = column.cast(arrow_type)
         if _has_extension_type(arrow_type) or not _is_recorded(arrow_type):
             continue
         try:
-            table.column(index).cast(_stored_form(arrow_type), safe=True)
+            column.cast(_stored_form(arrow_type), safe=True)
         except pa.ArrowInvalid:
             return name
     return None

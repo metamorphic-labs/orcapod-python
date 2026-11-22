@@ -606,6 +606,31 @@ def _held_columns(delta_table: deltalake.DeltaTable) -> dict[str, "pa.Field[Any]
     return fields
 
 
+def _non_null_violation(
+    held: Mapping[str, "pa.Field[Any]"], rows: pa.Table
+) -> tuple[str, bool] | None:
+    """The first column ``held`` declares non-nullable that ``rows`` omit or hold a
+    null in: Delta's writer refuses such a batch (ITL-1334).
+
+    Args:
+        held: Columns by name: a stored table's, a pending batch's, or the rows' own.
+        rows: The rows to append.
+
+    Returns:
+        ``(column, omitted)``: ``omitted`` is ``True`` when the rows lack the column,
+        ``False`` when they hold a null in it; ``None`` when there is no such column.
+    """
+    for name, field in held.items():
+        if field.nullable:
+            continue
+        index = rows.schema.get_field_index(name)
+        if index < 0:
+            return name, True
+        if rows.column(index).null_count:
+            return name, False
+    return None
+
+
 def _append_refusal(
     delta_table: deltalake.DeltaTable, rows: pa.Table
 ) -> tuple[str, str] | None:
@@ -635,14 +660,13 @@ def _append_refusal(
             change = _column_change(held[field.name], field)
             if change is not None:
                 return field.name, change
-    for name, field in held.items():
-        if field.nullable:
-            continue
-        index = rows.schema.get_field_index(name)
-        if index < 0:
-            return name, f"{name} is stored as non-nullable, and the rows omit it"
-        if rows.column(index).null_count:
-            return name, f"{name} is stored as non-nullable, and the rows hold a null"
+    violation = _non_null_violation(held, rows)
+    if violation is not None:
+        name, omitted = violation
+        return name, (
+            f"{name} is stored as non-nullable, and the rows "
+            f"{'omit it' if omitted else 'hold a null'}"
+        )
     written = pa.schema([written_field(f) for f in rows.schema])
     mismatch = DeltaTableDatabase._incompatible_append_column(
         delta_table, rows.schema, written
@@ -1642,7 +1666,15 @@ class DeltaTableDatabase:
         if pending is None:
             pending = self._pending_batches.get(self._get_record_key(record_path))
         refusal = None
-        if pending is not None:
+        # The rows' own declaration: a column they declare non-nullable and hold a
+        # null in fails the write, a first one included.
+        own = _non_null_violation({f.name: f for f in records.schema}, records)
+        if own is not None:
+            refusal = (
+                own[0],
+                f"{own[0]} is declared non-nullable, and the rows hold a null",
+            )
+        if refusal is None and pending is not None:
             held = {f.name: f for f in pending.schema}
             refusal = next(
                 (
@@ -1653,6 +1685,16 @@ class DeltaTableDatabase:
                 ),
                 None,
             )
+            # A pending column declared non-nullable fails the write of the batch
+            # the rows join, whether or not a table is stored yet.
+            violation = _non_null_violation(held, records) if refusal is None else None
+            if violation is not None:
+                name, omitted = violation
+                refusal = (
+                    name,
+                    f"{name} is queued as non-nullable, and the rows "
+                    f"{'omit it' if omitted else 'hold a null'}",
+                )
         if refusal is None:
             try:
                 delta_table = self._get_delta_table(record_path)
@@ -2475,6 +2517,9 @@ class DeltaTableDatabase:
                         database_error.add_note(
                             f"Another batch also failed to flush ({record_key}): "
                             f"{type(other).__name__}: {other}"
+                            + "".join(
+                                f" {note}" for note in getattr(other, "__notes__", [])
+                            )
                         )
                 raise database_error
             failed_keys = [k for k, _ in errors]
@@ -2633,17 +2678,21 @@ class DeltaTableDatabase:
             # ``_conformed_to_stored``): they would be refused by every later flush
             # too, so they leave the queue, as rows refused when added never enter
             # it (ITL-1334).
-            logger.error(f"Refused batch for {record_key}: {e}")
             # The refusal was decided against a version this handle may not have
             # cached: what it cached of the table is dropped, so its next read loads
             # the version another writer committed.
             self._delta_table_cache.pop(record_key, None)
             self._snapshots.pop(record_key, None)
-            e.add_note(
-                f"The {pending_batch.num_rows} rows queued for this table were not "
-                "written and are no longer queued."
+            # The discard notice is part of the message, so it survives wherever the
+            # error is reported: the log, and the note ``flush`` puts on another
+            # batch's error when that one is raised instead.
+            refused = InputValidationError(
+                f"{e} The {pending_batch.num_rows} rows queued for table "
+                f"{record_key!r} were not written and are no longer queued: correct "
+                "them and add them again."
             )
-            raise
+            logger.error(f"Refused batch for {record_key}: {refused}")
+            raise refused from e
         except Exception as e:
             logger.error(f"Error flushing batch for {record_key}: {e}")
             # Put the tables back in the pending queue
@@ -2962,9 +3011,10 @@ class DeltaTableDatabase:
         ``null`` items included, are still compared.
 
         One exception keeps tables written before types were recorded (ITL-928)
-        appendable: an unsigned integer column into a column without a record that
-        holds its written form (the signed integer of the same width), its values
-        then checked by ``first_column_out_of_stored_range``.
+        appendable: an unsigned integer column, dictionary-encoded or not, into a
+        column without a record that holds its written form (the signed integer of
+        the same width), its values then checked by
+        ``first_column_out_of_stored_range``.
 
         The stored schema comes from the loaded log; no data is read.
 
@@ -2999,9 +3049,15 @@ class DeltaTableDatabase:
             incoming = _with_nulls_resolved(comparable(field.type), held)
             if not _types_conflict(held, incoming):
                 continue
-            if record is None and pa.types.is_unsigned_integer(field.type):
+            decoded = (
+                field.type.value_type
+                if pa.types.is_dictionary(field.type)
+                else field.type
+            )
+            if record is None and pa.types.is_unsigned_integer(decoded):
                 as_written = _with_nulls_resolved(
-                    comparable(written.field(field.name).type), held
+                    comparable(written_field(pa.field(field.name, decoded)).type),
+                    held,
                 )
                 if not _types_conflict(held, as_written):
                     continue

@@ -244,7 +244,10 @@ def test_the_flush_refuses_rows_another_writer_made_conflict(
     with pytest.raises(InputValidationError, match="'x'") as raised:
         db.flush()
     refusal = raised.value
-    assert any("no longer queued" in note for note in getattr(refusal, "__notes__", []))
+    assert (
+        "2 rows queued for table 't' were not written and are no longer queued"
+        in str(refusal)
+    )
     assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
     db.flush()  # nothing left to refuse
     back = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="id")
@@ -489,3 +492,127 @@ def test_a_refused_merge_leaves_the_queued_rows_as_they_were(tmp_path: Path) -> 
     back = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="id")
     assert back is not None
     assert back.sort_by("id").column("x").to_pylist() == [1, None]
+
+
+def _legacy_int32_table(root: Path) -> None:
+    """A table as a build before ITL-928 wrote it: ``uint32`` columns ``x`` and ``y``
+    stored as Delta's ``int32``, with no recorded type."""
+    import deltalake
+
+    deltalake.write_deltalake(
+        str(root / "t"),
+        pa.table(
+            {
+                "__record_id": pa.array([b"1", b"2"], pa.large_binary()),
+                "x": pa.array([1, 2], pa.int32()),
+                "y": pa.array([1, 2], pa.int32()),
+            }
+        ),
+    )
+
+
+def _dictionary_rows(values: list[int]) -> pa.Table:
+    encoded = pa.array(values, pa.uint32()).dictionary_encode()
+    return pa.table(
+        {"id": pa.array([b"3", b"4"], pa.large_binary()), "x": encoded, "y": encoded}
+    )
+
+
+def test_dictionary_unsigned_rows_in_range_append_to_a_legacy_signed_column(
+    tmp_path: Path,
+) -> None:
+    """The legacy exception (unsigned rows into a pre-ITL-928 signed column) applies
+    to the decoded type of a dictionary too: it appended before this round's type rule
+    (fifth Codex review of PR 471)."""
+    _legacy_int32_table(tmp_path)
+    db = DeltaTableDatabase(tmp_path)
+    db.add_records(PATH, _dictionary_rows([3, 4]), record_id_column="id", flush=True)
+    back = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="id")
+    assert back is not None
+    assert back.sort_by("id").select(["x", "y"]).to_pylist() == [
+        {"x": 1, "y": 1},
+        {"x": 2, "y": 2},
+        {"x": 3, "y": 3},
+        {"x": 4, "y": 4},
+    ]
+
+
+def test_dictionary_unsigned_rows_out_of_range_are_refused(tmp_path: Path) -> None:
+    """The range check decodes a dictionary: a value the signed column cannot hold is
+    refused, naming the column, before anything is queued."""
+    _legacy_int32_table(tmp_path)
+    db = DeltaTableDatabase(tmp_path)
+    with pytest.raises(InputValidationError, match="'x'.*cannot hold"):
+        db.add_records(
+            PATH, _dictionary_rows([3_000_000_000, 4]), record_id_column="id"
+        )
+    assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
+    back = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="id")
+    assert back is not None and back.num_rows == 2
+
+
+_NOT_NULL = pa.schema(
+    [
+        pa.field("id", pa.large_binary()),
+        pa.field("x", I64, nullable=False),
+        pa.field("y", I64, nullable=False),
+    ]
+)
+
+
+def _not_null_rows(ids: list[bytes], x: list[Any], y: list[Any]) -> pa.Table:
+    """Rows of ``x`` and ``y`` declared non-nullable, holding what is given."""
+    return pa.Table.from_arrays(
+        [pa.array(ids, pa.large_binary()), pa.array(x, I64), pa.array(y, I64)],
+        schema=_NOT_NULL,
+    )
+
+
+@pytest.mark.parametrize("column", ["x", "y"])
+@pytest.mark.parametrize("mode", ["error", "merge", "coerce"])
+def test_nulls_in_a_column_a_pending_batch_declares_non_nullable_are_refused(
+    tmp_path: Path, mode: str, column: str
+) -> None:
+    """With no table stored yet, rows holding a null in a column the pending batch
+    declares non-nullable would fail the write of the whole batch, the valid queued
+    rows with it (fifth Codex review of PR 471). They are refused before buffering, in
+    every ``schema_handling`` mode, and the queued rows are written."""
+    db = DeltaTableDatabase(tmp_path)
+    queued = _not_null_rows([b"1", b"2"], [1, 2], [1, 2])
+    db.add_records(PATH, queued, record_id_column="id")
+    x, y = ([None, 3], [3, 4]) if column == "x" else ([3, 4], [3, None])
+    with pytest.raises(InputValidationError, match=f"'{column}'.*non-nullable"):
+        db.add_records(
+            PATH,
+            _not_null_rows([b"3", b"4"], x, y),
+            record_id_column="id",
+            schema_handling=cast(Any, mode),  # one of the three literals
+        )
+    pending = db._pending_batches["t"]  # pyright: ignore[reportPrivateUsage]
+    assert (
+        pending.select(["x", "y"]).to_pylist() == queued.select(["x", "y"]).to_pylist()
+    )
+    db.flush()
+    back = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="id")
+    assert back is not None
+    assert back.sort_by("id").select(["x", "y"]).to_pylist() == [
+        {"x": 1, "y": 1},
+        {"x": 2, "y": 2},
+    ]
+
+
+@pytest.mark.parametrize("column", ["x", "y"])
+def test_a_first_batch_holding_a_null_it_declares_non_nullable_is_refused(
+    tmp_path: Path, column: str
+) -> None:
+    """The rows' own declaration counts too: Delta's writer refuses a batch whose
+    non-nullable column holds a null, a first one included."""
+    db = DeltaTableDatabase(tmp_path)
+    x, y = ([None, 2], [1, 2]) if column == "x" else ([1, 2], [1, None])
+    with pytest.raises(
+        InputValidationError, match=f"'{column}'.*declared non-nullable"
+    ):
+        db.add_records(PATH, _not_null_rows([b"1", b"2"], x, y), record_id_column="id")
+    assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
+    db.flush()
+    assert db.get_all_records(PATH, record_id_column="id") is None
