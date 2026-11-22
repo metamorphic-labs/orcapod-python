@@ -44,7 +44,7 @@ META = b"ARROW:extension:metadata"
 PATH = ("t",)
 
 
-def _extension_class(name: str) -> type[pa.ExtensionType]:
+def _extension_class(name: str) -> Any:
     """An extension type named ``name`` over ``large_string``, any metadata bytes."""
 
     class _Ext(pa.ExtensionType):
@@ -62,7 +62,9 @@ def _extension_class(name: str) -> type[pa.ExtensionType]:
     return _Ext
 
 
-EXTENSIONS = {name: _extension_class(name) for name in ("itl1371.a", "itl1371.b")}
+EXTENSIONS: dict[str, Any] = {
+    name: _extension_class(name) for name in ("itl1371.a", "itl1371.b")
+}
 
 HELD = ("itl1371.a", b"m")
 CHANGES: dict[str, tuple[str, bytes] | None] = {
@@ -78,7 +80,7 @@ def _text(identifier: tuple[str, bytes]) -> str:
 
 def _leaf(
     identifier: tuple[str, bytes] | None, form: str, values: list[str]
-) -> tuple[pa.Field, pa.Array]:
+) -> tuple["pa.Field[Any]", Any]:
     storage = pa.array(values, pa.large_string())
     if identifier is None:
         return pa.field("v", pa.large_string()), storage
@@ -91,7 +93,7 @@ def _leaf(
 
 def _column(
     identifier: tuple[str, bytes] | None, form: str, depth: str, values: list[str]
-) -> tuple[pa.Field, pa.Array]:
+) -> tuple["pa.Field[Any]", Any]:
     field, array = _leaf(identifier, form, values)
     n = len(values)
     if depth == "top":
@@ -106,14 +108,16 @@ def _column(
             offsets, array, type=list_type
         )
     assert depth == "map value"
-    map_type = pa.map_(
-        pa.field("key", pa.large_string(), nullable=False), field.with_name("value")
+    # The stubs type pa.map_'s arguments as types and from_arrays' offsets as int64;
+    # pyarrow takes key and item fields, and int32 offsets for a map.
+    map_type: Any = pa.map_(
+        pa.field("key", pa.large_string(), nullable=False),  # pyright: ignore[reportArgumentType]
+        field.with_name("value"),  # pyright: ignore[reportArgumentType]
     )
     keys = pa.array([f"k{i}" for i in range(n)], pa.large_string())
-    offsets = pa.array(range(n + 1), pa.int32())
-    return pa.field("x", map_type), pa.MapArray.from_arrays(
-        offsets, keys, array, type=map_type
-    )
+    offsets: Any = pa.array(range(n + 1), pa.int32())
+    from_arrays: Any = pa.MapArray.from_arrays
+    return pa.field("x", map_type), from_arrays(offsets, keys, array, type=map_type)
 
 
 def _rows(
@@ -238,7 +242,7 @@ def _write_held(store: _Store, via: str, state: str, form: str, depth: str) -> N
 
 def _assert_only_held_rows(store: _Store) -> None:
     """The two held rows, as written, and nothing of the refused append."""
-    stored = store.stored()
+    stored = store.stored().sort_by("id")
     assert stored.column("id").to_pylist() == [b"1", b"22"]
     assert stored.column("a").to_pylist() == [1, 2]
     x = stored.column("x")
@@ -419,15 +423,68 @@ def test_columns_are_matched_by_name_in_any_order() -> None:
 
 
 def test_map_key_identifier_is_compared() -> None:
-    def map_field(identifier: tuple[str, bytes]) -> pa.Field:
+    def map_field(identifier: tuple[str, bytes]) -> "pa.Field[Any]":
         key = pa.field(
             "key",
             pa.large_string(),
             nullable=False,
             metadata={NAME: identifier[0].encode(), META: identifier[1]},
         )
-        return pa.field("x", pa.map_(key, pa.field("value", pa.int64())))
+        item = pa.field("value", pa.int64())
+        return pa.field("x", pa.map_(key, item))  # pyright: ignore[reportArgumentType]  # pyarrow takes key/item fields
 
     assert logical_identity_change(map_field(HELD), map_field(HELD)) is None
     reason = logical_identity_change(map_field(HELD), map_field(("itl1371.a", b"n")))
     assert reason is not None and reason.startswith("x.key ")
+
+
+def _struct_rows(form: str, unit: bytes, ids: list[bytes]) -> pa.Table:
+    """``x: struct<v>``, ``v`` of logical type ``HELD`` with ``{unit: <unit>}`` beside
+    its identifier."""
+    field, array = _leaf(HELD, form, [i.decode() for i in ids])
+    field = field.with_metadata({**dict(field.metadata or {}), b"unit": unit})
+    struct = pa.StructArray.from_arrays([array], fields=[field])
+    return pa.Table.from_arrays(
+        [pa.array(ids, pa.large_binary()), struct],
+        schema=pa.schema(
+            [pa.field("id", pa.large_binary()), pa.field("x", struct.type)]
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("form", "state"),
+    [
+        ("annotated", "pending"),
+        ("annotated", "committed"),
+        ("annotated", "reopened"),
+        # Committed, a struct child of an extension type with metadata of its own is
+        # refused even for the same type, as on main: the held view drops the child's
+        # own metadata (reported with ITL-1372).
+        ("extension", "pending"),
+    ],
+)
+def test_delta_other_nested_metadata_beside_an_identifier_is_still_refused(
+    tmp_path: Path, form: str, state: str
+) -> None:
+    """Delta leaves the nested extension keys to the identity rule and compares the
+    rest of a nested field's metadata as before (ITL-1334): a struct child of the
+    same logical type with other non-extension metadata is refused."""
+    with _store("Delta", tmp_path) as store:
+        store.db.add_records(
+            PATH,
+            _struct_rows(form, b"m", [b"1"]),
+            record_id_column="id",
+            flush=state != "pending",
+        )
+        if state == "reopened":
+            store.reopen()
+        store.db.add_records(
+            PATH, _struct_rows(form, b"m", [b"22"]), record_id_column="id"
+        )
+        with pytest.raises(InputValidationError, match="x.v has other field metadata"):
+            store.db.add_records(
+                PATH, _struct_rows(form, b"s", [b"333"]), record_id_column="id"
+            )
+        ids = store.stored().sort_by("id").column("id").to_pylist()
+        assert ids == [b"1", b"22"]

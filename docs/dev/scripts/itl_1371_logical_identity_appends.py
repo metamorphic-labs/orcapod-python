@@ -32,7 +32,7 @@ NAME = b"ARROW:extension:name"
 META = b"ARROW:extension:metadata"
 
 
-def _probe_class(name: str) -> type:
+def _probe_class(name: str) -> Any:
     """An extension type named ``name`` whose metadata is any bytes."""
 
     class Probe(pa.ExtensionType):
@@ -50,7 +50,7 @@ def _probe_class(name: str) -> type:
     return Probe
 
 
-PROBES = {name: _probe_class(name) for name in ("probe.a", "probe.b")}
+PROBES: dict[str, Any] = {name: _probe_class(name) for name in ("probe.a", "probe.b")}
 
 
 IDENTIFIERS = {
@@ -87,12 +87,16 @@ def column(identifier, form: str, depth: str, values: list[str]):
         arr = pa.LargeListArray.from_arrays(offsets, array, type=typ)
         return pa.field("x", typ), arr
     if depth == "map value":
-        offsets = pa.array(list(range(n + 1)), pa.int32())
+        # The stubs type pa.map_'s arguments as types and from_arrays' offsets as
+        # int64; pyarrow takes key and item fields, and int32 offsets for a map.
+        offsets: Any = pa.array(list(range(n + 1)), pa.int32())
         keys = pa.array([f"k{i}" for i in range(n)], pa.large_string())
-        typ = pa.map_(
-            pa.field("key", pa.large_string(), nullable=False), field.with_name("value")
+        typ: Any = pa.map_(
+            pa.field("key", pa.large_string(), nullable=False),  # pyright: ignore[reportArgumentType]
+            field.with_name("value"),  # pyright: ignore[reportArgumentType]
         )
-        arr = pa.MapArray.from_arrays(offsets, keys, array, type=typ)
+        from_arrays: Any = pa.MapArray.from_arrays
+        arr = from_arrays(offsets, keys, array, type=typ)
         return pa.field("x", typ), arr
     raise AssertionError(depth)
 

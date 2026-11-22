@@ -825,9 +825,8 @@ def _other_identifier(field: "pa.Field[Any]", column: Any) -> tuple[Any, Any]:
         b"ARROW:extension:name": f"{identifier.name}.other".encode(),
         b"ARROW:extension:metadata": identifier.metadata,
     }
-    storage = pa.chunked_array(
-        [chunk.storage for chunk in column.chunks], type=ext.storage_type
-    )
+    chunked: Any = pa.chunked_array  # the stubs type ``type=`` as None
+    storage = chunked([chunk.storage for chunk in column.chunks], type=ext.storage_type)
     return pa.field(field.name, ext.storage_type, field.nullable, metadata), storage
 
 

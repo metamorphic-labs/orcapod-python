@@ -630,7 +630,7 @@ def _with_extension_annotations(arrow_type: Any, delta_type: Any) -> Any:
         }
         inner = _with_extension_annotations(field.type, delta_field_type)
         return field.with_type(inner).with_metadata(
-            cast(Any, {**metadata_bytes(field.metadata), **keys}) or None
+            cast(Any, {**metadata_bytes(field.metadata), **keys})
         )
 
     t = pa.types
@@ -678,7 +678,7 @@ def _without_extension_annotations(arrow_type: Any) -> Any:
         metadata = _metadata(field.metadata)
         return field.with_type(
             _without_extension_annotations(field.type)
-        ).with_metadata(cast(Any, metadata) or None)
+        ).with_metadata(cast(Any, metadata))
 
     t = pa.types
     if isinstance(arrow_type, pa.BaseExtensionType):
