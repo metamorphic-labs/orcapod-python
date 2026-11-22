@@ -130,9 +130,9 @@ typed by `_zero_row_input`, ITL-912). A fan-out wraps one table for every succes
 `materialize_results=False` drops a node table once every successor ran (`_gc_buffers`).
 
 `OrchestratorResult.node_outputs` is public: `SyncPipelineOrchestrator` is exported. Today
-it holds rows, and `job.run()` discards it. The proposal is to hold node tables there. A
-caller who wants rows calls `ArrowTableStream(...).iter_data()` on one, as for any table.
-This is an API change, so the developer decides (question 1).
+it holds rows, and `job.run()` discards it. It will hold node tables (developer decision 1,
+below). A caller who wants rows calls `ArrowTableStream(...).iter_data()` on one, as for
+any table.
 
 ## Each node kind
 
@@ -199,7 +199,8 @@ The function is still called once per row. Everything around the call is a table
    - a `None` result or a failed row gives no row;
    - two equal inputs give two rows;
    - the column order is the first output row's, which differs between a stored row and a
-     fresh one today (`concat_tables_by_name`). Settling that order is question 2.
+     fresh one today (`concat_tables_by_name`). It is kept exactly (decision 2; giving
+     it one order is ITL-1353).
 
    Async keeps today's order: stored hits first, then computed rows as they finish. Async
    equals sync as a set of rows (see "Async equals sync" below).
@@ -208,7 +209,7 @@ The function is still called once per row. Everything around the call is a table
 7. **The node's own reads** (`iter_data`, `as_table`, `head`) read the run's rows from the
    node's tables instead of `_cached_output_datas` pairs. Today they list rows in the order
    the cache holds them (`_held_pairs`), which can differ from the input order a successor
-   receives. Keeping or unifying that order is question 3.
+   receives. Cache order is kept for now (decision 3).
 8. **Stored values decoded as a class.** A `TypeIdentityError` raised when a stored value
    is decoded as its class (ITL-881) must stop the run at the same point as today. Stage 4
    first establishes where it is raised today: at datagram construction, or at first
@@ -460,7 +461,7 @@ stage 0 replaces them with measurements before stage 1 merges.
 |---|---|---|---|
 | 0 | Measurement only. A script in `docs/dev/scripts/itl_1347/`, on a tutorial-data pipeline of the workshop's shape, counts per node kind: datagrams made, `R` calls and time by caller (kept output vs. edge), edges per node. No library change. | – | 0 s; gives the real split |
 | 1 | **First small step: reuse a producer's table when its successor takes it unmodified.** An operator node already keeps `R` of exactly the rows it hands on (`_kept_output(result, output)`). The sync orchestrator wraps that kept table for each successor instead of rebuilding it from the buffer, for held operator nodes too. Held row counts are read without rows. The row buffers stay. | By construction: the same `R` of the same rows. The node keeps the raw row-built table beside its stream, so no context column enters. One test asserts the equality per edge. | The edge rebuilds of operator outputs, times fan-out: about **4–8 s** |
-| 2 | Sync node protocol, sources and operators: `execute` returns node tables; sources pass on `F` of their table, operators `F` of their result; held nodes pass on node tables; `OrchestratorResult` holds node tables. Function and side-effect nodes take a node table as input and still iterate it internally. | L0, L1, L2, L5 | The datagrams of source and operator outputs and their remaining rebuilds: about **14–20 s** |
+| 2 | Sync node protocol, in two parts (decision 4). `execute` returns node tables; held nodes pass on node tables; `OrchestratorResult` holds node tables (decision 1). Function and side-effect nodes take a node table as input and still iterate it internally. **2a, sources**: sources pass on `F` of their table. **2b, operators**: operators pass on `F` of their result. | 2a: L0, L2, L5; 2b: L0, L1, L5 | The datagrams of source and operator outputs and their remaining rebuilds: about **14–20 s** together |
 | 3 | Function nodes: table input, entry ids from slices, hits from the stored table, the call on values taken from the table, results converted per column, output table by row index; row views for observers; the node's own reads from its tables. | L3, L4, differential | Input datagrams, stored-hit datagrams and result datagrams of function nodes: about **8–14 s** |
 | 4 | Side-effect nodes: masked pass-through, load-only pass-through, held table. | L0, differential | Small unless side effects sit on large streams |
 | 5 | Async orchestrator: batch channels; batch forms for sources, barrier and streaming operators, function nodes and side-effect nodes; correlation by row index. | L6, `test_async_sync_equivalence`, differential | The same order of gain for `run_async` / an async `job.run` |
@@ -485,23 +486,28 @@ Independent of this design: the `LazyModule` attribute cost (42.9 million `__get
 calls; 45.1 s → 40.7 s in the profile's experiment) is its own fix in this round. Its gain
 shrinks as fewer datagrams are made.
 
-## Questions for the developer
+## Developer decisions (2026-11-22)
 
-1. `OrchestratorResult.node_outputs` is public and holds rows today. Should it hold node
-   tables (proposed; a caller makes rows with `iter_data()` if needed), or stay rows,
-   built on access?
-2. A function node's output column order today follows its first output row, which
-   differs between a stored row and a fresh one. Keep that exactly (proposed for stages
-   1–3, so nothing moves), or open an issue to give it one order? The second option moves
-   the column order of downstream stored tables, so it needs its own decision.
-3. A function node's own reads list rows in cache order, while its successors receive
-   input order. Keep that (proposed), or make the node's reads follow the run's input
-   order in stage 3?
-4. Stage order: 0 → 1 → 2 → 3 → 4 → 5 is proposed. Stage 2's sources part and operators
-   part could go to two workers in parallel.
+The four questions this spec asked, answered by the developer (also recorded on ITL-1347):
+
+1. **`OrchestratorResult.node_outputs` holds node tables.** It no longer holds rows; a
+   caller makes rows with `iter_data()` if needed. This API change lands in stage 2.
+2. **A function node's first-row column order is kept exactly.** Its output columns
+   follow its first output row, which differs between a stored row and a fresh one. Every
+   stage reproduces this (L4 checks it), so no column order moves. Giving the output one
+   order is future work, ITL-1353, with its own decision because it moves the column order
+   of downstream stored tables.
+3. **A function node's own reads keep cache order for now.** Its reads (`iter_data`,
+   `as_table`, `head`) list rows in the order the cache holds them, while its successors
+   receive input order. Stage 3 keeps this.
+4. **Stages run in order 0 → 1 → 2 → 3 → 4 → 5.** Stage 2 is split in two, a sources part
+   and an operators part, which can go to two workers in parallel.
+
+The developer approves the spec as a whole before stage 0 starts.
 
 ## Future work (not designed here)
 
+- One output column order for a function node, whatever its first row (ITL-1353).
 - Batch the side-effect completion lookup (one `get_record_by_id` per row today).
 - Whether a `null` column stays `null` through the job layer (ITL-1319).
 - Polars instead of Arrow as a node table's backing, where an operator works in Polars.
