@@ -44,6 +44,7 @@ from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
     StreamBase,
     check_head_size,
+    reads_as_its_class,
     short_stream_repr,
     typed_zero_row_input,
     typed_zero_row_table,
@@ -1618,15 +1619,21 @@ def produced_stream(stream: StreamProtocol) -> StreamProtocol:
     An operator's result is a ``DynamicPodStream`` whose rows are those of the stream
     its ``static_process`` returned, which may itself be another operator's
     ``DynamicPodStream``: this follows them all to the stream that holds the rows
-    (ITL-1347).
+    (ITL-1347). A wrapper is followed only when it reads as ``DynamicPodStream`` itself
+    (``reads_as_its_class``: its rows are then exactly those of the stream it holds); a
+    subclass or a wrapper with a member replaced on the instance is where the chain
+    stops, so the caller, which proves the stream it is given, takes the row path.
 
     Args:
         stream: An operator's result, or any stream.
 
     Returns:
-        The stream that holds ``stream``'s rows.
+        The stream that holds ``stream``'s rows, or the first wrapper not proven to
+        read through the stream it holds.
     """
-    while isinstance(stream, DynamicPodStream):
+    while isinstance(stream, DynamicPodStream) and reads_as_its_class(
+        stream, DynamicPodStream
+    ):
         stream = stream.produced_stream()
     return stream
 

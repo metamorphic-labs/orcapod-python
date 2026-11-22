@@ -528,7 +528,9 @@ methods or properties** (`reads_as_its_class`). It is applied in two places:
 - a bound source: its class is a library source kind that itself declares
   `TABLE_IS_ROWS` (`table_is_rows`);
 - an operator's result: the stream it yields its rows from, followed through every
-  `DynamicPodStream` (`produced_stream`), is `ArrowTableStream`, and its own `keys()` (the
+  `DynamicPodStream` that is itself proven (`produced_stream`; a subclass or a wrapper
+  with a replaced member stops the chain), is `ArrowTableStream` in the node's data
+  context (its rows report that context, as `main`'s rows did), and its own `keys()` (the
   keys `iter_data` reads its rows with, tags in its tag-column order) give the order.
 
 Any subclass, replaced reader or other stream kind takes `main`'s row path.
