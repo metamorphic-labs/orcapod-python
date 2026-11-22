@@ -209,7 +209,9 @@ class AsyncPipelineOrchestrator:
         held_rows: Mapping[Any, list[tuple[TagProtocol, DataProtocol]]] | None = None,
     ) -> OrchestratorResult:
         """Core async logic: wire channels, launch tasks, collect results."""
-        from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+        from orcapod.core.operators.static_output_pod import (
+            rows_on_read,
+        )
         from orcapod.pipeline.observer import NoOpObserver
 
         run_id = run_id or str(uuid.uuid4())
@@ -365,9 +367,7 @@ class AsyncPipelineOrchestrator:
 
             return OrchestratorResult(
                 node_outputs=(
-                    StreamsOnRead(
-                        collectors, StaticOutputOperatorPod._materialize_upstream
-                    )
+                    StreamsOnRead(collectors, rows_on_read)
                     if materialize_results
                     else {}
                 )

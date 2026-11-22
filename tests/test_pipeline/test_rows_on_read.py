@@ -252,3 +252,184 @@ def test_replay_of_a_table_the_whole_table_build_cannot_use(
     else:
         replay.run(observer=observer)
         assert ("end", "selected") in observer.events
+
+
+# ── round 4: the boundary of the eager route, and the lazy output itself ──────
+
+
+DELIVERED: list[int] = []
+
+
+def _deliver(x: int, ctx: Any) -> None:
+    DELIVERED.append(x)
+
+
+def _leaf_run(job: PipelineJob, label: str) -> _NodeEvents:
+    """Run only ``label`` (a source node), as a leaf of a direct sync DAG."""
+    dag: OrcaDAG[Any] = OrcaDAG()
+    dag.add_node(job.nodes[label])
+    observer = _NodeEvents()
+    SyncPipelineOrchestrator().run(dag, observer=observer, materialize_results=False)
+    return observer
+
+
+def test_a_bound_tap_stream_delivers_every_row_as_main_does() -> None:
+    """A side-effect stream bound to a slot is not a library source kind: its rows.
+
+    The node iterates it as ``main`` did, delivering every row, and a leaf completes
+    (Codex on PR #485, round 4: the eager route read ``as_table()`` instead).
+    """
+    from orcapod.side_effects import tap_pod
+
+    tap = tap_pod(_deliver)
+    DELIVERED.clear()
+    raw = _with_source_x([[None, [[]]], [None, [[]]]], _UNCONVERTIBLE)
+    tapped: Any = tap.process(raw)
+    job = PipelineJob(name="tap_bound", database=InMemoryArrowDatabase())
+    with job:
+        _plain().select_data_columns(["x"], label="selected")
+    job.bind(sources={"s": tapped})
+    observer = _leaf_run(job, "s")
+    assert DELIVERED == [1, 2]
+    assert observer.events == [("start", "s"), ("end", "s")]
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        pytest.param(lambda: _plain().select_data_columns(["x"]), id="operator"),
+        pytest.param(
+            lambda: ArrowTableStream(_source_table(), tag_columns=["k"]), id="raw"
+        ),
+    ],
+)
+def test_a_bound_stream_that_is_not_a_source_kind_hands_on_its_rows(make: Any) -> None:
+    """Only a library source kind whose table is its rows (``TABLE_IS_ROWS``) is eager."""
+    from orcapod.core.operators.static_output_pod import RowsOnRead
+
+    job = PipelineJob(name="bound_kinds", database=InMemoryArrowDatabase())
+    with job:
+        _plain().select_data_columns(["x"], label="selected")
+    job.bind(sources={"s": make()})
+    assert isinstance(job.nodes["s"].execute(), RowsOnRead)
+
+
+def test_a_library_source_kind_is_eager() -> None:
+    from orcapod.core.operators.static_output_pod import RowsOnRead
+
+    job = PipelineJob(name="eager_kind", database=InMemoryArrowDatabase())
+    with job:
+        _plain().select_data_columns(["x"], label="selected")
+    assert not isinstance(job.nodes["s"].execute(), RowsOnRead)
+
+
+def test_an_empty_output_is_derived_at_the_edge() -> None:
+    """A source with no row: its zero-row output is derived where the successor reads.
+
+    An observer that rebinds the source when it ends changes what the successor
+    receives, as on ``main`` (Codex on PR #485, round 4).
+    """
+
+    def empty(mark: str) -> ArrowTableSource:
+        field = pa.field("x", pa.int64(), nullable=False, metadata={"mark": mark})
+        table = pa.table({"k": pa.array([], pa.int64()), "x": pa.array([], pa.int64())})
+        table = pa.Table.from_arrays(
+            table.columns,
+            schema=pa.schema([pa.field("k", pa.int64(), nullable=False), field]),
+        )
+        return ArrowTableSource(table, tag_columns=["k"], source_id="s")
+
+    job = PipelineJob(name="empty_edge", database=InMemoryArrowDatabase())
+    with job:
+        empty("before").select_data_columns(["x"], label="selected")
+    slot = next(label for label in job.nodes if label != "selected")
+    node = job.nodes[slot]
+
+    class RebindsAtEnd(NoOpObserver):
+        def contextualize(self, *identity_path: str) -> RebindsAtEnd:
+            return self
+
+        def on_node_end(self, node_label: str, node_hash: str) -> None:
+            if node_label == slot:
+                node.bound_source = empty("after")
+
+    job.run(observer=RebindsAtEnd())
+    kept = job.nodes["selected"].as_table()
+    assert kept.schema.field("x").metadata == {b"mark": b"after"}
+
+
+def test_an_operator_with_an_empty_result_is_not_called_again() -> None:
+    """An empty result's zero-row form is derived at the edge, never by a second call.
+
+    An operator that raises on empty input completes as a leaf, as on ``main``
+    (Codex on PR #485, round 4).
+    """
+    from orcapod.operators import SelectDataColumns
+
+    calls: list[int] = []
+
+    class EmptyThenRaises(SelectDataColumns):
+        def unary_static_process(self, stream: Any) -> Any:
+            rows = stream.as_table().num_rows
+            calls.append(rows)
+            if rows == 0:
+                raise ValueError("cannot process empty input")
+            return super().unary_static_process(stream).polars_filter(x=-1)
+
+    job = PipelineJob(name="empty_result", database=InMemoryArrowDatabase())
+    with job:
+        EmptyThenRaises(["x"])(_plain(), label="emptied")
+    observer = _NodeEvents()
+    job.run(observer=observer)
+    assert ("end", "emptied") in observer.events
+    assert 0 not in calls
+
+
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+def test_returned_function_rows_keep_their_meta(asynchronous: bool) -> None:
+    """``node_outputs[node].iter_data()`` gives the node's own rows, meta included."""
+    from orcapod import function_pod
+    from orcapod.pipeline import AsyncPipelineOrchestrator
+
+    @function_pod(output_keys="y")
+    def plus(x: int) -> int:
+        return x + 1
+
+    job = PipelineJob(name="returned_rows", database=InMemoryArrowDatabase())
+    with job:
+        plus.pod(_plain(), label="plus")
+    dag: OrcaDAG[Any] = OrcaDAG()
+    dag.add_edge(job.nodes["s"], job.nodes["plus"])
+    orchestrator: Any = (
+        AsyncPipelineOrchestrator() if asynchronous else SyncPipelineOrchestrator()
+    )
+    result = orchestrator.run(dag)
+    rows = list(result.node_outputs[job.nodes["plus"]].iter_data())
+    assert rows
+    assert all("__computed" in data.keys(columns={"meta": True}) for _, data in rows)
+
+
+def test_a_lazy_output_is_described_and_opened_without_reading() -> None:
+    """Describing an unread output, or opening its channel, builds nothing.
+
+    The first read of the channel raises what the rows' build raises (Codex on PR
+    #485, round 4).
+    """
+    import asyncio
+
+    from orcapod.core.operators.static_output_pod import RowsOnRead
+    from orcapod.protocols.core_protocols import StreamProtocol
+
+    job = PipelineJob(name="lazy_out", database=InMemoryArrowDatabase())
+    with job:
+        _plain().select_data_columns(["x"], label="selected")
+    job.bind(sources={"s": _unconvertible()})
+    out: Any = job.nodes["s"].execute()
+    assert isinstance(out, RowsOnRead)
+    assert isinstance(out, StreamProtocol)
+    assert not out.arrow_types_declared
+    assert "x" in out.arrow_schema().names
+    channel = out.open_channel()
+    assert out._stream is None  # pyright: ignore[reportPrivateUsage]  # nothing built
+    with pytest.raises(pa.ArrowTypeError, match="Expected bytes"):
+        asyncio.run(channel.collect())

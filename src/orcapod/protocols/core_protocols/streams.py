@@ -194,9 +194,11 @@ class StreamProtocol(TraceableProtocol, PipelineElementProtocol, Protocol):
     def arrow_types_declared(self) -> bool:
         """Whether ``arrow_schema()`` holds the rows' own Arrow types.
 
-        ``False`` only when the stream cannot type itself without rows (an unbound
-        slot, a ``PollingSource`` never polled; ITL-1089): its schema is then converted
-        from the Python schema.
+        ``False`` when the stream cannot type itself without rows (an unbound slot, a
+        ``PollingSource`` never polled; ITL-1089), or its rows decide its types (a
+        narrower bind, an output held as its rows): its schema is then converted from
+        the Python schema, and its names come in no guaranteed order; no consumer
+        relies on their order (ITL-1347).
         """
         ...
 

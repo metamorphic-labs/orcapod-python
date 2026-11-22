@@ -3,7 +3,14 @@ from __future__ import annotations
 import asyncio
 import logging
 from abc import abstractmethod
-from collections.abc import Collection, Coroutine, Iterable, Iterator, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Collection,
+    Coroutine,
+    Iterable,
+    Iterator,
+    Sequence,
+)
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, cast
 
@@ -657,7 +664,9 @@ class StaticOutputOperatorPod(TraceableBase):
             The output stream, with ``node``'s identity.
         """
         if table.num_rows == 0:
-            return StaticOutputOperatorPod._materialize_upstream([], node)
+            # No row: the zero-row input is derived where a successor reads it, as on
+            # main (``RowsOnRead``): nothing is prepared before then.
+            return rows_on_read([], node)
         tag_keys, data_keys = keys
         return StaticOutputOperatorPod._as_upstream_stream(
             StaticOutputOperatorPod._row_built_form(table, keys),
@@ -1181,12 +1190,18 @@ def transport_schema(stream: StreamProtocol) -> pa.Schema | None:
 
     Returns:
         The schema, or ``None`` for a stream that cannot say its Arrow types without
-        rows (an unbound input slot, a source that has not polled yet).
+        rows (an unbound input slot, a source that has not polled yet, a description
+        whose types are undeclared: ``arrow_types_declared`` false).
     """
     # TODO(ITL-1360): ``stream.arrow_schema()``, once every stream has it.
     from orcapod.core.streams.base import row_built_names, row_built_provenance
     from orcapod.utils import arrow_utils
 
+    if not getattr(stream, "arrow_types_declared", True):
+        # The rows decide the types (and the column order) of a description whose
+        # types are undeclared (a narrower bind, ``RowsOnRead``): the first batch sets
+        # them.
+        return None
     typed = StaticOutputOperatorPod._zero_row_input(stream)  # pyright: ignore[reportPrivateUsage]  # the zero-row form of an input
     if typed is None:
         return None
@@ -1360,14 +1375,21 @@ class RowsOnRead:
     """A node's output held as its rows, its table built on first read (ITL-1347).
 
     The one rule for every route where building the output from the whole table is
-    not provably ``main``'s result (a narrower bind, a whole-table build that is
-    unavailable, an odd stored table, a held node, a node whose output is still its
-    rows): the node hands on the rows ``main`` would hold, and the table is built from
-    them by ``main``'s own row path (``StaticOutputOperatorPod._materialize_upstream``)
-    when the stream is first read. The sync orchestrator reads each input of a node
-    before running it (``at_edge``), where ``main`` rebuilt it; a stream nobody reads
-    is never built, as ``main`` never rebuilt a leaf's rows. Every attribute is the
-    built stream's.
+    not provably ``main``'s result (a narrower bind, a bound stream that is not a
+    library source kind, a whole-table build that is unavailable, an odd stored table,
+    a held node, a result with no row, a node whose output is still its rows): the node
+    hands on the rows ``main`` would hold, and the table is built from them by
+    ``main``'s own row path (``StaticOutputOperatorPod._materialize_upstream``) when
+    the table is first read. The sync orchestrator reads each input of a node before
+    running it (``at_edge``), where ``main`` rebuilt it; a stream nobody reads is never
+    built, as ``main`` never rebuilt a leaf's rows.
+
+    It is a stream (``StreamProtocol``), structurally: every member of the protocol is
+    the built stream's, except those that read nothing. Its rows (``iter_data``,
+    iteration) are the rows it holds, unchanged, as ``main`` returned them. Its
+    description (``arrow_schema``) is the node's declared one and builds nothing
+    (``arrow_types_declared`` is false). Opening a channel builds nothing; the
+    channel's first read does.
     """
 
     # Not a stream the row-built form already made: a channel opened on it reads it.
@@ -1382,28 +1404,118 @@ class RowsOnRead:
             rows: The rows ``main`` would hold, in order (read once, here).
             node: The node (or stream) whose output they are.
         """
-        self._rows: list[tuple[TagProtocol, DataProtocol]] | None = list(rows)
+        self._rows: list[tuple[TagProtocol, DataProtocol]] = list(rows)
         self._node = node
         self._stream: StreamProtocol | None = None
 
     def built(self) -> StreamProtocol:
         """The stream, built from the rows on the first call (``main``'s row path)."""
         if self._stream is None:
-            rows = self._rows if self._rows is not None else []
             self._stream = StaticOutputOperatorPod._materialize_upstream(
-                rows, self._node
+                self._rows, self._node
             )
-            self._rows = None
         return self._stream
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self.built(), name)
+    def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
+        """The rows it holds, unchanged (their meta columns included), as ``main``."""
+        return iter(self._rows)
 
     def __iter__(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
-        return iter(self.built().iter_data())
+        return self.iter_data()
+
+    async def async_iter_data(
+        self,
+    ) -> AsyncIterator[tuple[TagProtocol, DataProtocol]]:
+        """The rows it holds, unchanged."""
+        for row in self._rows:
+            yield row
+
+    def arrow_schema(self) -> pa.Schema:
+        """The node's declared description, from its Python schema; builds nothing.
+
+        The rows decide the Arrow types (``arrow_types_declared`` is false): a
+        description with undeclared types gives the declared names, with no
+        guaranteed order.
+        """
+        from orcapod.core.streams.base import stream_arrow_schema
+
+        return stream_arrow_schema(self._node, from_table=False)
+
+    @property
+    def arrow_types_declared(self) -> bool:
+        """False: the rows decide the types (see ``arrow_schema``)."""
+        return False
+
+    def open_channel(self) -> Any:
+        """Open an input channel on this stream; its first read builds the table."""
+        from orcapod.core.streams.base import CompleteStreamFeed
+        from orcapod.core.streams.record_batch_input import InputChannel
+
+        return InputChannel(
+            cast(StreamProtocol, cast(object, self)),
+            CompleteStreamFeed(cast(StreamProtocol, cast(object, self))),
+        )
+
+    # The members that tell what the output is without reading it: the node's, which
+    # the built stream takes too (``_as_upstream_stream``), or the built stream's once
+    # it is built. A protocol check (``isinstance``) reads them and builds nothing.
+    @property
+    def producer(self) -> Any:
+        return self._node.producer
+
+    @property
+    def upstreams(self) -> tuple[StreamProtocol, ...]:
+        return self._node.upstreams
+
+    @property
+    def data_context_key(self) -> str:
+        return self._node.data_context_key
+
+    @property
+    def label(self) -> Any:
+        source = self._stream if self._stream is not None else self._node
+        return getattr(source, "label", None)
+
+    @property
+    def last_modified(self) -> Any:
+        source = self._stream if self._stream is not None else self._node
+        return getattr(source, "last_modified", None)
+
+    def __getattr__(self, name: str) -> Any:
+        # Every other member (``join``, ``as_polars_df``, ...) is the built stream's.
+        return getattr(self.built(), name)
 
     def __repr__(self) -> str:
         return f"RowsOnRead({short_stream_repr(self._node)})"
+
+
+def _stream_protocol_members() -> list[str]:
+    """The members ``StreamProtocol`` declares, its bases' included.
+
+    What ``isinstance(x, StreamProtocol)`` looks for on the class: declaring each one
+    there lets ``RowsOnRead`` pass the check on every supported Python.
+    """
+    names: set[str] = set()
+    for base in StreamProtocol.__mro__:
+        if base is object or base.__name__ in ("Protocol", "Generic"):
+            continue
+        names.update(name for name in vars(base) if not name.startswith("_"))
+    return sorted(names)
+
+
+def _delegated(name: str) -> Any:
+    """A method of ``RowsOnRead`` that is the built stream's (``RowsOnRead.built``)."""
+
+    def delegate(self: RowsOnRead, *args: Any, **kwargs: Any) -> Any:
+        return getattr(self.built(), name)(*args, **kwargs)
+
+    delegate.__name__ = name
+    return delegate
+
+
+for _name in _stream_protocol_members():
+    if _name not in vars(RowsOnRead):
+        setattr(RowsOnRead, _name, _delegated(_name))
 
 
 def rows_on_read(

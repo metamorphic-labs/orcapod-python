@@ -1752,7 +1752,9 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
                     kept_table, tag_keys, data_tags, self
                 )
             else:
-                output = StaticOutputOperatorPod._materialize_upstream([], self)
+                # Its zero-row form is derived where a successor reads it, as on main:
+                # the operator is not called again here (``RowsOnRead``).
+                output = rows_on_read([], self)
             ctx_obs.on_node_end(node_label, node_hash)
             return output
         except BaseException:

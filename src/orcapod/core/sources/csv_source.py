@@ -276,6 +276,7 @@ class CSVSource(RootSource):
     """
 
     SOURCE_KIND: ClassVar[str] = "csv"
+    TABLE_IS_ROWS: ClassVar[bool] = True
     """Config type key and default source-id kind of this source (one vocabulary)."""
     TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = True
 
