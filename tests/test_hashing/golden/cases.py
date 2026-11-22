@@ -2616,6 +2616,129 @@ def pipeline_polars_filter_expr_job() -> dict[str, Any]:
     return out
 
 
+REJOIN_ROWS = [
+    {
+        "cohort": "a",
+        "subject": "s1",
+        "age": 3,
+        "weight": 20.5,
+        "score": 0.5,
+        "height": 1.25,
+    },
+    {
+        "cohort": "a",
+        "subject": "s2",
+        "age": 4,
+        "weight": 22.25,
+        "score": 1.5,
+        "height": 1.5,
+    },
+    {
+        "cohort": "b",
+        "subject": "s3",
+        "age": 5,
+        "weight": 19.0,
+        "score": 2.5,
+        "height": 1.75,
+    },
+]
+
+
+def _rejoin_origin() -> Any:
+    """The stream a diamond splits: two tags and four data columns."""
+    from orcapod.sources import DictSource
+
+    return DictSource(
+        data=REJOIN_ROWS,
+        tag_columns=["cohort", "subject"],
+        tag_only_columns=True,
+        source_id="rejoin_origin",
+    )
+
+
+@case("pipeline", "rejoin", provisional=("PolarsFilter", "Rejoin"))
+def pipeline_rejoin() -> dict[str, Any]:
+    """Pin ``Rejoin`` (ITL-1336): its identity and the diamonds it puts back together.
+
+    Branches of one source (two tags, four data columns): selects, a rename, a function
+    pod and a filter. ``Rejoin`` is commutative, so each reordered input list pins the
+    values of its first order; the stream method pins the operator's.
+    """
+    from orcapod.operators import MapData, PolarsFilter, Rejoin, SelectDataColumns
+
+    def body() -> Any:
+        return SelectDataColumns(columns=["age", "weight"])(_rejoin_origin())
+
+    def marks() -> Any:
+        return SelectDataColumns(columns=["score", "height"])(_rejoin_origin())
+
+    def points() -> Any:
+        scores = SelectDataColumns(columns=["score"])(_rejoin_origin())
+        return MapData(name_map={"score": "points"})(scores)
+
+    def heights() -> Any:
+        return SelectDataColumns(columns=["height"])(_rejoin_origin())
+
+    out: dict[str, Any] = {
+        "operator.content_hash": Rejoin().content_hash().to_string(),
+        "operator.pipeline_hash": Rejoin().pipeline_hash().to_string(),
+    }
+    diamonds: dict[str, Any] = {
+        "two": Rejoin()(body(), marks()),
+        "two_reordered": Rejoin()(marks(), body()),
+        "three": Rejoin()(body(), points(), heights()),
+        "three_reordered": Rejoin()(heights(), body(), points()),
+        "pod_branch": Rejoin()(marks(), golden_ratio.pod(body())),
+        "filtered_branch": Rejoin()(
+            body(), PolarsFilter(constraints={"cohort": "a"})(marks())
+        ),
+        "method": body().rejoin(marks()),
+    }
+    for name, stream in diamonds.items():
+        out.update(_prefixed(name, stream_summary(stream)))
+    return out
+
+
+@case("pipeline", "rejoin_job", provisional=("Rejoin",))
+def pipeline_rejoin_job() -> dict[str, Any]:
+    """Record a job with a ``Rejoin`` node upstream of a function pod (ITL-1336)."""
+    from orcapod import PipelineJob
+    from orcapod.databases import InMemoryArrowDatabase
+    from orcapod.operators import Rejoin, SelectDataColumns
+
+    db = InMemoryArrowDatabase()
+    job = PipelineJob(name="golden_rejoin_job", database=db)
+    with job:
+        origin = _rejoin_origin()
+        ages = SelectDataColumns(columns=["age", "score"], label="ages")(origin)
+        weights = SelectDataColumns(columns=["weight", "height"], label="weights")(
+            origin
+        )
+        rejoined = Rejoin(label="rejoined")(ages, weights)
+        golden_ratio.pod(rejoined, label="ratio")
+    job.run()
+
+    out: dict[str, Any] = {}
+    for label in sorted(job.nodes):
+        out.update(_prefixed(f"node[{label}]", stream_summary(job.nodes[label])))
+    paths = sorted(db.list_sources())
+    out["table_paths"] = ["/".join(p) for p in paths]
+    for path in paths:
+        name = "/".join(path)
+        records = db.get_all_records(path, record_id_column="__golden_record_id")
+        assert records is not None
+        if "__input_data_hash" in records.column_names and "_result" in path:
+            # Result-table record ids are UUIDv7 (volatile); pin the lookup key instead.
+            out[f"table[{name}].input_data_hashes"] = sorted(
+                _jsonable(v) for v in records.column("__input_data_hash").to_pylist()
+            )
+        else:
+            out[f"table[{name}].record_ids"] = sorted(
+                _jsonable(v) for v in records.column("__golden_record_id").to_pylist()
+            )
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Group: arrow — value-hashed logical types in a column that holds no value
 # ---------------------------------------------------------------------------
