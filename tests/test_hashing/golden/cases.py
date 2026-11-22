@@ -2616,6 +2616,257 @@ def pipeline_polars_filter_expr_job() -> dict[str, Any]:
     return out
 
 
+REJOIN_ROWS = [
+    {
+        "cohort": "a",
+        "subject": "s1",
+        "age": 3,
+        "weight": 20.5,
+        "score": 0.5,
+        "height": 1.25,
+    },
+    {
+        "cohort": "a",
+        "subject": "s2",
+        "age": 4,
+        "weight": 22.25,
+        "score": 1.5,
+        "height": 1.5,
+    },
+    {
+        "cohort": "b",
+        "subject": "s3",
+        "age": 5,
+        "weight": 19.0,
+        "score": 2.5,
+        "height": 1.75,
+    },
+]
+
+
+def _rejoin_origin() -> Any:
+    """The stream a diamond splits: two tags and four data columns."""
+    from orcapod.sources import DictSource
+
+    return DictSource(
+        data=REJOIN_ROWS,
+        tag_columns=["cohort", "subject"],
+        tag_only_columns=True,
+        source_id="rejoin_origin",
+    )
+
+
+@case("pipeline", "rejoin", provisional=("PolarsFilter", "Rejoin"))
+def pipeline_rejoin() -> dict[str, Any]:
+    """Pin ``Rejoin`` (ITL-1336): its identity and the diamonds it puts back together.
+
+    Branches of one source (two tags, four data columns): selects, a rename, a function
+    pod and a filter. ``Rejoin`` is commutative, so each reordered input list pins the
+    values of its first order; the stream method pins the operator's.
+    """
+    from orcapod.operators import MapData, PolarsFilter, Rejoin, SelectDataColumns
+
+    def body() -> Any:
+        return SelectDataColumns(columns=["age", "weight"])(_rejoin_origin())
+
+    def marks() -> Any:
+        return SelectDataColumns(columns=["score", "height"])(_rejoin_origin())
+
+    def points() -> Any:
+        scores = SelectDataColumns(columns=["score"])(_rejoin_origin())
+        return MapData(name_map={"score": "points"})(scores)
+
+    def heights() -> Any:
+        return SelectDataColumns(columns=["height"])(_rejoin_origin())
+
+    out: dict[str, Any] = {
+        "operator.content_hash": Rejoin().content_hash().to_string(),
+        "operator.pipeline_hash": Rejoin().pipeline_hash().to_string(),
+    }
+    diamonds: dict[str, Any] = {
+        "two": Rejoin()(body(), marks()),
+        "two_reordered": Rejoin()(marks(), body()),
+        "three": Rejoin()(body(), points(), heights()),
+        "three_reordered": Rejoin()(heights(), body(), points()),
+        "pod_branch": Rejoin()(marks(), golden_ratio.pod(body())),
+        "filtered_branch": Rejoin()(
+            body(), PolarsFilter(constraints={"cohort": "a"})(marks())
+        ),
+        "method": body().rejoin(marks()),
+    }
+    for name, stream in diamonds.items():
+        out.update(_prefixed(name, stream_summary(stream)))
+    return out
+
+
+@case("pipeline", "rejoin_job", provisional=("Rejoin",))
+def pipeline_rejoin_job() -> dict[str, Any]:
+    """Record a job with a ``Rejoin`` node upstream of a function pod (ITL-1336)."""
+    return _rejoin_job(run_async=False)
+
+
+@case("pipeline", "rejoin_job_async", provisional=("Rejoin",))
+def pipeline_rejoin_job_async() -> dict[str, Any]:
+    """The job of ``rejoin_job`` on the async orchestrator: the same entries
+    (``tests/test_hashing/golden/test_rejoin_arrangements.py`` asserts it)."""
+    return _rejoin_job(run_async=True)
+
+
+def _rejoin_job(run_async: bool) -> dict[str, Any]:
+    """Run the ``rejoin_job`` job on the sync or the async orchestrator."""
+    import asyncio
+
+    from orcapod import PipelineJob
+    from orcapod.databases import InMemoryArrowDatabase
+    from orcapod.operators import Rejoin, SelectDataColumns
+
+    db = InMemoryArrowDatabase()
+    job = PipelineJob(name="golden_rejoin_job", database=db)
+    with job:
+        origin = _rejoin_origin()
+        ages = SelectDataColumns(columns=["age", "score"], label="ages")(origin)
+        weights = SelectDataColumns(columns=["weight", "height"], label="weights")(
+            origin
+        )
+        rejoined = Rejoin(label="rejoined")(ages, weights)
+        golden_ratio.pod(rejoined, label="ratio")
+    if run_async:
+        _ = asyncio.run(job.run_async())
+    else:
+        _ = job.run()
+
+    out: dict[str, Any] = {}
+    for label in sorted(job.nodes):
+        out.update(_prefixed(f"node[{label}]", stream_summary(job.nodes[label])))
+    paths = sorted(db.list_sources())
+    out["table_paths"] = ["/".join(p) for p in paths]
+    for path in paths:
+        name = "/".join(path)
+        records = db.get_all_records(path, record_id_column="__golden_record_id")
+        assert records is not None
+        if "__input_data_hash" in records.column_names and "_result" in path:
+            # Result-table record ids are UUIDv7 (volatile); pin the lookup key instead.
+            out[f"table[{name}].input_data_hashes"] = sorted(
+                _jsonable(v) for v in records.column("__input_data_hash").to_pylist()
+            )
+        else:
+            out[f"table[{name}].record_ids"] = sorted(
+                _jsonable(v) for v in records.column("__golden_record_id").to_pylist()
+            )
+    return out
+
+
+REJOIN_ARRANGEMENTS: dict[str, tuple[list[str], list[str]]] = {
+    # name: (tag_columns, table layout)
+    "tags_first": (
+        ["cohort", "subject"],
+        ["cohort", "subject", "age", "weight", "score", "height"],
+    ),
+    "reversed": (
+        ["subject", "cohort"],
+        ["height", "score", "weight", "age", "subject", "cohort"],
+    ),
+    "interleaved": (
+        ["subject", "cohort"],
+        ["age", "subject", "score", "cohort", "height", "weight"],
+    ),
+}
+"""Arrangements of one input whose ``Rejoin`` entries must be equal (ITL-1336):
+``tests/test_hashing/golden/test_rejoin_arrangements.py`` asserts it."""
+
+REJOIN_ROLES: dict[str, bool | list[str]] = {
+    # name: tag_only_columns
+    "plain": True,
+    "data_tags": [],
+    "mixed": ["cohort"],
+}
+"""The column roles of the tags: both plain, both data-tags, and ``subject`` a
+data-tag beside a plain ``cohort``."""
+
+
+def _rejoin_arranged(tags: list[str], layout: list[str], role: bool | list[str]) -> Any:
+    """The ``REJOIN_ROWS`` source, in one arrangement and one role of its tags."""
+    from orcapod.sources import ArrowTableSource
+
+    types = {
+        "cohort": pa.large_string(),
+        "subject": pa.large_string(),
+        "age": pa.int64(),
+        "weight": pa.float64(),
+        "score": pa.float64(),
+        "height": pa.float64(),
+    }
+    table = pa.table(
+        {
+            name: pa.array([row[name] for row in REJOIN_ROWS], types[name])
+            for name in layout
+        }
+    )
+    return ArrowTableSource(
+        table,
+        tag_columns=tags,
+        tag_only_columns=role,
+        source_id="rejoin_arrangement",
+    )
+
+
+def _rejoin_diamond(origin: Any) -> Any:
+    """Two branches of ``origin``, each without the other's data, rejoined."""
+    from orcapod.operators import DropDataColumns, Rejoin
+
+    body = DropDataColumns(columns=["score", "height"], label="body")(origin)
+    marks = DropDataColumns(columns=["age", "weight"], label="marks")(origin)
+    return Rejoin(label="rejoined")(body, marks)
+
+
+def _role_summary(stream: Any) -> dict[str, Any]:
+    """``stream_summary`` plus the column roles, as sorted names."""
+    tags, data = stream.keys()
+    data_tags = sorted(set(tags) & set(data))
+    return {
+        **stream_summary(stream),
+        "tag_keys": sorted(tags),
+        "data_keys": sorted(data),
+        "data_tags": data_tags,
+    }
+
+
+@case("pipeline", "rejoin_arrangement", provisional=("Rejoin",))
+def pipeline_rejoin_arrangement() -> dict[str, Any]:
+    """Pin ``Rejoin`` over each column role of the tags, in several arrangements, on a
+    plain stream and in a job on the sync and the async orchestrator (ITL-1336).
+
+    Every arrangement of a role pins the same values, and the async job pins the sync
+    job's; the roles differ from one another.
+    """
+    import asyncio
+
+    from orcapod import PipelineJob
+    from orcapod.databases import InMemoryArrowDatabase
+
+    out: dict[str, Any] = {}
+    for role, tag_only in REJOIN_ROLES.items():
+        for name, (tags, layout) in REJOIN_ARRANGEMENTS.items():
+            stream = _rejoin_diamond(_rejoin_arranged(tags, layout, tag_only))
+            out.update(_prefixed(f"stream.{role}.{name}", _role_summary(stream)))
+            for kind in ("job_sync", "job_async"):
+                job = PipelineJob(
+                    name="golden_rejoin_arrangement", database=InMemoryArrowDatabase()
+                )
+                with job:
+                    _ = _rejoin_diamond(_rejoin_arranged(tags, layout, tag_only))
+                if kind == "job_async":
+                    _ = asyncio.run(job.run_async())
+                else:
+                    _ = job.run()
+                out.update(
+                    _prefixed(
+                        f"{kind}.{role}.{name}", _role_summary(job.nodes["rejoined"])
+                    )
+                )
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Group: arrow — value-hashed logical types in a column that holds no value
 # ---------------------------------------------------------------------------
