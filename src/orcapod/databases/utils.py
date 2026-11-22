@@ -245,10 +245,12 @@ def in_held_column_order(
     table written before ITL-1370, in another order, keeps it). The fields are kept as
     given (metadata, nullability): the append checks that follow compare them by name.
 
-    Anything else is returned as given, for the database's own append rule: a column
-    added or missing, a type that differs (a struct whose children are in another
-    order included: its type differs; ITL-1368), and names that repeat or that differ
-    in case only, which a database matching names without case could pair otherwise.
+    Types are compared as the database compares them: a logical (extension) type as
+    its storage type, in the large variants. Anything else is returned as given, for
+    the database's own append rule: a column added or missing, a type
+    that differs (a struct whose children are in another order included: its type
+    differs; ITL-1368), and a name that repeats exactly. Names are matched exactly, as
+    Arrow matches them: ``a`` and ``A`` are two columns.
 
     Args:
         records: The rows to append, the record id column already named as held.
@@ -266,16 +268,26 @@ def in_held_column_order(
     held_names = [name for name, _ in held]
     if names == held_names:
         return records
-    if len({n.casefold() for n in names}) != len(names):
-        return records
-    if len({n.casefold() for n in held_names}) != len(held_names):
+    # Arrow matches names exactly: ``a`` and ``A`` are two columns. Only a name that
+    # repeats exactly cannot be matched.
+    if len(set(names)) != len(names) or len(set(held_names)) != len(held_names):
         return records
     if set(names) != set(held_names):
         return records
-    large = arrow_utils.normalize_to_large_types
     held_types = dict(held)
     for field in records.schema:
-        given = large(field.type, keep_null=True)
-        if given != large(held_types[field.name], keep_null=True):
+        if _stored_form(field.type) != _stored_form(held_types[field.name]):
             return records
     return records.select(held_names)
+
+
+def _stored_form(arrow_type: "pa.DataType") -> "pa.DataType":
+    """``arrow_type`` as a database compares it: a logical (extension) type as its
+    storage type, a dictionary as its value type, in the large variants. A database
+    that holds such a column reports that type, so the comparison sees what the
+    database sees."""
+    if isinstance(arrow_type, pa.ExtensionType):
+        arrow_type = arrow_type.storage_type
+    if pa.types.is_dictionary(arrow_type):
+        arrow_type = cast(Any, arrow_type).value_type
+    return arrow_utils.normalize_to_large_types(arrow_type, keep_null=True)

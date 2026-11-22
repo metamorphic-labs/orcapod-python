@@ -81,10 +81,15 @@ would add a non-nullable struct field (the stored rows have no value for it) or 
 struct field inside a map (Delta cannot). A nested field the append makes nullable reads
 as nullable afterwards, as Delta stores it.
 
-An append matches columns by name, never by position. Rows whose columns are the held
-table's columns in another order, each of the held type, are put in the held order (the
-rows still pending, else the stored table) by every database before anything is checked
-or written, whether the table was flushed in between or not. A table keeps the column
+An append matches columns by name, exactly as Arrow matches them (`a` and `A` are two
+columns), never by position. Rows whose columns are the held table's columns in another
+order, each of the held type (a logical type compared by its storage type), are put in
+the held order (the rows still pending, else the stored table) by every database before
+they are queued and before the checks that compare them with the held columns (field
+attributes, declared nulls, schema compatibility), whether the table was flushed in
+between or not; the checks that look at the rows alone (a storable type, the record id)
+come first. Rows still queued are matched again, by name, to the stored table when they
+are read with it or written. A table keeps the column
 order the database gave its first write: the first write's order, except in SpiralDB,
 which stores and reads a table's key columns first and then its other columns sorted by
 name, whatever the order written (measured on SpiralDB itself). An append that also
