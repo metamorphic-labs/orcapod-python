@@ -69,9 +69,9 @@ def test_a_held_stream_is_released_once_its_successors_ran(
             tag_only_columns=True,
             source_id="s",
         )
-        a = step.pod(source, label="a")
-        b = step.pod(a.map_data({"y": "x"}), label="b")
-        c = step.pod(b.map_data({"y": "x"}), label="c")
+        a: Any = step.pod(source, label="a")
+        b: Any = step.pod(a.map_data({"y": "x"}), label="b")
+        c: Any = step.pod(b.map_data({"y": "x"}), label="c")
         step.pod(c.map_data({"y": "x"}), label="d")
     job.run()
     for label in ("b", "c", "d"):
