@@ -1023,6 +1023,52 @@ def test_a_retained_output_keeps_only_its_rows_once_read(
     assert output.as_table().num_rows == 2
 
 
+# ── CodeRabbit on dd6b7cd4: one computation per run ───────────────────────────
+
+
+@pytest.mark.parametrize("mode", [CacheMode.OFF, CacheMode.LOG], ids=["off", "log"])
+@pytest.mark.parametrize("route", ["eager", "rows"])
+def test_an_operator_runs_once_over_an_undated_upstream(
+    route: str, mode: CacheMode
+) -> None:
+    """Over an upstream with no modified time, every read of the operator's result
+    wrapper runs the operator again; the node reads its table, keys and rows from the
+    one computation it captured, so the operator runs once, as on ``main``."""
+    from orcapod.core.nodes.operator_node import OperatorJobNode
+    from orcapod.operators import SelectDataColumns
+
+    calls: list[int] = []
+
+    class Undated(ArrowTableStream):
+        @property
+        def last_modified(self) -> Any:
+            return None
+
+    class Unproven(ArrowTableStream):
+        """Not proven: ``main``'s row path."""
+
+    class Counting(SelectDataColumns):
+        def unary_static_process(self, stream: Any) -> Any:
+            calls.append(1)
+            out: Any = super().unary_static_process(stream)
+            if route == "eager":
+                return out
+            table = out.as_table(columns={"source": True, "system_tags": True})
+            return Unproven(table, tag_columns=["k"])
+
+    table = pa.table({"k": [1, 2], "x": [10, 20], "y": [1, 2]})
+    upstream = Undated(table, tag_columns=["k"])
+    node = OperatorJobNode(
+        Counting(["x"]),
+        [upstream],
+        pipeline_database=InMemoryArrowDatabase(),
+        cache_mode=mode,
+    )
+    output: Any = node.execute(upstream)
+    assert len(list(output.iter_data())) == 2
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize(
     "kind",
     [pa.time64("ns"), pa.decimal256(76, 40)],
