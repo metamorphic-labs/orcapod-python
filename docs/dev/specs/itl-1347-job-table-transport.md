@@ -16,6 +16,8 @@ Revisions, all on 2026-11-22:
   stream or channel. Async runs keep arrival order, as on `main`; `Batch` grouping by
   arrival is accepted; column order is not a goal. The order rule of the third revision is
   dropped.
+- Fifth revision: `Rejoin`'s new rule (ITL-1355) resolves question 9. `Rejoin` matches on
+  every shared column, never refuses on data, and drops unmatched rows.
 
 Terms used throughout:
 - **Arrow table**: a `pyarrow.Table`.
@@ -315,7 +317,7 @@ input, it is a barrier. Row order within a stream or channel is not critical (de
 | `SelectTagColumns`, `SelectDataColumns`, `DropTagColumns`, `DropDataColumns`, `SelectColumns`, `DropColumns`, `MapTags`, `MapData`, `MapColumns`, `AddTags`, `DropNulls`, `Index`, `Pick` | streaming, per Arrow record batch | each output row comes from one input row, and its content does not depend on other rows |
 | `Join` | streaming: a symmetric hash join | an output row is a pair of matching rows; it can be emitted as soon as both have arrived |
 | `MergeJoin` | streaming, as `Join` | the same inner join (`join._inner_join`). Each matched pair's lists are built from that pair alone, in argument order |
-| `Rejoin` | streaming: a symmetric hash join on every system-tag column | an output row is the set of one origin row's rows from every input |
+| `Rejoin` | streaming: a symmetric match on every shared column (ITL-1355), with matched rows removed from both sides | an output row is the set of one origin row's rows from every input; each row matches at most once |
 | `SemiJoin` | streaming on the left. A left row is emitted as soon as its key is among the right rows seen so far; undecided left rows wait for the right input to close | whether a left row is kept depends on the whole right input only when no match has been seen yet |
 | `GroupBy` | barrier | a group needs all its members. Its output does not depend on input order (members are ordered by tags, record id and source id; groups by key) |
 | `Batch` | streaming, per group of `batch_size` arrivals, as on `main`; a barrier for `batch_size=0` | groups consecutive arrivals. When the input arrives in another order than on sync, its groups differ from sync: accepted by the developer ("This difference is totally fine in Batch for sync and async") |
@@ -354,29 +356,60 @@ form.
 
 #### Streaming `Rejoin`
 
-- **Hash tables.** Each input keeps an accumulating Arrow table and a key frame of every
-  system-tag column (sorted names, `polars_ready`).
-- **Checks done incrementally**, each raising the sync path's `InputValidationError` with
-  the sync message:
-  - *before the first batch*, from the descriptions: the same system-tag names on every
-    input (`_require_same_system_tags`); shared tags' Arrow types
-    (`require_shared_arrow_type`, `require_matchable_key`); one data context. In a job, every
-    row of an edge carries its producing node's context, so the description's
-    `data_context_key` is the rows' context;
-  - *per arriving batch*: no null in a system-tag column;
-  - *per arriving batch*: at most one row per origin row in each input. A key already in
-    that input's table, or repeated within the batch, is refused;
-  - *at each match*: the columns both sides hold (system tags, shared tags, a shared
-    data-tag's source info) are checked bit for bit on the matched rows (`_same_bits`).
-- **Matching.** A key present in every input's table is emitted once, when its last row
-  arrives, built as `_rejoin_pair` builds it (left's copy of a shared column, after the bit
-  check).
-- **N inputs** chain pairwise in canonical order, as the sync `static_process` does.
-- **A refusal can come after rows have flowed.** The sync path refuses before any row. The
-  async path refuses when it meets the offending row, so successors may already have
-  received rows. The run still fails with the same error, and the node keeps and stores
-  nothing (`LOG` stores only after close). A downstream function node may have stored
-  results for rows that flowed; those are results of valid input rows. Question 9.
+It follows `Rejoin`'s rule as ITL-1355 sets it on `main` (developer, 2026-11-22). That
+change lands on `main` separately, before stage 5:
+- system tags are assumed unique by construction (ITL-1356 makes record ids unique at the
+  source);
+- `Rejoin` is an inner join on every column its inputs share: the system-tag columns, shared
+  user tags, the data context, and a shared data-tag's source info;
+- equality is `Join`'s: NaN equals NaN, and `-0.0` equals `0.0`. The output keeps the first
+  input's bits;
+- each row matches at most once;
+- a row that matches nothing is dropped. A differing shared value is a non-match, never an
+  error.
+
+How it streams:
+
+- **Remaining sets.** Each input keeps an Arrow table of its rows not yet matched, with a key
+  frame of its shared columns (sorted names, `arrow_keys.polars_ready`). Unlike `Join`,
+  which holds every row of both sides, a matched row is removed from its remaining set, so
+  the memory held is the unmatched rows only. Removal is a mask over row numbers; the table
+  is compacted when the removed share passes a threshold, so a batch never copies the whole
+  table.
+- **Matching an arriving Arrow record batch**, vectorized and never per row:
+  1. The batch's key frame is joined (Polars, keys and row numbers only) with the other
+     side's remaining key frame **on every shared column**. That gives the matches under
+     `Join`'s equality.
+  2. Each matched pair is emitted, built as `_rejoin_pair` builds it (the first input's copy
+     of each shared column, every value taken by row number), and both rows leave their
+     remaining sets.
+  3. The batch's unmatched rows join their side's remaining set.
+- **The warning, per batch.** A second join of the same batch, on the system-tag columns
+  only, against the other side's remaining rows finds the pairs that match on system tags.
+  Pairs found by this join but not by the first one matched on system tags and differed on
+  another shared column. For each shared column outside the system tags, one vectorized
+  comparison over those pairs, with `Join`'s equality on the prepared keys, names the
+  columns that differed. The operator issues its warning once per operator and set of
+  columns, as ITL-1355 specifies (after the pattern of `SemiJoinIgnoredColumnWarning`).
+  These rows are non-matches: they stay in their remaining sets.
+- **Early release.** When one input closes, the other input's remaining rows can never match
+  any more (nothing will arrive to match them), so they are dropped at once. From then on, an
+  arriving row from the open input either matches the closed input's remaining rows or is
+  dropped at once. So after one input closes, only the closed input's unmatched rows are
+  held, and that set only shrinks. When both inputs close, whatever is left is dropped.
+- **A differing data context.** The data context is per stream. In a job, every row of an
+  edge carries its producing node's context. So inputs whose descriptions name different
+  contexts can match nothing. The operator knows this before the first batch: it reads every
+  input to its end (ITL-1075-AH1), emits nothing, and warns once, as the rule's non-match.
+- **Checks: description-only, before the first batch.** These are the same system-tag names
+  on every input (`_require_same_system_tags`), the shared tags' Arrow types
+  (`require_shared_arrow_type`, `require_matchable_key`), and disjoint data columns.
+  `Rejoin` raises on nothing else, so it never refuses after rows have flowed.
+- **N inputs** chain pairwise in canonical order, as the sync `static_process` does. Each
+  link applies the same rule.
+- **Duplicates.** If system tags are not unique after all (a source with non-unique
+  `record_id_columns`), "match once" pairs duplicates in arrival order, which can differ
+  between sync and async (risks; ITL-1356 removes the case).
 
 ### Row order
 
@@ -480,12 +513,27 @@ stage.
 
 | # | What differs | On `main` today | On the branch | Why `main` is wrong (bug, reproducer) | Approval needed |
 |---|---|---|---|---|---|
-| c | A refusal after rows have flowed (async, failure path) | `Rejoin` is a barrier (`rejoin.py:416`): it refuses before emitting anything, so nothing downstream of it is stored or delivered. `Join` streams but checks key types at the first row of each side, before any pair is emitted (`join.py` ~`:912`–`:935`); all its refusals are schema-level. So the difference is **`Rejoin` only** | Streaming `Rejoin` may emit rows before it meets a duplicate origin row, a null system tag or a bit inequality. Downstream, a function node may store results for those earlier rows, and a side-effect node (or a function node whose pod takes the invocation context, `ctx_arg`) may **deliver** for them before the refusal | Not a bug fix: a consequence of streaming. `main`'s async path already lets earlier rows flow on and be stored or delivered before a failure upstream. An async function pod sends each successful row as it finishes (`function_pod.py:738`) and raises under `fail_fast` only when its failing row comes (`:734`). A downstream function node records and forwards each row (`function_node.py:4370`). A side-effect node delivers each row (`side_effects.py:1525`, `:1542`). On failure, the job commits the writes that succeeded (`job.py:1342`). The sync path runs nodes one after another, so nothing downstream runs. Under the governing rule, c needs explicit approval. **Without approval**, `Rejoin` matches as it streams but holds its output until its inputs are complete, keeping `main`'s failure behaviour for `Rejoin` (question 9, open) | yes (c), or the fallback |
 | e1 | Async `Join` / `SemiJoin` with an empty input and disagreeing key types | Returns nothing (no row is there to read a type from) | Raises the sync path's `InputValidationError`, from the descriptions, before the first batch | **ITL-856.** Reproducer: a zero-row source with an `int16` key joined, async, with a source whose key is `int32` | yes |
 | e2 | An async input row of another data context | The async function node answers it from the cache (the ITL-858 inventory) | A whole-input error before the first batch, as on sync | **ITL-951** (its comment; ITL-858 decision 9). Reproducer: an async function node fed a stream of another data context, with its result stored | yes |
 | e3 | Function calls and stored rows for duplicate inputs, async; `RunSummary` computed counts | About 3× more calls than sync, and more stored rows (4,188 against 4,060 in ITL-1062's measurement) | Misses are deduplicated by base entry id, so calls, stored rows and counts equal sync | **ITL-1062.** Reproducer: ITL-1062's workshop-shaped pipeline with repeated input data, async | yes |
 | e6 | Async values that depend on an earlier validation of the same operator object | `SemiJoin._validated_common_keys` and `Index._element_arrow_type_fallback` hold the last validation's values (ITL-858, section 1.2). One operator object applied to two streams can use the other stream's keys or fallback type | Read from each input's description, with no state | The ITL-858 finding; not filed on its own (question 12). Reproducer: one `SemiJoin` instance validated on stream B, then run async over stream A with other keys. To be confirmed in stage 5 | yes, once confirmed |
 | e7 | What a consumer does after its producer failed (async, failure path) | The producer closes its output in `finally`, so a consumer sees a normal end and may finish, and a `LOG` operator node may store, a partial result before the task group cancels it | Readers raise `UpstreamFailedError`, so nothing is computed or stored from a partial input. The run raises the producer's own error, as today | A candidate race, to be confirmed with a reproducer in stage 5: a `fail_fast` function node raising on row 3 of 6, feeding a `Select` node in `LOG` mode; check the operator cache after the failed run. If `main` never stores in practice, this row is no difference | yes, once confirmed |
+
+**Resolved: refusals after rows have flowed (was c, question 9).** The developer's `Rejoin`
+rule (ITL-1355) removes every data-dependent refusal from `Rejoin`: it checks only what its
+inputs' descriptions show, before the first batch, so the streaming form never refuses after
+rows have flowed. The fallback is gone. `Join`'s refusals were already schema-level.
+
+**A behaviour change on `main`, not made by this design: ITL-1355.** It is decided by the
+developer and lands on `main` separately (its own PR), before stage 5. Inputs `main`'s
+`Rejoin` refused now give fewer rows plus a warning:
+- duplicate origin rows;
+- a null system tag;
+- rows of different data contexts;
+- shared values that differ.
+
+`Rejoin` is provisional (`PROVISIONAL_OPERATORS`), and no golden value moves. Every stage
+pins the `main` it is compared with, which includes ITL-1355 once it has landed.
 
 **Accepted by the developer, kept as `main`** (2026-11-22). These are not differences the
 branch introduces: the branch keeps `main`'s behaviour, and they are documented here.
@@ -952,9 +1000,16 @@ Not covered:
    - **L6 (async)**: for every node kind and every operator (streaming and barrier),
      `output.result()` equals the sync output stream's Arrow table as a set of rows, with
      columns matched by name. It runs with the three batch layouts and with a predecessor
-     that streams in match order. It also covers `Join`'s and `Rejoin`'s refusals: the same
-     error type and message as sync. For `Rejoin` it runs both with c approved (a refusal
-     after rows flowed) and with the fallback (nothing flows before the inputs are complete).
+     that streams in match order. It also covers `Join`'s schema-level refusals (the same
+     error type and message as sync) and ITL-1355's non-match cases under streaming:
+     - a shared tag that differs;
+     - NaN and `-0.0` / `0.0` in a shared column (they match; the first input's bits are
+       kept);
+     - inputs of different data contexts;
+     - rows held until close, and released early once one input closes.
+
+     Each is compared with sync as a set, and the warning is checked to be issued once per
+     operator and set of columns.
      `Batch` and order-dependent `PolarsFilter` predicates behind an out-of-order input are
      checked on their invariants instead (every input row in exactly one batch; the
      predicate applied to the arrival order), as the developer accepted.
@@ -1029,9 +1084,12 @@ Not covered:
 
    Each case asserts the rows equal sync as a set (or, for `Batch` and the order-dependent
    `PolarsFilter`, their invariants), and the same against `main`'s async run. The `Rejoin`
-   case also runs the c and fallback variants: a duplicate origin row on the late branch,
-   with a function node and a side-effect node downstream. It records what was stored and
-   delivered before the refusal.
+   case runs ITL-1355's non-match cases with the late branch behind the function node:
+   - a differing shared value;
+   - NaN and `-0.0` / `0.0` in a shared column;
+   - a different data context.
+
+   It compares with sync as a set, and checks the warning once.
 
 ## Migration and staging
 
@@ -1057,7 +1115,7 @@ measurements before stage 1 merges. The profile's unit costs:
 | 2b | Operators, sync: kept output and return value `F(result.as_table())`, and REPLAY likewise | – | L0, L1, L5 | (with 2a) |
 | 3 | Function nodes, sync: input from the input stream's Arrow table; entry ids from slices; hits from the stored Arrow table; calls on values from Arrow data; results per column; row views for observers; own reads from the kept stream | – | L3, L4, differential | about **8–14 s** |
 | 4 | Side-effect nodes, sync: masked pass-through, load-only pass-through, held stream | – | L0, differential | small |
-| 5 | Async: `InputChannel`, `OutputChannel`, the conversions and `open_channel()`; every `async_execute` on input channels and an output channel; barrier operators (`GroupBy`, `PolarsFilter`, `Batch(0)`) by `to_stream()`; streaming `Join`, `MergeJoin`, `Rejoin` (or its fallback, question 9) and `SemiJoin` (vectorized symmetric hash joins, incremental `Rejoin` checks); `Batch` streaming by arrival as on `main`; key checks before the first batch; per-row operators per Arrow record batch; validation state, `input_pipeline_hashes` and `BroadcastChannel` removed; function node async with dedup | ITL-856, ITL-844/951 async, ITL-865/906 general form, ITL-1062; standing guards | L6, L7, L8, `test_async_sync_equivalence`, differential | the same order of gain for async runs |
+| 5 | Async: `InputChannel`, `OutputChannel`, the conversions and `open_channel()`; every `async_execute` on input channels and an output channel; barrier operators (`GroupBy`, `PolarsFilter`, `Batch(0)`) by `to_stream()`; streaming `Join`, `MergeJoin`, `Rejoin` (ITL-1355's rule: match on every shared column, matched rows removed, early release, the warning per batch) and `SemiJoin` (vectorized symmetric hash joins); `Batch` streaming by arrival as on `main`; key checks before the first batch; per-row operators per Arrow record batch; validation state, `input_pipeline_hashes` and `BroadcastChannel` removed; function node async with dedup | ITL-856, ITL-844/951 async, ITL-865/906 general form, ITL-1062; standing guards | L6, L7, L8, `test_async_sync_equivalence`, differential | the same order of gain for async runs |
 
 The ranges overlap:
 - the bound for stages 1–4 is the ~40 s (~90%) the profile puts on conversions;
@@ -1120,8 +1178,9 @@ In `changelog.d/<issue>.md`, under `### Breaking changes and migration`:
 | **Test migration size** | Stage 5 touches 42 files with 171 `async_execute` lines, 329 `Channel(` lines and 84 `input_pipeline_hashes` lines, and stage 2a touches 18 files with 88 `execute` calls. A large diff is hard to review, and a test could be weakened by accident | A shared helper (`tests/stream_helpers.py`). Plumbing changes go in their own commit, before any behaviour change. Assertions are not edited, only how inputs are fed and outputs read | A per-file count of `assert` statements before and after, reported on the PR. The coordinator's full-suite run and CodeRabbit |
 | **Estimates that stage 0 may disprove** | The savings come from profile shares that overlap. The datagram cost may sit mostly in function nodes' stored-hit loading, or in observers, rather than on edges. Stage 1's 4–8 s may be less | Stage 0 measures the split per node kind and per caller before stage 1 merges. If a stage's measured share differs from its estimate by more than half, the plan is revisited with the developer | Stage 0's numbers against the stage table. Each stage's before-and-after benchmark (best of 3, with the load average) |
 | **Byte-identity drift in edge cases** | `null` columns, source-info flags, the function node's first-row column order, `EmptyData` rows, and the point where `TypeIdentityError` is raised | F's explicit steps. The stage 3 investigations named in "Function job node". No golden file is regenerated | L0–L7, the golden check, and the differential (stored tables byte for byte) |
-| **Memory of a streaming join's held inputs** | A streaming `Join`, `MergeJoin` or `Rejoin` holds every row of both inputs in its hash tables until they close, as `main`'s streaming `Join` does with rows | The hash tables hold Arrow tables and key frames, not datagrams, so they are smaller than `main`'s row buffers | Peak RSS of async runs against `main`'s async run, in stage 0 and stage 5 |
-| **Refusals after rows have flowed** | Streaming `Rejoin` (duplicate origin rows, a null system tag, bit inequality) may refuse after some rows reached successors. A downstream function node may already have stored results for those rows, and a side-effect or `ctx_arg` node may already have delivered for them | The checks that need no rows run before the first batch. A refused run keeps and stores nothing at the refusing node. Until question 9 is answered, the fallback holds `Rejoin`'s output until its inputs are complete | L6 refusal cases. The differential's failing-run case lists what is stored downstream |
+| **Memory of a streaming join's held inputs** | A streaming `Join` or `MergeJoin` holds every row of both inputs in its hash tables until they close, as `main`'s streaming `Join` does with rows | The hash tables hold Arrow tables and key frames, not datagrams, so they are smaller than `main`'s row buffers | Peak RSS of async runs against `main`'s async run, in stage 0 and stage 5 |
+| **Held unmatched rows (`Rejoin`)** | A streaming `Rejoin` holds every unmatched row until it can rule out a match (developer: "unmatched rows will remain in 'to-be matched' in memory all the way until the operator channel closes"). Branches that drop or delay many rows keep them held longer | Matched rows leave both remaining sets at once. When one input closes, the other input's remaining rows are dropped, and the held set then only shrinks. Removal is a mask, with periodic compaction | Peak RSS in stage 5's async benchmark, with a branch that filters most rows out; a test that the held count falls to the closed side's unmatched rows when one input closes |
+| **Non-unique system tags (`Rejoin`)** | With duplicate record ids, "match once" pairs duplicates in arrival order, which can differ between sync and async, so the rows differ even as sets | Out of the design's scope: ITL-1356 makes record ids unique at the source. The equivalence tests use unique record ids, as the rule assumes | A test documents the duplicate case and is excluded, by name, from the set comparison |
 | **Sync join order is Polars' unspecified order** (found while writing this) | The sync `Join`, `MergeJoin` and `Rejoin` take their row order from Polars' inner join without `maintain_order` (`join.py:94`, `rejoin.py`). Polars does not guarantee that order, so a Polars upgrade or thread count could reorder the stored rows of a join node on the sync path too. Hashes would not move; stored row order would | Not changed by this design. Making it explicit (`maintain_order="left_right"`) is a separate decision, because it could change today's stored row order (question 10) | Stage 0 compares the current order with `left_right` order over the corpus. The differential runs with the Polars thread count at 1 and at the default |
 | **Hidden consumers of row lists** | Code outside the orchestrators reads `node_outputs` or held rows as lists: tests, alignment helpers, user code | The inventory in "Call sites", and the release note | The full suite, and the grep inventory re-run at each stage |
 
@@ -1168,18 +1227,10 @@ The developer approves the spec as a whole before stage 0 starts.
    needs directly on `eywalker/job-speed`, with no thin forms of the old ones. `main` sees
    one breaking change, at the branch merge. Accept?
 8. **`node_outputs` as output streams** (refining decision 1): accept?
-9. **Refusals after rows have flowed (difference c, `Rejoin` only), open.** A streaming
-   `Rejoin` refuses when it meets an offending row, so downstream:
-   - a function node may already have stored results for earlier rows;
-   - a side-effect node, or a `ctx_arg` function node, may already have delivered for them.
-
-   On `main`, `Rejoin` is a barrier, so nothing downstream of it is stored or delivered. But
-   `main`'s async path already behaves this way when an upstream function node fails under
-   `fail_fast` (difference c's row cites the code). `Join`'s refusals are all schema-level and
-   come before any row. Two options:
-   - approve c;
-   - or keep the fallback: `Rejoin` matches as it streams but holds its output until its
-     inputs are complete. This is the default until c is approved.
+9. **Resolved** (developer, 2026-11-22, ITL-1355). `Rejoin` matches on every shared column
+   with `Join`'s equality, never refuses on data, and drops unmatched rows, so it never refuses
+   after rows have flowed. The rule lands on `main` separately; stage 5's streaming `Rejoin`
+   builds on it.
 10. **Polars' join order** is not part of this design. Recommendation: one low-priority Linear
     issue to record the risk. Making the order explicit is allowed only if stage 0 shows
     `maintain_order="left_right"` gives exactly today's order everywhere. Shall I open it?
