@@ -1197,6 +1197,24 @@ class Datagram(ContentIdentifiableBase):
     # 8. Utility Operations
     # ------------------------------------------------------------------
 
+    def with_datagram_uuid(self, record_uuid: uuid.UUID) -> Self:
+        """Return a shallow copy of this datagram whose datagram id is ``record_uuid``.
+
+        Every column, type, source-info token and cached content hash is this
+        datagram's (``copy``); only the id differs. A row read back from a store is built
+        by a stream, which gives it a fresh id; the id it was stored under is set here
+        (ITL-1060).
+
+        Args:
+            record_uuid: The datagram id of the copy.
+
+        Returns:
+            The copy.
+        """
+        new_d = self.copy(include_cache=True, preserve_id=False)
+        new_d._datagram_uuid = record_uuid
+        return new_d
+
     def copy(self, include_cache: bool = True, preserve_id: bool = True) -> Self:
         """Return a shallow copy of this datagram.
 

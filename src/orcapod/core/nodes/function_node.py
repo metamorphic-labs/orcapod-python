@@ -283,10 +283,12 @@ _TAG_NODE_INPUT_REF = "_tag_node_input_ref"
 
 
 def _with_datagram_id(data: Data, datagram_id: uuid.UUID) -> Data:
-    """Return ``data`` rebuilt with ``datagram_id`` as its datagram id.
+    """Return ``data`` with ``datagram_id`` as its datagram id.
 
     A stored row read back is built by a stream, which gives every row a fresh id.
-    The rebuilt datagram has the same columns, types, source info and data context.
+    The copy shares the row's columns, types, source info and data context
+    (``Datagram.with_datagram_uuid``), instead of building the datagram again from its
+    table (ITL-1361).
 
     Args:
         data: The datagram a stream built from a stored row.
@@ -295,11 +297,7 @@ def _with_datagram_id(data: Data, datagram_id: uuid.UUID) -> Data:
     Returns:
         A datagram equal to ``data`` whose ``datagram_uuid`` is ``datagram_id``.
     """
-    return Data(
-        data.as_table(columns={"source": True}),
-        record_uuid=datagram_id,
-        data_context=data.data_context_key,
-    )
+    return data.with_datagram_uuid(datagram_id)
 
 
 def _executor_supports_concurrent(
