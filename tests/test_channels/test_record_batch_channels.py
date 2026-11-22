@@ -5,7 +5,7 @@ carrier of the stream's rows as Arrow record batches. An input channel is opened
 complete stream (``stream.open_channel()``) or from an output channel
 (``OutputChannel.open_reader``); an output channel, once closed, gives its rows back as
 an ordinary stream (``result()``), and so does an input channel that is read to its end
-(``channel_to_stream``). One test per rule of the design's table "The hard semantics".
+(``to_stream()``). One test per rule of the design's table "The hard semantics".
 
 The oracle of every table is ``R``: the table today's code builds from a stream's rows
 (``StaticOutputOperatorPod._rows_to_table``).
@@ -36,7 +36,6 @@ from orcapod.core.operators import MapData, PolarsFilter, SelectDataColumns, Sem
 from orcapod.core.operators.static_output_pod import (
     ROW_BUILT_OUTPUT,
     StaticOutputOperatorPod,
-    channel_to_stream,
     stream_from_batches,
     transport_schema,
 )
@@ -118,7 +117,7 @@ def batches_of(stream: Any, rows: int = SOURCE_BATCH_ROWS) -> list[pa.RecordBatc
 
 def test_a_channel_opened_on_a_stream_delivers_its_rows_and_refers_to_it() -> None:
     """The record batches are the stream's rows in the row-built form; the description
-    is the stream, and ``channel_to_stream`` rebuilds what the channel delivered, with
+    is the stream, and ``to_stream()`` rebuilds what the channel delivered, with
     the stream's identity."""
     stream = source()
     channel = stream.open_channel()
@@ -129,7 +128,7 @@ def test_a_channel_opened_on_a_stream_delivers_its_rows_and_refers_to_it() -> No
     assert as_protocol.stream is stream
     batches = run(stream.open_channel().collect)
     assert same(pa.Table.from_batches(batches), R(stream))
-    delivered = run(lambda: channel_to_stream(channel))
+    delivered = run(lambda: channel.to_stream())
     assert same(delivered.as_table(columns=ALL), R(stream))
     assert delivered.keys() == stream.keys()
     assert delivered.data_context_key == stream.data_context_key
@@ -140,14 +139,14 @@ def test_a_channel_opened_on_a_stream_delivers_its_rows_and_refers_to_it() -> No
 
 def test_a_source_node_opens_a_channel_on_its_rows() -> None:
     """A source node is a stream too. A job's source node delivers its source's rows in
-    the row-built form, which ``channel_to_stream`` rebuilds. An unbound slot opens a
+    the row-built form, which ``to_stream()`` rebuilds. An unbound slot opens a
     channel (opening reads nothing), and its first read raises."""
     stream = source()
     node = SourceJobNode.from_stream(stream, name="events")
     assert isinstance(node, StreamProtocol)
     batches = run(node.open_channel().collect)
     assert same(pa.Table.from_batches(batches), R(node))
-    rebuilt = run(lambda: channel_to_stream(node.open_channel()))
+    rebuilt = run(lambda: node.open_channel().to_stream())
     assert same(rebuilt.as_table(columns=ALL), R(node))
 
     slot = SourceNode.from_stream(stream, name="events")
@@ -254,7 +253,7 @@ def test_a_source_nodes_channel_carries_its_execute_output(
         for batch in batches:
             await output.send(batch)  # the node's description takes them
         await output.close()
-        return batches, await channel_to_stream(node.open_channel())
+        return batches, await node.open_channel().to_stream()
 
     batches, rebuilt = run(read)
     assert same(pa.Table.from_batches(batches), R(expected))
@@ -275,7 +274,7 @@ def test_a_rebind_before_the_first_read_is_read_whole() -> None:
 
 def test_a_source_nodes_conversion_keeps_the_delivered_column_order() -> None:
     """Plain tags declared ``k, j`` over physical columns ``x, j, k, y``: the stream
-    ``channel_to_stream`` makes keeps the columns in the order they were delivered
+    ``to_stream()`` makes keeps the columns in the order they were delivered
     (the node's rows), though the node describes itself in the slot's order."""
     stream = ArrowTableSource(
         pa.table(
@@ -295,7 +294,7 @@ def test_a_source_nodes_conversion_keeps_the_delivered_column_order() -> None:
 
     async def read() -> tuple[list[str], list[str]]:
         batches = await node.open_channel().collect()
-        rebuilt = await channel_to_stream(node.open_channel())
+        rebuilt = await node.open_channel().to_stream()
         return batches[0].schema.names, rebuilt.as_table(columns=ALL).column_names
 
     delivered, rebuilt = run(read)
@@ -349,26 +348,26 @@ def test_a_flagged_stream_is_given_as_it_is_only_by_its_own_channel() -> None:
         for batch in batches:
             await output.send(batch)
         await output.close()
-        return await channel_to_stream(output.open_reader())
+        return await output.open_reader().to_stream()
 
     flagged = run(flagged_stream)
     assert getattr(flagged, ROW_BUILT_OUTPUT, False)
 
     async def read() -> None:
         direct = flagged.open_channel()
-        assert await channel_to_stream(direct) is flagged
+        assert await direct.to_stream() is flagged
         other = OutputChannel(flagged)
         reader = other.open_reader()
         await other.send(batches[0])
         await other.close()
-        rebuilt = await channel_to_stream(reader)
+        rebuilt = await reader.to_stream()
         assert rebuilt is not flagged
         assert rebuilt.as_table().num_rows == 1
         failed = OutputChannel(flagged)
         failing = failed.open_reader()
         failed.fail(OSError("disk gone"))
         with pytest.raises(UpstreamFailedError):
-            _ = await channel_to_stream(failing)
+            _ = await failing.to_stream()
         op = SemiJoin()
         semi_output = OutputChannel(op(stream, flagged))
         broken = OutputChannel(flagged)
@@ -397,7 +396,7 @@ def test_a_reader_has_one_consumer(retain: bool) -> None:
         await asyncio.sleep(0)
         assert not reader.unread
         with pytest.raises(RuntimeError, match="read already|another consumer"):
-            _ = await channel_to_stream(reader)
+            _ = await reader.to_stream()
         with pytest.raises(RuntimeError, match="another consumer"):
             _ = await reader.receive()
         await output.send(batch)
@@ -484,7 +483,7 @@ def test_a_reserved_reader_is_read_only_through_its_claim(retain: bool) -> None:
 
 @pytest.mark.parametrize("retain", [True, False], ids=["retained", "bounded"])
 def test_a_conversion_reserves_the_reader_when_it_is_created(retain: bool) -> None:
-    """``pending = channel_to_stream(reader)`` reserves at once: a receive before
+    """``pending = reader.to_stream()`` reserves at once: a receive before
     ``await pending`` is refused, and the conversion gets every batch."""
     stream = source(2)
     batches = batches_of(stream, 1)
@@ -495,7 +494,7 @@ def test_a_conversion_reserves_the_reader_when_it_is_created(retain: bool) -> No
         for batch in batches:
             await output.send(batch)
         await output.close()
-        pending = channel_to_stream(reader)
+        pending = reader.to_stream()
         with pytest.raises(RuntimeError, match="held for a conversion"):
             _ = await reader.receive()
         return (await pending).as_table().num_rows
@@ -595,7 +594,7 @@ def test_a_feed_raising_stop_async_iteration_is_a_read_error() -> None:
         with pytest.raises(RuntimeError, match="StopAsyncIteration"):
             _ = await InputChannel(stream, _StoppingFeed(first)).collect()
         with pytest.raises(RuntimeError, match="StopAsyncIteration"):
-            _ = await channel_to_stream(InputChannel(stream, _StoppingFeed(first)))
+            _ = await InputChannel(stream, _StoppingFeed(first)).to_stream()
 
     run(read)
 
@@ -628,7 +627,7 @@ def test_a_barrier_leaves_no_conversion_behind_when_an_input_was_read() -> None:
 
 @pytest.mark.parametrize("never", ["cancelled", "dropped"])
 def test_a_conversion_that_never_starts_releases_its_reader(never: str) -> None:
-    """``channel_to_stream`` reserves at call time. If its conversion never starts (its
+    """``to_stream()`` reserves at call time. If its conversion never starts (its
     task is cancelled before the first step, or it is dropped unawaited), the
     reservation is released: the reader is closed and a bounded producer no longer
     waits on it."""
@@ -639,12 +638,12 @@ def test_a_conversion_that_never_starts_releases_its_reader(never: str) -> None:
         output = OutputChannel(stream, retain=False, buffer_size=1)
         reader = output.open_reader()
         if never == "cancelled":
-            task = asyncio.ensure_future(channel_to_stream(reader))
+            task = asyncio.ensure_future(reader.to_stream())
             _ = task.cancel()
             _ = await asyncio.gather(task, return_exceptions=True)
             del task
         else:
-            pending = channel_to_stream(reader)
+            pending = reader.to_stream()
             pending.close()  # what dropping an unawaited coroutine does
             del pending
         gc.collect()
@@ -680,7 +679,7 @@ def test_a_dropped_reader_whose_claim_is_freed_later_releases_its_producer() -> 
 
 
 def test_a_closed_reader_cannot_be_converted() -> None:
-    """A reader closed before any read: ``channel_to_stream`` raises ``ChannelClosed``,
+    """A reader closed before any read: ``to_stream()`` raises ``ChannelClosed``,
     as documented, not the error of a channel already read."""
     stream = source(1)
 
@@ -688,7 +687,7 @@ def test_a_closed_reader_cannot_be_converted() -> None:
         reader = OutputChannel(stream).open_reader()
         await reader.close()
         with pytest.raises(ChannelClosed, match="closed before its producer"):
-            _ = await channel_to_stream(reader)
+            _ = await reader.to_stream()
 
     run(read)
 
@@ -705,7 +704,7 @@ class _ClosingFetch(FakeDynamicSource):
 
 def test_a_channel_closed_inside_the_read_is_a_read_error() -> None:
     """A ``ChannelClosed`` raised by the feed's own read (the source's) is not the end
-    of the input: iteration, ``collect`` and ``channel_to_stream`` raise it, and a
+    of the input: iteration, ``collect`` and ``to_stream()`` raise it, and a
     barrier fails before its body."""
     declared = Schema({"id": int, "val": int})
 
@@ -722,7 +721,7 @@ def test_a_channel_closed_inside_the_read_is_a_read_error() -> None:
             _ = await polling().open_channel().collect()
         channel = polling().open_channel()
         with pytest.raises(ChannelClosed, match="underlying input"):
-            _ = await channel_to_stream(channel)
+            _ = await channel.to_stream()
         assert not channel.unread
         left = source()
         right = polling()
@@ -765,7 +764,7 @@ def test_a_delivered_batch_is_not_kept_by_the_feed() -> None:
 
 def test_an_unbound_input_fails_a_barrier_before_it_runs() -> None:
     """``SemiJoin`` with no shared tag never reads its right input on the sync path,
-    but ``channel_to_stream`` reads every input first: an unbound right input (a slot,
+    but ``to_stream()`` reads every input first: an unbound right input (a slot,
     or a ``SourceProxy``) raises what reading it raises, before the operator runs."""
     left = source()
     other = ArrowTableSource(
@@ -816,14 +815,14 @@ def test_an_exhausted_channel_never_yields_rows_later() -> None:
     async def after_run() -> None:
         assert await channel.collect() == []  # single pass: nothing more
         with pytest.raises(RuntimeError, match="read already"):
-            _ = await channel_to_stream(channel)
+            _ = await channel.to_stream()
 
     run(after_run)
 
 
 def test_a_polling_source_is_read_once_through_a_channel() -> None:
     """A fresh ``PollingSource``: opening a channel fetches nothing; reading it fetches
-    once and the stream ``channel_to_stream`` gives is a fixed snapshot, read again
+    once and the stream ``to_stream()`` gives is a fixed snapshot, read again
     with no further fetch, also through ``collect``."""
     fake = FakeDynamicSource(batches=[_batch(i, 10 * i) for i in range(1, 6)])
     polling = PollingSource(
@@ -834,7 +833,7 @@ def test_a_polling_source_is_read_once_through_a_channel() -> None:
         channel = polling.open_channel()
         other = polling.open_channel()
         assert len(fake.fetch_cursors) == 0  # opening reads nothing
-        snapshot = await channel_to_stream(channel)
+        snapshot = await channel.to_stream()
         fetched = len(fake.fetch_cursors)
         assert fetched == 1  # exactly one fetch for the channel's first read
         assert len(await other.collect()) >= 1
@@ -909,8 +908,8 @@ def test_a_channel_is_read_once_and_the_stream_again() -> None:
     assert run(read) == (1, 0)
 
 
-def test_channel_to_stream_is_everything_or_nothing() -> None:
-    """``channel_to_stream`` on a channel already read is refused: never part of an
+def test_to_stream_is_everything_or_nothing() -> None:
+    """``to_stream()`` on a channel already read is refused: never part of an
     input, and a channel is never read again."""
 
     batches = batches_of(source(), 2)
@@ -923,7 +922,7 @@ def test_channel_to_stream_is_everything_or_nothing() -> None:
         channel = output.open_reader()
         _ = await channel.receive()
         with pytest.raises(RuntimeError, match="read already"):
-            _ = await channel_to_stream(channel)
+            _ = await channel.to_stream()
 
     run(read)
 
@@ -963,7 +962,7 @@ def test_result_is_the_batches_sent_in_order_as_the_nodes_stream(rows: int) -> N
 
 
 def test_the_identity_of_a_result_with_and_without_a_producer() -> None:
-    """``result()`` and ``channel_to_stream`` take the describing stream's identity: its
+    """``result()`` and ``to_stream()`` take the describing stream's identity: its
     producer and upstreams when it has a producer, its pipeline hash when it has none."""
     root = source()
     produced = SelectDataColumns(["subject", "trial", "amplitude"])(root)
@@ -973,7 +972,7 @@ def test_the_identity_of_a_result_with_and_without_a_producer() -> None:
         for batch in batches:
             await output.send(batch)
         await output.close()
-        return output.result(), await channel_to_stream(output.open_reader())
+        return output.result(), await output.open_reader().to_stream()
 
     for stream in (root, produced):
         batches = batches_of(stream, 3)
@@ -986,7 +985,7 @@ def test_the_identity_of_a_result_with_and_without_a_producer() -> None:
 
 
 def test_a_close_with_no_batch_is_the_typed_zero_row_stream() -> None:
-    """Zero rows: ``result()`` and ``channel_to_stream`` are typed by the description, never
+    """Zero rows: ``result()`` and ``to_stream()`` are typed by the description, never
     by rows, with the columns of a run with rows."""
     stream = SelectDataColumns(["subject", "trial", "amplitude", "trace"])(source())
     with_rows = R(stream)
@@ -996,7 +995,7 @@ def test_a_close_with_no_batch_is_the_typed_zero_row_stream() -> None:
         reader = output.open_reader()
         await output.close()
         await output.close()  # a second close does nothing
-        return output.result(), await channel_to_stream(reader)
+        return output.result(), await reader.to_stream()
 
     for made in run(empty):
         table = made.as_table(columns=ALL)
@@ -1238,20 +1237,18 @@ def test_a_send_scheduled_before_the_end_of_a_retained_output_publishes_nothing(
     assert rows == [1]
 
 
-def test_channel_to_stream_of_a_channel_closed_before_its_end_raises() -> None:
-    """A reader closed while ``channel_to_stream`` (or ``collect()``) reads never makes part
+def test_to_stream_of_a_channel_closed_before_its_end_raises() -> None:
+    """A reader closed while ``to_stream()`` (or ``collect()``) reads never makes part
     of an input into a stream."""
     stream = source(2)
     first, second = batches_of(stream, 1)
 
     async def write() -> None:
-        for read in ("channel_to_stream", "collect"):
+        for read in ("to_stream", "collect"):
             output = OutputChannel(stream, retain=False, buffer_size=4)
             reader = output.open_reader()
             reading = asyncio.ensure_future(
-                channel_to_stream(reader)
-                if read == "channel_to_stream"
-                else reader.collect()
+                reader.to_stream() if read == "to_stream" else reader.collect()
             )
             await output.send(first)
             await asyncio.sleep(0)
@@ -1755,7 +1752,7 @@ def test_a_failed_producer_is_never_a_normal_end(retain: bool) -> None:
 
         blocked = asyncio.ensure_future(waiting_consumer())
         await first_read.wait()
-        whole = asyncio.ensure_future(channel_to_stream(barrier))
+        whole = asyncio.ensure_future(barrier.to_stream())
         await asyncio.sleep(0)
         output.fail(boom)
         output.fail(RuntimeError("a second failure changes nothing"))
@@ -1790,7 +1787,7 @@ def test_fail_after_close_changes_nothing() -> None:
             await output.send(batch)
         await output.close()
         output.fail(OSError("too late"))
-        return (await channel_to_stream(output.open_reader())).as_table().num_rows
+        return (await output.open_reader().to_stream()).as_table().num_rows
 
     assert run(write) == 7
 
@@ -1899,7 +1896,7 @@ def test_an_operator_reads_its_input_to_the_end_and_closes_its_output() -> None:
 
 
 def test_stream_from_batches_is_the_one_conversion() -> None:
-    """``result()`` and ``channel_to_stream`` are ``stream_from_batches``: its table equals the
+    """``result()`` and ``to_stream()`` are ``stream_from_batches``: its table equals the
     rows' table for every way the batches are cut, and no batch gives zero rows."""
     stream = source()
     for rows in (1, 2, 5, 7):
