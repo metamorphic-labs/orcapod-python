@@ -218,10 +218,9 @@ def check_sources(streams: Iterable[Any]) -> tuple[str, ...]:
         The source ids of the sources that could not be checked, in the order met.
     """
     import sys
-    import warnings
 
     from orcapod.errors import SourceCheckFailedWarning
-    from orcapod.utils.warning_utils import outside_orcapod_stacklevel
+    from orcapod.utils.warning_utils import outside_orcapod_stacklevel, warn_at_frame
 
     unchecked: list[str] = []
     for source in run_sources(streams):
@@ -230,20 +229,15 @@ def check_sources(streams: Iterable[Any]) -> tuple[str, ...]:
         except Exception as exc:
             name = source_name(source)
             unchecked.append(name)
-            # Shown at the user's line that started the run, at every run: a fresh
-            # registry each time, as for RowFailuresWarning, so the default filter's
-            # once-per-line rule cannot hide the next run's failure.
+            # Shown at the user's line that started the run, at every run, as
+            # RowFailuresWarning is: the next run's failure is never hidden.
             caller = sys._getframe(outside_orcapod_stacklevel() - 1)  # pyright: ignore[reportPrivateUsage]  # as the warnings module does
-            warnings.warn_explicit(
+            warn_at_frame(
                 f"Source {name!r} could not be checked for new data: "
                 f"{type(exc).__name__}: {str(exc).rstrip('.')}. The run proceeds "
                 "with the data the source already holds.",
                 SourceCheckFailedWarning,
-                caller.f_code.co_filename,
-                caller.f_lineno,
-                module=caller.f_globals.get("__name__"),
-                registry=None,
-                module_globals=caller.f_globals,
+                caller,
             )
     return tuple(unchecked)
 
