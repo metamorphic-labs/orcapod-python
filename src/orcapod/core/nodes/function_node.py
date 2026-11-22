@@ -3958,6 +3958,38 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         Raises:
             RuntimeError: If ``load_status`` is UNAVAILABLE.
         """
+        self._prepare_held_read()
+        yield from self._held_pairs()
+
+    def held_row_count(self) -> int:
+        """The number of rows ``iter_data`` yields now, counted from the run's inputs.
+
+        The same count as ``iter_data`` (one row per input of the run that has an
+        output), without going through the rows (ITL-1351).
+
+        Returns:
+            The row count.
+
+        Raises:
+            RuntimeError: If ``load_status`` is UNAVAILABLE.
+        """
+        self._prepare_held_read()
+        counts = self._run_entry_counts
+        if counts is None:
+            return 0
+        return sum(
+            counts.get(entry_id, 0)
+            for entry_id, (_, data) in self._cached_output_datas.items()
+            if data is not None
+        )
+
+    def _prepare_held_read(self) -> None:
+        """What every read of the held rows does first: refuse a node with no database
+        to read, and drop rows that went stale.
+
+        Raises:
+            RuntimeError: If ``load_status`` is UNAVAILABLE.
+        """
         from orcapod.pipeline.serialization import LoadStatus
 
         status = self.load_status
@@ -3966,7 +3998,6 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         # A CACHE_ONLY node has no live input to be stale against.
         if status != LoadStatus.CACHE_ONLY and self.is_stale:
             self.clear_cache()
-        yield from self._held_pairs()
 
     def run(self, *, load_only: bool = False) -> StreamView:
         """Run the node as a job run would, and return a ``StreamView`` of its rows.

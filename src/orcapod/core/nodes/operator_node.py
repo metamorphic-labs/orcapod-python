@@ -1927,6 +1927,18 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             return None
         return self._cached_output_stream
 
+    def held_row_count(self) -> int:
+        """The number of rows of the node's current run, from its output table.
+
+        The same count as ``iter_data`` (0 when the node holds no run), without building
+        a ``(Tag, Data)`` pair per row (ITL-1351).
+
+        Returns:
+            The row count.
+        """
+        current = self._current_output()
+        return 0 if current is None else current.as_table().num_rows
+
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         """Return an iterator over the (tag, data) rows of the node's current run.
 
