@@ -1,10 +1,12 @@
 """Streaming join kernels: symmetric hash joins on Arrow record batches (ITL-1362).
 
 The async path of ``Join``, ``MergeJoin``, ``SemiJoin`` and ``Rejoin`` (ITL-1347, stage
-5) reads its inputs as Arrow record batches, in whatever order they arrive, and must give the rows of
-the operator's sync ``static_process`` over the same inputs, as a multiset (row order is
-not a result on the async path; developer, November 22, 2026). A kernel is that
-computation without the channels: the channel layer creates one per run from the input
+5) is to read its inputs as Arrow record batches, in whatever order they arrive; these
+kernels are that computation, not yet wired into ``async_execute``. A kernel gives the
+rows of the operator's sync ``static_process`` over the same inputs as a multiset (row
+order is not a result on the async path; developer, November 22, 2026), within the
+limits each kernel's docstring states (``StreamingRejoin``: repeated origins with three
+or more inputs). A kernel is that computation without the channels: the channel layer creates one per run from the input
 streams (the descriptions) and hands it each arriving record batch (``push``) and each
 input's end (``close``); every call returns the output rows it decided, as record batches.
 
@@ -1002,8 +1004,10 @@ class StreamingSemiJoin(StreamingJoinKernel):
         return []
 
 
-# The occurrence-number column of a Rejoin key frame (never an input column).
+# The occurrence-number column of a Rejoin key frame, and the prefix of the other side's
+# columns in the warning's pairs (never an input column: those never start so).
 _OCCURRENCE = "__streaming_occurrence"
+_OTHER = "__streaming_other_"
 
 
 def _with_context(table: pa.Table, context_key: str) -> pa.Table:
@@ -1274,32 +1278,31 @@ class _RejoinLink:
     def _note_differing(self, rest: pa.Table, other: _Remaining, side: int) -> None:
         """Note the shared columns in which unmatched rows of one origin row differ.
 
-        A second join of the arriving rows that matched nothing, on the system tags only,
-        against the other side's remaining rows finds the rows of one origin row (their
-        repeats paired in arrival order); for each other shared column, one join on the
-        system tags and that column, nulls equal (``Join``'s equality otherwise), tells
-        which of those pairs agree in it.
+        One more join, of the arriving rows that matched nothing on the system tags only
+        against the other side's remaining rows, pairs the rows of one origin row (their
+        repeats in arrival order), with both sides' prepared values of the other shared
+        columns. Each such column is then compared over those pairs in one vectorized
+        expression, ``eq_missing`` on the prepared values: ``Join``'s equality (NaN
+        equals NaN, ``-0.0`` equals ``0.0``, at any depth) with a null equal to a null,
+        as the sync path compares them.
         """
-        row, other_row = _ROW[side], _ROW[1 - side]
-        mine = _occurrences(polars_key_frame(rest, self.shared, row), self.system)
-        theirs = _occurrences(other.frame(), self.system)
+        row = _ROW[side]
+        names = [name for name in self.others if name not in self.differing]
+        if not names:
+            return
         origin = [*self.system, _OCCURRENCE]
-        pairs = mine.select([*origin, row]).join(
-            theirs.select([*origin, other_row]), on=origin, how="inner"
+        mine = _occurrences(polars_key_frame(rest, self.shared, row), self.system)
+        theirs = _occurrences(other.frame(), self.system).select(
+            [*origin, *(pl.col(name).alias(_OTHER + name) for name in names)]
         )
+        pairs = mine.select([*origin, *names]).join(theirs, on=origin, how="inner")
         if not pairs.height:
             return
-        for name in self.others:
-            if name in self.differing:
-                continue
-            agree = mine.select([*origin, name, row]).join(
-                theirs.select([*origin, name, other_row]),
-                on=[*origin, name],
-                how="inner",
-                nulls_equal=True,
-            )
-            if agree.height < pairs.height:
-                self.differing.add(name)
+        differ = pairs.select(
+            (~pl.col(name).eq_missing(pl.col(_OTHER + name))).any().alias(name)
+            for name in names
+        ).row(0, named=True)
+        self.differing.update(name for name, differs in differ.items() if differs)
 
 
 class StreamingRejoin(StreamingJoinKernel):
@@ -1319,10 +1322,15 @@ class StreamingRejoin(StreamingJoinKernel):
     - once one side closes, the other side's remaining rows are dropped, and an arriving
       row either matches at once or is dropped.
 
-    Cost: one vectorized join per arriving batch against the other side's remaining rows
-    (and their occurrence numbers), so O(held rows) per batch, as in the ``Join``
-    kernels; values are taken from the held tables' chunks by row number, never by
-    copying a whole held table. A long run of one-row batches against a large buffer is
+    Cost, per arriving batch and per step it reaches: at most two Polars joins against
+    the other side's remaining rows, the match and, when some arriving rows matched
+    nothing and the other side holds rows, one more on the system tags for the warning
+    (each other shared column then compared in one vectorized expression); and the
+    occurrence numbers of the remaining rows. That is O(held rows) per batch, as in the
+    ``Join`` kernels, plus O(m log m) to take the m pairs it makes from the held chunks
+    (``_take_rows``: one vectorized chunk lookup and one sort for all of them), never by
+    copying a whole held table; a compaction copies the remaining rows when half of
+    those held were removed. A long run of one-row batches against a large buffer is
     quadratic in the rows.
 
     Rows: they equal the sync path's as a multiset, for every arrival schedule, when

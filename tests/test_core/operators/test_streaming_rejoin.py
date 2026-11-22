@@ -1,13 +1,18 @@
-"""The streaming Rejoin kernel gives the sync Rejoin's rows, whatever the arrivals.
+"""The streaming Rejoin kernel gives the sync Rejoin's rows, within its stated limits.
 
-ITL-1362 (ITL-1347, stage 5): ``Rejoin`` runs on the async path as symmetric matches on
-every shared column over Arrow record batches (``StreamingRejoin``), with ITL-1355's rule:
-an inner join on every column the inputs share (system tags, shared user tags, a shared
-data-tag's source info, the data context), ``Join``'s equality, a null equal to a null
-outside the system tags, a null system tag matching nothing, each row matching at most
-once. The oracle and the arrivals are those of ``test_streaming_joins``: the sync
-operator over the inputs rebuilt from rows, compared as a multiset, after random batch
-cuts and interleavings.
+ITL-1362 (ITL-1347, stage 5): ``StreamingRejoin`` is the streaming form of ``Rejoin`` on
+Arrow record batches, not yet wired into ``async_execute`` (which is still the barrier).
+It applies ITL-1355's rule: an inner join on every column the inputs share (system
+tags, shared user tags, a shared data-tag's source info, the data context), ``Join``'s
+equality, a null equal to a null outside the system tags, a null system tag matching
+nothing, each row matching at most once. Its rows equal the sync rows as a multiset for
+every schedule with unique origins, and with repeated origins for two inputs; with
+three or more inputs and repeated origins, arrival order can change the pairing
+(``test_repeats_with_three_inputs_can_pair_by_arrival``), and the warning is guaranteed
+only for two inputs with unique origins; those documented differences are pinned below.
+These are direct tests of the kernel, not of an async execution path. The oracle and the arrivals are those of
+``test_streaming_joins``: the sync operator over the inputs rebuilt from rows, compared
+as a multiset, after random batch cuts and interleavings.
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ import math
 import random
 import warnings
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 import polars as pl
@@ -644,3 +650,128 @@ def test_each_batch_costs_one_join_and_copies_no_held_table(
     # removed since the last one, so at most log2(n) times in the run.
     assert len(large) <= math.ceil(math.log2(n)), large
     assert kernel.held_rows == 0
+
+
+def test_a_partly_matching_batch_costs_two_joins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Held: origins x and z with k = [1, 1]. Arriving in one batch: x and z with
+    # k = [2, 1]. z matches (the match join); x matched nothing but shares its
+    # origin with a held row, so one more join on the system tags finds the pair and
+    # a vectorized comparison names k. Two joins, and the warning is the sync path's.
+    left = _hand_branch("a", origin=["x", "z"], tag=[1, 1])
+    right = _hand_branch("b", origin=["x", "z"], tag=[2, 1])
+    joins = 0
+    original = pl.DataFrame.join
+
+    def counted(self: pl.DataFrame, *args: Any, **kwargs: Any) -> pl.DataFrame:
+        nonlocal joins
+        joins += 1
+        return original(self, *args, **kwargs)
+
+    kernel = StreamingRejoin(Rejoin(), (left, right))
+    kernel.push(0, _sent(left).combine_chunks().to_batches()[0])
+    monkeypatch.setattr(pl.DataFrame, "join", counted)
+    caught: list[pa.RecordBatch] = []
+
+    def run() -> None:
+        caught.extend(kernel.push(1, _sent(right).combine_chunks().to_batches()[0]))
+        caught.extend(kernel.close(0) + kernel.close(1))
+
+    found = _warnings_of(run)
+    monkeypatch.undo()
+    assert joins == 2
+    assert sum(batch.num_rows for batch in caught) == 1
+    assert found == _sync_warnings((left, right))
+    assert len(found) == 1
+
+
+def test_four_inputs_keep_buffered_matches_when_earlier_steps_release() -> None:
+    # Canonical inputs I0..I3. x and y match through the first two steps and wait at
+    # the last step for I3. Then I1 closes: the steps before the last can never emit
+    # again and are released, but the last step keeps its two buffered rows, which
+    # I3 then matches. A late row of I0 (z) goes to a released step and is not held.
+    # Every call order of the four inputs gives the sync rows.
+    names = sorted(
+        "abcd",
+        key=lambda n: _hand_branch(n, origin=["x"], tag=[1]).pipeline_hash().to_hex(),
+    )
+    canonical = [
+        _hand_branch(names[0], origin=["x", "y", "z"], tag=[1, 2, 3]),
+        *(_hand_branch(n, origin=["x", "y"], tag=[1, 2]) for n in names[1:]),
+    ]
+    assert sorted(canonical, key=lambda s: s.pipeline_hash().to_hex()) == canonical
+    expected = _transport(Rejoin().static_process(*map(_row_built, canonical)))
+    assert expected.num_rows == 2
+    sent = [_sent(stream).combine_chunks() for stream in canonical]
+    for call_order in itertools.permutations(range(4)):
+        inputs = [canonical[i] for i in call_order]
+        at = {position: call_order.index(position) for position in range(4)}
+        kernel = StreamingRejoin(Rejoin(), inputs)
+        out: list[pa.RecordBatch] = []
+        out += kernel.push(at[0], sent[0].slice(0, 2).to_batches()[0])
+        out += kernel.push(at[1], sent[1].to_batches()[0])
+        out += kernel.push(at[2], sent[2].to_batches()[0])
+        assert kernel.held_rows == 2
+        out += kernel.close(at[1])
+        assert kernel.held_rows == 2
+        out += kernel.push(at[0], sent[0].slice(2, 1).to_batches()[0])
+        assert kernel.held_rows == 2
+        out += kernel.push(at[3], sent[3].to_batches()[0])
+        assert kernel.held_rows == 0
+        for position in (0, 2, 3):
+            out += kernel.close(at[position])
+        assert_same_rows(out, kernel, expected)
+
+
+def test_extension_and_nested_payloads_cross_held_chunks_and_compaction() -> None:
+    # A logical (extension) payload and a nested payload, held in one-row chunks and
+    # matched in another order, across the compactions: every value is taken from
+    # its chunk, bit for bit, and the rows are the sync rows.
+    n = 40
+    path_type = contexts.get_default_context().type_converter.python_type_to_arrow_type(
+        Path
+    )
+    assert isinstance(path_type, pa.BaseExtensionType)
+    nested_type = pa.large_list(
+        pa.struct([("a", pa.int64()), ("b", pa.large_list(pa.int64()))])
+    )
+    origin = ArrowTableSource(
+        pa.table(
+            {
+                "unit": pa.array(range(n), pa.int64()),
+                "path": pa.ExtensionArray.from_storage(
+                    path_type,
+                    pa.array(
+                        [f"/data/f{i}.bin" for i in range(n)], path_type.storage_type
+                    ),
+                ),
+                "nested": pa.array(
+                    [[{"a": i, "b": [i, i + 1]}] for i in range(n)], nested_type
+                ),
+                "other": pa.array([float(i) for i in range(n)], pa.float64()),
+            }
+        ),
+        tag_columns=["unit"],
+        tag_only_columns=True,
+        source_id="payloads",
+    )
+    held = origin.select_data_columns(["path", "nested"])
+    arriving = origin.select_data_columns(["other"])
+    expected = _transport(
+        Rejoin().static_process(_row_built(held), _row_built(arriving))
+    )
+    assert expected.num_rows == n
+    for inputs, first in (((held, arriving), 0), ((arriving, held), 1)):
+        kernel = StreamingRejoin(Rejoin(), inputs)
+        out: list[pa.RecordBatch] = []
+        for batch in _sent(held).combine_chunks().to_batches(max_chunksize=1):
+            out += kernel.push(first, batch)
+        rows = _sent(arriving).combine_chunks()
+        for start in reversed(range(0, n, 3)):
+            out += kernel.push(1 - first, rows.slice(start, 3).to_batches()[0])
+        out += kernel.close(0) + kernel.close(1)
+        assert kernel.held_rows == 0
+        assert_same_rows(out, kernel, expected)
+        got = pa.Table.from_batches(out)
+        assert got.schema.field("path").type == path_type
