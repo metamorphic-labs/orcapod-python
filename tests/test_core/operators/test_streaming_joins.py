@@ -4,13 +4,18 @@ ITL-1362 (ITL-1347, stage 5): ``Join``, ``MergeJoin`` and ``SemiJoin`` run on th
 path as symmetric hash joins over Arrow record batches (``core/operators/streaming_joins``).
 Row order is not a result on the async path (developer, November 22, 2026), so a kernel
 must give the rows of the operator's sync ``static_process`` over the same inputs as a
-multiset, with the same columns and Arrow types. These tests feed each kernel its inputs'
-transport tables cut into batches of random sizes (empty and one-row batches included),
-in random interleavings of the inputs and of their ends, and compare.
+multiset, with the same columns and Arrow types.
 
-Field flags are compared as the stream built from the batches settles them: every flag
-is the sync result's, except source info, which a complete table decides (step 5 of the
-spec's row-built form F, ``_flag_source_info_nullability``) and is compared after it.
+The oracle is the sync operator over its inputs as a job's edges carry them: each input
+rebuilt from its rows (``StaticOutputOperatorPod._materialize_upstream``, the row-built
+form F of the ITL-1347 spec, where a ``null`` column is ``large_string``). These tests
+feed each kernel those inputs' transport tables cut into batches of random sizes (empty
+and one-row batches included), in random interleavings of the inputs and of their ends,
+and compare.
+
+Field flags are compared as the stream built from the batches settles them: the
+system-tag and source-info fields by their values over the complete table (the last step
+of F, ``_flag_by_values``), on both sides, rows or none.
 """
 
 from __future__ import annotations
@@ -32,6 +37,7 @@ from orcapod.core.operators import Join, MergeJoin, SemiJoin
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.operators.streaming_joins import (
     TRANSPORT_COLUMNS,
+    _flag_by_values,  # pyright: ignore[reportPrivateUsage]  # F's last step
     StreamingJoin,
     StreamingJoinKernel,
     StreamingMergeJoin,
@@ -41,11 +47,14 @@ from orcapod.core.sources import ArrowTableSource
 from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import StreamProtocol
+from orcapod.system_constants import constants
 
 from .several_items import MAIN, MIXED, P, PLAIN, Q, R, DATA_TAGS, Arrangement
 from .several_items import TAGS_FIRST, make_source
 
 SEEDS = range(12)
+# The fields whose flags a complete table decides by its values.
+SETTLED_PREFIXES = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
 # Batch sizes drawn for the cuts: empty and one-row batches included.
 SIZES = (0, 1, 1, 2, 3, 5, 64)
 
@@ -58,8 +67,20 @@ def _quiet_provisional() -> Any:
 
 
 def _transport(stream: StreamProtocol) -> pa.Table:
-    """An input's rows as the channel layer sends them: its transport columns."""
+    """A stream's transport columns."""
     return stream.as_table(columns=TRANSPORT_COLUMNS)
+
+
+def _row_built(stream: StreamProtocol, *, zero_rows: bool = False) -> StreamProtocol:
+    """``stream`` as an operator in a job reads it: rebuilt from its rows (form F)."""
+    return StaticOutputOperatorPod._materialize_upstream(  # pyright: ignore[reportPrivateUsage]  # the oracle
+        list(stream.iter_data()), stream, zero_rows=zero_rows
+    )
+
+
+def _sent(stream: StreamProtocol) -> pa.Table:
+    """An input's rows as the channel layer sends them: the row-built transport table."""
+    return _transport(_row_built(stream))
 
 
 def _cut(table: pa.Table, rng: random.Random) -> list[pa.RecordBatch]:
@@ -123,32 +144,40 @@ def _rows(table: pa.Table) -> Counter[tuple[Any, ...]]:
     )
 
 
-def _settled(table: pa.Table) -> pa.Table:
-    return StaticOutputOperatorPod._flag_source_info_nullability(table)  # pyright: ignore[reportPrivateUsage]
+def assert_same_fields(got: pa.Table, want: pa.Table) -> None:
+    """Same columns, types, field metadata and flags, after settling both (F's last step)."""
+    assert sorted(got.column_names) == sorted(want.column_names)
+    got = _flag_by_values(got.select(want.column_names))
+    want = _flag_by_values(want)
+    for field in want.schema:
+        other = got.schema.field(field.name)
+        assert other.type == field.type, field.name
+        assert other.metadata == field.metadata, field.name
+        assert other.nullable == field.nullable, field.name
 
 
 def assert_same_rows(
     batches: Sequence[pa.RecordBatch], kernel: StreamingJoinKernel, expected: pa.Table
 ) -> None:
-    """The emitted batches equal ``expected`` as a multiset, with its columns and types."""
+    """The emitted batches equal ``expected`` as a multiset, with its columns and types.
+
+    With no batch, the kernel's own zero-row result stands for its output.
+    """
     for batch in batches:
         assert batch.schema.names == list(kernel.output_columns)
+        # One schema for every batch of the run; the fields a complete table decides
+        # by its values are declared nullable (``_flag_by_values`` settles them).
+        assert batch.schema == batches[0].schema
+        for field in batch.schema:
+            if field.name.startswith(SETTLED_PREFIXES):
+                assert field.nullable, field.name
     got = (
         pa.Table.from_batches(batches)
         if batches
-        else expected.slice(0, 0).select(list(kernel.output_columns))
+        else _transport(kernel.zero_row_result).select(list(kernel.output_columns))
     )
-    assert sorted(got.column_names) == sorted(expected.column_names)
-    got = _settled(got.select(expected.column_names))
-    want = _settled(expected)
-    if got.num_rows or not want.num_rows:
-        for field in want.schema:
-            other = got.schema.field(field.name)
-            assert other.type == field.type, field.name
-            assert other.metadata == field.metadata, field.name
-            if got.num_rows:
-                assert other.nullable == field.nullable, field.name
-    assert _rows(got) == _rows(want)
+    assert_same_fields(got, expected)
+    assert _rows(got.select(expected.column_names)) == _rows(expected)
 
 
 def _check(
@@ -157,10 +186,21 @@ def _check(
     inputs: Sequence[StreamProtocol],
     seeds: Sequence[int] = SEEDS,
 ) -> None:
-    expected = _transport(sync(*inputs))
-    tables = [_transport(stream) for stream in inputs]
+    rebuilt = [_row_built(stream) for stream in inputs]
+    expected = _transport(sync(*rebuilt))
+    # The kernel's zero-row result is the sync operator's over the inputs rebuilt from
+    # their rows with none kept.
+    zero_rows = _transport(
+        sync(*(_row_built(stream, zero_rows=True) for stream in inputs))
+    )
+    tables = [_transport(stream) for stream in rebuilt]
     for seed in seeds:
         kernel = make_kernel(inputs)
+        assert_same_fields(_transport(kernel.zero_row_result), zero_rows)
+        assert (
+            list(kernel.output_columns)
+            == _transport(kernel.zero_row_result).column_names
+        )
         batches = _run(kernel, _arrivals(tables, random.Random(seed)))
         assert_same_rows(batches, kernel, expected)
         assert kernel.held_rows == 0
@@ -184,12 +224,20 @@ KEY_POOLS: dict[str, tuple[pa.DataType, list[Any]]] = {
             datetime(2026, 1, 2, tzinfo=timezone.utc),
         ],
     ),
+    "decimal256": (
+        pa.decimal256(40, 2),
+        [Decimal("1.10"), Decimal("-2.00"), None, Decimal("1.10")],
+    ),
+    # Top-level nulls: a null list, struct or decimal256 key matches nothing, as on the
+    # sync path (a single-key Polars join would match two of them).
     "struct": (
         pa.struct([("a", pa.int64()), ("b", pa.large_string())]),
-        [{"a": 1, "b": "x"}, {"a": 1, "b": "y"}, {"a": 2, "b": "x"}],
+        [{"a": 1, "b": "x"}, {"a": 1, "b": "y"}, {"a": 2, "b": "x"}, None],
     ),
-    "list": (pa.large_list(pa.int64()), [[1, 2], [2], [], [1, 2]]),
+    "list": (pa.large_list(pa.int64()), [[1, 2], [2], [], [1, 2], None]),
 }
+# The pools whose keys may hold a top-level null.
+NULL_POOLS = ("decimal", "decimal256", "list", "nullable_int", "struct")
 
 
 def _keyed_source(
@@ -242,14 +290,71 @@ def _join_kernel(inputs: Sequence[StreamProtocol]) -> StreamingJoinKernel:
     return StreamingJoin(Join(), inputs)
 
 
+@pytest.mark.parametrize("shared", ["one key", "two keys"])
 @pytest.mark.parametrize("pool", sorted(KEY_POOLS))
-def test_join_two_inputs_every_key_type(pool: str) -> None:
+def test_join_two_inputs_every_key_type(pool: str, shared: str) -> None:
     left = _keyed_source(
-        "a", pool, 9, {"x": pa.int64(), "x2": pa.float64()}, 1, extra_tag="g"
+        "a", pool, 12, {"x": pa.int64(), "x2": pa.float64()}, 1, extra_tag="g"
     )
-    right = _keyed_source("b", pool, 7, {"y": pa.int64(), "y2": pa.large_string()}, 2)
+    right = _keyed_source(
+        "b",
+        pool,
+        10,
+        {"y": pa.int64(), "y2": pa.large_string()},
+        2,
+        extra_tag="g" if shared == "two keys" else None,
+    )
     for inputs in ((left, right), (right, left)):
         _check(_join_kernel, Join().static_process, inputs)
+
+
+@pytest.mark.parametrize("pool", NULL_POOLS)
+def test_join_three_inputs_with_null_keys(pool: str) -> None:
+    sources = [
+        _keyed_source(name, pool, 10, {f"x{name}": pa.int64()}, seed)
+        for seed, name in enumerate("abc")
+    ]
+    for order in itertools.permutations(range(3)):
+        _check(
+            _join_kernel,
+            Join().static_process,
+            [sources[i] for i in order],
+            seeds=range(3),
+        )
+
+
+@pytest.mark.parametrize(
+    ("arrow_type", "values"),
+    [
+        (pa.large_list(pa.int64()), [None, [1]]),
+        (pa.struct([("a", pa.int64())]), [None, {"a": 1}]),
+        (pa.decimal256(40, 2), [None, Decimal("1.00")]),
+    ],
+)
+@pytest.mark.parametrize(
+    ("operator", "kernel"),
+    [
+        (Join(), StreamingJoin),
+        (MergeJoin(), StreamingMergeJoin),
+        (SemiJoin(), StreamingSemiJoin),
+    ],
+)
+def test_a_null_key_matches_nothing(
+    arrow_type: pa.DataType, values: list[Any], operator: Any, kernel: Any
+) -> None:
+    # The reviewer's minimal case: two null keys, one shared key, one-row batches.
+    def keyed(source_id: str, data: str) -> ArrowTableSource:
+        return ArrowTableSource(
+            pa.table({"k": pa.array(values, arrow_type), data: [1, 2]}),
+            tag_columns=["k"],
+            tag_only_columns=True,
+            source_id=source_id,
+        )
+
+    inputs = (keyed("a", "v"), keyed("b", "w"))
+    expected = _transport(operator.static_process(*map(_row_built, inputs)))
+    assert expected.num_rows == 1
+    _check(lambda i: kernel(operator, i), operator.static_process, inputs)
 
 
 @pytest.mark.parametrize("order", list(itertools.permutations(range(3))))
@@ -317,12 +422,24 @@ def _merge_kernel(inputs: Sequence[StreamProtocol]) -> StreamingJoinKernel:
     return StreamingMergeJoin(MergeJoin(), inputs)
 
 
-@pytest.mark.parametrize("pool", ["int", "nullable_int", "float", "struct", "list"])
-def test_merge_join_colliding_columns_in_both_argument_orders(pool: str) -> None:
+@pytest.mark.parametrize("shared", ["one key", "two keys"])
+@pytest.mark.parametrize(
+    "pool", ["int", "nullable_int", "float", "struct", "list", "decimal256"]
+)
+def test_merge_join_colliding_columns_in_both_argument_orders(
+    pool: str, shared: str
+) -> None:
     left = _keyed_source(
-        "a", pool, 8, {"x": pa.int64(), "c": pa.float64()}, 6, extra_tag="g"
+        "a", pool, 10, {"x": pa.int64(), "c": pa.float64()}, 6, extra_tag="g"
     )
-    right = _keyed_source("b", pool, 6, {"c": pa.float64(), "y": pa.int64()}, 7)
+    right = _keyed_source(
+        "b",
+        pool,
+        8,
+        {"c": pa.float64(), "y": pa.int64()},
+        7,
+        extra_tag="g" if shared == "two keys" else None,
+    )
     for inputs in ((left, right), (right, left)):
         _check(_merge_kernel, MergeJoin().static_process, inputs)
 
@@ -344,10 +461,18 @@ def _semi_kernel(inputs: Sequence[StreamProtocol]) -> StreamingJoinKernel:
     return StreamingSemiJoin(SemiJoin(), inputs)
 
 
+@pytest.mark.parametrize("shared", ["one key", "two keys"])
 @pytest.mark.parametrize("pool", sorted(KEY_POOLS))
-def test_semi_join_every_key_type(pool: str) -> None:
-    left = _keyed_source("a", pool, 9, {"x": pa.int64()}, 8, extra_tag="g")
-    right = _keyed_source("b", pool, 4, {"y": pa.int64()}, 9)
+def test_semi_join_every_key_type(pool: str, shared: str) -> None:
+    left = _keyed_source("a", pool, 12, {"x": pa.int64()}, 8, extra_tag="g")
+    right = _keyed_source(
+        "b",
+        pool,
+        5,
+        {"y": pa.int64()},
+        9,
+        extra_tag="g" if shared == "two keys" else None,
+    )
     _check(_semi_kernel, SemiJoin().static_process, (left, right))
 
 
@@ -479,3 +604,232 @@ def test_kernels_change_no_sync_result() -> None:
     operator = Join()
     StreamingJoin(operator, inputs)
     assert _rows(_transport(operator.static_process(*inputs))) == before
+
+
+# ---------------------------------------------------------------------------
+# Inputs rebuilt from rows: ``null`` columns are ``large_string`` (form F, ITL-1319)
+# ---------------------------------------------------------------------------
+
+
+def _with_null_column(
+    name: str, null_type: bool, data: str, *, tag: bool, n: int = 2
+) -> ArrowTableStream:
+    """A raw stream with column ``name`` all null, typed ``null`` or ``large_string``."""
+    column_type = pa.null() if null_type else pa.large_string()
+    columns: dict[str, pa.Array[Any]] = {
+        "k": pa.array(list(range(n)), pa.int64()),
+        name: pa.array([None] * n, column_type),
+        data: pa.array(list(range(n)), pa.int64()),
+    }
+    return ArrowTableStream(
+        pa.table(list(columns.values()), names=list(columns)),
+        tag_columns=["k", name] if tag else ["k"],
+    )
+
+
+ALL_KERNELS: list[tuple[Any, Any]] = [
+    (Join(), StreamingJoin),
+    (MergeJoin(), StreamingMergeJoin),
+    (SemiJoin(), StreamingSemiJoin),
+]
+
+
+@pytest.mark.parametrize(("operator", "kernel"), ALL_KERNELS)
+def test_a_null_typed_tag_meets_a_large_string_tag_as_rows_carry_it(
+    operator: Any, kernel: Any
+) -> None:
+    # Rows carry the ``null`` tag as ``large_string``: the sync path over the inputs
+    # rebuilt from rows accepts the pair (all null, so nothing matches), and so does
+    # the kernel, built from the descriptions.
+    left = _with_null_column("n", True, "v", tag=True)
+    right = _with_null_column("n", False, "w", tag=True)
+    for inputs in ((left, right), (right, left)):
+        _check(lambda i: kernel(operator, i), operator.static_process, inputs)
+
+
+def test_merge_join_merges_a_null_typed_and_a_large_string_column() -> None:
+    left = _with_null_column("x", True, "v", tag=False)
+    right = _with_null_column("x", False, "w", tag=False)
+    for inputs in ((left, right), (right, left)):
+        expected = _transport(MergeJoin().static_process(*map(_row_built, inputs)))
+        assert expected.column("x").to_pylist() == [[None, None]] * 2
+        _check(_merge_kernel, MergeJoin().static_process, inputs)
+
+
+@pytest.mark.parametrize(("operator", "kernel"), ALL_KERNELS)
+def test_a_zero_row_batch_of_the_zero_row_form_does_not_fix_a_type(
+    operator: Any, kernel: Any
+) -> None:
+    # Both inputs describe ``x`` as ``null`` (a colliding data column for MergeJoin, a
+    # shared tag otherwise). An empty batch typed as the zero-row form (``null``) holds
+    # no value and is taken; the populated batches after it are in the row-built form
+    # (``large_string``) and are taken too.
+    tag = not isinstance(operator, MergeJoin)
+    left = _with_null_column("x", True, "v", tag=tag)
+    right = _with_null_column("x", True, "w", tag=tag)
+    for inputs in ((left, right), (right, left)):
+        instance = kernel(operator, inputs)
+        out: list[pa.RecordBatch] = []
+        for index, stream in enumerate(inputs):
+            schema = _transport(stream).schema
+            empty = pa.record_batch(
+                [pa.array([], field.type) for field in schema], schema=schema
+            )
+            assert pa.types.is_null(empty.schema.field("x").type)
+            out += instance.push(index, empty)
+            out += instance.push(index, _sent(stream).combine_chunks().to_batches()[0])
+        for index in range(2):
+            out += instance.close(index)
+        expected = _transport(operator.static_process(*map(_row_built, inputs)))
+        assert_same_rows(out, instance, expected)
+
+
+def test_a_null_typed_input_that_ends_empty_is_read_in_its_zero_row_form() -> None:
+    # With no rows, the sync path reads an input in its zero-row form, where ``null``
+    # stays ``null``: a ``null`` key against a ``large_string`` one is refused, while
+    # the kernel, which cannot know the input will be empty, refuses at the last close.
+    for operator, kernel in ALL_KERNELS:
+        left = _with_null_column("n", True, "v", tag=True, n=0)
+        right = _with_null_column("n", False, "w", tag=True)
+        with pytest.raises(Exception) as sync_error:
+            operator.static_process(_row_built(left), _row_built(right))
+        instance = kernel(operator, (left, right))
+        assert instance.push(1, _sent(right).combine_chunks().to_batches()[0]) == []
+        assert instance.close(0) == []
+        with pytest.raises(type(sync_error.value)) as kernel_error:
+            instance.close(1)
+        assert str(kernel_error.value) == str(sync_error.value)
+        # Two ``null`` inputs that both end empty are accepted, as on the sync path.
+        both = (left, _with_null_column("n", True, "w", tag=True, n=0))
+        operator.static_process(*map(_row_built, both))
+        instance = kernel(operator, both)
+        assert instance.close(0) == []
+        assert instance.close(1) == []
+
+
+# ---------------------------------------------------------------------------
+# System-tag flags are settled on the complete table
+# ---------------------------------------------------------------------------
+
+
+def test_merge_join_over_a_join_of_inputs_of_one_pipeline_hash() -> None:
+    # A Join of inputs tied on pipeline hash declares its system tags nullable; a table
+    # built from its rows flags them by their values. MergeJoin over it, in the kernel,
+    # declares them nullable and the complete table settles them as the sync path's.
+    def tied(source_id: str, keys: list[int], groups: list[str]) -> ArrowTableSource:
+        return ArrowTableSource(
+            pa.table(
+                {
+                    "k": pa.array(keys, pa.int64()),
+                    "g": pa.array(groups, pa.large_string()),
+                }
+            ),
+            tag_columns=["k", "g"],
+            source_id=source_id,
+        )
+
+    joined = Join()(
+        tied("a", [1, 2, 3], ["x", "y", "x"]),
+        tied("b", [2, 1, 3], ["y", "x", "x"]),
+        tied("c", [3, 2, 1], ["x", "y", "x"]),
+    )
+    other = _keyed_source("o", "int", 6, {"z": pa.int64()}, 4)
+    for inputs in ((joined, other), (other, joined)):
+        _check(_merge_kernel, MergeJoin().static_process, inputs)
+        _check(_join_kernel, Join().static_process, inputs, seeds=range(4))
+
+
+# ---------------------------------------------------------------------------
+# A refusal that depends on values is raised when its batch arrives
+# ---------------------------------------------------------------------------
+
+
+def _data_tag_stream(data: str, tokens: list[list[str]]) -> ArrowTableStream:
+    """A stream with data-tag ``k`` whose source info is a token list per row."""
+    token_list = pa.large_list(pa.large_string())
+    return ArrowTableStream(
+        pa.table(
+            {
+                "k": pa.array([1, 2], pa.int64()),
+                data: pa.array([1, 2], pa.int64()),
+                "_source_k": pa.array(tokens, token_list),
+                f"_source_{data}": pa.array([["s"], ["t"]], token_list),
+            }
+        ),
+        tag_columns=["k"],
+        data_tags=["k"],
+    )
+
+
+@pytest.mark.parametrize(
+    ("operator", "kernel"), [(Join(), StreamingJoin), (MergeJoin(), StreamingMergeJoin)]
+)
+def test_source_info_lists_of_different_lengths_raise_when_their_batch_arrives(
+    operator: Any, kernel: Any
+) -> None:
+    # The descriptions agree (one type of token list); the lengths are values. The
+    # sync path refuses the run; the kernel raises the same error when the offending
+    # pair arrives, after the rows already decided (module docstring).
+    left = _data_tag_stream("v", [["a"], ["b"]])
+    right = _data_tag_stream("w", [["c"], ["d", "e"]])
+    with pytest.raises(ValueError, match="different lengths") as sync_error:
+        operator.static_process(_row_built(left), _row_built(right))
+    instance = kernel(operator, (left, right))
+    instance.push(0, _sent(left).combine_chunks().to_batches()[0])
+    sent = _sent(right).combine_chunks()
+    emitted = instance.push(1, sent.slice(0, 1).to_batches()[0])
+    assert sum(batch.num_rows for batch in emitted) == 1
+    with pytest.raises(ValueError, match="different lengths") as kernel_error:
+        instance.push(1, sent.slice(1, 1).to_batches()[0])
+    assert str(kernel_error.value) == str(sync_error.value)
+
+
+def test_join_releases_every_step_once_an_input_ends_empty() -> None:
+    # Three inputs: when the first in canonical order ends with no row, no step can
+    # emit again, so the rows of the other inputs are not held while they are open.
+    sources = [make_source(MAIN), make_source(P), make_source(Q)]
+    order = sorted(range(3), key=lambda i: sources[i].pipeline_hash().to_hex())
+    for first in (order[0], order[1]):
+        kernel = StreamingJoin(Join(), sources)
+        assert kernel.close(first) == []
+        for index in range(3):
+            if index != first:
+                kernel.push(
+                    index, _sent(sources[index]).combine_chunks().to_batches()[0]
+                )
+        assert kernel.held_rows == 0
+        rest = [index for index in range(3) if index != first]
+        assert kernel.close(rest[0]) == []
+        assert kernel.close(rest[1]) == []
+
+
+def test_join_releases_the_steps_before_one_that_cannot_emit() -> None:
+    # The last input in canonical order ends empty: the earlier steps' rows could
+    # only reach that step, so none is held.
+    sources = [make_source(MAIN), make_source(P), make_source(Q)]
+    order = sorted(range(3), key=lambda i: sources[i].pipeline_hash().to_hex())
+    kernel = StreamingJoin(Join(), sources)
+    assert kernel.close(order[2]) == []
+    for index in order[:2]:
+        kernel.push(index, _sent(sources[index]).combine_chunks().to_batches()[0])
+    assert kernel.held_rows == 0
+
+
+@pytest.mark.parametrize("pool", NULL_POOLS)
+def test_semi_join_never_holds_a_left_row_with_a_null_key(pool: str) -> None:
+    left = _keyed_source("a", pool, 30, {"x": pa.int64()}, 11)
+    # The same seed: a right row for every left key, the null ones included.
+    right = _keyed_source("b", pool, 30, {"y": pa.int64()}, 11)
+    left_rows = _sent(left).combine_chunks()
+    null_keys = left_rows.column("k").null_count
+    assert null_keys > 0
+    kernel = StreamingSemiJoin(SemiJoin(), (left, right))
+    assert kernel.push(0, left_rows.to_batches()[0]) == []
+    assert kernel.held_rows == left_rows.num_rows - null_keys
+    # The left input ends and the right rows arrive: every left row with a key is
+    # emitted, and nothing is held.
+    kernel.close(0)
+    emitted = kernel.push(1, _sent(right).combine_chunks().to_batches()[0])
+    assert sum(batch.num_rows for batch in emitted) == left_rows.num_rows - null_keys
+    assert kernel.held_rows == 0
+    assert kernel.close(1) == []
