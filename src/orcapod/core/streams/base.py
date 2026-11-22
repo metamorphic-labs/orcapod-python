@@ -365,11 +365,18 @@ def stream_arrow_schema(
         keys = typed.keys()
     table = typed_zero_row_input(stream)
     if table is None:
-        tag_schema, data_schema = typed.output_schema(
-            columns={"system_tags": True, "source": True}
-        )
+        # Only what the stream declares: asking for its source-info columns would make
+        # a source that has not polled poll (a description never computes, polls or
+        # reads). A source's tokens are strings, so each data column's source info is
+        # a string field.
+        tag_schema, data_schema = typed.output_schema(columns={"system_tags": True})
         converter = StaticOutputOperatorPod._upstream_context(typed).type_converter  # pyright: ignore[reportPrivateUsage]  # the one place that resolves an upstream's context
         table = arrow_utils.make_empty_table({**tag_schema, **data_schema}, converter)
+        for name in data_schema:
+            table = table.append_column(
+                pa.field(f"{constants.SOURCE_PREFIX}{name}", pa.large_string()),
+                pa.array([], pa.large_string()),
+            )
     names = row_built_names(table.column_names, keys)
     schema = row_built_provenance(table.select(names)).schema
     prefixes = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)

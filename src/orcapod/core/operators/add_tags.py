@@ -120,6 +120,8 @@ class AddTags(UnaryOperator):
     PROVISIONAL: ClassVar[bool] = True
 
     # Data-tags pass through as they are; the new tags are plain (ITL-1023).
+    # Each output row comes from one input row (ITL-1347).
+    ROW_BY_ROW: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def __init__(self, tags: Mapping[str, TagConstant], **kwargs: Any):

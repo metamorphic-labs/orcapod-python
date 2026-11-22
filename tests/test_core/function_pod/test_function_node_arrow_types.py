@@ -394,3 +394,30 @@ def test_a_null_typed_row_is_compared_as_null() -> None:
 
     with pytest.raises(InputValidationError, match="'k': null and int64"):
         _concat_row_tables(rows)
+
+
+@pytest.mark.parametrize("materialize_results", [True, False])
+def test_an_async_run_over_a_store_written_before_the_fix_finishes(
+    materialize_results: bool, tmp_path: pathlib.Path
+) -> None:
+    """e9 is sync only: an async run over such a store finishes and holds its rows.
+
+    The async orchestrator builds a node's output stream when it is read
+    (``StreamsOnRead``), so the run finishes as on ``main`` with either value of
+    ``materialize_results``; reading the node's rows as one table raises, as it does
+    on ``main``.
+    """
+    from orcapod.pipeline import AsyncPipelineOrchestrator
+
+    _build(DeltaTableDatabase(tmp_path), _source_table("uint32").slice(0, 2)).run()
+    _as_written_before_the_fix(tmp_path)
+    job = _build(DeltaTableDatabase(tmp_path), _source_table("uint32"))
+    job.run(
+        orchestrator=AsyncPipelineOrchestrator(),
+        materialize_results=materialize_results,
+    )
+
+    node = job.nodes["double"]
+    assert len(list(node.iter_data())) == 3
+    with pytest.raises(InputValidationError, match="'k'"):
+        node.as_table()

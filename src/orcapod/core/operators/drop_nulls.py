@@ -91,6 +91,8 @@ class DropNulls(UnaryOperator):
     """
 
     # Data-tags (ITL-1023): handled.
+    # Each output row comes from one input row (ITL-1347).
+    ROW_BY_ROW: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def __init__(

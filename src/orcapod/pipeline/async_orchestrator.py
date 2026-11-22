@@ -24,7 +24,7 @@ from orcapod.errors import (
     OrcapodDatabaseWriteError,
     TypeIdentityError,
 )
-from orcapod.pipeline.result import OrchestratorResult
+from orcapod.pipeline.result import OrchestratorResult, StreamsOnRead
 from orcapod.utils.database_errors import keep_database_error
 from orcapod.protocols.node_protocols import (
     is_function_node,
@@ -41,7 +41,6 @@ if TYPE_CHECKING:
     from orcapod.pipeline.dag import GraphProtocol
     from orcapod.protocols.core_protocols import (
         DataProtocol,
-        StreamProtocol,
         TagProtocol,
     )
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
@@ -87,7 +86,7 @@ class AsyncPipelineOrchestrator:
         run_id: str | None = None,
         pipeline_uri: str = "",
         load_only: bool = False,
-        held: Mapping[Any, StreamProtocol] | None = None,
+        held_rows: Mapping[Any, list[tuple[TagProtocol, DataProtocol]]] | None = None,
     ) -> OrchestratorResult:
         """Synchronous entry point — runs the async pipeline to completion.
 
@@ -132,7 +131,7 @@ class AsyncPipelineOrchestrator:
                     run_id=run_id,
                     pipeline_uri=pipeline_uri,
                     load_only=load_only,
-                    held=held,
+                    held_rows=held_rows,
                 )
             )
 
@@ -154,7 +153,7 @@ class AsyncPipelineOrchestrator:
                 run_id=run_id,
                 pipeline_uri=pipeline_uri,
                 load_only=load_only,
-                held=held,
+                held_rows=held_rows,
             )
 
         return _run_on_own_thread(make_run, rows_in_flight)
@@ -168,7 +167,7 @@ class AsyncPipelineOrchestrator:
         run_id: str | None = None,
         pipeline_uri: str = "",
         load_only: bool = False,
-        held: Mapping[Any, StreamProtocol] | None = None,
+        held_rows: Mapping[Any, list[tuple[TagProtocol, DataProtocol]]] | None = None,
     ) -> OrchestratorResult:
         """Async entry point for callers already inside an event loop.
 
@@ -181,8 +180,9 @@ class AsyncPipelineOrchestrator:
             pipeline_uri: Opaque URI string identifying this pipeline run.
                 Forwarded verbatim to ``observer.on_run_start``.
             load_only: As for ``SyncPipelineOrchestrator.run``.
-            held: As for ``SyncPipelineOrchestrator.run``: nodes not run, whose
-                rows feed their successors.
+            held_rows: Nodes not run, with the rows of their current run as the run's
+                plan took them (``RunPlan.held_rows``): those rows feed their
+                successors. The async path carries rows until ITL-1347 stage 5.
 
         Returns:
             OrchestratorResult with node outputs.
@@ -194,7 +194,7 @@ class AsyncPipelineOrchestrator:
             run_id=run_id,
             pipeline_uri=pipeline_uri,
             load_only=load_only,
-            held=held,
+            held_rows=held_rows,
         )
 
     async def _run_async(
@@ -206,7 +206,7 @@ class AsyncPipelineOrchestrator:
         run_id: str | None = None,
         pipeline_uri: str = "",
         load_only: bool = False,
-        held: Mapping[Any, StreamProtocol] | None = None,
+        held_rows: Mapping[Any, list[tuple[TagProtocol, DataProtocol]]] | None = None,
     ) -> OrchestratorResult:
         """Core async logic: wire channels, launch tasks, collect results."""
         from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
@@ -269,7 +269,7 @@ class AsyncPipelineOrchestrator:
                         collector = collectors[node]
                         writer = _CollectingWriter(writer, collector)
 
-                    if held is not None and node in held:
+                    if held_rows is not None and node in held_rows:
                         # Not run: the rows of its current run feed its successors. Its
                         # own inputs are read and discarded, so no producer blocks on
                         # a channel nobody reads.
@@ -279,9 +279,8 @@ class AsyncPipelineOrchestrator:
                             tg,
                             failed_nodes,
                             node,
-                            # The held node's own rows, as before stage 2: the async
-                            # path still carries rows (ITL-1347, stage 5 changes it).
-                            _send_held(list(node.iter_data()), writer),
+                            # The rows the plan took (ITL-1347, stage 5 changes it).
+                            _send_held(held_rows[node], writer),
                         )
                     elif is_source_node(node):
                         _start_node(
@@ -366,10 +365,9 @@ class AsyncPipelineOrchestrator:
 
             return OrchestratorResult(
                 node_outputs=(
-                    {
-                        node: StaticOutputOperatorPod._materialize_upstream(rows, node)
-                        for node, rows in collectors.items()
-                    }
+                    StreamsOnRead(
+                        collectors, StaticOutputOperatorPod._materialize_upstream
+                    )
                     if materialize_results
                     else {}
                 )

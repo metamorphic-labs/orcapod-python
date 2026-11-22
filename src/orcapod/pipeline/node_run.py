@@ -251,7 +251,10 @@ class RunPlan:
             them (a source slot is read; any other one is held).
         held: The output stream of each held node of ``dag``: of its current run, or
             of a stream outside the job; it feeds the nodes after it as if the node had
-            just run.
+            just run (the sync orchestrator).
+        held_rows: The rows of each held node, as the plan took them; ``held`` is
+            built from them. The async orchestrator sends them (it carries rows until
+            ITL-1347 stage 5).
         to_run: The nodes the run runs, in dependency order.
         held_counts: Every node of the whole graph that holds a current run, with its
             row count, for the summary.
@@ -261,6 +264,7 @@ class RunPlan:
     held: dict[Any, Any]
     to_run: list[Any]
     held_counts: dict[Any, int]
+    held_rows: dict[Any, list[Any]]
 
 
 def plan_run(graph: Any, *, load_only: bool, outside: Sequence[Any] = ()) -> RunPlan:
@@ -336,17 +340,19 @@ def plan_run(graph: Any, *, load_only: bool, outside: Sequence[Any] = ()) -> Run
 
     # A held node's output stream: what the sync orchestrator built from its rows for
     # the nodes after it, exactly (ITL-1347, stage 2).
-    held = {
-        node: StaticOutputOperatorPod._materialize_upstream(
-            list(node.iter_data()), node
-        )
+    held_rows = {
+        node: list(node.iter_data())
         for node in included
         if not any(node is r for r in to_run) and not is_source(node)
+    }
+    held = {
+        node: StaticOutputOperatorPod._materialize_upstream(rows, node)
+        for node, rows in held_rows.items()
     }
     # Counted from what each node holds: iterating an operator's rows would build a
     # (Tag, Data) pair per row only to count them (ITL-1351).
     held_counts = {node: node.held_row_count() for node in current}
-    return RunPlan(dag, held, to_run, held_counts)
+    return RunPlan(dag, held, to_run, held_counts, held_rows)
 
 
 def commit_run(databases: Sequence[ArrowDatabaseProtocol], ran: Sequence[Any]) -> None:

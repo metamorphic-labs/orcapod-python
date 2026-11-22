@@ -13,7 +13,7 @@ import functools
 import json
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Collection, Iterator, Mapping
+from collections.abc import AsyncIterator, Collection, Iterator, Mapping, Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
 
@@ -183,6 +183,32 @@ class _DeclaredForm:
             ):
                 order[slot] = position[name]
         return order
+
+
+def _keys_of_rows(
+    table: pa.Table, keys: tuple[Sequence[str], Sequence[str]]
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return the tag and data keys a source's rows have, given its table and ``keys()``.
+
+    A source's rows come from a stream over its table (``ArrowTableStream``), whose rows
+    list their tags in the stream's tag order and their data with the data-tags first,
+    in tag order, then the other data columns in the table's order. A source whose
+    ``keys()`` states its declared order (a ``PollingSource`` whose fetched table has
+    another column order) has rows in the table's order all the same, as a table built
+    from its rows does (Codex on PR #485).
+
+    Args:
+        table: The source's table, as its rows are read from it.
+        keys: The source's ``keys()``.
+
+    Returns:
+        The tag keys, and the data keys in the order of the rows.
+    """
+    tag_keys, data_keys = (tuple(keys[0]), tuple(keys[1]))
+    data_tags = data_tag_names(tag_keys, data_keys)
+    data = set(data_keys) - set(tag_keys)
+    in_table = tuple(name for name in table.column_names if name in data)
+    return tag_keys, (*data_tags, *in_table)
 
 
 def _system_tag_columns(
@@ -1193,9 +1219,8 @@ class SourceNodeBase(TraceableBase, ABC):
         Here this node's own table (``ZERO_ROW_INPUT_COLUMNS``) and keys.
         """
         stream = cast("StreamProtocol", self)
-        tag_keys, data_keys = stream.keys()
         table = stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
-        return table, (tuple(tag_keys), tuple(data_keys))
+        return table, _keys_of_rows(table, stream.keys())
 
     def arrow_schema(self) -> pa.Schema:
         """The Arrow schema of the columns this stream passes between job nodes.
@@ -1235,7 +1260,10 @@ class SourceNodeBase(TraceableBase, ABC):
         Raises:
             UnboundSourceError: When no concrete data is available.
         """
-        from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+        from orcapod.core.operators.static_output_pod import (
+            SourceInfoTypesDisagree,
+            StaticOutputOperatorPod,
+        )
 
         node_label = self.label
         node_hash = self.content_hash().to_string()
@@ -1244,7 +1272,15 @@ class SourceNodeBase(TraceableBase, ABC):
         # The table and keys of this node's rows: a slot's own key order can differ
         # from its source's.
         table, keys = self._rows_table()
-        result = StaticOutputOperatorPod._output_stream(table, keys, self)
+        try:
+            result = StaticOutputOperatorPod._output_stream(table, keys, self)
+        except SourceInfoTypesDisagree as error:
+            # Rows whose source-info tokens cannot make one table: the node has read
+            # its rows, and the run fails where its rows are handed on, raising what
+            # their concatenation raises.
+            if observer is not None:
+                observer.on_node_end(node_label, node_hash)
+            StaticOutputOperatorPod._raise_as_rows_do(self.iter_data(), error)
         if observer is not None:
             observer.on_node_end(node_label, node_hash)
         return result
@@ -1743,8 +1779,7 @@ class SourceJobNode(SourceNodeBase):
             )
         table = self._bound_source.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
         if self._declared_form is None:
-            tag_keys, data_keys = self._bound_source.keys()
-            return table, (tuple(tag_keys), tuple(data_keys))
+            return table, _keys_of_rows(table, self._bound_source.keys())
         return self._declared_form.apply(table), self._row_keys()
 
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
