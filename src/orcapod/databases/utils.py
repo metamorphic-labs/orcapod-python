@@ -203,35 +203,65 @@ def first_changed_column(
     return None
 
 
+def canonical_column_order(records: "pa.Table", record_id_column: str) -> "pa.Table":
+    """``records`` with its columns in the canonical order of a new table (ITL-1370).
+
+    The record id column, then every other column sorted by name, by code point
+    (Python's ``sorted`` on ``str``): the order SpiralDB stores every table in, so all
+    five databases store and read one order. Nothing else depends on it: no hash, path
+    or record id reads a stored table's column order, and every reader presents its
+    rows in row order whatever the stored order (``utils.arrow_utils.in_presented_order``).
+    Names that repeat are returned as given, for the database's own rule.
+
+    Args:
+        records: The rows that create the table.
+        record_id_column: The record id column, as the database names it.
+
+    Returns:
+        ``records``, reordered or as given.
+    """
+    names = records.column_names
+    if len(set(names)) != len(names) or record_id_column not in names:
+        return records
+    order = [record_id_column, *sorted(n for n in names if n != record_id_column)]
+    if order == names:
+        return records
+    return records.select(order)
+
+
 def in_held_column_order(
-    records: "pa.Table", held: "Sequence[tuple[str, pa.DataType]] | None"
+    records: "pa.Table",
+    held: "Sequence[tuple[str, pa.DataType]] | None",
+    record_id_column: str,
 ) -> "pa.Table":
-    """``records`` with its columns in the order the database holds them (ITL-1367).
+    """``records`` with its columns in the order the database stores them (ITL-1367,
+    ITL-1370).
 
-    An append matches columns by name, never by position: when ``records`` has
-    exactly the held columns in another order, each with the held type, its columns
-    are put in the held order, so every database stores and buffers them as the
-    table already has them, and the table keeps the order of its first write. The
-    fields are kept as given (metadata, nullability): the append checks that follow
-    compare them by name.
+    A new table (``held`` is ``None``) is written in the canonical order
+    (``canonical_column_order``): the record id, then every other column by name. A
+    table the database already holds keeps its order: an append matches columns by
+    name, never by position, so when ``records`` has exactly the held columns in
+    another order, each with the held type, its columns are put in the held order (a
+    table written before ITL-1370, in another order, keeps it). The fields are kept as
+    given (metadata, nullability): the append checks that follow compare them by name.
 
-    Anything else is returned as given, for the database's own append rule: no held
-    table, a column added or missing, a type that differs (a struct whose children
-    are in another order included: its type differs), and names that repeat or that
-    differ in case only, which a database matching names without case could pair
-    otherwise.
+    Anything else is returned as given, for the database's own append rule: a column
+    added or missing, a type that differs (a struct whose children are in another
+    order included: its type differs; ITL-1368), and names that repeat or that differ
+    in case only, which a database matching names without case could pair otherwise.
 
     Args:
         records: The rows to append, the record id column already named as held.
         held: Each held column's name and type, in the held order (the pending
             batch, else the stored table), or ``None`` when the database holds no
             such table.
+        record_id_column: The record id column, as the database names it.
 
     Returns:
         ``records``, reordered or as given.
     """
     if held is None:
-        return records
+        return canonical_column_order(records, record_id_column)
     names = records.column_names
     held_names = [name for name, _ in held]
     if names == held_names:

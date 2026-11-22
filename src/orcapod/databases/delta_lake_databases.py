@@ -1894,8 +1894,11 @@ class DeltaTableDatabase:
             records = records.rename_columns(total_name_map)
 
         # Columns match by name: rows with the held columns in another order are
-        # put in the held order (ITL-1367).
-        records = in_held_column_order(records, self._held_column_order(record_path))
+        # put in the held order (ITL-1367); a new table is written in the canonical
+        # order (ITL-1370).
+        records = in_held_column_order(
+            records, self._held_column_order(record_path), self.RECORD_ID_COLUMN
+        )
 
         # A column Delta cannot hold is refused before anything is buffered (ITL-1334).
         self.require_storable(records.schema)

@@ -411,8 +411,10 @@ class ConnectorArrowDatabase:
         record_key = self._get_record_key(record_path)
         # Columns match by name: rows with the held columns in another order are
         # put in the held order, so the connector always receives the stored order
-        # (ITL-1367).
-        records = in_held_column_order(records, self._held_column_order(record_path))
+        # (ITL-1367); a new table is written in the canonical order (ITL-1370).
+        records = in_held_column_order(
+            records, self._held_column_order(record_path), self.RECORD_ID_COLUMN
+        )
         self._refuse_changed_columns(record_path, records.schema)
 
         records = self._deduplicate_within_table(records)

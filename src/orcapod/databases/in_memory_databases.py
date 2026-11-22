@@ -260,7 +260,7 @@ class InMemoryArrowDatabase:
         record_key = self._get_record_key(record_path)
         # Columns match by name: rows with the held columns in another order are
         # put in the held order, the pending batch's, else the stored table's
-        # (ITL-1367).
+        # (ITL-1367); a new table is written in the canonical order (ITL-1370).
         held_table = self._pending_batches.get(record_key)
         if held_table is None:
             held_table = self._tables.get(record_key)
@@ -269,6 +269,7 @@ class InMemoryArrowDatabase:
             None
             if held_table is None
             else [(f.name, f.type) for f in held_table.schema],
+            self.RECORD_ID_COLUMN,
         )
         # The table holds one type per column: rows whose field metadata or nested
         # field attributes differ would read back with the held ones (ITL-1334).
