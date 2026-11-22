@@ -20,7 +20,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import pyarrow as pa
@@ -268,7 +268,8 @@ def test_a_store_written_before_takes_new_rows_and_new_tables(
         for path in database.list_table_paths()
     }
     with _job(database, [1, 2, 3], extra_node=True) as (job, cached):
-        assert sorted(cached.as_table().column("a_tag").to_pylist()) == [1, 2, 3]
+        tags = cast(list[int], cached.as_table().column("a_tag").to_pylist())
+        assert sorted(tags) == [1, 2, 3]
         for label in ("fn", "joined", "fn2"):
             records = job.nodes[label].get_all_records()
             assert records is not None
