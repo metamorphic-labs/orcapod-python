@@ -391,3 +391,19 @@ def test_a_source_with_a_nullable_system_tag_is_not_bound() -> None:
     slot = next(label for label in job.nodes if label != "selected")
     with pytest.raises(SourceSpecMismatchError, match="record_id"):
         job.bind(sources={slot: ArrowTableStream(with_null, tag_columns=["k"])})
+
+
+def test_a_token_the_rows_cannot_convert_fails_as_main_does() -> None:
+    """A conversion failure of F's whole-table build falls back to the rows, as on main.
+
+    Each row's token ``[None, [[]]]`` gives one list level (``source_info_arrow_type``),
+    whose conversion fails (``ArrowTypeError``). The node builds its rows, which raise
+    the same error, after the source node has ended (Codex on PR #485, round 2).
+    """
+    nested = pa.large_list(_NESTED)
+    job = _batched_job(InMemoryArrowDatabase())
+    job.bind(sources={"s": _with_source_x([[None, [[]]], [None, [[]]]], nested)})
+    observer = _NodeEvents()
+    with pytest.raises(pa.ArrowTypeError, match="Expected bytes"):
+        job.run(observer=observer)
+    assert observer.events == [("start", "s"), ("end", "s")]

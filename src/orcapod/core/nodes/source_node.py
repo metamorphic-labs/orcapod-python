@@ -1265,7 +1265,7 @@ class SourceNodeBase(TraceableBase, ABC):
             UnboundSourceError: When no concrete data is available.
         """
         from orcapod.core.operators.static_output_pod import (
-            SourceInfoTypesDisagree,
+            RowBuiltFormUnavailable,
             StaticOutputOperatorPod,
         )
 
@@ -1278,7 +1278,7 @@ class SourceNodeBase(TraceableBase, ABC):
         table, keys = self._rows_table()
         try:
             result = StaticOutputOperatorPod._output_stream(table, keys, self)
-        except SourceInfoTypesDisagree as error:
+        except RowBuiltFormUnavailable as error:
             # Rows whose source-info tokens cannot make one table: the node has read
             # its rows, and the run fails where its rows are handed on, raising what
             # their concatenation raises.

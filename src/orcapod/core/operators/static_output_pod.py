@@ -66,12 +66,20 @@ if TYPE_CHECKING:
     from orcapod.protocols.hashing_protocols import SemanticHasherProtocol
 
 
-class SourceInfoTypesDisagree(ValueError):
+class RowBuiltFormUnavailable(ValueError):
+    """F cannot be built from the whole table (``_row_built_form``).
+
+    The one signal that a node's output must come from its rows instead: the caller
+    builds the rows (``StaticOutputOperatorPod._rows_to_table``, through
+    ``_raise_as_rows_do``), which raises the error a table built from rows raises, so
+    the run fails as it does when rows are handed on, with the same observer events.
+    """
+
+
+class SourceInfoTypesDisagree(RowBuiltFormUnavailable):
     """Two rows give one source-info column different types (``_row_built_form``).
 
-    A table built from such rows cannot be concatenated: the caller builds the rows
-    (``StaticOutputOperatorPod._rows_to_table``), which raises the error a table built
-    from rows raises, so the run fails as it does when rows are handed on.
+    A table built from such rows cannot be concatenated.
     """
 
 
@@ -587,24 +595,33 @@ class StaticOutputOperatorPod(TraceableBase):
             The table ``_rows_to_table`` would build from its rows.
 
         Raises:
-            SourceInfoTypesDisagree: If the rows' tokens give a source-info column two
-                types (``_type_source_info_by_values``).
+            RowBuiltFormUnavailable: If the whole table cannot be built: the rows'
+                tokens give a source-info column two types
+                (``SourceInfoTypesDisagree``), or an Arrow conversion fails. The node
+                then builds its rows (``_raise_as_rows_do``).
         """
-        return StaticOutputOperatorPod._flag_by_values(
-            StaticOutputOperatorPod._type_source_info_by_values(
-                row_built_columns(table, keys)
+        try:
+            return StaticOutputOperatorPod._flag_by_values(
+                StaticOutputOperatorPod._type_source_info_by_values(
+                    row_built_columns(table, keys)
+                )
             )
-        )
+        except RowBuiltFormUnavailable:
+            raise
+        except pa.ArrowException as error:
+            # Values the whole table cannot be built from (a token the rows' own
+            # conversion refuses too): the rows decide, as on ``main``.
+            raise RowBuiltFormUnavailable(str(error)) from error
 
     @staticmethod
     def _raise_as_rows_do(
         rows: Iterable[tuple[TagProtocol, DataProtocol]],
-        error: SourceInfoTypesDisagree,
+        error: RowBuiltFormUnavailable,
     ) -> NoReturn:
         """Build ``rows`` into a table to raise the error a table built from them raises.
 
         Called when ``_row_built_form`` finds rows whose source-info tokens cannot make
-        one table (``SourceInfoTypesDisagree``): the rows' own concatenation
+        one table (``RowBuiltFormUnavailable``): the rows' own concatenation
         (``_rows_to_table``) raises exactly what a run that hands rows on raises.
 
         Args:
@@ -613,7 +630,7 @@ class StaticOutputOperatorPod(TraceableBase):
 
         Raises:
             pyarrow.ArrowInvalid: As ``_rows_to_table`` raises it.
-            SourceInfoTypesDisagree: ``error``, if the rows concatenate after all.
+            RowBuiltFormUnavailable: ``error``, if the rows build after all.
         """
         StaticOutputOperatorPod._rows_to_table(list(rows))
         raise error
