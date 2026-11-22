@@ -9,7 +9,14 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import pyarrow as pa
 
-from orcapod.channels import ReadableChannel, WritableChannel
+from orcapod.channels import (
+    InputChannel,
+    OutputChannel,
+    ReadableChannel,
+    WritableChannel,
+    stream_from_batches,
+    transport_columns,
+)
 from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.contexts import DataContext
@@ -69,6 +76,16 @@ class StaticOutputOperatorPod(TraceableBase):
     # ``None`` when it handles them (ITL-1023). An operator that declares nothing
     # does not handle them yet: it raises instead of giving a wrong answer.
     DATA_TAGS_ISSUE: ClassVar[str | None] = "ITL-1022"
+
+    ROW_BY_ROW: ClassVar[bool] = False
+    """Whether each output row comes from one input row, whatever the other rows are.
+
+    Declared by the operators that select, rename or add columns, narrow a column or
+    leave rows out by their own values (the column selections and mappers,
+    ``AddTags``, ``DropNulls``, ``Index``, ``Pick``). Such an operator can be applied
+    to each Arrow record batch of its input as it arrives
+    (``async_execute_batches``); every other operator needs all of an input first.
+    """
 
     OUTPUT_SCHEMA_IS_INPUT_SCHEMA: ClassVar[bool] = False
     """Whether the output has exactly its single input's columns and Arrow types.
@@ -771,6 +788,109 @@ class StaticOutputOperatorPod(TraceableBase):
                 await output.send((tag, data))
         finally:
             await output.close()
+
+    # ------------------------------------------------------------------
+    # Async execution on Arrow record batches (ITL-1347)
+    # ------------------------------------------------------------------
+
+    async def async_execute_batches(
+        self, inputs: Sequence[InputChannel], output: OutputChannel
+    ) -> None:
+        """Run this operator over input channels of Arrow record batches.
+
+        The Arrow-record-batch form of ``async_execute`` (ITL-1347, stage 5); the
+        nodes and the orchestrator still call the row form until they are wired to
+        this one, which then takes its name. The operator has one body for both
+        paths, ``static_process``: each input's description is its channel's stream
+        (identity, pipeline hash, data context, keys), as on the sync path.
+
+        A row-by-row operator (``ROW_BY_ROW``) is applied to each record batch as it
+        arrives and sends that batch's result at once. Every other operator reads
+        all of its inputs first (``InputChannel.to_stream``) and then runs exactly
+        the sync call, so an input with no rows gives the typed zero-row result of
+        the sync path, with no row to send.
+
+        The output is closed when the operator is done. If it fails or is cancelled,
+        the output fails instead, so no reader takes it for complete; every input is
+        closed in either case.
+
+        Args:
+            inputs: One input channel per input stream, in the operator's order.
+            output: The channel the result's record batches are sent into.
+        """
+        try:
+            if self.ROW_BY_ROW:
+                (channel,) = inputs
+                async for batch in channel:
+                    await self._send_processed([batch], channel.stream, output)
+            else:
+                streams = await _streams_of(inputs)
+                await self._send_result(self.static_process(*streams), output)
+        except BaseException as error:
+            output.fail(error)
+            raise
+        else:
+            await output.close()
+        finally:
+            for channel in inputs:
+                await channel.close()
+
+    async def _send_processed(
+        self,
+        batches: Sequence[pa.RecordBatch],
+        stream: StreamProtocol,
+        output: OutputChannel,
+    ) -> None:
+        """Apply this operator to some record batches of one input and send the result.
+
+        The batches are wrapped as a stream with the input's identity and given to
+        ``static_process``, the sync body.
+
+        Args:
+            batches: Record batches of the input's rows, in order.
+            stream: The input's describing stream.
+            output: The channel to send the result into.
+        """
+        await self._send_result(
+            self.static_process(stream_from_batches(stream, batches)), output
+        )
+
+    @staticmethod
+    async def _send_result(result: StreamProtocol, output: OutputChannel) -> None:
+        """Send a result stream's rows into ``output`` as its own record batches.
+
+        Args:
+            result: An operator's result.
+            output: The channel to send into; a result with no rows sends nothing.
+        """
+        table = transport_columns(
+            result.as_table(columns=ZERO_ROW_INPUT_COLUMNS), result.keys()
+        )
+        for batch in table.to_batches():
+            if batch.num_rows:
+                await output.send(batch)
+
+
+async def _streams_of(inputs: Sequence[InputChannel]) -> list[StreamProtocol]:
+    """Read every input channel to its end, each as a stream, at the same time.
+
+    Args:
+        inputs: The input channels.
+
+    Returns:
+        One complete stream per input, in order.
+
+    Raises:
+        UpstreamFailedError: If an input's producer failed; the other inputs are no
+            longer read.
+    """
+    tasks = [asyncio.ensure_future(channel.to_stream()) for channel in inputs]
+    try:
+        return list(await asyncio.gather(*tasks))
+    except BaseException:
+        for task in tasks:
+            _ = task.cancel()
+        raise
 
 
 class _RowsOfStream(ArrowTableStream):

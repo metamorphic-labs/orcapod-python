@@ -14,7 +14,7 @@ from collections.abc import (
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pandas as pd
 import polars as pl
@@ -36,6 +36,9 @@ from orcapod.protocols.core_protocols import (
 )
 from orcapod.types import ColumnConfig, Schema
 from orcapod.utils import arrow_utils
+
+if TYPE_CHECKING:
+    from orcapod.channels import InputChannel
 
 # TODO: consider using this instead of making copy of dicts
 # from types import MappingProxyType
@@ -994,6 +997,22 @@ class StreamBase(TraceableBase):
     def iter_data(
         self,
     ) -> Iterator[tuple[TagProtocol, DataProtocol]]: ...
+
+    def open_channel(self) -> "InputChannel":
+        """Open an input channel on this stream, for async computation (ITL-1347).
+
+        The channel delivers this stream's rows as Arrow record batches, read once
+        and in order; its description is this stream (``channel.stream``). Several
+        channels may be opened on one stream, each with its own position, and the
+        stream stays as it is: readable again, and by every other reader. Nothing is
+        computed until the channel is first read.
+
+        Returns:
+            The input channel.
+        """
+        from orcapod.channels import channel_from_stream
+
+        return channel_from_stream(self)
 
     async def async_iter_data(
         self,
