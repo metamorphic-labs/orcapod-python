@@ -219,6 +219,10 @@ def _check(
     for seed in seeds:
         kernel = make_kernel(inputs)
         assert_same_fields(_transport(kernel.zero_row_result), zero_rows)
+        # Column order is not a result on the async path (developer, November 22,
+        # 2026), so it is not compared with the sync result's. The kernel is
+        # consistent with itself: its zero-row result lists ``output_columns`` in
+        # order, and every emitted batch does too (``assert_same_rows``).
         assert (
             list(kernel.output_columns)
             == _transport(kernel.zero_row_result).column_names
@@ -877,3 +881,52 @@ def test_semi_join_never_holds_a_left_row_with_a_null_key(pool: str) -> None:
     assert sum(batch.num_rows for batch in emitted) == left_rows.num_rows - null_keys
     assert kernel.held_rows == 0
     assert kernel.close(1) == []
+
+
+def test_join_still_refuses_merged_source_info_when_a_later_input_ends_empty() -> None:
+    # The sync path joins the inputs in canonical order: it merges the first two
+    # inputs' data-tag source info (refusing lists of different lengths) before it
+    # meets the empty last input. The kernel's earlier steps keep matching after that
+    # input closed, so it refuses the same pair with the same error.
+    def stream(data: str, tokens: list[list[str]]) -> ArrowTableStream:
+        return (
+            _data_tag_stream(data, tokens) if tokens else _empty_data_tag_stream(data)
+        )
+
+    variants = {
+        name: [
+            stream("v", [] if name == "v" else [["a"], ["b"]]),
+            stream("w", [] if name == "w" else [["c"], ["d", "e"]]),
+            stream("z", [] if name == "z" else [["f"], ["g", "h"]]),
+        ]
+        for name in ("v", "w", "z")
+    }
+    checked = 0
+    for name, inputs in variants.items():
+        order = sorted(range(3), key=lambda i: inputs[i].pipeline_hash().to_hex())
+        empty = "vwz".index(name)
+        if order[2] != empty:
+            continue
+        first, second = order[0], order[1]
+        rebuilt = [_row_built(s) for s in inputs]
+        with pytest.raises(ValueError, match="different lengths") as sync_error:
+            Join().static_process(*rebuilt)
+        kernel = StreamingJoin(Join(), inputs)
+        assert kernel.close(empty) == []
+        kernel.push(first, _sent(inputs[first]).combine_chunks().to_batches()[0])
+        with pytest.raises(ValueError, match="different lengths") as kernel_error:
+            kernel.push(second, _sent(inputs[second]).combine_chunks().to_batches()[0])
+        assert str(kernel_error.value) == str(sync_error.value)
+        checked += 1
+    assert checked > 0
+
+
+def _empty_data_tag_stream(data: str) -> ArrowTableStream:
+    """``_data_tag_stream``'s columns, with no row."""
+    return ArrowTableStream(
+        _data_tag_stream(data, [["x"], ["y"]])
+        .as_table(columns=TRANSPORT_COLUMNS)
+        .slice(0, 0),
+        tag_columns=["k"],
+        data_tags=["k"],
+    )

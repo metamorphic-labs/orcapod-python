@@ -651,6 +651,12 @@ class StreamingJoin(StreamingJoinKernel):
         self._position = {index: position for position, index in enumerate(order)}
         self._renames: dict[int, dict[str, str]] = {}
         self._links: list[_BinaryLink] = []
+        # Whether each step merges source info (a data-tag both its sides hold), which
+        # refuses token lists of different lengths: a refusal decided by values.
+        self._merges: list[bool] = []
+        # The steps whose output is dropped: no later step it reaches can emit, but the
+        # step still matches, so a value-decided refusal is raised as on sync.
+        self._sinks: set[int] = set()
         self._merged_source: set[str] = set()
         if len(inputs) == 1:
             return
@@ -675,6 +681,7 @@ class StreamingJoin(StreamingJoinKernel):
             self._links.append(
                 _BinaryLink(keys, self._link_finish(keys, rename, final=last))
             )
+            self._merges.append(bool(rename))
             tag_keys |= next_tags
             data_tags |= next_data_tags
 
@@ -731,6 +738,8 @@ class StreamingJoin(StreamingJoinKernel):
         step, side = (0, 0) if position == 0 else (position - 1, 1)
         result = self._links[step].push(side, table)
         while result is not None and step < len(self._links) - 1:
+            if step in self._sinks:
+                return []
             step += 1
             result = self._links[step].push(0, result)
         return [] if result is None else [result]
@@ -739,8 +748,12 @@ class StreamingJoin(StreamingJoinKernel):
         """End an input's side of its step, and every side that can no longer receive.
 
         A step that can never emit again (``_BinaryLink.exhausted``) closes its
-        successor's left side, and releases every earlier step, whose rows could only
-        reach it. Closing never emits a row.
+        successor's left side. The earlier steps' rows could only reach it, so they are
+        released, except the steps up to the last earlier one that merges source info:
+        the sync path joins those steps before it reaches the empty one, and a merge
+        refuses token lists of different lengths (a value-decided refusal, module
+        docstring). Those steps keep matching, and the last of them drops its output
+        (``_sinks``). Closing never emits a row.
 
         Args:
             input_index: The input, in call order.
@@ -753,12 +766,16 @@ class StreamingJoin(StreamingJoinKernel):
         position = self._position[input_index]
         step, side = (0, 0) if position == 0 else (position - 1, 1)
         self._links[step].close(side)
-        # A step that can never emit again ends the next step's left side, and no
-        # earlier step's rows are needed any more (they could only reach this one).
         for step, link in enumerate(self._links):
             if not link.exhausted:
                 continue
-            for earlier in self._links[:step]:
+            # The last earlier step that merges source info, and every step before it,
+            # keep matching; the steps after it, up to this one, are released.
+            merging = [j for j in range(step) if self._merges[j]]
+            kept = merging[-1] if merging else -1
+            if kept >= 0:
+                self._sinks.add(kept)
+            for earlier in self._links[kept + 1 : step]:
                 earlier.release()
             if (
                 step + 1 < len(self._links)
