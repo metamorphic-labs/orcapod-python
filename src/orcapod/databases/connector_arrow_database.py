@@ -101,6 +101,15 @@ class ConnectorArrowDatabase:
         # The schema each stored table was read with, for the append check
         # (``_refuse_changed_columns``).
         self._stored_schemas: dict[str, pa.Schema] = {}
+        # Each stored table's columns (name and large-normalized type, in the stored
+        # order) as this handle last saw them: looked up by an append, read, or
+        # written by a flush; ``None`` for a table found absent (ITL-1367). An
+        # append to a table already seen looks nothing up; a read and a flush
+        # combine queued rows with what is stored now, by name.
+        self._known_columns: dict[str, list[tuple[str, pa.DataType]] | None] = {}
+        # A lookup an append made with nothing queued, for the flush of that batch
+        # to use instead of looking the table up again.
+        self._lookups_for_flush: dict[str, list[tuple[str, pa.DataType]] | None] = {}
         # Per-batch flag: True when the batch was added with skip_duplicates=True,
         # so flush() can pass skip_existing=True to the connector and let it use
         # native INSERT-OR-IGNORE semantics rather than Python-side prefiltering.
@@ -465,20 +474,49 @@ class ConnectorArrowDatabase:
         """Each column the table holds, with its type, in the held order (ITL-1367).
 
         The pending batch's order when rows are pending, else the stored table's as
-        the connector reports it now (``get_column_info``, the types ``flush``
-        compares), else ``None``. It is read on every call, never cached, so a table
-        dropped and created again in another order is read as it is now.
+        this handle last saw it (its lookup, read or flush), else looked up now
+        (``get_column_info``, the types ``flush`` compares, shared with that flush),
+        else ``None``. A table another connection created again since may have
+        another order: a read and a flush match the queued rows to what is stored
+        then, by name (``_in_stored_order``).
         """
         pending = self._pending_batches.get(self._get_record_key(record_path))
         if pending is not None:
             return [(f.name, f.type) for f in pending.schema]
         table_name = self._path_to_table_name(self._path_prefix + record_path)
+        if table_name in self._known_columns:
+            return self._known_columns[table_name]
+        columns = self._look_up_columns(table_name)
+        self._lookups_for_flush[table_name] = columns
+        return columns
+
+    def _look_up_columns(self, table_name: str) -> list[tuple[str, pa.DataType]] | None:
+        """The stored table's columns as the connector reports them now, in its order
+        (``get_column_info``, large-normalized types), or ``None`` when it does not
+        exist; remembered as the table's known columns."""
         if table_name not in self._connector.get_table_names():
-            return None
-        return [
-            (c.name, normalize_to_large_types(c.arrow_type, keep_null=True))
-            for c in self._connector.get_column_info(table_name)
-        ]
+            columns = None
+        else:
+            columns = [
+                (c.name, normalize_to_large_types(c.arrow_type, keep_null=True))
+                for c in self._connector.get_column_info(table_name)
+            ]
+        self._known_columns[table_name] = columns
+        return columns
+
+    def _in_stored_order(
+        self, pending: pa.Table, stored: list[tuple[str, pa.DataType]] | None
+    ) -> pa.Table:
+        """Queued rows in the order of the stored table they are combined with.
+
+        The one place queued and stored rows meet (a read, a flush): the rows were
+        put in the order known when they were queued, and another connection may
+        have created the table again since in another order, so they are matched to
+        what is stored now, by name (ITL-1367).
+        """
+        if stored is None:
+            return pending
+        return in_held_column_order(pending, stored)
 
     def _refuse_changed_columns(
         self, record_path: tuple[str, ...], schema: pa.Schema
@@ -591,14 +629,16 @@ class ConnectorArrowDatabase:
             # names and Arrow types match before writing.  Schema evolution is
             # intentionally out of scope; a clear ValueError is preferable to a
             # cryptic DB-level error or a silent partial write.
-            existing_table_names = self._connector.get_table_names()
-            if table_name in existing_table_names:
+            # The lookup the batch's first append made, else one now.
+            existing = (
+                self._lookups_for_flush.pop(table_name)
+                if table_name in self._lookups_for_flush
+                else self._look_up_columns(table_name)
+            )
+            if existing is not None:
                 # A connector reads text and binary back in their large variants,
                 # which are the same types (ITL-1162).
-                existing_cols = {
-                    c.name: normalize_to_large_types(c.arrow_type, keep_null=True)
-                    for c in self._connector.get_column_info(table_name)
-                }
+                existing_cols = dict(existing)
                 pending_cols = {
                     c.name: normalize_to_large_types(c.arrow_type, keep_null=True)
                     for c in columns
@@ -619,6 +659,8 @@ class ConnectorArrowDatabase:
                         "Schema evolution is not supported."
                     )
 
+                pending = self._in_stored_order(pending, existing)
+
             self._connector.create_table_if_not_exists(
                 table_name, columns, pk_column=self.RECORD_ID_COLUMN
             )
@@ -628,6 +670,11 @@ class ConnectorArrowDatabase:
                 id_column=self.RECORD_ID_COLUMN,
                 skip_existing=skip_existing,
             )
+            if existing is None:
+                self._known_columns[table_name] = [
+                    (f.name, normalize_to_large_types(f.type, keep_null=True))
+                    for f in pending.schema
+                ]
 
     # ── Read methods ──────────────────────────────────────────────────────────
 
@@ -668,11 +715,20 @@ class ConnectorArrowDatabase:
         parts: list[pa.Table] = []
 
         committed = self._get_committed_table(record_path)
+        stored: list[tuple[str, pa.DataType]] | None = None
+        if committed is not None:
+            stored = [
+                (f.name, normalize_to_large_types(f.type, keep_null=True))
+                for f in committed.schema
+            ]
+            self._known_columns[
+                self._path_to_table_name(self._path_prefix + record_path)
+            ] = stored
         if committed is not None and committed.num_rows > 0:
             parts.append(committed)
         pending = self._pending_batches.get(record_key)
         if pending is not None and pending.num_rows > 0:
-            parts.append(pending)
+            parts.append(self._in_stored_order(pending, stored))
 
         if not parts:
             return None

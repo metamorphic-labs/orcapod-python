@@ -1089,6 +1089,7 @@ class DeltaTableDatabase:
         _shared_snapshots: "dict[str, _CommittedSnapshot] | None" = None,
         _shared_pending_indexes: "dict[str, KeyIndex] | None" = None,
         _shared_absent_tables: "set[str] | None" = None,
+        _shared_reordered_keys: "set[str] | None" = None,
     ):
         self._root_uri, self._storage_options = parse_base_path(
             base_path, storage_options
@@ -1148,11 +1149,18 @@ class DeltaTableDatabase:
         self._absent_tables: set[str] = (
             _shared_absent_tables if _shared_absent_tables is not None else set()
         )
+        # Record keys whose pending rows include rows reordered by name to the held
+        # order (ITL-1367): committed by MERGE, as main commits rows given in another
+        # order than the stored table's. Family-wide like the pending batches.
+        self._reordered_keys: set[str] = (
+            _shared_reordered_keys if _shared_reordered_keys is not None else set()
+        )
 
     def _clear_pending(self):
         """Clear all pending state."""
         self._pending_batches = {}
         self._pending_record_ids = defaultdict(set)
+        self._reordered_keys = set()
         # Note: next_row_index continues incrementing
 
     def _get_record_key(self, record_path: tuple[str, ...]) -> str:
@@ -1893,10 +1901,6 @@ class DeltaTableDatabase:
             total_name_map = {k: rename_map.get(k, k) for k in records.column_names}
             records = records.rename_columns(total_name_map)
 
-        # Columns match by name: rows with the held columns in another order are
-        # put in the held order (ITL-1367).
-        records = in_held_column_order(records, self._held_column_order(record_path))
-
         # A column Delta cannot hold is refused before anything is buffered (ITL-1334).
         self.require_storable(records.schema)
         self._refuse_untyped_null_columns(record_path, records.schema)
@@ -1916,6 +1920,18 @@ class DeltaTableDatabase:
             # Check for conflicts - insert never allows duplicates when skip_duplicates=False
             # self._check_all_conflicts(record_path, deduplicated_table)
             filtered_table = deduplicated_table
+
+        # Columns match by name: rows with the held columns in another order are
+        # put in the held order (ITL-1367). Looked up only for rows that will be
+        # queued. A table whose rows were reordered is committed by MERGE, as main
+        # commits rows that are not in the stored layout: insert-if-missing against
+        # the version the commit loads, never a blind append.
+        given_order = filtered_table.column_names
+        filtered_table = in_held_column_order(
+            filtered_table, self._held_column_order(record_path)
+        )
+        if filtered_table.column_names != given_order:
+            self._reordered_keys.add(self._get_record_key(record_path))
 
         # Step 4: the rows' field attributes, compared as given: a merge or a
         # coercion casts them to the pending batch's schema, which would give them
@@ -2602,6 +2618,8 @@ class DeltaTableDatabase:
         # Get all pending records
         pending_batch = self._pending_batches.pop(record_key)
         pending_ids = self._pending_record_ids.pop(record_key, set())
+        reordered = record_key in self._reordered_keys
+        self._reordered_keys.discard(record_key)
 
         # Derive the absolute table URI directly from the key (already includes prefix).
         abs_path_components = tuple(record_key.split("/"))
@@ -2691,8 +2709,10 @@ class DeltaTableDatabase:
                 assert base.ids is not None
                 incoming_ids = self._non_null_ids(combined_table)
                 inserted_ids = incoming_ids - base.ids
-                if len(inserted_ids) == len(incoming_ids) and self._stores_as_is(
-                    delta_table, combined_table
+                if (
+                    not reordered
+                    and len(inserted_ids) == len(incoming_ids)
+                    and self._stores_as_is(delta_table, combined_table)
                 ):
                     # Every pending id is new in the version just loaded and the rows
                     # have the stored schema: append (ITL-919). A MERGE reads the whole
@@ -2744,6 +2764,8 @@ class DeltaTableDatabase:
             # Put the tables back in the pending queue
             self._pending_batches[record_key] = pending_batch
             self._pending_record_ids[record_key] = pending_ids
+            if reordered:
+                self._reordered_keys.add(record_key)
             raise
 
         # The rows are committed: nothing below may put them back in the queue.
@@ -3166,6 +3188,7 @@ class DeltaTableDatabase:
             _shared_snapshots=root_instance._snapshots,
             _shared_pending_indexes=root_instance._pending_indexes,
             _shared_absent_tables=root_instance._absent_tables,
+            _shared_reordered_keys=root_instance._reordered_keys,
         )
 
     def list_sources(self) -> list[tuple[str, ...]]:
