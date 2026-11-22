@@ -288,7 +288,27 @@ checks and zero-row results are one implementation. For example,
 | **Cancellation** | A cancelled producer fails its output channel with the cancellation. A cancelled reader closes its input channel. |
 | **Close** | `close()` after the last `send` completes the output. A second `close()` does nothing, and `send` after `close` raises. A zero-row output is a close with no batch: `result()` is the zero-row stream typed by `stream.arrow_schema()`, never by rows. |
 
-## Compared with the alternatives
+## Today vs proposed
+
+Each concern, with where it lives today on `origin/main` 8c6fc4f5.
+
+| Concern | Today | Proposed |
+|---|---|---|
+| **Data unit** | Rows: `list[tuple[Tag, Data]]` per node (node protocols `node_protocols.py:45`–`:175`; the sync buffers, `sync_orchestrator.py:101`–`:141`); async channels of rows | A stream (sync). Arrow record batches through channels (async) |
+| **Description** | Sync: the stream's members, with Arrow types from `typed_zero_row_table` (`core/streams/base.py:116`). Async: only `input_pipeline_hashes` (`static_output_pod.py:728`, `base.py:207`, `:321`); everything else is read from rows | The stream's members plus `arrow_schema()`, on both paths. Async reads it through `channel.stream` |
+| **Sync input** | Rebuilt from the predecessor's rows for each successor: `_materialize_as_stream` (`sync_orchestrator.py:206`) → `_materialize_upstream` (`static_output_pod.py:570`) → `_rows_to_table` (`:304`) | The predecessor's output stream, passed as it is |
+| **Sync output** | A row list: a source's `list(self.iter_data())` (`source_node.py:1191`); an operator's `list(result.iter_data())` plus `_kept_output` (`operator_node.py:1647`, `static_output_pod.py:428`); a function node's appended pairs (`function_node.py:2485`) | The node's output stream, `_as_upstream_stream(F(Arrow table), node)` |
+| **Async input** | A row `ReadableChannel` per edge (`async_orchestrator.py:230`–`:250`, `:294`, `:320`, `:340`) | An `InputChannel` opened from the predecessor's `OutputChannel`, or from a held predecessor's stream |
+| **Async output** | A row `WritableChannel`. An operator node forwards through an intermediate channel and collects every row (`operator_node.py:2218`, `:2231`), then rebuilds them (`_materialize_to_stream`, `static_output_pod.py:543`) | An `OutputChannel`; `result()` after close is the output stream |
+| **Fan-out** | Sync: one rebuild per successor (`sync_orchestrator.py:110`, `:123`). Async: `BroadcastChannel` (`async_orchestrator.py:239`, `channels.py:247`) | Sync: the same stream for every successor. Async: one reader per successor on one `OutputChannel` |
+| **Held nodes** | `list(node.iter_data())`, then a second pass to count (`node_run.py:341`–`:346`). Async: `_send_held` re-sends the rows (`async_orchestrator.py:651`), and `_drain` reads inputs (`:645`) | The held node's output stream. Async successors open channels on it. Counts are read without rows |
+| **Observers** | Per-row hooks with the row's datagrams (`function_node.py:2579` `on_data_start`, `:2606`/`:2614` `on_data_crash`; side effects per row, `side_effects.py:403`) | The same hooks and order, with `RowView`s that build a datagram only when read |
+| **Error policy** | Per row in the function node's loop (`function_node.py:2628` `fail_fast`; a failed row is not appended) and per delivery | Per call, as today; a failed row is left out by mask |
+| **Zero rows** | Sync: `_zero_row_input` (`static_output_pod.py:476`). Async: an operator node records rows through `_InputTap` (`operator_node.py:109`) to rebuild empty inputs (`:2275`); barrier operators emit nothing (ITL-865 narrow fix) | Sync: the same zero-row stream. Async: `to_stream()` of an empty channel gives that same stream, typed by `arrow_schema()` |
+| **Identity** | The successor's input takes the predecessor's identity: `_as_upstream_stream` (`static_output_pod.py:634`), or `_RowsOfStream` without a producer (`:779`). An async barrier rebuild takes `input_pipeline_hashes` (`_materialize_input_stream`, `:689`) | Output streams are built by the same `_as_upstream_stream`. Channels have no identity |
+| **Memory** | Row objects held in several places: the sync buffers (`sync_orchestrator.py:101`), `_CollectingWriter` (`async_orchestrator.py:799`), an operator node's `collected` list plus its kept stream (`operator_node.py:2231`), a function node's `_cached_output_datas` (`function_node.py:1430`), a side effect's `_held_rows` (`side_effects.py:1103`). Channel buffer: 64 rows | Arrow tables in the same places. A retained output channel's result is the node's kept output, not a second copy. Input channel buffer: `buffer_size` Arrow record batches |
+
+## Alternatives considered
 
 | | Stream primary, separate channels (proposed) | (a) Two protocols, `TableInput` + `BatchInput` (first revision) | (b) One class that is both (second revision) |
 |---|---|---|---|
@@ -310,6 +330,15 @@ The proposed form keeps what the second revision gained:
 
 It also removes the second revision's open and consumed stream states, and their raising
 sync reads. Nothing blocks it.
+
+The four alternatives, each with what it gains, what it costs, and why it was not chosen:
+
+| Alternative | Gains | Costs | Why not chosen |
+|---|---|---|---|
+| **(a) Two protocols** (`TableInput`, a stream; `BatchInput`, explicitly not one; a shared `StreamDescription`) | The split is visible in the types. An async input cannot be read synchronously by mistake | A third protocol repeats what a stream already answers. Operators are written against the description protocol rather than streams. A `NodeTable` wrapper is needed for outputs | The developer prefers the stream as the primary concept that owns the description. The proposed form keeps (a)'s safety, since no open stream exists, with one fewer type |
+| **(b) One class that is both** (a stream that is fed by and read as a channel) | One type for everything. Sync code runs on async data once it is complete | Four states (open, complete, consumed, failed) on one class. Sync reads must raise on an open stream. Five new members on `StreamProtocol`. It blurs the line between an Arrow table and a queue, the hazard ITL-858 named | The developer: "I don't think data structure wise a truly synchronous table/list must equal the async channel". The proposed form gives the same reuse with separate, convertible structures |
+| **(c) Rows with cheaper datagrams only** (ITL-1348-style: no per-row normalization or `prepare_prefixed_columns`, rows built through a trusted path) | The smallest change, with no protocol change and byte identity easy to keep. ITL-1348 estimates about 10 s of the 45 s (the normalizations and `prepare_prefixed_columns`). It is in progress now | 121,139 datagrams are still built, `R` still concatenates one-row Arrow tables on every edge, and fan-out still rebuilds per successor. Its ceiling is the normalization share, not the ~40 s conversion share. The ITL-858 divergences stay, because channels still carry only rows | Not a replacement but a complement. It lands first and keeps paying wherever rows remain: function-node misses, observers that read a `RowView`, side-effect deliveries. It cannot bring a job near the plain-stream floor (1.9 s) |
+| **(d) Polars-backed nodes** (nodes pass Polars data frames or lazy frames; operators fused into Polars plans) | Fused, multithreaded operator plans and fast joins and group-bys. Lazy evaluation could skip work | Orcapod's type rules require values bit for bit and Arrow types as given. Polars round trips lose them: `date64` comes back at midnight, `decimal256` panics, and extension (logical) types, `float16` and large-versus-non-large layouts do not survive. The operators were moved off carrying columns through Polars for this reason (ITL-1284, ITL-1281). Hashes are computed over Arrow tables, so every node would convert back | It conflicts with the type-strict, bit-for-bit rules, and it targets the ~8% operator compute rather than the ~90% conversions. It stays future work, only where an operator already works in Polars |
 
 ## Protocol change
 
@@ -829,6 +858,20 @@ In `changelog.d/<issue>.md`, under `### Breaking changes and migration`:
 > - `StreamProtocol` has two new members, `arrow_schema()` and `open_channel()`.
 >   `StreamBase` provides them. A class that implements the protocol without `StreamBase`
 >   must add them.
+
+## Risks and unknowns
+
+| Risk | What could go wrong | Mitigation | How we would detect it |
+|---|---|---|---|
+| **Memory with retained output** | `retain=True` is the default (`materialize_results=True`), so whole outputs are held as Arrow tables. During the transition a node could hold both its old rows and its new Arrow table. A large source, fully retained, could exceed today's footprint | A retained output channel's `result()` is the node's kept output: one copy, enforced by a test that they are the same object. Sources retain only when `materialize_results=True`. Arrow tables are far smaller than datagram objects | Stage 0 records peak RSS (`resource.getrusage`) for the baseline; every stage's benchmark reports it before and after |
+| **Back-pressure and deadlock cycles** | Channels now count Arrow record batches. Diamonds, `SemiJoin` over one source, `Join`'s internal chain and slow fan-out readers could block a producer, as ITL-1075 did with rows | The read-to-the-end rule and `close()` on input channels. `retain=True` on node outputs means `send` never waits. REPLAY and `SemiJoin` keep reading their inputs | The ITL-1075 deadlock tests, run with one-row batches and `buffer_size=1`, plus a diamond and fan-out matrix under a pytest timeout (L8) |
+| **Error propagation** | `UpstreamFailedError` could become the error a run raises instead of the producer's own. A consumer could take a producer's failure as a normal end and store a partial result | `fail()` in the producer's `finally`. The failure selection skips `UpstreamFailedError`. `LOG` stores only after a complete run | L8, and the existing error tests (`test_async_error_policy.py`, `test_store_write_failure.py`), asserting the raised type and message equal `main`'s. The differential's failing-row cases |
+| **Async ordering** | Arrow record batches change the granularity of what async nodes see. An order-sensitive operator (`Batch`) or a function node's hits-then-misses order could change, even when the rows are equal as a set | Keep today's async order rules exactly. Batch boundaries are not part of any result | `test_async_sync_equivalence` with three batch layouts (one batch, one row per batch, mixed); the `ASYNC_ORDER_XFAIL` cases |
+| **Observer `RowView` cost and fidelity** | With a status or logging observer attached, every row's tag datagram is built again, so part of the cost returns. A lazy view could also differ from a real datagram (`isinstance`, equality, `as_dict()` values, pickling in a logger) | A `RowView` builds the real datagram on first access and then delegates every call to it. ITL-1348 makes that construction cheaper | The differential's recording observer compares every value it reads. A benchmark row "warm run with a status observer" shows the remaining cost |
+| **Test migration size** | Stage 5 touches 42 files with 171 `async_execute` lines, 329 `Channel(` lines and 84 `input_pipeline_hashes` lines, and stage 2a touches 18 files with 88 `execute` calls. A large diff is hard to review, and a test could be weakened by accident | A shared helper (`tests/stream_helpers.py`). Plumbing changes go in their own commit, before any behaviour change. Assertions are not edited, only how inputs are fed and outputs read | A per-file count of `assert` statements before and after, reported on the PR. The coordinator's full-suite run and CodeRabbit |
+| **Estimates that stage 0 may disprove** | The savings come from profile shares that overlap. The datagram cost may sit mostly in function nodes' stored-hit loading, or in observers, rather than on edges. Stage 1's 4–8 s may be less | Stage 0 measures the split per node kind and per caller before stage 1 merges. If a stage's measured share differs from its estimate by more than half, the plan is revisited with the developer | Stage 0's numbers against the stage table. Each stage's before-and-after benchmark (best of 3, with the load average) |
+| **Byte-identity drift in edge cases** | `null` columns, source-info flags, the function node's first-row column order, `EmptyData` rows, and the point where `TypeIdentityError` is raised | F's explicit steps. The stage 3 investigations named in "Function job node". No golden file is regenerated | L0–L7, the golden check, and the differential (stored tables byte for byte) |
+| **Hidden consumers of row lists** | Code outside the orchestrators reads `node_outputs` or held rows as lists: tests, alignment helpers, user code | The inventory in "Call sites", and the release note | The full suite, and the grep inventory re-run at each stage |
 
 ## Developer decisions (2026-11-22)
 
