@@ -475,7 +475,7 @@ def test_a_held_nodes_rows_are_built_at_its_successors_edge(
     source, then ``increment`` after ``double``. The independent source runs before
     ``increment``'s input is built and raises (Codex on PR #485, round 3).
     """
-    from orcapod.core.operators.static_output_pod import RowsOnRead
+    from orcapod.core.operators.static_output_pod import rows_on_read
     from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
     from orcapod.pipeline.dag import OrcaDAG
     from orcapod.pipeline.observer import NoOpObserver
@@ -505,7 +505,7 @@ def test_a_held_nodes_rows_are_built_at_its_successors_edge(
     dag.add_node(double)
     dag.add_node(independent)
     dag.add_edge(double, increment)
-    held = {double: RowsOnRead(list(double.iter_data()), double)}
+    held = {double: rows_on_read(double.iter_data(), double)}
     with pytest.raises(pa.ArrowInvalid):
         SyncPipelineOrchestrator().run(dag, observer=Starts(), held=held)
     assert starts == ["src"]

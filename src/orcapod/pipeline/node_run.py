@@ -245,9 +245,9 @@ def check_sources(streams: Iterable[Any]) -> tuple[str, ...]:
 
 def _rows_on_read(rows: Sequence[Any], node: Any) -> Any:
     """A held node's output: its rows, built where a successor reads them (``RowsOnRead``)."""
-    from orcapod.core.operators.static_output_pod import RowsOnRead
+    from orcapod.core.operators.static_output_pod import rows_on_read
 
-    return RowsOnRead(rows, node)
+    return rows_on_read(rows, node)
 
 
 @dataclass(frozen=True)

@@ -1303,8 +1303,8 @@ class SourceNodeBase(TraceableBase, ABC):
         """
         from orcapod.core.operators.static_output_pod import (
             RowBuiltFormUnavailable,
-            RowsOnRead,
             StaticOutputOperatorPod,
+            rows_on_read,
         )
 
         node_label = self.label
@@ -1316,14 +1316,14 @@ class SourceNodeBase(TraceableBase, ABC):
         rows_table = self._rows_table()
         result: StreamProtocol
         if rows_table is None:
-            result = cast("StreamProtocol", RowsOnRead(self.iter_data(), self))
+            result = rows_on_read(self.iter_data(), self)
         else:
             table, keys = rows_table
             try:
                 result = StaticOutputOperatorPod._output_stream(table, keys, self)
             except RowBuiltFormUnavailable:
                 # The rows decide (read once, here), built when read, as on main.
-                result = cast("StreamProtocol", RowsOnRead(self.iter_data(), self))
+                result = rows_on_read(self.iter_data(), self)
         if observer is not None:
             observer.on_node_end(node_label, node_hash)
         return result
@@ -1808,7 +1808,7 @@ class SourceJobNode(SourceNodeBase):
         (``arrow_types_declared`` is false): no second placement rule.
         """
         if self._declared_form is not None:
-            return stream_arrow_schema(self, self.keys(), typed=False)
+            return stream_arrow_schema(self, self.keys(), from_table=False)
         return stream_arrow_schema(self, self._row_keys())
 
     @property

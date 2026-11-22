@@ -1371,7 +1371,7 @@ class RowsOnRead:
     _orcapod_row_built_output = False
 
     def __init__(
-        self, rows: Sequence[tuple[TagProtocol, DataProtocol]], node: StreamProtocol
+        self, rows: Iterable[tuple[TagProtocol, DataProtocol]], node: StreamProtocol
     ) -> None:
         """Hold ``node``'s rows; nothing is built.
 
@@ -1401,6 +1401,23 @@ class RowsOnRead:
 
     def __repr__(self) -> str:
         return f"RowsOnRead({short_stream_repr(self._node)})"
+
+
+def rows_on_read(
+    rows: Iterable[tuple[TagProtocol, DataProtocol]], node: StreamProtocol
+) -> StreamProtocol:
+    """``RowsOnRead`` of ``rows`` as a stream (it delegates every member to the built one).
+
+    Args:
+        rows: The rows ``main`` would hold, in order (read once, here).
+        node: The node (or stream) whose output they are.
+
+    Returns:
+        The output, built from the rows when first read.
+    """
+    # ``RowsOnRead`` stands for the stream it builds; the checker cannot see that
+    # through its delegation, so the cast goes through object.
+    return cast(StreamProtocol, cast(object, RowsOnRead(rows, node)))
 
 
 def at_edge(stream: StreamProtocol) -> StreamProtocol:
