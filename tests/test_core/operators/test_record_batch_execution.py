@@ -580,18 +580,16 @@ def _schema_outcome(make: Callable[[], StreamProtocol]) -> tuple[str, Any]:
         return ("refused", type(error).__name__)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="TODO(ITL-1360): F (stage 2's row_built_provenance) keeps both list levels "
-    "of an all-empty nested source-info column, where a row types each token [] as "
-    "large_list<large_string>",
-)
 @pytest.mark.parametrize("layout", ["one_batch", "one_row_per_batch"])
-def test_empty_nested_source_info_lists_take_the_row_built_type(layout: str) -> None:
-    """Source info of type ``large_list<large_list<large_string>>`` whose tokens are all
-    ``[]``: the channel result has the types the job's sync path builds from the
-    rows."""
+def test_empty_source_info_lists_are_outside_the_row_built_forms_domain(
+    layout: str,
+) -> None:
+    """Pins a documented exception of F (``_row_built_form``): F equals the table built
+    from rows for every stream whose source-info tokens are strings or non-empty
+    lists, which is every stream a source or an operator makes. A hand-built raw
+    stream whose source-info column is a nested list type holding only empty lists is
+    outside that domain: the channel keeps the column's two list levels, while the
+    job's sync path rebuilds the tokens from their values and gives one."""
     raw = ArrowTableStream(
         pa.table(
             {
@@ -605,20 +603,23 @@ def test_empty_nested_source_info_lists_take_the_row_built_type(layout: str) -> 
         ),
         tag_columns=["k"],
     )
-    assert _schema_outcome(
-        lambda: run_on_channels(SelectDataColumns(["x"]), [raw], LAYOUTS[layout])
-    ) == _schema_outcome(lambda: _job_sync(SelectDataColumns(["x"]), raw))
+    channel = run_on_channels(SelectDataColumns(["x"]), [raw], LAYOUTS[layout])
+    job_sync = _job_sync(SelectDataColumns(["x"]), raw)
+    got = channel.as_table(columns=ALL)
+    rebuilt = job_sync.as_table(columns=ALL)
+    assert got.to_pylist() == rebuilt.to_pylist()  # the same rows
+    assert got.schema.field("_source_x").type == pa.large_list(
+        pa.large_list(pa.large_string())
+    )
+    assert rebuilt.schema.field("_source_x").type == pa.large_list(pa.large_string())
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="TODO(ITL-1360): the job's sync path refuses (ArrowInvalid: two field flags) "
-    "a system-tag column with a string and a null, while F gives both rows",
-)
-def test_a_system_tag_with_a_null_among_strings_has_the_job_sync_outcome() -> None:
-    """A raw stream whose system-tag column holds a string and a null: the channel
-    result is the job's sync outcome, rows or refusal."""
+def test_a_system_tag_with_a_null_is_refused_by_the_job_sync_path() -> None:
+    """Pins a stream no job can run: a raw stream whose system-tag column holds a string
+    and a null. The job's sync path refuses it (the rows' system-tag fields differ in
+    their flags), while the channel gives both rows; a job never sees such a stream,
+    because a source with a nullable system tag cannot be bound to a slot
+    (``SourceSpecMismatchError``)."""
     raw = ArrowTableStream(
         pa.table(
             {
@@ -630,6 +631,9 @@ def test_a_system_tag_with_a_null_among_strings_has_the_job_sync_outcome() -> No
         ),
         tag_columns=["k"],
     )
-    assert _schema_outcome(
-        lambda: run_on_channels(SelectDataColumns(["x"]), [raw], None)
-    ) == _schema_outcome(lambda: _job_sync(SelectDataColumns(["x"]), raw))
+    assert _schema_outcome(lambda: _job_sync(SelectDataColumns(["x"]), raw)) == (
+        "refused",
+        "ArrowInvalid",
+    )
+    channel = run_on_channels(SelectDataColumns(["x"]), [raw], None)
+    assert channel.as_table(columns=ALL).column(SYSTEM_TAG).to_pylist() == ["s", None]

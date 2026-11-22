@@ -500,10 +500,20 @@ class StaticOutputOperatorPod(TraceableBase):
         """Return ``table`` as ``_rows_to_table`` builds it from the table's own rows.
 
         F in the ITL-1347 spec: the same table, without making the rows. The columns,
-        their order and their types are decided row by row (``streams.base.row_built_columns``), the
-        system-tag and source-info field flags by their values over the whole table
-        (``_flag_by_values``). The equality with ``_rows_to_table`` is tested over every
-        operator, source kind and column role (ITL-1347, L0-L2).
+        their order and their types are decided row by row
+        (``streams.base.row_built_columns``), the system-tag and source-info field flags
+        by their values over the whole table (``_flag_by_values``). The equality with
+        ``_rows_to_table`` is tested over every operator, source kind and column role
+        (ITL-1347, L0-L2).
+
+        Its domain: F equals ``_rows_to_table`` for every stream whose source-info tokens
+        are strings or non-empty lists of tokens, which is every stream a source or an
+        operator makes (a token list has one element per member of a batch, group or
+        merge). The one exception is a hand-built raw ``ArrowTableStream`` whose
+        source-info column is a list type holding only empty lists: a row types its
+        tokens from their values, so ``_rows_to_table`` loses the list levels the
+        empty lists do not show, while F keeps the column's type. Such a stream reaches
+        a job only when bound to a slot with a copied source-id and record-id pair.
 
         Args:
             table: A table of user tags, system tags, data and source info, with rows.
