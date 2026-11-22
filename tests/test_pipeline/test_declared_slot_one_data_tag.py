@@ -1,14 +1,13 @@
-"""A declared slot over a narrower source with one data-tag among two tags (ITL-1366, e10).
+"""A declared slot over a narrower source with one data-tag among two tags (ITL-1366).
 
 A source slot declared from a source whose ``x`` is ``int | None``, bound to the same
 table with ``x: int`` (a narrower source, given as the declared schema), feeding an
 operator. On ``main`` the run raises ``ValueError`` ("Duplicate column name") where the
 source's rows are rebuilt for its successor, when exactly one of the two tags is a
-data-tag and the tags are declared ``j, k``. On the sync path the branch hands on the
-declared table itself (F over ``_DeclaredForm.apply`` of the bound table), and the run
-completes with the rows the bind describes (spec row e10; provisional, coordinator
-decision 2026-11-22, pending the developer). The async path still carries rows until
-ITL-1347 stage 5 and raises as ``main`` does.
+data-tag and the tags are declared ``j, k`` (ITL-1366, a ``main`` bug fixed there
+separately). A narrower bind hands on its rows as ``main`` gives them (``RowsOnRead``),
+built where the successor reads them: the branch raises the same error at the same
+point, on the sync and the async path, and completes every other arrangement.
 """
 
 from __future__ import annotations
@@ -68,26 +67,21 @@ def _rows(job: PipelineJob) -> list[dict[str, Any]]:
     return sorted(table.to_pylist(), key=lambda row: row["j"])
 
 
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
 @pytest.mark.parametrize("roles", list(ROLES), ids=list(ROLES))
 @pytest.mark.parametrize("order", [("j", "k"), ("k", "j")], ids=["j-k", "k-j"])
-def test_the_sync_run_completes_with_the_rows_the_bind_describes(
-    order: tuple[str, str], roles: str
+def test_the_run_is_as_on_main(
+    order: tuple[str, str], roles: str, asynchronous: bool
 ) -> None:
-    """Every arrangement runs on the sync path and gives the bound table's rows."""
+    """Raises where ``main`` raises (ITL-1366), else gives the bound table's rows."""
     job = _bound_job(order, ROLES[roles])
-    job.run()
-    assert _rows(job) == ROWS
-
-
-@pytest.mark.parametrize("roles", list(ROLES), ids=list(ROLES))
-@pytest.mark.parametrize("order", [("j", "k"), ("k", "j")], ids=["j-k", "k-j"])
-def test_the_async_run_is_as_on_main(order: tuple[str, str], roles: str) -> None:
-    """The async path carries rows until stage 5: it raises where ``main`` raises."""
-    job = _bound_job(order, ROLES[roles])
+    kwargs: dict[str, Any] = (
+        {"orchestrator": AsyncPipelineOrchestrator()} if asynchronous else {}
+    )
     raises_on_main = order == ("j", "k") and roles in ("k_data_tag", "j_data_tag")
     if raises_on_main:
         with pytest.raises(ValueError, match="Duplicate column name"):
-            job.run(orchestrator=AsyncPipelineOrchestrator())
+            job.run(**kwargs)
     else:
-        job.run(orchestrator=AsyncPipelineOrchestrator())
+        job.run(**kwargs)
         assert _rows(job) == ROWS

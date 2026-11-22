@@ -36,7 +36,7 @@ from orcapod import PipelineJob, function_pod, tap_pod
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.nodes.operator_node import OperatorJobNode
 from orcapod.core.nodes.source_node import SourceNodeBase
-from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod, at_edge
 from orcapod.core.streams.base import ZERO_ROW_INPUT_COLUMNS
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import ProvisionalHashWarning
@@ -125,7 +125,13 @@ def _identity(stream: Any) -> tuple[Any, ...]:
 
 
 def assert_same_stream(got: Any, expected: Any) -> None:
-    """Equal identity, and equal tables byte for byte (every column group)."""
+    """Equal identity, and equal tables byte for byte (every column group).
+
+    ``got`` is taken as a successor receives it (``at_edge``: an output held as its rows
+    is built there).
+    """
+    got = at_edge(got)
+    expected = at_edge(expected)
     assert _identity(got) == _identity(expected)
     got_table = got.as_table(columns=ALL_COLUMNS).combine_chunks()
     expected_table = expected.as_table(columns=ALL_COLUMNS).combine_chunks()

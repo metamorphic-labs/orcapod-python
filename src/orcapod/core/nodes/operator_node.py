@@ -40,6 +40,7 @@ from orcapod.channels import Channel, ChannelClosed, ReadableChannel, WritableCh
 from orcapod.config import OrcapodConfig
 from orcapod.core.operators.static_output_pod import (
     RowBuiltFormUnavailable,
+    RowsOnRead,
     StaticOutputOperatorPod,
 )
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
@@ -1697,9 +1698,12 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
                         cached_output.keys(),
                         self,
                     )
-                except RowBuiltFormUnavailable as error:
-                    StaticOutputOperatorPod._raise_as_rows_do(
-                        cached_output.iter_data(), error
+                except RowBuiltFormUnavailable:
+                    # A stored table F cannot build from: its rows, built when read,
+                    # as main handed them on (ITL-1347).
+                    output = cast(
+                        StreamProtocol,
+                        cast(object, RowsOnRead(cached_output.iter_data(), self)),
                     )
                 ctx_obs.on_node_end(node_label, node_hash)
                 return output

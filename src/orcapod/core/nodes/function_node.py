@@ -285,12 +285,11 @@ def _with_datagram_id(data: Data, datagram_id: uuid.UUID) -> Data:
 def rows_as_output_stream(
     rows: Sequence[tuple[TagProtocol, DataProtocol]], node: StreamProtocol
 ) -> StreamProtocol:
-    """Return ``rows`` as ``node``'s output stream, as the sync orchestrator built it.
+    """Return ``rows`` as ``node``'s output stream: the rows, built when read.
 
-    ``StaticOutputOperatorPod._materialize_upstream``, for the job nodes whose output is
-    still their rows (function and side-effect nodes, until ITL-1347 stages 3 and 4):
-    the rows' table with the node's identity, or its zero-row input with no row. One
-    place imports the operator module for them.
+    For the job nodes whose output is still their rows (function and side-effect
+    nodes, until ITL-1347 stages 3 and 4): ``RowsOnRead``, built by ``main``'s row path
+    where a successor reads it. One place imports the operator module for them.
 
     Args:
         rows: The node's output rows, in order.
@@ -299,9 +298,9 @@ def rows_as_output_stream(
     Returns:
         The node's output stream.
     """
-    from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+    from orcapod.core.operators.static_output_pod import RowsOnRead
 
-    return StaticOutputOperatorPod._materialize_upstream(rows, node)  # pyright: ignore[reportPrivateUsage]  # the one definition of a rebuilt upstream
+    return cast(StreamProtocol, cast(object, RowsOnRead(rows, node)))
 
 
 def _executor_supports_concurrent(
@@ -2483,20 +2482,13 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
     ) -> StreamProtocol:
         """The output stream of a run whose output rows are ``rows``.
 
-        What the sync orchestrator built from a node's rows for its successors
-        (``StaticOutputOperatorPod._materialize_upstream``): the rows' table with this
-        node's identity, or the node's zero-row input when there is no row.
+        The rows, their table built when read by ``main``'s row path
+        (``RowsOnRead``): the sync orchestrator builds it where a successor reads it,
+        as ``main`` rebuilt the rows there, and a leaf's is never built (ITL-1347).
         """
-        from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+        from orcapod.core.operators.static_output_pod import RowsOnRead
 
-        try:
-            return StaticOutputOperatorPod._materialize_upstream(rows, self)
-        except pa.ArrowInvalid:
-            # Rows that disagree on a column's Arrow type (cached rows of a store
-            # written before ITL-928): raise what ``as_table`` raises for them, naming
-            # the node, the column and both types (ITL-1360, e9).
-            self._table_from_pairs(rows)
-            raise
+        return cast(StreamProtocol, cast(object, RowsOnRead(rows, self)))
 
     def execute_data(
         self,
@@ -2681,14 +2673,6 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             self._commit_or_end_node(
                 self._commit_at_node_end, ctx_obs, node_label, node_hash
             )
-            # The output stream, built once the run is committed (a failed write is
-            # reported first, as on main) and before the node takes the run: rows that
-            # cannot make one table fail the run (ITL-1360, e9).
-            try:
-                result_stream = self._output_stream(output)
-            except InputValidationError:
-                ctx_obs.on_node_end(node_label, node_hash)
-                raise
             # The node's rows are those of this run's inputs, whatever else it caches.
             self._set_run_rows(emitted_entry_ids, failed=failed_rows)
             # Mark this node as freshly computed before the observer hears the end, so
@@ -2705,7 +2689,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             self.clear_cache()
             raise
 
-        return result_stream
+        return self._output_stream(output)
 
     def _empty_data_cache_hit(
         self, tag: TagProtocol, data: EmptyData, base_entry_id: bytes
