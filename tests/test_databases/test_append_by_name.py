@@ -1,11 +1,15 @@
 """An append matches columns by name, whatever their order (ITL-1367).
 
-Every database puts rows whose columns are the held table's columns in another order
-(each with the held type) into the held order before anything is checked or buffered:
-the pending batch's order, else the stored table's. The table keeps the order of its
-first write. ``a`` and ``c`` are both ``int64``, so a positional match would swap their
-values: every test reads the values back by name. Appends that add, lack or retype a
-column, and a name that repeats exactly, keep the database's own rule.
+Every database puts rows whose columns are the held table's columns in another order,
+each field equal to the held one, into the held order: the in-memory database when the
+rows are queued (the pending batch, else the stored table); Delta when they are queued,
+against its pending batch only (it matches a stored table by name itself); a connector
+database when they are queued, against its pending batch only, and at a flush or a
+combined read, against the stored table read then. The table keeps the order its
+database gave the first write. ``a`` and ``c`` are both ``int64``, so a positional match
+would swap their values: every test reads the values back by name. Appends that add,
+lack or retype a column, a field that differs in any way, and a name that repeats
+exactly, keep the database's own rule.
 """
 
 from __future__ import annotations
@@ -557,9 +561,9 @@ def test_a_reordered_append_is_committed_as_insert_if_missing_across_writers(
 
 
 def test_an_all_duplicate_append_looks_up_no_order(tmp_path: Path) -> None:
-    """With ``skip_duplicates`` and nothing left to write, the stored order is not
-    looked up: a stored table whose recorded type cannot be read does not fail an
-    append that writes nothing."""
+    """With ``skip_duplicates`` and nothing left to write, a stored table whose
+    recorded type cannot be read does not fail an append that writes nothing (Delta
+    looks no stored order up at all)."""
     from deltalake import write_deltalake
 
     rows = _rows([ID, "a", "c", "b"], [1]).rename_columns(
@@ -583,9 +587,8 @@ def test_an_all_duplicate_append_looks_up_no_order(tmp_path: Path) -> None:
 
 
 def test_an_aligned_append_looks_the_stored_table_up_once(tmp_path: Path) -> None:
-    """The connector database looks a table up once per flushed append, as main
-    does: an append on a fresh handle shares its lookup with the flush, and an
-    append to a table the handle has seen looks nothing up before the flush."""
+    """The connector database looks a table up once per flushed append, at the
+    flush, as main does: an append looks nothing up when it is queued."""
     path = str(tmp_path / "store.db")
     ConnectorArrowDatabase(SQLiteConnector(path)).add_records(
         PATH, _rows([ID, "a", "c", "b"], [1]), record_id_column=ID, flush=True
@@ -889,6 +892,85 @@ def test_a_delta_table_created_again_in_another_order_takes_mains_commit(
     )
     assert table is not None
     assert sorted(cast(list[int], table.column("a").to_pylist())) == [10, 20, 30]
+
+
+def _extension_values(type_: Any) -> Any:
+    return pa.ExtensionArray.from_storage(type_, pa.array([1], pa.int64()))
+
+
+def _container_columns() -> dict[str, tuple[Any, Any]]:
+    """A column of each container kind the comparison does not handle, held and
+    appended: the appended one holds an extension type with other metadata (or, for
+    a plain list view, an item field with other metadata)."""
+    held_ext, other_ext = _Unit("m"), _Unit("s")
+    offsets = pa.array([0], pa.int32())
+    sizes = pa.array([1], pa.int32())
+
+    def list_view(value: Any, large: bool) -> Any:
+        kind: Any = pa.LargeListViewArray if large else pa.ListViewArray
+        return kind.from_arrays(
+            pa.array([0], pa.int64() if large else pa.int32()),
+            pa.array([1], pa.int64() if large else pa.int32()),
+            value,
+        )
+
+    def run_end() -> Any:
+        encoded: Any = pa.RunEndEncodedArray
+        return encoded.from_arrays(pa.array([1], pa.int32()), pa.array([1]))
+
+    def interval() -> Any:
+        return pa.array([(1, 0, 0)], pa.month_day_nano_interval())
+
+    def union(value: Any, mode: str) -> Any:
+        types = pa.array([0], pa.int8())
+        if mode == "dense":
+            return pa.UnionArray.from_dense(types, pa.array([0], pa.int32()), [value])
+        return pa.UnionArray.from_sparse(types, [value])
+
+    list_view_array: Any = pa.ListViewArray
+    plain_item = list_view_array.from_arrays(offsets, sizes, pa.array([1]))
+    marked_item = plain_item.cast(
+        pa.list_view(pa.field("item", pa.int64(), metadata={"unit": "s"}))
+    )
+    return {
+        "list_view": (
+            list_view(_extension_values(held_ext), False),
+            list_view(_extension_values(other_ext), False),
+        ),
+        "large_list_view": (
+            list_view(_extension_values(held_ext), True),
+            list_view(_extension_values(other_ext), True),
+        ),
+        "dense union": (
+            union(_extension_values(held_ext), "dense"),
+            union(_extension_values(other_ext), "dense"),
+        ),
+        "sparse union": (
+            union(_extension_values(held_ext), "sparse"),
+            union(_extension_values(other_ext), "sparse"),
+        ),
+        "list view item metadata": (plain_item, marked_item),
+        "dictionary": (
+            pa.array(["x"]).dictionary_encode(),
+            pa.array(["x"]).dictionary_encode(),
+        ),
+        "run-end encoded": (run_end(), run_end()),
+        "interval": (interval(), interval()),
+    }
+
+
+@pytest.mark.parametrize("kind", list(_container_columns()))
+def test_a_column_of_a_type_the_comparison_does_not_handle_is_never_reordered(
+    kind: str,
+) -> None:
+    """Eligibility is positive (codex review of PR 491, round 4): a column whose type
+    tree holds anything but the handled leaf types, structs, maps, the three list
+    kinds and extension types over those is not eligible, even when equal, so the
+    table is left as given and the database's own rule applies."""
+    held_values, given_values = _container_columns()[kind]
+    held = list(pa.table({"b": [0], "a": held_values}).schema)
+    given = pa.table({"a": given_values, "b": [1]})
+    assert in_held_column_order(given, held) is given
 
 
 # ── PostgreSQL (a live server: the PostgreSQL CI job) ──────────────────────────

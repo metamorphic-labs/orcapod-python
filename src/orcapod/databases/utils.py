@@ -257,11 +257,36 @@ def _same_field(given: "pa.Field[Any]", held: "pa.Field[Any]") -> bool:
     return appended_field_change(held, given) is None
 
 
+_LEAF_KINDS = (
+    "is_null",
+    "is_boolean",
+    "is_integer",
+    "is_floating",
+    "is_decimal",
+    "is_string",
+    "is_large_string",
+    "is_binary",
+    "is_large_binary",
+    "is_fixed_size_binary",
+    "is_date",
+    "is_time",
+    "is_timestamp",
+    "is_duration",
+)
+"""The leaf types the comparison handles. Eligibility is positive: a type of any
+other kind anywhere in a column's tree (a list view, a union, a dictionary, a
+run-end-encoded type, an interval, a view type, anything pyarrow adds later) makes
+the column not eligible, and the table is left as given for the database's own
+rule (codex review of PR 491, round 4)."""
+
+
 def _same_type(given: Any, held: Any) -> bool:
-    """Arrow type equality at every depth, with an extension type equal only to one
-    of its own name and serialized metadata: pyarrow compares a Python extension type
-    by its class and storage, not by its metadata (two units over ``int64`` are
-    equal to it)."""
+    """Whether two Arrow types are equal at every depth, for a type tree the
+    comparison handles entirely: the leaf kinds of ``_LEAF_KINDS``, a struct, a map,
+    a list, large list or fixed-size list, and an extension type over those, equal
+    only to one of its own name and serialized metadata (pyarrow compares a Python
+    extension type by its class and storage, not by its metadata). Any other type
+    anywhere in either tree gives ``False``."""
     t = pa.types
     if isinstance(given, pa.ExtensionType) or isinstance(held, pa.ExtensionType):
         return (
@@ -282,7 +307,6 @@ def _same_type(given: Any, held: Any) -> bool:
         return _same_type(given.key_type, held.key_type) and _same_type(
             given.item_type, held.item_type
         )
-    lists = (t.is_list, t.is_large_list, t.is_fixed_size_list)
-    if any(kind(given) for kind in lists):
+    if t.is_list(given) or t.is_large_list(given) or t.is_fixed_size_list(given):
         return _same_type(cast(Any, given).value_type, cast(Any, held).value_type)
-    return True
+    return any(getattr(t, kind)(given) for kind in _LEAF_KINDS)
