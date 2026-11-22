@@ -1076,9 +1076,11 @@ Not covered:
      - **recorded arrivals**: the differential records, for each node in the set, the rows of
        each of its inputs in the order the node received them on the async path (it wraps
        the node's input channels; the library is not changed);
-     - **per-node consistency**: the node is computed again on the sync path, over those
-       inputs as Arrow tables in that recorded order. Its async output must equal that
-       recomputation as a multiset of rows. For a `Batch` this fixes the groups to the
+     - **per-node consistency**: the node is computed again on the sync path of pinned
+       `main` (not the branch's), over those inputs as Arrow tables in that recorded order.
+       Its async output must equal that recomputation as a multiset of rows, apart from the
+       named differences. Using `main`'s operator catches a branch defect that shows only on
+       an arrival order the sync run never produces. For a `Batch` this fixes the groups to the
        consecutive `batch_size` segments of its own arrival sequence, with their boundaries
        and member order (lists are compared in order). Interleaved groups such as [A, C] and
        [B, D] from arrivals A, B, C, D fail. For an order-dependent `PolarsFilter` it fixes
@@ -1094,6 +1096,10 @@ Not covered:
        multiplicity. So a row lost or duplicated between two excluded nodes fails, even
        though each node agrees with its own recomputation;
      - **everything outside the set** is compared as usual.
+
+     This is the complete statement of the gate. The stage 0 harness (`docs/dev/scripts/itl_1347/`)
+     implements the comparisons stages 1–4 need; stage 5 adds the recorded-arrival checks
+     above (its README lists them).
 
      A difference anywhere else fails the gate.
    - **What it dumps and compares**: every stored table (Arrow IPC, with Delta version
