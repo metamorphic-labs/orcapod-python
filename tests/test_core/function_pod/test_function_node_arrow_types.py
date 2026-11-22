@@ -421,3 +421,39 @@ def test_an_async_run_over_a_store_written_before_the_fix_finishes(
     assert len(list(node.iter_data())) == 3
     with pytest.raises(InputValidationError, match="'k'"):
         node.as_table()
+
+
+def test_a_second_async_run_holds_the_node_and_sends_its_rows(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The plan builds no held stream for an async run: it sends the held rows as on main.
+
+    Over a store written before ITL-928, the held ``double`` holds rows that cannot
+    make one table; a second async run (``increment`` cleared) holds it and sends its
+    three rows on, as on ``main`` (Codex on PR #485, round 2).
+    """
+    from orcapod.pipeline import AsyncPipelineOrchestrator
+    from orcapod.pipeline.observer import NoOpObserver
+
+    class DataStarts(NoOpObserver):
+        def __init__(self) -> None:
+            self.count = 0
+
+        def contextualize(self, *identity_path: str) -> DataStarts:
+            return self
+
+        def on_data_start(self, node_label: str, tag: Any, data: Any) -> None:
+            if node_label == "increment":
+                self.count += 1
+
+    _build(
+        DeltaTableDatabase(tmp_path), _source_table("uint32").slice(0, 2), chained=True
+    ).run()
+    _as_written_before_the_fix(tmp_path)
+    job = _build(DeltaTableDatabase(tmp_path), _source_table("uint32"), chained=True)
+    job.run(orchestrator=AsyncPipelineOrchestrator())
+    job.nodes["increment"].clear_cache()
+    observer = DataStarts()
+    summary = job.run(orchestrator=AsyncPipelineOrchestrator(), observer=observer)
+    assert summary.nodes["double"].held == 3
+    assert observer.count == 3
