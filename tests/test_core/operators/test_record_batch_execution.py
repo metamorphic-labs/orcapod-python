@@ -27,9 +27,13 @@ import pyarrow as pa
 import pytest
 
 import orcapod.core.operators as operators
-from orcapod.channels import InputChannel, OutputChannel, channel_from_stream
 from orcapod.core.operators import Batch
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+from orcapod.core.record_batch_channels import (
+    InputChannel,
+    OutputChannel,
+    channel_from_stream,
+)
 from orcapod.protocols.core_protocols import StreamProtocol
 from tests.test_core.operators.test_async_sync_equivalence import (
     AFTER_OPERATOR_CASES,

@@ -8,9 +8,9 @@ import pyarrow as pa
 
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.channels import (
-    InputChannel,
-    OutputChannel,
     ReadableChannel,
+    RecordBatchInput,
+    RecordBatchOutput,
     WritableChannel,
 )
 from orcapod.core.operators.base import UnaryOperator
@@ -270,7 +270,7 @@ class Batch(UnaryOperator):
             await output.close()
 
     async def async_execute_batches(
-        self, inputs: Sequence[InputChannel], output: OutputChannel
+        self, inputs: Sequence[RecordBatchInput], output: RecordBatchOutput
     ) -> None:
         """Batch the rows of an input channel as they arrive.
 

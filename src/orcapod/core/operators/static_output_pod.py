@@ -10,12 +10,10 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 import pyarrow as pa
 
 from orcapod.channels import (
-    InputChannel,
-    OutputChannel,
     ReadableChannel,
+    RecordBatchInput,
+    RecordBatchOutput,
     WritableChannel,
-    stream_from_batches,
-    transport_columns,
 )
 from orcapod import contexts
 from orcapod.config import OrcapodConfig
@@ -56,7 +54,9 @@ from orcapod.protocols.core_protocols import (
     TagProtocol,
     TrackerManagerProtocol,
 )
+from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, ContentHash, Schema
+from orcapod.utils import arrow_utils
 
 logger = logging.getLogger(__name__)
 
@@ -794,7 +794,7 @@ class StaticOutputOperatorPod(TraceableBase):
     # ------------------------------------------------------------------
 
     async def async_execute_batches(
-        self, inputs: Sequence[InputChannel], output: OutputChannel
+        self, inputs: Sequence[RecordBatchInput], output: RecordBatchOutput
     ) -> None:
         """Run this operator over input channels of Arrow record batches.
 
@@ -839,7 +839,7 @@ class StaticOutputOperatorPod(TraceableBase):
         self,
         batches: Sequence[pa.RecordBatch],
         stream: StreamProtocol,
-        output: OutputChannel,
+        output: RecordBatchOutput,
     ) -> None:
         """Apply this operator to some record batches of one input and send the result.
 
@@ -856,7 +856,7 @@ class StaticOutputOperatorPod(TraceableBase):
         )
 
     @staticmethod
-    async def _send_result(result: StreamProtocol, output: OutputChannel) -> None:
+    async def _send_result(result: StreamProtocol, output: RecordBatchOutput) -> None:
         """Send a result stream's rows into ``output`` as its own record batches.
 
         Args:
@@ -871,7 +871,7 @@ class StaticOutputOperatorPod(TraceableBase):
                 await output.send(batch)
 
 
-async def _streams_of(inputs: Sequence[InputChannel]) -> list[StreamProtocol]:
+async def _streams_of(inputs: Sequence[RecordBatchInput]) -> list[StreamProtocol]:
     """Read every input channel to its end, each as a stream, at the same time.
 
     Args:
@@ -891,6 +891,151 @@ async def _streams_of(inputs: Sequence[InputChannel]) -> list[StreamProtocol]:
         for task in tasks:
             _ = task.cancel()
         raise
+
+
+# ---------------------------------------------------------------------------
+# Conversions between streams and Arrow record batches (ITL-1347)
+# ---------------------------------------------------------------------------
+
+
+def transport_columns(
+    table: pa.Table, keys: tuple[Sequence[str], Sequence[str]]
+) -> pa.Table:
+    """Return ``table`` as the columns passed between nodes, for a channel.
+
+    The transport columns of a stream are what a table built from its rows holds: user
+    tags, system tags, data and source info, in that order, with no data-context and no
+    meta (``__``) column, and ``null`` as ``large_string`` (a row's datagram stores a
+    ``null`` column so). The source info follows the stream's data keys, a data-tag's
+    first, as each row lists it. No value is changed.
+
+    One property is left for the complete table: whether a source-info field is
+    nullable follows its tokens, so it cannot be decided on one record batch of many.
+    Here every source-info field is nullable, so all record batches of one channel have
+    one schema; ``stream_from_batches`` sets the flags over all of them.
+
+    Args:
+        table: A stream's table with its system tags and source info
+            (``ZERO_ROW_INPUT_COLUMNS``), of any number of rows.
+        keys: The stream's tag keys and data keys (``stream.keys()``).
+
+    Returns:
+        The transport columns, in row order.
+    """
+    # TODO(ITL-1360): this is steps 1 to 4 of the row-built form of the design
+    # (docs/dev/specs/itl-1347-job-table-transport.md); stage 2 defines that form once,
+    # and this function then calls it.
+    tag_keys, data_keys = keys
+    names = table.column_names
+    system_tags = [n for n in names if n.startswith(constants.SYSTEM_TAG_PREFIX)]
+    source_info = [n for n in names if n.startswith(constants.SOURCE_PREFIX)]
+    # A row lists its source info in the order of its data columns.
+    by_data_key = [f"{constants.SOURCE_PREFIX}{name}" for name in data_keys]
+    source_info = [n for n in by_data_key if n in source_info] + [
+        n
+        for n in source_info
+        if n not in by_data_key
+        and not n.removeprefix(constants.SOURCE_PREFIX).startswith(
+            constants.META_PREFIX
+        )
+    ]
+    placed = {*tag_keys, *system_tags, *source_info, constants.CONTEXT_KEY}
+    data = [
+        n
+        for n in names
+        if n not in placed
+        and not n.startswith((constants.META_PREFIX, constants.SOURCE_PREFIX))
+    ]
+    kept = arrow_utils.normalize_table_to_large_types(
+        table.select([*tag_keys, *system_tags, *data, *source_info])
+    )
+    schema = pa.schema(
+        [
+            column.with_nullable(True)
+            if column.name.startswith(constants.SOURCE_PREFIX)
+            else column
+            for column in kept.schema
+        ]
+    )
+    return pa.Table.from_arrays(kept.columns, schema=schema)
+
+
+def transport_schema(stream: StreamProtocol) -> pa.Schema | None:
+    """Return the schema ``stream``'s record batches have, from its description.
+
+    Never computes, reads or polls a row: it is the schema of the stream's zero-row
+    input, as its record batches carry it (``transport_columns``).
+
+    Args:
+        stream: The describing stream.
+
+    Returns:
+        The schema, or ``None`` for a stream that cannot say its Arrow types without
+        rows (an unbound input slot, a source that has not polled yet).
+    """
+    # TODO(ITL-1360): ``stream.arrow_schema()``, once every stream has it.
+    typed = StaticOutputOperatorPod._zero_row_input(stream)  # pyright: ignore[reportPrivateUsage]  # the zero-row form of an input
+    if typed is None:
+        return None
+    return transport_columns(
+        typed.as_table(columns=ZERO_ROW_INPUT_COLUMNS), stream.keys()
+    ).schema
+
+
+def stream_from_batches(
+    stream: StreamProtocol, batches: Sequence[pa.RecordBatch]
+) -> StreamProtocol:
+    """Return the Arrow record batches of ``stream``'s rows as a stream.
+
+    The one place a stream is made from Arrow record batches: what an output channel
+    gives once closed (``OutputChannel.result``), what an input channel delivered
+    (``InputChannel.to_stream``), and the record batches a row-by-row operator is
+    applied to. The batches are put under one another in the order
+    given, each system-tag and source-info field is flagged nullable only when one of
+    its values is null (decided over the complete table, never per batch), and the
+    table is wrapped with ``stream``'s identity: its producer, upstreams, pipeline hash and data
+    context. With no batch it is ``stream``'s zero-row input, typed by its description
+    and never by rows.
+
+    Args:
+        stream: The describing stream: the node or stream the rows are of.
+        batches: Its rows as transport columns (``transport_columns``), in order.
+
+    Returns:
+        A complete, re-readable stream over the rows.
+    """
+    if not batches:
+        return StaticOutputOperatorPod._materialize_upstream([], stream)  # pyright: ignore[reportPrivateUsage]  # the zero-row input of an operator
+    table = _flagged_by_values(pa.Table.from_batches(list(batches)))
+    return StaticOutputOperatorPod._as_upstream_stream(  # pyright: ignore[reportPrivateUsage]  # the identity of a successor's input
+        table, stream.keys()[0], stream_data_tags(stream), stream
+    )
+
+
+def _flagged_by_values(table: pa.Table) -> pa.Table:
+    """Flag each system-tag and source-info field nullable only when it holds a null.
+
+    What a table built from rows has: a row states its system tags and its source-info
+    tokens as values, so those fields are non-nullable unless a value is missing. It is
+    decided over the complete table, never per record batch (two batches of one
+    channel would then have two schemas). The same arrays under the new flags.
+
+    Args:
+        table: The complete table of a stream's transport columns.
+
+    Returns:
+        The table with those fields' flags set by their values.
+    """
+    by_values = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
+    schema = pa.schema(
+        [
+            column.with_nullable(table.column(i).null_count > 0)
+            if column.name.startswith(by_values)
+            else column
+            for i, column in enumerate(table.schema)
+        ]
+    )
+    return pa.Table.from_arrays(table.columns, schema=schema)
 
 
 class _RowsOfStream(ArrowTableStream):
