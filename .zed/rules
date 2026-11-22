@@ -1506,7 +1506,9 @@ data. The rules:
   (`_differing_columns`: per shared column, the inputs that have it stacked and counted per
   origin row), never from the rows rejoined so far, which have lost the origin rows an
   earlier input lacks or disagrees on. System tags are assumed unique (no input is refused
-  for repeating one). A shared column keeps the values of the first input that has it, in
+  for repeating one); the warning compares repeats by occurrence, and a surplus repeat is
+  never compared, so it warns for none (developer, November 22, 2026: no code for it). A
+  shared column keeps the values of the first input that has it, in
   the canonical input order (by pipeline hash; equal hashes stay in argument order, which
   only the bits of equal floats can follow). With unique system tags the rows are matched
   on the system tags first, by the same join as before ITL-1355, and the pairs filtered,

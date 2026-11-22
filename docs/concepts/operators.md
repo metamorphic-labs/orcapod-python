@@ -230,6 +230,10 @@ The rules:
   an input repeat an origin row, each row still matches at most once: among the rows equal
   in every shared column, the first of one input pairs with the first of the other, the
   second with the second, in row order (on the async path, the order the rows arrived in).
+  The warning is narrower for such rows: it compares the repeats of an origin row by
+  occurrence (the first of one input with the first of another), and a surplus repeat, one
+  more than another input holds, matches nothing whatever its values and is never compared,
+  so no warning names a column for it.
 - **The first input's values.** A shared column is kept once, with the values of the first
   input that has it. Rejoin takes its inputs in a canonical order, by pipeline hash, so the
   result does not follow the order of the arguments; inputs with equal pipeline hashes (two

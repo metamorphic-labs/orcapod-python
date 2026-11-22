@@ -790,6 +790,11 @@ class RejoinDifferingColumnWarning(UserWarning):
     of the result. A branch changed that column, which is rarely meant, so this warning
     names such columns, once per operator and set of columns.
 
+    System tags are assumed unique in each input. Should an input repeat an origin row,
+    the repeats are compared by occurrence, the first of one input with the first of
+    another; a surplus repeat matches nothing whatever its values, and no warning is
+    issued for it.
+
     To keep the rows, drop or rename the column in one branch before the rejoin
     (``drop_tag_columns``, ``map_tags``). To silence the warning, call
     ``warnings.filterwarnings("ignore", category=RejoinDifferingColumnWarning)``.

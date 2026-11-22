@@ -195,7 +195,10 @@ def _differing_columns(tables: Sequence["pa.Table"], keys: Sequence[str]) -> lis
     under one another and counted per origin row. An origin row with two values in
     the column is one where two inputs differ. Rows that repeat an origin row are
     compared in row order, the first of each input with the first of the others
-    (``_numbered``). Equality is ``Join``'s, and a null equals a null.
+    (``_numbered``); a surplus repeat, one more than another input holds, has nothing
+    to be compared with and names no column (developer decision, November 22, 2026:
+    repeats break the assumption that system tags are unique, and a surplus one is
+    left out whatever it holds). Equality is ``Join``'s, and a null equals a null.
 
     Args:
         tables: The inputs' rows.
@@ -300,7 +303,11 @@ class Rejoin(Join):
     repeat an origin row, each row still matches at most once: among the rows equal in
     every shared column, the first of one input pairs with the first of the other, the
     second with the second, in row order (the order the rows arrived in, on the async
-    path), in time linear in the rows.
+    path), in time linear in the rows. The warning is narrower for such rows: it
+    compares the repeats of an origin row by occurrence (the first of one input with
+    the first of another, the second with the second), and a surplus repeat, one more
+    than another input holds, matches nothing whatever its values and is never
+    compared, so no warning names a column for it.
 
     A shared column is kept once, with the values of the first input that has it. The
     inputs are taken in a canonical order, by pipeline hash, so the result does not

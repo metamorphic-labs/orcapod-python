@@ -917,6 +917,27 @@ def test_repeats_that_differ_in_a_shared_tag_pair_within_equal_values() -> None:
     )
 
 
+def test_a_surplus_repeat_matches_nothing_and_warns_for_no_column() -> None:
+    """One input holds an origin row twice, with ``k`` = 1 and 2; the other holds it
+    once, with ``k`` = 1. The first rows are put together; the surplus repeat matches
+    nothing whatever it holds and is never compared, so no warning names ``k``
+    (developer decision, November 22, 2026: with repeated origin rows the warning
+    compares repeats by occurrence). On the sync and the async path, in both orders."""
+    twice = _repeated(2, "a", [1, 2])
+    once = _repeated(1, "b", [1])
+    for inputs in ((twice, once), (once, twice)):
+        result, warned = _rejoined(*inputs)
+        assert result.as_table().to_pylist() == [{"k": 1, "a": 0, "b": 0}]
+        assert warned == []
+        rows, warned = _rejoined_async(*inputs)
+        assert [(tag["k"], data["a"], data["b"]) for tag, data in rows] == [(1, 0, 0)]
+        assert warned == []
+    # The repeats in the other order: now the first rows differ, and ``k`` is named.
+    result, warned = _rejoined(_repeated(2, "a", [2, 1]), once)
+    assert result.as_table().num_rows == 1
+    assert len(warned) == 1 and "tag 'k'" in warned[0]
+
+
 # ---------------------------------------------------------------------------
 # Equality is Join's; a shared column keeps the first input's values
 # ---------------------------------------------------------------------------
