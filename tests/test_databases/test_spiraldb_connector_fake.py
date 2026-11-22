@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pyarrow as pa
 import pytest
@@ -28,6 +29,7 @@ from orcapod.errors import (
 from orcapod.utils import arrow_utils
 from orcapod.sources import ArrowTableSource, SpiralDBTableSource
 from tests.test_databases import fake_pyspiral
+from tests.test_databases.type_matrix import map_of_fields
 
 _NESTED = pa.schema(
     [
@@ -591,3 +593,99 @@ class TestStructLevelNulls:
             )
             with pytest.raises(UnsupportedValueError, match="'g'"):
                 db.flush()
+
+
+class TestKeptOrRefused:
+    """ITL-1334: SpiralDB keeps a column exactly or refuses it, naming it."""
+
+    @pytest.fixture()
+    def database(self, tmp_path: Path):
+        """A connector database over the fake project ``p``."""
+        with fake_pyspiral.install(tmp_path / "spiral"):
+            fake_pyspiral.FakeSpiral().project("p")
+            yield ConnectorArrowDatabase(SpiralDBConnector("p"))
+
+    @pytest.mark.parametrize("python_type", [Path, set[int]], ids=["Path", "set[int]"])
+    def test_a_logical_type_is_refused_naming_the_column(self, database, python_type):
+        """SpiralDB drops field metadata, so the type would read back as its storage."""
+        from orcapod.contexts import get_default_context
+        from orcapod.errors import UnstorableColumnError
+
+        value = Path("/a") if python_type is Path else {1, 2}
+        table = get_default_context().type_converter.python_dicts_to_arrow_table(
+            [{"id": b"r1", "v": value}],
+            python_schema={"id": bytes, "v": python_type},
+        )
+        with pytest.raises(UnstorableColumnError, match="'v'.*storage type"):
+            database.add_records(("t",), table, record_id_column="id", flush=True)
+
+    def test_a_fixed_size_list_with_non_null_items_and_a_null_row_reads_back(
+        self, database
+    ):
+        """A null row's hidden item slots are null; the read keeps the column as is
+        (pyarrow refuses to cast it to its own type, so only changed columns are cast)."""
+        item = pa.field("item", pa.int64(), nullable=False)
+        fsl_type: Any = pa.list_(item, 2)  # pyarrow's stubs type ``type`` narrowly
+        column = pa.FixedSizeListArray.from_arrays(
+            pa.array([1, 2, None, None, 5, 6]),
+            type=fsl_type,
+            mask=pa.array([False, True, False]),
+        )
+        table = pa.Table.from_arrays(
+            [pa.array([b"a", b"b", b"c"], pa.large_binary()), column],
+            names=["id", "f"],
+        )
+        database.add_records(("t",), table, record_id_column="id", flush=True)
+        back = database.get_all_records(("t",), record_id_column="id")
+        assert back is not None
+        assert back.schema.field("f").type == pa.list_(item, 2)
+        assert back.sort_by("id").column("f").to_pylist() == [[1, 2], None, [5, 6]]
+
+    @pytest.mark.parametrize(
+        "arrow_type",
+        [
+            pa.uuid(),
+            pa.json_(),
+            pa.large_list(pa.uuid()),
+            pa.struct([pa.field("j", pa.json_())]),
+        ],
+        ids=["uuid", "json", "list of uuid", "struct of json"],
+    )
+    def test_an_arrow_canonical_extension_type_is_refused(self, database, arrow_type):
+        """Arrow's own extension types (``BaseExtensionType``, not ``ExtensionType``)
+        would read back as their storage type too (CodeRabbit on PR 471)."""
+        from orcapod.errors import UnstorableColumnError
+
+        table = pa.table(
+            {"id": pa.array([b"a"], pa.large_binary()), "v": pa.nulls(1, arrow_type)}
+        )
+        with pytest.raises(UnstorableColumnError, match="'v'.*storage type"):
+            database.add_records(("t",), table, record_id_column="id", flush=True)
+
+    @pytest.mark.parametrize(
+        "item",
+        [
+            pa.field("value", pa.int64(), metadata={"unit": "m"}),
+            pa.field(
+                "value", pa.struct([pa.field("a", pa.int64(), metadata={"u": "m"})])
+            ),
+            pa.field(
+                "value",
+                pa.large_list(pa.field("item", pa.int64(), metadata={"u": "m"})),
+            ),
+        ],
+        ids=["on the item", "inside an item struct", "inside an item list"],
+    )
+    def test_field_metadata_below_a_map_is_refused(self, database, item):
+        """The connector's metadata record does not descend into a map, so such
+        metadata would read back dropped (CodeRabbit on PR 471)."""
+        from orcapod.errors import UnstorableColumnError
+
+        map_type: Any = map_of_fields(
+            pa.field("key", pa.large_string(), nullable=False), item
+        )
+        table = pa.table(
+            {"id": pa.array([b"a"], pa.large_binary()), "m": pa.nulls(1, map_type)}
+        )
+        with pytest.raises(UnstorableColumnError, match="'m'.*below a map"):
+            database.add_records(("t",), table, record_id_column="id", flush=True)

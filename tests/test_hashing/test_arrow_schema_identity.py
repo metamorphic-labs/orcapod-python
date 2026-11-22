@@ -261,8 +261,19 @@ class TestStoredTables:
         assert after.as_table().schema.field("g").type == pa.int64()
 
 
+@pytest.fixture()
+def delta_without_restore(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A store that gives a column back as another type: Delta with its recorded-type
+    restore skipped, so a fixed-size list reads back as Delta's ``large_list``, as it
+    did before ITL-1275 (fixed by ITL-1334)."""
+    from orcapod.databases import delta_lake_databases
+
+    monkeypatch.setattr(delta_lake_databases, "from_delta_layout", lambda table: table)
+
+
+@pytest.mark.usefixtures("delta_without_restore")
 def test_a_stored_read_of_another_type_is_refused(tmp_path: Path) -> None:
-    """Delta reads a fixed_size_list back as large_list (ITL-1275): refused, named."""
+    """A store reading a fixed_size_list back as large_list: refused, named."""
     fixed, _ = DIFFERENT["fixed_size_list/large_list"]
     node = _logged_map(DeltaTableDatabase(tmp_path / "delta"), _source(_table(fixed)))
     with pytest.raises(InputValidationError, match=r"'z' reads back as large_list"):
@@ -598,8 +609,9 @@ def test_a_cached_source_reads_its_declared_types(kind: str, tmp_path: Path) -> 
     assert first.arrow_schemas == typed_arrow_schemas(_source(table))
 
 
+@pytest.mark.usefixtures("delta_without_restore")
 def test_a_cached_read_of_another_type_is_refused(tmp_path: Path) -> None:
-    """Delta reads a fixed-size list back as a list (ITL-1275): refused, naming it."""
+    """A store reading a fixed-size list back as a list: refused, naming it."""
     table = _table(FIXED_SIZE)
     database = _databases(tmp_path)["delta"]
     with pytest.raises(
@@ -610,9 +622,11 @@ def test_a_cached_read_of_another_type_is_refused(tmp_path: Path) -> None:
         _cached(table, database).as_table()
 
 
-def test_a_cached_fixed_size_list_in_memory_is_exact(tmp_path: Path) -> None:
+@pytest.mark.parametrize("kind", ["memory", "delta"])
+def test_a_cached_fixed_size_list_is_exact(kind: str, tmp_path: Path) -> None:
+    """Delta keeps a fixed-size list through its recorded type (ITL-1275, ITL-1334)."""
     table = _table(FIXED_SIZE)
-    database = _databases(tmp_path)["memory"]
+    database = _databases(tmp_path)[kind]
     for _ in range(2):
         read = _cached(table, database).as_table()
         assert read.schema.field("x").type == pa.list_(pa.int8(), 2)
@@ -624,6 +638,7 @@ _CACHED_REFUSAL = (
 )
 
 
+@pytest.mark.usefixtures("delta_without_restore")
 def test_get_all_records_refuses_a_cached_read_of_another_type(tmp_path: Path) -> None:
     """Every read of the cache's rows is checked (fourth Codex review of PR 454):
     ``get_all_records()`` after an ``as_table()`` refusal, and on a fresh wrapper over

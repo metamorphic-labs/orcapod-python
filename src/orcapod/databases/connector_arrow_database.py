@@ -23,8 +23,15 @@ from collections import defaultdict
 from collections.abc import Collection, Mapping
 from typing import TYPE_CHECKING, Any, cast
 
-from orcapod.databases.utils import coerce_record_id
-from orcapod.errors import UnstorableColumnError, UnstorableTableNameError
+from orcapod.databases.utils import (
+    coerce_record_id,
+    first_changed_column,
+)
+from orcapod.errors import (
+    InputValidationError,
+    UnstorableColumnError,
+    UnstorableTableNameError,
+)
 from orcapod.utils.arrow_utils import (
     normalize_schema_to_large_types,
     normalize_table_to_large_types,
@@ -90,6 +97,9 @@ class ConnectorArrowDatabase:
             if _shared_pending_record_ids is not None
             else defaultdict(set)
         )
+        # The schema each stored table was read with, for the append check
+        # (``_refuse_changed_columns``).
+        self._stored_schemas: dict[str, pa.Schema] = {}
         # Per-batch flag: True when the batch was added with skip_duplicates=True,
         # so flush() can pass skip_existing=True to the connector and let it use
         # native INSERT-OR-IGNORE semantics rather than Python-side prefiltering.
@@ -397,8 +407,10 @@ class ConnectorArrowDatabase:
         records = normalize_table_to_large_types(records, keep_null=True)
         self._connector.validate_records(records)
 
-        records = self._deduplicate_within_table(records)
         record_key = self._get_record_key(record_path)
+        self._refuse_changed_columns(record_path, records.schema)
+
+        records = self._deduplicate_within_table(records)
         input_ids = set(cast(list[bytes], records[self.RECORD_ID_COLUMN].to_pylist()))
 
         if skip_duplicates:
@@ -441,6 +453,57 @@ class ConnectorArrowDatabase:
 
         if flush:
             self.flush()
+
+    def _refuse_changed_columns(
+        self, record_path: tuple[str, ...], schema: pa.Schema
+    ) -> None:
+        """Refuse rows whose columns would not read back as written (ITL-1334).
+
+        The table holds one type per column, so an appended column must have the held
+        column's field metadata and nested field attributes (``appended_field_change``),
+        held by the stored table and by a batch pending for it: otherwise one side's
+        rows would read back with the other's. A connector that keeps no field
+        metadata refuses metadata and nested types itself, so only one that keeps it
+        is checked. The stored table's schema is read once per table
+        (``_read_stored_schema``): an append the check accepts does not change it.
+
+        Raises:
+            InputValidationError: For the first such column, naming it and the path.
+        """
+        if not self.keeps_field_metadata:
+            return
+        held: list[pa.Schema] = []
+        pending = self._pending_batches.get(self._get_record_key(record_path))
+        if pending is not None:
+            held.append(pending.schema)
+        table_name = self._path_to_table_name(self._path_prefix + record_path)
+        stored = self._stored_schemas.get(table_name)
+        if stored is None and table_name in self._connector.get_table_names():
+            stored = self._read_stored_schema(table_name)
+            if stored is not None:
+                self._stored_schemas[table_name] = stored
+        if stored is not None:
+            held.append(stored)
+        changed = first_changed_column(held, schema)
+        if changed is not None:
+            raise InputValidationError(
+                f"Cannot append to the table at {record_path!r}: column "
+                f"{changed[0]!r}: {changed[1]}. Nothing was written."
+            )
+
+    def _read_stored_schema(self, table_name: str) -> pa.Schema | None:
+        """The schema a read of the stored table gives, its field metadata included.
+
+        Read without rows from a connector that offers ``get_arrow_schema``
+        (``SpiralDBConnector``); from any other, the schema of its first batch.
+        """
+        get_arrow_schema = getattr(self._connector, "get_arrow_schema", None)
+        if callable(get_arrow_schema):
+            return cast("pa.Schema", get_arrow_schema(table_name))
+        first = next(
+            iter(self._connector.iter_batches(f'SELECT * FROM "{table_name}"')), None
+        )
+        return None if first is None else first.schema
 
     # ── base_path / at ────────────────────────────────────────────────────────
 

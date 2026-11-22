@@ -22,6 +22,7 @@ import uuid
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
+from orcapod.databases.utils import is_direct_projection
 from orcapod.errors import UnstorableTableNameError
 from orcapod.types import ColumnInfo
 from orcapod.utils.lazy_module import LazyModule
@@ -260,9 +261,10 @@ def _coerce_pg_value(value: Any, arrow_type: "pa.DataType") -> Any:
 def _resolve_column_type_lookup(
     query: str,
     connector: "PostgreSQLConnector",
-) -> dict[str, pa.DataType]:
+) -> dict[str, ColumnInfo]:
     """Parse the FROM clause of query to find the source table, then return
-    a column-name → Arrow-type dict from get_column_info.
+    a column-name → column info (Arrow type and nullability) dict from
+    get_column_info.
 
     Returns an empty dict if no single unambiguous table can be identified,
     causing iter_batches to fall back to pa.large_string() for all columns.
@@ -272,7 +274,7 @@ def _resolve_column_type_lookup(
         connector: The connector to call get_column_info on.
 
     Returns:
-        Dict mapping column name to Arrow DataType.
+        Dict mapping column name to its ``ColumnInfo``.
     """
     # Be conservative: only resolve types when we can unambiguously identify
     # a single source table. For multi-table queries (JOINs, comma-separated
@@ -310,7 +312,7 @@ def _resolve_column_type_lookup(
     if "," in from_tail:
         return {}
 
-    return {ci.name: ci.arrow_type for ci in connector.get_column_info(table_name)}
+    return {ci.name: ci for ci in connector.get_column_info(table_name)}
 
 
 def _field_has_metadata(field: pa.Field) -> bool:
@@ -589,10 +591,21 @@ class PostgreSQLConnector:
             if cur.description is None:
                 return
             col_names = [d.name for d in cur.description]
-            type_lookup = _resolve_column_type_lookup(query, self)
-            arrow_types = [type_lookup.get(n, _pa.large_string()) for n in col_names]
+            infos = _resolve_column_type_lookup(query, self)
+            arrow_types = [
+                infos[n].arrow_type if n in infos else _pa.large_string()
+                for n in col_names
+            ]
+            # A column created NOT NULL reads back non-null (ITL-1276), only as a
+            # direct projection of its table (an outer join can give it nulls).
+            direct = is_direct_projection(query)
             schema = _pa.schema(
-                [_pa.field(n, t) for n, t in zip(col_names, arrow_types)]
+                [
+                    _pa.field(
+                        n, t, infos[n].nullable or not direct if n in infos else True
+                    )
+                    for n, t in zip(col_names, arrow_types)
+                ]
             )
             rows = cur.fetchmany(batch_size)
 

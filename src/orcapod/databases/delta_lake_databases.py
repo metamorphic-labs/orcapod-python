@@ -16,18 +16,28 @@ from orcapod.databases._row_index import (
     matching_rows,
     rows_at,
 )
-from orcapod.databases.utils import coerce_record_id
+from orcapod.databases.utils import (
+    appended_field_change,
+    coerce_record_id,
+    metadata_bytes,
+)
 from orcapod.errors import (
     InputValidationError,
     OrcapodDatabaseReadError,
     TableListingNotSupportedError,
     TypeIdentityError,
+    UnstorableColumnError,
 )
 from orcapod.databases.delta_arrow_types import (
+    ARROW_TYPE_KEY,
     first_column_out_of_stored_range,
     from_delta_layout,
+    merged_type,
+    rebased_offsets,
     recorded_type,
     to_delta_layout,
+    with_recorded_type,
+    written_field,
 )
 from orcapod.databases.delta_statistics import statistics_configuration
 from orcapod.databases.storage_utils import (
@@ -138,8 +148,8 @@ def _allows_http(storage_options: Mapping[str, str]) -> bool:
 def _comparable_storage_type(arrow_type: pa.DataType) -> pa.DataType:
     """Return ``arrow_type`` reduced to what the append check compares.
 
-    Extension types are replaced by their storage type and every nested field is
-    made nullable, at every depth. The result is used only to compare a batch
+    Extension types are replaced by their storage type, a dictionary by its value
+    type, and every nested field is made nullable, at every depth. The result is used only to compare a batch
     with a stored table (ITL-884); it is never stored, so dropping nested
     non-null flags here changes no schema or hash.
 
@@ -151,6 +161,11 @@ def _comparable_storage_type(arrow_type: pa.DataType) -> pa.DataType:
     """
     if isinstance(arrow_type, pa.ExtensionType):
         return _comparable_storage_type(arrow_type.storage_type)
+    if pa.types.is_dictionary(arrow_type):
+        # The Delta writer decodes a dictionary: its values are what is stored.
+        return _comparable_storage_type(
+            arrow_utils.normalize_to_large_types(arrow_type.value_type)
+        )
     if pa.types.is_struct(arrow_type):
         return pa.struct(
             [pa.field(f.name, _comparable_storage_type(f.type)) for f in arrow_type]
@@ -182,7 +197,8 @@ def _without_null_types(arrow_type: pa.DataType) -> pa.DataType | None:
     """Return ``arrow_type`` without the parts typed ``null``, or ``None`` if none is left.
 
     A ``null``-typed value fits a column of any type, and Delta has no ``null``
-    type to compare it with, so the append check leaves it out at every depth: a
+    type, so the storability check (``delta_unstorable_reason``) leaves it out at
+    every depth: a
     ``null`` struct field is dropped (its siblings are still compared, inside lists
     and maps too), and a type that is ``null``, or whose list items or map keys or
     values are entirely ``null``, is not compared.
@@ -260,6 +276,576 @@ def _as_delta_writer_stores(schema: pa.Schema) -> pa.Schema:
     )
 
 
+def _conformed_to_stored(
+    delta_table: deltalake.DeltaTable, written: pa.Table, table_uri: str
+) -> pa.Table:
+    """Return ``written`` with each struct, at every depth, in the stored layout.
+
+    Delta's MERGE matches the fields of a struct by POSITION, so a struct appended with
+    its fields in another order would store each value under another field's name. Each
+    column the table stores is given the stored struct layout, by name: the stored
+    fields in their order (a field the rows omit is filled with nulls), then the rows'
+    new fields (schema evolution), at every depth of lists and maps. Logical
+    (extension) columns, whose layout their type fixes, are left as they are.
+
+    Args:
+        delta_table: The loaded stored table.
+        written: The rows about to be appended, as written (``to_delta_layout``).
+        table_uri: The table, for the error message.
+
+    Returns:
+        ``written`` in the stored layout.
+
+    Raises:
+        InputValidationError: The rows omit a struct field the table stores as
+            non-nullable.
+    """
+    stored = _stored_arrow_schema(delta_table)
+    for index, field in enumerate(written.schema):
+        position = stored.get_field_index(field.name)
+        if position < 0 or isinstance(field.type, pa.ExtensionType):
+            continue
+        column = written.column(index)
+        try:
+            conformed = pa.chunked_array(
+                [
+                    _conformed_array(chunk, stored.field(position).type)
+                    for chunk in column.chunks
+                ]
+            )
+        except ValueError as exc:
+            raise InputValidationError(
+                f"Cannot append to the stored table {table_uri!r}: column "
+                f"{field.name!r}: {exc}. The stored rows are unchanged and nothing "
+                "was written."
+            ) from exc
+        if conformed.type != column.type or _struct_orders(conformed.type) != (
+            _struct_orders(column.type)
+        ):
+            written = written.set_column(
+                index, field.with_type(conformed.type), conformed
+            )
+    return written
+
+
+def _struct_orders(arrow_type: pa.DataType) -> tuple[Any, ...]:
+    """The field names of every struct in ``arrow_type``, in order (Arrow's type
+    equality compares them, but this states the intent)."""
+    if pa.types.is_struct(arrow_type):
+        return tuple((f.name, _struct_orders(f.type)) for f in arrow_type)
+    return tuple(
+        _struct_orders(arrow_type.field(i).type) for i in range(arrow_type.num_fields)
+    )
+
+
+def _conformed_array(array: Any, stored: Any) -> Any:
+    """Return ``array`` with every struct in the stored layout (``_conformed_to_stored``).
+
+    Raises:
+        ValueError: The array omits a struct field ``stored`` has as non-nullable.
+    """
+    t = pa.types
+    if t.is_null(array.type) and not t.is_null(stored):
+        # A ``null``-typed part where the table stores a type: typed nulls, since
+        # Delta's MERGE panics on a ``null`` child of an evolving struct (ITL-1334).
+        return pa.nulls(len(array), stored)
+    mask = array.is_null() if array.null_count else None
+    if t.is_struct(array.type) and t.is_struct(stored):
+        own = {array.type.field(i).name: i for i in range(array.type.num_fields)}
+        fields, children = [], []
+        for stored_field in stored:
+            if stored_field.name in own:
+                i = own[stored_field.name]
+                child = _conformed_array(array.field(i), stored_field.type)
+                fields.append(array.type.field(i).with_type(child.type))
+                children.append(child)
+            elif stored_field.nullable:
+                fields.append(stored_field)
+                children.append(pa.nulls(len(array), stored_field.type))
+            else:
+                raise ValueError(
+                    f"the rows omit the struct field {stored_field.name!r}, stored as "
+                    "non-nullable"
+                )
+        stored_names = {f.name for f in stored}
+        for i in range(array.type.num_fields):
+            own_field = array.type.field(i)
+            if own_field.name not in stored_names:
+                fields.append(own_field)
+                children.append(array.field(i))
+        return pa.StructArray.from_arrays(children, fields=fields, mask=mask)
+    if t.is_map(array.type) and t.is_map(stored):
+        offsets, start, length = rebased_offsets(array)
+        keys = _conformed_array(array.keys.slice(start, length), stored.key_type)
+        items = _conformed_array(array.items.slice(start, length), stored.item_type)
+        return pa.MapArray.from_arrays(
+            offsets,
+            keys,
+            items,
+            type=cast(
+                Any,
+                pa.map_(  # pyright: ignore[reportCallIssue]  # pyarrow takes fields
+                    array.type.key_field.with_type(keys.type),
+                    array.type.item_field.with_type(items.type),
+                    keys_sorted=array.type.keys_sorted,
+                ),
+            ),
+            mask=mask,
+        )
+    # A fixed-size list is written as a large_list (``to_delta_layout``), so only the
+    # variable-size lists appear here.
+    lists = (t.is_list, t.is_large_list)
+    if any(k(array.type) for k in lists) and any(k(stored) for k in lists):
+        # cast: the type guards above narrow the types in the stubs' terms.
+        list_type: Any = array.type
+        offsets, start, length = rebased_offsets(array)
+        values = _conformed_array(
+            array.values.slice(start, length), cast(Any, stored).value_type
+        )
+        if values.type == list_type.value_type and _struct_orders(values.type) == (
+            _struct_orders(list_type.value_type)
+        ):
+            return array
+        value_field = list_type.value_field.with_type(values.type)
+        if t.is_large_list(array.type):
+            return pa.LargeListArray.from_arrays(
+                offsets, values, type=pa.large_list(value_field), mask=mask
+            )
+        return pa.ListArray.from_arrays(
+            offsets, values, type=pa.list_(value_field), mask=mask
+        )
+    return array
+
+
+def _with_merged_records(
+    delta_table: deltalake.DeltaTable, original: pa.Table, written: pa.Table
+) -> pa.Table:
+    """Return ``written`` with each recorded column's record describing the column
+    after the append (ITL-1334).
+
+    A column recorded on either side (stored or incoming) is recorded as the merge of
+    its stored type (its record, else its stored type) and the incoming rows' type
+    (``merged_type``): an append that evolves a struct (a field added, omitted or in
+    another order) keeps every stored field and its values, which a read then matches
+    by name. Columns the stored table does not have, and logical (extension) columns,
+    are left as they are.
+
+    Args:
+        delta_table: The loaded stored table.
+        original: The rows about to be appended, with their own types.
+        written: ``original`` as it is written (``to_delta_layout``).
+
+    Returns:
+        ``written`` with the merged records.
+    """
+    stored = _stored_arrow_schema(delta_table)
+    stored_records = {
+        f.name: recorded_type(f.metadata) for f in delta_table.schema().fields
+    }
+    for index, field in enumerate(written.schema):
+        position = stored.get_field_index(field.name)
+        own = original.schema.field(field.name).type
+        if position < 0 or isinstance(own, pa.ExtensionType):
+            continue
+        stored_record = stored_records.get(field.name)
+        incoming_record = recorded_type(field.metadata)
+        if stored_record is None and incoming_record is None:
+            continue
+        base = (
+            stored_record
+            if stored_record is not None
+            else arrow_utils.normalize_to_large_types(stored.field(position).type)
+        )
+        incoming = (
+            incoming_record
+            if incoming_record is not None
+            else arrow_utils.normalize_to_large_types(own)
+        )
+        written = written.set_column(
+            index,
+            with_recorded_type(field, merged_type(base, incoming)),
+            written.column(index),
+        )
+    return written
+
+
+_EXTENSION_KEYS = (b"ARROW:extension:name", b"ARROW:extension:metadata")
+
+
+def _metadata(metadata: Mapping[Any, Any] | None) -> dict[bytes, bytes]:
+    """A field's own metadata as bytes: without the record a Delta column carries
+    (``ARROW_TYPE_KEY``) and the extension name and metadata Delta keeps for a logical
+    column (they are its type)."""
+    as_bytes = metadata_bytes(metadata)
+    for key in (ARROW_TYPE_KEY, *_EXTENSION_KEYS):
+        as_bytes.pop(key, None)
+    return as_bytes
+
+
+def _is_logical(field: "pa.Field[Any]") -> bool:
+    """Whether ``field`` is a logical (extension) column: as given, or as Delta stores
+    it (its storage type, with the extension name in its metadata)."""
+    return isinstance(field.type, pa.ExtensionType) or (
+        _EXTENSION_KEYS[0] in metadata_bytes(field.metadata)
+    )
+
+
+def _evolution_change(
+    stored: Any, incoming: Any, path: str, *, in_map: bool = False
+) -> str | None:
+    """Say why a struct of ``incoming`` cannot evolve the stored one (ITL-1334).
+
+    Walks both types by struct field NAME and through lists and maps: a struct field
+    ``incoming`` adds may not be non-nullable (the stored rows have no value for it,
+    and Delta then cannot read the table), nor be inside a map (Delta's merge cannot
+    add it); a field it omits is filled with nulls (``_conformed_to_stored``), so it
+    may not be one stored as non-nullable.
+
+    Args:
+        stored: The type the table holds, large-normalized.
+        incoming: The appended rows' type, large-normalized.
+        path: Where in the column this is, for the reason.
+        in_map: Whether ``path`` is inside a map.
+
+    Returns:
+        The reason, or ``None``.
+    """
+    t = pa.types
+    if t.is_struct(stored) and t.is_struct(incoming):
+        known = {f.name: f for f in stored}
+        given = {f.name for f in incoming}
+        for field in stored:
+            if field.name not in given and not field.nullable:
+                return (
+                    f"{path}.{field.name} is stored as non-nullable, and the rows "
+                    "omit it"
+                )
+        for field in incoming:
+            here = f"{path}.{field.name}"
+            if field.name not in known:
+                if in_map:
+                    return f"{here} is a new struct field inside a map, which Delta cannot add"
+                if not field.nullable:
+                    return (
+                        f"{here} is a new non-nullable struct field, which the stored "
+                        "rows have no value for"
+                    )
+                continue
+            found = _evolution_change(
+                known[field.name].type, field.type, here, in_map=in_map
+            )
+            if found is not None:
+                return found
+        return None
+    if t.is_map(stored) and t.is_map(incoming):
+        return _evolution_change(
+            stored.key_type, incoming.key_type, f"{path}.key", in_map=True
+        ) or _evolution_change(
+            stored.item_type, incoming.item_type, f"{path}.item", in_map=True
+        )
+    lists = (t.is_list, t.is_large_list, t.is_fixed_size_list)
+    if any(k(stored) for k in lists) and any(k(incoming) for k in lists):
+        # cast: the type guards above narrow ``stored`` in the stubs' terms.
+        return _evolution_change(
+            cast(Any, stored).value_type,
+            incoming.value_type,
+            f"{path}[]",
+            in_map=in_map,
+        )
+    return None
+
+
+def _column_change(held: "pa.Field[Any]", field: "pa.Field[Any]") -> str | None:
+    """Say why rows of column ``field`` cannot be appended where ``held`` is held.
+
+    The column's own field metadata and its nested field tree must be the held ones
+    (``appended_field_change``): the table holds one type per column, so either
+    side's rows would read back with the other's. A struct may evolve, within
+    ``_evolution_change``. A logical column's type is its extension's, which the type
+    check compares; its own field metadata is compared here. Nullability is not
+    compared: the append check and Delta decide it, and whether a change is refused
+    belongs to the nullability audit (ITL-842).
+
+    Args:
+        held: The column as the table holds it (its record, else its stored type,
+            with its field metadata; or a pending batch's column).
+        field: The column of the rows to append.
+
+    Returns:
+        The reason, naming the path, or ``None``.
+    """
+    if _is_logical(field) or _is_logical(held):
+        if _metadata(held.metadata) == _metadata(field.metadata):
+            return None
+        return f"{field.name} has other field metadata than the stored column"
+    return appended_field_change(
+        held.with_metadata(cast(Any, _metadata(held.metadata))),
+        field.with_metadata(cast(Any, _metadata(field.metadata))),
+    ) or _evolution_change(
+        arrow_utils.normalize_to_large_types(held.type, keep_null=True),
+        arrow_utils.normalize_to_large_types(field.type, keep_null=True),
+        field.name,
+    )
+
+
+def _held_columns(delta_table: deltalake.DeltaTable) -> dict[str, "pa.Field[Any]"]:
+    """Each stored column as the table holds it: its recorded type, else its stored
+    type, with its field metadata as stored. Read from the log; no data is read."""
+    stored = _stored_arrow_schema(delta_table)
+    fields: dict[str, pa.Field[Any]] = {}
+    for delta_field in delta_table.schema().fields:
+        record = recorded_type(delta_field.metadata)
+        fields[delta_field.name] = pa.field(
+            delta_field.name,
+            record
+            if record is not None
+            else stored.field(stored.get_field_index(delta_field.name)).type,
+            nullable=delta_field.nullable,
+            metadata=cast(Any, metadata_bytes(delta_field.metadata)) or None,
+        )
+    return fields
+
+
+def _non_null_violation(
+    held: Mapping[str, "pa.Field[Any]"], rows: pa.Table
+) -> tuple[str, bool] | None:
+    """The first column ``held`` declares non-nullable that ``rows`` omit or hold a
+    null in: Delta's writer refuses such a batch (ITL-1334).
+
+    Args:
+        held: Columns by name: a stored table's, a pending batch's, or the rows' own.
+        rows: The rows to append.
+
+    Returns:
+        ``(column, omitted)``: ``omitted`` is ``True`` when the rows lack the column,
+        ``False`` when they hold a null in it; ``None`` when there is no such column.
+    """
+    for name, field in held.items():
+        if field.nullable:
+            continue
+        index = rows.schema.get_field_index(name)
+        if index < 0:
+            return name, True
+        if rows.column(index).null_count:
+            return name, False
+    return None
+
+
+def _append_refusal(
+    delta_table: deltalake.DeltaTable, rows: pa.Table
+) -> tuple[str, str] | None:
+    """The first column of ``rows`` the stored table cannot take, and why (ITL-1334).
+
+    One rule for what an append is refused for, checked before the rows are buffered
+    and again at flush against the version then loaded:
+
+    - a column change (``_column_change``): other field attributes, a struct that
+      adds a non-nullable field or one inside a map, or omits a non-nullable one;
+    - a column stored as non-nullable that the rows omit or hold a null in (Delta
+      refuses the commit);
+    - a type the stored column does not have (``_incompatible_append_column``);
+    - a value a column stored without a recorded type cannot hold
+      (``first_column_out_of_stored_range``).
+
+    Args:
+        delta_table: The loaded stored table.
+        rows: The rows to append, with their own types.
+
+    Returns:
+        ``(column, reason)``, or ``None`` when the rows can be appended.
+    """
+    held = _held_columns(delta_table)
+    for field in rows.schema:
+        if field.name in held:
+            change = _column_change(held[field.name], field)
+            if change is not None:
+                return field.name, change
+    violation = _non_null_violation(held, rows)
+    if violation is not None:
+        name, omitted = violation
+        return name, (
+            f"{name} is stored as non-nullable, and the rows "
+            f"{'omit it' if omitted else 'hold a null'}"
+        )
+    written = pa.schema([written_field(f) for f in rows.schema])
+    mismatch = DeltaTableDatabase._incompatible_append_column(
+        delta_table, rows.schema, written
+    )
+    if mismatch is not None:
+        column, stored_type, incoming_type = mismatch
+        return column, (
+            f"it is stored as {stored_type} but the new rows have {incoming_type} "
+            f"(input type {rows.schema.field(column).type})"
+        )
+    overflowing = first_column_out_of_stored_range(
+        rows, [name for name, f in held.items() if recorded_type(f.metadata) is None]
+    )
+    if overflowing is not None:
+        return overflowing, (
+            "it is stored as a signed integer with no recorded Arrow type (a table "
+            "written before ITL-928), and the new rows have "
+            f"{rows.schema.field(overflowing).type} values it cannot hold; rebuild "
+            "the database"
+        )
+    return None
+
+
+def _with_nulls_resolved(incoming: Any, held: Any) -> Any:
+    """``incoming`` with each ``null``-typed part replaced by the type ``held`` has at
+    the same path, so the parts beside it are still compared (ITL-1334).
+
+    Struct fields are matched by name; list items and map keys and items followed.
+    A ``null`` part at a path ``held`` has no type for stays ``null`` (refused by
+    ``add_records`` before this is reached).
+
+    Args:
+        incoming: A type reduced by ``_comparable_storage_type``.
+        held: The type the table holds, reduced the same way, or ``None``.
+
+    Returns:
+        ``incoming``, its ``null`` parts resolved.
+    """
+    t = pa.types
+    if held is None:
+        return incoming
+    if t.is_null(incoming):
+        return held
+    if t.is_struct(incoming) and t.is_struct(held):
+        known = {f.name: f.type for f in held}
+        return pa.struct(
+            [
+                f.with_type(_with_nulls_resolved(f.type, known.get(f.name)))
+                for f in incoming
+            ]
+        )
+    if t.is_map(incoming) and t.is_map(held):
+        return pa.map_(  # pyright: ignore[reportCallIssue]  # pyarrow takes key/item fields
+            incoming.key_field.with_type(
+                _with_nulls_resolved(incoming.key_type, held.key_type)
+            ),
+            incoming.item_field.with_type(
+                _with_nulls_resolved(incoming.item_type, held.item_type)
+            ),
+            keys_sorted=incoming.keys_sorted,
+        )
+    lists = (t.is_list, t.is_large_list, t.is_fixed_size_list)
+    if any(k(incoming) for k in lists) and any(k(held) for k in lists):
+        # cast: the type guards above narrow the types in the stubs' terms.
+        list_type: Any = incoming
+        item = list_type.value_field.with_type(
+            _with_nulls_resolved(list_type.value_type, cast(Any, held).value_type)
+        )
+        if t.is_large_list(list_type):
+            return pa.large_list(item)
+        if t.is_list(list_type):
+            return pa.list_(item)
+        return pa.list_(item, list_type.list_size)
+    return incoming
+
+
+def _untyped_null_paths(incoming: Any, given: Any, path: str) -> list[str]:
+    """Every path where ``incoming`` is ``null``-typed and ``given`` has no type.
+
+    ``given`` is what the stored table (or a pending batch) has at ``path``, or ``None``
+    when it has nothing there; a stored ``null`` type gives no type either. Struct
+    fields are matched by name, and list items, map keys and items followed.
+
+    Returns:
+        The dotted paths (``x.b``, ``x[]``), in field order; empty when every ``null``
+        part of ``incoming`` has a typed counterpart.
+    """
+    t = pa.types
+    if given is not None and t.is_null(given):
+        given = None
+    if t.is_null(incoming):
+        return [path] if given is None else []
+    if t.is_struct(incoming):
+        known = (
+            {f.name: f.type for f in given}
+            if given is not None and t.is_struct(given)
+            else {}
+        )
+        return [
+            found
+            for field in incoming
+            for found in _untyped_null_paths(
+                field.type, known.get(field.name), f"{path}.{field.name}"
+            )
+        ]
+    if t.is_map(incoming):
+        is_map = given is not None and t.is_map(given)
+        return _untyped_null_paths(
+            incoming.key_type, given.key_type if is_map else None, f"{path}.key"
+        ) + _untyped_null_paths(
+            incoming.item_type, given.item_type if is_map else None, f"{path}.item"
+        )
+    if incoming.num_fields or t.is_fixed_size_list(incoming):
+        is_list = given is not None and (
+            t.is_list(given) or t.is_large_list(given) or t.is_fixed_size_list(given)
+        )
+        return _untyped_null_paths(
+            incoming.value_type, given.value_type if is_list else None, f"{path}[]"
+        )
+    return []
+
+
+def _holds_empty_struct(arrow_type: pa.DataType) -> bool:
+    """Whether ``arrow_type`` is or nests a struct with no fields, which a Parquet file
+    cannot store (it stores values in leaf columns only; ITL-1334)."""
+    if isinstance(arrow_type, pa.BaseExtensionType):
+        return _holds_empty_struct(arrow_type.storage_type)
+    if pa.types.is_struct(arrow_type) and arrow_type.num_fields == 0:
+        return True
+    return any(
+        _holds_empty_struct(arrow_type.field(i).type)
+        for i in range(arrow_type.num_fields)
+    )
+
+
+def _holds_null_type(arrow_type: pa.DataType) -> bool:
+    """Whether ``arrow_type`` is or nests a ``null`` type (Delta has none; ITL-1334)."""
+    if pa.types.is_null(arrow_type):
+        return True
+    return any(
+        _holds_null_type(arrow_type.field(i).type) for i in range(arrow_type.num_fields)
+    )
+
+
+def delta_unstorable_reason(field: "pa.Field[Any]") -> str | None:
+    """Say why Delta cannot hold a column, even through a recorded type, or ``None``.
+
+    The column as it is written (``written_field``) goes through the Delta writer's
+    own conversion and type mapping (``_as_delta_writer_stores``), so the answer
+    follows the installed ``deltalake``: a timestamp in seconds is converted, a
+    ``decimal256`` or an interval is refused.
+
+    A ``null``-typed part is left out, as the append check leaves it out: it fits a
+    column already stored with a type, and a column with no stored type yet is
+    refused by ``add_records``, which knows the stored table.
+
+    Args:
+        field: A column, as given to the database.
+
+    Returns:
+        Delta's reason (``Invalid data type for Delta Lake: Decimal256(40, 2)``), or
+        ``None`` when Delta holds the column.
+    """
+    if arrow_utils.holds_renamed_map(field.type):
+        # The recorded type goes through Arrow IPC, which renames them (ITL-1334).
+        return "a map's key and item fields read back as 'key' and 'value'"
+    if _holds_empty_struct(field.type):
+        return "a struct with no fields has no leaf column for a Parquet file to store"
+    written = written_field(field)
+    reduced = _without_null_types(written.type)
+    if reduced is None:
+        return None
+    try:
+        _ = _as_delta_writer_stores(pa.schema([written.with_type(reduced)]))
+    except Exception as exc:  # noqa: BLE001  # deltalake raises a bare Exception
+        return str(exc).removeprefix("Schema error: ")
+    return None
+
+
 def _merge_source_in_stored_layout(
     delta_table: deltalake.DeltaTable, batch: pa.Table
 ) -> pa.Table:
@@ -268,9 +854,10 @@ def _merge_source_in_stored_layout(
     Delta stores ``large_list<large_binary>`` as ``list<binary>``, and the MERGE
     cannot plan a ``CASE WHEN`` over the two (ITL-984). A list column, a logical
     list included, is therefore handed to the MERGE as its storage type cast to
-    the stored type. The values are unchanged and the stored field metadata stays
-    as it is; every other column, and a list column the table does not have yet,
-    is passed as it is.
+    the stored type. The values are unchanged, and the field keeps its metadata (the
+    recorded type, a logical column's extension name and metadata), which a MERGE
+    that evolves the schema writes to the table; every other column, and a list
+    column the table does not have yet, is passed as it is.
 
     Args:
         delta_table: The loaded stored table.
@@ -297,9 +884,21 @@ def _merge_source_in_stored_layout(
             # More than the layout differs (a timestamp unit, a width, an evolved
             # struct): the MERGE decides, and no cast may change a value.
             continue
+        # The field keeps its metadata: a MERGE that evolves the schema takes each
+        # field's metadata from the source, so a dropped record or extension name
+        # would be dropped from the table (ITL-1334).
+        metadata = dict(field.metadata or {})
+        if isinstance(field.type, pa.ExtensionType):
+            metadata[b"ARROW:extension:name"] = field.type.extension_name.encode()
+            metadata[b"ARROW:extension:metadata"] = field.type.__arrow_ext_serialize__()
         batch = batch.set_column(
             index,
-            pa.field(field.name, target, nullable=field.nullable),
+            pa.field(
+                field.name,
+                target,
+                nullable=field.nullable,
+                metadata=cast(Any, metadata) or None,
+            ),
             pa.chunked_array([plain]).cast(target)
             if isinstance(plain, pa.Array)
             else plain.cast(target),
@@ -1014,6 +1613,220 @@ class DeltaTableDatabase:
             flush=flush,
         )
 
+    def require_storable(self, schema: pa.Schema) -> None:
+        """Refuse a table schema with a column Delta cannot hold (ITL-1334).
+
+        Most types Delta has no column type for are kept through a recorded type
+        (``delta_arrow_types``); the rest (``decimal256``, an interval) are refused,
+        as Delta's own schema conversion decides. Called by ``add_records`` before
+        anything of the table is buffered, and by a job node when the database is
+        attached to it (``contexts/stored.require_storable``), before anything runs.
+
+        Args:
+            schema: The Arrow schema of a table this database is to hold.
+
+        Raises:
+            UnstorableColumnError: For the first column Delta cannot hold, naming the
+                column, its Arrow type and Delta's reason.
+        """
+        for field in schema:
+            reason = delta_unstorable_reason(field)
+            if reason is not None:
+                raise UnstorableColumnError(
+                    database_kind=type(self).__name__,
+                    column=field.name,
+                    arrow_type=field.type,
+                    reason=reason,
+                )
+
+    def _refuse_unmergeable_append(
+        self,
+        record_path: tuple[str, ...],
+        records: pa.Table,
+        pending: pa.Table | None = None,
+    ) -> None:
+        """Refuse, before anything is buffered, rows a flush would refuse (ITL-1334).
+
+        Checked against a batch pending for the table (``_column_change``) and against
+        the stored table (``_append_refusal``, which the flush repeats against the
+        version it loads): what would not read back as written, would break the
+        table, or the Delta writer would reject. A stored table that cannot be loaded
+        is left to the flush, which reports it (``OrcapodDatabaseReadError``).
+
+        Args:
+            record_path: The table the rows are for.
+            records: The rows about to be added.
+            pending: The batch pending for the table as it would be queued with them
+                (``schema_handling="merge"`` re-types it), or ``None`` for the one
+                queued now.
+
+        Raises:
+            InputValidationError: For the first such column, naming it and the path.
+        """
+        if pending is None:
+            pending = self._pending_batches.get(self._get_record_key(record_path))
+        self._refuse_declared_nulls(record_path, records)
+        refusal = None
+        if pending is not None:
+            held = {f.name: f for f in pending.schema}
+            refusal = next(
+                (
+                    (f.name, change)
+                    for f in records.schema
+                    if f.name in held
+                    and (change := _column_change(held[f.name], f)) is not None
+                ),
+                None,
+            )
+            # A pending column declared non-nullable fails the write of the batch
+            # the rows join, whether or not a table is stored yet.
+            violation = _non_null_violation(held, records) if refusal is None else None
+            if violation is not None:
+                name, omitted = violation
+                refusal = (
+                    name,
+                    f"{name} is queued as non-nullable, and the rows "
+                    f"{'omit it' if omitted else 'hold a null'}",
+                )
+        if refusal is None:
+            try:
+                delta_table = self._get_delta_table(record_path)
+            except OrcapodDatabaseReadError:
+                delta_table = None
+            if delta_table is not None:
+                refusal = _append_refusal(delta_table, records)
+        if refusal is not None:
+            column, reason = refusal
+            raise InputValidationError(
+                f"Cannot append to the stored table "
+                f"{self._get_table_uri(record_path)!r}: column {column!r}: {reason}. "
+                "The stored rows are unchanged and nothing was written."
+            )
+
+    def _refuse_declared_nulls(
+        self, record_path: tuple[str, ...], rows: pa.Table
+    ) -> None:
+        """Refuse rows holding a null in a column they declare non-nullable (ITL-1334).
+
+        Delta's writer refuses such a batch, a first one included, so every row
+        queued with them would fail. ``add_records`` checks the rows as given, before
+        any ``schema_handling`` casts them (a cast to a nullable pending column would
+        hide the declaration), and again as they will be queued.
+
+        Args:
+            record_path: The table the rows are for.
+            rows: The rows.
+
+        Raises:
+            InputValidationError: For the first such column, naming it.
+        """
+        violation = _non_null_violation({f.name: f for f in rows.schema}, rows)
+        if violation is not None:
+            name = violation[0]
+            raise InputValidationError(
+                f"Cannot append to the stored table "
+                f"{self._get_table_uri(record_path)!r}: column {name!r}: {name} is "
+                "declared non-nullable, and the rows hold a null. The stored rows are "
+                "unchanged and nothing was written."
+            )
+
+    def _refuse_changed_attributes(
+        self, record_path: tuple[str, ...], schema: pa.Schema
+    ) -> None:
+        """Refuse rows whose field attributes differ from the held columns', compared
+        before any ``schema_handling`` casts them (ITL-1334).
+
+        A ``"merge"`` or ``"coerce"`` casts the rows to the pending batch's schema,
+        which would give them the pending columns' field metadata and nested
+        attributes: the rows would then be stored, and read back, with another
+        column's attributes. So the field tree of each column (``_column_change``) is
+        compared as given, against the pending batch and the stored table, in every
+        mode, as an append without schema handling is.
+
+        Args:
+            record_path: The table the rows are for.
+            schema: The schema of the rows as given.
+
+        Raises:
+            InputValidationError: For the first such column, naming it and the path.
+        """
+        held: list[dict[str, pa.Field[Any]]] = []
+        pending = self._pending_batches.get(self._get_record_key(record_path))
+        if pending is not None:
+            held.append({f.name: f for f in pending.schema})
+        try:
+            delta_table = self._get_delta_table(record_path)
+        except OrcapodDatabaseReadError:
+            delta_table = None
+        if delta_table is not None:
+            held.append(_held_columns(delta_table))
+        for given in held:
+            for field in schema:
+                if field.name not in given:
+                    continue
+                change = _column_change(given[field.name], field)
+                if change is not None:
+                    raise InputValidationError(
+                        f"Cannot append to the stored table "
+                        f"{self._get_table_uri(record_path)!r}: column "
+                        f"{field.name!r}: {change}. The stored rows are unchanged and "
+                        "nothing was written."
+                    )
+
+    def _refuse_untyped_null_columns(
+        self, record_path: tuple[str, ...], schema: pa.Schema
+    ) -> None:
+        """Refuse a ``null``-typed part that nothing stored gives a type (ITL-1334).
+
+        Delta has no ``null`` type. A ``null``-typed value, at any depth, fits where
+        the stored table (or a batch pending for it) already has a typed column or
+        nested field at the same path, and the append check leaves it out. A ``null``
+        part at a path nothing gives a type (a new column, a new struct field, the items
+        of a new list) cannot be written, so it is refused here, before anything is
+        buffered, instead of failing the flush without naming it.
+
+        Args:
+            record_path: The table the rows are for.
+            schema: The schema of the rows about to be added.
+
+        Raises:
+            UnstorableColumnError: For the first such column, naming the path.
+        """
+        untyped = [f for f in schema if _holds_null_type(f.type)]
+        if not untyped:
+            return
+        try:
+            delta_table = self._get_delta_table(record_path)
+        except OrcapodDatabaseReadError:
+            # A stored table that cannot be loaded is left to the flush to report.
+            return
+        stored = _stored_arrow_schema(delta_table) if delta_table is not None else None
+        pending = self._pending_batches.get(self._get_record_key(record_path))
+        for field in untyped:
+            known = [
+                given.field(given.get_field_index(field.name)).type
+                for given in (stored, pending.schema if pending is not None else None)
+                if given is not None and given.get_field_index(field.name) >= 0
+            ]
+            # A ``null`` part is typed when the stored table or the pending batch
+            # types its path; the flush writes it as typed nulls (``_conformed_array``).
+            unresolved = _untyped_null_paths(field.type, None, field.name)
+            for given_type in known:
+                typed_here = set(unresolved) - set(
+                    _untyped_null_paths(field.type, given_type, field.name)
+                )
+                unresolved = [p for p in unresolved if p not in typed_here]
+            if unresolved:
+                raise UnstorableColumnError(
+                    database_kind=type(self).__name__,
+                    column=field.name,
+                    arrow_type=field.type,
+                    reason=(
+                        "Delta has no null type, and nothing stored gives "
+                        f"{', '.join(repr(p) for p in unresolved)} a type"
+                    ),
+                )
+
     def add_records(
         self,
         record_path: tuple[str, ...],
@@ -1059,6 +1872,10 @@ class DeltaTableDatabase:
             total_name_map = {k: rename_map.get(k, k) for k in records.column_names}
             records = records.rename_columns(total_name_map)
 
+        # A column Delta cannot hold is refused before anything is buffered (ITL-1334).
+        self.require_storable(records.schema)
+        self._refuse_untyped_null_columns(record_path, records.schema)
+
         # Step 2: Deduplicate within input table (keep last occurrence)
         deduplicated_table = self._deduplicate_within_table(records)
 
@@ -1075,15 +1892,32 @@ class DeltaTableDatabase:
             # self._check_all_conflicts(record_path, deduplicated_table)
             filtered_table = deduplicated_table
 
-        # Step 4: Handle schema compatibility
-        schema_compatible_table = self._handle_schema_compatibility(
+        # Step 4: the rows' field attributes, compared as given: a merge or a
+        # coercion casts them to the pending batch's schema, which would give them
+        # its field metadata and nested attributes instead (ITL-1334).
+        self._refuse_changed_attributes(record_path, filtered_table.schema)
+        self._refuse_declared_nulls(record_path, filtered_table)
+
+        # Step 5: Handle schema compatibility (the pending batch is only staged)
+        schema_compatible_table, staged_pending = self._handle_schema_compatibility(
             record_path, filtered_table, schema_handling
         )
 
-        # Step 5: Add to pending batch (no overwrite logic needed)
+        # Step 6: what the flush would refuse is refused now, on the rows that are
+        # queued: after duplicates are dropped and any requested schema handling, the
+        # rows already queued included when a merge re-types them. Nothing queued
+        # changes unless both pass (ITL-1334).
+        self._refuse_unmergeable_append(
+            record_path, schema_compatible_table, staged_pending
+        )
+        if staged_pending is not None:
+            self._refuse_unmergeable_append(record_path, staged_pending, staged_pending)
+            self._pending_batches[self._get_record_key(record_path)] = staged_pending
+
+        # Step 7: Add to pending batch (no overwrite logic needed)
         self._add_to_pending_batch(record_path, schema_compatible_table)
 
-        # Step 6: Flush if asked to; otherwise commit this table alone once its
+        # Step 8: Flush if asked to; otherwise commit this table alone once its
         # pending batch reaches batch_size. Only the full table: committing every
         # pending table here would commit another table's rows, such as pipeline
         # records whose results are still pending, out of their writer's order
@@ -1170,16 +2004,24 @@ class DeltaTableDatabase:
 
     def _handle_schema_compatibility(
         self, record_path: tuple[str, ...], table: pa.Table, schema_handling: str
-    ) -> pa.Table:
-        """Handle schema differences between input and pending batch."""
+    ) -> tuple[pa.Table, pa.Table | None]:
+        """Handle schema differences between input and pending batch.
+
+        Nothing queued is changed here: a ``"merge"`` returns the pending batch cast to
+        the unified schema, for the caller to queue once the rows are accepted.
+
+        Returns:
+            The input as it is to be queued, and the re-typed pending batch (``None``
+            when the pending batch stays as it is).
+        """
         record_key = self._get_record_key(record_path)
         pending_batch = self._pending_batches.get(record_key)
         if pending_batch is None:
-            return table
+            return table, None
 
         if pending_batch.schema.equals(table.schema):
             # TODO: perform more careful check
-            return table
+            return table, None
 
         if schema_handling == "error":
             raise ValueError(
@@ -1190,18 +2032,15 @@ class DeltaTableDatabase:
                 # Unify schemas and cast both input table and pending batch
                 unified_schema = pa.unify_schemas([pending_batch.schema, table.schema])
 
-                # Cast the pending batch to unified schema (excluding tracking columns)
-                self._pending_batches[record_key] = pending_batch.cast(unified_schema)
-
-                # Cast and return the input table
-                return table.cast(unified_schema)
+                # The input and the pending batch, cast to the unified schema.
+                return table.cast(unified_schema), pending_batch.cast(unified_schema)
             except Exception as e:
                 # TODO: perform more careful error check
                 raise ValueError(f"Cannot merge schemas: {e}")
         elif schema_handling == "coerce":
             try:
                 # Coerce input table to match existing pending batch schema
-                return table.cast(pending_batch.schema)
+                return table.cast(pending_batch.schema), None
             except Exception as e:
                 raise ValueError(f"Cannot coerce schema: {e}")
         else:
@@ -1660,16 +2499,24 @@ class DeltaTableDatabase:
     def flush(self) -> None:
         """Flush all pending batches.
 
-        Every pending batch is attempted, even after one fails. A batch that fails
-        stays queued, so a later flush tries it again, and each failure is logged.
+        Every pending batch is attempted, even after one fails, and each failure is
+        logged. What happens to a failed batch depends on why it failed:
+
+        - Refused by its stored table (``InputValidationError``): the table, as
+          another writer committed it after the rows were queued, cannot take them
+          (``_append_refusal``). The batch is dropped from the queue, since every later
+          flush would refuse it too; the error says how many rows were not written.
+          Correct the rows and add them again (ITL-1334).
+        - Any other failure (a table that cannot be loaded, a failed write): the batch
+          stays queued, so a later flush tries it again.
 
         Raises:
             OrcapodDatabaseReadError: If a batch's existing table could not be loaded. It is
                 raised as itself; every other batch that failed in this flush is
                 added to it as a note.
             InputValidationError: If no batch failed with ``OrcapodDatabaseReadError`` but a
-                batch's column types differ from its stored table's. Other failed
-                batches are added to it as notes.
+                batch was refused by its stored table (dropped from the queue, above).
+                Other failed batches are added to it as notes.
             RuntimeError: If batches failed with other errors only, naming the
                 failed batches, with the first failure as its ``__cause__``.
         """
@@ -1691,6 +2538,9 @@ class DeltaTableDatabase:
                         database_error.add_note(
                             f"Another batch also failed to flush ({record_key}): "
                             f"{type(other).__name__}: {other}"
+                            + "".join(
+                                f" {note}" for note in getattr(other, "__notes__", [])
+                            )
                         )
                 raise database_error
             failed_keys = [k for k, _ in errors]
@@ -1790,36 +2640,26 @@ class DeltaTableDatabase:
                     f"Created new Delta table for {record_key} with {len(combined_table)} records"
                 )
             else:
-                mismatch = self._incompatible_append_column(
-                    delta_table, original_table, combined_table
-                )
-                if mismatch is not None:
-                    column, stored_type, incoming_type = mismatch
+                # The add-time check, against the version just loaded: another
+                # writer may have committed since the rows were buffered (ITL-1334).
+                refusal = _append_refusal(delta_table, original_table)
+                if refusal is not None:
+                    column, reason = refusal
                     raise InputValidationError(
                         f"Cannot append to the stored table {table_uri!r}: column "
-                        f"{column!r} is stored as {stored_type} but the new rows have "
-                        f"{incoming_type} (input type "
-                        f"{original_table.schema.field(column).type}). "
-                        "The stored rows are unchanged and nothing was written."
+                        f"{column!r}: {reason}. The stored rows are unchanged and "
+                        "nothing was written."
                     )
-                overflowing = first_column_out_of_stored_range(
+                # Delta's MERGE matches struct fields by position: the rows are given
+                # the stored struct layout by name first, so an evolved struct (fields
+                # reordered, omitted or added) keeps every value under its name; and a
+                # recorded column's record describes the column after this append
+                # (ITL-1334).
+                combined_table = _with_merged_records(
+                    delta_table,
                     original_table,
-                    [
-                        f.name
-                        for f in delta_table.schema().fields
-                        if recorded_type(f.metadata) is None
-                    ],
+                    _conformed_to_stored(delta_table, combined_table, table_uri),
                 )
-                if overflowing is not None:
-                    raise InputValidationError(
-                        f"Cannot append to the stored table {table_uri!r}: column "
-                        f"{overflowing!r} is stored as a signed integer with no "
-                        "recorded Arrow type (a table written before ITL-928), and "
-                        "the new rows have "
-                        f"{original_table.schema.field(overflowing).type} values it "
-                        "cannot hold. The stored rows are unchanged and nothing was "
-                        "written; rebuild the database."
-                    )
                 base = self._snapshot_for_commit(
                     record_key, delta_table, table_uri, abs_path_components
                 )
@@ -1854,6 +2694,26 @@ class DeltaTableDatabase:
                     f"Appended batch of {len(combined_table)} records to {record_key}"
                 )
 
+        except InputValidationError as e:
+            # The stored table refuses these rows (``_append_refusal``,
+            # ``_conformed_to_stored``): they would be refused by every later flush
+            # too, so they leave the queue, as rows refused when added never enter
+            # it (ITL-1334).
+            # The refusal was decided against a version this handle may not have
+            # cached: what it cached of the table is dropped, so its next read loads
+            # the version another writer committed.
+            self._delta_table_cache.pop(record_key, None)
+            self._snapshots.pop(record_key, None)
+            # The discard notice is part of the message, so it survives wherever the
+            # error is reported: the log, and the note ``flush`` puts on another
+            # batch's error when that one is raised instead.
+            refused = InputValidationError(
+                f"{e} The {pending_batch.num_rows} rows queued for table "
+                f"{record_key!r} were not written and are no longer queued: correct "
+                "them and add them again."
+            )
+            logger.error(f"Refused batch for {record_key}: {refused}")
+            raise refused from e
         except Exception as e:
             logger.error(f"Error flushing batch for {record_key}: {e}")
             # Put the tables back in the pending queue
@@ -1941,6 +2801,15 @@ class DeltaTableDatabase:
             incoming = _as_delta_writer_stores(schema)
         except Exception:
             # A type Delta cannot store directly (null): leave it to the MERGE.
+            return False
+        # A changed recorded type must reach the log: the MERGE writes it (ITL-1334).
+        stored_records = {
+            f.name: recorded_type(f.metadata) for f in delta_table.schema().fields
+        }
+        if any(
+            recorded_type(f.metadata) != stored_records.get(f.name)
+            for f in batch.schema
+        ):
             return False
         return incoming.equals(_stored_arrow_schema(delta_table), check_metadata=False)
 
@@ -2145,38 +3014,39 @@ class DeltaTableDatabase:
 
     @staticmethod
     def _incompatible_append_column(
-        delta_table: deltalake.DeltaTable, batch: pa.Table, written: pa.Table
+        delta_table: deltalake.DeltaTable, batch: pa.Schema, written: pa.Schema
     ) -> tuple[str, pa.DataType, pa.DataType] | None:
-        """Find a column whose type in ``batch`` differs from the stored table's.
+        """Find a column whose type in ``batch`` is not the type the table holds.
 
-        Delta's merge either casts such a batch to the stored type (``int32`` or
-        ``float64`` rows into an ``int64`` column) or, when an extension type is
-        involved, writes data files the table can no longer read. ``null``-typed
-        parts of the batch fit any stored type and are not compared (see
-        ``_without_null_types``). The batch's types
-        are first converted exactly as the Delta writer converts them (see
-        ``_as_delta_writer_stores``), then both sides are compared with extension
-        types reduced to storage, large-normalized and nullability ignored, so a
-        type Delta stores differently (``uint64`` as ``int64``, ``timestamp[ns]``
-        as ``timestamp[us]``) is not reported. Columns and nested
-        struct fields present on only one side are allowed (schema evolution);
-        see ``_types_conflict``. The stored schema comes from the loaded log; no
-        data is read.
+        One rule (ITL-1334): each column the stored table has is compared by its own
+        type with the type the table holds for it, its recorded type or else its
+        stored type (a column without a record holds a type Delta keeps exactly, so
+        its stored type is what was written). A conversion the Delta writer would make
+        is never taken as agreement: ``timestamp[ms]`` rows are refused by a
+        ``timestamp[us]`` column, whose read would give them back as microseconds.
+        Both sides are compared with extension types reduced to storage,
+        large-normalized and nested nullability ignored; struct fields are matched
+        by name, and a field on one side only is schema evolution
+        (``_types_conflict``). A ``null``-typed part takes the held type at its path
+        (``_with_nulls_resolved``), so its typed siblings, a map's keys beside
+        ``null`` items included, are still compared.
 
-        A stored column whose Arrow type is recorded (ITL-928, see
-        ``delta_arrow_types``) is compared by that type with the batch's own type
-        instead. A stored column without one was written before types were
-        recorded: besides the check above, the form the batch is written in
-        (``written``) must be the stored type, so a ``timestamp[ns]`` batch, now
-        written as ``int64``, is refused by a column stored as ``timestamp[us]``.
+        One exception keeps tables written before types were recorded (ITL-928)
+        appendable: an unsigned integer column, dictionary-encoded or not, into a
+        column without a record that holds its written form (the signed integer of
+        the same width), its values then checked by
+        ``first_column_out_of_stored_range``.
+
+        The stored schema comes from the loaded log; no data is read.
 
         Args:
             delta_table: The loaded stored table.
-            batch: The rows about to be merged into it, with their own types.
-            written: ``batch`` as it is written (``to_delta_layout(batch)``).
+            batch: The schema of the rows about to be merged into it, with their own
+                types.
+            written: ``batch`` as it is written (``written_field`` of each column).
 
         Returns:
-            ``(column, stored_type, incoming_type)`` for the first column whose
+            ``(column, held_type, incoming_type)`` for the first column whose
             compared types differ, or ``None`` when the batch can be appended.
         """
         stored = _stored_arrow_schema(delta_table)
@@ -2189,37 +3059,31 @@ class DeltaTableDatabase:
                 arrow_utils.normalize_to_large_types(arrow_type, keep_null=True)
             )
 
-        def conflict(
-            stored_schema: pa.Schema, rows: pa.Schema
-        ) -> tuple[str, pa.DataType, pa.DataType] | None:
-            compared = [
-                (f.name, _without_null_types(_comparable_storage_type(f.type)))
-                for f in rows
-                if recorded.get(f.name) is None
-            ]
-            incoming = _as_delta_writer_stores(
-                pa.schema([pa.field(name, t) for name, t in compared if t is not None])
+        for field in batch:
+            index = stored.get_field_index(field.name)
+            if index < 0:
+                continue  # a new column: schema evolution
+            record = recorded.get(field.name)
+            held = comparable(
+                record if record is not None else stored.field(index).type
             )
-            for field in incoming:
-                index = stored_schema.get_field_index(field.name)
-                if index < 0:
-                    continue
-                stored_type = comparable(stored_schema.field(index).type)
-                incoming_type = comparable(field.type)
-                if _types_conflict(stored_type, incoming_type):
-                    return field.name, stored_type, incoming_type
-            return None
-
-        for field in batch.schema:
-            stored_original = recorded.get(field.name)
-            if stored_original is None:
+            incoming = _with_nulls_resolved(comparable(field.type), held)
+            if not _types_conflict(held, incoming):
                 continue
-            reduced = _without_null_types(comparable(field.type))
-            if reduced is not None and _types_conflict(
-                comparable(stored_original), reduced
-            ):
-                return field.name, stored_original, field.type
-        return conflict(stored, batch.schema) or conflict(stored, written.schema)
+            decoded = (
+                field.type.value_type
+                if pa.types.is_dictionary(field.type)
+                else field.type
+            )
+            if record is None and pa.types.is_unsigned_integer(decoded):
+                as_written = _with_nulls_resolved(
+                    comparable(written_field(pa.field(field.name, decoded)).type),
+                    held,
+                )
+                if not _types_conflict(held, as_written):
+                    continue
+            return field.name, held, incoming
+        return None
 
     @property
     def base_path(self) -> tuple[str, ...]:
