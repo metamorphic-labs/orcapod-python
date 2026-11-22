@@ -108,7 +108,7 @@ and these about how it was computed (`__pf_exec_` prefix):
 
 | Column | Python type | Arrow type | Nullable | Meaning |
 |---|---|---|---|---|
-| `executor_type` | `str` | `large_string` | yes | the type identifier of the executor that ran the function: `local`, `ray.v0` (`RayExecutor`), or `none` when the function has no executor |
+| `executor_type` | `str` | `large_string` | yes | the executor that ran the function (`local`, `ray`, `none`) |
 | `executor_info` | `dict[str, str]` | `large_list<item: struct<key: large_string, value: large_string>>` | yes | the executor's own settings, as text |
 | `python_version` | `str` | `large_string` | yes | the Python version that ran the function (`3.12.3`) |
 | `extra_info` | `dict[str, str]` | `large_list<item: struct<key: large_string, value: large_string>>` | yes | further facts about the run, as text; empty today |
