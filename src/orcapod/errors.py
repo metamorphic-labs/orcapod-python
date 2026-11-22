@@ -791,6 +791,27 @@ class UpstreamFailedError(Exception):
     """
 
 
+class RejoinDifferingColumnWarning(UserWarning):
+    """``Rejoin`` dropped rows of one origin row because a shared column differed.
+
+    ``Rejoin`` puts rows together when every column its inputs share is equal: the
+    system tags, a tag several inputs have, the source info of a shared data-tag and
+    the data context (ITL-1355). Rows that come from one origin row (their system tags
+    match) and differ in another shared column are not put together: they are left out
+    of the result. A branch changed that column, which is rarely meant, so this warning
+    names such columns, once per operator and set of columns.
+
+    System tags are assumed unique in each input. Should an input repeat an origin row,
+    the repeats are compared by occurrence, the first of one input with the first of
+    another; a surplus repeat matches nothing whatever its values, and no warning is
+    issued for it.
+
+    To keep the rows, drop or rename the column in one branch before the rejoin
+    (``drop_tag_columns``, ``map_tags``). To silence the warning, call
+    ``warnings.filterwarnings("ignore", category=RejoinDifferingColumnWarning)``.
+    """
+
+
 class EmptyDataAccessError(Exception):
     """Raised when a payload-access method is called on an ``EmptyData`` instance.
 
