@@ -1722,7 +1722,10 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
                 reads_as_its_class(produced, ArrowTableStream)
                 and produced.data_context_key == self.data_context_key
             ):
-                result_table = result_stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+                # From the captured stream: reading the wrapper again could run the
+                # operator again (an upstream with no modified time), so the table,
+                # the keys and the gate describe one computation.
+                result_table = produced.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
                 if not system_tags_as_rows_give(result_table.schema):
                     result_table = None
             if result_table is None:
@@ -1730,7 +1733,8 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
                 # data context, system tags the rows type otherwise): main's own row
                 # path, its rows read once and handed on unchanged, its table built
                 # where a successor reads it (ITL-1347).
-                rows = list(result_stream.iter_data())
+                # The rows of the computation already made (``produced``), read once.
+                rows = list(produced.iter_data())
                 self._cached_output_stream = StaticOutputOperatorPod._kept_output(
                     result_stream, rows
                 )
@@ -1751,7 +1755,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
                         )
                     except RowBuiltFormUnavailable as error:
                         StaticOutputOperatorPod._raise_as_rows_do(
-                            result_stream.iter_data(), error
+                            produced.iter_data(), error
                         )
                     self._cached_output_stream = ArrowTableStream(
                         kept_table, tag_columns=tag_keys, data_tags=data_tags
