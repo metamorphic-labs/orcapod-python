@@ -9,7 +9,10 @@ from __future__ import annotations
 import logging
 import re
 import threading
-from typing import TYPE_CHECKING, Any, Iterable
+from typing import Any, Iterable
+
+import polars as pl
+import pyarrow as pa
 
 from orcapod.errors import MissingOptionalDependencyError
 from orcapod.logical_types.identifier import LogicalTypeIdentifierError
@@ -20,14 +23,6 @@ from orcapod.logical_types.protocols import (
     LogicalTypeFactoryProtocol,
 )
 from orcapod.utils.deferred_types import load_object, module_available, qualified_name
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import polars as pl
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
-    pl = LazyModule("polars")
 
 logger = logging.getLogger(__name__)
 

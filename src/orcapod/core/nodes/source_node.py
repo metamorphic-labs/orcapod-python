@@ -17,6 +17,8 @@ from collections.abc import AsyncIterator, Collection, Iterator, Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
+import pyarrow as pa
+
 from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.core.base import TraceableBase
@@ -46,7 +48,6 @@ from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
 from orcapod.types import ColumnConfig, ContentHash, Schema
 from orcapod.utils import arrow_utils
 from orcapod.utils.arrow_utils import system_tag_column_names
-from orcapod.utils.lazy_module import LazyModule
 from orcapod.utils.schema_utils import (
     arrow_schema_identity,
     compute_source_schema_hash,
@@ -54,13 +55,9 @@ from orcapod.utils.schema_utils import (
 )
 
 if TYPE_CHECKING:
-    import pyarrow as pa
-
     from orcapod.channels import WritableChannel
     from orcapod.protocols.core_protocols import StreamProtocol
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
-else:
-    pa = LazyModule("pyarrow")
 
 logger = logging.getLogger(__name__)
 

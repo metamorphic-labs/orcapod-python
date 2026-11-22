@@ -30,15 +30,11 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Collection, Mapping
-from typing import TYPE_CHECKING, Any
+from typing import Any
+
+import pyarrow as pa
 
 from orcapod.utils import arrow_utils
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
 
 # Field metadata key holding a column's original Arrow type.
 ARROW_TYPE_KEY = b"orcapod:arrow_type"

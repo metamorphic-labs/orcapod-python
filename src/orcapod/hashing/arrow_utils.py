@@ -4,14 +4,9 @@ import base64
 import hashlib
 import json
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
+import pyarrow as pa
 
 
 def serialize_pyarrow_table_schema(table: "pa.Table") -> str:

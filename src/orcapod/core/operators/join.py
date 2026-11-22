@@ -3,7 +3,9 @@ import functools
 import itertools
 import json
 from collections.abc import Callable, Collection, Mapping, Sequence
-from typing import Any, ClassVar, TYPE_CHECKING
+from typing import Any, ClassVar
+
+import pyarrow as pa
 
 from orcapod.core.operators.meta_columns import (
     WithoutMetaWriter,
@@ -42,15 +44,6 @@ from orcapod.protocols.core_protocols import (
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, ContentHash, DataValue, Schema
 from orcapod.utils import arrow_utils, schema_utils
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import polars as pl
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
-    pl = LazyModule("polars")
-
 
 # The row-number columns of the frames Polars joins (``_inner_join``); a tag, so a
 # key, never starts with the meta prefix ``__``.

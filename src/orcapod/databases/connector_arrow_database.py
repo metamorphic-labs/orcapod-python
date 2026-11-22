@@ -21,7 +21,10 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from collections.abc import Collection, Mapping
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
+
+import pyarrow as pa
+import pyarrow.compute as pc
 
 from orcapod.databases.utils import coerce_record_id
 from orcapod.errors import UnstorableColumnError, UnstorableTableNameError
@@ -31,14 +34,6 @@ from orcapod.utils.arrow_utils import (
     normalize_to_large_types,
 )
 from orcapod.protocols.db_connector_protocol import ColumnInfo, DBConnectorProtocol
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-    import pyarrow.compute as pc
-else:
-    pa = LazyModule("pyarrow")
-    pc = LazyModule("pyarrow.compute")
 
 
 def _arrow_schema_to_column_infos(schema: pa.Schema) -> list[ColumnInfo]:

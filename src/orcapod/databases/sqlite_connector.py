@@ -19,16 +19,11 @@ import os
 import sqlite3
 import threading
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, Any
+from typing import Any
+
+import pyarrow as pa
 
 from orcapod.types import ColumnInfo
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-else:
-    from orcapod.utils.lazy_module import LazyModule
-
-    pa = LazyModule("pyarrow")
 
 logger = logging.getLogger(__name__)
 

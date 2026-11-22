@@ -8,18 +8,12 @@ and type detection overhead.
 
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import Any
 from collections.abc import Callable
 import pyarrow as pa
-from orcapod.utils.lazy_module import LazyModule
 
 
 from orcapod.semantic_types.universal_converter import UniversalTypeConverter
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
 
 
 class SemanticSchemaConverter:

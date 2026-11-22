@@ -3,7 +3,9 @@ from __future__ import annotations
 import itertools
 import logging
 from collections.abc import Collection, Iterator
-from typing import TYPE_CHECKING, Any
+from typing import Any
+
+import pyarrow as pa
 
 from orcapod.hashing.orcapod_table import OrcapodTable
 from orcapod import contexts
@@ -19,13 +21,6 @@ from orcapod.protocols.hashing_protocols import PipelineElementProtocol
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema, SourceInfoValue
 from orcapod.utils import arrow_utils, schema_utils
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
-
 
 logger = logging.getLogger(__name__)
 

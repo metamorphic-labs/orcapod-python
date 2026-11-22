@@ -770,7 +770,7 @@ src/orcapod/
     ├── arrow_data_utils.py     # System tag manipulation, source info, column helpers
     ├── arrow_utils.py          # Arrow table utilities
     ├── schema_utils.py         # Schema extraction, union, intersection, compatibility
-    └── lazy_module.py          # LazyModule for deferred heavy imports
+    └── lazy_module.py          # LazyModule for modules `import orcapod` does not load
 
 tests/
 ├── test_core/
@@ -1120,8 +1120,15 @@ and `as_table()` methods. `all_info=True` sets everything to True.
 
 ### Key patterns
 
-- **`LazyModule("pyarrow")`** — deferred import for heavy deps (pyarrow, polars). Used in
-  `if TYPE_CHECKING:` / `else:` blocks at module level.
+- **Imports: direct, or `LazyModule` only for a module `import orcapod` does not load**
+  (developer, November 22, 2026, ITL-1349). Every attribute read through a `LazyModule` is
+  a `__getattr__` call (42.9 million in one warm workshop-scale `job.run()`), so a module
+  that `import orcapod` loads anyway (pyarrow, `pyarrow.compute`, polars, numpy, pandas,
+  asyncio) is imported directly: `import pyarrow as pa`. `LazyModule` (in an
+  `if TYPE_CHECKING:` / `else:` block at module level) stays only for a module a plain
+  `import orcapod` never loads (networkx, deltalake, `pyarrow.fs`, `pyarrow.dataset`, git)
+  and for the optional extras (psycopg, ray, spiral).
+  `tests/test_utils/test_lazy_module_use.py` checks it.
 - **Argument symmetry** — each operator declares `argument_symmetry(streams)` returning
   `frozenset` (commutative) or `tuple` (ordered). Determines how upstream hashes combine.
 - **`StaticOutputPod.process()` → `DynamicPodStream`** — wraps `static_process()` output

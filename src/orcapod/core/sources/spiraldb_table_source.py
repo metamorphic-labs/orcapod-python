@@ -45,6 +45,7 @@ from collections.abc import AsyncIterator, Collection, Generator, Iterator, Mapp
 from contextlib import contextmanager
 from typing import Any, ClassVar, NamedTuple, TYPE_CHECKING
 
+import pyarrow as pa
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource, saved_tag_only_columns
@@ -65,19 +66,12 @@ from orcapod.databases.spiraldb_connector import SpiralDBConnector
 from orcapod.errors import InputValidationError, RowIdentifierError, SourceTooLargeError
 from orcapod.types import ColumnConfig, Condition
 from orcapod.utils import arrow_utils
-from orcapod.utils.lazy_module import LazyModule
 from orcapod.utils.schema_utils import _normalize_column_list
 
 if TYPE_CHECKING:
-    import polars as pl
-    import pyarrow as pa
-
     from orcapod import contexts
     from orcapod.config import OrcapodConfig
     from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
-else:
-    pa = LazyModule("pyarrow")
-    pl = LazyModule("polars")
 
 DEFAULT_MAX_ROWS = 100_000
 DEFAULT_BATCH_ROWS = 8_192

@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 import typing
 from collections.abc import Sequence
-from typing import Any, ClassVar, TYPE_CHECKING, cast
+from typing import Any, ClassVar, cast
+
+import pyarrow as pa
 
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
@@ -17,12 +19,6 @@ from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
 from orcapod.types import ColumnConfig, ContentHash, Schema, SourceInfoValue
 from orcapod.utils import arrow_utils, schema_utils
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
 
 logger = logging.getLogger(__name__)
 

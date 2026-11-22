@@ -3,7 +3,10 @@ import contextlib
 import warnings
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Collection, Sequence
-from typing import TYPE_CHECKING, Any, ClassVar, final
+from typing import Any, ClassVar, final
+
+import pyarrow as pa
+import pyarrow.compute as pc
 
 from orcapod.channels import ChannelClosed, ReadableChannel, WritableChannel
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
@@ -22,17 +25,7 @@ from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagPr
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, ContentHash, Schema
 from orcapod.utils import arrow_utils, schema_utils
-from orcapod.utils.lazy_module import LazyModule
 from orcapod.utils.warning_utils import outside_orcapod_stacklevel
-
-if TYPE_CHECKING:
-    import polars as pl
-    import pyarrow as pa
-    import pyarrow.compute as pc
-else:
-    pa = LazyModule("pyarrow")
-    pc = LazyModule("pyarrow.compute")
-    pl = LazyModule("polars")
 
 # The row-number column of the left frame Polars matches; a tag, so a key, never
 # starts with the meta prefix ``__``.

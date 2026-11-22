@@ -14,7 +14,11 @@ from collections.abc import (
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
+
+import pandas as pd
+import polars as pl
+import pyarrow as pa
 
 from orcapod.core.base import TraceableBase
 from orcapod.core.streams.view import (
@@ -32,17 +36,6 @@ from orcapod.protocols.core_protocols import (
 )
 from orcapod.types import ColumnConfig, Schema
 from orcapod.utils import arrow_utils
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import pandas as pd
-    import polars as pl
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
-    pl = LazyModule("polars")
-    pd = LazyModule("pandas")
-
 
 # TODO: consider using this instead of making copy of dicts
 # from types import MappingProxyType

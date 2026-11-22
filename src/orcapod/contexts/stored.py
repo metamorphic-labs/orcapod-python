@@ -32,7 +32,10 @@ import logging
 import warnings
 from collections.abc import Collection
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, cast
+from typing import Any, NamedTuple, Protocol, cast
+
+import pyarrow as pa
+import pyarrow.compute as pc
 
 from orcapod.errors import (
     InputValidationError,
@@ -49,14 +52,6 @@ from orcapod.system_constants import (
     TRACKING_DB_SCHEMA_VERSION,
     constants,
 )
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-    import pyarrow.compute as pc
-else:
-    pa = LazyModule("pyarrow")
-    pc = LazyModule("pyarrow.compute")
 
 logger = logging.getLogger(__name__)
 

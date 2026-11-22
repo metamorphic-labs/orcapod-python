@@ -24,6 +24,9 @@ from abc import abstractmethod
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+import pyarrow as pa
+import pyarrow.compute as pc
+
 from orcapod import contexts
 from orcapod.core.data_tags import (
     mark_data_tags,
@@ -82,18 +85,11 @@ from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.system_constants import OPERATOR_DB_SCHEMA_VERSION, constants
 from orcapod.types import CacheMode, ColumnConfig, ContentHash, Schema
 from orcapod.utils import arrow_utils
-from orcapod.utils.lazy_module import LazyModule
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    import pyarrow as pa
-    import pyarrow.compute as pc
-
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
-else:
-    pa = LazyModule("pyarrow")
-    pc = LazyModule("pyarrow.compute")
 
 
 async def _discard(channel: ReadableChannel[Any]) -> None:

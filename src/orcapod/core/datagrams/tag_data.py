@@ -21,6 +21,8 @@ import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Self
 
+import pyarrow as pa
+
 from orcapod import contexts
 from orcapod.core.datagrams.datagram import Datagram, context_key_field
 from orcapod.semantic_types import infer_python_schema_from_pylist_data
@@ -35,14 +37,9 @@ from orcapod.types import (
     SourceInfoValue,
 )
 from orcapod.utils import arrow_utils
-from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
-    import pyarrow as pa
-
     from orcapod.protocols.core_protocols import DataProtocol
-else:
-    pa = LazyModule("pyarrow")
 
 logger = logging.getLogger(__name__)
 

@@ -1,14 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
+import pyarrow as pa
 
 
 class NoOpArrowDatabase:

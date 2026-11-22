@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping, Sequence, Set
-from typing import Any, ClassVar, TYPE_CHECKING, cast, get_origin
+from typing import Any, ClassVar, cast, get_origin
+
+import numpy as np
+import polars as pl
+import pyarrow as pa
 
 from orcapod.core.operators.arrow_keys import (
     is_list_kind,
@@ -21,18 +25,7 @@ from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
 from orcapod.utils import arrow_utils
-from orcapod.utils.lazy_module import LazyModule
 from orcapod.utils.schema_utils import column_names
-
-if TYPE_CHECKING:
-    import numpy as np
-    import polars as pl
-    import pyarrow as pa
-else:
-    np = LazyModule("numpy")
-    pl = LazyModule("polars")
-    pa = LazyModule("pyarrow")
-
 
 # GroupBy decides which rows form a group, and in what order, with Polars, and builds
 # its output from the input's Arrow arrays (ITL-1250): no value passes through Python,

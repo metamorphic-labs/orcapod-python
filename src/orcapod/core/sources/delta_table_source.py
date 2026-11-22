@@ -6,6 +6,7 @@ from collections.abc import Collection
 from pathlib import Path
 from typing import Any, ClassVar, TYPE_CHECKING
 
+import pyarrow as pa
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource, saved_tag_only_columns
@@ -23,10 +24,8 @@ from orcapod.utils.lazy_module import LazyModule
 from orcapod.utils.schema_utils import _normalize_column_list
 
 if TYPE_CHECKING:
-    import pyarrow as pa
     import deltalake
 else:
-    pa = LazyModule("pyarrow")
     deltalake = LazyModule("deltalake")
 
 
