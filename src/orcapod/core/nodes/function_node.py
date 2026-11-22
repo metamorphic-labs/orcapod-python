@@ -364,6 +364,78 @@ def passed_rows_output_stream(
         StaticOutputOperatorPod._raise_as_rows_do(rows, error)  # pyright: ignore[reportPrivateUsage]  # the rows' own error
 
 
+class _LazyRows:
+    """A stream's rows, made on the first read of any of them (ITL-1361).
+
+    A run over stored results reads no input row's values: it passes the rows to the
+    observers only. The rows are made once, when one is first read.
+    """
+
+    def __init__(self, stream: StreamProtocol) -> None:
+        self._stream = stream
+        self._rows: list[tuple[TagProtocol, DataProtocol]] | None = None
+
+    def get(self) -> list[tuple[TagProtocol, DataProtocol]]:
+        """The stream's rows, made on the first call."""
+        if self._rows is None:
+            self._rows = list(self._stream.iter_data())
+        return self._rows
+
+
+class _RowView:
+    """One input row's tag or data, made only when it is read (``RowView`` in the spec).
+
+    Every attribute is the datagram's: the first read makes the input's rows
+    (``_LazyRows``). The observers a job installs read no input row, so a run over
+    stored results makes none (ITL-1361).
+    """
+
+    __slots__ = ("_index", "_part", "_rows")
+
+    def __init__(self, rows: _LazyRows, index: int, part: int) -> None:
+        self._rows = rows
+        self._index = index
+        self._part = part
+
+    def datagram(self) -> Any:
+        """The row's datagram (its tag for part 0, its data for part 1)."""
+        return self._rows.get()[self._index][self._part]
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.datagram(), name)
+
+    def __getitem__(self, key: Any) -> Any:
+        return self.datagram()[key]
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter(self.datagram())
+
+    def __len__(self) -> int:
+        return len(self.datagram())
+
+    def __contains__(self, key: object) -> bool:
+        return key in self.datagram()
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, _RowView):
+            other = other.datagram()
+        return bool(self.datagram() == other)
+
+    def __hash__(self) -> int:
+        return hash(self.datagram())
+
+    def __repr__(self) -> str:
+        return repr(self.datagram())
+
+    def __str__(self) -> str:
+        return str(self.datagram())
+
+
+def _datagram(value: Any) -> Any:
+    """The datagram behind a ``_RowView``, or ``value`` itself."""
+    return value.datagram() if isinstance(value, _RowView) else value
+
+
 class _StoredHitTable(NamedTuple):
     """The table of stored results a node loaded, and its stream's keys (ITL-1361)."""
 
@@ -2785,8 +2857,8 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 pkt_logger = ctx_obs.create_data_logger(tag, data)
                 try:
                     tag_out, result = self._process_data_internal(
-                        tag,
-                        data,
+                        _datagram(tag),
+                        _datagram(data),
                         logger=pkt_logger,
                         run_id=run_id,
                         base_entry_id=base_entry_id,
@@ -3233,7 +3305,8 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         field flags set by their values as a row's are (``_flag_by_values``), and the
         input data hash is ``hash_table`` of its data columns, which is the data
         datagram's content hash (``Datagram.identity_structure``). The same ids,
-        without building each row's tables (ITL-1361).
+        without building each row's tables (ITL-1361). The rows are then views
+        (``_RowView``), made only when one is read.
 
         Args:
             input_stream: The node's input.
@@ -3243,13 +3316,15 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         """
         from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 
-        rows = list(input_stream.iter_data())
-        if not rows or not isinstance(input_stream, ArrowTableStream):
+        if not isinstance(input_stream, ArrowTableStream):
             return [
-                (tag, data, self.compute_base_entry_id(tag, data)) for tag, data in rows
+                (tag, data, self.compute_base_entry_id(tag, data))
+                for tag, data in input_stream.iter_data()
             ]
         tag_keys, data_keys = input_stream.keys()
         table = input_stream.as_table(columns={"system_tags": True})
+        # The rows themselves are made only when one is read (``_RowView``).
+        lazy = _LazyRows(input_stream)
         system_tags = [
             name
             for name in table.column_names
@@ -3262,8 +3337,8 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         hasher = self.data_context.arrow_hasher
         return [
             (
-                tag,
-                data,
+                cast(TagProtocol, _RowView(lazy, index, 0)),
+                cast(DataProtocol, _RowView(lazy, index, 1)),
                 hasher.hash_table(
                     _with_input_data_hash(
                         tag_side.slice(index, 1),
@@ -3271,7 +3346,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                     )
                 ).to_prefixed_digest(),
             )
-            for index, (tag, data) in enumerate(rows)
+            for index in range(table.num_rows)
         ]
 
     def compute_pipeline_entry_id(
