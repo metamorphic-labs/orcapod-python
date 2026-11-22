@@ -198,7 +198,7 @@ class InputChannel(ReadableChannel[pa.RecordBatch], Protocol):
     async def receive(self) -> pa.RecordBatch: ...  # raises ChannelClosed at the end
     def __aiter__(self) -> AsyncIterator[pa.RecordBatch]: ...
     async def collect(self) -> list[pa.RecordBatch]: ...  # as every ReadableChannel
-    async def to_stream(self) -> StreamProtocol: ...  # reads to the end: an ordinary stream
+    async def to_stream(self) -> StreamProtocol: ...  # reads to the end: the producer's result()
     async def close(self) -> None: ...  # stop reading; the producer stops waiting
 
 
@@ -249,7 +249,7 @@ class OutputChannel(WritableChannel[pa.RecordBatch], Protocol):
 |---|---|---|
 | stream → input channel | `channel_from_stream(stream, buffer_size)`, called by `StreamBase.open_channel()` | held nodes feeding async successors; tests; any async consumer of a complete stream |
 | output channel → stream | `stream_from_batches(stream, batches)`, called by `OutputChannel.result()` | every node's async output |
-| input channel → stream | `stream_from_batches(channel.stream, batches)`, called by `InputChannel.to_stream()` | barrier operators; operators that need all of an input |
+| input channel → stream | `InputChannel.to_stream()`: reads to the end, then gives the producer's `result()` (sync order); for a producer with `retain=False`, `stream_from_batches(channel.stream, batches)` | barrier operators; the close of a streaming operator |
 
 `stream_from_batches` is the only place a stream is made from Arrow record batches. It
 concatenates them, applies F step 5, and wraps the result as `_as_upstream_stream` does for
@@ -269,8 +269,123 @@ checks and zero-row results are one implementation. For example,
 - **A per-row operator** (select, map, `AddTags`, `DropNulls`, `Index`, `Pick`) has one rule,
   `_apply(arrow_table, stream)`. Sync applies it to `stream.as_table()`. Async applies it to
   each Arrow record batch, with `channel.stream` as the description.
-- **`Join` and `SemiJoin`, async**: check key types from `channel.stream.arrow_schema()`
-  before the first batch (ITL-856), and order inputs with the sync method.
+- **`Join`, `MergeJoin`, `Rejoin` and `SemiJoin`, async**: check key types from
+  `channel.stream.arrow_schema()` before the first batch (ITL-856), order inputs with the
+  sync method, and stream as below.
+
+### Barrier or streaming: every operator
+
+The developer, 2026-11-22: `Join` and `Rejoin` must not be barrier operators; both can run
+fully async on Arrow record batches. The test for each operator: can each output row be
+decided from the input rows seen so far, and is its content independent of the order in
+which rows arrive? If so, the operator streams. If it needs all of an input, or its rows
+depend on input order, it is a barrier.
+
+| Operator | Async form | Why |
+|---|---|---|
+| `SelectTagColumns`, `SelectDataColumns`, `DropTagColumns`, `DropDataColumns`, `SelectColumns`, `DropColumns`, `MapTags`, `MapData`, `MapColumns`, `AddTags`, `DropNulls`, `Index`, `Pick` | streaming, per Arrow record batch | each output row comes from one input row, and its content does not depend on other rows |
+| `Join` | streaming: a symmetric hash join | an output row is a pair of matching rows; it can be emitted as soon as both have arrived |
+| `MergeJoin` | streaming, as `Join` | the same inner join (`join._inner_join`). Each matched pair's lists are built from that pair alone, in argument order |
+| `Rejoin` | streaming: a symmetric hash join on every system-tag column | an output row is the set of one origin row's rows from every input |
+| `SemiJoin` | streaming on the left. A left row is emitted as soon as its key is among the right rows seen so far; undecided left rows wait for the right input to close | whether a left row is kept depends on the whole right input only when no match has been seen yet |
+| `GroupBy` | barrier | a group needs all its members. Its output does not depend on input order (members are ordered by tags, record id and source id; groups by key) |
+| `Batch` | barrier | its groups are consecutive rows, so its output rows depend on input order. A streamed batch over rows that arrived in another order would be a different row, not the same row moved |
+| `PolarsFilter` | barrier | a predicate may be a window or whole-table expression (`pl.col(...).rank()`), so a row cannot be decided alone |
+| one-input `Join` / `Rejoin` | pass-through | as today |
+
+On `main`:
+- `Join`'s async path already streams: a symmetric hash join, row by row
+  (`join.py:669`, `_binary_streaming_join`), with N inputs as a staggered chain in canonical
+  order.
+- `Rejoin` is a barrier (`rejoin.py:416` delegates to the default).
+- `Batch` streams per batch over arrival order, and is a barrier for `batch_size=0`
+  (`batch.py:211`).
+
+The change: `Rejoin` and `MergeJoin` stream; `Batch` becomes a barrier, so its rows are
+always the sync rows.
+
+#### Streaming `Join` and `MergeJoin`
+
+- **Hash tables.** Each input keeps an accumulating Arrow table of its rows and a key frame
+  of its prepared keys (`arrow_keys.polars_ready`, as the sync join prepares them). The key
+  frame holds the shared tag keys and row numbers only.
+- **Probing.** When an Arrow record batch arrives on one input, its key frame is joined
+  (Polars, keys and row numbers only, as `_inner_join` does) with the other input's
+  accumulated key frame. The matches are emitted at once, every value taken from the two
+  Arrow tables by row number (`take`), so values are the inputs', bit for bit. The batch is
+  then appended to its own side.
+- **Matching is vectorized**, one join per arriving batch, never per row. Each pair is
+  emitted exactly once: by whichever of its two rows arrives second.
+- **N inputs**: a staggered chain of binary joins in canonical order, as today. Each link is
+  an `OutputChannel` whose `stream` is that pair's `zero_row_result`.
+- **System-tag renaming** uses each input's `stream.pipeline_hash()` and position, as the
+  sync path does.
+- **`MergeJoin`** builds each emitted pair's merged lists from the pair's two rows
+  (`aggregated_list_array` over the taken values), in argument order.
+
+#### Streaming `Rejoin`
+
+- **Hash tables.** Each input keeps an accumulating Arrow table and a key frame of every
+  system-tag column (sorted names, `polars_ready`).
+- **Checks done incrementally**, each raising the sync path's `InputValidationError` with
+  the sync message:
+  - *before the first batch*, from the descriptions: the same system-tag names on every
+    input (`_require_same_system_tags`); shared tags' Arrow types
+    (`require_shared_arrow_type`, `require_matchable_key`); one data context. In a job, every
+    row of an edge carries its producing node's context, so the description's
+    `data_context_key` is the rows' context;
+  - *per arriving batch*: no null in a system-tag column;
+  - *per arriving batch*: at most one row per origin row in each input. A key already in
+    that input's table, or repeated within the batch, is refused;
+  - *at each match*: the columns both sides hold (system tags, shared tags, a shared
+    data-tag's source info) are checked bit for bit on the matched rows (`_same_bits`).
+- **Matching.** A key present in every input's table is emitted once, when its last row
+  arrives, built as `_rejoin_pair` builds it (left's copy of a shared column, after the bit
+  check).
+- **N inputs** chain pairwise in canonical order, as the sync `static_process` does.
+- **A refusal can come after rows have flowed.** The sync path refuses before any row. The
+  async path refuses when it meets the offending row, so successors may already have
+  received rows. The run still fails with the same error, and the node keeps and stores
+  nothing (`LOG` stores only after close). A downstream function node may have stored
+  results for rows that flowed; those are results of valid input rows. Question 9.
+
+### The order rule
+
+| What | Order |
+|---|---|
+| **Rows in flight** (Arrow record batches on channels) | Arrival or match order. Async flow is compared with sync as a set of rows, as `test_async_sync_equivalence` does today |
+| **What a node keeps, stores and gives as `result()`** (its output stream: kept output, operator cache, `node_outputs`, held stream) | The sync order, byte for byte: the Arrow table the sync path would produce from the same inputs |
+
+How the sync order is reached at close, without calling user code again. Every node
+computes its kept table from its predecessors' kept tables, which by induction are in sync
+order:
+- **Sources**: their Arrow table's order, which is the order they send.
+- **Operators**:
+  - A barrier operator computes only at close, from its inputs' `to_stream()`, which gives
+    the predecessor's `result()`: already sync order.
+  - A streaming operator emits in match order while it runs. At close it computes its kept
+    table with `static_process` over its predecessors' `result()` streams, the sync call on
+    the sync inputs. For a join this is the key-only join plus `take`, which is cheap next
+    to the rows already emitted.
+  - A per-row operator whose inputs arrived in sync order (from a source, or from a barrier
+    node) keeps the concatenation of its emitted batches with no recompute. L6 checks this
+    shortcut in order.
+- **Function nodes**: assemble the kept table from their in-memory results, by base entry id,
+  in the order of the predecessor's `result()`. That is the sync `execute` order, and no
+  function is called again.
+- **Side-effect nodes**: the predecessor's `result()`, masked to the rows passed on.
+
+`InputChannel.to_stream()` therefore reads its channel to the end and returns the
+producer's `result()`, not the arrival-order concatenation. Only a producer with
+`retain=False` (a source when `materialize_results=False`) gives the concatenation, which
+for a source is its Arrow table's order. An async run therefore retains every
+predecessor's output until its successors close (risks: memory).
+
+On `main` today, the async operator node keeps and stores `_materialize_to_stream(collected)`
+in arrival order (`operator_node.py:2231`). So an async run's operator cache equals the sync
+one only as a set, and its row order depends on scheduling. This design makes it equal byte
+for byte. The values and every hash are unchanged: hashes are per row, and stored rows are
+read in row order (`_in_row_order_on_read`).
 
 ### The hard semantics
 
@@ -305,6 +420,7 @@ Each concern, with where it lives today on `origin/main` 8c6fc4f5.
 | **Observers** | Per-row hooks with the row's datagrams (`function_node.py:2579` `on_data_start`, `:2606`/`:2614` `on_data_crash`; side effects per row, `side_effects.py:403`) | The same hooks and order, with `RowView`s that build a datagram only when read |
 | **Error policy** | Per row in the function node's loop (`function_node.py:2628` `fail_fast`; a failed row is not appended) and per delivery | Per call, as today; a failed row is left out by mask |
 | **Zero rows** | Sync: `_zero_row_input` (`static_output_pod.py:476`). Async: an operator node records rows through `_InputTap` (`operator_node.py:109`) to rebuild empty inputs (`:2275`); barrier operators emit nothing (ITL-865 narrow fix) | Sync: the same zero-row stream. Async: `to_stream()` of an empty channel gives that same stream, typed by `arrow_schema()` |
+| **Async row order** | Rows flow in arrival order. `Join` streams in match order (`join.py:669`), and `Rejoin` is a barrier (`rejoin.py:416`). The async operator node keeps and stores rows in arrival order (`operator_node.py:2231`), so they equal sync only as a set, in a scheduling-dependent order | Rows in flight: arrival or match order (set-equal to sync). What every node keeps, stores and gives as `result()`: the sync order, byte for byte (the order rule). `Join`, `MergeJoin` and `Rejoin` stream; `GroupBy`, `Batch` and `PolarsFilter` are barriers |
 | **Identity** | The successor's input takes the predecessor's identity: `_as_upstream_stream` (`static_output_pod.py:634`), or `_RowsOfStream` without a producer (`:779`). An async barrier rebuild takes `input_pipeline_hashes` (`_materialize_input_stream`, `:689`) | Output streams are built by the same `_as_upstream_stream`. Channels have no identity |
 | **Memory** | Row objects held in several places: the sync buffers (`sync_orchestrator.py:101`), `_CollectingWriter` (`async_orchestrator.py:799`), an operator node's `collected` list plus its kept stream (`operator_node.py:2231`), a function node's `_cached_output_datas` (`function_node.py:1430`), a side effect's `_held_rows` (`side_effects.py:1103`). Channel buffer: 64 rows | Arrow tables in the same places. A retained output channel's result is the node's kept output, not a second copy. Input channel buffer: `buffer_size` Arrow record batches |
 
@@ -528,8 +644,10 @@ Counted on `origin/main`, by file, excluding database cursors' own `execute`:
   - `_store_output_stream` stores the same Arrow table.
   - REPLAY returns the stored stream in that form.
   - A result with no rows keeps `_zero_rows_in_row_order` (ITL-1131).
-- **Async**: the operator writes into the node's output channel.
-  - After close, the node keeps `output.result()` and stores it in `LOG` mode.
+- **Async**: the operator writes into the node's output channel (barrier or streaming, per
+  the table above).
+  - At close, the node's kept table is in sync order (the order rule). The node keeps it as
+    `output.result()` and stores it in `LOG` mode.
   - REPLAY sends the stored Arrow table's batches and drains its inputs.
   - A run with no rows closes with no batch.
 - Operators have no per-row error policy: a failure fails the node, as today.
@@ -565,7 +683,10 @@ The function is still called once per row. Everything around the call is Arrow d
    - two equal inputs give two rows;
    - the column order is the first output row's (developer decision 2).
 
-   Async keeps today's order: stored hits first, then computed rows as they finish.
+   On the async path, rows in flight keep today's order: stored hits first, then computed
+   rows as they finish. At close, the node's `result()` is assembled in the sync order (the
+   order rule), from its in-memory results by base entry id, with no call repeated. The
+   node's own reads keep cache order on both paths (developer decision 3).
 6. **Load-only**: the hits-only case, with the same `not_stored` count.
 7. **The node's own reads** come from its kept stream, in cache order (developer decision 3).
 8. **Stored values decoded as a class (ITL-881).** A `TypeIdentityError` must stop the run at
@@ -638,6 +759,8 @@ call:
   - An operator reads its description from a stream on both paths, and a barrier operator
     runs `static_process` on streams on both.
   - Validation, input order, key checks and zero-row results are one implementation.
+  - Rows in flight are equal to the sync rows as a set. What every node keeps and stores is
+    equal in order (the order rule).
   - `test_async_sync_equivalence` stays the check, with the standing guards below.
 - **ITL-1133 and ITL-1131, one column order.**
   - F places every stream's transport columns in row order, and `arrow_schema()` is in the
@@ -649,7 +772,8 @@ call:
   - a function node (sync): input order;
   - a held function node: cache order;
   - a side-effect node: delivery order;
-  - async: as today.
+  - async: rows in flight arrive in arrival or match order; what every node keeps, stores
+    and gives as `result()` is in the sync order above (the order rule).
 - **Staleness.**
   - Every node calls `_update_modified_time` at the same points and in the same order.
   - A channel has no modified time; its stream does.
@@ -742,8 +866,12 @@ Not covered:
      - the output equals `R` of today's output rows, both with the first row a hit and with
        it a miss.
    - **L5 (held)**: a held node's output stream and count equal today's.
-   - **L6 (async)**: for every node kind, `output.result()` equals the sync output stream's
-     Arrow table as a set of rows, and in order for sources and operators.
+   - **L6 (async)**: for every node kind and every operator (streaming and barrier),
+     `output.result()` equals the sync output stream's Arrow table **in order**, byte for
+     byte. The rows emitted in flight equal it as a set. This runs with the three batch
+     layouts, and with a predecessor that streams in match order. It also covers the
+     per-row shortcut, and `Rejoin`'s and `Join`'s incremental refusals (same error type and
+     message as sync).
    - **L7 (descriptions)**: the declared-against-materialized guard.
    - **L8 (channels)**: unit tests of `InputChannel`, `OutputChannel` and the conversions,
      one per row of the semantics table:
@@ -787,6 +915,9 @@ Not covered:
    - Each runs cold, warm, held and load-only, on both orchestrators.
    - It dumps every stored table (Arrow IPC), every node's `as_table(all_info=True)`, the
      `RunSummary` and a recording observer's events, and compares them byte for byte.
+     There is one exception. An async run's stored tables are compared byte for byte with
+     the branch's sync run (the order rule), but only as sets with `main`'s async run,
+     whose order depends on scheduling.
    - Its output goes on each stage's PR.
 
 ## Migration and staging
@@ -813,7 +944,7 @@ measurements before stage 1 merges. The profile's unit costs:
 | 2b | Operators, sync: kept output and return value `F(result.as_table())`, and REPLAY likewise | – | L0, L1, L5 | (with 2a) |
 | 3 | Function nodes, sync: input from the input stream's Arrow table; entry ids from slices; hits from the stored Arrow table; calls on values from Arrow data; results per column; row views for observers; own reads from the kept stream | – | L3, L4, differential | about **8–14 s** |
 | 4 | Side-effect nodes, sync: masked pass-through, load-only pass-through, held stream | – | L0, differential | small |
-| 5 | Async: `InputChannel`, `OutputChannel`, the conversions and `open_channel()`; every `async_execute` on input channels and an output channel; barrier operators by `to_stream()`; `Join` / `SemiJoin` checks before the first batch; per-row operators per Arrow record batch; validation state, `input_pipeline_hashes` and `BroadcastChannel` removed; function node async with dedup | ITL-856, ITL-844/951 async, ITL-865/906 general form, ITL-1249 xfail, ITL-1062; standing guards | L6, L7, L8, `test_async_sync_equivalence`, differential | the same order of gain for async runs |
+| 5 | Async: `InputChannel`, `OutputChannel`, the conversions and `open_channel()`; every `async_execute` on input channels and an output channel; barrier operators (`GroupBy`, `Batch`, `PolarsFilter`) by `to_stream()`; streaming `Join`, `MergeJoin`, `Rejoin` and `SemiJoin` (vectorized symmetric hash joins, incremental `Rejoin` checks); key checks before the first batch; per-row operators per Arrow record batch; the order rule at every node's close; validation state, `input_pipeline_hashes` and `BroadcastChannel` removed; function node async with dedup | ITL-856, ITL-844/951 async, ITL-865/906 general form, ITL-1249 xfail, ITL-1062; standing guards | L6, L7, L8, `test_async_sync_equivalence`, differential | the same order of gain for async runs |
 
 The ranges overlap:
 - the bound for stages 1–4 is the ~40 s (~90%) the profile puts on conversions;
@@ -866,11 +997,15 @@ In `changelog.d/<issue>.md`, under `### Breaking changes and migration`:
 | **Memory with retained output** | `retain=True` is the default (`materialize_results=True`), so whole outputs are held as Arrow tables. During the transition a node could hold both its old rows and its new Arrow table. A large source, fully retained, could exceed today's footprint | A retained output channel's `result()` is the node's kept output: one copy, enforced by a test that they are the same object. Sources retain only when `materialize_results=True`. Arrow tables are far smaller than datagram objects | Stage 0 records peak RSS (`resource.getrusage`) for the baseline; every stage's benchmark reports it before and after |
 | **Back-pressure and deadlock cycles** | Channels now count Arrow record batches. Diamonds, `SemiJoin` over one source, `Join`'s internal chain and slow fan-out readers could block a producer, as ITL-1075 did with rows | The read-to-the-end rule and `close()` on input channels. `retain=True` on node outputs means `send` never waits. REPLAY and `SemiJoin` keep reading their inputs | The ITL-1075 deadlock tests, run with one-row batches and `buffer_size=1`, plus a diamond and fan-out matrix under a pytest timeout (L8) |
 | **Error propagation** | `UpstreamFailedError` could become the error a run raises instead of the producer's own. A consumer could take a producer's failure as a normal end and store a partial result | `fail()` in the producer's `finally`. The failure selection skips `UpstreamFailedError`. `LOG` stores only after a complete run | L8, and the existing error tests (`test_async_error_policy.py`, `test_store_write_failure.py`), asserting the raised type and message equal `main`'s. The differential's failing-row cases |
-| **Async ordering** | Arrow record batches change the granularity of what async nodes see. An order-sensitive operator (`Batch`) or a function node's hits-then-misses order could change, even when the rows are equal as a set | Keep today's async order rules exactly. Batch boundaries are not part of any result | `test_async_sync_equivalence` with three batch layouts (one batch, one row per batch, mixed); the `ASYNC_ORDER_XFAIL` cases |
+| **Async ordering** | Arrow record batches change the granularity of what async nodes see. An order-sensitive operator (`Batch`) could produce different rows, not only rows in another order | Order-dependent operators are barriers that read their predecessors' sync-order `result()` (the order rule). Kept and stored tables are put into sync order at close. Batch boundaries are not part of any result | L6 in order, with the three batch layouts and a predecessor that streams in match order; the `ASYNC_ORDER_XFAIL` cases |
 | **Observer `RowView` cost and fidelity** | With a status or logging observer attached, every row's tag datagram is built again, so part of the cost returns. A lazy view could also differ from a real datagram (`isinstance`, equality, `as_dict()` values, pickling in a logger) | A `RowView` builds the real datagram on first access and then delegates every call to it. ITL-1348 makes that construction cheaper | The differential's recording observer compares every value it reads. A benchmark row "warm run with a status observer" shows the remaining cost |
 | **Test migration size** | Stage 5 touches 42 files with 171 `async_execute` lines, 329 `Channel(` lines and 84 `input_pipeline_hashes` lines, and stage 2a touches 18 files with 88 `execute` calls. A large diff is hard to review, and a test could be weakened by accident | A shared helper (`tests/stream_helpers.py`). Plumbing changes go in their own commit, before any behaviour change. Assertions are not edited, only how inputs are fed and outputs read | A per-file count of `assert` statements before and after, reported on the PR. The coordinator's full-suite run and CodeRabbit |
 | **Estimates that stage 0 may disprove** | The savings come from profile shares that overlap. The datagram cost may sit mostly in function nodes' stored-hit loading, or in observers, rather than on edges. Stage 1's 4–8 s may be less | Stage 0 measures the split per node kind and per caller before stage 1 merges. If a stage's measured share differs from its estimate by more than half, the plan is revisited with the developer | Stage 0's numbers against the stage table. Each stage's before-and-after benchmark (best of 3, with the load average) |
 | **Byte-identity drift in edge cases** | `null` columns, source-info flags, the function node's first-row column order, `EmptyData` rows, and the point where `TypeIdentityError` is raised | F's explicit steps. The stage 3 investigations named in "Function job node". No golden file is regenerated | L0–L7, the golden check, and the differential (stored tables byte for byte) |
+| **Memory of the order rule** | Async nodes keep their predecessors' `result()` streams until their successors close, so a source is retained in every async run, where today `materialize_results=False` does not keep it. A streaming join holds both inputs in its hash tables, as `main`'s streaming join holds both sides' rows. Its close builds the sync table again: one more Arrow table of the output's size | Retained streams are the nodes' kept outputs, with no second copy. Hash tables hold Arrow tables and key frames, not datagrams. A predecessor's retained result is released once all its successors have closed (`_gc_buffers`' rule, applied to `result()` streams) | Peak RSS of an async run against a sync run and against `main`'s async run, in stage 0 and stage 5 |
+| **Cost of the close recompute** | A streaming operator computes its result twice: in flight, and in sync order at close | The close is the key-only join plus `take` (or the per-row rule) over Arrow tables. The per-row shortcut skips it when the inputs arrived in sync order | Stage 5's benchmark: async run time with and without the recompute, set against the ~8% operator share |
+| **Refusals after rows have flowed** | Streaming `Rejoin` (duplicate origin rows, a null system tag, bit inequality) and `Join` may refuse after some rows reached successors. A downstream function node may already have stored results for those rows | The checks that need no rows run before the first batch. A refused run keeps and stores nothing at the refusing node. Results stored downstream are results of valid input rows (question 9) | L6 refusal cases. The differential's failing-run case lists what is stored downstream |
+| **Sync join order is Polars' unspecified order** (found while writing this) | The sync `Join`, `MergeJoin` and `Rejoin` take their row order from Polars' inner join without `maintain_order` (`join.py:94`, `rejoin.py`). Polars does not guarantee that order, so a Polars upgrade or thread count could reorder the stored rows of a join node on the sync path too. Hashes would not move; stored row order would | Not changed by this design. Making it explicit (`maintain_order="left_right"`) is a separate decision, because it could change today's stored row order (question 10) | Stage 0 compares the current order with `left_right` order over the corpus. The differential runs with the Polars thread count at 1 and at the default |
 | **Hidden consumers of row lists** | Code outside the orchestrators reads `node_outputs` or held rows as lists: tests, alignment helpers, user code | The inventory in "Call sites", and the release note | The full suite, and the grep inventory re-run at each stage |
 
 ## Developer decisions (2026-11-22)
@@ -912,6 +1047,15 @@ The developer approves the spec as a whole before stage 0 starts.
    needs directly on `eywalker/job-speed`, with no thin forms of the old ones. `main` sees
    one breaking change, at the branch merge. Accept?
 8. **`node_outputs` as output streams** (refining decision 1): accept?
+9. **Refusals after rows have flowed.** Streaming `Rejoin` and `Join` refuse when they meet
+   an offending row, so successors may already have received, and a function node already
+   stored results for, earlier rows. The run fails with the sync error, and the refusing
+   node keeps nothing. Accept (proposed)? The alternative is to hold `Rejoin`'s output
+   until its inputs are complete, which makes it a barrier again.
+10. **Polars' join order.** The sync joins rely on Polars' unspecified inner-join order (risk
+    above). Should a separate issue make it explicit (`maintain_order="left_right"`), after
+    stage 0 measures whether that changes today's order? If you agree, I will log the
+    design issue and the Linear issue.
 
 ## Future work (not designed here)
 
