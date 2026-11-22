@@ -1278,8 +1278,12 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
         """
         from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 
+        # A side-effect job node is a stream (``StreamBase``) that the checker cannot
+        # match against the protocol through its mixins.
+        # A side-effect job node is a ``StreamBase``; the checker cannot match its
+        # mixin members against ``StreamProtocol``, so the cast goes through object.
         return StaticOutputOperatorPod._materialize_upstream(
-            rows, cast("StreamProtocol", self)
+            rows, cast("StreamProtocol", cast(object, self))
         )
 
     def _deliver_rows(
