@@ -28,7 +28,7 @@ from upath import UPath
 
 from orcapod.contexts import get_default_context
 from orcapod.databases import DeltaTableDatabase
-from orcapod.errors import InputValidationError
+from orcapod.errors import InputValidationError, UnstorableColumnError
 from orcapod.logical_types.directory_type import Directory
 from orcapod.logical_types.file_type import File
 
@@ -172,20 +172,17 @@ LOGICAL_TYPES: dict[str, Any] = {
     "logical list[Path]": list[pathlib.Path],
 }
 
-# Types the Delta writer cannot store at all (deltalake 1.0.2): the first write
-# fails, before the append check is ever reached, on main as on this branch. Kept
+# Types the Delta writer cannot store at all (deltalake 1.0.2): the first write is
+# refused (``DeltaTableDatabase.require_storable``, ITL-1334). Kept
 # explicit so a deltalake upgrade that starts storing one of them makes the test
 # fail and the type join the guarded list.
 NOT_STORABLE: set[str] = {
-    "float16",
     "decimal256(40, 2)",
 }
 # ``date64``, ``time`` and ``duration`` are stored as their integer value with the
-# Arrow type recorded since ITL-928 (``orcapod.databases.delta_arrow_types``).
-
-# Types Delta stores but whose append Delta's own merge rejects, on main as on
-# this branch (not the append check): tracked in ITL-916.
-MERGE_REJECTS: set[str] = {"fixed_size_list<int64, 2>"}
+# Arrow type recorded since ITL-928, and ``float16`` (as ``float32``) and a fixed-size
+# list (as a ``large_list``, which also appends) since ITL-1334
+# (``orcapod.databases.delta_arrow_types``).
 
 
 def table(arrow_type: pa.DataType, rid: bytes, *, nullable: bool) -> pa.Table:
@@ -205,18 +202,12 @@ def all_types() -> list[Any]:
     """Every (id, Arrow type) pair, nullable and non-nullable."""
     types = dict(PLAIN_TYPES)
     types.update({name: _logical(t) for name, t in LOGICAL_TYPES.items()})
-    merge_rejects = pytest.mark.xfail(
-        raises=RuntimeError,
-        strict=True,
-        reason="deltalake rejects this type on append: its list item field is named 'element', not 'item' (ITL-1076)",
-    )
     return [
         pytest.param(
             name,
             arrow_type,
             nullable,
             id=f"{name}-{'nullable' if nullable else 'non-null'}",
-            marks=[merge_rejects] if name in MERGE_REJECTS else [],
         )
         for name, arrow_type in types.items()
         for nullable in (True, False)
@@ -236,8 +227,9 @@ def test_identical_schema_appends(
     """A second batch with the stored batch's exact schema appends and reads back."""
     db = DeltaTableDatabase(base_path=tmp_path)
     if name in NOT_STORABLE:
-        # Delta cannot store the type: the first write already fails.
-        with pytest.raises(RuntimeError):
+        # Delta cannot store the type: the first write is refused, naming the column,
+        # before anything is buffered (ITL-1334).
+        with pytest.raises(UnstorableColumnError, match="'x'"):
             write(db, table(arrow_type, b"a", nullable=nullable))
         return
     write(db, table(arrow_type, b"a", nullable=nullable))

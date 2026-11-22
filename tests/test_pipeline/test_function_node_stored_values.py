@@ -141,24 +141,12 @@ NOT_IN_DELTA = {
     "decimal256(76,40)",
     "large_list<decimal256>",
     "struct<a: date64, b: decimal256>",
-    "float16 -0.0",
 }
 
 ORCHESTRATORS: dict[str, Callable[[], Any]] = {
     "sync": SyncPipelineOrchestrator,
     "async": AsyncPipelineOrchestrator,
 }
-
-
-# Delta Lake stores fixed_size_binary as large_binary: a reused node's tag comes back
-# with another type, so a node over it records new entries (ITL-999; also on main; not
-# this read path).
-DELTA_CHANGES_TYPE = pytest.mark.xfail(
-    strict=True,
-    reason="ITL-999: Delta Lake stores fixed_size_binary as large_binary, so the "
-    + "downstream node's entries repeat on a reuse run (a type the database does not "
-    + "keep, not the Polars read)",
-)
 
 
 def _cases() -> list[Any]:
@@ -168,8 +156,6 @@ def _cases() -> list[Any]:
             marks = []
             if database == "delta" and name in NOT_IN_DELTA:
                 marks = [pytest.mark.skip(reason="Delta Lake cannot store this type")]
-            elif database == "delta" and name == "fixed_size_binary(3)":
-                marks = [DELTA_CHANGES_TYPE]
             params.append(
                 pytest.param(name, database, id=f"{name}-{database}", marks=marks)
             )

@@ -556,3 +556,87 @@ class TestValidateRecords:
         )
         with pytest.raises(ValueError, match="metadata"):
             c.validate_records(table)
+
+
+@pytest.mark.parametrize("arrow_type", [pa.int64(), pa.large_string()])
+def test_a_non_null_column_reads_back_non_null(
+    tmp_path: Path, arrow_type: pa.DataType
+) -> None:
+    """The connector creates a non-null column NOT NULL and reads the flag back with the
+    rows (ITL-1276); a nullable column stays nullable."""
+    from orcapod.databases import ConnectorArrowDatabase, SQLiteConnector
+
+    db = ConnectorArrowDatabase(SQLiteConnector(str(tmp_path / "s.db")))
+    values = [1, 2] if arrow_type == pa.int64() else ["a", "b"]
+    table = pa.Table.from_arrays(
+        [
+            pa.array([b"r1", b"r2"], pa.large_binary()),
+            pa.array(values, arrow_type),
+            pa.array([values[0], None], arrow_type),
+        ],
+        schema=pa.schema(
+            [
+                pa.field("id", pa.large_binary(), nullable=False),
+                pa.field("required", arrow_type, nullable=False),
+                pa.field("optional", arrow_type),
+            ]
+        ),
+    )
+    db.add_records(("t",), table, record_id_column="id", flush=True)
+    back = db.get_all_records(("t",), record_id_column="id")
+    assert back is not None
+    assert back.schema.field("required").nullable is False
+    assert back.schema.field("optional").nullable is True
+    assert back.sort_by("id").column("required").to_pylist() == values
+
+
+def test_an_outer_join_reads_a_not_null_column_nullable(tmp_path: Path) -> None:
+    """The stored NOT NULL holds only for a direct projection of the table: a LEFT JOIN
+    gives the right table's column nulls (Codex review of PR 471)."""
+    import sqlite3
+
+    path = str(tmp_path / "j.db")
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE l (x INTEGER NOT NULL)")
+        conn.execute("CREATE TABLE r (x INTEGER NOT NULL)")
+        conn.executemany("INSERT INTO l VALUES (?)", [(1,), (2,)])
+    conn.close()
+    connector = SQLiteConnector(path)
+    try:
+        (batch,) = connector.iter_batches("SELECT r.x FROM l LEFT JOIN r ON l.x = r.x")
+        assert batch.schema.field("x").nullable is True
+        assert batch.column("x").to_pylist() == [None, None]
+        (direct,) = connector.iter_batches('SELECT * FROM "l" WHERE x IN (1, 2)')
+        assert direct.schema.field("x").nullable is False
+    finally:
+        connector.close()
+
+
+@pytest.mark.parametrize(
+    "values", [[float("nan"), 1.0], [1.0, -0.0]], ids=["NaN", "-0.0"]
+)
+def test_a_float_sqlite_does_not_keep_is_refused_naming_the_column(
+    tmp_path: Path, values: list[float]
+) -> None:
+    """SQLite reads a NaN back as NULL and -0.0 as 0.0 (ITL-1334); a null is kept."""
+    from orcapod.databases import ConnectorArrowDatabase
+    from orcapod.errors import UnstorableColumnError
+
+    db = ConnectorArrowDatabase(SQLiteConnector(str(tmp_path / "f.db")))
+    ids = pa.array([b"r1", b"r2"], pa.large_binary())
+    with pytest.raises(UnstorableColumnError, match="'d'.*NaN"):
+        db.add_records(
+            ("t",),
+            pa.table({"id": ids, "d": pa.array(values, pa.float64())}),
+            record_id_column="id",
+            flush=True,
+        )
+    db.add_records(
+        ("u",),
+        pa.table({"id": ids, "d": pa.array([1.5, None], pa.float64())}),
+        record_id_column="id",
+        flush=True,
+    )
+    back = db.get_all_records(("u",), record_id_column="id")
+    assert back is not None
+    assert back.sort_by("id").column("d").to_pylist() == [1.5, None]

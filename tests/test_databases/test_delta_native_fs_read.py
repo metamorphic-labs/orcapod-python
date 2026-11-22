@@ -23,6 +23,7 @@ import pytest
 
 import orcapod as op
 from orcapod.databases import DeltaTableDatabase
+from orcapod.databases.delta_arrow_types import from_delta_layout
 from orcapod.pipeline import AsyncPipelineOrchestrator, PipelineJob
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 
@@ -139,7 +140,9 @@ def test_pipeline_store_reads_match_default_reader_for_logical_types(
         actual = fresh.get_all_records(
             record_path, record_id_column=DeltaTableDatabase.RECORD_ID_COLUMN
         )
-        expected = _default_reader(table_dirs[record_path])
+        # The default reader's rows with the recorded types restored, as Orcapod's
+        # read restores them (every list is recorded: ITL-1334).
+        expected = from_delta_layout(_default_reader(table_dirs[record_path]))
         assert actual is not None
         _assert_identical(actual, expected, sort_by=DeltaTableDatabase.RECORD_ID_COLUMN)
         compared += 1
