@@ -13,6 +13,14 @@ rebuilt from its rows (``StaticOutputOperatorPod._materialize_upstream``), which
 row-built form F of the ITL-1347 spec. Batches arrive in that form (``null`` columns as
 ``large_string``, ITL-1319), and every type a kernel holds is that form's.
 
+The kernels serve a job's edges, so their domain is the inputs a job can carry. A
+``null``-typed column is outside it: no source accepts one (the Arrow hasher refuses the
+type, also with no rows), the type converter maps no Python type to it, and a bound
+stream must match its slot. A kernel still accepts a raw stream with such a column and
+gives the sync rows for it, but a refusal it raises for such a column before the first
+batch is decided on the row-built form and may name ``large_string`` where the sync path
+over a raw empty stream names ``null``.
+
 How a kernel stays equal to the sync path:
 
 - **Schema-decided checks before the first batch.** The constructor applies the
@@ -26,13 +34,19 @@ How a kernel stays equal to the sync path:
   not on the description, cannot be raised before them: merging the source-info token
   lists of a data-tag several inputs join on refuses lists of different lengths
   (``ValueError``, from the sync path's own helper and with its message). A kernel raises
-  it when the offending batch arrives; rows already emitted belong to a run that then
-  fails.
+  it for the first offending pair it observes, when that pair's batch arrives; rows
+  already emitted belong to a run that then fails. With several offending pairs, which
+  one is reported may depend on arrival (the sync path reports the first in its own
+  order): the error type is the sync path's and the message has its form.
 - **An input that ends empty.** The sync path reads an input with no rows in its zero-row
   form, where a ``null`` column stays ``null``, not ``large_string``. When the last input
   closes, a kernel whose empty inputs have such a column applies ``static_process`` again
-  over that mix, and raises what it raises. An input with no rows makes every join's
-  result empty, so no row was emitted before.
+  over that mix, and raises what it raises; when it emitted no row, that result is its
+  ``zero_row_result`` from then on (the output's types are the sync result's). The
+  re-check refuses only shared columns (keys, colliding data columns), and an input with
+  no rows that shares a tag with the others empties the result (an inner join), so no
+  row was emitted before it can refuse. ``SemiJoin`` with no shared tag passes every
+  left row whatever its right input holds, and has no shared column to refuse.
 - **Matching is the sync join's.** Each input keeps the rows it needs as Arrow tables and
   a Polars frame of their prepared keys and row numbers (``arrow_keys.polars_key_frame``),
   with the constant key every join adds (``join._with_common_key``). An arriving batch's
@@ -47,15 +61,16 @@ How a kernel stays equal to the sync path:
   with the sync path's helpers. Each of them works row by row, so applying them per
   batch of pairs gives the sync rows.
 - **Field flags.** A batch's flags are the sync result's, except the system-tag and
-  source-info fields: a complete table decides those by its values (``_flag_by_values``,
+  source-info fields: a complete table decides those by its values (``StaticOutputOperatorPod._flag_by_values``,
   the last step of F), so a kernel declares every such field nullable and the stream made
   from its batches settles them.
 
 A kernel holds only what can still match: a side's rows are dropped when the other side
 closes (nothing can arrive to match them), and an arriving row is not kept once the
-other side has closed. A step of a ``Join`` chain that can never emit again (a side
-closed holding no row) releases its successor's other side and every earlier step, and
-``SemiJoin`` never keeps a left row whose key holds a top-level null.
+other side has closed. A row whose key holds a top-level null is never kept (it matches
+nothing). A step of a ``Join`` chain that can never emit again (a side closed holding no
+row that can match) closes its successor's left side and releases the earlier steps,
+except those the sync path still merges before it (``StreamingJoin._close``).
 """
 
 from __future__ import annotations
@@ -89,7 +104,7 @@ from orcapod.core.operators.semijoin import (
     _has_whole_key,  # pyright: ignore[reportPrivateUsage]  # SemiJoin's one rule
 )
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
-from orcapod.core.streams.base import ZERO_ROW_INPUT_COLUMNS
+from orcapod.core.streams.base import ZERO_ROW_INPUT_COLUMNS, row_built_columns
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.system_constants import constants
 from orcapod.utils import arrow_utils
@@ -103,69 +118,11 @@ TRANSPORT_COLUMNS: dict[str, bool] = {"source": True, "system_tags": True}
 _ROW = ("__streaming_left_row", "__streaming_right_row")
 
 
-# TODO(ITL-1360): ``_row_built_columns`` and ``_flag_by_values`` are interim copies of
-# stage 2's ``StaticOutputOperatorPod._row_built_columns`` and ``_flag_by_values`` (the
-# row-built form F, same names and behaviour); call those once stage 2 is on job-speed.
-def _row_built_columns(
-    table: pa.Table, keys: tuple[Sequence[str], Sequence[str]]
-) -> pa.Table:
-    """Return ``table``'s columns as ``_rows_to_table`` lays out the table's rows.
-
-    The steps of F that each row decides on its own: user tags in tag order, system tags
-    in table order, the data columns that are not data-tags and the source info of every
-    data column, both in data-key order, normalized to the large types without keeping
-    ``null`` (a row's datagram stores a ``null`` column as ``large_string``).
-
-    Args:
-        table: A table of user tags, system tags, data and source info.
-        keys: The tag keys and the data keys of its stream (``stream.keys()``).
-
-    Returns:
-        The same arrays, selected and ordered, in their large types.
-    """
-    tag_keys, data_keys = keys
-    names = set(table.column_names)
-    tags = set(tag_keys)
-    system_tags = [
-        n for n in table.column_names if n.startswith(constants.SYSTEM_TAG_PREFIX)
-    ]
-    data = [n for n in data_keys if n not in tags]
-    source_info = [
-        f"{constants.SOURCE_PREFIX}{n}"
-        for n in data_keys
-        if f"{constants.SOURCE_PREFIX}{n}" in names
-    ]
-    return arrow_utils.normalize_table_to_large_types(
-        table.select([*tag_keys, *system_tags, *data, *source_info])
-    )
-
-
-def _flag_by_values(table: pa.Table) -> pa.Table:
-    """Flag each system-tag and source-info field nullable only when it holds a null.
-
-    The last step of F, on a complete table only. No schema metadata is kept.
-
-    Args:
-        table: A table of user tags, system tags, data and source info.
-
-    Returns:
-        The same arrays under the new field flags.
-    """
-    prefixes = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
-    fields = [
-        field.with_nullable(table.column(i).null_count > 0)
-        if field.name.startswith(prefixes)
-        else field
-        for i, field in enumerate(table.schema)
-    ]
-    return pa.Table.from_arrays(table.columns, schema=pa.schema(fields))
-
-
 def _settled_by_values(schema: pa.Schema) -> pa.Schema:
     """``schema`` with every system-tag and source-info field nullable.
 
     What a kernel declares for the fields a complete table decides by its values
-    (``_flag_by_values``): one record batch of many cannot.
+    (``StaticOutputOperatorPod._flag_by_values``): one record batch of many cannot.
     """
     prefixes = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
     return pa.schema(
@@ -193,7 +150,7 @@ def _row_built_zero_rows(stream: StreamProtocol) -> tuple[StreamProtocol, bool]:
     pod = StaticOutputOperatorPod
     zero = pod._materialize_upstream([], stream)  # pyright: ignore[reportPrivateUsage]  # the operators' one form of an input
     table = zero.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
-    row_built = _flag_by_values(_row_built_columns(table, stream.keys()))
+    row_built = pod._flag_by_values(row_built_columns(table, stream.keys()))  # pyright: ignore[reportPrivateUsage]  # F's last step
     differs = any(
         field.type != table.schema.field(field.name).type for field in row_built.schema
     )
@@ -357,6 +314,8 @@ class _BinaryLink:
     def exhausted(self) -> bool:
         """Whether the link can never emit again: a side closed holding no row.
 
+        A side holds only rows that can match (``push`` drops a row with a null key).
+
         A closed side's rows are held while the other side is open; with none, no row
         still to arrive can pair. Two closed sides hold no row (each close drops the
         other side's rows).
@@ -382,6 +341,12 @@ class _BinaryLink:
         this, other = self.sides[side], self.sides[1 - side]
         if this.schema is None:
             this.schema = table.schema
+        if self.keys:
+            # A row whose key holds a top-level null matches nothing: never held, so a
+            # closed side holding only such rows is exhausted.
+            table = table.filter(_has_whole_key(table, self.keys))
+            if not table.num_rows:
+                return None
         frame = this.key_frame(table)
         result = None
         if other.rows:
@@ -455,6 +420,7 @@ class StreamingJoinKernel(ABC):
         )
         self._closed: list[bool] = [False] * len(self.inputs)
         self._received: list[bool] = [False] * len(self.inputs)
+        self._emitted_any: bool = False
         # The sync path over no rows: its checks, and the output's columns.
         self.zero_row_result: StreamProtocol = operator.static_process(*self._zero_rows)
         self.output_columns: tuple[str, ...] = tuple(
@@ -506,23 +472,31 @@ class StreamingJoinKernel(ABC):
         self._closed[input_index] = True
         emitted = self._emitted(self._close(input_index))
         if all(self._closed):
-            self._check_empty_inputs()
+            result = self._check_empty_inputs()
+            if result is not None and not self._emitted_any and not emitted:
+                # No row: the output is the sync path's result over the inputs as
+                # they ended, whose types an empty input decides.
+                self.zero_row_result = result
         return emitted
 
-    def _check_empty_inputs(self) -> None:
+    def _check_empty_inputs(self) -> StreamProtocol | None:
         """Apply the sync path's checks to the inputs as they ended.
 
         An input with no rows is read in its zero-row form, where a ``null`` column stays
         ``null``; only such an input can make the checks differ from the constructor's.
+
+        Returns:
+            The sync path's result over the inputs as they ended, with no rows, or
+            ``None`` when it is the constructor's.
         """
         empty = [
             not received and null_typed
             for received, null_typed in zip(self._received, self._null_typed)
         ]
         if not any(empty):
-            return
+            return None
         pod = StaticOutputOperatorPod
-        self.operator.static_process(
+        return self.operator.static_process(
             *(
                 pod._materialize_upstream([], stream)  # pyright: ignore[reportPrivateUsage]  # the operators' one form of an input
                 if is_empty
@@ -608,11 +582,12 @@ class StreamingJoinKernel(ABC):
         """The record batches of the output tables, holding ``output_columns``.
 
         Every system-tag and source-info field is declared nullable: the complete
-        table's values decide those flags (``_flag_by_values``).
+        table's values decide those flags (``StaticOutputOperatorPod._flag_by_values``).
         """
         batches: list[pa.RecordBatch] = []
         for table in tables:
             if table.num_rows:
+                self._emitted_any = True
                 table = table.select(list(self.output_columns)).combine_chunks()
                 table = pa.Table.from_arrays(
                     table.columns, schema=_settled_by_values(table.schema)

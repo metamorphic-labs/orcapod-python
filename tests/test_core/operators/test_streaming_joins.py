@@ -37,7 +37,6 @@ from orcapod.core.operators import Join, MergeJoin, SemiJoin
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.operators.streaming_joins import (
     TRANSPORT_COLUMNS,
-    _flag_by_values,  # pyright: ignore[reportPrivateUsage]  # F's last step
     StreamingJoin,
     StreamingJoinKernel,
     StreamingMergeJoin,
@@ -159,18 +158,32 @@ def _value(value: Any) -> Any:
     return value
 
 
+def _exact(column: pa.ChunkedArray[Any]) -> pa.ChunkedArray[Any]:
+    """A temporal column as its integer storage: Python values drop nanoseconds."""
+    arrow_type = column.type
+    if pa.types.is_timestamp(arrow_type) or pa.types.is_time64(arrow_type):
+        return column.cast(pa.int64())
+    if pa.types.is_duration(arrow_type) or pa.types.is_date64(arrow_type):
+        return column.cast(pa.int64())
+    if pa.types.is_time32(arrow_type) or pa.types.is_date32(arrow_type):
+        return column.cast(pa.int32())
+    return column
+
+
 def _rows(table: pa.Table) -> Counter[tuple[Any, ...]]:
+    """The rows as a multiset, every value compared exactly (floats by bits)."""
     names = sorted(table.column_names)
+    exact = pa.table([_exact(table.column(name)) for name in names], names=names)
     return Counter(
-        tuple(_value(row[name]) for name in names) for row in table.to_pylist()
+        tuple(_value(row[name]) for name in names) for row in exact.to_pylist()
     )
 
 
 def assert_same_fields(got: pa.Table, want: pa.Table) -> None:
     """Same columns, types, field metadata and flags, after settling both (F's last step)."""
     assert sorted(got.column_names) == sorted(want.column_names)
-    got = _flag_by_values(got.select(want.column_names))
-    want = _flag_by_values(want)
+    got = StaticOutputOperatorPod._flag_by_values(got.select(want.column_names))  # pyright: ignore[reportPrivateUsage]  # F's last step
+    want = StaticOutputOperatorPod._flag_by_values(want)  # pyright: ignore[reportPrivateUsage]  # F's last step
     for field in want.schema:
         other = got.schema.field(field.name)
         assert other.type == field.type, field.name
@@ -250,6 +263,10 @@ KEY_POOLS: dict[str, tuple[pa.DataType, list[Any]]] = {
             datetime(2026, 1, 2, tzinfo=timezone.utc),
         ],
     ),
+    # Values that differ below a microsecond: compared as Arrow integers, never as
+    # Python values (which drop nanoseconds).
+    "time64_ns": (pa.time64("ns"), [1, 2, 1001, 2]),
+    "timestamp_ns": (pa.timestamp("ns", tz="UTC"), [1, 2, 1001, 2, None]),
     "decimal256": (
         pa.decimal256(40, 2),
         [Decimal("1.10"), Decimal("-2.00"), None, Decimal("1.10")],
@@ -263,7 +280,7 @@ KEY_POOLS: dict[str, tuple[pa.DataType, list[Any]]] = {
     "list": (pa.large_list(pa.int64()), [[1, 2], [2], [], [1, 2], None]),
 }
 # The pools whose keys may hold a top-level null.
-NULL_POOLS = ("decimal", "decimal256", "list", "nullable_int", "struct")
+NULL_POOLS = ("decimal", "decimal256", "list", "nullable_int", "struct", "timestamp_ns")
 
 
 def _keyed_source(
@@ -930,3 +947,126 @@ def _empty_data_tag_stream(data: str) -> ArrowTableStream:
         tag_columns=["k"],
         data_tags=["k"],
     )
+
+
+@pytest.mark.parametrize(("operator", "kernel"), ALL_KERNELS)
+def test_an_empty_run_ends_with_the_types_of_the_sync_result(
+    operator: Any, kernel: Any
+) -> None:
+    # The left input ends with no row and a ``null`` data column: the sync result has
+    # no row and keeps ``x: null``. The kernel emits nothing and its zero-row result,
+    # the output's description, takes the sync result's types at the last close.
+    left = _with_null_column("x", True, "v", tag=False, n=0)
+    right = ArrowTableStream(
+        pa.table({"k": pa.array([0, 1], pa.int64()), "y": pa.array([1, 2])}),
+        tag_columns=["k"],
+    )
+    want = _transport(operator.static_process(_row_built(left), _row_built(right)))
+    assert want.num_rows == 0
+    assert pa.types.is_null(want.schema.field("x").type)
+    instance = kernel(operator, (left, right))
+    out = instance.push(1, _sent(right).combine_chunks().to_batches()[0])
+    out += instance.close(1) + instance.close(0)
+    assert out == []
+    assert_same_rows(out, instance, want)
+
+
+def test_a_source_refuses_a_null_typed_column() -> None:
+    # The kernels' domain is what a job carries (module docstring): no source takes a
+    # ``null``-typed column, with rows or without, tag or data.
+    for table, tags in (
+        (pa.table({"k": [1], "x": pa.array([None], pa.null())}), ["k"]),
+        (pa.table({"k": pa.array([None], pa.null()), "x": [1]}), ["k"]),
+        (
+            pa.table({"k": pa.array([], pa.int64()), "x": pa.array([], pa.null())}),
+            ["k"],
+        ),
+    ):
+        with pytest.raises(ValueError, match="type null"):
+            ArrowTableSource(
+                table, tag_columns=tags, tag_only_columns=True, source_id="s"
+            )
+
+
+def _tokens_stream(
+    data: str, keys: list[int], tokens: list[list[str]]
+) -> ArrowTableStream:
+    """A stream with data-tag ``k`` (keys in this order) and token lists per row."""
+    token_list = pa.large_list(pa.large_string())
+    return ArrowTableStream(
+        pa.table(
+            {
+                "k": pa.array(keys, pa.int64()),
+                data: pa.array(list(range(len(keys))), pa.int64()),
+                "_source_k": pa.array(tokens, token_list),
+                f"_source_{data}": pa.array([["s"]] * len(keys), token_list),
+            }
+        ),
+        tag_columns=["k"],
+        data_tags=["k"],
+    )
+
+
+@pytest.mark.parametrize(
+    ("operator", "kernel"), [(Join(), StreamingJoin), (MergeJoin(), StreamingMergeJoin)]
+)
+def test_with_several_offending_pairs_the_first_observed_is_refused(
+    operator: Any, kernel: Any
+) -> None:
+    # Both pairs (k=1, k=2) have token lists of different lengths. Which one is
+    # reported depends on arrival; the type is the sync path's and the message has its
+    # form (module docstring).
+    left = _tokens_stream("v", [1, 2], [["a"], ["b"]])
+    right = _tokens_stream("w", [2, 1], [["c", "d"], ["e", "f", "g"]])
+    form = r"cannot merge source info of lists of different lengths: \[\d+, \d+\]"
+    with pytest.raises(ValueError, match=form):
+        operator.static_process(_row_built(left), _row_built(right))
+    inputs = (left, right)
+    for whole in (0, 1):
+        instance = kernel(operator, inputs)
+        instance.push(whole, _sent(inputs[whole]).combine_chunks().to_batches()[0])
+        first_row = _sent(inputs[1 - whole]).combine_chunks().slice(0, 1)
+        with pytest.raises(ValueError, match=form):
+            instance.push(1 - whole, first_row.to_batches()[0])
+
+
+def test_join_releases_every_step_once_an_input_ends_with_only_null_keys() -> None:
+    # A closed input whose rows all have a null key can match nothing: as good as
+    # empty, so no step holds rows for it.
+    def keyed(source_id: str, keys: list[int | None], data: str) -> ArrowTableSource:
+        column = pa.array(keys, pa.int64())
+        return ArrowTableSource(
+            pa.table(
+                [column, pa.array(list(range(len(keys))), pa.int64())],
+                schema=pa.schema(
+                    [
+                        pa.field("k", pa.int64(), nullable=True),
+                        pa.field(data, pa.int64()),
+                    ]
+                ),
+            ),
+            tag_columns=["k"],
+            tag_only_columns=True,
+            source_id=source_id,
+        )
+
+    for null_input in range(3):
+        sources = [
+            keyed(
+                name,
+                [None, None] if i == null_input else [1, 2, 3, 1, 2, 3],
+                f"d{name}",
+            )
+            for i, name in enumerate("abc")
+        ]
+        kernel = StreamingJoin(Join(), sources)
+        kernel.push(
+            null_input, _sent(sources[null_input]).combine_chunks().to_batches()[0]
+        )
+        assert kernel.close(null_input) == []
+        for index in range(3):
+            if index != null_input:
+                kernel.push(
+                    index, _sent(sources[index]).combine_chunks().to_batches()[0]
+                )
+        assert kernel.held_rows == 0, null_input
