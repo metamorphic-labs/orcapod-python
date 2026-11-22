@@ -40,6 +40,7 @@ from orcapod.core.function_pod import (
     with_fall_through,
 )
 from orcapod.core.data_tags import (
+    data_tag_names,
     mark_data_tags,
     require_database_keeps_marker,
     stored_data_tags,
@@ -54,6 +55,7 @@ from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
     StreamBase,
     check_head_size,
+    row_built_columns,
     short_stream_repr,
 )
 from orcapod.core.streams.view import (
@@ -360,6 +362,27 @@ def passed_rows_output_stream(
         return StaticOutputOperatorPod._output_stream(table, input_stream.keys(), node)  # pyright: ignore[reportPrivateUsage]  # F with the node's identity
     except SourceInfoTypesDisagree as error:
         StaticOutputOperatorPod._raise_as_rows_do(rows, error)  # pyright: ignore[reportPrivateUsage]  # the rows' own error
+
+
+class _StoredHitTable(NamedTuple):
+    """The table of stored results a node loaded, and its stream's keys (ITL-1361)."""
+
+    table: "pa.Table"
+    keys: tuple[tuple[str, ...], tuple[str, ...]]
+
+
+def _provenance_nullable(table: "pa.Table") -> "pa.Table":
+    """``table`` with every system-tag and source-info field nullable.
+
+    Pieces of one output are concatenated before F's last step flags these fields by
+    the values of the complete table; until then a piece's flags follow its own values.
+    """
+    prefixes = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
+    fields = [
+        field.with_nullable(True) if field.name.startswith(prefixes) else field
+        for field in table.schema
+    ]
+    return pa.Table.from_arrays(table.columns, schema=pa.schema(fields))
 
 
 def _executor_supports_concurrent(
@@ -1508,6 +1531,8 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         self._cached_output_table: "pa.Table | None" = None
         self._cached_content_hash_column: "pa.Array | None" = None
         self._run_entry_counts = None
+        self._stored_hit_tables: list[_StoredHitTable] = []
+        self._stored_hit_positions: dict[int, tuple[DataProtocol, int, int]] = {}
 
         # DB persistence state (initially None; set via __init__ params or attach_databases)
         self._pipeline_database: ArrowDatabaseProtocol | None = None
@@ -1935,6 +1960,8 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         node._cached_output_datas = {}
         node._cached_output_table = None
         node._cached_content_hash_column = None
+        node._stored_hit_tables = []
+        node._stored_hit_positions = {}
 
         # FunctionJobNode — orchestrator config
         node._node_config = NodeConfig()
@@ -1986,6 +2013,8 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         self._cached_output_datas.clear()
         self._cached_output_table = None
         self._cached_content_hash_column = None
+        self._stored_hit_tables = []
+        self._stored_hit_positions = {}
         self._run_entry_counts = None
         self._run_load_only = False
         self._run_not_stored = 0
@@ -2545,6 +2574,9 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 
         try:
+            output = self._output_from_stored_tables(rows)
+            if output is not None:
+                return output
             return StaticOutputOperatorPod._materialize_upstream(rows, self)
         except pa.ArrowInvalid:
             # Rows that disagree on a column's Arrow type (cached rows of a store
@@ -2552,6 +2584,77 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             # the node, the column and both types (ITL-1360, e9).
             self._table_from_pairs(rows)
             raise
+
+    def _output_from_stored_tables(
+        self, rows: list[tuple[TagProtocol, DataProtocol]]
+    ) -> StreamProtocol | None:
+        """Return the output stream of ``rows``, taking stored results from their table.
+
+        What ``_materialize_upstream`` builds from ``rows``, without building again the
+        rows of results read from the store: those are taken from the stored rows'
+        table (in its row-built form, ``row_built_columns``), and the other rows are
+        built from their datagrams (``_rows_to_table``). The pieces, in the rows' order,
+        are concatenated by name in the first piece's column order, as the rows are in
+        the first row's order, then F's steps on the complete table type the source
+        info and flag the provenance fields by their values (ITL-1361).
+
+        Returns:
+            The output stream, or ``None`` when no row is a stored result, or when the
+            pieces cannot be concatenated: the rows' own build then gives the stream,
+            or raises what it raises.
+        """
+        from orcapod.core.operators.static_output_pod import (
+            SourceInfoTypesDisagree,
+            StaticOutputOperatorPod,
+        )
+
+        pieces: list[
+            tuple[int, list[int]] | list[tuple[TagProtocol, DataProtocol]]
+        ] = []
+        any_stored = False
+        for tag, data in rows:
+            position = self._stored_hit_positions.get(id(data))
+            if position is not None and position[0] is data:
+                any_stored = True
+                _, table_index, row = position
+                last = pieces[-1] if pieces else None
+                if isinstance(last, tuple) and last[0] == table_index:
+                    last[1].append(row)
+                else:
+                    pieces.append((table_index, [row]))
+            else:
+                last = pieces[-1] if pieces else None
+                if isinstance(last, list):
+                    last.append((tag, data))
+                else:
+                    pieces.append([(tag, data)])
+        if not any_stored:
+            return None
+        tables: list[pa.Table] = []
+        try:
+            for piece in pieces:
+                if isinstance(piece, tuple):
+                    stored = self._stored_hit_tables[piece[0]]
+                    table = row_built_columns(stored.table, stored.keys).take(
+                        pa.array(piece[1], type=pa.int64())
+                    )
+                else:
+                    table = StaticOutputOperatorPod._rows_to_table(piece)[0]  # pyright: ignore[reportPrivateUsage]  # the rows' own build
+                table = StaticOutputOperatorPod._type_source_info_by_values(table)  # pyright: ignore[reportPrivateUsage]  # F's whole-table step, per piece
+                tables.append(_provenance_nullable(table))
+            combined = arrow_utils.concat_tables_by_name(tables)
+            formed = StaticOutputOperatorPod._flag_by_values(  # pyright: ignore[reportPrivateUsage]  # F's whole-table steps
+                StaticOutputOperatorPod._type_source_info_by_values(combined)  # pyright: ignore[reportPrivateUsage]
+            )
+        except (pa.ArrowInvalid, SourceInfoTypesDisagree):
+            return None
+        first_tag, first_data = rows[0]
+        return StaticOutputOperatorPod._as_upstream_stream(  # pyright: ignore[reportPrivateUsage]  # the node's identity
+            formed,
+            tuple(first_tag.keys()),
+            data_tag_names(first_tag.keys(), first_data.keys()),
+            self,
+        )
 
     def execute_data(
         self,
@@ -3940,12 +4043,26 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         stored = self._stored_rows_stream(fetched)
         if stored is not None:
             base_entry_ids_col, stream, data_ids = stored
-            for base_eid, data_id, (tag, data) in zip(
-                base_entry_ids_col, data_ids, stream.iter_data(), strict=True
+            # The stored rows' table, so an output of these results is taken from it
+            # instead of being built again from their datagrams (ITL-1361).
+            table_index = len(self._stored_hit_tables)
+            self._stored_hit_tables.append(
+                _StoredHitTable(
+                    stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS), stream.keys()
+                )
+            )
+            for row, (base_eid, data_id, (tag, data)) in enumerate(
+                zip(base_entry_ids_col, data_ids, stream.iter_data(), strict=True)
             ):
                 # A stored result is the datagram its own provenance names: it
                 # carries the stored ``__data_id`` as its datagram id (ITL-1060).
-                loaded[base_eid] = (tag, _with_datagram_id(data, data_id))
+                stored_data = _with_datagram_id(data, data_id)
+                loaded[base_eid] = (tag, stored_data)
+                self._stored_hit_positions[id(stored_data)] = (
+                    stored_data,
+                    table_index,
+                    row,
+                )
 
         # --- Process EmptyData tokens (ephemeral misses) ---
         for base_eid, empty_data in fetched.empty_data_tokens.items():
