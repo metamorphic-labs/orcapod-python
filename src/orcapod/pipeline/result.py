@@ -11,34 +11,47 @@ if TYPE_CHECKING:
 
 
 class StreamsOnRead(Mapping[Any, "StreamProtocol"]):
-    """Each node's output stream, built when it is first read.
+    """Each node's output stream, built from its rows when it is read.
 
     The async orchestrator collects each node's rows as they are sent; a node's stream
-    is built from them (``build``) the first time it is read, and kept. A run whose
-    rows cannot make one table (rows of a store written before ITL-928) therefore
-    finishes, as it does on ``main``, and only reading that node's output raises, as
-    reading its rows as a table does (ITL-1360).
+    is built from them (``build``) when it is read. A run whose rows cannot make one
+    table (rows of a store written before ITL-928) therefore finishes, as it does on
+    ``main``, and only reading that node's output raises, as reading its rows as a
+    table does (ITL-1360). Membership, length and iteration never build a stream. A run
+    plan's held streams are built the same way, when the sync orchestrator reaches the
+    node, and are not kept (``keep=False``): the orchestrator drops each one once its
+    successors have run.
     """
 
     def __init__(
         self,
         rows: Mapping[Any, Any],
         build: Callable[[Any, Any], "StreamProtocol"],
+        *,
+        keep: bool = True,
     ) -> None:
         """Hold each node's rows and how a stream is built from them.
 
         Args:
-            rows: Each node's collected rows.
+            rows: Each node's rows.
             build: Builds a node's stream from its rows, given ``(rows, node)``.
+            keep: Keep a stream once built, so a second read returns it again.
         """
         self._rows = dict(rows)
         self._build = build
+        self._keep = keep
         self._built: dict[Any, StreamProtocol] = {}
 
     def __getitem__(self, node: Any) -> "StreamProtocol":
-        if node not in self._built:
-            self._built[node] = self._build(self._rows[node], node)
-        return self._built[node]
+        if node in self._built:
+            return self._built[node]
+        stream = self._build(self._rows[node], node)
+        if self._keep:
+            self._built[node] = stream
+        return stream
+
+    def __contains__(self, node: object) -> bool:
+        return node in self._rows
 
     def __iter__(self) -> Iterator[Any]:
         return iter(self._rows)

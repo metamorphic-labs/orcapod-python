@@ -194,9 +194,13 @@ A run checks its sources first (ITL-1102), which polls them.
 **ITL-1307 later.** When `Schema` carries its Arrow schema, `arrow_schema()` reads the two
 schemas plus the system-tag and source-info fields, in one place (`StreamBase`).
 
-Two exceptions keep today's bytes:
-- **Source-info nullability** is decided by a complete Arrow table's values (F step 5).
-  `arrow_schema()` states those fields nullable (question 5).
+Three exceptions keep today's bytes:
+- **Source-info and system-tag nullability** is decided by a complete Arrow table's values
+  (F step 5). `arrow_schema()` states those fields nullable (question 5).
+- **Source-info types** are decided by a complete Arrow table's tokens, as each row types
+  its tokens from their values (`_type_source_info_by_values`): a list of `None` or of
+  empty lists shows fewer list levels than its column declares. `arrow_schema()` states the
+  declared token type; consumers must not rely on it (Codex on PR #485).
 - **`null` columns.** Rows carry `large_string`, and a zero-row Arrow table carries `null`, as
   today (ITL-1319).
 
@@ -509,7 +513,7 @@ with the developer's approval, given row by row. Each row gets its own test: it 
 row, by name. The developer has accepted some behaviours of `main` that are not listed as
 rows; they are kept as `main` has them, and documented below.
 
-**No row changes a sync-path result, except e9** (provisional, pending the developer). On
+**No row changes a sync-path result, except e9 and e10** (provisional, pending the developer). On
 the sync path the branch equals `main` byte for byte. Stages 1–4 hold this by construction
 and by L0–L5, and a lemma that fails stops its stage.
 
@@ -522,6 +526,7 @@ and by L0–L5, and a lemma that fails stops its stage.
 | e7 | What a consumer does after its producer failed (async, failure path) | The producer closes its output in `finally`, so a consumer sees a normal end and may finish, and a `LOG` operator node may store, a partial result before the task group cancels it | Readers raise `UpstreamFailedError` at the failure point instead of seeing a normal end, so no consumer finishes, or stores its result, as if its input were complete. Batches a consumer processed before the failure are still processed, and a streaming node may already have passed them on or a function node stored results for them, as on `main`; there is no rollback. A barrier operator never computes over a partial input. The run raises the producer's own error, as today | A candidate race, to be confirmed with a reproducer in stage 5: a `fail_fast` function node raising on row 3 of 6, feeding a `Select` node in `LOG` mode; check the operator cache after the failed run. If `main` never stores in practice, this row is no difference | filed by the developer only once a test reproduces it |
 | e8 | Meta columns of an async side-effect node's rows | An async side-effect node passes on and holds the rows it receives as they are, so a computed row keeps its `__computed` meta column (from the cached function pod), and the node's `as_table(all_info=True)` shows it. On sync, its input is rebuilt from rows (`_rows_to_table` drops meta), so the column is absent | Async drops input meta columns as sync does. With table transport this follows from the transport columns, which hold no meta column | A `main` bug: the async and sync paths give the node different columns. Found by the stage 0 harness on `job-speed` 0e15d0db, which does not change side-effect nodes; the stage 0 differential checks it on pinned `main`. Reproducer: a function node (with a result store) feeding a `tap_pod`, async against sync, comparing the side-effect node's `as_table(all_info=True)` columns | approved (developer, 2026-11-22) |
 | e9 | A sync function node whose output rows disagree on a column's Arrow type | A node with no successor completes the run; its `as_table()` raises `InputValidationError` ("Function node 'double': Rows disagree on the Arrow type of column 'k': int32 and uint32"). A node with a successor fails the run with a bare pyarrow `ArrowInvalid`, raised where the successor's input is rebuilt | The node builds its output stream when it runs (stage 2), so the run fails at the node, once its writes are committed (a failed write is still reported first, as on `main`) and before the node takes the run, with the `InputValidationError` `as_table()` raises (same type and message), with or without a successor; the node then holds no run. What is stored equals `main`'s: the row computed before the disagreement could be seen is stored, as on `main` (2 stored rows before the run, 3 after, on both) | Not a `main` bug to fix: a consequence of building the output stream in `execute`, and for a node with a successor an improvement (`main`'s `ArrowInvalid` names nothing). It arises only from a store written before ITL-928, whose cached rows give a `uint32` tag back as `int32`; such a store must be rebuilt. Reproducer: `tests/test_core/function_pod/test_function_node_arrow_types.py::test_new_rows_over_a_store_written_before_the_fix_raise_naming_the_column` (leaf and with successor) | provisional, coordinator decision 2026-11-22, pending developer |
+| e10 | ITL-1366: a declared source slot over a narrower source with one data-tag among two tags | The run raises `ValueError` ("Duplicate column name 'k'") where the source's rows are rebuilt for its successor (`_rows_to_table`: the row's tag and data both hold the data-tag), when exactly one of the two tags is a data-tag and the tags are declared `j, k`; the source node has ended, the successor never starts. The same on the async path | Sync: the source node hands on F of the declared table (`_DeclaredForm.apply` of the bound table, the data-tag once, among the tags) and the run completes with the rows the bind describes. Async: as on `main` until stage 5 | A `main` bug (ITL-1366): the bind is accepted, then the rows cannot be built. Reproducer: `tests/test_pipeline/test_declared_slot_one_data_tag.py` (no, one or both data-tags, both tag orders, sync and async) | provisional, coordinator decision 2026-11-22, pending developer |
 
 **Resolved: refusals after rows have flowed (was c, question 9).** The developer's `Rejoin`
 rule (ITL-1355) removes every data-dependent refusal from `Rejoin`: it checks only what its

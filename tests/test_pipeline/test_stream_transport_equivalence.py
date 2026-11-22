@@ -42,7 +42,7 @@ from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import ProvisionalHashWarning
 from orcapod.pipeline import AsyncPipelineOrchestrator
 from orcapod.pipeline.observer import NoOpObserver
-from orcapod.operators import MergeJoin, Rejoin, SelectDataColumns
+from orcapod.operators import Batch, MergeJoin, Rejoin, SelectDataColumns
 from orcapod.side_effects import SideEffectJobNode
 from orcapod.system_constants import constants
 from orcapod.types import CacheMode
@@ -240,15 +240,20 @@ def test_a_held_node_hands_on_the_stream_built_from_its_rows(
 def _without_exceptions(schema: pa.Schema) -> list[tuple[str, Any, bool, Any]]:
     """Fields in order as (name, type, nullable, metadata), the spec's exceptions applied.
 
-    A system-tag or source-info field's flag is decided by a table's values (stated
-    nullable), and a ``null`` column is ``large_string`` in rows (ITL-1319). Column
-    order counts on the sync path (Codex on PR #485).
+    Decided by the values of a complete table, not by the description: a system-tag or
+    source-info field's flag (stated nullable) and a source-info field's type (left out).
+    A ``null`` column is ``large_string`` in rows (ITL-1319). Column order counts on the
+    sync path (Codex on PR #485).
     """
     prefixes = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
     return [
         (
             field.name,
-            pa.large_string() if pa.types.is_null(field.type) else field.type,
+            None
+            if field.name.startswith(constants.SOURCE_PREFIX)
+            else pa.large_string()
+            if pa.types.is_null(field.type)
+            else field.type,
             True if field.name.startswith(prefixes) else field.nullable,
             field.metadata,
         )
@@ -544,3 +549,91 @@ def test_an_operator_stream_declares_its_tags_in_its_rows_order() -> None:
     stream = SelectDataColumns(["x"])(source)
     built, _, _ = StaticOutputOperatorPod._rows_to_table(list(stream.iter_data()))  # pyright: ignore[reportPrivateUsage]  # the rows' order
     assert stream.arrow_schema().names[:2] == built.column_names[:2]
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
+def test_a_poller_that_fetched_describes_its_rows_order() -> None:
+    """L7: after a fetch in another order than declared, the description follows the rows.
+
+    A poller declaring ``k, j, b, a`` that fetched ``j, k, a, b`` lists its data as its
+    rows do (Codex on PR #485).
+    """
+    poller = _poller(("j", "k", "a", "b"))
+    rows = list(poller.iter_data())
+    built, _, _ = StaticOutputOperatorPod._rows_to_table(rows)  # pyright: ignore[reportPrivateUsage]  # the rows' order
+    assert poller.arrow_types_declared
+    assert _without_exceptions(poller.arrow_schema()) == _without_exceptions(
+        built.schema
+    )
+
+
+def test_a_value_decided_source_info_depth_is_a_named_exception() -> None:
+    """L7: ``Batch`` over null list tokens; the description and the rows agree but for it.
+
+    The rows give ``[None, None]`` one list level (``large_list<large_string>``); the
+    description states the declared token type. A source-info type is decided by the
+    values of a complete table and is one of the description's named exceptions.
+    """
+    from orcapod.core.streams import ArrowTableStream
+    from orcapod.sources import DictSource
+
+    table = DictSource(
+        [{"k": 1, "x": 1}, {"k": 2, "x": 2}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="s",
+    ).as_table(columns={"source": True, "system_tags": True})
+    position = table.schema.get_field_index("_source_x")
+    strings = pa.large_list(pa.large_string())
+    raw = ArrowTableStream(
+        table.set_column(
+            position,
+            pa.field("_source_x", strings, nullable=True),
+            pa.array([None, None], strings),
+        ),
+        tag_columns=["k"],
+    )
+    batched = Batch(batch_size=2)(raw)
+    built, _, _ = StaticOutputOperatorPod._rows_to_table(list(batched.iter_data()))  # pyright: ignore[reportPrivateUsage]  # the rows
+    declared = batched.arrow_schema()
+    assert declared.field("_source_x").type != built.schema.field("_source_x").type
+    assert _without_exceptions(declared) == _without_exceptions(built.schema)
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
+def test_describing_an_undeclared_poller_that_has_not_polled_reads_nothing() -> None:
+    """L7: a poller with no declared schema is described with no column, and not polled.
+
+    Its columns are known only from rows; the description never fetches, its modified
+    time does not move and ``arrow_types_declared`` stays false (Codex on PR #485).
+    """
+    from orcapod.core.sources import PollingSource
+    from tests.test_hashing.test_logical_type_forms import (
+        _TableImpl,  # pyright: ignore[reportPrivateUsage]  # the one test polling implementation
+    )
+
+    fetches: list[int] = []
+
+    class Undeclared(_TableImpl):
+        async def fetch(self, cursor: Any = None) -> Any:
+            fetches.append(1)
+            return await super().fetch(cursor)
+
+        def schema(self) -> Any:
+            return None
+
+    table = pa.table(
+        {"k": pa.array(["1"], pa.large_string()), "a": pa.array([1], pa.int64())}
+    )
+    poller = PollingSource(
+        Undeclared(table, table.schema),
+        tag_columns=["k"],
+        record_id_columns=["k"],
+        source_id="undeclared",
+    )
+    modified = poller.last_modified
+    assert poller.arrow_schema() == pa.schema([])
+    assert poller.arrow_schema() == pa.schema([])
+    assert fetches == []
+    assert poller.last_modified == modified
+    assert not poller.arrow_types_declared

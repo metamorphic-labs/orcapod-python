@@ -14,7 +14,7 @@ the commit ``job.run()`` makes.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -25,6 +25,7 @@ from orcapod.pipeline.run_summary import (
     run_node_summaries,
 )
 from orcapod.pipeline.restrictions import restrictions_in_force, source_name
+from orcapod.pipeline.result import StreamsOnRead
 from orcapod.utils.database_errors import flush_best_effort
 
 if TYPE_CHECKING:
@@ -251,7 +252,7 @@ class RunPlan:
             them (a source slot is read; any other one is held).
         held: The output stream of each held node of ``dag``: of its current run, or
             of a stream outside the job; it feeds the nodes after it as if the node had
-            just run (the sync orchestrator).
+            just run (the sync orchestrator). Built when read (``StreamsOnRead``).
         held_rows: The rows of each held node, as the plan took them; ``held`` is
             built from them. The async orchestrator sends them (it carries rows until
             ITL-1347 stage 5).
@@ -261,7 +262,7 @@ class RunPlan:
     """
 
     dag: Any
-    held: dict[Any, Any]
+    held: Mapping[Any, Any]
     to_run: list[Any]
     held_counts: dict[Any, int]
     held_rows: dict[Any, list[Any]]
@@ -345,10 +346,11 @@ def plan_run(graph: Any, *, load_only: bool, outside: Sequence[Any] = ()) -> Run
         for node in included
         if not any(node is r for r in to_run) and not is_source(node)
     }
-    held = {
-        node: StaticOutputOperatorPod._materialize_upstream(rows, node)
-        for node, rows in held_rows.items()
-    }
+    # Built when the sync orchestrator reaches the node, never while planning (an
+    # async run reads only the rows), and not kept by the plan (ITL-1360).
+    held = StreamsOnRead(
+        held_rows, StaticOutputOperatorPod._materialize_upstream, keep=False
+    )
     # Counted from what each node holds: iterating an operator's rows would build a
     # (Tag, Data) pair per row only to count them (ITL-1351).
     held_counts = {node: node.held_row_count() for node in current}

@@ -39,7 +39,7 @@ from orcapod.core.data_tags import (
 from orcapod.channels import Channel, ChannelClosed, ReadableChannel, WritableChannel
 from orcapod.config import OrcapodConfig
 from orcapod.core.operators.static_output_pod import (
-    SourceInfoTypesDisagree,
+    RowBuiltFormUnavailable,
     StaticOutputOperatorPod,
 )
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
@@ -1697,7 +1697,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
                         cached_output.keys(),
                         self,
                     )
-                except SourceInfoTypesDisagree as error:
+                except RowBuiltFormUnavailable as error:
                     StaticOutputOperatorPod._raise_as_rows_do(
                         cached_output.iter_data(), error
                     )
@@ -1720,7 +1720,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
                     kept_table = StaticOutputOperatorPod._row_built_form(
                         result_table, keys
                     )
-                except SourceInfoTypesDisagree as error:
+                except RowBuiltFormUnavailable as error:
                     StaticOutputOperatorPod._raise_as_rows_do(
                         result_stream.iter_data(), error
                     )

@@ -21,6 +21,7 @@ import polars as pl
 import pyarrow as pa
 
 from orcapod.core.base import TraceableBase
+from orcapod.core.data_tags import data_tag_names
 from orcapod.core.streams.view import (
     SCHEMA_NEEDS_POLL_NOTE,
     ViewStatus,
@@ -333,6 +334,32 @@ def row_built_names(
     return [*tag_keys, *system_tags, *data, *source_info]
 
 
+def keys_of_rows(
+    table: pa.Table, keys: tuple[Sequence[str], Sequence[str]]
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return the tag and data keys a source's rows have, given its table and ``keys()``.
+
+    A source's rows come from a stream over its table (``ArrowTableStream``), whose rows
+    list their tags in the stream's tag order and their data with the data-tags first,
+    in tag order, then the other data columns in the table's order. A source whose
+    ``keys()`` states its declared order (a ``PollingSource`` whose fetched table has
+    another column order) has rows in the table's order all the same, as a table built
+    from its rows does (Codex on PR #485).
+
+    Args:
+        table: The source's table, as its rows are read from it.
+        keys: The source's ``keys()``.
+
+    Returns:
+        The tag keys, and the data keys in the order of the rows.
+    """
+    tag_keys, data_keys = (tuple(keys[0]), tuple(keys[1]))
+    data_tags = data_tag_names(tag_keys, data_keys)
+    data = set(data_keys) - set(tag_keys)
+    in_table = tuple(name for name in table.column_names if name in data)
+    return tag_keys, (*data_tags, *in_table)
+
+
 def stream_arrow_schema(
     stream: object, keys: tuple[Sequence[str], Sequence[str]] | None = None
 ) -> pa.Schema:
@@ -344,9 +371,14 @@ def stream_arrow_schema(
     (``row_built_names``: user tags, system tags, data, source
     info, data and source info in data-key order), with no context and no meta column. A
     stream that cannot type itself without rows answers with its Python schema
-    converted by its data context (``arrow_types_declared`` is then false). Each
+    converted by its data context (``arrow_types_declared`` is then false), and one
+    whose schema is known only by polling (nothing declared, nothing polled:
+    ``schema_requires_io``) answers with no column. Each
     system-tag and source-info field is stated nullable: a table decides its flag from
-    its values (F's last step). A ``null`` column keeps the zero-row ``null`` type; rows
+    its values (F's last step). A source-info field's type is stated as the declared
+    token type; a complete table decides it from its tokens
+    (``StaticOutputOperatorPod._type_source_info_by_values``), so consumers must not
+    rely on it. A ``null`` column keeps the zero-row ``null`` type; rows
     carry ``large_string`` (ITL-1319). ITL-1307 later reads it from ``Schema`` instead,
     here.
 
@@ -361,9 +393,13 @@ def stream_arrow_schema(
     from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 
     typed = cast(StreamProtocol, stream)
-    if keys is None:
-        keys = typed.keys()
+    given_keys = keys
     table = typed_zero_row_input(stream)
+    if table is None and schema_requires_io(stream, ColumnConfig(system_tags=True)):
+        # Nothing declared, nothing polled (a poller with no declared schema): the
+        # columns are known only from rows, and a description never polls. No column,
+        # as a head says (``SCHEMA_NEEDS_POLL_NOTE``); ``arrow_types_declared`` is false.
+        return pa.schema([])
     if table is None:
         # Only what the stream declares: asking for its source-info columns would make
         # a source that has not polled poll (a description never computes, polls or
@@ -377,6 +413,9 @@ def stream_arrow_schema(
                 pa.field(f"{constants.SOURCE_PREFIX}{name}", pa.large_string()),
                 pa.array([], pa.large_string()),
             )
+    # The rows' keys: the data in the order of the stream's table (a poller that
+    # fetched its columns in another order than it declares lists them so).
+    keys = given_keys if given_keys is not None else keys_of_rows(table, typed.keys())
     names = row_built_names(table.column_names, keys)
     schema = row_built_provenance(table.select(names)).schema
     prefixes = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
