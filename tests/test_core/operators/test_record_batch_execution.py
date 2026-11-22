@@ -27,7 +27,7 @@ import pyarrow as pa
 import pytest
 
 import orcapod.core.operators as operators
-from orcapod.channels import InputChannel, OutputChannel
+from orcapod.channels import InputChannel, OutputChannel, channel_from_stream
 from orcapod.core.operators import Batch
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.protocols.core_protocols import StreamProtocol
@@ -74,9 +74,9 @@ async def _channel(
     stream: StreamProtocol, sizes: tuple[int, ...] | None
 ) -> InputChannel:
     """An input channel delivering ``stream``'s rows in record batches of ``sizes``."""
-    batches = await stream.open_channel().collect()
+    batches = await channel_from_stream(stream).collect()
     if sizes is None or not batches:
-        return stream.open_channel()
+        return channel_from_stream(stream)
     rows = pa.Table.from_batches(batches)
     feed = OutputChannel(stream)
     for batch in _cut(rows, sizes):
@@ -255,7 +255,7 @@ def test_a_row_by_row_operator_sends_each_batch_as_it_arrives(case: Case) -> Non
         output = OutputChannel(op(source), retain=False, buffer_size=1)
         results = output.open_reader()
         task = asyncio.ensure_future(op.async_execute_batches([reader], output))
-        rows = pa.Table.from_batches(await source.open_channel().collect())
+        rows = pa.Table.from_batches(await channel_from_stream(source).collect())
         received: list[pa.RecordBatch] = []
         sizes: list[int] = []
         for batch in _cut(rows, (1,)):
@@ -302,7 +302,7 @@ def test_batch_sends_each_full_batch_before_the_input_ends() -> None:
         output = OutputChannel(op(source))
         results = output.open_reader()
         task = asyncio.ensure_future(op.async_execute_batches([reader], output))
-        rows = pa.Table.from_batches(await source.open_channel().collect())
+        rows = pa.Table.from_batches(await channel_from_stream(source).collect())
         one_row = _cut(rows, (1,))
         await feed.send(one_row[0])
         await feed.send(one_row[1])

@@ -78,7 +78,7 @@ def R(stream: Any) -> pa.Table:
 
 def same(table: pa.Table, expected: pa.Table) -> bool:
     """Whether two tables have one schema (metadata included) and the same rows."""
-    return table.schema.equals(expected.schema, check_metadata=True) and (
+    return table.schema.equals(expected.schema, check_metadata=True) and bool(
         table.combine_chunks().equals(expected.combine_chunks())
     )
 
@@ -371,7 +371,7 @@ def test_a_late_reader_of_a_retained_output_replays_and_continues() -> None:
     stream = source()
     batches = batches_of(stream, 2)
 
-    async def write() -> list[list[int]]:
+    async def write() -> list[list[Any]]:
         output = OutputChannel(stream)
         early = output.open_reader()
         await output.send(batches[0])
