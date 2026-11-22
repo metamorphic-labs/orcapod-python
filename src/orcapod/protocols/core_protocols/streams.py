@@ -188,8 +188,8 @@ class StreamProtocol(TraceableProtocol, PipelineElementProtocol, Protocol):
 
         The channel delivers the stream's rows as Arrow record batches, read once and
         in order; its description is this stream. Several channels may be opened on
-        one stream, each with its own position, and ``to_stream()`` of a channel not
-        read yet is this stream.
+        one stream, each with its own position (``channel_to_stream`` makes a stream of
+        what a channel delivers).
 
         Returns:
             The input channel.
@@ -618,18 +618,9 @@ class RecordBatchInput(Protocol):
         """Read to the end and return every remaining record batch, in arrival order."""
         ...
 
-    async def to_stream(self) -> StreamProtocol:
-        """Read to the end and return what the channel delivered, as a stream.
-
-        All of the input or nothing: it needs a channel not read yet. ``collect``
-        drains the batches that remain; ``to_stream`` never makes a stream of part of
-        an input.
-
-        Raises:
-            RuntimeError: If a record batch has already been received.
-            ChannelClosed: If the channel was closed before its producer completed.
-            UpstreamFailedError: If the producer failed or was cancelled.
-        """
+    @property
+    def unread(self) -> bool:
+        """Whether nothing has been read from the channel: no batch, no end, no close."""
         ...
 
     async def close(self) -> None:

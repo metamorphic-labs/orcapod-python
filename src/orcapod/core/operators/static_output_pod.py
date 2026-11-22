@@ -547,14 +547,19 @@ class StaticOutputOperatorPod(TraceableBase):
             The output stream, with ``node``'s identity.
         """
         if table.num_rows == 0:
-            return StaticOutputOperatorPod._materialize_upstream([], node)
-        tag_keys, data_keys = keys
-        return StaticOutputOperatorPod._as_upstream_stream(
-            StaticOutputOperatorPod._row_built_form(table, keys),
-            tag_keys,
-            data_tag_names(tag_keys, data_keys),
-            node,
-        )
+            stream = StaticOutputOperatorPod._materialize_upstream([], node)
+        else:
+            tag_keys, data_keys = keys
+            stream = StaticOutputOperatorPod._as_upstream_stream(
+                StaticOutputOperatorPod._row_built_form(table, keys),
+                tag_keys,
+                data_tag_names(tag_keys, data_keys),
+                node,
+            )
+        # The one place a stream is marked as a complete, immutable output in the
+        # row-built form (ITL-1347): ``channel_to_stream`` may give it as it is.
+        setattr(stream, ROW_BUILT_OUTPUT, True)
+        return stream
 
     @staticmethod
     def _flag_source_info_nullability(table: pa.Table) -> pa.Table:
@@ -900,7 +905,7 @@ class StaticOutputOperatorPod(TraceableBase):
 
         A row-by-row operator (``ROW_BY_ROW``) is applied to each record batch as it
         arrives and sends that batch's result at once. Every other operator reads
-        all of its inputs first (``InputChannel.to_stream``) and then runs exactly
+        all of its inputs first (``channel_to_stream``) and then runs exactly
         the sync call, so an input with no rows gives the typed zero-row result of
         the sync path, with no row to send.
 
@@ -1012,7 +1017,7 @@ async def _streams_of(inputs: Sequence[RecordBatchInput]) -> list[StreamProtocol
         UpstreamFailedError: If an input's producer failed; the other inputs are no
             longer read.
     """
-    tasks = [asyncio.ensure_future(channel.to_stream()) for channel in inputs]
+    tasks = [asyncio.ensure_future(channel_to_stream(channel)) for channel in inputs]
     try:
         return list(await asyncio.gather(*tasks))
     except BaseException:
@@ -1065,6 +1070,50 @@ def transport_schema(stream: StreamProtocol) -> pa.Schema | None:
     return row_built_provenance(zero_rows.select(names)).schema
 
 
+ROW_BUILT_OUTPUT = "_orcapod_row_built_output"
+"""The attribute that marks a stream ``_output_stream`` built (ITL-1347).
+
+Set in that one place, never inferred from a class: such a stream is a complete,
+immutable output already in the row-built form, so a consumer of its record batches
+would rebuild exactly it, and ``channel_to_stream`` may give it without reading.
+"""
+
+
+async def channel_to_stream(channel: RecordBatchInput) -> StreamProtocol:
+    """Return what an input channel delivers, as a stream: the one such conversion.
+
+    It reads the channel to its end (one pass; every error of the read, such as an
+    unbound source's or a failed producer's, is raised here, before any operator runs)
+    and builds a fixed snapshot of what was delivered through the one settlement path
+    (``stream_from_batches``). The only shortcut: a channel not read yet whose stream
+    ``_output_stream`` built (``ROW_BUILT_OUTPUT``) gives that stream, which is exactly
+    what its batches would rebuild; the channel is then closed.
+
+    Args:
+        channel: The input channel, not read yet.
+
+    Returns:
+        A complete, re-readable stream of the channel's input.
+
+    Raises:
+        RuntimeError: If the channel has already been read (a batch received, or its
+            end reached): a stream of part of an input is never made, and a channel
+            is never read again.
+        ChannelClosed: If the channel was closed before its producer completed.
+        UpstreamFailedError: If the producer failed or was cancelled.
+    """
+    if not channel.unread:
+        raise RuntimeError(
+            "channel_to_stream() gives everything an input channel delivers, as a "
+            + "stream; this channel has been read already."
+        )
+    stream = channel.stream
+    if getattr(stream, ROW_BUILT_OUTPUT, False):
+        await channel.close()
+        return stream
+    return stream_from_batches(stream, await channel.collect())
+
+
 def stream_from_batches(
     stream: StreamProtocol, batches: Sequence[pa.RecordBatch]
 ) -> StreamProtocol:
@@ -1072,7 +1121,7 @@ def stream_from_batches(
 
     The one place a stream is made from Arrow record batches: what an output channel
     gives once closed (``OutputChannel.result``), what an input channel delivered
-    (``InputChannel.to_stream``), and the record batches a row-by-row operator is
+    (``channel_to_stream``), and the record batches a row-by-row operator is
     applied to. The batches are put under one another in the order given, and the
     table is handed on as a node hands its rows to its successors
     (``_output_stream``): in the row-built form, each system-tag and source-info field

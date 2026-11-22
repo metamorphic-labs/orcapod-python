@@ -24,10 +24,7 @@ from orcapod.channels import ChannelClosed
 if TYPE_CHECKING:
     import pyarrow as pa
 
-    from orcapod.protocols.core_protocols.streams import (
-        RecordBatchInput,
-        StreamProtocol,
-    )
+    from orcapod.protocols.core_protocols.streams import StreamProtocol
 
 SOURCE_BATCH_ROWS = 65_536
 """The most rows of one Arrow record batch a complete stream is read in.
@@ -48,14 +45,6 @@ class BatchFeed(Protocol):
         """Stop reading: nothing waits for this reader any more."""
         ...
 
-    async def to_stream(self, channel: RecordBatchInput) -> StreamProtocol:
-        """Return all of ``channel``'s input as a stream; ``channel`` is not read yet.
-
-        Args:
-            channel: The input channel this feed serves.
-        """
-        ...
-
 
 class InputChannel:
     """A single-pass, back-pressured reader of a stream's Arrow record batches.
@@ -64,7 +53,7 @@ class InputChannel:
     delivers is its ``stream``, known before the first batch: the producing node, or
     the stream it was opened from. A channel has no identity of its own and is read
     once; to read again, go back to a stream (the one it was opened from, or the one
-    ``to_stream`` gives).
+    ``channel_to_stream`` makes of what it delivered).
 
     Made by ``stream.open_channel()`` or by ``OutputChannel.open_reader()``, never
     directly.
@@ -88,6 +77,11 @@ class InputChannel:
     def stream(self) -> StreamProtocol:
         """The stream whose rows this channel delivers: the description."""
         return self._stream
+
+    @property
+    def unread(self) -> bool:
+        """Whether nothing has been read from the channel: no batch, no end, no close."""
+        return not self._received and not self._ended
 
     async def receive(self) -> pa.RecordBatch:
         """Return the next Arrow record batch.
@@ -153,32 +147,6 @@ class InputChannel:
             UpstreamFailedError: If the producer failed or was cancelled.
         """
         return [batch async for batch in self]
-
-    async def to_stream(self) -> StreamProtocol:
-        """Read to the end and return all of the channel's input, as a stream.
-
-        It is how an operator that needs all of an input reads it, and it needs a
-        channel not read yet: a stream of part of an input is never made. A channel
-        opened on a complete stream gives that stream; a reader of an output channel
-        gives the record batches it delivered, in arrival order, with the identity of
-        ``stream``.
-
-        Raises:
-            RuntimeError: If a record batch has already been received.
-            ChannelClosed: If the channel was closed before its producer completed.
-            UpstreamFailedError: If the producer failed or was cancelled.
-        """
-        if self._received:
-            raise RuntimeError(
-                "to_stream() gives everything an input channel delivers, as a stream; "
-                + f"{self._received} record batch(es) of this one have been received "
-                + "already."
-            )
-        if self._closed:
-            raise self._closed_early()
-        stream = await self._feed.to_stream(self)
-        self._ended = True
-        return stream
 
     async def close(self) -> None:
         """Stop reading. The producer no longer waits for this reader."""

@@ -33,9 +33,6 @@ from orcapod.utils import arrow_utils
 
 if TYPE_CHECKING:
     from orcapod.protocols.core_protocols import StreamProtocol
-    from orcapod.protocols.core_protocols.streams import (
-        RecordBatchInput,
-    )
 
 BATCH_BUFFER_SIZE = 8
 """How many Arrow record batches an input channel queues before its producer waits."""
@@ -83,22 +80,6 @@ class _OutputFeed:
                 return None
             await output._changed.wait()  # pyright: ignore[reportPrivateUsage]
         return None
-
-    async def to_stream(self, channel: RecordBatchInput) -> StreamProtocol:
-        """Read ``channel`` to its end and return what it delivered, as a stream.
-
-        The record batches in arrival order, with the identity of ``channel.stream``
-        (``stream_from_batches``, which settles the provenance fields on the complete
-        table).
-
-        Args:
-            channel: The input channel this feed serves, not read yet.
-
-        Raises:
-            ChannelClosed: If the channel is closed before its producer completed.
-            UpstreamFailedError: If the output failed.
-        """
-        return stream_from_batches(channel.stream, await channel.collect())
 
     def close(self) -> None:
         """Stop reading and unregister from the output.

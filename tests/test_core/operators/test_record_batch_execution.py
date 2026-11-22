@@ -4,7 +4,7 @@ Every operator has one body, ``static_process``. Its Arrow-record-batch form
 (``async_execute_batches``) reads input channels opened from streams and writes an
 output channel, which closes into a stream. An operator whose output rows each come
 from one input row is applied to every record batch as it arrives; every other
-operator reads all of its inputs first (``InputChannel.to_stream``) and then runs the
+operator reads all of its inputs first (``channel_to_stream``) and then runs the
 sync call; ``Batch`` batches consecutive arrivals.
 
 For every case of the async/sync matrix (``test_async_sync_equivalence.CASES``) the
@@ -27,6 +27,7 @@ import polars as pl
 import pyarrow as pa
 import pytest
 
+import orcapod.contexts as contexts
 import orcapod.core.operators as operators
 from orcapod.core.operators import AddTags, Batch, PolarsFilter, SelectDataColumns
 from orcapod.core.operators.static_output_pod import (
@@ -37,6 +38,11 @@ from orcapod.core.record_batch_channels import OutputChannel
 from orcapod.protocols.core_protocols.streams import RecordBatchInput
 from orcapod.channels import ChannelClosed
 from orcapod.core.streams import ArrowTableStream
+from orcapod.databases import InMemoryArrowDatabase
+from orcapod.pipeline import SyncPipelineOrchestrator
+from orcapod.pipeline.job import PipelineJob
+from orcapod.system_constants import constants
+from tests.test_core.operators.test_rejoin import other_context  # noqa: F401  # the fixture
 from orcapod.errors import UpstreamFailedError
 from orcapod.protocols.core_protocols import StreamProtocol
 from tests.test_core.operators.test_async_sync_equivalence import (
@@ -381,17 +387,14 @@ BARRIER_ORACLE_CASES: dict[
 
 @pytest.mark.parametrize("label", list(BARRIER_ORACLE_CASES))
 def test_a_barrier_operator_sees_its_input_as_a_job_gives_it(label: str) -> None:
-    """Two oracles, which coincide in a job. A channel opened on a complete stream gives
-    the operator that stream (``to_stream()`` is the stream itself), so the result is
-    the sync result over it. Record batches that travelled through an output channel
-    give the stream rebuilt from them in the row-built form, which is what a job's
-    sync path gives an operator (``_materialize_upstream``: ``null`` as
-    ``large_string``, the columns in row order). In a job every node's output stream
-    is already in that form, so both are the job's; on a raw stream they differ, and
-    a predicate that reads a ``null`` column's type or the column order follows the
-    form it is given (documented behaviour, e5). In a job neither case reaches an
-    operator: a source refuses a ``null`` column, and a job refuses an expression that
-    selects columns by position."""
+    """The record-batch form is held to what a job's sync path gives an operator: the
+    upstream rebuilt from its rows (``_materialize_upstream``: ``null`` as
+    ``large_string``, the columns in row order), not the raw stream it came from, in
+    every layout: ``channel_to_stream`` rebuilds what the channel delivered. A
+    predicate that reads a ``null`` column's type or the column order follows that
+    form (documented behaviour, e5); in a job neither case reaches an operator: a
+    source refuses a ``null`` column, and a job refuses an expression that selects
+    columns by position."""
     make_stream, make_op = BARRIER_ORACLE_CASES[label]
     stream = make_stream()
     job_sync = _outcome(
@@ -401,10 +404,9 @@ def test_a_barrier_operator_sees_its_input_as_a_job_gives_it(label: str) -> None
             )
         )
     )
-    raw_sync = _outcome(lambda: make_op()(stream))
-    assert raw_sync != job_sync  # the case tells the two oracles apart
-    assert _outcome(lambda: run_on_channels(make_op(), [stream], None)) == raw_sync
-    for layout in ("one_row_per_batch", "mixed_sizes"):
+    # The raw stream gives another outcome: the case tells the two oracles apart.
+    assert _outcome(lambda: make_op()(stream)) != job_sync
+    for layout in LAYOUTS:
         assert (
             _outcome(lambda: run_on_channels(make_op(), [stream], LAYOUTS[layout]))
             == job_sync
@@ -730,3 +732,59 @@ def test_drop_tag_columns_over_three_tags_sends_its_result() -> None:
     assert expected is not None
     result = run_on_channels(operators.DropTagColumns(["a"]), [stream], None)
     assert_same_table(result.as_table(columns=ALL), expected)
+
+
+# --- A barrier over a job's own nodes ------------------------------------------------------
+
+
+def test_rejoin_over_job_nodes_with_rows_of_two_data_contexts(
+    other_context: contexts.DataContext,  # noqa: F811  # the fixture, by name
+) -> None:
+    """``Rejoin`` of a job's source node with a renaming branch held from the run, rows
+    in two data contexts: reading the source node's channel rebuilds its rows in the
+    row-built form (never its raw table with its own context column), so the result
+    has both rows, as the sync run does."""
+    table = pa.table(
+        {
+            "k": pa.array([1, 2], pa.int64()),
+            "x": pa.array([1.0, 2.0], pa.float64()),
+            "y": pa.array([3, 4], pa.int64()),
+            "source_id::a": pa.array(["s", "s"], pa.large_string()),
+            "record_id::a": pa.array(["r0", "r1"], pa.large_string()),
+            constants.CONTEXT_KEY: pa.array(
+                [contexts.get_default_context().context_key, other_context.context_key],
+                pa.large_string(),
+            ),
+        }
+    )
+    table = table.cast(
+        pa.schema(
+            [
+                f.with_nullable(False) if f.name.endswith("::a") else f
+                for f in table.schema
+            ]
+        )
+    )
+    raw = ArrowTableStream(
+        table, tag_columns=["k"], system_tag_columns=["source_id::a", "record_id::a"]
+    )
+    job = PipelineJob(name="rejoin-contexts", database=InMemoryArrowDatabase())
+    with job:
+        branch = operators.MapData({"x": "u", "y": "v"})(raw, label="branch")
+        _ = operators.Rejoin()(raw, branch, label="rejoin")
+    _ = job.run(orchestrator=SyncPipelineOrchestrator())
+    rejoin = job.nodes["rejoin"]
+    assert rejoin.as_table().num_rows == 2
+    upstreams = rejoin.upstreams
+
+    async def go() -> StreamProtocol:
+        op = operators.Rejoin()
+        output = OutputChannel(op(*upstreams))
+        await op.async_execute_batches([u.open_channel() for u in upstreams], output)
+        return output.result()
+
+    result = asyncio.run(go())
+    assert result.as_table().num_rows == 2
+    assert sorted(map(str, result.as_table().to_pylist())) == sorted(
+        map(str, rejoin.as_table().to_pylist())
+    )

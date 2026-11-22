@@ -1172,13 +1172,17 @@ class SourceNodeBase(TraceableBase, ABC):
         """Open an input channel on this node's rows, for async computation (ITL-1347).
 
         As ``StreamBase.open_channel()``: the rows as Arrow record batches in the
-        row-built form, read on the first read; the description is this node, and
-        ``to_stream()`` is this node.
+        row-built form, read once on the first read; the description is this node.
+        The rows are those of ``execute()``, so their columns follow the bound
+        source's keys (its tag order), which may differ from this node's keys (the
+        slot's order). An unbound node's first read raises what reading it raises.
 
         Returns:
             The input channel.
         """
-        return InputChannel(self, CompleteStreamFeed(self))
+        bound = self._bound_stream()
+        keys = bound.keys() if bound is not None else None
+        return InputChannel(self, CompleteStreamFeed(self, keys))
 
     async def async_iter_data(self):
         """Asynchronous iterator over (tag, data) pairs.

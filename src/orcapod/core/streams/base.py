@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from abc import abstractmethod
+from collections import deque
 from collections.abc import (
     AsyncIterator,
     Callable,
@@ -339,21 +340,29 @@ class CompleteStreamFeed:
     """The record batches of a complete stream, read at one reader's own position.
 
     The feed of a channel opened on a stream (``StreamBase.open_channel()``). Nothing
-    is read until the first ``next``; then the stream's table is read once, in the
-    row-built form (``row_built_columns``), and cut into record batches of at most
-    ``SOURCE_BATCH_ROWS`` rows. The stream is complete, so nothing is queued and no
-    producer waits on a reader.
+    is read until the first ``next``; then the stream's table is read once (a fixed
+    snapshot: a stream that changes later is not read again), in the row-built form
+    (``row_built_columns``), and cut into record batches of at most
+    ``SOURCE_BATCH_ROWS`` rows. A batch is dropped by the feed once delivered. The
+    stream is complete, so nothing is queued and no producer waits on a reader.
     """
 
-    def __init__(self, stream: StreamProtocol) -> None:
+    def __init__(
+        self,
+        stream: StreamProtocol,
+        keys: tuple[Sequence[str], Sequence[str]] | None = None,
+    ) -> None:
         """Make a feed of ``stream``'s rows; nothing is read until the first ``next``.
 
         Args:
             stream: The complete stream to read.
+            keys: The tag and data keys of the rows read, when they differ from
+                ``stream.keys()`` (a source node gives its bound source's rows);
+                default ``stream.keys()``.
         """
         self._stream = stream
-        self._batches: list[pa.RecordBatch] | None = None
-        self._position = 0
+        self._keys = keys
+        self._batches: deque[pa.RecordBatch] | None = None
 
     async def next(self) -> pa.RecordBatch | None:
         """Return the stream's next record batch, or ``None`` at the end.
@@ -362,35 +371,20 @@ class CompleteStreamFeed:
         batches with no rows are skipped.
         """
         if self._batches is None:
+            keys = self._keys if self._keys is not None else self._stream.keys()
             table = row_built_columns(
-                self._stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS),
-                self._stream.keys(),
+                self._stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS), keys
             )
-            self._batches = [
+            self._batches = deque(
                 batch
                 for batch in table.to_batches(max_chunksize=SOURCE_BATCH_ROWS)
                 if batch.num_rows
-            ]
-        if self._position >= len(self._batches):
-            return None
-        self._position += 1
-        return self._batches[self._position - 1]
+            )
+        return self._batches.popleft() if self._batches else None
 
     def close(self) -> None:
         """Stop reading: the batches not read are dropped."""
-        self._batches = []
-        self._position = 0
-
-    async def to_stream(self, channel: RecordBatchInput) -> StreamProtocol:
-        """Return the stream itself: all of the input, read by nobody yet.
-
-        It is exactly what the sync path gives an operator over that stream, identity
-        and rows; nothing is read or rebuilt.
-
-        Args:
-            channel: The input channel this feed serves.
-        """
-        return self._stream
+        self._batches = deque()
 
 
 def typed_arrow_schemas(
@@ -1213,8 +1207,8 @@ class StreamBase(TraceableBase):
         ``SOURCE_BATCH_ROWS`` rows, in the row-built form, read once and in order; its
         description is this stream (``channel.stream``). Several channels may be
         opened on one stream, each with its own position, and the stream stays as it
-        is. Nothing is read until the channel is first read, and its ``to_stream()`` is
-        this stream.
+        is. Nothing is read until the channel is first read; then the stream is read
+        once, a fixed snapshot.
 
         Returns:
             The input channel.

@@ -5,7 +5,7 @@ carrier of the stream's rows as Arrow record batches. An input channel is opened
 complete stream (``stream.open_channel()``) or from an output channel
 (``OutputChannel.open_reader``); an output channel, once closed, gives its rows back as
 an ordinary stream (``result()``), and so does an input channel that is read to its end
-(``to_stream()``). One test per rule of the design's table "The hard semantics".
+(``channel_to_stream``). One test per rule of the design's table "The hard semantics".
 
 The oracle of every table is ``R``: the table today's code builds from a stream's rows
 (``StaticOutputOperatorPod._rows_to_table``).
@@ -14,6 +14,8 @@ The oracle of every table is ``R``: the table today's code builds from a stream'
 from __future__ import annotations
 
 import asyncio
+import gc
+import weakref
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, TypeVar
 from unittest import mock
@@ -30,9 +32,10 @@ from orcapod.channels import (
     ReadableChannel,
     WritableChannel,
 )
-from orcapod.core.operators import MapData, PolarsFilter, SelectDataColumns
+from orcapod.core.operators import MapData, PolarsFilter, SelectDataColumns, SemiJoin
 from orcapod.core.operators.static_output_pod import (
     StaticOutputOperatorPod,
+    channel_to_stream,
     stream_from_batches,
     transport_schema,
 )
@@ -46,7 +49,14 @@ from orcapod.core.nodes.source_node import SourceJobNode, SourceNode
 from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import UnboundSourceError, UpstreamFailedError
 from orcapod.protocols.core_protocols import StreamProtocol
+from orcapod.core.sources import PollingSource
+from orcapod.core.sources.source_proxy import SourceProxy
+from orcapod.databases import InMemoryArrowDatabase
+from orcapod.pipeline import SyncPipelineOrchestrator
+from orcapod.pipeline.job import PipelineJob
 from orcapod.sources import ArrowTableSource
+from orcapod.types import Schema
+from tests.test_channels.test_polling_source import FakeDynamicSource, _batch
 
 T = TypeVar("T")
 ALL = {"system_tags": True, "source": True}
@@ -107,8 +117,8 @@ def batches_of(stream: Any, rows: int = SOURCE_BATCH_ROWS) -> list[pa.RecordBatc
 
 def test_a_channel_opened_on_a_stream_delivers_its_rows_and_refers_to_it() -> None:
     """The record batches are the stream's rows in the row-built form; the description
-    is the stream, and ``to_stream()`` is the stream itself (all of the input, nothing
-    rebuilt)."""
+    is the stream, and ``channel_to_stream`` rebuilds what the channel delivered, with
+    the stream's identity."""
     stream = source()
     channel = stream.open_channel()
 
@@ -118,27 +128,171 @@ def test_a_channel_opened_on_a_stream_delivers_its_rows_and_refers_to_it() -> No
     assert as_protocol.stream is stream
     batches = run(stream.open_channel().collect)
     assert same(pa.Table.from_batches(batches), R(stream))
-    assert run(channel.to_stream) is stream
+    delivered = run(lambda: channel_to_stream(channel))
+    assert same(delivered.as_table(columns=ALL), R(stream))
+    assert delivered.keys() == stream.keys()
+    assert delivered.data_context_key == stream.data_context_key
+    assert delivered.pipeline_hash() == stream.pipeline_hash()
     with pytest.raises(ChannelClosed):
-        _ = run(channel.receive)  # read to its end by to_stream()
+        _ = run(channel.receive)  # read to its end
 
 
 def test_a_source_node_opens_a_channel_on_its_rows() -> None:
     """A source node is a stream too. A job's source node delivers its source's rows in
-    the row-built form, and ``to_stream()`` is the node itself. An unbound slot opens a
+    the row-built form, which ``channel_to_stream`` rebuilds. An unbound slot opens a
     channel (opening reads nothing), and its first read raises."""
     stream = source()
     node = SourceJobNode.from_stream(stream, name="events")
     assert isinstance(node, StreamProtocol)
     batches = run(node.open_channel().collect)
     assert same(pa.Table.from_batches(batches), R(node))
-    assert run(node.open_channel().to_stream) is node
+    rebuilt = run(lambda: channel_to_stream(node.open_channel()))
+    assert same(rebuilt.as_table(columns=ALL), R(node))
 
     slot = SourceNode.from_stream(stream, name="events")
     assert isinstance(slot, StreamProtocol)
     channel = slot.open_channel()
     with pytest.raises(UnboundSourceError):
         _ = run(channel.receive)
+
+
+def test_a_bound_source_node_sends_its_rows_in_their_own_column_order() -> None:
+    """A source whose physical columns are x, j, k, y with tags declared k, j: the
+    node's batches have the column order of its own rows (``execute()``: k, j, ...),
+    not the slot's schema order."""
+    stream = ArrowTableSource(
+        pa.table(
+            {
+                "x": pa.array([1, 2], pa.int64()),
+                "j": pa.array([3, 4], pa.int64()),
+                "k": pa.array([5, 6], pa.int64()),
+                "y": pa.array([7.5, 8.5], pa.float64()),
+            }
+        ),
+        tag_columns=["k", "j"],
+        tag_only_columns=True,
+        source_id="ordered",
+    )
+    node = SourceJobNode.from_stream(stream, name="ordered")
+    assert node.keys()[0] != stream.keys()[0]  # the slot's order is another
+    rows = node.execute()
+    expected = StaticOutputOperatorPod._rows_to_table(rows)[0]
+    batches = run(node.open_channel().collect)
+    assert pa.Table.from_batches(batches).schema.names == expected.schema.names
+    assert same(pa.Table.from_batches(batches), expected)
+
+
+def test_a_delivered_batch_is_not_kept_by_the_feed() -> None:
+    """Once delivered, a batch is not held by the channel: a consumer that drops it
+    frees it, also while the channel is still open."""
+    n = SOURCE_BATCH_ROWS + 3
+    stream = ArrowTableSource(
+        pa.table(
+            {"k": pa.array(range(n), pa.int64()), "v": pa.array(range(n), pa.int64())}
+        ),
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="large",
+    )
+
+    async def read() -> bool:
+        channel = stream.open_channel()
+        first = await channel.receive()
+        reference = weakref.ref(first)
+        del first
+        rest = await channel.collect()
+        assert sum(batch.num_rows for batch in rest) == 3
+        gc.collect()
+        return reference() is None
+
+    assert run(read)
+
+
+def test_an_unbound_input_fails_a_barrier_before_it_runs() -> None:
+    """``SemiJoin`` with no shared tag never reads its right input on the sync path,
+    but ``channel_to_stream`` reads every input first: an unbound right input (a slot,
+    or a ``SourceProxy``) raises what reading it raises, before the operator runs."""
+    left = source()
+    other = ArrowTableSource(
+        pa.table({"other": pa.array([1], pa.int64()), "v": pa.array([0.5])}),
+        tag_columns=["other"],
+        tag_only_columns=True,
+        source_id="other",
+    )
+    slot = SourceNode.from_stream(other, name="other")
+    proxy = SourceProxy(
+        source_id="other",
+        expected_class_name="ArrowTableSource",
+        tag_schema=Schema({"other": int}),
+        data_schema=Schema({"v": float}),
+        content_hash_str=other.content_hash().to_string(),
+        pipeline_hash_str=other.pipeline_hash().to_string(),
+    )
+    for right, raised in ((slot, UnboundSourceError), (proxy, NotImplementedError)):
+        op = SemiJoin()
+
+        async def go(right: Any = right) -> None:
+            output = OutputChannel(op(left, right))
+            await op.async_execute_batches(
+                [left.open_channel(), right.open_channel()], output
+            )
+
+        with pytest.raises(raised):
+            run(go)
+
+
+def test_an_exhausted_channel_never_yields_rows_later() -> None:
+    """A job node's channel read to its end before the node's run delivered nothing;
+    after the run, the same channel neither gives the run's rows nor reads again."""
+    job = PipelineJob(name="exhausted", database=InMemoryArrowDatabase())
+    with job:
+        _ = SelectDataColumns(["subject", "trial", "note"])(source(), label="selected")
+    node = job.nodes["selected"]
+
+    async def before_run() -> Any:
+        channel = node.open_channel()
+        assert await channel.collect() == []
+        return channel
+
+    channel = run(before_run)
+    _ = job.run(orchestrator=SyncPipelineOrchestrator())
+    assert node.as_table().num_rows == 7
+
+    async def after_run() -> None:
+        assert await channel.collect() == []  # single pass: nothing more
+        with pytest.raises(RuntimeError, match="read already"):
+            _ = await channel_to_stream(channel)
+
+    run(after_run)
+
+
+def test_a_polling_source_is_read_once_through_a_channel() -> None:
+    """A fresh ``PollingSource``: opening a channel fetches nothing; reading it fetches
+    once and the stream ``channel_to_stream`` gives is a fixed snapshot, read again
+    with no further fetch, also through ``collect``."""
+    fake = FakeDynamicSource(batches=[_batch(i, 10 * i) for i in range(1, 6)])
+    polling = PollingSource(
+        fake, tag_columns="id", record_id_columns="id", source_id="polled"
+    )
+
+    async def read() -> None:
+        channel = polling.open_channel()
+        assert len(fake.fetch_cursors) == 0  # opening reads nothing
+        snapshot = await channel_to_stream(channel)
+        fetched = len(fake.fetch_cursors)
+        assert fetched > 0
+        rows = snapshot.as_table().num_rows
+        assert snapshot.as_table().num_rows == rows  # a fixed snapshot
+        assert len(fake.fetch_cursors) == fetched  # read again: no fetch
+        second = polling.open_channel()
+        assert len(fake.fetch_cursors) == fetched
+        batches = await second.collect()
+        read_once = len(fake.fetch_cursors)
+        assert await second.collect() == []  # one pass
+        assert len(fake.fetch_cursors) == read_once  # never read again
+        assert batches
+
+    run(read)
 
 
 def test_opening_a_channel_computes_nothing() -> None:
@@ -196,8 +350,9 @@ def test_a_channel_is_read_once_and_the_stream_again() -> None:
     assert run(read) == (1, 0)
 
 
-def test_to_stream_is_everything_or_nothing() -> None:
-    """``to_stream()`` on a channel already read is refused: never part of an input."""
+def test_channel_to_stream_is_everything_or_nothing() -> None:
+    """``channel_to_stream`` on a channel already read is refused: never part of an
+    input, and a channel is never read again."""
 
     batches = batches_of(source(), 2)
 
@@ -208,8 +363,8 @@ def test_to_stream_is_everything_or_nothing() -> None:
         await output.close()
         channel = output.open_reader()
         _ = await channel.receive()
-        with pytest.raises(RuntimeError, match="1 record batch"):
-            _ = await channel.to_stream()
+        with pytest.raises(RuntimeError, match="read already"):
+            _ = await channel_to_stream(channel)
 
     run(read)
 
@@ -249,7 +404,7 @@ def test_result_is_the_batches_sent_in_order_as_the_nodes_stream(rows: int) -> N
 
 
 def test_the_identity_of_a_result_with_and_without_a_producer() -> None:
-    """``result()`` and ``to_stream()`` take the describing stream's identity: its
+    """``result()`` and ``channel_to_stream`` take the describing stream's identity: its
     producer and upstreams when it has a producer, its pipeline hash when it has none."""
     root = source()
     produced = SelectDataColumns(["subject", "trial", "amplitude"])(root)
@@ -259,7 +414,7 @@ def test_the_identity_of_a_result_with_and_without_a_producer() -> None:
         for batch in batches:
             await output.send(batch)
         await output.close()
-        return output.result(), await output.open_reader().to_stream()
+        return output.result(), await channel_to_stream(output.open_reader())
 
     for stream in (root, produced):
         batches = batches_of(stream, 3)
@@ -272,7 +427,7 @@ def test_the_identity_of_a_result_with_and_without_a_producer() -> None:
 
 
 def test_a_close_with_no_batch_is_the_typed_zero_row_stream() -> None:
-    """Zero rows: ``result()`` and ``to_stream()`` are typed by the description, never
+    """Zero rows: ``result()`` and ``channel_to_stream`` are typed by the description, never
     by rows, with the columns of a run with rows."""
     stream = SelectDataColumns(["subject", "trial", "amplitude", "trace"])(source())
     with_rows = R(stream)
@@ -282,7 +437,7 @@ def test_a_close_with_no_batch_is_the_typed_zero_row_stream() -> None:
         reader = output.open_reader()
         await output.close()
         await output.close()  # a second close does nothing
-        return output.result(), await reader.to_stream()
+        return output.result(), await channel_to_stream(reader)
 
     for made in run(empty):
         table = made.as_table(columns=ALL)
@@ -524,17 +679,21 @@ def test_a_send_scheduled_before_the_end_of_a_retained_output_publishes_nothing(
     assert rows == [1]
 
 
-def test_to_stream_of_a_channel_closed_before_its_end_raises() -> None:
-    """A reader closed while ``to_stream()`` (or ``collect()``) reads never makes part
+def test_channel_to_stream_of_a_channel_closed_before_its_end_raises() -> None:
+    """A reader closed while ``channel_to_stream`` (or ``collect()``) reads never makes part
     of an input into a stream."""
     stream = source(2)
     first, second = batches_of(stream, 1)
 
     async def write() -> None:
-        for read in ("to_stream", "collect"):
+        for read in ("channel_to_stream", "collect"):
             output = OutputChannel(stream, retain=False, buffer_size=4)
             reader = output.open_reader()
-            reading = asyncio.ensure_future(getattr(reader, read)())
+            reading = asyncio.ensure_future(
+                channel_to_stream(reader)
+                if read == "channel_to_stream"
+                else reader.collect()
+            )
             await output.send(first)
             await asyncio.sleep(0)
             await reader.close()
@@ -1017,7 +1176,7 @@ def test_a_failed_producer_is_never_a_normal_end(retain: bool) -> None:
         await output.send(batches[0])
         _ = await waiting.receive()
         blocked = asyncio.ensure_future(waiting.receive())
-        whole = asyncio.ensure_future(barrier.to_stream())
+        whole = asyncio.ensure_future(channel_to_stream(barrier))
         await asyncio.sleep(0)
         output.fail(boom)
         output.fail(RuntimeError("a second failure changes nothing"))
@@ -1052,7 +1211,7 @@ def test_fail_after_close_changes_nothing() -> None:
             await output.send(batch)
         await output.close()
         output.fail(OSError("too late"))
-        return (await output.open_reader().to_stream()).as_table().num_rows
+        return (await channel_to_stream(output.open_reader())).as_table().num_rows
 
     assert run(write) == 7
 
@@ -1161,7 +1320,7 @@ def test_an_operator_reads_its_input_to_the_end_and_closes_its_output() -> None:
 
 
 def test_stream_from_batches_is_the_one_conversion() -> None:
-    """``result()`` and ``to_stream()`` are ``stream_from_batches``: its table equals the
+    """``result()`` and ``channel_to_stream`` are ``stream_from_batches``: its table equals the
     rows' table for every way the batches are cut, and no batch gives zero rows."""
     stream = source()
     for rows in (1, 2, 5, 7):
