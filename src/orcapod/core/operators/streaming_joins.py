@@ -1,7 +1,7 @@
 """Streaming join kernels: symmetric hash joins on Arrow record batches (ITL-1362).
 
-The async path of ``Join``, ``MergeJoin`` and ``SemiJoin`` (ITL-1347, stage 5) reads its
-inputs as Arrow record batches, in whatever order they arrive, and must give the rows of
+The async path of ``Join``, ``MergeJoin``, ``SemiJoin`` and ``Rejoin`` (ITL-1347, stage
+5) reads its inputs as Arrow record batches, in whatever order they arrive, and must give the rows of
 the operator's sync ``static_process`` over the same inputs, as a multiset (row order is
 not a result on the async path; developer, November 22, 2026). A kernel is that
 computation without the channels: the channel layer creates one per run from the input
@@ -98,6 +98,10 @@ from orcapod.core.operators.merge_join import (
     MergeJoin,
     _merged_list,  # pyright: ignore[reportPrivateUsage]  # MergeJoin's one rule
     _output_types,  # pyright: ignore[reportPrivateUsage]  # MergeJoin's one rule
+)
+from orcapod.core.operators.rejoin import (
+    Rejoin,
+    _described,  # pyright: ignore[reportPrivateUsage]  # Rejoin's one rule
 )
 from orcapod.core.operators.semijoin import (
     SemiJoin,
@@ -992,4 +996,432 @@ class StreamingSemiJoin(StreamingJoinKernel):
         else:
             # No right row will arrive: the undecided left rows never match.
             self._waiting = None
+        return []
+
+
+# The occurrence-number column of a Rejoin key frame (never an input column).
+_OCCURRENCE = "__streaming_occurrence"
+
+
+def _with_context(table: pa.Table, context_key: str) -> pa.Table:
+    """``table`` with the data context column every row of it carries on the sync path.
+
+    An input a job rebuilds from rows carries its producer's data context on every row
+    (``StaticOutputOperatorPod._as_upstream_stream``), and ``Rejoin`` matches on it.
+    Transport batches carry no context column, so the kernel adds the input's own.
+    """
+    return table.append_column(
+        pa.field(constants.CONTEXT_KEY, pa.large_string(), nullable=False),
+        pa.array([context_key] * table.num_rows, pa.large_string()),
+    )
+
+
+def _with_system_tags(table: pa.Table, keys: Sequence[str]) -> pa.Table:
+    """The rows of ``table`` whose system tags are all present: a null matches nothing."""
+    if not table.num_rows:
+        return table
+    return table.filter(_has_whole_key(table, keys))
+
+
+def _occurrences(frame: pl.DataFrame, among: Sequence[str]) -> pl.DataFrame:
+    """Number each row among the rows before it equal to it in ``among`` (0, 1, ...).
+
+    With it, rows that repeat an origin row are matched one to one in the order they
+    arrived (``Rejoin``'s occurrence rule), and no join ever pairs every repeat of one
+    side with every repeat of the other: the work stays linear in the rows.
+    """
+    return frame.with_columns(
+        pl.int_range(pl.len()).over(list(among)).alias(_OCCURRENCE)
+    )
+
+
+class _Remaining:
+    """An input's rows not matched yet, with a key frame and a mask of removed rows.
+
+    Removing a row only clears its mask bit; the rows are compacted when the removed
+    ones are the majority, so a batch never copies the whole table.
+
+    Args:
+        columns: The shared columns of the key frame (system tags first).
+        row: The row-number column.
+    """
+
+    def __init__(self, columns: Sequence[str], row: str) -> None:
+        self.columns: list[str] = list(columns)
+        self.row: str = row
+        self.closed: bool = False
+        self.schema: pa.Schema | None = None
+        self._tables: list[pa.Table] = []
+        self._frames: list[pl.DataFrame] = []
+        self._alive: list[np.ndarray[Any, np.dtype[np.bool_]]] = []
+        self._table: pa.Table | None = None
+        self._frame: pl.DataFrame | None = None
+        self.size: int = 0
+        self.rows: int = 0
+
+    def append(self, table: pa.Table) -> None:
+        """Hold ``table``'s rows."""
+        if not table.num_rows:
+            return
+        frame = polars_key_frame(table, self.columns, self.row)
+        self._frames.append(frame.with_columns(pl.col(self.row) + self.size))
+        self._tables.append(table)
+        self._alive.append(np.ones(table.num_rows, dtype=np.bool_))
+        self._table, self._frame = None, None
+        self.size += table.num_rows
+        self.rows += table.num_rows
+
+    def table(self) -> pa.Table:
+        """Every row appended and not compacted away, numbered as in ``frame``."""
+        if self._table is None:
+            self._table = pa.concat_tables(self._tables)
+            self._tables = [self._table]
+        return self._table
+
+    def frame(self) -> pl.DataFrame:
+        """The key frame of the rows not removed, in the order they arrived."""
+        if self._frame is None:
+            frame = pl.concat(self._frames, rechunk=False)
+            alive = np.concatenate(self._alive)
+            self._frames, self._alive = [frame], [alive]
+            self._frame = frame.filter(pl.Series(alive))
+        return self._frame
+
+    def remove(self, rows: np.ndarray[Any, np.dtype[np.int64]]) -> None:
+        """Remove the rows with these numbers (each held and not removed yet)."""
+        if not len(rows):
+            return
+        self.frame()
+        alive = self._alive[0]
+        alive[rows] = False
+        self.rows -= len(rows)
+        self._frame = None
+        if self.rows * 2 < self.size:
+            self._compact()
+
+    def _compact(self) -> None:
+        """Drop the removed rows and number the rest from 0."""
+        alive = np.concatenate(self._alive)
+        table = self.table().filter(pa.array(alive))
+        self.clear()
+        self.append(table)
+
+    def clear(self) -> None:
+        """Drop every row held."""
+        self._tables, self._frames, self._alive = [], [], []
+        self._table, self._frame = None, None
+        self.size = 0
+        self.rows = 0
+
+
+class _RejoinLink:
+    """One step of ``Rejoin``: a symmetric match of two sides on every shared column.
+
+    Args:
+        system: The system-tag columns, sorted.
+        others: The other columns both sides have (shared user tags, a shared data-tag's
+            source info, the data context), sorted.
+        finish: Turns the pairs' table into the link's output; given both schemas.
+    """
+
+    def __init__(
+        self,
+        system: Sequence[str],
+        others: Sequence[str],
+        finish: Callable[[pa.Table, pa.Schema, pa.Schema], pa.Table],
+    ) -> None:
+        self.system: list[str] = list(system)
+        self.others: list[str] = list(others)
+        self.shared: list[str] = [*system, *others]
+        self.sides: tuple[_Remaining, _Remaining] = (
+            _Remaining(self.shared, _ROW[0]),
+            _Remaining(self.shared, _ROW[1]),
+        )
+        self._finish: Callable[[pa.Table, pa.Schema, pa.Schema], pa.Table] = finish
+        # The shared columns other than system tags in which rows of one origin row
+        # (their system tags match) were seen to differ.
+        self.differing: set[str] = set()
+
+    @property
+    def held_rows(self) -> int:
+        """The unmatched rows both sides hold."""
+        return self.sides[0].rows + self.sides[1].rows
+
+    @property
+    def exhausted(self) -> bool:
+        """Whether the link can never emit again: a side closed holding no row."""
+        return any(side.closed and not side.rows for side in self.sides)
+
+    def release(self) -> None:
+        """End both sides: the link's output is never needed again."""
+        for side in self.sides:
+            side.closed = True
+            side.clear()
+
+    def close(self, side: int) -> None:
+        """Note that ``side`` ends: the other side's rows can never match again."""
+        self.sides[side].closed = True
+        self.sides[1 - side].clear()
+
+    def push(self, side: int, table: pa.Table) -> pa.Table | None:
+        """Match ``table``'s rows with the other side's remaining rows.
+
+        Args:
+            side: 0 for the left side, 1 for the right.
+            table: The arriving rows (with the data context column).
+
+        Returns:
+            The output rows of the matched pairs, or ``None`` when there is none.
+        """
+        this, other = self.sides[side], self.sides[1 - side]
+        if this.schema is None:
+            this.schema = table.schema
+        table = _with_system_tags(table, self.system)
+        if not table.num_rows:
+            return None
+        row, other_row = _ROW[side], _ROW[1 - side]
+        frame = _occurrences(polars_key_frame(table, self.shared, row), self.shared)
+        result = None
+        unmatched = np.ones(table.num_rows, dtype=np.bool_)
+        if other.rows:
+            held = _occurrences(other.frame(), self.shared)
+            pairs = frame.join(
+                held, on=[*self.shared, _OCCURRENCE], how="inner", nulls_equal=True
+            )
+            if pairs.height:
+                mine = pairs.get_column(row).to_numpy()
+                theirs = pairs.get_column(other_row).to_numpy()
+                unmatched[mine] = False
+                tables = (table, other.table()) if side == 0 else (other.table(), table)
+                rows = (mine, theirs) if side == 0 else (theirs, mine)
+                result = self._pairs(*tables, *rows)
+                other.remove(theirs)
+        rest = table.filter(pa.array(unmatched)) if not unmatched.all() else table
+        if rest.num_rows and other.rows and self.others:
+            self._note_differing(rest, other, side)
+        if not other.closed:
+            this.append(rest)
+        return result
+
+    def _pairs(
+        self,
+        left: pa.Table,
+        right: pa.Table,
+        left_rows: np.ndarray[Any, np.dtype[np.int64]],
+        right_rows: np.ndarray[Any, np.dtype[np.int64]],
+    ) -> pa.Table:
+        """The matched pairs as ``Rejoin._rejoin_pair`` builds them, by row number."""
+        left_take = pa.array(left_rows, pa.int64())
+        right_take = pa.array(right_rows, pa.int64())
+        names: list[str] = []
+        arrays: list[Any] = []
+        for name in left.column_names:
+            names.append(name)
+            arrays.append(left.column(name).combine_chunks().take(left_take))
+        for name in right.column_names:
+            if name not in left.column_names:
+                names.append(name)
+                arrays.append(right.column(name).combine_chunks().take(right_take))
+        assert self.sides[0].schema is not None
+        assert self.sides[1].schema is not None
+        return self._finish(
+            pa.Table.from_arrays(arrays, names=names),
+            self.sides[0].schema,
+            self.sides[1].schema,
+        )
+
+    def _note_differing(self, rest: pa.Table, other: _Remaining, side: int) -> None:
+        """Note the shared columns in which unmatched rows of one origin row differ.
+
+        A second join of the arriving rows that matched nothing, on the system tags only,
+        against the other side's remaining rows finds the rows of one origin row (their
+        repeats paired in arrival order); for each other shared column, one join on the
+        system tags and that column, nulls equal (``Join``'s equality otherwise), tells
+        which of those pairs agree in it.
+        """
+        row, other_row = _ROW[side], _ROW[1 - side]
+        mine = _occurrences(polars_key_frame(rest, self.shared, row), self.system)
+        theirs = _occurrences(other.frame(), self.system)
+        origin = [*self.system, _OCCURRENCE]
+        pairs = mine.select([*origin, row]).join(
+            theirs.select([*origin, other_row]), on=origin, how="inner"
+        )
+        if not pairs.height:
+            return
+        for name in self.others:
+            if name in self.differing:
+                continue
+            agree = mine.select([*origin, name, row]).join(
+                theirs.select([*origin, name, other_row]),
+                on=[*origin, name],
+                how="inner",
+                nulls_equal=True,
+            )
+            if agree.height < pairs.height:
+                self.differing.add(name)
+
+
+class StreamingRejoin(StreamingJoinKernel):
+    """``Rejoin`` on record batches: symmetric matches on every shared column.
+
+    ITL-1355's rule, as ``Rejoin.static_process`` applies it: the inputs are taken in
+    ``Join``'s canonical order (by pipeline hash, ties in call order) and rejoined pair by
+    pair, the rows rejoined so far with the next input, each step an inner join on every
+    column both sides have (system tags, shared user tags, a shared data-tag's source
+    info, the data context) under ``Join``'s equality, a null equal to a null outside the
+    system tags and a null system tag matching nothing. Each step is a ``_RejoinLink``:
+
+    - each side keeps only its rows not matched yet (a matched row leaves at once), so
+      the memory held is the unmatched rows;
+    - an arriving batch is matched, in one vectorized join, with the other side's
+      remaining rows; rows that repeat an origin row pair one to one in arrival order;
+    - once one side closes, the other side's remaining rows are dropped, and an arriving
+      row either matches at once or is dropped.
+
+    The data context: a job's rows carry their producer's data context, which ``Rejoin``
+    matches on. Transport batches carry none, so each input's rows are given the data
+    context of its stream (``StaticOutputOperatorPod._upstream_context``): inputs of two
+    data contexts match nothing, and a link holds their rows to the end.
+
+    The warning: rows of one origin row (system tags equal) that differ in another
+    shared column are noted per batch; when the last input closes, the kernel issues
+    ``RejoinDifferingColumnWarning`` once for the columns noted, through the operator
+    (``Rejoin._warn_differing_once``), as the sync path issues it once for its run. With
+    two inputs the columns are the sync path's. A difference from the sync path
+    (accepted provisionally, November 22, 2026): with three or more inputs the warning
+    is detected per link, the rows rejoined so far against the next input, so a
+    difference between two inputs that are not adjacent in the chain, for an origin row
+    the input between them lacks, is not warned about; the sync path compares every pair
+    of inputs. The rows are identical either way. The alternative is pairwise detection,
+    which would keep every input's shared-column keys for every row until all inputs
+    close.
+
+    ``Rejoin`` refuses nothing for what rows hold, so every refusal is raised before the
+    first batch.
+
+    Args:
+        operator: The ``Rejoin``.
+        inputs: Its input streams, in call order.
+    """
+
+    def __init__(self, operator: Rejoin, inputs: Sequence[StreamProtocol]) -> None:
+        super().__init__(operator, inputs)
+        self._rejoin = operator
+        order = sorted(
+            range(len(inputs)), key=lambda i: inputs[i].pipeline_hash().to_hex()
+        )
+        self._position = {index: position for position, index in enumerate(order)}
+        self._contexts = [
+            StaticOutputOperatorPod._upstream_context(stream).context_key  # pyright: ignore[reportPrivateUsage]  # the operators' one rule
+            for stream in inputs
+        ]
+        self._user_tags: set[str] = {
+            name for stream in inputs for name in stream.keys()[0]
+        }
+        self._links: list[_RejoinLink] = []
+        if len(inputs) == 1:
+            return
+        layouts = [self._layouts[i] for i in order]
+        system = sorted(
+            name
+            for name in layouts[0].names
+            if name.startswith(constants.SYSTEM_TAG_PREFIX)
+        )
+        left_names = [*layouts[0].names, constants.CONTEXT_KEY]
+        user_tags = set(inputs[order[0]].keys()[0])
+        for index in order[1:]:
+            right_names = [*self._layouts[index].names, constants.CONTEXT_KEY]
+            others = sorted(
+                name
+                for name in right_names
+                if name in left_names and name not in system
+            )
+            next_tags = set(inputs[index].keys()[0])
+            self._links.append(
+                _RejoinLink(system, others, self._link_finish(user_tags & next_tags))
+            )
+            left_names = [
+                *left_names,
+                *(name for name in right_names if name not in left_names),
+            ]
+            user_tags |= next_tags
+
+    @property
+    def held_rows(self) -> int:
+        return sum(link.held_rows for link in self._links)
+
+    def _link_finish(
+        self, shared_tags: set[str]
+    ) -> Callable[[pa.Table, pa.Schema, pa.Schema], pa.Table]:
+        """What one step does to its pairs, as ``Rejoin._rejoin_pair`` does."""
+
+        def finish(
+            table: pa.Table, left_schema: pa.Schema, right_schema: pa.Schema
+        ) -> pa.Table:
+            table = arrow_utils.restore_schema_nullability(
+                table, left_schema, right_schema
+            )
+            return Join._shared_key_nullability(  # pyright: ignore[reportPrivateUsage]  # Join's one rule
+                table, left_schema, right_schema, shared_tags
+            )
+
+        return finish
+
+    def _push(self, input_index: int, table: pa.Table) -> list[pa.Table]:
+        """Feed an input's rows into its step and forward what each step emits.
+
+        Args:
+            input_index: The input, in call order.
+            table: Its rows, never empty.
+
+        Returns:
+            The last step's output, possibly none.
+        """
+        if not self._links:
+            return [table]
+        table = _with_context(table, self._contexts[input_index])
+        position = self._position[input_index]
+        step, side = (0, 0) if position == 0 else (position - 1, 1)
+        result = self._links[step].push(side, table)
+        while result is not None and step < len(self._links) - 1:
+            step += 1
+            result = self._links[step].push(0, result)
+        return [] if result is None else [result]
+
+    def _close(self, input_index: int) -> list[pa.Table]:
+        """End an input's side, every side that can no longer receive, and warn last.
+
+        A step that can never emit again closes its successor's left side and releases
+        every earlier step, whose rows could only reach it. When the last input closes,
+        the differing columns noted are warned of once.
+
+        Args:
+            input_index: The input, in call order.
+
+        Returns:
+            No table.
+        """
+        if not self._links:
+            return []
+        position = self._position[input_index]
+        step, side = (0, 0) if position == 0 else (position - 1, 1)
+        self._links[step].close(side)
+        for step, link in enumerate(self._links):
+            if not link.exhausted:
+                continue
+            for earlier in self._links[:step]:
+                earlier.release()
+            if (
+                step + 1 < len(self._links)
+                and not self._links[step + 1].sides[0].closed
+            ):
+                self._links[step + 1].close(0)
+        if all(self._closed):
+            differing = {name for link in self._links for name in link.differing}
+            if differing:
+                self._rejoin._warn_differing_once(  # pyright: ignore[reportPrivateUsage]  # Rejoin's one rule
+                    tuple(
+                        sorted(_described(name, self._user_tags) for name in differing)
+                    )
+                )
         return []
