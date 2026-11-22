@@ -17,7 +17,11 @@ own process, one after another. For each fixture:
    - branch async against branch sync, ``set``;
    - branch async against base async, ``set``.
 
-Writes ``OUT/report.json`` (every comparison with its differences) and prints a summary.
+Writes ``OUT/report.json`` (every comparison with its differences; ``--compare-only``
+writes ``OUT/report_compare_only.json`` and leaves ``report.json`` as it is) and prints a
+summary. The exit status is the gate: 1 if a dump process failed, 2 if sync on the branch
+differs from sync on base, else 0. The async comparisons are printed for review against
+the spec's named differences and do not set the status.
 """
 
 from __future__ import annotations
@@ -198,14 +202,22 @@ def main(argv: list[str]) -> int:
                         d("base", "async"), d("branch", "async"), "set", volatile
                     ),
                 ]
-    (out / "report.json").write_text(json.dumps(report, indent=1))
+    report_name = "report_compare_only.json" if args.compare_only else "report.json"
+    (out / report_name).write_text(json.dumps(report, indent=1))
     failed_runs = [r for r in report["runs"] if r["returncode"] != 0]
-    if args.compare_only:
-        (out / "report.json").rename(out / "report_compare_only.json")
     for c in report["comparisons"]:
         status = "EQUAL" if c["equal"] else "DIFFERENT"
         print(f"{status:9} {c['fixture']:8} t={c['threads']:7} {c['check']}")
     print(f"{len(failed_runs)} dump processes failed")
+    # The exit status is the gate. A failed dump makes the run incomplete (1). A sync
+    # difference against main fails the governing rule (2). The async comparisons are
+    # printed for review against the spec's named differences, and do not set it.
+    if failed_runs:
+        return 1
+    if any(
+        not c["equal"] and c["check"].startswith("sync") for c in report["comparisons"]
+    ):
+        return 2
     return 0
 
 

@@ -99,9 +99,12 @@ def _bits(array: Any) -> Any:
             _bits(array.values), kind.list_size, mask=array.is_null()
         )
     if pa.types.is_struct(kind):
+        children = [_bits(array.field(i)) for i in range(kind.num_fields)]
         return pa.StructArray.from_arrays(
-            [_bits(array.field(i)) for i in range(kind.num_fields)],
-            fields=[kind.field(i) for i in range(kind.num_fields)],
+            children,
+            fields=[
+                kind.field(i).with_type(child.type) for i, child in enumerate(children)
+            ],
             mask=array.is_null(),
         )
     return array
@@ -118,6 +121,11 @@ def _without(table: pa.Table, volatile: set[str]) -> pa.Table:
 
 
 def _rows_as_multiset(table: pa.Table) -> list[str]:
+    """The rows as a sorted list of their serialized values, duplicates kept.
+
+    Floats are taken by their bits (``_bitwise``), so NaN payloads stay distinct.
+    """
+    table = _bitwise(table)
     names = sorted(table.column_names)
     return sorted(
         json.dumps([repr(row[n]) for n in names])
@@ -142,6 +150,14 @@ def compare(
         events_b = sorted(json.dumps(e) for e in mb["events"])
     if events_a != events_b:
         problems.append("observer events differ")
+    for group in ("nodes", "stored"):
+        only = sorted(set(ma[group]) ^ set(mb[group]))
+        if only:
+            problems.append(f"{group}: only in one dump: {only}")
+    for name in sorted(set(ma["nodes"]) & set(mb["nodes"])):
+        ea, eb = ma["nodes"][name].get("error"), mb["nodes"][name].get("error")
+        if ea != eb:
+            problems.append(f"nodes:{name}: as_table error {ea!r} != {eb!r}")
     for name in sorted(set(ma["stored"]) | set(mb["stored"])):
         va = ma["stored"].get(name, {}).get("versions")
         vb = mb["stored"].get(name, {}).get("versions")
@@ -167,6 +183,11 @@ def compare(
                 y.column(name).is_null()
             ):
                 problems.append(f"{key}: null pattern of volatile {name!r} differs")
+        if mode == "set":
+            # Keep each volatile column's validity with its row, then drop its values.
+            for name in sorted(volatile & set(x.column_names) & set(y.column_names)):
+                x = x.append_column(f"__valid__{name}", x.column(name).is_valid())
+                y = y.append_column(f"__valid__{name}", y.column(name).is_valid())
         xs, ys = _without(x, volatile), _without(y, volatile)
         if mode == "exact":
             if not _bitwise(xs).equals(_bitwise(ys)):
