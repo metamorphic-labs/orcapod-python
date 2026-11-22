@@ -592,15 +592,11 @@ def _schema_outcome(make: Callable[[], StreamProtocol]) -> tuple[str, Any]:
 
 
 @pytest.mark.parametrize("layout", ["one_batch", "one_row_per_batch"])
-def test_empty_source_info_lists_are_outside_the_row_built_forms_domain(
-    layout: str,
-) -> None:
-    """Pins a documented exception of F (``_row_built_form``): F equals the table built
-    from rows for every stream whose source-info tokens are strings or non-empty
-    lists, which is every stream a source or an operator makes. A hand-built raw
-    stream whose source-info column is a nested list type holding only empty lists is
-    outside that domain: the channel keeps the column's two list levels, while the
-    job's sync path rebuilds the tokens from their values and gives one."""
+def test_empty_source_info_lists_are_typed_from_their_tokens(layout: str) -> None:
+    """A raw stream whose source-info column is a nested list type holding only empty
+    lists: the channel's result equals the job's sync path, both typing the tokens from
+    their values over the complete table (``_type_source_info_by_values``), as the rows
+    do: one list level, not the column's two."""
     raw = ArrowTableStream(
         pa.table(
             {
@@ -618,11 +614,9 @@ def test_empty_source_info_lists_are_outside_the_row_built_forms_domain(
     job_sync = _job_sync(SelectDataColumns(["x"]), raw)
     got = channel.as_table(columns=ALL)
     rebuilt = job_sync.as_table(columns=ALL)
-    assert got.to_pylist() == rebuilt.to_pylist()  # the same rows
-    assert got.schema.field("_source_x").type == pa.large_list(
-        pa.large_list(pa.large_string())
-    )
-    assert rebuilt.schema.field("_source_x").type == pa.large_list(pa.large_string())
+    assert got.to_pylist() == rebuilt.to_pylist()
+    assert got.schema.equals(rebuilt.schema)
+    assert got.schema.field("_source_x").type == pa.large_list(pa.large_string())
 
 
 def test_a_system_tag_with_a_null_is_refused_by_the_job_sync_path() -> None:

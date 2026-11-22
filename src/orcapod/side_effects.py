@@ -20,7 +20,11 @@ from typing_extensions import override
 
 from orcapod.core.base import TraceableBase
 from orcapod.core.nodes.staleness import RunHoldingNode
-from orcapod.core.nodes.function_node import _build_record_id_preimage, run_job_node
+from orcapod.core.nodes.function_node import (
+    _build_record_id_preimage,
+    rows_as_output_stream,
+    run_job_node,
+)
 from orcapod.core.streams.base import (
     StreamBase,
     check_head_size,
@@ -1274,17 +1278,12 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
         """The output stream of a run that passed ``rows`` on.
 
         What the sync orchestrator built from a node's rows for its successors
-        (``StaticOutputOperatorPod._materialize_upstream``).
+        (``StaticOutputOperatorPod._materialize_upstream``, through
+        ``rows_as_output_stream``).
         """
-        from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
-
-        # A side-effect job node is a stream (``StreamBase``) that the checker cannot
-        # match against the protocol through its mixins.
         # A side-effect job node is a ``StreamBase``; the checker cannot match its
         # mixin members against ``StreamProtocol``, so the cast goes through object.
-        return StaticOutputOperatorPod._materialize_upstream(
-            rows, cast("StreamProtocol", cast(object, self))
-        )
+        return rows_as_output_stream(rows, cast("StreamProtocol", cast(object, self)))
 
     def _deliver_rows(
         self, input_stream: StreamProtocol, *, run_id: str | None

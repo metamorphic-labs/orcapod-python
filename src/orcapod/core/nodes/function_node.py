@@ -282,6 +282,28 @@ def _with_datagram_id(data: Data, datagram_id: uuid.UUID) -> Data:
     )
 
 
+def rows_as_output_stream(
+    rows: Sequence[tuple[TagProtocol, DataProtocol]], node: StreamProtocol
+) -> StreamProtocol:
+    """Return ``rows`` as ``node``'s output stream, as the sync orchestrator built it.
+
+    ``StaticOutputOperatorPod._materialize_upstream``, for the job nodes whose output is
+    still their rows (function and side-effect nodes, until ITL-1347 stages 3 and 4):
+    the rows' table with the node's identity, or its zero-row input with no row. One
+    place imports the operator module for them.
+
+    Args:
+        rows: The node's output rows, in order.
+        node: The node.
+
+    Returns:
+        The node's output stream.
+    """
+    from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+
+    return StaticOutputOperatorPod._materialize_upstream(rows, node)  # pyright: ignore[reportPrivateUsage]  # the one definition of a rebuilt upstream
+
+
 def _executor_supports_concurrent(
     data_function: DataFunctionProtocol,
 ) -> bool:

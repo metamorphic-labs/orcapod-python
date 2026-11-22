@@ -563,7 +563,10 @@ def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:
     ``null`` type of the description (anywhere in a column's type) is carried as
     ``large_string``, as a row's datagram stores it, and only null values are taken
     there. Whether a system-tag or source-info field is nullable is not compared: it
-    follows the values of the complete table (``_flag_by_values``).
+    follows the values of the complete table (``_flag_by_values``). Nor is a
+    source-info column's type, which follows its tokens over the complete table
+    (``_type_source_info_by_values``): it must only be a token type (``large_string``,
+    or ``large_list`` of a token type).
     """
     sent = batch.schema
     if declared.names != sent.names:
@@ -571,6 +574,14 @@ def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:
     provenance = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
     for index, (expected, column) in enumerate(zip(declared, sent)):
         carried = arrow_utils.normalize_to_large_types(expected.type)
+        if column.name.startswith(constants.SOURCE_PREFIX):
+            if not _is_token_type(column.type):
+                return f"column {column.name!r} is {column.type}, not a token type"
+            if column.metadata or not column.type.equals(
+                _without_metadata(column.type), check_metadata=True
+            ):
+                return f"column {column.name!r} carries field metadata"
+            continue
         if column.type != carried:
             return f"column {column.name!r} is {column.type}, the stream's is {carried}"
         if carried != expected.type and not _holds_only_nulls(
@@ -601,6 +612,18 @@ def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:
                 + f"its type {column.type}), the stream's is {expected.metadata}"
             )
     return None
+
+
+def _is_token_type(kind: pa.DataType) -> bool:
+    """Whether ``kind`` is a source-info token type: ``large_string``, or a list of one.
+
+    The types ``arrow_utils.source_info_arrow_type`` gives a token.
+    """
+    if pa.types.is_large_string(kind):
+        return True
+    if isinstance(kind, pa.LargeListType):
+        return _is_token_type(kind.value_type)  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
+    return False
 
 
 def _without_metadata(kind: pa.DataType) -> pa.DataType:
