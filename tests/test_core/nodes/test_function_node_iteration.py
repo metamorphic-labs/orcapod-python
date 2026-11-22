@@ -174,8 +174,12 @@ class TestIterDatasReadOnly:
             def on_data_crash(self, node_label, tag, data, exc):
                 errors.append(exc)
 
-        results = node.execute(
-            node._input_stream, observer=CapturingObserver(), error_policy="continue"
+        results = list(
+            node.execute(
+                node._input_stream,
+                observer=CapturingObserver(),
+                error_policy="continue",
+            ).iter_data()
         )
         assert len(errors) == 1
         assert isinstance(errors[0], ValueError)

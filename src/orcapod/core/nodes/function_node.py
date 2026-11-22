@@ -2456,6 +2456,19 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
     # Data processing
     # ------------------------------------------------------------------
 
+    def _output_stream(
+        self, rows: list[tuple[TagProtocol, DataProtocol]]
+    ) -> StreamProtocol:
+        """The output stream of a run whose output rows are ``rows``.
+
+        What the sync orchestrator built from a node's rows for its successors
+        (``StaticOutputOperatorPod._materialize_upstream``): the rows' table with this
+        node's identity, or the node's zero-row input when there is no row.
+        """
+        from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+
+        return StaticOutputOperatorPod._materialize_upstream(rows, self)
+
     def execute_data(
         self,
         tag: TagProtocol,
@@ -2485,7 +2498,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         error_policy: Literal["continue", "fail_fast"] = "continue",
         run_id: str | None = None,
         load_only: bool = False,
-    ) -> list[tuple[TagProtocol, DataProtocol]]:
+    ) -> StreamProtocol:
         """Execute all data from a stream: compute, persist, and cache.
 
         For each data: fire ``on_data_start``, check the in-memory cache
@@ -2511,8 +2524,10 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 this way.
 
         Returns:
-            Materialized list of (tag, output_data) pairs, excluding
-            ``None`` outputs and failed data.
+            The node's output stream: its output rows (no row for a ``None`` output or
+            a failed row) as the table ``_rows_to_table`` builds from them, with this
+            node's identity (``StaticOutputOperatorPod._materialize_upstream``). The sync
+            orchestrator hands it to every successor (ITL-1347, stage 2).
 
         Raises:
             RuntimeError: If the node was loaded by ``PipelineJob.load`` and so
@@ -2524,7 +2539,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         from orcapod.pipeline.observer import NoOpObserver
 
         if load_only:
-            return self._execute_load_only(input_stream, observer)
+            return self._output_stream(self._execute_load_only(input_stream, observer))
         if self._function_pod is None:
             raise self._cannot_compute_error()
 
@@ -2653,7 +2668,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             self.clear_cache()
             raise
 
-        return output
+        return self._output_stream(output)
 
     def _empty_data_cache_hit(
         self, tag: TagProtocol, data: EmptyData, base_entry_id: bytes

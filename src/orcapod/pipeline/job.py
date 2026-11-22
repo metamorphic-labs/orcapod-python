@@ -997,7 +997,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 pipeline_uri=prepared.pipeline_uri,
                 materialize_results=materialize_results,
                 load_only=load_only,
-                held_rows=plan.held_rows,
+                held=plan.held,
             )
         summary = self._finish_run(
             prepared,
@@ -1068,7 +1068,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 pipeline_uri=prepared.pipeline_uri,
                 materialize_results=materialize_results,
                 load_only=load_only,
-                held_rows=plan.held_rows,
+                held=plan.held,
             )
         summary = self._finish_run(
             prepared,

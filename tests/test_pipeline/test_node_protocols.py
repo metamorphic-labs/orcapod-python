@@ -200,14 +200,14 @@ class TestSourceNodeExecute:
 
     def test_execute_returns_list(self):
         node = self._make_source_node()
-        result = node.execute()
+        result = list(node.execute().iter_data())
         assert isinstance(result, list)
         assert len(result) == 3
 
     def test_execute_populates_cached_results(self):
         """execute() on SourceJobNode returns correct data (no caching field)."""
         node = self._make_source_node()
-        result = node.execute()
+        result = list(node.execute().iter_data())
         assert len(result) == 3
 
     def test_execute_with_observer(self):
@@ -234,7 +234,7 @@ class TestSourceNodeExecute:
     def test_execute_without_observer(self):
         """execute() works fine with no observer."""
         node = self._make_source_node()
-        result = node.execute()
+        result = list(node.execute().iter_data())
         assert len(result) == 3
 
 
@@ -337,7 +337,7 @@ class TestFunctionNodeExecute:
                 return _NOOP_LOGGER
 
         input_stream = node._input_stream
-        result = node.execute(input_stream, observer=Obs())
+        result = list(node.execute(input_stream, observer=Obs()).iter_data())
 
         assert len(result) == 2
         assert events[0][0] == "node_start"
@@ -348,7 +348,7 @@ class TestFunctionNodeExecute:
     def test_execute_without_observer(self):
         node = self._make_function_node()
         input_stream = node._input_stream
-        result = node.execute(input_stream)
+        result = list(node.execute(input_stream).iter_data())
         assert len(result) == 2
         values = sorted([pkt.as_dict()["result"] for _, pkt in result])
         assert values == [2, 4]
@@ -488,14 +488,14 @@ class TestOperatorNodeExecute:
             def on_data_end(self, node_label, t, ip, op, cached):
                 pass
 
-        result = node.execute(*node._input_streams, observer=Obs())
+        result = list(node.execute(*node._input_streams, observer=Obs()).iter_data())
         assert len(result) == 2
         assert events[0][0] == "node_start"
         assert events[1][0] == "node_end"
 
     def test_execute_without_observer(self):
         node = self._make_join_node()
-        result = node.execute(*node._input_streams)
+        result = list(node.execute(*node._input_streams).iter_data())
         assert len(result) == 2
 
 

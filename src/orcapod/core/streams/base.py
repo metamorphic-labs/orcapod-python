@@ -184,6 +184,50 @@ def typed_zero_row_input(stream: object) -> pa.Table | None:
     )
 
 
+def stream_arrow_schema(
+    stream: object, tag_keys: Sequence[str] | None = None
+) -> pa.Schema:
+    """Return ``stream``'s declared Arrow schema: what ``arrow_schema()`` answers (ITL-1347).
+
+    The schema of the columns a job node passes on, without reading, computing or
+    polling a row: the stream's zero-row input (``typed_zero_row_input``, the Arrow types
+    its rows have) in row order (user tags, system tags, data, source info;
+    ``StaticOutputOperatorPod._in_row_order``), with no context and no meta column. A
+    stream that cannot type itself without rows answers with its Python schema
+    converted by its data context (``arrow_types_declared`` is then false). Each
+    source-info field is stated nullable: a table decides its flag from its tokens. A
+    ``null`` column keeps the zero-row ``null`` type; rows carry ``large_string``
+    (ITL-1319). ITL-1307 later reads it from ``Schema`` instead, here.
+
+    Args:
+        stream: The stream, source or node.
+        tag_keys: The order of the user tags in the stream's rows, when it differs from
+            ``keys()`` (a source slot gives its bound source's rows); default
+            ``keys()``.
+
+    Returns:
+        The declared Arrow schema.
+    """
+    from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+    from orcapod.system_constants import constants
+
+    typed = cast(StreamProtocol, stream)
+    if tag_keys is None:
+        tag_keys = typed.keys()[0]
+    table = typed_zero_row_input(stream)
+    if table is None:
+        tag_schema, data_schema = typed.output_schema(
+            columns={"system_tags": True, "source": True}
+        )
+        converter = StaticOutputOperatorPod._upstream_context(typed).type_converter  # pyright: ignore[reportPrivateUsage]  # the one place that resolves an upstream's context
+        table = arrow_utils.make_empty_table({**tag_schema, **data_schema}, converter)
+    schema = StaticOutputOperatorPod._in_row_order(table, tag_keys).schema  # pyright: ignore[reportPrivateUsage]  # the one statement of the row order
+    for index, field in enumerate(schema):
+        if field.name.startswith(constants.SOURCE_PREFIX):
+            schema = schema.set(index, field.with_nullable(True))  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
+    return schema
+
+
 def typed_arrow_schemas(
     stream: object, *, own: bool = True
 ) -> tuple[pa.Schema, pa.Schema]:
@@ -918,6 +962,18 @@ class StreamBase(TraceableBase):
         from orcapod.core.operators import Index
 
         return Index(column, i, out=out, fail_on_miss=fail_on_miss)(self, label=label)
+
+    def arrow_schema(self) -> pa.Schema:
+        """The Arrow schema of the columns this stream passes between job nodes.
+
+        See ``stream_arrow_schema`` (ITL-1347): never reads, computes or polls a row.
+        """
+        return stream_arrow_schema(self)
+
+    @property
+    def arrow_types_declared(self) -> bool:
+        """Whether ``arrow_schema()`` holds the rows' own Arrow types (ITL-1089, ITL-1347)."""
+        return typed_zero_row_table(self) is not None
 
     @abstractmethod
     def keys(

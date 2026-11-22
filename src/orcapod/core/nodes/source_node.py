@@ -15,7 +15,7 @@ import logging
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Collection, Iterator, Mapping
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pyarrow as pa
 
@@ -23,10 +23,12 @@ from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.core.base import TraceableBase
 from orcapod.core.datagrams import Data, Tag
+from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.operators.drop_nulls import _without_none  # pyright: ignore[reportPrivateUsage]  # DropNulls' rule for removing None from a type, shared, never copied
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
+    stream_arrow_schema,
     schema_requires_io,
     typed_arrow_schemas,
     typed_zero_row_table,
@@ -1185,27 +1187,61 @@ class SourceNodeBase(TraceableBase, ABC):
         """Yield ``(tag, data)`` pairs, or raise if data is unavailable."""
         ...
 
+    def _rows_stream(self) -> "StreamProtocol":
+        """The stream whose rows are this node's rows (``iter_data``): this node itself."""
+        return cast("StreamProtocol", self)
+
+    def arrow_schema(self) -> pa.Schema:
+        """The Arrow schema of the columns this stream passes between job nodes.
+
+        See ``stream_arrow_schema`` (ITL-1347): never reads, computes or polls a row.
+        The user tags are in the order of the node's rows (``_row_tag_keys``).
+        """
+        return stream_arrow_schema(self, self._row_tag_keys())
+
+    def _row_tag_keys(self) -> tuple[str, ...]:
+        """The order of the user tags in this node's rows: its own key order."""
+        return self.keys()[0]
+
+    @property
+    def arrow_types_declared(self) -> bool:
+        """Whether ``arrow_schema()`` holds the rows' own Arrow types (ITL-1089, ITL-1347)."""
+        return typed_zero_row_table(self) is not None
+
     def execute(
         self,
         *,
         observer: ExecutionObserverProtocol | None = None,
-    ) -> list[tuple[TagProtocol, DataProtocol]]:
-        """Execute this source node: materialize and return data.
+    ) -> StreamProtocol:
+        """Execute this source node: read its source once and return its output stream.
+
+        The source's table, as the table built from its rows would be
+        (``StaticOutputOperatorPod._output_stream``), with this node's identity, built
+        without making rows (ITL-1347, stage 2). The sync orchestrator hands it to every
+        successor.
 
         Args:
             observer: Optional execution observer.
 
         Returns:
-            List of (tag, data) tuples.
+            The node's output stream.
 
         Raises:
             UnboundSourceError: When no concrete data is available.
         """
+        from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+
         node_label = self.label
         node_hash = self.content_hash().to_string()
         if observer is not None:
             observer.on_node_start(node_label, node_hash)
-        result = list(self.iter_data())
+        # The stream this node's rows come from: its table and its tag order are the
+        # rows' (a slot's own key order can differ from its source's).
+        rows_stream = self._rows_stream()
+        table = rows_stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+        result = StaticOutputOperatorPod._output_stream(
+            table, rows_stream.keys()[0], stream_data_tags(rows_stream), self
+        )
         if observer is not None:
             observer.on_node_end(node_label, node_hash)
         return result
@@ -1666,6 +1702,46 @@ class SourceJobNode(SourceNodeBase):
         if self._bound_source is not None:
             return self._bound_source.identity_structure()
         return super().identity_structure()
+
+    def _row_tag_keys(self) -> tuple[str, ...]:
+        """The order of the user tags in this node's rows, known without reading a row.
+
+        The bound source's key order; the declared order for a narrower source given
+        as the declared schema (``_DeclaredForm``); the slot's own when unbound.
+        """
+        if self._bound_source is None:
+            return self.keys()[0]
+        if self._declared_form is not None:
+            return self._declared_form.tag_order
+        return self._bound_source.keys()[0]
+
+    def _rows_stream(self) -> StreamProtocol:
+        """The stream whose rows are this node's rows (``iter_data``).
+
+        The bound source, or, for a narrower source, the source's table given as the
+        declared schema (``_declared_stream``), whose rows are those ``_declared_rows``
+        gives one by one.
+
+        Raises:
+            UnboundSourceError: When no concrete source is attached.
+        """
+        if self._bound_source is None:
+            raise UnboundSourceError(
+                f"SourceJobNode '{self._name}' has no concrete source bound. "
+                "Call job.bind(sources={'<name>': source}) before running."
+            )
+        if self._declared_form is None:
+            return self._bound_source
+        table = self._bound_source.as_table(
+            columns={
+                "meta": True,
+                "source": True,
+                "system_tags": True,
+                "context": True,
+                "sort_by_tags": False,
+            }
+        )
+        return self._declared_stream(self._bound_source, self._declared_form, table)
 
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         """Delegate to concrete source, or raise if unbound.

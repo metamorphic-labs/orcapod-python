@@ -688,7 +688,7 @@ class TestStoreWrittenBeforeFix:
         assert _stored_source(old) == [tokens[0]] * 3
 
         new = self._node(db)
-        out = new.execute(_pin_source())
+        out = list(new.execute(_pin_source()).iter_data())
 
         # The run itself emits the corrected rows.
         assert _source_info_tokens(out) == tokens

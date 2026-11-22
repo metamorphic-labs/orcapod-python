@@ -1645,7 +1645,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         *input_streams: StreamProtocol,
         observer: ExecutionObserverProtocol | None = None,
         load_only: bool = False,
-    ) -> list[tuple[TagProtocol, DataProtocol]]:
+    ) -> StreamProtocol:
         """Execute input streams: compute, persist, and cache.
 
         Args:
@@ -1657,7 +1657,10 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
                 as in any run.
 
         Returns:
-            Materialized list of (tag, data) pairs.
+            The node's output stream: its rows as the table ``_rows_to_table`` builds
+            from them (``StaticOutputOperatorPod._output_stream``), with this node's
+            identity, built from the operator's result table without making rows
+            (ITL-1347, stage 2). The sync orchestrator hands it to every successor.
 
         Raises:
             ValueError: If the node caches (``LOG`` or ``REPLAY``) and a source
@@ -1685,23 +1688,37 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             # Check REPLAY cache first
             cached_output = self.get_cached_output()
             if cached_output is not None:
-                output = list(cached_output.iter_data())
+                output = StaticOutputOperatorPod._output_stream(
+                    cached_output.as_table(columns=ZERO_ROW_INPUT_COLUMNS),
+                    cached_output.keys()[0],
+                    stream_data_tags(cached_output),
+                    self,
+                )
                 ctx_obs.on_node_end(node_label, node_hash)
                 return output
 
             # Compute
             result_stream = self._operator.process(*input_streams)
 
-            # Materialize
-            output = list(result_stream.iter_data())
+            # The result's table, as the table built from its rows would be, without
+            # making the rows (ITL-1347, stage 2).
+            result_table = result_stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+            tag_keys = result_stream.keys()[0]
+            data_tags = stream_data_tags(result_stream)
 
-            # Cache, in row order with or without rows (ITL-1131, ITL-1133). The rows
-            # returned carry the table the kept stream is built over, so the sync
-            # orchestrator gives it to each successor without building it again
-            # (ITL-1347, stage 1).
-            self._cached_output_stream, output = (
-                StaticOutputOperatorPod._kept_output_with_rows(result_stream, output)
-            )
+            # Cache, in row order with or without rows (ITL-1131, ITL-1133).
+            if result_table.num_rows:
+                kept_table = StaticOutputOperatorPod._row_built_form(
+                    result_table, tag_keys
+                )
+                self._cached_output_stream = ArrowTableStream(
+                    kept_table, tag_columns=tag_keys, data_tags=data_tags
+                )
+            else:
+                kept_table = None
+                self._cached_output_stream = (
+                    StaticOutputOperatorPod._zero_rows_in_row_order(result_stream)
+                )
 
             self._update_modified_time()
 
@@ -1714,6 +1731,14 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             ):
                 self._store_output_stream(self._cached_output_stream)
 
+            # The output stream, built once the node holds its run (as the sync
+            # orchestrator built a successor's input after ``execute`` returned).
+            if kept_table is not None:
+                output = StaticOutputOperatorPod._as_upstream_stream(
+                    kept_table, tag_keys, data_tags, self
+                )
+            else:
+                output = StaticOutputOperatorPod._materialize_upstream([], self)
             ctx_obs.on_node_end(node_label, node_hash)
             return output
         except BaseException:

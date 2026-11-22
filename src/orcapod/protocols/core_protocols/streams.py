@@ -171,6 +171,32 @@ class StreamProtocol(TraceableProtocol, PipelineElementProtocol, Protocol):
         """
         ...
 
+    def arrow_schema(self) -> "pa.Schema":
+        """The Arrow schema of the columns the stream passes between job nodes.
+
+        The user tags, system tags, data and source-info columns, in row order (user
+        tags, system tags, data, source info), with the Arrow types, nullability and
+        field metadata of the rows; no context and no meta column (ITL-1347). Known
+        without reading, computing or polling a row. Two exceptions keep today's
+        bytes: source-info fields are stated nullable (a table decides their flags
+        from its tokens), and a ``null`` column keeps the ``null`` type a zero-row table
+        has (rows carry ``large_string``; ITL-1319).
+
+        Returns:
+            The declared Arrow schema.
+        """
+        ...
+
+    @property
+    def arrow_types_declared(self) -> bool:
+        """Whether ``arrow_schema()`` holds the rows' own Arrow types.
+
+        ``False`` only when the stream cannot type itself without rows (an unbound
+        slot, a ``PollingSource`` never polled; ITL-1089): its schema is then converted
+        from the Python schema.
+        """
+        ...
+
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         """
         Generates explicit iterator over (tag, data) pairs in the stream.

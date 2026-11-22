@@ -249,8 +249,8 @@ class RunPlan:
     Attributes:
         dag: The nodes the run touches: those it runs, and the predecessors that feed
             them (a source slot is read; any other one is held).
-        held_rows: The rows of each held node of ``dag``: the rows of its current run,
-            or of a stream outside the job; they feed the nodes after it as if it had
+        held: The output stream of each held node of ``dag``: of its current run, or
+            of a stream outside the job; it feeds the nodes after it as if the node had
             just run.
         to_run: The nodes the run runs, in dependency order.
         held_counts: Every node of the whole graph that holds a current run, with its
@@ -258,7 +258,7 @@ class RunPlan:
     """
 
     dag: Any
-    held_rows: dict[Any, list[Any]]
+    held: dict[Any, Any]
     to_run: list[Any]
     held_counts: dict[Any, int]
 
@@ -332,15 +332,21 @@ def plan_run(graph: Any, *, load_only: bool, outside: Sequence[Any] = ()) -> Run
     for node in to_run:
         for upstream in graph.predecessors(node):
             dag.add_edge(upstream, node)
-    held_rows = {
-        node: list(node.iter_data())
+    from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+
+    # A held node's output stream: what the sync orchestrator built from its rows for
+    # the nodes after it, exactly (ITL-1347, stage 2).
+    held = {
+        node: StaticOutputOperatorPod._materialize_upstream(
+            list(node.iter_data()), node
+        )
         for node in included
         if not any(node is r for r in to_run) and not is_source(node)
     }
     # Counted from what each node holds: iterating an operator's rows would build a
     # (Tag, Data) pair per row only to count them (ITL-1351).
     held_counts = {node: node.held_row_count() for node in current}
-    return RunPlan(dag, held_rows, to_run, held_counts)
+    return RunPlan(dag, held, to_run, held_counts)
 
 
 def commit_run(databases: Sequence[ArrowDatabaseProtocol], ran: Sequence[Any]) -> None:
@@ -425,7 +431,7 @@ def run_with_dependencies(
     counter = RunCountingObserver()
     try:
         _ = SyncPipelineOrchestrator().run(
-            plan.dag, observer=counter, load_only=load_only, held_rows=plan.held_rows
+            plan.dag, observer=counter, load_only=load_only, held=plan.held
         )
     except BaseException as run_error:
         if isinstance(run_error, Exception) and not load_only:

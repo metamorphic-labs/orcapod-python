@@ -611,7 +611,9 @@ class TestPipelineIntegration:
         result = orch.run(exec_dag)
 
         fn_outputs = [
-            v for k, v in result.node_outputs.items() if k.node_type == "function"
+            list(v.iter_data())
+            for k, v in result.node_outputs.items()
+            if k.node_type == "function"
         ]
         assert len(fn_outputs) == 1
         assert len(fn_outputs[0]) == 3
