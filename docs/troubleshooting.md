@@ -217,6 +217,33 @@ old results are returned.
 default is `"v0.0"`, and a minor bump (`"v0.1"`) is not enough. Renaming the function also
 works. See the tutorial, [Part 6](tutorial/06-reruns-and-caching.md).
 
+### A job with `RayExecutor` hangs and its tasks never start
+
+**Symptom.** With Ray 2.54 or later, a script started with `uv run` hangs on its first function
+call through `RayExecutor`. No task ever runs and no error is raised. The Ray log (the raylet
+output in the terminal) shows a failed build, ending with
+`setuptools-scm was unable to detect version for .../working_dir_files/...`.
+
+**Cause.** When the driver is started with `uv run`, Ray starts its workers through `uv run`
+too: it uploads the working directory and installs the project there. Since Ray 2.54 the upload
+leaves `.git` out. A project whose version comes from version control (hatch-vcs or
+setuptools-scm, as an Orcapod source checkout's does) then cannot be installed on the workers,
+so the workers never start. A driver started with `python`, or a project with a fixed version,
+is not affected.
+
+**Fix.** Turn off Ray's `uv run` propagation for the run:
+
+```
+RAY_ENABLE_UV_RUN_RUNTIME_ENV=0 uv run python my_pipeline.py
+```
+
+or start the driver with the environment's Python (`.venv/bin/python my_pipeline.py`). Ray then
+sends neither the project nor `uv run` to the workers. On a local cluster the workers use the
+driver's environment, as they did anyway. On a remote cluster (`RayExecutor(ray_address=...)`)
+they use what is installed on the cluster, or the `runtime_env` given to `RayExecutor`: Orcapod
+and what the pipeline imports must be there.
+`RayExecutor` raising instead of hanging is ITL-1213.
+
 ### A node's table is empty
 
 **Cause.** A job node shows the results of its current run, and it has none yet:
