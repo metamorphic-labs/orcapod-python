@@ -6,7 +6,11 @@ from collections.abc import Collection, Mapping
 from typing import TYPE_CHECKING, Any, cast
 
 from orcapod.databases._row_index import KeyIndex, compact_tail, matching_rows
-from orcapod.databases.utils import coerce_record_id, first_changed_column
+from orcapod.databases.utils import (
+    coerce_record_id,
+    first_changed_column,
+    first_logical_identity_change,
+)
 from orcapod.errors import InputValidationError
 from orcapod.utils.lazy_module import LazyModule
 
@@ -264,7 +268,10 @@ class InMemoryArrowDatabase:
             )
             if table is not None
         ]
-        changed = first_changed_column(held, records.schema)
+        # A column of another logical type would read back as the held one (ITL-1371).
+        changed = first_logical_identity_change(
+            held, records.schema
+        ) or first_changed_column(held, records.schema)
         if changed is not None:
             raise InputValidationError(
                 f"Cannot append to the table at {record_path!r}: column "

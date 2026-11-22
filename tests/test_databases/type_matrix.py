@@ -53,6 +53,7 @@ from orcapod.databases import (
     SpiralDBConnector,
 )
 from orcapod.databases.delta_arrow_types import _is_recorded  # pyright: ignore[reportPrivateUsage]
+from orcapod.databases.utils import field_logical_identifier
 from orcapod.utils.arrow_utils import normalize_to_large_types
 
 KEPT = "KEPT"
@@ -812,9 +813,29 @@ def _nested_changed(arrow_type: Any) -> Any:
     return None
 
 
+def _other_identifier(field: "pa.Field[Any]", column: Any) -> tuple[Any, Any]:
+    """A logical column as the same storage annotated with another extension name
+    (the column's, suffixed) and the same metadata: another logical type identifier
+    (ITL-1371). Not the same name with other metadata: a registered type's
+    unreadable metadata is refused before the append is compared."""
+    ext = cast("pa.BaseExtensionType", field.type)
+    identifier = field_logical_identifier(field)
+    assert identifier is not None
+    metadata = {
+        b"ARROW:extension:name": f"{identifier.name}.other".encode(),
+        b"ARROW:extension:metadata": identifier.metadata,
+    }
+    storage = pa.chunked_array(
+        [chunk.storage for chunk in column.chunks], type=ext.storage_type
+    )
+    return pa.field(field.name, ext.storage_type, field.nullable, metadata), storage
+
+
 def _attribute_changes(rows: pa.Table) -> list[tuple[str, pa.Table]]:
     """``rows`` (new ids) with other field attributes on ``x`` and ``y``: the columns'
-    own metadata, then, for a nested type, its first nested field's metadata."""
+    own metadata; for a logical type, another identifier (another extension name);
+    for a nested type, its first nested field's
+    metadata."""
     ids = pa.array([b"c1", b"c2", b"c3"], pa.large_binary())
     rows = rows.set_column(0, rows.schema.field("id"), ids)
     out = []
@@ -825,6 +846,15 @@ def _attribute_changes(rows: pa.Table) -> list[tuple[str, pa.Table]]:
             index, _with_changed_metadata(own.schema.field(name)), own.column(index)
         )
     out.append(("column metadata", own))
+    if isinstance(rows.schema.field("x").type, pa.BaseExtensionType):
+        other = rows
+        for name in ("x", "y"):
+            index = other.schema.get_field_index(name)
+            field, column = _other_identifier(
+                other.schema.field(name), other.column(index)
+            )
+            other = other.set_column(index, field, column)
+        out.append(("logical type identifier", other))
     nested = rows
     for name in ("x", "y"):
         index = nested.schema.get_field_index(name)
@@ -1014,8 +1044,10 @@ How it is measured: a table holding two columns of the type (the second nullable
 null row) is written with `add_records` and flushed. The same type is then appended as
 slices of a larger table (three rows over two chunks, then the null row alone), and the
 same columns with other field metadata (the column's own, and a nested field's) are
-appended, which every database must refuse, naming the column. Every batch written is read
-back with `get_all_records`.
+appended, which every database must refuse, naming the column; for a logical type, so are
+the same values under another logical type identifier (another extension name over the
+same storage), which would otherwise read back as the stored type. Every batch written is
+read back with `get_all_records`.
 The SpiralDB column is measured through the test suite's disk fake of SpiralDB, which
 models what SpiralDB does to a column (no SpiralDB is used). No database tells tag
 columns from data columns, so a type is kept or refused the same way in either role.

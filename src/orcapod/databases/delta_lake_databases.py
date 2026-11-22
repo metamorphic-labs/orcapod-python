@@ -18,6 +18,7 @@ from orcapod.databases._row_index import (
 )
 from orcapod.databases.utils import (
     appended_field_change,
+    logical_identity_change,
     coerce_record_id,
     metadata_bytes,
 )
@@ -561,8 +562,10 @@ def _column_change(held: "pa.Field[Any]", field: "pa.Field[Any]") -> str | None:
     The column's own field metadata and its nested field tree must be the held ones
     (``appended_field_change``): the table holds one type per column, so either
     side's rows would read back with the other's. A struct may evolve, within
-    ``_evolution_change``. A logical column's type is its extension's, which the type
-    check compares; its own field metadata is compared here. Nullability is not
+    ``_evolution_change``. A logical column's identifier (extension name and
+    metadata, at every depth, as an extension type or a field annotation) must be the
+    held one (``logical_identity_change``, ITL-1371); its storage type is compared by
+    the type check, its other field metadata here. Nullability is not
     compared: the append check and Delta decide it, and whether a change is refused
     belongs to the nullability audit (ITL-842).
 
@@ -574,13 +577,29 @@ def _column_change(held: "pa.Field[Any]", field: "pa.Field[Any]") -> str | None:
     Returns:
         The reason, naming the path, or ``None``.
     """
+    # The logical type identifier first, at every depth, in either form: the
+    # metadata comparison below leaves a logical column's extension name and
+    # metadata out, and the type check compares storage types only (ITL-1371).
+    identity = logical_identity_change(held, field)
+    if identity is not None:
+        return identity
     if _is_logical(field) or _is_logical(held):
         if _metadata(held.metadata) == _metadata(field.metadata):
             return None
         return f"{field.name} has other field metadata than the stored column"
     return appended_field_change(
-        held.with_metadata(cast(Any, _metadata(held.metadata))),
-        field.with_metadata(cast(Any, _metadata(field.metadata))),
+        pa.field(
+            held.name,
+            _without_extension_annotations(held.type),
+            nullable=held.nullable,
+            metadata=cast(Any, _metadata(held.metadata)) or None,
+        ),
+        pa.field(
+            field.name,
+            _without_extension_annotations(field.type),
+            nullable=field.nullable,
+            metadata=cast(Any, _metadata(field.metadata)) or None,
+        ),
     ) or _evolution_change(
         arrow_utils.normalize_to_large_types(held.type, keep_null=True),
         arrow_utils.normalize_to_large_types(field.type, keep_null=True),
@@ -588,9 +607,103 @@ def _column_change(held: "pa.Field[Any]", field: "pa.Field[Any]") -> str | None:
     )
 
 
+def _with_extension_annotations(arrow_type: Any, delta_type: Any) -> Any:
+    """``arrow_type`` (a stored type without nested metadata) with the
+    ``ARROW:extension:*`` annotation the Delta log keeps on each nested field
+    (ITL-1371): a nested logical type's identifier is part of what the column holds.
+
+    Struct children are matched by name, a list's item and a map's key and item
+    followed; no other metadata is restored.
+
+    Args:
+        arrow_type: The stored Arrow type of a column, or of a nested field.
+        delta_type: The same column's ``deltalake.schema`` type.
+
+    Returns:
+        ``arrow_type`` with the nested annotations.
+    """
+    from deltalake.schema import ArrayType, MapType, StructType
+
+    def annotated(field: "pa.Field[Any]", delta_field_type: Any, metadata: Any) -> Any:
+        keys = {
+            k: v for k, v in metadata_bytes(metadata).items() if k in _EXTENSION_KEYS
+        }
+        inner = _with_extension_annotations(field.type, delta_field_type)
+        return field.with_type(inner).with_metadata(
+            cast(Any, {**metadata_bytes(field.metadata), **keys}) or None
+        )
+
+    t = pa.types
+    if isinstance(delta_type, StructType) and t.is_struct(arrow_type):
+        by_name = {f.name: f for f in delta_type.fields}
+        return pa.struct(
+            [
+                annotated(f, by_name[f.name].type, by_name[f.name].metadata)
+                if f.name in by_name
+                else f
+                for f in arrow_type
+            ]
+        )
+    if isinstance(delta_type, ArrayType) and (
+        t.is_list(arrow_type) or t.is_large_list(arrow_type)
+    ):
+        # Delta keeps no metadata on a list's element.
+        item = _with_extension_annotations(
+            arrow_type.value_type, delta_type.element_type
+        )
+        value_field = arrow_type.value_field.with_type(item)
+        if t.is_large_list(arrow_type):
+            return pa.large_list(value_field)
+        return pa.list_(value_field)
+    if isinstance(delta_type, MapType) and t.is_map(arrow_type):
+        return pa.map_(  # pyright: ignore[reportCallIssue]  # pyarrow takes key/item fields
+            arrow_type.key_field.with_type(
+                _with_extension_annotations(arrow_type.key_type, delta_type.key_type)
+            ),
+            arrow_type.item_field.with_type(
+                _with_extension_annotations(arrow_type.item_type, delta_type.value_type)
+            ),
+            keys_sorted=arrow_type.keys_sorted,
+        )
+    return arrow_type
+
+
+def _without_extension_annotations(arrow_type: Any) -> Any:
+    """``arrow_type`` with the ``ARROW:extension:*`` keys removed from the metadata of
+    every nested field: the identifier they hold is compared by
+    ``logical_identity_change``, the rest of the metadata by ``appended_field_change``
+    (ITL-1371)."""
+
+    def bare(field: "pa.Field[Any]") -> "pa.Field[Any]":
+        metadata = _metadata(field.metadata)
+        return field.with_type(
+            _without_extension_annotations(field.type)
+        ).with_metadata(cast(Any, metadata) or None)
+
+    t = pa.types
+    if isinstance(arrow_type, pa.BaseExtensionType):
+        return arrow_type
+    if t.is_struct(arrow_type):
+        return pa.struct([bare(f) for f in arrow_type])
+    if t.is_large_list(arrow_type):
+        return pa.large_list(bare(arrow_type.value_field))
+    if t.is_list(arrow_type):
+        return pa.list_(bare(arrow_type.value_field))
+    if t.is_fixed_size_list(arrow_type):
+        return pa.list_(bare(arrow_type.value_field), arrow_type.list_size)
+    if t.is_map(arrow_type):
+        return pa.map_(  # pyright: ignore[reportCallIssue]  # pyarrow takes key/item fields
+            bare(arrow_type.key_field),
+            bare(arrow_type.item_field),
+            keys_sorted=arrow_type.keys_sorted,
+        )
+    return arrow_type
+
+
 def _held_columns(delta_table: deltalake.DeltaTable) -> dict[str, "pa.Field[Any]"]:
     """Each stored column as the table holds it: its recorded type, else its stored
-    type, with its field metadata as stored. Read from the log; no data is read."""
+    type with the nested logical type annotations the log keeps, with its field
+    metadata as stored. Read from the log; no data is read."""
     stored = _stored_arrow_schema(delta_table)
     fields: dict[str, pa.Field[Any]] = {}
     for delta_field in delta_table.schema().fields:
@@ -599,7 +712,10 @@ def _held_columns(delta_table: deltalake.DeltaTable) -> dict[str, "pa.Field[Any]
             delta_field.name,
             record
             if record is not None
-            else stored.field(stored.get_field_index(delta_field.name)).type,
+            else _with_extension_annotations(
+                stored.field(stored.get_field_index(delta_field.name)).type,
+                delta_field.type,
+            ),
             nullable=delta_field.nullable,
             metadata=cast(Any, metadata_bytes(delta_field.metadata)) or None,
         )

@@ -39,8 +39,10 @@ How it is measured: a table holding two columns of the type (the second nullable
 null row) is written with `add_records` and flushed. The same type is then appended as
 slices of a larger table (three rows over two chunks, then the null row alone), and the
 same columns with other field metadata (the column's own, and a nested field's) are
-appended, which every database must refuse, naming the column. Every batch written is read
-back with `get_all_records`.
+appended, which every database must refuse, naming the column; for a logical type, so are
+the same values under another logical type identifier (another extension name over the
+same storage), which would otherwise read back as the stored type. Every batch written is
+read back with `get_all_records`.
 The SpiralDB column is measured through the test suite's disk fake of SpiralDB, which
 models what SpiralDB does to a column (no SpiralDB is used). No database tells tag
 columns from data columns, so a type is kept or refused the same way in either role.
