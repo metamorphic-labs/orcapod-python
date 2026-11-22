@@ -22,11 +22,10 @@ import pyarrow as pa
 
 from orcapod.channels import ChannelClosed
 from orcapod.core.operators.static_output_pod import (
-    StaticOutputOperatorPod,
     stream_from_batches,
     transport_schema,
 )
-from orcapod.core.streams.base import ZERO_ROW_INPUT_COLUMNS
+from orcapod.core.streams.base import ZERO_ROW_INPUT_COLUMNS, row_built_columns
 from orcapod.errors import UpstreamFailedError
 from orcapod.system_constants import constants
 from orcapod.utils import arrow_utils
@@ -68,7 +67,7 @@ class _StreamFeed:
         if self._batches is None:
             # On the first read, not when the channel is opened: opening computes
             # nothing.
-            table = StaticOutputOperatorPod._row_built_columns(  # pyright: ignore[reportPrivateUsage]  # F, stage 2's
+            table = row_built_columns(
                 self._stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS),
                 self._stream.keys(),
             )
@@ -416,7 +415,7 @@ class OutputChannel:
 def channel_from_stream(stream: StreamProtocol) -> InputChannel:
     """Open an input channel on a complete stream.
 
-    The channel delivers the stream's rows in the row-built form (``_row_built_columns``) as
+    The channel delivers the stream's rows in the row-built form (``row_built_columns``) as
     Arrow record batches of at most ``SOURCE_BATCH_ROWS`` rows. Several channels may be
     opened on one stream, each with its own position; nothing is computed until the
     first read, and nothing is queued, since the stream is complete.

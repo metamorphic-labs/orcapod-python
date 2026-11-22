@@ -444,17 +444,11 @@ def test_batch_takes_arrivals_whose_provenance_flags_differ() -> None:
     assert result.as_table(columns=ALL).to_pylist() == expected.to_pylist()
 
 
-# --- The row-built form, F (stage 2, ITL-1360) ----------------------------------------------
+# --- The row-built form, F (stage 2, ITL-1360) ---------------------------------------------
 
 SYSTEM_TAG = "_tag_source_id::abc"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="TODO(ITL-1360): F (stage 2's _row_built_form) keeps system-tag field "
-    "metadata and a list's item field, where a table built from rows has neither",
-)
 def test_the_provenance_columns_have_the_row_built_schema() -> None:
     """A raw stream whose system-tag field carries metadata and whose list-valued
     source info has a non-nullable item named ``member``: the channel result's
@@ -493,13 +487,6 @@ def test_the_provenance_columns_have_the_row_built_schema() -> None:
         assert_same_table(result.as_table(columns=ALL), expected)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=(AssertionError, KeyError),
-    reason="TODO(ITL-1360): F (stage 2's _row_built_columns) carries a raw stream's "
-    "meta (__) columns and their source info as data (the data keys name a meta "
-    "column, which the zero-row table a description is read from lacks)",
-)
 def test_a_meta_column_does_not_travel() -> None:
     """A raw stream with a meta column: neither it nor a source-info column of it is
     in the record batches or in the stream rebuilt from them, as in the table built
