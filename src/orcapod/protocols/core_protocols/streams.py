@@ -629,11 +629,15 @@ class RecordBatchInput(Protocol):
         ``None`` (a reader of an output channel, whatever its description)."""
         ...
 
-    def reserve(self) -> None:
+    def reserve(self, claim: object | None = None) -> object:
         """Take the channel for one consumer that will read all of it.
 
+        Without ``claim``, the calling task takes the unread channel and gets a claim;
+        with that claim, another task (the one that will read it) takes it over.
+
         Raises:
-            RuntimeError: If a read was called on it already.
+            RuntimeError: If a read was called on it already, or ``claim`` is not its
+                claim.
             ChannelClosed: If it was closed.
         """
         ...

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from abc import abstractmethod
-from collections.abc import Collection, Iterator, Sequence
+from collections.abc import Collection, Coroutine, Iterator, Sequence
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
@@ -1079,7 +1079,9 @@ would rebuild exactly it, and ``channel_to_stream`` may give it without reading.
 """
 
 
-async def channel_to_stream(channel: RecordBatchInput) -> StreamProtocol:
+def channel_to_stream(
+    channel: RecordBatchInput,
+) -> Coroutine[Any, Any, StreamProtocol]:
     """Return what an input channel delivers, as a stream: the one such conversion.
 
     It reads the channel to its end (one pass; every error of the read, such as an
@@ -1089,14 +1091,17 @@ async def channel_to_stream(channel: RecordBatchInput) -> StreamProtocol:
     stream that ``_output_stream`` built (``ROW_BUILT_OUTPUT``), not read yet, gives
     that stream, which is exactly what its batches would rebuild; the channel is then
     closed. A reader of an output channel always collects, whatever its description.
-    The channel is reserved for this call when it is made: no other consumer may
-    read it.
+
+    The channel is reserved when this function is called, before the returned
+    coroutine is awaited, so nothing can read it in between; the task that runs the
+    coroutine takes the channel over, and any other task's read is refused.
 
     Args:
         channel: The input channel, not read yet.
 
     Returns:
-        A complete, re-readable stream of the channel's input.
+        The conversion to await: a complete, re-readable stream of the channel's
+        input.
 
     Raises:
         RuntimeError: If a read of the channel was already called (a batch received,
@@ -1105,7 +1110,20 @@ async def channel_to_stream(channel: RecordBatchInput) -> StreamProtocol:
         ChannelClosed: If the channel was closed, before or during the read.
         UpstreamFailedError: If the producer failed or was cancelled.
     """
-    channel.reserve()  # one consumer, from this call on
+    claim = channel.reserve()  # at call time: nothing can read it before the await
+    return _channel_to_stream(channel, claim)
+
+
+async def _channel_to_stream(
+    channel: RecordBatchInput, claim: object
+) -> StreamProtocol:
+    """Read a reserved channel and return its input as a stream (``channel_to_stream``).
+
+    Args:
+        channel: The channel ``channel_to_stream`` reserved.
+        claim: Its claim, which the task running this conversion takes over.
+    """
+    channel.reserve(claim)
     opened_on = channel.opened_on
     if opened_on is not None and getattr(opened_on, ROW_BUILT_OUTPUT, False):
         await channel.close()

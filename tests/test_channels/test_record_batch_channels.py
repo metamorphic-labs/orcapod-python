@@ -377,6 +377,102 @@ def test_a_reader_has_one_consumer(retain: bool) -> None:
     assert run(read) == 1
 
 
+@pytest.mark.parametrize("retain", [True, False], ids=["retained", "bounded"])
+def test_a_reader_belongs_to_its_first_consumer_between_batches(retain: bool) -> None:
+    """Task A iterates a reader and pauses after its first batch; task B's read of the
+    same reader, between A's batches, is refused, and A reads all three batches."""
+    stream = source(3)
+    batches = batches_of(stream, 1)
+
+    async def read() -> int:
+        output = OutputChannel(stream, retain=retain, buffer_size=4)
+        reader = output.open_reader()
+        for batch in batches:
+            await output.send(batch)
+        await output.close()
+        paused, resume = asyncio.Event(), asyncio.Event()
+
+        async def consumer_a() -> int:
+            seen = 0
+            async for _ in reader:
+                seen += 1
+                if seen == 1:
+                    paused.set()
+                    await resume.wait()
+            return seen
+
+        async def consumer_b() -> None:
+            _ = await reader.receive()
+
+        a = asyncio.ensure_future(consumer_a())
+        await paused.wait()
+        with pytest.raises(RuntimeError, match="belongs to another consumer"):
+            await asyncio.ensure_future(consumer_b())
+        resume.set()
+        return await a
+
+    assert run(read) == 3
+
+
+@pytest.mark.parametrize("retain", [True, False], ids=["retained", "bounded"])
+def test_a_reserved_reader_is_read_only_through_its_claim(retain: bool) -> None:
+    """``reserve()`` holds the reader for its claim: no read is taken (from another
+    task, nor from the reserving task) until a task takes it over with the claim;
+    then only that task reads."""
+    stream = source(2)
+    batches = batches_of(stream, 1)
+
+    async def read() -> int:
+        output = OutputChannel(stream, retain=retain, buffer_size=4)
+        reader = output.open_reader()
+        for batch in batches:
+            await output.send(batch)
+        await output.close()
+        claim = reader.reserve()
+        with pytest.raises(RuntimeError, match="held for a conversion"):
+            _ = await reader.receive()
+
+        async def other() -> None:
+            _ = await reader.receive()
+
+        with pytest.raises(RuntimeError, match="held for a conversion"):
+            await asyncio.ensure_future(other())
+        with pytest.raises(RuntimeError, match="claimed by another consumer"):
+            _ = reader.reserve(object())
+
+        async def owner() -> int:
+            _ = reader.reserve(claim)
+            return len(await reader.collect())
+
+        taken = await asyncio.ensure_future(owner())
+        with pytest.raises(ChannelClosed):
+            _ = await reader.receive()  # read to its end: nothing left, for anyone
+        return taken
+
+    assert run(read) == 2
+
+
+@pytest.mark.parametrize("retain", [True, False], ids=["retained", "bounded"])
+def test_a_conversion_reserves_the_reader_when_it_is_created(retain: bool) -> None:
+    """``pending = channel_to_stream(reader)`` reserves at once: a receive before
+    ``await pending`` is refused, and the conversion gets every batch."""
+    stream = source(2)
+    batches = batches_of(stream, 1)
+
+    async def read() -> int:
+        output = OutputChannel(stream, retain=retain, buffer_size=4)
+        reader = output.open_reader()
+        for batch in batches:
+            await output.send(batch)
+        await output.close()
+        pending = channel_to_stream(reader)
+        with pytest.raises(RuntimeError, match="held for a conversion"):
+            _ = await reader.receive()
+        return (await pending).as_table().num_rows
+
+    assert run(read) == 2
+
+
 def test_a_closed_reader_cannot_be_converted() -> None:
     """A reader closed before any read: ``channel_to_stream`` raises ``ChannelClosed``,
     as documented, not the error of a channel already read."""
@@ -1201,13 +1297,16 @@ def test_overlapping_sends_reach_every_reader_in_one_order() -> None:
                 got.extend(batch.column("trial").to_pylist())
             return got
 
-        readers = asyncio.ensure_future(
-            asyncio.gather(trials(fast, [0]), trials(slow, []))
-        )
-        _ = await asyncio.gather(*sending)
-        await output.close()
-        fast_order, slow_order = await readers
-        return fast_order, slow_order
+        async def close_after_sends() -> None:
+            _ = await asyncio.gather(*sending)
+            await output.close()
+
+        # Each reader has one consumer: this task keeps reading the fast one.
+        slow_order = asyncio.ensure_future(trials(slow, []))
+        closing = asyncio.ensure_future(close_after_sends())
+        fast_order = await trials(fast, [0])
+        await closing
+        return fast_order, await slow_order
 
     fast_order, slow_order = run(write)
     assert fast_order == slow_order == [0, 1, 2]
@@ -1337,24 +1436,28 @@ def test_without_retain_send_waits_for_room_in_every_reader() -> None:
             await output.close()
 
         producer = asyncio.ensure_future(produce())
-        # Two batches fit each queue. The fast reader makes room for a third, which
-        # then waits for the slow reader: that send does not return.
-        got_fast = [await fast.receive() for _ in range(3)]
+        # Two batches fit each queue. The fast reader (one consumer, its own task)
+        # makes room for a third, which then waits for the slow reader: that send
+        # does not return, and the fast reader waits for its fourth batch.
+        three_read = asyncio.Event()
+
+        async def fast_consumer() -> int:
+            got = [await fast.receive() for _ in range(3)]
+            three_read.set()
+            return len(got) + len(await fast.collect())
+
+        fast_reading = asyncio.ensure_future(fast_consumer())
+        await three_read.wait()
         await asyncio.sleep(0.01)
         sent_while_slow_is_full = len(sent)
-        starved = asyncio.ensure_future(fast.receive())
-        await asyncio.sleep(0.01)
-        fast_waits_for_the_slow_reader = not starved.done()
-
-        async def rest_of_fast() -> int:
-            return 1 + len(await fast.collect()) if await starved else 0
-
-        rest, slow_batches = await asyncio.gather(rest_of_fast(), slow.collect())
+        fast_waits_for_the_slow_reader = not fast_reading.done()
+        slow_batches = await slow.collect()
+        fast_total = await fast_reading
         await producer
         return (
             sent_while_slow_is_full,
             fast_waits_for_the_slow_reader,
-            len(got_fast) + rest,
+            fast_total,
             len(slow_batches),
         )
 
@@ -1429,8 +1532,16 @@ def test_a_failed_producer_is_never_a_normal_end(retain: bool) -> None:
         output = OutputChannel(stream, retain=retain)
         unread, waiting, barrier = (output.open_reader() for _ in range(3))
         await output.send(batches[0])
-        _ = await waiting.receive()
-        blocked = asyncio.ensure_future(waiting.receive())
+        first_read = asyncio.Event()
+
+        async def waiting_consumer() -> Any:
+            # One consumer for the reader: it reads a batch, then waits for the next.
+            _ = await waiting.receive()
+            first_read.set()
+            return await waiting.receive()
+
+        blocked = asyncio.ensure_future(waiting_consumer())
+        await first_read.wait()
         whole = asyncio.ensure_future(channel_to_stream(barrier))
         await asyncio.sleep(0)
         output.fail(boom)

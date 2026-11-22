@@ -82,6 +82,10 @@ class InputChannel:
         self._started = False
         # A read is in progress.
         self._reading = False
+        # The consumer: the asyncio task the channel belongs to, for its whole life,
+        # and the claim a conversion holds while it moves to the task that runs it.
+        self._owner: asyncio.Task[Any] | None = None
+        self._claim: object | None = None
 
     @property
     def stream(self) -> StreamProtocol:
@@ -102,23 +106,66 @@ class InputChannel:
         """
         return self._feed.opened_on
 
-    def reserve(self) -> None:
+    def reserve(self, claim: object | None = None) -> object:
         """Take the channel for one consumer that will read all of it.
+
+        Without ``claim``: the channel, not read yet, is held for the returned claim:
+        no read is taken, from any task, until a task takes it over with the claim
+        (the task that runs a conversion). With the claim it returned: the calling
+        task takes the channel over, and any other task's read is then refused.
+
+        Args:
+            claim: The claim an earlier ``reserve()`` returned, to take it over.
+
+        Returns:
+            The claim.
 
         Raises:
             RuntimeError: If a read was called on it already (by any consumer, also
-                one still waiting), so all of the input can no longer be given.
+                one still waiting), so all of the input can no longer be given; or
+                if ``claim`` is not this channel's claim.
             ChannelClosed: If it was closed.
         """
         if self._closed:
             raise self._closed_early()
-        if self._started or self._ended:
+        if claim is not None:
+            if claim is not self._claim:
+                raise RuntimeError(
+                    f"The input channel of {_named(self._stream)} is claimed by "
+                    + "another consumer."
+                )
+            self._owner = _current_task()
+            return claim
+        if self._started or self._ended or self._owner is not None:
             raise RuntimeError(
                 f"The input channel of {_named(self._stream)} has been read already, "
                 + "or is being read by another consumer; all of its input can no "
                 + "longer be given."
             )
         self._started = True
+        self._owner = None  # held for the claim until a task takes it over
+        self._claim = object()
+        return self._claim
+
+    def _belong_to_caller(self) -> None:
+        """Bind the channel to the calling task on its first read; refuse any other.
+
+        A channel has one consumer for its whole life: between batches as well as
+        while a read is pending, a read from another task is refused.
+        """
+        task = _current_task()
+        if self._owner is None and self._claim is not None:
+            raise RuntimeError(
+                f"The input channel of {_named(self._stream)} is held for a "
+                + "conversion that has not started; no other read is taken."
+            )
+        if self._owner is None:
+            self._owner = task
+        elif self._owner is not task:
+            raise RuntimeError(
+                f"The input channel of {_named(self._stream)} belongs to another "
+                + "consumer (another task); a channel has one consumer."
+            )
 
     async def receive(self) -> pa.RecordBatch:
         """Return the next Arrow record batch.
@@ -132,13 +179,15 @@ class InputChannel:
                 (``async for``) raises it instead of ending: no consumer loop takes
                 part of an input for all of it. A ``ChannelClosed`` raised by the
                 feed's own read is a read error too: only the feed's end ends it.
-            RuntimeError: If another consumer's read of this channel is in progress.
+            RuntimeError: If the channel belongs to another consumer (another task;
+                the first read binds it), or a read of it is in progress.
             UpstreamFailedError: If the producer failed or was cancelled.
         """
         if self._closed:
             raise self._closed_early()
         if self._ended:
-            raise ChannelClosed()
+            raise ChannelClosed()  # after the end there is nothing to take, for anyone
+        self._belong_to_caller()
         if self._reading:
             raise RuntimeError(
                 f"The input channel of {_named(self._stream)} is being read by another "
@@ -204,6 +253,14 @@ class InputChannel:
             self._closed = True
         self._ended = True
         self._feed.close()
+
+
+def _current_task() -> asyncio.Task[Any] | None:
+    """The running asyncio task, or ``None`` outside one."""
+    try:
+        return asyncio.current_task()
+    except RuntimeError:  # no running event loop
+        return None
 
 
 def _named(stream: Any) -> str:  # pyright: ignore[reportExplicitAny]  # any stream or node
