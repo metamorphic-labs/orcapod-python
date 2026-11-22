@@ -181,11 +181,31 @@ def _build_record_id_preimage(
         A single-row ``pa.Table`` with system-tag columns and
         ``INPUT_DATA_HASH_COL`` (``large_binary``, the prefixed digest).
     """
-    return tag.as_table(columns={"system_tags": True}).append_column(
+    return _with_input_data_hash(
+        tag.as_table(columns={"system_tags": True}), input_data
+    )
+
+
+def _with_input_data_hash(
+    tag_table: "pa.Table", input_data: "DataProtocol | ContentHash"
+) -> "pa.Table":
+    """Return a row's tag table (with system tags) with its input data hash appended.
+
+    The one statement of the entry-id preimage's last column (``_build_record_id_preimage``).
+
+    Args:
+        tag_table: The row's one-row tag table, system tags included.
+        input_data: The row's data datagram, or its content hash.
+
+    Returns:
+        The preimage: ``tag_table`` and ``INPUT_DATA_HASH_COL`` (``large_binary``).
+    """
+    data_hash = (
+        input_data if isinstance(input_data, ContentHash) else input_data.content_hash()
+    )
+    return tag_table.append_column(
         constants.INPUT_DATA_HASH_COL,
-        pa.array(
-            [input_data.content_hash().to_prefixed_digest()], type=pa.large_binary()
-        ),
+        pa.array([data_hash.to_prefixed_digest()], type=pa.large_binary()),
     )
 
 
@@ -2039,10 +2059,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             )
             tag_schema = input_stream.output_schema(columns={"system_tags": True})[0]
             ctx_obs.on_node_start(node_label, node_hash, tag_schema=tag_schema)
-            inputs = [
-                (tag, data, self.compute_base_entry_id(tag, data))
-                for tag, data in input_stream.iter_data()
-            ]
+            inputs = self._input_entries(input_stream)
             _ = self.get_cached_results(base_entry_ids=[eid for _, _, eid in inputs])
             for tag, data, entry_id in inputs:
                 entry = self._stored_entry(entry_id)
@@ -2574,10 +2591,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         try:
             # Collect upstream entries and resolve base_entry_ids (stable across
             # recomputation)
-            upstream_entries: list[tuple[TagProtocol, DataProtocol, bytes]] = [
-                (tag, data, self.compute_base_entry_id(tag, data))
-                for tag, data in input_stream.iter_data()
-            ]
+            upstream_entries = self._input_entries(input_stream)
             base_entry_ids = [eid for _, _, eid in upstream_entries]
 
             # Hot-load any already-computed results from DB into _cached_output_datas.
@@ -3043,6 +3057,59 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         return self.data_context.arrow_hasher.hash_table(
             self._build_entry_id_preimage(tag, input_data)
         ).to_prefixed_digest()
+
+    def _input_entries(
+        self, input_stream: StreamProtocol
+    ) -> list[tuple[TagProtocol, DataProtocol, bytes]]:
+        """Return ``input_stream``'s rows, each with its base entry id.
+
+        The id is ``compute_base_entry_id`` of the row. For a stream over an Arrow
+        table (every stream a job hands a node, ITL-1347), each row's preimage is
+        taken from slices of the stream's table instead of tables built from the
+        row's values: the tag side is its user tags and system tags, the system-tag
+        field flags set by their values as a row's are (``_flag_by_values``), and the
+        input data hash is ``hash_table`` of its data columns, which is the data
+        datagram's content hash (``Datagram.identity_structure``). The same ids,
+        without building each row's tables (ITL-1361).
+
+        Args:
+            input_stream: The node's input.
+
+        Returns:
+            ``(tag, data, base entry id)`` for each row, in the stream's order.
+        """
+        from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+
+        rows = list(input_stream.iter_data())
+        if not rows or not isinstance(input_stream, ArrowTableStream):
+            return [
+                (tag, data, self.compute_base_entry_id(tag, data)) for tag, data in rows
+            ]
+        tag_keys, data_keys = input_stream.keys()
+        table = input_stream.as_table(columns={"system_tags": True})
+        system_tags = [
+            name
+            for name in table.column_names
+            if name.startswith(constants.SYSTEM_TAG_PREFIX)
+        ]
+        tag_side = StaticOutputOperatorPod._flag_by_values(  # pyright: ignore[reportPrivateUsage]  # F's flags, as a row has them
+            table.select([*tag_keys, *system_tags])
+        )
+        data_side = table.select(list(data_keys))
+        hasher = self.data_context.arrow_hasher
+        return [
+            (
+                tag,
+                data,
+                hasher.hash_table(
+                    _with_input_data_hash(
+                        tag_side.slice(index, 1),
+                        hasher.hash_table(data_side.slice(index, 1)),
+                    )
+                ).to_prefixed_digest(),
+            )
+            for index, (tag, data) in enumerate(rows)
+        ]
 
     def compute_pipeline_entry_id(
         self,
