@@ -5,6 +5,22 @@ Related: ITL-1265 (a `Filter` over a `Condition`, the earlier issue this one rea
 ITL-1218 / ITL-1219 (source restrictions), ITL-1266 (provisional operators), ITL-1251
 (floats: `0.0 == -0.0`, NaN equals NaN), ITL-1373 (exploring a dataset; findings fold in here).
 
+**Changed in revision 2 (2026-11-22), folding in findings F07-F13:**
+
+- 2.1: `Filter` takes tag and data columns alike, stated explicitly (F10); how a user finds
+  a struct's field names (F09).
+- 2.2 (new 2.6): the literal rule. A literal is checked against the column's type and
+  accepted when it is exactly representable (`7` against `uint32`); no conversion between
+  Python kinds (`7` against a `double` column is still refused). What enters the identity
+  is the literal as written (F11). New decision 15.
+- 4: `Filter` is eligible for the job-speed table transport (F13).
+- 5: conditions are checked when built, so nothing is refused later by the job (F07); the
+  node-naming gap of streams built before a job is out of scope. `Filter` and
+  `RestrictedAggregationWarning` (F12). Pushdown rewritten (F08): what a version 1 without
+  pushdown costs on a large table, the smallest safe pushdown, and `explain()`, which
+  reports what the source applies and what is applied after reading.
+- 10: decision 9 rewritten (pushdown and `explain()`); decision 15 added.
+
 ## In one paragraph
 
 `stream.filter(...)` keeps the rows that satisfy a condition. It takes exactly what
@@ -171,8 +187,17 @@ Two related gaps F05 found are not `Filter`'s job, and are noted for separate is
 on a plain Arrow struct column, and a function-pod annotation that accepts a plain struct
 column.
 
-Columns: the stream's user tag and data columns (data-tags included). System-tag,
-source-info, context and meta columns are not columns a condition names.
+Columns: the stream's user tag and data columns (data-tags included), **alike** (F10).
+Whether a column is a tag or data decides what `Join`, `SemiJoin` and `GroupBy` can do with
+it; it decides nothing for `Filter`: every condition kind works on a tag, a data column and a
+data-tag, with the same semantics. System-tag, source-info, context and meta columns are not
+columns a condition names.
+
+Finding a struct's field names (F09): `output_schema()` shows a struct column as a generated
+class name, which hides its fields. Version 1 makes `col(c).field(f)` refuse an unknown
+field with a message listing the fields the column has (with their types), and the docs
+show `stream.as_table().schema` (or the preview's column types) as the way to see them.
+Showing struct fields in `output_schema()` and the preview is a separate issue.
 
 The equality column types are those `where` supports today (`_condition_value_type` in
 `spiraldb_table_source.py`); that function moves to one shared module so `where` and
@@ -256,6 +281,31 @@ the two differ in result, and the reason pushdown is not free (section 5).
 - A `datetime` value against a zoned column compares instants; zones of the value do not
   matter. A naive value is accepted only for a naive column. `date` and `datetime` are
   distinct types (a `datetime` is refused for a `date` column even though it is a subclass).
+
+### 2.6 Literals: checked against the column, never converted between kinds (F11)
+
+A Python literal has no Arrow type of its own; the column gives it one. The rule:
+
+- The literal's Python type must be exactly the column's Python type (`int` for every
+  integer width, signed or not; `float` for `float16`/`float32`/`double`; `str`, `bytes`,
+  `bool`, `date`, `datetime`). `7` against a `double` column, `True` against an `int`
+  column and `"7"` against an `int` column are refused. This is `where`'s rule today.
+- Within that kind, the literal is accepted when the column's Arrow type holds it exactly:
+  `7` against `uint32` or `int8` is accepted, `-1` against `uint32` and `300` against `int8`
+  are refused (`InputValidationError`, naming the column, its type and the value). So
+  `is_in([3, 7])` on a `uint32` column works, which `semi_join` against an `int64` key
+  column does not (there two columns meet, and columns never convert).
+- A float literal against a `float32` column is rounded to the column's precision, as a
+  float column stores any value and as `where` does today; a finite literal beyond the
+  column's range is refused. Comparisons are made in the column's type, after that rounding,
+  and the docs say so (`col("x32") <= 0.1` keeps a stored `0.1f`).
+- Timestamps: the literal is compared at the column's unit; a literal with a part below the
+  column's unit (a microsecond against a `timestamp[s]` column) is refused, never truncated.
+
+What enters the identity is the literal as written, with its Python type token (section
+3.2), never the column's Arrow type: the operator's identity does not depend on its input,
+whose schema is already in the upstream's pipeline hash. So `col("unit") == 7` is one
+operator whether `unit` is `uint32` or `int64`.
 
 ## 3. Identity
 
@@ -353,6 +403,12 @@ needs a new data context version.
   `eywalker/job-speed`, `ROW_BY_ROW = True`, so it is applied per record batch. The filter is
   row-independent, so both give the rows of the sync path in the same order. Added to
   `test_async_sync_equivalence.py`.
+- **Job transport (F13)**: on the released version a `polars_filter` step roughly doubles
+  `job.run()`, warm runs included (measured on 60k rows: 6.6 s to 14.6 s), because a job node
+  rebuilds its rows one by one. The job table transport on `eywalker/job-speed` removes that
+  cost for operator nodes whose result is a plain Arrow table. `Filter` must be eligible for
+  that fast path: its result is an `ArrowTableStream` built by `Table.filter`, and it
+  declares `ROW_BY_ROW = True`. A test on that branch asserts it takes the fast path.
 - **Cost**: one pass per term over its column, O(rows × terms), no copy of untouched columns
   beyond Arrow's `filter`. Far cheaper than `PolarsFilter`, which converts the whole table to
   Polars and back and then restores types.
@@ -367,6 +423,18 @@ needs a new data context version.
   own path, as any operator node. The existing refusal applies unchanged: an operator node
   that caches (`LOG` or `REPLAY`) over a restricted source is refused
   (`refuse_restricted_operator_cache`); with `CacheMode.OFF` it runs.
+- **Checked when built (F07)**: a `Condition` is checked and given its canonical form when it
+  is built, and the operator's schema checks run at graph build; nothing a `Filter` accepts
+  outside a job is refused when a job records it. (F07's other part, that a stream built
+  before a job gets nodes named `<label>:<hash>` and its source is not listed in
+  `job.nodes`, is a job-capture gap outside `Filter`'s scope, for its own issue.)
+- **`RestrictedAggregationWarning` (F12)**: a `where`-restricted source feeding `GroupBy`,
+  `Batch` or `MergeJoin` warns at every run, because the restriction is in no identity: the
+  aggregate's hash does not say which rows were aggregated. A `Filter` step never triggers
+  it: its condition is in the identity of every node downstream, so the aggregate's hash
+  says exactly which rows it saw. This is a reason to prefer `filter` over `where` once a
+  selection becomes part of what a pipeline computes. A pushdown (below) is internal to the
+  `Filter` and must not trigger the warning either.
 - **`filter` directly over a source versus `where`**: the same rows (except NaN and signed
   zero on float columns, 2.4), different identities: `where` leaves the source's identity
   unchanged and adds no node; `filter` adds a node. A pipeline that started from
@@ -382,12 +450,41 @@ needs a new data context version.
   upstream (a function pod upstream still reads "not computed"), never polls, never
   writes. Pushing the condition into a source's bounded read (so the first `n` matching
   rows of a SpiralDB table are shown) is the pushdown below, and comes with it.
-- **Pushdown**: not in version 1. Cost: a `filter` over a SpiralDB source reads the whole
-  table and then filters in memory. For the workshop's table sizes this is acceptable; for a
-  large table the user can keep `where` on the source for speed and put the same `filter`
-  in the pipeline for identity (correct, redundant, cheap), within the restriction rules
-  above. A later pushdown (with ITL-1219) must change no hash and no row: only terms whose
-  semantics are proven equal on that table system are pushed (non-float columns first).
+- **Pushdown (F08)**. Today nothing tells a user whether a condition runs in the table
+  system or after a full read: `polars_filter(pl.col("unit") == 7)` on a large unrestricted
+  table reads every row (and can hit a SpiralDB source's `max_rows` cap), where
+  `where(unit=7)` reads few.
+
+  *Cost of version 1 without pushdown*: a `filter` over a SpiralDB source reads the whole
+  table into memory, then filters. Time and memory grow with the table, not with the
+  result; a table above the source's `max_rows` cannot be filtered at all. The workaround,
+  `where` on the source plus the same `filter` in the pipeline, is correct but makes the
+  source restricted, with its rules (`RestrictedAggregationWarning`, no caching operator node
+  over it).
+
+  *The smallest safe pushdown* rests on one invariant: **the source may return more rows
+  than match, never fewer, and the `Filter` always evaluates its whole condition on what is
+  read.** Then the result is the same rows whatever the table system's semantics, and no
+  hash moves (the `Filter`'s identity is unchanged, and a source's restriction is in no
+  identity). Under that invariant, version 1 can push:
+  - the top-level equality terms (`==`, keywords) of a `Filter` placed directly on a
+    `SpiralDBTableSource` (the only source with a scan condition today),
+  - on columns whose equality the table system shares with Orcapod: integer, string, bytes,
+    bool, date and timestamp columns; never a float column (NaN, signed zero), a struct
+    field, or a logical type;
+  - only when the source has no `limit` (a limit after a pushed condition chooses other
+    rows), and never into a `CachedSource` or a source over another.
+  `is_in` and comparisons follow when SpiralDB's scan takes them (piece E). Record ids are
+  unchanged by a restriction (a positional id is never renumbered), so the rows read carry
+  the ids a full read gives them.
+
+  *`explain()`*: `stream.explain()` (and one line of the preview of a `Filter`) reports the
+  split, for example `applied by the source: unit == 7; after reading: t >= 1.0` or
+  `applied by the source: nothing; after reading: unit == 7, t >= 1.0 (the whole table is
+  read)`. It is in version 1 even without pushdown, so the cost is visible.
+
+  Recommendation (decision 9): `explain()` in version 1; the equality pushdown above in
+  version 1 if piece E is done by Tuesday, otherwise the first follow-up.
 
 ## 6. Relation to `PolarsFilter` and `DropNulls`
 
@@ -453,6 +550,11 @@ By CLAUDE.md's conventions, on the shared family `tests/test_core/operators/seve
 - **Struct fields and column operands**: a field, a field of a field, a null struct, a null
   field, a user class column's field, a missing field, a non-struct column; two columns of
   equal and of different Arrow types; the same condition inside and outside a job (F02).
+- **Literals** (2.6): `7` on `uint8`, `uint32`, `int64`; `-1` on `uint32` and `300` on `int8`
+  refused; `7` on `double` refused; a float on `float32`; identity equal across widths.
+- **Pushdown and `explain()`**: the `explain()` text for each case; with pushdown, equal rows,
+  record ids and hashes against a full read, a float column and a `limit` never pushed, no
+  `RestrictedAggregationWarning`.
 - **No masks**: a list, array, series or bool as a condition is refused (F04).
 - **head()** (if decision 13 is taken): a `Filter` over a source shows matches among the
   bounded read; over a function pod it still reads "not computed"; nothing is written.
@@ -481,6 +583,7 @@ this document:
 | B. `Filter` operator | The class, validation (Python types at build, Arrow at apply), the mask kernel with NaN-aware terms, struct-field paths and column-against-column terms, sync and async (and `ROW_BY_ROW` on job-speed), provisional registration, `stream.filter`, the protocol method, exports. | A's interface (can start on stubs) | 1–1.5 days |
 | C. Tests | The matrix of section 8, order invariance, async-sync, golden provisional cases. | A, B | 1 day, overlapping B |
 | D. Docs | Tutorial 03 and the others, concepts, API, changelog fragment. | B's spelling (frozen by this document) | 0.5–1 day |
+| E. Pushdown and `explain()` | `explain()` and the preview line (version 1, with B); the equality pushdown into a SpiralDB scan under the invariant of section 5, with tests that rows, record ids and every hash equal those of a full read, and that no restriction rule or warning fires. | A, B | `explain()` 0.5 day; pushdown 1 day |
 
 Honest total: about 3 working days of wall time with three workers, 4–5 for one. For
 Wednesday's workshop: A and B by Monday evening, C and D on Tuesday, a release candidate
@@ -511,9 +614,13 @@ the tree from piece A.
 8. **`PolarsFilter`.** Keep as the escape hatch, provisional; docs move equality filtering to
    `filter`. Alternative: rebuild `polars_filter` on stretch 1 (translate when possible), or
    deprecate it later.
-9. **Pushdown.** None in version 1; `filter` over a source reads the whole table. Alternative:
-   push equality terms on non-float columns into a SpiralDB source's scan in version 1
-   (rows unchanged, no hash moves, but more to test before Wednesday).
+9. **Pushdown and `explain()`** (F08). `explain()` reports what the source applies and what
+   is applied after reading, in version 1. Push the top-level equality terms on integer,
+   string, bytes, bool, date and timestamp columns of a `Filter` directly on a SpiralDB
+   source with no `limit` into its scan, the `Filter` still evaluating everything (rows and
+   hashes unchanged), in version 1 if time allows (piece E). Without it, a `filter` over a
+   large table reads the whole table and fails above `max_rows`. Alternative: no pushdown
+   in version 1, users combine `where` and `filter` on large tables.
 10. **`where` and the new terms.** `Condition` holds them in version 1; `where` refuses
     non-equality terms with a pointer to `filter`; pushing them into SpiralDB is a follow-up
     issue. Alternative: leave `Condition` equality-only and give `Filter` its own condition
@@ -530,3 +637,9 @@ the tree from piece A.
     `run()` or `where` on the source to look).
 14. **`PolarsFilter` positional masks** (F04): file a bug; refuse a positional mask inside
     a job (or everywhere). `Filter` never takes one.
+15. **Literals** (F11, section 2.6). A literal must be of the column's Python kind and is
+    accepted when the column's Arrow type holds it exactly (`7` against `uint32`), a float
+    rounded to a `float32` column as `where` does; the identity holds the literal as
+    written. Alternative: refuse a literal unless it is of the column's exact Arrow width
+    (the `semi_join` behaviour; strict, but Python has no `uint32` literal, so `is_in` on
+    such a column would need a NumPy or Arrow value, which is refused).
