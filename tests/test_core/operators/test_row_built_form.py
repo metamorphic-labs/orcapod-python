@@ -26,7 +26,7 @@ import pyarrow.compute as pc
 import pytest
 
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
-from orcapod.core.streams.base import ZERO_ROW_INPUT_COLUMNS
+from orcapod.core.streams.base import ZERO_ROW_INPUT_COLUMNS, row_built_columns
 from tests.test_core.operators.test_async_sync_equivalence import (
     AFTER_OPERATOR_CASES,
     CASES,
@@ -123,8 +123,8 @@ def test_row_built_columns_is_the_same_on_every_slice() -> None:
     result = case.make_op()(*case.make_sources())
     table = result.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
     keys = result.keys()
-    whole = StaticOutputOperatorPod._row_built_columns(table, keys)  # pyright: ignore[reportPrivateUsage]  # under test
+    whole = row_built_columns(table, keys)
     for start in range(table.num_rows):
-        part = StaticOutputOperatorPod._row_built_columns(table.slice(start, 1), keys)  # pyright: ignore[reportPrivateUsage]  # under test
+        part = row_built_columns(table.slice(start, 1), keys)
         assert part.schema.equals(whole.schema, check_metadata=True)
         assert part.equals(whole.slice(start, 1))

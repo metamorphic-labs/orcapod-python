@@ -33,6 +33,7 @@ from orcapod.core.streams.base import (
     short_stream_repr,
     typed_zero_row_input,
     typed_zero_row_table,
+    row_built_columns,
 )
 from orcapod.core.streams.view import (
     STALE_NOTE,
@@ -446,80 +447,6 @@ class StaticOutputOperatorPod(TraceableBase):
         return StaticOutputOperatorPod._zero_rows_in_row_order(result)
 
     @staticmethod
-    def _row_built_columns(
-        table: pa.Table, keys: tuple[Sequence[str], Sequence[str]]
-    ) -> pa.Table:
-        """Return ``table``'s columns as ``_rows_to_table`` lays out the table's rows.
-
-        Every step of F (``_row_built_form``) that each row decides on its own, so it
-        gives the same result on a whole table and on each slice of it:
-
-        1. The columns a row-built table holds: the user tags, the system tags, the data
-           columns that are not data-tags, and the source info of every data column (a
-           data-tag's included). ``table`` holds no context, meta or content-hash column
-           (``ZERO_ROW_INPUT_COLUMNS``).
-        2. In row order: user tags in tag order, system tags in table order, then the data
-           columns and their source info, both in the order of the data keys. A row's
-           ``Data`` lists its source info in the order of its data keys, data-tags first
-           in tag order (``Data._ensure_source_info_table``), so a data-tag's source info
-           comes before the other data columns' even when the data-tag is not the first
-           column of ``table``.
-        3. Normalized to the large types without keeping ``null``: each row's datagram
-           stores a ``null`` column as ``large_string`` (``Datagram._init_from_table``).
-
-        Whether a system-tag or source-info field is nullable depends on its values over
-        the complete table (``_flag_by_values``), so it is not decided here.
-
-        Args:
-            table: A table of user tags, system tags, data and source info.
-            keys: The tag keys and the data keys of the stream ``table`` belongs to
-                (``stream.keys()``).
-
-        Returns:
-            The same arrays, selected and ordered, in their large types.
-        """
-        from orcapod.utils import arrow_utils
-
-        return arrow_utils.normalize_table_to_large_types(
-            table.select(
-                StaticOutputOperatorPod._row_built_names(table.column_names, keys)
-            )
-        )
-
-    @staticmethod
-    def _row_built_names(
-        names: Sequence[str], keys: tuple[Sequence[str], Sequence[str]]
-    ) -> list[str]:
-        """Return the columns of a table built from rows, in row order (F steps 1-2).
-
-        The user tags in tag order, the system tags in the order of ``names``, the data
-        columns that are not data-tags, then the source info of every data column; data
-        and source info in the order of the data keys (a row's ``Data`` lists its source
-        info so, data-tags first in tag order: ``Data._ensure_source_info_table``).
-
-        Args:
-            names: The column names of a table of user tags, system tags, data and
-                source info.
-            keys: The tag keys and the data keys of the stream the table belongs to.
-
-        Returns:
-            The names a table built from rows holds, in its order.
-        """
-        from orcapod.system_constants import constants
-
-        tag_keys, data_keys = keys
-        present = set(names)
-        tags = set(tag_keys)
-        system_tags = [n for n in names if n.startswith(constants.SYSTEM_TAG_PREFIX)]
-        data = [n for n in data_keys if n not in tags]
-        source_info = [
-            f"{constants.SOURCE_PREFIX}{n}"
-            for n in data_keys
-            if f"{constants.SOURCE_PREFIX}{n}" in present
-        ]
-        return [*tag_keys, *system_tags, *data, *source_info]
-
-    @staticmethod
     def _flag_by_values(table: pa.Table) -> pa.Table:
         """Flag each system-tag and source-info field nullable only when it holds a null.
 
@@ -555,7 +482,7 @@ class StaticOutputOperatorPod(TraceableBase):
         """Return ``table`` as ``_rows_to_table`` builds it from the table's own rows.
 
         F in the ITL-1347 spec: the same table, without making the rows. The columns,
-        their order and their types are decided row by row (``_row_built_columns``), the
+        their order and their types are decided row by row (``streams.base.row_built_columns``), the
         system-tag and source-info field flags by their values over the whole table
         (``_flag_by_values``). The equality with ``_rows_to_table`` is tested over every
         operator, source kind and column role (ITL-1347, L0-L2).
@@ -568,9 +495,7 @@ class StaticOutputOperatorPod(TraceableBase):
         Returns:
             The table ``_rows_to_table`` would build from its rows.
         """
-        return StaticOutputOperatorPod._flag_by_values(
-            StaticOutputOperatorPod._row_built_columns(table, keys)
-        )
+        return StaticOutputOperatorPod._flag_by_values(row_built_columns(table, keys))
 
     @staticmethod
     def _output_stream(
