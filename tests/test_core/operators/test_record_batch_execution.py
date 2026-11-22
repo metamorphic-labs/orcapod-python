@@ -4,7 +4,7 @@ Every operator has one body, ``static_process``. Its Arrow-record-batch form
 (``async_execute_batches``) reads input channels opened from streams and writes an
 output channel, which closes into a stream. An operator whose output rows each come
 from one input row is applied to every record batch as it arrives; every other
-operator reads all of its inputs first (``channel_to_stream``) and then runs the
+operator reads all of its inputs first (``to_stream()``) and then runs the
 sync call; ``Batch`` batches consecutive arrivals.
 
 For every case of the async/sync matrix (``test_async_sync_equivalence.CASES``) the
@@ -398,7 +398,7 @@ def test_a_barrier_operator_sees_its_input_as_a_job_gives_it(label: str) -> None
     """The record-batch form is held to what a job's sync path gives an operator: the
     upstream rebuilt from its rows (``_materialize_upstream``: ``null`` as
     ``large_string``, the columns in row order), not the raw stream it came from, in
-    every layout: ``channel_to_stream`` rebuilds what the channel delivered. A
+    every layout: ``to_stream()`` rebuilds what the channel delivered. A
     predicate that reads a ``null`` column's type or the column order follows that
     form (documented behaviour, e5); in a job neither case reaches an operator: a
     source refuses a ``null`` column, and a job refuses an expression that selects

@@ -1356,16 +1356,18 @@ data. The rules:
   and `OutputChannel.result()` closes it into that stream. The conversions are in one place,
   `core/operators/static_output_pod.py` (`stream_from_batches`, `transport_schema`, and F,
   `_row_built_form`); never build a stream from record batches elsewhere.
-  `channel_to_stream(channel)` is the one conversion from an input channel to a stream: it
-  reads the channel to its end (one pass, every read error raised before an operator runs) and
-  rebuilds a fixed snapshot through `stream_from_batches`; only an unread channel whose stream
+  `channel.to_stream()` is the one conversion from an input channel to a stream (a plain
+  method that reserves the channel when called and returns the conversion to await; it imports
+  the builder inside its body, since the operators sit above the streams): it reads the
+  channel to its end (one pass, every read error raised before an operator runs) and rebuilds
+  a fixed snapshot through `stream_from_batches`; only an unread channel opened on a stream
   `_output_stream` built (`ROW_BUILT_OUTPUT`, set there only) gives that stream as it is. An
   operator's record-batch form (`async_execute_batches`, renamed `async_execute` when wired)
   applies its one `static_process` body: per record batch when the class declares `ROW_BY_ROW
   = True` (each output row comes from one input row), otherwise as a barrier over the whole
-  input (`channel_to_stream`); `Batch` with a size has its own form, grouping rows by arrival.
-  A new operator whose output rows each come from one input row declares `ROW_BY_ROW`; write
-  no other per-operator batch code.
+  input (`to_stream()`); `Batch` with a size has its own form, grouping rows by arrival. A new
+  operator whose output rows each come from one input row declares `ROW_BY_ROW`; write no
+  other per-operator batch code.
 - The type converter keys synthesized struct classes by the large-normalized struct, so
   `struct<b: string>` and `struct<b: large_string>` are one Python type (a workaround,
   `TODO(ITL-841)`).
@@ -1546,6 +1548,10 @@ data. The rules:
   are not concerned. The refusal is for now: how an operator node logs and replays is to be
   redesigned to load its cache and then apply the restriction (`TODO(ITL-1219)`).
 - Empty data → `ArrowTableSource` raises `ValueError("Table is empty")`.
+- An observer only watches (developer, November 22, 2026, ITL-1369): an observer or callback
+  that changes the job, its nodes or its bound sources during a run is unsupported; what the
+  run then does is undefined and is not part of the equality with `main`. Preventing it (a
+  guard, then a read-only view) is ITL-1369; never chase a case that needs such a change.
 - A side-effect job node delivers only when it runs (developer, November 13, 2026, ITL-1091):
   `job.run()`, `node.run()` (state-driven, ITL-1095: a node holding a current run delivers
   nothing, so `clear_cache()` it first to deliver again; otherwise the job run's work for that

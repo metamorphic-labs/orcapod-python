@@ -7,7 +7,6 @@ from collections.abc import (
     AsyncIterator,
     Callable,
     Collection,
-    Coroutine,
     Iterable,
     Iterator,
     Sequence,
@@ -935,7 +934,7 @@ class StaticOutputOperatorPod(TraceableBase):
         # Every complete node output in the row-built form ends here (the rows'
         # rebuild, F's output, a stored-table output) or, with no row, in
         # ``_materialize_upstream``'s zero-row input: the places that mark it
-        # (ITL-1347): ``channel_to_stream`` may give it as it is.
+        # (ITL-1347): ``InputChannel.to_stream`` may give it as it is.
         setattr(stream, ROW_BUILT_OUTPUT, True)
         return stream
 
@@ -1046,7 +1045,7 @@ class StaticOutputOperatorPod(TraceableBase):
 
         A row-by-row operator (``ROW_BY_ROW``) is applied to each record batch as it
         arrives and sends that batch's result at once. Every other operator reads
-        all of its inputs first (``channel_to_stream``) and then runs exactly
+        all of its inputs first (``InputChannel.to_stream``) and then runs exactly
         the sync call, so an input with no rows gives the typed zero-row result of
         the sync path, with no row to send.
 
@@ -1161,7 +1160,7 @@ async def _streams_of(inputs: Sequence[RecordBatchInput]) -> list[StreamProtocol
     tasks: list[asyncio.Future[StreamProtocol]] = []
     try:
         for channel in inputs:
-            tasks.append(asyncio.ensure_future(channel_to_stream(channel)))
+            tasks.append(asyncio.ensure_future(channel.to_stream()))
         return list(await asyncio.gather(*tasks))
     except BaseException:
         # Every conversion already started is cancelled and awaited: none is left
@@ -1228,64 +1227,9 @@ ROW_BUILT_OUTPUT = "_orcapod_row_built_output"
 Set where every such output is made (``_as_upstream_stream``, and the zero-row input
 of ``_materialize_upstream``), never inferred from a class: such a stream is a
 complete, immutable output already in the row-built form, so a consumer of its record
-batches would rebuild exactly it, and ``channel_to_stream`` may give it without
+batches would rebuild exactly it, and ``InputChannel.to_stream`` may give it without
 reading.
 """
-
-
-def channel_to_stream(
-    channel: RecordBatchInput,
-) -> Coroutine[Any, Any, StreamProtocol]:
-    """Return what an input channel delivers, as a stream: the one such conversion.
-
-    It reads the channel to its end (one pass; every error of the read, such as an
-    unbound source's or a failed producer's, is raised here, before any operator runs)
-    and builds a fixed snapshot of what was delivered through the one settlement path
-    (``stream_from_batches``). The only shortcut: a channel opened on a complete
-    complete node output in the row-built form (``ROW_BUILT_OUTPUT``), not read yet, gives
-    that stream, which is exactly what its batches would rebuild; the channel is then
-    closed. A reader of an output channel always collects, whatever its description.
-
-    The channel is reserved when this function is called, before the returned
-    coroutine is awaited, so nothing can read it in between; the task that runs the
-    coroutine takes the channel over, and any other task's read is refused. If the
-    coroutine never starts (its task is cancelled first, or it is never awaited),
-    the reservation's claim is freed with it and the channel is closed, so no
-    producer waits on it.
-
-    Args:
-        channel: The input channel, not read yet.
-
-    Returns:
-        The conversion to await: a complete, re-readable stream of the channel's
-        input.
-
-    Raises:
-        RuntimeError: If a read of the channel was already called (a batch received,
-            its end reached, or another consumer still waiting): a stream of part of
-            an input is never made, and a channel is never read again.
-        ChannelClosed: If the channel was closed, before or during the read.
-        UpstreamFailedError: If the producer failed or was cancelled.
-    """
-    claim = channel.reserve()  # at call time: nothing can read it before the await
-    return _channel_to_stream(channel, claim)
-
-
-async def _channel_to_stream(
-    channel: RecordBatchInput, claim: object
-) -> StreamProtocol:
-    """Read a reserved channel and return its input as a stream (``channel_to_stream``).
-
-    Args:
-        channel: The channel ``channel_to_stream`` reserved.
-        claim: Its claim, which the task running this conversion takes over.
-    """
-    channel.reserve(claim)
-    opened_on = channel.opened_on
-    if opened_on is not None and getattr(opened_on, ROW_BUILT_OUTPUT, False):
-        await channel.close()
-        return opened_on
-    return stream_from_batches(channel.stream, await channel.collect())
 
 
 def stream_from_batches(
@@ -1295,7 +1239,7 @@ def stream_from_batches(
 
     The one place a stream is made from Arrow record batches: what an output channel
     gives once closed (``OutputChannel.result``), what an input channel delivered
-    (``channel_to_stream``), and the record batches a row-by-row operator is
+    (``InputChannel.to_stream``), and the record batches a row-by-row operator is
     applied to. The batches are put under one another in the order given, and the
     table is handed on as a node hands its rows to its successors
     (``_output_stream``): in the row-built form, each system-tag and source-info field
