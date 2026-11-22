@@ -51,6 +51,7 @@ from orcapod.core.streams.base import (
     check_head_size,
     reads_as_its_class,
     short_stream_repr,
+    system_tags_as_rows_give,
 )
 from orcapod.core.streams.view import (
     JOB_NODE_NOT_RUN_NOTE,
@@ -1712,27 +1713,32 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             produced = produced_stream(result_stream)
 
             output: StreamProtocol
+            # The result's table, as the table built from its rows would be, without
+            # making the rows (ITL-1347, stage 2), when it provably is its rows: the
+            # stream holding them is exactly an ``ArrowTableStream`` in the node's
+            # data context, whose system tags are what the rows give.
+            result_table: pa.Table | None = None
             if (
-                not reads_as_its_class(produced, ArrowTableStream)
-                or produced.data_context_key != self.data_context_key
+                reads_as_its_class(produced, ArrowTableStream)
+                and produced.data_context_key == self.data_context_key
             ):
-                # A result that is not exactly a stream over its table (a custom
-                # stream kind, a replaced reader), or whose rows report another data
-                # context than the node's: main's own row path, its rows read once and
-                # handed on unchanged, its table built where a successor reads it
-                # (ITL-1347).
+                result_table = result_stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+                if not system_tags_as_rows_give(result_table.schema):
+                    result_table = None
+            if result_table is None:
+                # Otherwise (a custom stream kind, a replaced reader, rows of another
+                # data context, system tags the rows type otherwise): main's own row
+                # path, its rows read once and handed on unchanged, its table built
+                # where a successor reads it (ITL-1347).
                 rows = list(result_stream.iter_data())
                 self._cached_output_stream = StaticOutputOperatorPod._kept_output(
                     result_stream, rows
                 )
                 output = rows_on_read(rows, self)
             else:
-                # The result's table, as the table built from its rows would be,
-                # without making the rows (ITL-1347, stage 2). An exact
-                # ``ArrowTableStream``'s ``keys()`` are the keys its rows are read with
-                # (``iter_data``), so they are the order of the result's rows, to any
-                # depth of composition, never the prediction.
-                result_table = result_stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+                # An exact ``ArrowTableStream``'s ``keys()`` are the keys its rows are
+                # read with (``iter_data``), so they are the order of the result's
+                # rows, to any depth of composition, never the prediction.
                 keys = produced.keys()
                 tag_keys = keys[0]
                 data_tags = data_tag_names(*keys)

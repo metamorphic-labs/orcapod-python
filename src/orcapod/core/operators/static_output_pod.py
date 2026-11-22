@@ -1417,6 +1417,15 @@ class RowsOnRead:
             )
         return self._stream
 
+    def release_built(self) -> None:
+        """Drop the built stream and keep only the rows.
+
+        The sync orchestrator calls this on an output it retains once every successor
+        has read it: ``main`` held only the rows, so the retained output holds one
+        representation, and a later read builds the same table again from them.
+        """
+        self._stream = None
+
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         """The rows it holds, unchanged (their meta columns included), as ``main``."""
         return iter(self._rows)
