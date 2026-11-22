@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
+import dataclasses
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
-from orcapod.logical_types.identifier import (
-    LogicalTypeIdentifier,
-    arrow_type_identifier,
-)
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
 
@@ -210,118 +208,169 @@ def first_changed_column(
 _EXTENSION_NAME = b"ARROW:extension:name"
 _EXTENSION_METADATA = b"ARROW:extension:metadata"
 
+# A logical type identifier as stored: the extension name and metadata, as bytes.
+# Compared as bytes only; decoded only to word an error.
+RawIdentifier = tuple[bytes, bytes]
 
-def field_logical_identifier(field: "pa.Field[Any]") -> LogicalTypeIdentifier | None:
-    """The logical type identifier a field carries, in either form (ITL-1371).
 
-    A logical column reaches a database as an Arrow extension type, or as its storage
-    type annotated with the extension name and metadata in the field metadata (the
-    form a stored column is read back in, and the form ``ExtensionAwareDatabase``
-    passes on). Both forms carry one identifier.
+@dataclass(frozen=True)
+class IdentityNode:
+    """What a database knows of the logical type identifier at one place in a column
+    (ITL-1371): the column itself, or a nested field.
 
-    Args:
-        field: A column or nested field.
-
-    Returns:
-        The identifier (extension name and metadata), or ``None`` for a field of no
-        logical type.
+    Attributes:
+        known: Whether ``identifier`` is reliably known. A held column read back
+            through something that may rewrite or drop an identifier (a Delta list
+            item, map key or item; see ``delta_identity_node``) is not known, and the
+            rule abstains there.
+        identifier: The raw identifier, or ``None`` for no logical type.
+        claims: ``False`` for an untyped null (``pa.null()``) part: it holds no value
+            and claims no type, so it is never another identifier.
+        children: The nested places, by path label (``.name`` for a struct child,
+            ``[]`` for a list item, ``.key`` and ``.item`` for a map, ``|name`` for a
+            union member, ``{values}`` for dictionary values, ``<storage>`` for an
+            extension type held directly as another's storage, ``.name`` for the
+            other children of a nested type).
     """
-    if isinstance(field.type, pa.ExtensionType):
-        return arrow_type_identifier(field.type)
-    if isinstance(field.type, pa.BaseExtensionType):
-        # An extension type defined in Arrow's C++ library (``arrow.uuid``,
-        # ``arrow.fixed_shape_tensor``) has no ``__arrow_ext_serialize__``: its name
-        # and metadata are read from its C data interface export, as field metadata
-        # (arro3, which ``deltalake`` depends on).
-        from arro3.core import Field as Arro3Field
 
-        exported = metadata_bytes(
-            Arro3Field.from_arrow(pa.field(field.name, field.type)).metadata
-        )
-        return LogicalTypeIdentifier(
-            exported[_EXTENSION_NAME].decode(), exported.get(_EXTENSION_METADATA, b"")
-        )
-    metadata = metadata_bytes(field.metadata)
-    name = metadata.get(_EXTENSION_NAME)
+    known: bool
+    identifier: RawIdentifier | None
+    claims: bool = True
+    children: "dict[str, IdentityNode]" = dataclasses.field(default_factory=dict)
+
+
+UNKNOWN = IdentityNode(known=False, identifier=None)
+
+
+def _annotation(metadata: Mapping[Any, Any] | None) -> RawIdentifier | None:
+    as_bytes = metadata_bytes(metadata)
+    name = as_bytes.get(_EXTENSION_NAME)
     if name is None:
         return None
-    return LogicalTypeIdentifier(name.decode(), metadata.get(_EXTENSION_METADATA, b""))
+    return name, as_bytes.get(_EXTENSION_METADATA, b"")
 
 
-def _identifier_text(identifier: LogicalTypeIdentifier | None) -> str:
-    return "no logical type" if identifier is None else repr(identifier.text)
+def _extension_identifier(arrow_type: Any) -> RawIdentifier:
+    """The raw identifier of an Arrow extension type."""
+    if isinstance(arrow_type, pa.ExtensionType):
+        return (
+            arrow_type.extension_name.encode(),
+            arrow_type.__arrow_ext_serialize__(),
+        )
+    # An extension type defined in Arrow's C++ library (``arrow.uuid``,
+    # ``arrow.fixed_shape_tensor``) has no ``__arrow_ext_serialize__``: its name and
+    # metadata are read from its C data interface export, as field metadata (arro3,
+    # which ``deltalake`` depends on).
+    from arro3.core import Field as Arro3Field
+
+    exported = _annotation(Arro3Field.from_arrow(pa.field("x", arrow_type)).metadata)
+    assert exported is not None  # an extension type exports its name
+    return exported
+
+
+def identity_node(arrow_field: "pa.Field[Any]") -> IdentityNode:
+    """The identifiers an Arrow field carries, at every depth, in either form.
+
+    A logical type reaches a database as an Arrow extension type, or as its storage
+    type annotated with ``ARROW:extension:name`` / ``ARROW:extension:metadata`` (the
+    form a stored column reads back in, and the one ``ExtensionAwareDatabase``
+    passes on). Each level is one identifier: an annotation names the field's own
+    type as storage; an extension type is unwrapped one level, and an extension
+    type found as storage is a level of its own. The children of every nested Arrow
+    type are enumerated from the type itself, so no container is a leaf.
+
+    Args:
+        arrow_field: A column, or a nested field, as given (or as a database holds
+            it, when what it holds is the field itself).
+
+    Returns:
+        The field's ``IdentityNode``; every part known.
+    """
+    arrow_type = arrow_field.type
+    if pa.types.is_null(arrow_type):
+        return IdentityNode(known=True, identifier=None, claims=False)
+    identifier = _annotation(arrow_field.metadata)
+    if identifier is not None:
+        storage = arrow_type
+    elif isinstance(arrow_type, pa.BaseExtensionType):
+        identifier = _extension_identifier(arrow_type)
+        storage = arrow_type.storage_type
+    else:
+        storage = arrow_type
+    return IdentityNode(
+        known=True, identifier=identifier, children=_children_of(storage)
+    )
+
+
+def _children_of(arrow_type: Any) -> dict[str, IdentityNode]:
+    t = pa.types
+    if isinstance(arrow_type, pa.BaseExtensionType):
+        return {"<storage>": identity_node(pa.field("storage", arrow_type))}
+    if t.is_dictionary(arrow_type):
+        return {"{values}": identity_node(pa.field("values", arrow_type.value_type))}
+    if t.is_map(arrow_type):
+        return {
+            ".key": identity_node(arrow_type.key_field),
+            ".item": identity_node(arrow_type.item_field),
+        }
+    if t.is_struct(arrow_type):
+        return {f".{child.name}": identity_node(child) for child in arrow_type}
+    if (
+        t.is_list(arrow_type)
+        or t.is_large_list(arrow_type)
+        or t.is_fixed_size_list(arrow_type)
+        or t.is_list_view(arrow_type)
+        or t.is_large_list_view(arrow_type)
+    ):
+        return {"[]": identity_node(arrow_type.value_field)}
+    prefix = "|" if t.is_union(arrow_type) else "."
+    children = (arrow_type.field(i) for i in range(arrow_type.num_fields))
+    return {f"{prefix}{child.name}": identity_node(child) for child in children}
+
+
+def _identifier_text(identifier: RawIdentifier | None) -> str:
+    if identifier is None:
+        return "no logical type"
+    name, metadata = identifier
+    return repr(f"{name.decode('utf-8', 'replace')};{metadata.hex()}")
 
 
 def logical_identity_change(
-    held: "pa.Field[Any]", incoming: "pa.Field[Any]"
+    held: IdentityNode, incoming: IdentityNode, path: str
 ) -> str | None:
     """Say why rows of ``incoming`` would be read back as another logical type than
-    they were written as, appended to a column a database holds as ``held``
-    (ITL-1371).
+    they were written as, appended where a database holds ``held`` (ITL-1371).
 
-    A table holds one logical type per column and per nested field, so the appended
-    column must carry, at every depth, the logical type identifier the held column
-    carries (``field_logical_identifier``: extension name and metadata, as an
-    extension type or as a field annotation; none counts as an identifier too). The
-    walk follows struct children by name, the items of every list kind, a map's key
-    and item, and an extension type's storage. Whatever else differs (a type, a
-    nested field's name or other metadata) is left to the other append checks.
-
-    The comparison is by identifier, never by Arrow type equality: pyarrow's
-    equality of two Python extension types ignores their serialized metadata.
+    A table holds one logical type per column and per nested field, so at every place
+    both sides have, the appended identifier must be the held one; no logical type is
+    an identifier too. The rule refuses only where it knows: wherever the held
+    identifier is not reliably known, or a side is an untyped null, it abstains at
+    that place, and a place only one side has (struct evolution, another kind of
+    type) is left to the database's other append checks. It compares raw bytes,
+    never Arrow type equality: pyarrow's equality of two instances of one Python
+    extension class ignores their serialized metadata.
 
     Args:
-        held: The column as the database holds it (stored or pending).
-        incoming: The column of the rows to append.
+        held: What the database holds (stored or pending).
+        incoming: The rows to append, as given (``identity_node``).
+        path: The column name, or the path of the nested place.
 
     Returns:
-        The reason, naming the path (``x``, ``x.a``, ``x[]``, ``x.key``) and both
-        identifiers' text, or ``None``.
+        The reason, naming the path and both identifiers' text, or ``None``.
     """
-    return _identity_change(held, incoming, incoming.name)
-
-
-def _identity_change(
-    held: "pa.Field[Any]", incoming: "pa.Field[Any]", path: str
-) -> str | None:
-    held_id = field_logical_identifier(held)
-    incoming_id = field_logical_identifier(incoming)
-    if held_id != incoming_id:
-        return (
-            f"{path} is of logical type {_identifier_text(incoming_id)}, the stored "
-            f"column's {_identifier_text(held_id)}"
-        )
-    return _nested_identity_change(_storage(held.type), _storage(incoming.type), path)
-
-
-def _storage(arrow_type: Any) -> Any:
-    while isinstance(arrow_type, pa.BaseExtensionType):
-        arrow_type = arrow_type.storage_type
-    return arrow_type
-
-
-def _nested_identity_change(held: Any, incoming: Any, path: str) -> str | None:
-    t = pa.types
-    if t.is_struct(held) and t.is_struct(incoming):
-        known = {f.name: f for f in held}
-        for field in incoming:
-            if field.name in known:
-                found = _identity_change(
-                    known[field.name], field, f"{path}.{field.name}"
-                )
-                if found is not None:
-                    return found
+    if not (held.claims and incoming.claims):
         return None
-    if t.is_map(held) and t.is_map(incoming):
-        return _identity_change(
-            held.key_field, incoming.key_field, f"{path}.key"
-        ) or _identity_change(held.item_field, incoming.item_field, f"{path}.item")
-    lists = (t.is_list, t.is_large_list, t.is_fixed_size_list)
-    if any(k(held) for k in lists) and any(k(incoming) for k in lists):
-        # cast: the type guards above narrow the types in the stubs' terms.
-        return _identity_change(
-            cast(Any, held).value_field, cast(Any, incoming).value_field, f"{path}[]"
+    if held.known and incoming.known and held.identifier != incoming.identifier:
+        return (
+            f"{path} is of logical type {_identifier_text(incoming.identifier)}, the "
+            f"stored column's {_identifier_text(held.identifier)}"
         )
+    for label, child in incoming.children.items():
+        held_child = held.children.get(label)
+        if held_child is not None:
+            found = logical_identity_change(held_child, child, f"{path}{label}")
+            if found is not None:
+                return found
     return None
 
 
@@ -329,9 +378,11 @@ def first_logical_identity_change(
     held: "Iterable[pa.Schema]", schema: "pa.Schema"
 ) -> tuple[str, str] | None:
     """The first column of ``schema`` that carries another logical type identifier
-    than a column of that name the database holds (``logical_identity_change``).
+    than a column of that name the database holds, as given (``identity_node``).
 
-    Columns are matched by name; the order of either schema plays no part.
+    For a database that holds what it was given (in-memory, a pending batch, a
+    connector's stored schema). Columns are matched by name; the order of either
+    schema plays no part.
 
     Args:
         held: The schemas the database holds for the table (stored, pending).
@@ -341,12 +392,15 @@ def first_logical_identity_change(
         The column's name and the reason, or ``None``.
     """
     held = list(held)
-    for field in schema:
+    for given_field in schema:
+        incoming = identity_node(given_field)
         for given in held:
-            index = given.get_field_index(field.name)
+            index = given.get_field_index(given_field.name)
             if index < 0:
                 continue
-            reason = logical_identity_change(given.field(index), field)
+            reason = logical_identity_change(
+                identity_node(given.field(index)), incoming, given_field.name
+            )
             if reason is not None:
-                return field.name, reason
+                return given_field.name, reason
     return None

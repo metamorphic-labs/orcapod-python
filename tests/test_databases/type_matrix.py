@@ -53,7 +53,7 @@ from orcapod.databases import (
     SpiralDBConnector,
 )
 from orcapod.databases.delta_arrow_types import _is_recorded  # pyright: ignore[reportPrivateUsage]
-from orcapod.databases.utils import field_logical_identifier
+from orcapod.databases.utils import identity_node
 from orcapod.utils.arrow_utils import normalize_to_large_types
 
 KEPT = "KEPT"
@@ -819,11 +819,11 @@ def _other_identifier(field: "pa.Field[Any]", column: Any) -> tuple[Any, Any]:
     (ITL-1371). Not the same name with other metadata: a registered type's
     unreadable metadata is refused before the append is compared."""
     ext = cast("pa.BaseExtensionType", field.type)
-    identifier = field_logical_identifier(field)
+    identifier = identity_node(field).identifier
     assert identifier is not None
     metadata = {
-        b"ARROW:extension:name": f"{identifier.name}.other".encode(),
-        b"ARROW:extension:metadata": identifier.metadata,
+        b"ARROW:extension:name": identifier[0] + b".other",
+        b"ARROW:extension:metadata": identifier[1],
     }
     chunked: Any = pa.chunked_array  # the stubs type ``type=`` as None
     storage = chunked([chunk.storage for chunk in column.chunks], type=ext.storage_type)

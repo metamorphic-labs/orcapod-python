@@ -16,7 +16,7 @@ import contextlib
 import itertools
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 import pytest
@@ -29,12 +29,13 @@ from orcapod.databases import (
 from orcapod.databases.connector_arrow_database import ConnectorArrowDatabase
 from orcapod.databases.spiraldb_connector import SpiralDBConnector
 from orcapod.databases.utils import (
-    field_logical_identifier,
     first_logical_identity_change,
+    identity_node,
     logical_identity_change,
 )
 from orcapod.errors import InputValidationError
 from orcapod.logical_types.identifier import LogicalTypeIdentifier
+from orcapod.logical_types.registry import make_arrow_extension_type
 from orcapod.logical_types.registry import LogicalTypeRegistry
 from orcapod.semantic_types.universal_converter import UniversalTypeConverter
 from tests.test_databases import fake_pyspiral
@@ -191,15 +192,18 @@ def _supported(kind: str, form: str, depth: str) -> bool:
     return True
 
 
-def _loses_nested_extension(kind: str, state: str, form: str, depth: str) -> bool:
-    """Delta writes a list item or map value of an extension type as plain storage
-    (ITL-1372): a committed table no longer holds the identifier, so only refusals
-    are asserted there. (A struct child keeps its annotation in the Delta log.)"""
+def _abstains(kind: str, state: str, depth: str) -> bool:
+    """Whether the identity rule cannot know the held identifier, and so abstains:
+    a Delta list item or map key or item, which the Delta log keeps no metadata for
+    (ITL-1372). There the database's other checks decide, exactly as on main."""
+    return kind == "Delta" and state != "pending" and depth in ("list", "map value")
+
+
+def _main_accepts(kind: str, state: str, form: str, depth: str) -> bool:
+    """Where the rule abstains, main accepts a map of extension values whatever the
+    identifier (Delta wrote it as plain storage, ITL-1372; pinned below)."""
     return (
-        kind == "Delta"
-        and form == "extension"
-        and depth in ("list", "map value")
-        and state != "pending"
+        _abstains(kind, state, depth) and form == "extension" and depth == "map value"
     )
 
 
@@ -219,15 +223,14 @@ REFUSED_CASES = [
     pytest.param(*case, change, id=f"{'-'.join(case)}-{change}")
     for case in BASE
     for change in CHANGES
-    # A plain column over a Delta column that lost its nested type (ITL-1372) is not
-    # another identifier: the held column is plain too.
-    if not (_loses_nested_extension(*case) and CHANGES[change] is None)
+    if not _main_accepts(*case)
 ]
 
 SAME_CASES = [
     pytest.param(*case, id="-".join(case))
     for case in BASE
-    if not _loses_nested_extension(*case)  # pinned by the ITL-1372 test below
+    # Main refuses a second list of extension values for its item's name (ITL-1372).
+    if not (_abstains(case[0], case[1], case[3]) and case[2:] == ("extension", "list"))
 ]
 
 
@@ -265,12 +268,12 @@ def test_another_identifier_is_refused(
         message = str(refused.value)
         assert "column 'x'" in message
         assert "othing was written" in message
-        lost = _loses_nested_extension(kind, state, form, depth)
-        assert (repr(_text(HELD)) if not lost else "no logical type") in message
-        identifier = CHANGES[change]
-        assert (
-            repr(_text(identifier)) if identifier is not None else "no logical type"
-        ) in message
+        if not _abstains(kind, state, depth):
+            assert repr(_text(HELD)) in message
+            identifier = CHANGES[change]
+            assert (
+                repr(_text(identifier)) if identifier is not None else "no logical type"
+            ) in message
         # Nothing was buffered, and the held rows are unchanged.
         _assert_only_held_rows(store)
 
@@ -287,11 +290,19 @@ def test_same_identifier_is_accepted(
         assert store.stored().num_rows == 3
 
 
+LOGICAL_OVER_PLAIN = [
+    pytest.param(kind, state, form, depth, id=f"{kind}-{state}-{form}-{depth}")
+    for kind, state, form, depth in itertools.product(
+        ("in-memory", "Delta"), ("pending", "committed"), FORMS, DEPTHS
+    )
+    # The rule abstains at a stored Delta list or map item; main accepts extension
+    # values there.
+    if not (_abstains(kind, state, depth) and form == "extension")
+]
+
+
 @pytest.mark.parametrize("via", ["direct", "wrapper"])
-@pytest.mark.parametrize("form", FORMS)
-@pytest.mark.parametrize("depth", DEPTHS)
-@pytest.mark.parametrize("state", ["pending", "committed"])
-@pytest.mark.parametrize("kind", ["in-memory", "Delta"])
+@pytest.mark.parametrize(("kind", "state", "form", "depth"), LOGICAL_OVER_PLAIN)
 def test_a_logical_type_over_a_plain_column_is_refused(
     tmp_path: Path, kind: str, state: str, form: str, depth: str, via: str
 ) -> None:
@@ -302,49 +313,51 @@ def test_a_logical_type_over_a_plain_column_is_refused(
             record_id_column="id",
             flush=state == "committed",
         )
-        with pytest.raises(
-            InputValidationError, match="the stored column's no logical"
-        ):
+        match = None if _abstains(kind, state, depth) else "stored column's no logical"
+        with pytest.raises(InputValidationError, match=match):
             _through(store.db, via).add_records(
                 PATH, _rows(HELD, form, depth, [b"22"]), record_id_column="id"
             )
         assert store.stored().column("id").to_pylist() == [b"1"]
 
 
-@pytest.mark.parametrize("depth", ["list", "map value"])
-def test_delta_nested_extension_second_append_is_refused(
-    tmp_path: Path, depth: str
+@pytest.mark.parametrize("state", ["committed", "reopened"])
+def test_delta_list_and_map_of_extension_values_decide_as_on_main(
+    tmp_path: Path, state: str
 ) -> None:
-    """Pins a consequence of ITL-1372; revisit there.
+    """Pins the behaviour of ITL-1372; revisit there.
 
-    Delta writes a list item or map value of an extension type as plain storage on
-    the first write: the first write is accepted and reads back plain. On main a
-    second append of the same type to the committed table was accepted and stored as
-    plain storage too (the map; the list was refused for its item's name); it is now
-    refused, because the held column has no logical type. A same-type append to the
-    pending batch is still accepted.
+    Delta writes a list item or map item of an extension type as plain storage, and
+    its log keeps no metadata there, so the identity rule cannot know the stored
+    identifier and abstains: main's checks decide. A second list is refused for its
+    item's name (``item`` given, ``element`` stored); a second map is accepted with any
+    identifier, and every row reads back as plain storage. A same-type append to the
+    pending batch is accepted.
     """
-    db = DeltaTableDatabase(tmp_path / "delta")
-    db.add_records(PATH, _rows(HELD, "extension", depth, [b"1"]), record_id_column="id")
-    db.add_records(
-        PATH, _rows(HELD, "extension", depth, [b"22"]), record_id_column="id"
-    )
-    db.flush()
-    stored = db.get_all_records(PATH, record_id_column="id")
-    assert stored is not None and stored.num_rows == 2
-    leaf = stored.schema.field("x").type
-    leaf_field = leaf.value_field if depth == "list" else leaf.item_field
-    assert field_logical_identifier(leaf_field) is None  # read back plain
-    with pytest.raises(InputValidationError) as refused:
-        db.add_records(
-            PATH, _rows(HELD, "extension", depth, [b"333"]), record_id_column="id"
-        )
-    assert f"of logical type {_text(HELD)!r}, the stored column's no logical type" in (
-        str(refused.value)
-    )
-    db.flush()
-    after = db.get_all_records(PATH, record_id_column="id")
-    assert after is not None and after.num_rows == 2
+    for depth in ("list", "map value"):
+        root = tmp_path / depth.replace(" ", "_")
+        with _store("Delta", root) as store:
+            db = store.db
+            db.add_records(
+                PATH, _rows(HELD, "extension", depth, [b"1"]), record_id_column="id"
+            )
+            db.add_records(
+                PATH, _rows(HELD, "extension", depth, [b"22"]), record_id_column="id"
+            )
+            db.flush()
+            if state == "reopened":
+                store.reopen()
+            other = _rows(("itl1371.b", b"m"), "extension", depth, [b"333"])
+            if depth == "list":
+                with pytest.raises(InputValidationError, match="is named 'item'"):
+                    store.db.add_records(PATH, other, record_id_column="id")
+                assert store.stored().num_rows == 2
+                continue
+            store.db.add_records(PATH, other, record_id_column="id")
+            stored = store.stored()
+            assert stored.num_rows == 3
+            item = stored.schema.field("x").type.item_field
+            assert identity_node(item).identifier is None  # read back plain
 
 
 def test_the_reproducer_through_the_wrapper(tmp_path: Path) -> None:
@@ -375,27 +388,31 @@ def test_the_reproducer_through_the_wrapper(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _change(held: "pa.Field[Any]", incoming: "pa.Field[Any]") -> str | None:
+    return logical_identity_change(
+        identity_node(held), identity_node(incoming), incoming.name
+    )
+
+
 def test_identifier_is_read_from_either_form() -> None:
     ext = EXTENSIONS["itl1371.a"](b"m")
     annotated = pa.field(
         "x", pa.large_string(), metadata={NAME: b"itl1371.a", META: b"m"}
     )
-    assert field_logical_identifier(pa.field("x", ext)) == LogicalTypeIdentifier(
-        "itl1371.a", b"m"
-    )
-    assert field_logical_identifier(annotated) == LogicalTypeIdentifier(
-        "itl1371.a", b"m"
-    )
-    assert field_logical_identifier(pa.field("x", pa.large_string())) is None
+    assert identity_node(pa.field("x", ext)).identifier == (b"itl1371.a", b"m")
+    assert identity_node(annotated).identifier == (b"itl1371.a", b"m")
+    assert identity_node(pa.field("x", pa.large_string())).identifier is None
     # The two forms of one identifier are one identifier.
-    assert logical_identity_change(annotated, pa.field("x", ext)) is None
+    assert _change(annotated, pa.field("x", ext)) is None
+    # Arrow's own extension types too.
+    assert identity_node(pa.field("x", pa.uuid())).identifier == (b"arrow.uuid", b"")
 
 
 def test_pyarrow_equality_does_not_decide() -> None:
     """pyarrow's equality of two Python extension types ignores their metadata."""
     m, n = EXTENSIONS["itl1371.a"](b"m"), EXTENSIONS["itl1371.a"](b"n")
     assert m == n  # what the rule must not rely on
-    assert logical_identity_change(pa.field("x", m), pa.field("x", n)) is not None
+    assert _change(pa.field("x", m), pa.field("x", n)) is not None
 
 
 @pytest.mark.parametrize(
@@ -433,8 +450,8 @@ def test_map_key_identifier_is_compared() -> None:
         item = pa.field("value", pa.int64())
         return pa.field("x", pa.map_(key, item))  # pyright: ignore[reportArgumentType]  # pyarrow takes key/item fields
 
-    assert logical_identity_change(map_field(HELD), map_field(HELD)) is None
-    reason = logical_identity_change(map_field(HELD), map_field(("itl1371.a", b"n")))
+    assert _change(map_field(HELD), map_field(HELD)) is None
+    reason = _change(map_field(HELD), map_field(("itl1371.a", b"n")))
     assert reason is not None and reason.startswith("x.key ")
 
 
@@ -488,3 +505,352 @@ def test_delta_other_nested_metadata_beside_an_identifier_is_still_refused(
             )
         ids = store.stored().sort_by("id").column("id").to_pylist()
         assert ids == [b"1", b"22"]
+
+
+# ---------------------------------------------------------------------------
+# Review round 1 (PR 492)
+# ---------------------------------------------------------------------------
+
+
+def _struct_of(field: "pa.Field[Any]", array: Any, ids: list[bytes]) -> pa.Table:
+    struct = pa.StructArray.from_arrays([array], fields=[field.with_name("v")])
+    return pa.Table.from_arrays(
+        [pa.array(ids, pa.large_binary()), struct],
+        schema=pa.schema(
+            [pa.field("id", pa.large_binary()), pa.field("x", struct.type)]
+        ),
+    )
+
+
+@pytest.mark.parametrize("state", ["committed", "reopened"])
+@pytest.mark.parametrize(
+    ("first", "second"), [("extension", "annotated"), ("annotated", "extension")]
+)
+def test_delta_struct_child_representation_change_is_refused_as_on_main(
+    tmp_path: Path, first: str, second: str, state: str
+) -> None:
+    """The same identifier in the other representation on a struct child is refused,
+    as on main, and nothing about the stored rows changes: their identifier reads
+    back, and no recorded type is written."""
+    import deltalake
+
+    with _store("Delta", tmp_path) as store:
+        field, array = _leaf(HELD, first, ["1"])
+        store.db.add_records(
+            PATH, _struct_of(field, array, [b"1"]), record_id_column="id", flush=True
+        )
+        log_before = deltalake.DeltaTable(str(tmp_path / "delta" / "t")).schema()
+        if state == "reopened":
+            store.reopen()
+        field, array = _leaf(HELD, second, ["22"])
+        with pytest.raises(InputValidationError, match="x.v has other field metadata"):
+            store.db.add_records(
+                PATH, _struct_of(field, array, [b"22"]), record_id_column="id"
+            )
+        stored = store.stored()
+        assert stored.column("id").to_pylist() == [b"1"]
+        child = stored.schema.field("x").type.field("v")
+        assert identity_node(child).identifier == (HELD[0].encode(), HELD[1])
+        log_after = deltalake.DeltaTable(str(tmp_path / "delta" / "t")).schema()
+        assert log_after.fields[1].metadata == log_before.fields[1].metadata
+
+
+def _readable_type() -> Any:
+    """A registered logical type that writes ``b"new"`` and also reads ``b"old"``."""
+    ext_class: Any = make_arrow_extension_type(
+        "itl1371.readable", pa.large_string(), b"new", also_reads=(b"old",)
+    )
+    try:
+        pa.register_extension_type(ext_class())
+    except pa.ArrowKeyError:
+        pass  # registered by an earlier test in this process
+    return ext_class
+
+
+def _annotated_nested(meta: bytes, depth: str, ids: list[bytes]) -> pa.Table:
+    field = pa.field(
+        "v", pa.large_string(), metadata={NAME: b"itl1371.readable", META: meta}
+    )
+    array = pa.array([i.decode() for i in ids], pa.large_string())
+    if depth == "struct":
+        return _struct_of(field, array, ids)
+    list_type = pa.large_list(field.with_name("item"))
+    lists = pa.LargeListArray.from_arrays(
+        pa.array(range(len(ids) + 1), pa.int64()), array, type=list_type
+    )
+    return pa.Table.from_arrays(
+        [pa.array(ids, pa.large_binary()), lists],
+        schema=pa.schema([pa.field("id", pa.large_binary()), pa.field("x", list_type)]),
+    )
+
+
+@pytest.mark.parametrize("depth", ["struct", "list"])
+@pytest.mark.parametrize(
+    ("held", "given"), [(b"old", b"new"), (b"old", b"old"), (b"new", b"new")]
+)
+def test_delta_registered_nested_type_decides_by_raw_bytes(
+    tmp_path: Path, depth: str, held: bytes, given: bytes
+) -> None:
+    """A registered logical type nested in a Delta column with a recorded type.
+
+    The identity rule decides by the raw stored bytes, which the Delta log keeps for
+    a struct child: ``old`` then ``new`` is refused naming both. It cannot know them
+    for a list item (the log keeps none, and the recorded type is read through the
+    registry, which gives ``new`` for ``old``), so it abstains there. Every case is
+    refused, as on main: main's field-metadata check compares the given annotation
+    with the recorded type as the registry reads it, an extension type, so it refuses
+    even an identical second append (pre-existing; reported with ITL-1372).
+    """
+    _readable_type()
+    with _store("Delta", tmp_path) as store:
+        store.db.add_records(
+            PATH,
+            _annotated_nested(held, depth, [b"1"]),
+            record_id_column="id",
+            flush=True,
+        )
+        store.reopen()
+        with pytest.raises(InputValidationError) as refused:
+            store.db.add_records(
+                PATH, _annotated_nested(given, depth, [b"22"]), record_id_column="id"
+            )
+        message = str(refused.value)
+        if depth == "struct" and held != given:
+            assert f"x.v is of logical type {_raw_text(given)}" in message
+            assert f"the stored column's {_raw_text(held)}" in message
+        else:
+            assert "has other field metadata" in message
+        assert store.stored().column("id").to_pylist() == [b"1"]
+
+
+def _raw_text(meta: bytes) -> str:
+    return repr(f"itl1371.readable;{meta.hex()}")
+
+
+def _wrapped(meta: bytes, values: list[str]) -> Any:
+    ext = EXTENSIONS["itl1371.a"](meta)
+    return ext.wrap_array(pa.array(values, pa.large_string()))
+
+
+# The stubs know only some of these constructors' signatures.
+_LIST_VIEW: Any = pa.ListViewArray
+_LARGE_LIST_VIEW: Any = pa.LargeListViewArray
+
+CONTAINERS: dict[str, Any] = {
+    "list_view": lambda a: _LIST_VIEW.from_arrays(
+        pa.array(range(len(a)), pa.int32()), pa.array([1] * len(a), pa.int32()), a
+    ),
+    "large_list_view": lambda a: _LARGE_LIST_VIEW.from_arrays(
+        pa.array(range(len(a)), pa.int64()), pa.array([1] * len(a), pa.int64()), a
+    ),
+    "sparse union": lambda a: pa.UnionArray.from_sparse(
+        pa.array([0] * len(a), pa.int8()), [a], ["v"]
+    ),
+    "dense union": lambda a: pa.UnionArray.from_dense(
+        pa.array([0] * len(a), pa.int8()),
+        pa.array(range(len(a)), pa.int32()),
+        [a],
+        ["v"],
+    ),
+    "dictionary": lambda a: pa.DictionaryArray.from_arrays(
+        pa.array(range(len(a)), pa.int8()), a
+    ),
+    # Run-end encoded extension values cannot be combined by pyarrow; the values are
+    # a struct whose child carries the identifier as an annotation.
+    "run-end encoded": lambda a: pa.RunEndEncodedArray.from_arrays(
+        pa.array(range(1, len(a) + 1), pa.int16()),
+        pa.StructArray.from_arrays(
+            [a.storage],
+            fields=[
+                pa.field(
+                    "v",
+                    pa.large_string(),
+                    metadata={
+                        NAME: a.type.extension_name.encode(),
+                        META: a.type.__arrow_ext_serialize__(),
+                    },
+                )
+            ],
+        ),
+    ),
+}
+
+
+def _outer_class() -> Any:
+    """An extension type whose storage is directly another extension type."""
+
+    class _Outer(pa.ExtensionType):
+        def __init__(self, storage: Any) -> None:
+            super().__init__(storage, "itl1371.outer")
+
+        def __arrow_ext_serialize__(self) -> bytes:
+            return b"outer"
+
+        @classmethod
+        def __arrow_ext_deserialize__(cls, storage_type: Any, serialized: bytes) -> Any:
+            return cls(storage_type)
+
+    return _Outer
+
+
+_OUTER = _outer_class()
+CONTAINERS["extension in extension"] = lambda a: _OUTER(a.type).wrap_array(a)
+
+
+def _container_rows(container: str, meta: bytes, ids: list[bytes]) -> pa.Table:
+    column = CONTAINERS[container](_wrapped(meta, [i.decode() for i in ids]))
+    return pa.table({"id": pa.array(ids, pa.large_binary()), "x": column})
+
+
+@pytest.mark.parametrize("state", ["pending", "committed"])
+@pytest.mark.parametrize("container", list(CONTAINERS))
+def test_every_container_is_walked(tmp_path: Path, container: str, state: str) -> None:
+    """An identifier under any nested Arrow type is compared (in-memory, which keeps
+    them all): the same identifier is appended and reads back, another is refused."""
+    db = InMemoryArrowDatabase()
+    db.add_records(
+        PATH,
+        _container_rows(container, b"m", [b"1"]),
+        record_id_column="id",
+        flush=state == "committed",
+    )
+    held_ids = [b"1"]
+    if container != "dictionary":
+        # (pyarrow cannot unify two dictionaries of extension values at the flush.)
+        db.add_records(
+            PATH, _container_rows(container, b"m", [b"22"]), record_id_column="id"
+        )
+        held_ids.append(b"22")
+    with pytest.raises(InputValidationError, match="itl1371.a;6e"):
+        db.add_records(
+            PATH, _container_rows(container, b"n", [b"333"]), record_id_column="id"
+        )
+    db.flush()
+    stored = db.get_all_records(PATH, record_id_column="id")
+    assert stored is not None
+    assert sorted(cast(list[bytes], stored.column("id").to_pylist())) == held_ids
+    assert (
+        stored.schema.field("x").type
+        == _container_rows(container, b"m", [b"1"]).schema.field("x").type
+    )
+
+
+def test_delta_dictionary_of_extension_values(tmp_path: Path) -> None:
+    """Delta decodes a dictionary column and stores its values as plain storage: a
+    pending batch is compared as given (another identifier refused); once stored, the
+    log names no identifier for the values, so the rule abstains and main's verdict
+    stands (accepted, read back as plain values)."""
+    with _store("Delta", tmp_path) as store:
+        store.db.add_records(
+            PATH, _container_rows("dictionary", b"m", [b"1"]), record_id_column="id"
+        )
+        with pytest.raises(InputValidationError, match="x\\{values\\}"):
+            store.db.add_records(
+                PATH,
+                _container_rows("dictionary", b"n", [b"22"]),
+                record_id_column="id",
+            )
+        store.db.flush()
+        store.db.add_records(
+            PATH, _container_rows("dictionary", b"n", [b"333"]), record_id_column="id"
+        )
+        stored = store.stored()
+        assert sorted(cast(list[bytes], stored.column("id").to_pylist())) == [
+            b"1",
+            b"333",
+        ]
+        assert identity_node(stored.schema.field("x")).identifier is None
+
+
+@pytest.mark.parametrize("state", ["pending", "committed", "reopened"])
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {b"orcapod:arrow_type": b"a"},  # an ordinary key with that name, nested
+        {META: b"a"},  # extension metadata without a name: no identifier
+    ],
+    ids=["arrow_type key", "lone extension metadata"],
+)
+def test_other_nested_metadata_without_an_identifier_is_still_refused(
+    tmp_path: Path, metadata: dict[bytes, bytes], state: str
+) -> None:
+    """Nested metadata other than a complete identifier stays with ITL-1334's
+    comparison: a change is refused, as on main."""
+
+    def rows(value: bytes, ids: list[bytes]) -> pa.Table:
+        key = next(iter(metadata))
+        field = pa.field("v", pa.large_string(), metadata={key: value})
+        array = pa.array([i.decode() for i in ids], pa.large_string())
+        return _struct_of(field, array, ids)
+
+    with _store("Delta", tmp_path) as store:
+        store.db.add_records(
+            PATH, rows(b"a", [b"1"]), record_id_column="id", flush=state != "pending"
+        )
+        if state == "reopened":
+            store.reopen()
+        with pytest.raises(InputValidationError, match="x.v has other field metadata"):
+            store.db.add_records(PATH, rows(b"b", [b"22"]), record_id_column="id")
+        assert store.stored().column("id").to_pylist() == [b"1"]
+
+
+@pytest.mark.parametrize("state", ["pending", "committed"])
+def test_identifiers_are_compared_as_bytes(state: str) -> None:
+    """An extension name that is not UTF-8: identical bytes are one identifier (the
+    second append is accepted, as on main); other bytes are refused, the error
+    naming the name with replacement characters."""
+
+    def rows(meta: bytes, ids: list[bytes]) -> pa.Table:
+        field = pa.field("x", pa.large_string(), metadata={NAME: b"\xff", META: meta})
+        return pa.Table.from_arrays(
+            [
+                pa.array(ids, pa.large_binary()),
+                pa.array(["v"] * len(ids), pa.large_string()),
+            ],
+            schema=pa.schema([pa.field("id", pa.large_binary()), field]),
+        )
+
+    db = InMemoryArrowDatabase()
+    db.add_records(
+        PATH, rows(b"a", [b"1"]), record_id_column="id", flush=state == "committed"
+    )
+    db.add_records(PATH, rows(b"a", [b"22"]), record_id_column="id")
+    with pytest.raises(InputValidationError, match="\ufffd;62"):
+        db.add_records(PATH, rows(b"b", [b"333"]), record_id_column="id")
+    db.flush()
+    stored = db.get_all_records(PATH, record_id_column="id")
+    assert stored is not None and stored.num_rows == 2
+
+
+@pytest.mark.parametrize("schema_handling", ["error", "merge", "coerce"])
+@pytest.mark.parametrize("state", ["committed", "reopened"])
+def test_delta_untyped_null_over_a_logical_column(
+    tmp_path: Path, state: str, schema_handling: str
+) -> None:
+    """An untyped null column holds no value and claims no type: it is resolved to the
+    held type and stored as a null, as on main, in every schema handling mode."""
+    with _store("Delta", tmp_path) as store:
+        store.db.add_records(
+            PATH,
+            _rows(HELD, "annotated", "top", [b"1"]),
+            record_id_column="id",
+            flush=True,
+        )
+        if state == "reopened":
+            store.reopen()
+        nulls = pa.table(
+            {
+                "a": pa.array([1], pa.int64()),
+                "id": pa.array([b"22"], pa.large_binary()),
+                "x": pa.nulls(1),
+            }
+        )
+        store.db.add_records(
+            PATH, nulls, record_id_column="id", schema_handling=schema_handling
+        )
+        stored = store.stored().sort_by("id")
+        assert stored.column("x").to_pylist() == ["1", None]
+        assert identity_node(stored.schema.field("x")).identifier == (
+            HELD[0].encode(),
+            HELD[1],
+        )
