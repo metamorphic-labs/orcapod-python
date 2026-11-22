@@ -1431,12 +1431,15 @@ class RowsOnRead:
             yield row
 
     def arrow_schema(self) -> pa.Schema:
-        """The node's declared description, from its Python schema; builds nothing.
+        """The node's own description (``arrow_schema()``); builds nothing.
 
-        The rows decide the Arrow types (``arrow_types_declared`` is false): a
-        description with undeclared types gives the declared names, with no
-        guaranteed order.
+        The rows decide the Arrow types (``arrow_types_declared`` is false): the
+        description gives the node's names and declared types, with no guaranteed
+        order.
         """
+        describe = getattr(self._node, "arrow_schema", None)
+        if callable(describe):
+            return cast(pa.Schema, describe())
         from orcapod.core.streams.base import stream_arrow_schema
 
         return stream_arrow_schema(self._node, from_table=False)
@@ -1836,6 +1839,20 @@ class DynamicPodStream(StreamBase):
             "StreamProtocol has not been updated or is empty."
         )
         return self._cached_stream.iter_data()
+
+    def result_keys(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """The keys of the stream the operator returned: the order its rows have.
+
+        The prediction (``keys``) never reorders a result: an operator node keeps,
+        stores and hands on its result in the order its rows have, as ``main`` built
+        it from them (ITL-1347).
+        """
+        self._refresh()
+        assert self._cached_stream is not None, (
+            "StreamProtocol has not been updated or is empty."
+        )
+        tag_keys, data_keys = self._cached_stream.keys()
+        return tuple(tag_keys), tuple(data_keys)
 
     def head(
         self,

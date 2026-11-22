@@ -1910,3 +1910,50 @@ def test_stream_from_batches_is_the_one_conversion() -> None:
         made = stream_from_batches(stream, batches_of(stream, rows))
         assert same(made.as_table(columns=ALL), R(stream))
     assert stream_from_batches(stream, []).as_table().num_rows == 0
+
+
+def test_a_batch_with_a_duplicate_column_is_refused() -> None:
+    """Without Arrow types the names are compared as a multiset: a duplicate is refused
+    (Codex on PR #485, round 5)."""
+    table = source().as_table(columns=ALL)
+    stream = _UntypedStream(
+        table, tag_columns=["subject", "trial"], data_tags=["trial"]
+    )
+    (batch,) = batches_of(stream)
+    name = next(n for n in batch.schema.names if not n.startswith(("_", "subject")))
+    doubled = batch.append_column(batch.schema.field(name), batch.column(name))
+
+    async def write() -> None:
+        output = OutputChannel(stream)
+        await output.send(doubled)
+
+    with pytest.raises(ValueError, match="the stream's keys are"):
+        run(write)
+
+
+def test_a_batch_whose_tokens_cannot_settle_with_accepted_ones_is_refused() -> None:
+    """A second batch with list tokens where the first had string tokens is refused at
+    send, with the error the complete table would raise (Codex on PR #485, round 5)."""
+    from orcapod.core.operators.static_output_pod import SourceInfoTypesDisagree
+
+    stream = source()
+    (batch,) = batches_of(stream)
+    column = next(n for n in batch.schema.names if n.startswith("_source_"))
+    position = batch.schema.get_field_index(column)
+    tokens = pa.large_list(pa.large_string())
+    listed = pa.RecordBatch.from_arrays(
+        [
+            *batch.columns[:position],
+            pa.array([["t"]] * batch.num_rows, tokens),
+            *batch.columns[position + 1 :],
+        ],
+        schema=batch.schema.set(position, pa.field(column, tokens, nullable=True)),
+    )
+
+    async def write() -> None:
+        output = OutputChannel(stream)
+        await output.send(batch)
+        await output.send(listed)
+
+    with pytest.raises(SourceInfoTypesDisagree, match=column):
+        run(write)

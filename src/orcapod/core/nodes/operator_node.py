@@ -1711,9 +1711,11 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             # The result's table, as the table built from its rows would be, without
             # making the rows (ITL-1347, stage 2).
             result_table = result_stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
-            keys = result_stream.keys()
+            # The order the result's rows have (``result_keys``), never the prediction.
+            result_keys = getattr(result_stream, "result_keys", None)
+            keys = result_keys() if callable(result_keys) else result_stream.keys()
             tag_keys = keys[0]
-            data_tags = stream_data_tags(result_stream)
+            data_tags = data_tag_names(*keys)
 
             # Cache, in row order with or without rows (ITL-1131, ITL-1133).
             if result_table.num_rows:

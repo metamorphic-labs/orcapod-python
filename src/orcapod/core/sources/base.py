@@ -47,6 +47,40 @@ def saved_tag_only_columns(config: dict[str, Any]) -> bool | list[str]:
     return config["tag_only_columns"]
 
 
+_ROW_READERS = (
+    "iter_data",
+    "as_table",
+    "__iter__",
+    "async_iter_data",
+    "keys",
+    "output_schema",
+)
+"""The members a source's rows and table are read through."""
+
+
+def table_is_rows(source: object) -> bool:
+    """Whether ``source``'s ``as_table()`` and ``iter_data()`` provably read the same data.
+
+    True only when the class that declares ``TABLE_IS_ROWS = True`` (a library source
+    kind) reads ``source``: ``source``'s own class, or a subclass that overrides none of
+    the members the rows and the table are read through (``_ROW_READERS``). A subclass
+    that changes how it reads (a filtering ``iter_data``) is not that kind any more, and
+    a job node bound to it hands on its rows, as ``main`` iterated them (ITL-1347).
+
+    Args:
+        source: The object bound to a source slot.
+
+    Returns:
+        Whether F of its table is the table its rows give.
+    """
+    for klass in type(source).__mro__:
+        if "TABLE_IS_ROWS" in vars(klass):
+            return bool(vars(klass)["TABLE_IS_ROWS"])
+        if any(name in vars(klass) for name in _ROW_READERS):
+            return False
+    return False
+
+
 class RootSource(StreamBase):
     """Abstract base class for all root sources in Orcapod.
 

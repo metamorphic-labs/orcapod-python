@@ -434,3 +434,174 @@ def test_a_lazy_output_is_described_and_opened_without_reading() -> None:
     assert out._stream is None  # pyright: ignore[reportPrivateUsage]  # nothing built
     with pytest.raises(pa.ArrowTypeError, match="Expected bytes"):
         asyncio.run(channel.collect())
+
+
+# ── round 5 ──────────────────────────────────────────────────────────────────
+
+
+def _subclass_overriding(member: str) -> type:
+    """An ``ArrowTableSource`` subclass that overrides ``member`` (reading as before)."""
+    from orcapod.core.sources import ArrowTableSource as Base
+
+    def through(self: Any, *args: Any, **kwargs: Any) -> Any:
+        return getattr(super(cls, self), member)(*args, **kwargs)
+
+    cls = type(f"Overrides_{member}", (Base,), {member: through})
+    return cls
+
+
+@pytest.mark.parametrize(
+    "member",
+    ["iter_data", "as_table", "__iter__", "async_iter_data", "keys", "output_schema"],
+)
+def test_a_subclass_that_overrides_a_reader_is_not_a_table_is_rows_kind(
+    member: str,
+) -> None:
+    """``TABLE_IS_ROWS`` is not inherited past an override of how rows are read."""
+    from orcapod.core.sources.base import table_is_rows
+
+    table = _source_table().select(["k", "x"])
+    cls = _subclass_overriding(member)
+    source = cls(table, tag_columns=["k"], tag_only_columns=True, source_id="s")
+    assert not table_is_rows(source)
+    plain = ArrowTableSource(
+        table, tag_columns=["k"], tag_only_columns=True, source_id="s"
+    )
+    assert table_is_rows(plain)
+    subclass = type("Plain", (ArrowTableSource,), {})
+    assert table_is_rows(
+        subclass(table, tag_columns=["k"], tag_only_columns=True, source_id="s")
+    )
+
+
+def test_a_filtering_subclass_delivers_only_its_rows() -> None:
+    """A subclass whose ``iter_data`` filters is read through it, as on ``main``."""
+
+    class AboveTen(ArrowTableSource):
+        def iter_data(self) -> Any:
+            return (row for row in super().iter_data() if row[1]["x"] > 10)
+
+    table = pa.table({"k": pa.array([1, 2]), "x": pa.array([10, 20])})
+    job = PipelineJob(name="filtering", database=InMemoryArrowDatabase())
+    with job:
+        ArrowTableSource(
+            table, tag_columns=["k"], tag_only_columns=True, source_id="s"
+        ).select_data_columns(["x"], label="selected")
+    job.bind(
+        sources={
+            "s": AboveTen(
+                table, tag_columns=["k"], tag_only_columns=True, source_id="s"
+            )
+        }
+    )
+    job.run()
+    assert job.nodes["selected"].as_table()["x"].to_pylist() == [20]
+
+
+def test_an_operator_result_keeps_its_own_column_order() -> None:
+    """A result laid out ``y, x`` against a prediction ``x, y`` is kept, stored and
+    handed on as ``y, x``, as ``main`` built it from the result's rows."""
+    from orcapod.operators import SelectDataColumns
+
+    class Reordered(SelectDataColumns):
+        def unary_static_process(self, stream: Any) -> Any:
+            out: Any = super().unary_static_process(stream)
+            table = out.as_table(columns={"source": True, "system_tags": True})
+            names = [n for n in table.column_names if n not in ("x", "y")]
+            plain = [n for n in names if not n.startswith("_source_")]
+            source = ["_source_y", "_source_x"]
+            rest = [n for n in names if n.startswith("_source_") and n not in source]
+            return ArrowTableStream(
+                table.select([*plain, "y", "x", *source, *rest]), tag_columns=["k"]
+            )
+
+    database = InMemoryArrowDatabase()
+    job = PipelineJob(name="reordered", database=database)
+    with job:
+        source = DictSource(
+            [{"k": 1, "x": 1, "y": 2}, {"k": 2, "x": 3, "y": 4}],
+            tag_columns=["k"],
+            tag_only_columns=True,
+            source_id="s",
+        )
+        Batch(batch_size=2)(Reordered(["x", "y"])(source, label="reordered"), label="b")
+    job.nodes["reordered"].attach_databases(
+        pipeline_database=database.at("log"), cache_mode=CacheMode.LOG
+    )
+    job.run()
+    expected = ["k", "y", "x", "_source_y", "_source_x"]
+    node = job.nodes["reordered"]
+    assert node.as_table(columns={"source": True}).column_names == expected
+    stored = node.get_all_records(columns={"source": True})
+    assert stored is not None
+    assert [n for n in stored.column_names if not n.startswith("__")] == expected
+    assert job.nodes["b"].as_table(columns={"source": True}).column_names == expected
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [pa.time64("ns"), pa.decimal256(76, 40)],
+    ids=["time64ns", "decimal256"],
+)
+def test_a_lazy_output_describes_itself_without_converting_python_types(
+    kind: pa.DataType,
+) -> None:
+    """Types with no Python type of their own are described from the node, never raised."""
+    values = (
+        pa.array([1, 2]).cast(kind)
+        if pa.types.is_decimal(kind)
+        else pa.array([1, 2], kind)
+    )
+    base = pa.table({"k": pa.array([1, 2], pa.int64()), "x": values})
+    base = base.cast(pa.schema([f.with_nullable(False) for f in base.schema]))
+    source = ArrowTableSource(
+        base, tag_columns=["k"], tag_only_columns=True, source_id="s"
+    )
+    raw = ArrowTableStream(
+        source.as_table(columns={"source": True, "system_tags": True}),
+        tag_columns=["k"],
+    )
+    job = PipelineJob(name="lazy_types", database=InMemoryArrowDatabase())
+    with job:
+        source.select_data_columns(["x"], label="selected")
+    job.bind(sources={"s": raw})
+    out: Any = job.nodes["s"].execute()
+    assert out.arrow_schema().field("x").type == kind
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="spec row e11: observer rebinds between two edges of one empty output (open)",
+)
+def test_a_fanned_out_empty_source_rebound_between_edges() -> None:
+    """Pinned limit (spec row e11): ``main`` rebuilds each edge, the branch builds once."""
+    from orcapod.operators import SelectDataColumns
+
+    def empty(mark: str) -> ArrowTableSource:
+        field = pa.field("x", pa.int64(), nullable=False, metadata={"mark": mark})
+        table = pa.Table.from_arrays(
+            [pa.array([], pa.int64()), pa.array([], pa.int64())],
+            schema=pa.schema([pa.field("k", pa.int64(), nullable=False), field]),
+        )
+        return ArrowTableSource(table, tag_columns=["k"], source_id="s")
+
+    job = PipelineJob(name="fan_out_empty", database=InMemoryArrowDatabase())
+    with job:
+        source = empty("initial")
+        SelectDataColumns(["x"])(source, label="first")
+        SelectDataColumns(["x"])(source, label="second")
+    slot = next(label for label in job.nodes if label not in ("first", "second"))
+    node = job.nodes[slot]
+
+    class RebindsAfterFirst(NoOpObserver):
+        def contextualize(self, *identity_path: str) -> RebindsAfterFirst:
+            return self
+
+        def on_node_end(self, node_label: str, node_hash: str) -> None:
+            if node_label == "first":
+                node.bound_source = empty("next")
+
+    job.run(observer=RebindsAfterFirst())
+    kept = job.nodes["second"].as_table()
+    assert kept.schema.field("x").metadata == {b"mark": b"next"}
