@@ -211,8 +211,8 @@ def canonical_column_order(records: "pa.Table", record_id_column: str) -> "pa.Ta
     five databases store and read one order. Nothing else depends on it: no hash, path
     or record id reads a stored table's column order, and every reader presents its
     rows in its own layout whatever the stored order
-    (``utils.arrow_utils.in_presented_order``).
-    Names that repeat are returned as given, for the database's own rule.
+    (``utils.arrow_utils.in_presented_order``). Names that repeat, or rows without the
+    record id column, are returned as given, for the database's own rule.
 
     Args:
         records: The rows that create the table.
@@ -232,32 +232,32 @@ def canonical_column_order(records: "pa.Table", record_id_column: str) -> "pa.Ta
 
 def in_held_column_order(
     records: "pa.Table",
-    held: "Sequence[tuple[str, pa.DataType]] | None",
+    held: "Sequence[pa.Field[Any]] | None",
     record_id_column: str,
 ) -> "pa.Table":
-    """``records`` with its columns in the order the database stores them (ITL-1367,
-    ITL-1370).
+    """``records`` with its columns in the order the database holds them (ITL-1367),
+    or in the canonical order when nothing is held (ITL-1370).
 
-    A new table (``held`` is ``None``) is written in the canonical order
-    (``canonical_column_order``): the record id, then every other column by name. A
-    table the database already holds keeps its order: an append matches columns by
-    name, never by position, so when ``records`` has exactly the held columns in
-    another order, each with the held type, its columns are put in the held order (a
-    table written before ITL-1370, in another order, keeps it). The fields are kept as
-    given (metadata, nullability): the append checks that follow compare them by name.
+    With nothing held (``held`` is ``None``: no batch pending and, where the database
+    looks, no stored table), the rows are put in the canonical order
+    (``canonical_column_order``), the order a new table is written in. Otherwise an
+    append matches columns by name, never by position: when ``records`` has exactly
+    the held columns in another order, and each of its fields equals the held field of
+    its name, its columns are put in the held order. Equal is one rule
+    (``_same_field``): a type tree the comparison handles entirely, the same at every
+    depth (in the large variants, a logical type with its own name and metadata, at
+    any depth), and no change the append check reports (``appended_field_change``:
+    field metadata and nested field attributes at every depth). Names are matched
+    exactly, as Arrow matches them: ``a`` and ``A`` are two columns.
 
-    Types are compared as the database compares them: a logical (extension) type as
-    its storage type, in the large variants. Anything else is returned as given, for
-    the database's own append rule: a column added or missing, a type
-    that differs (a struct whose children are in another order included: its type
-    differs; ITL-1368), and a name that repeats exactly. Names are matched exactly, as
-    Arrow matches them: ``a`` and ``A`` are two columns.
+    Anything else is returned exactly as given, so the database's own rule applies
+    as before: a column added or missing, a field that differs in any way (a struct
+    whose children are in another order included: ITL-1368), a type the comparison
+    does not handle, a name that repeats.
 
     Args:
         records: The rows to append, the record id column already named as held.
-        held: Each held column's name and type, in the held order (the pending
-            batch, else the stored table), or ``None`` when the database holds no
-            such table.
+        held: The held columns, in the held order, or ``None`` when nothing is held.
         record_id_column: The record id column, as the database names it.
 
     Returns:
@@ -266,29 +266,81 @@ def in_held_column_order(
     if held is None:
         return canonical_column_order(records, record_id_column)
     names = records.column_names
-    held_names = [name for name, _ in held]
+    held_names = [field.name for field in held]
     if names == held_names:
         return records
-    # Arrow matches names exactly: ``a`` and ``A`` are two columns. Only a name that
-    # repeats exactly cannot be matched.
     if len(set(names)) != len(names) or len(set(held_names)) != len(held_names):
         return records
     if set(names) != set(held_names):
         return records
-    held_types = dict(held)
-    for field in records.schema:
-        if _stored_form(field.type) != _stored_form(held_types[field.name]):
-            return records
+    held_fields = {field.name: field for field in held}
+    if not all(_same_field(field, held_fields[field.name]) for field in records.schema):
+        return records
     return records.select(held_names)
 
 
-def _stored_form(arrow_type: "pa.DataType") -> "pa.DataType":
-    """``arrow_type`` as a database compares it: a logical (extension) type as its
-    storage type, a dictionary as its value type, in the large variants. A database
-    that holds such a column reports that type, so the comparison sees what the
-    database sees."""
-    if isinstance(arrow_type, pa.ExtensionType):
-        arrow_type = arrow_type.storage_type
-    if pa.types.is_dictionary(arrow_type):
-        arrow_type = cast(Any, arrow_type).value_type
-    return arrow_utils.normalize_to_large_types(arrow_type, keep_null=True)
+def _same_field(given: "pa.Field[Any]", held: "pa.Field[Any]") -> bool:
+    """Whether rows of ``given`` would be held as ``held`` holds them: the same type at
+    every depth, in the large variants (a logical type is equal only to itself: its
+    name, metadata and storage), and no change ``appended_field_change`` reports."""
+    large = arrow_utils.normalize_to_large_types
+    if not _same_type(
+        large(given.type, keep_null=True), large(held.type, keep_null=True)
+    ):
+        return False
+    return appended_field_change(held, given) is None
+
+
+_LEAF_KINDS = (
+    "is_null",
+    "is_boolean",
+    "is_integer",
+    "is_floating",
+    "is_decimal",
+    "is_string",
+    "is_large_string",
+    "is_binary",
+    "is_large_binary",
+    "is_fixed_size_binary",
+    "is_date",
+    "is_time",
+    "is_timestamp",
+    "is_duration",
+)
+"""The leaf types the comparison handles. Eligibility is positive: a type of any
+other kind anywhere in a column's tree (a list view, a union, a dictionary, a
+run-end-encoded type, an interval, a view type, anything pyarrow adds later) makes
+the column not eligible, and the table is left as given for the database's own
+rule (codex review of PR 491, round 4)."""
+
+
+def _same_type(given: Any, held: Any) -> bool:
+    """Whether two Arrow types are equal at every depth, for a type tree the
+    comparison handles entirely: the leaf kinds of ``_LEAF_KINDS``, a struct, a map,
+    a list, large list or fixed-size list, and an extension type over those, equal
+    only to one of its own name and serialized metadata (pyarrow compares a Python
+    extension type by its class and storage, not by its metadata). Any other type
+    anywhere in either tree gives ``False``."""
+    t = pa.types
+    if isinstance(given, pa.ExtensionType) or isinstance(held, pa.ExtensionType):
+        return (
+            isinstance(given, pa.ExtensionType)
+            and isinstance(held, pa.ExtensionType)
+            and given.extension_name == held.extension_name
+            and given.__arrow_ext_serialize__() == held.__arrow_ext_serialize__()
+            and _same_type(given.storage_type, held.storage_type)
+        )
+    if given != held:
+        return False
+    if t.is_struct(given):
+        return all(
+            _same_type(given.field(i).type, held.field(i).type)
+            for i in range(given.num_fields)
+        )
+    if t.is_map(given):
+        return _same_type(given.key_type, held.key_type) and _same_type(
+            given.item_type, held.item_type
+        )
+    if t.is_list(given) or t.is_large_list(given) or t.is_fixed_size_list(given):
+        return _same_type(cast(Any, given).value_type, cast(Any, held).value_type)
+    return any(getattr(t, kind)(given) for kind in _LEAF_KINDS)

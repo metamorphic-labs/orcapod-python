@@ -93,9 +93,11 @@ column sorted by name, by code point.** No other rule.
   only key column in every Orcapod table), so all five databases then store and read the
   same order.
 - **Code point:** Python's `sorted` on `str`, the order SpiralDB was measured to use
-  (uppercase before `_` before lowercase). Names that differ in case only are refused by
-  SQLite and PostgreSQL already; the in-memory and Delta databases keep them apart, and
-  code point order is total, so the order is still decided.
+  (uppercase before `_` before lowercase). Names that differ in case only are one
+  column to SQLite, which resolves names without case; the PostgreSQL connector quotes
+  every name, so it should keep them apart (not measured); the in-memory and Delta
+  databases keep them apart. Code point order is total, so the order is decided either
+  way.
 
 ## Which stored tables change
 

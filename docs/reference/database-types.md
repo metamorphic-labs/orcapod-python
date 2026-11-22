@@ -83,21 +83,23 @@ as nullable afterwards, as Delta stores it.
 
 An append matches columns by name, exactly as Arrow matches them (`a` and `A` are two
 columns), never by position. Rows whose columns are the held table's columns in another
-order, each of the held type (a logical type compared by its storage type), are put in
-the held order (the rows still pending, else the stored table) by every database before
-they are queued and before the checks that compare them with the held columns (field
-attributes, declared nulls, schema compatibility), whether the table was flushed in
-between or not; the checks that look at the rows alone (a storable type, the record id)
-come first. Rows still queued are matched again, by name, to the stored table when they
-are read with it or written. A new table is written in the canonical column order, in
-every database: the record id, then every other column sorted by name (by code point,
-so upper case before `_` before lower case). It is the order SpiralDB stores and reads
-every table in, whatever the order written (measured on SpiralDB itself), so the order
-written and the order read are the same in every database. A table written before
-Orcapod used the canonical order keeps the order of its first write and takes appends in
-any order. No hash, record id or stored path depends on a stored table's column order,
-and what Orcapod shows of stored rows (a node, a cached or derived source, an observer)
-is in the reader's own column order, whatever order they are stored in. An append that also
+order, each field equal to the held one (the same type at every depth, the same logical
+type, the same field attributes), are put in the held order, whether the table was
+flushed in between or not. The in-memory database matches them to the rows still pending,
+else the stored table; Delta to the rows still pending (it matches a stored table by name
+itself); a connector database (SQLite, PostgreSQL, SpiralDB) to the rows it has pending,
+and to the stored table when it writes or reads them, checking them first against the
+table as it is then, by exact name and type. A new table is written in the canonical
+column order, in every database: the record id, then every other column sorted by name
+(by code point, so upper case before `_` before lower case). It is the order SpiralDB
+stores and reads every table in, whatever the order written (measured on SpiralDB
+itself), so the order written and the order read are the same in every database; rows
+queued with nothing pending for their table are put in that order. A table written
+before Orcapod used the canonical order keeps the order of its first write and takes
+appends in any order (Delta commits such a table's batches by merge). No hash, record id
+or stored path depends on a stored table's column order, and what Orcapod shows of
+stored rows (a node, a cached or derived source, an observer) is in the reader's own
+column order, whatever order they are stored in. An append that also
 adds, omits or retypes a column keeps each database's own rule. The order of a struct's
 fields is not covered: a struct whose fields are in another order is another type here.
 
