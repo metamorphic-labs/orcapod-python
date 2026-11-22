@@ -29,7 +29,10 @@ import pytest
 
 import orcapod.core.operators as operators
 from orcapod.core.operators import AddTags, Batch, PolarsFilter, SelectDataColumns
-from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+from orcapod.core.operators.static_output_pod import (
+    StaticOutputOperatorPod,
+    stream_from_batches,
+)
 from orcapod.core.record_batch_channels import (
     InputChannel,
     OutputChannel,
@@ -249,38 +252,46 @@ def test_the_row_by_row_operators_are_exactly_these() -> None:
     ids=lambda case: case.label,
 )
 def test_a_row_by_row_operator_sends_each_batch_as_it_arrives(case: Case) -> None:
-    """One result record batch per input record batch, before the next is read: with a
-    queue of one batch and no retained output, the operator can only go on when its
-    reader has taken the batch before."""
+    """One result per input record batch, sent before the next input is read. Each
+    one-row input is sent and its result (the sync body over that row alone) is
+    received before the next row is sent or the input is closed; a row whose result
+    is empty sends nothing, which the end of the output shows. A barrier operator
+    sends nothing until its input ends, so it fails here."""
     (source,) = case.make_sources()
     op = case.make_op()
     expected = R(case.make_op()(source))
     assert expected is not None
 
-    async def go() -> tuple[list[int], pa.Table]:
+    async def go() -> list[pa.RecordBatch]:
+        rows = pa.Table.from_batches(await channel_from_stream(source).collect())
+        inputs = _cut(rows, (1,))
+        wanted = [
+            case.make_op()(stream_from_batches(source, [batch])).as_table().num_rows
+            for batch in inputs
+        ]
         feed = OutputChannel(source, retain=False, buffer_size=1)
         reader = feed.open_reader()
         output = OutputChannel(op(source), retain=False, buffer_size=1)
         results = output.open_reader()
         task = asyncio.ensure_future(op.async_execute_batches([reader], output))
-        rows = pa.Table.from_batches(await channel_from_stream(source).collect())
         received: list[pa.RecordBatch] = []
-        sizes: list[int] = []
-        for batch in _cut(rows, (1,)):
+        for batch, rows_wanted in zip(inputs, wanted):
             await asyncio.wait_for(feed.send(batch), TIMEOUT)
-            await asyncio.sleep(0.001)
-            sizes.append(len(received))
-            # Whatever this input row gave is there before the next row is sent.
-            while output._sent > len(received):  # pyright: ignore[reportPrivateUsage]
-                received.append(await asyncio.wait_for(results.receive(), TIMEOUT))
+            if rows_wanted:
+                # This row's result arrives before the next row is sent.
+                result = await asyncio.wait_for(results.receive(), TIMEOUT)
+                assert result.num_rows == rows_wanted
+                received.append(result)
         await feed.close()
-        received.extend(await asyncio.wait_for(results.collect(), TIMEOUT))
-        await task
-        return sizes, pa.Table.from_batches(received) if received else rows.slice(0, 0)
+        assert await asyncio.wait_for(results.collect(), TIMEOUT) == []
+        await asyncio.wait_for(task, TIMEOUT)
+        return received
 
-    _, table = asyncio.run(go())
-    assert table.num_rows == expected.num_rows
-    assert table.to_pylist() == expected.to_pylist()
+    received = asyncio.run(go())
+    table = pa.Table.from_batches(received) if received else None
+    assert (table.num_rows if table is not None else 0) == expected.num_rows
+    if table is not None:
+        assert table.to_pylist() == expected.to_pylist()
 
 
 @pytest.mark.parametrize("batch_size", [2, 3, 5])
@@ -637,3 +648,84 @@ def test_a_system_tag_with_a_null_is_refused_by_the_job_sync_path() -> None:
     )
     channel = run_on_channels(SelectDataColumns(["x"]), [raw], None)
     assert channel.as_table(columns=ALL).column(SYSTEM_TAG).to_pylist() == ["s", None]
+
+
+# --- Ending the output and closing the inputs ------------------------------------------------
+
+
+class _FailingClose(OutputChannel):
+    """An output channel whose ``close`` fails (an implementation that flushes)."""
+
+    async def close(self) -> None:
+        raise OSError("flush failed")
+
+
+def test_a_failing_close_of_the_output_fails_it() -> None:
+    """An operator whose ``output.close()`` raises fails the output, so its readers
+    never wait for an end that does not come."""
+    source = source_a()
+    op = SelectDataColumns(["i8", "s"])
+
+    async def go() -> None:
+        output = _FailingClose(op(source))
+        results = output.open_reader()
+        with pytest.raises(OSError, match="flush failed"):
+            await op.async_execute_batches([channel_from_stream(source)], output)
+        with pytest.raises(UpstreamFailedError):
+            _ = await asyncio.wait_for(results.collect(), TIMEOUT)
+
+    asyncio.run(go())
+
+
+def test_every_input_is_closed_when_one_close_fails() -> None:
+    """A barrier operator over two inputs whose first close raises: the second input
+    is still closed, and the close error is raised once both are closed."""
+    left, right = source_a(), source_a()
+    op = operators.SemiJoin()
+
+    async def go() -> None:
+        first, second = channel_from_stream(left), channel_from_stream(right)
+
+        async def failing_close() -> None:
+            raise OSError("cannot close")
+
+        first.close = failing_close  # a failing input
+        output = OutputChannel(op(left, right))
+        with pytest.raises(OSError, match="cannot close"):
+            await op.async_execute_batches([first, second], output)
+        with pytest.raises(ChannelClosed):
+            _ = await second.receive()  # closed
+        assert output.result().as_table().num_rows > 0  # the output completed first
+
+    asyncio.run(go())
+
+
+# --- A prediction bug that refuses a valid result (ITL-1365) ---------------------------------
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=ValueError,
+    reason="ITL-1365: DropTagColumns predicts its tags in another order than its result "
+    "has them (pre-existing on main), so the result's batches do not match the "
+    "description and send() refuses them; the result should be sent",
+)
+def test_drop_tag_columns_over_three_tags_sends_its_result() -> None:
+    """Tags c, b, a with data-tags a and b; ``DropTagColumns(["a"])``: the channel
+    result is the table built from the sync rows."""
+    stream = ArrowTableStream(
+        pa.table(
+            {
+                "a": pa.array([1, 2], pa.int64()),
+                "b": pa.array([3, 4], pa.int64()),
+                "c": pa.array([7, 8], pa.int64()),
+                "x": pa.array([5.0, 6.0], pa.float64()),
+            }
+        ),
+        tag_columns=["c", "b", "a"],
+        data_tags=["a", "b"],
+    )
+    expected = R(operators.DropTagColumns(["a"])(stream))
+    assert expected is not None
+    result = run_on_channels(operators.DropTagColumns(["a"]), [stream], None)
+    assert_same_table(result.as_table(columns=ALL), expected)

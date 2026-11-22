@@ -48,7 +48,17 @@ class RecordBatchInput(Protocol):
         ...
 
     async def to_stream(self) -> StreamProtocol:
-        """Read to the end and return what the channel delivered, as a stream."""
+        """Read to the end and return what the channel delivered, as a stream.
+
+        All of the input or nothing: it needs a channel not read yet. ``collect``
+        drains the batches that remain; ``to_stream`` never makes a stream of part of
+        an input.
+
+        Raises:
+            RuntimeError: If a record batch has already been received.
+            ChannelClosed: If the channel was closed before its producer completed.
+            UpstreamFailedError: If the producer failed or was cancelled.
+        """
         ...
 
     async def close(self) -> None:

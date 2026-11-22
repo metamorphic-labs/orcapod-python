@@ -926,14 +926,12 @@ class StaticOutputOperatorPod(TraceableBase):
             else:
                 streams = await _streams_of(inputs)
                 await self._send_result(self.static_process(*streams), output)
+            await output.close()
         except BaseException as error:
             output.fail(error)
+            await close_inputs(inputs, error)
             raise
-        else:
-            await output.close()
-        finally:
-            for channel in inputs:
-                await channel.close()
+        await close_inputs(inputs)
 
     async def _send_processed(
         self,
@@ -969,6 +967,36 @@ class StaticOutputOperatorPod(TraceableBase):
         for batch in table.to_batches():
             if batch.num_rows:
                 await output.send(batch)
+
+
+async def close_inputs(
+    inputs: Sequence[RecordBatchInput], error: BaseException | None = None
+) -> None:
+    """Close every input channel of an operator, also when one close fails.
+
+    Each input is closed on its own, so a failing close never leaves another input's
+    producer waiting. When the operator already failed (``error``), a failing close is
+    added to that error as a note and the operator's error stays the one raised;
+    otherwise the first failing close is raised once every input is closed.
+
+    Args:
+        inputs: The operator's input channels.
+        error: The error the operator is failing with, if any.
+
+    Raises:
+        Exception: The first error of a close, when ``error`` is ``None``.
+    """
+    first: Exception | None = None
+    for channel in inputs:
+        try:
+            await channel.close()
+        except Exception as failure:  # noqa: BLE001  # every input is closed first
+            if error is not None:
+                error.add_note(f"Closing an input channel also failed: {failure!r}")
+            elif first is None:
+                first = failure
+    if first is not None:
+        raise first
 
 
 async def _streams_of(inputs: Sequence[RecordBatchInput]) -> list[StreamProtocol]:

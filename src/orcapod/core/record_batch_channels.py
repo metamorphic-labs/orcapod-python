@@ -65,10 +65,21 @@ class _StreamFeed:
     """The record batches of a complete stream, read at this reader's own position."""
 
     def __init__(self, stream: StreamProtocol) -> None:
+        """Make a feed of ``stream``'s rows; nothing is read until the first ``next``.
+
+        Args:
+            stream: The complete stream to read.
+        """
         self._stream = stream
         self._batches: deque[pa.RecordBatch] | None = None
 
     async def next(self) -> pa.RecordBatch | None:
+        """Return the stream's next record batch, or ``None`` at the end.
+
+        The stream's table is read on the first call, not when the feed is made, in
+        the row-built form (``row_built_columns``) and cut into batches of at most
+        ``SOURCE_BATCH_ROWS`` rows; batches with no rows are skipped.
+        """
         if self._batches is None:
             # On the first read, not when the channel is opened: opening computes
             # nothing.
@@ -84,6 +95,7 @@ class _StreamFeed:
         return self._batches.popleft() if self._batches else None
 
     def close(self) -> None:
+        """Stop reading: the batches not read are dropped. No producer waits on it."""
         self._batches = deque()
 
 
@@ -91,6 +103,11 @@ class _OutputFeed:
     """One reader of an output channel, with its own position."""
 
     def __init__(self, output: OutputChannel) -> None:
+        """Make a reader of ``output`` at the start of what it sends.
+
+        Args:
+            output: The output channel read.
+        """
         self._output = output
         self.open = True
         # With retained batches: this reader's position among them. Without: the
@@ -99,6 +116,15 @@ class _OutputFeed:
         self.queue: deque[pa.RecordBatch] = deque()
 
     async def next(self) -> pa.RecordBatch | None:
+        """Return this reader's next record batch, or ``None`` at the end.
+
+        Waits while nothing is there for it. A failed output raises at once, with
+        batches still unread. Without ``retain``, taking a batch frees room in this
+        reader's queue and wakes a producer waiting for it.
+
+        Raises:
+            UpstreamFailedError: If the output failed.
+        """
         output = self._output
         while self.open:
             if output._error is not None:  # pyright: ignore[reportPrivateUsage]
@@ -117,6 +143,11 @@ class _OutputFeed:
         return None
 
     def close(self) -> None:
+        """Stop reading and unregister from the output.
+
+        The queued batches are dropped and a producer waiting for room in this
+        reader's queue is woken: it no longer waits for this reader.
+        """
         self.open = False
         self.queue.clear()
         output = self._output
@@ -140,6 +171,12 @@ class InputChannel:
     """
 
     def __init__(self, stream: StreamProtocol, feed: _BatchFeed) -> None:
+        """Make an input channel; use ``channel_from_stream`` or ``open_reader``.
+
+        Args:
+            stream: The stream whose rows the channel delivers: its description.
+            feed: Where the record batches come from.
+        """
         self._stream = stream
         self._feed = feed
         self._received = 0
@@ -183,9 +220,16 @@ class InputChannel:
         return batch
 
     def __aiter__(self) -> AsyncIterator[pa.RecordBatch]:
+        """Iterate over the remaining record batches, in arrival order."""
         return self
 
     async def __anext__(self) -> pa.RecordBatch:
+        """Return the next record batch; end the iteration at the producer's end.
+
+        A channel closed before its producer completed does not end the iteration:
+        its ``ChannelClosed`` is raised, so a loop never takes part of an input for
+        all of it.
+        """
         try:
             return await self.receive()
         except ChannelClosed:
@@ -265,6 +309,11 @@ class OutputChannel:
         retain: bool = True,
         buffer_size: int = BATCH_BUFFER_SIZE,
     ) -> None:
+        """Make an output channel for ``stream``'s rows (the arguments: see the class).
+
+        Raises:
+            ValueError: If ``buffer_size`` is less than 1.
+        """
         if buffer_size < 1:
             raise ValueError(f"buffer_size must be at least 1, got {buffer_size}")
         self._stream = stream
@@ -275,6 +324,7 @@ class OutputChannel:
         self._sent = 0
         # Sends waiting for a reader's room (``retain=False`` only).
         self._sending = 0
+        self._send_lock = asyncio.Lock()
         self._closed = False
         self._error: BaseException | None = None
         self._result: StreamProtocol | None = None
@@ -295,6 +345,7 @@ class OutputChannel:
         changed.set()
 
     def _upstream_failed(self) -> UpstreamFailedError:
+        """The error a reader or a send meets on a failed output, caused by its cause."""
         error = self._error
         assert error is not None
         failure = UpstreamFailedError(
@@ -318,9 +369,11 @@ class OutputChannel:
         if not self._schema_known:
             self._schema = transport_schema(self._stream)
             self._schema_known = True
-        if self._schema is None:
-            # No Arrow types in the description: the first batch sets them (they must
-            # be in the large variants), but the names are still the stream's.
+        schema = self._schema
+        if schema is None:
+            # No Arrow types in the description: the first batch that passes sets them
+            # (they must be in the large variants), but the names are still the
+            # stream's. A refused batch sets nothing.
             names = batch.schema.names
             if names != row_built_names(names, self._stream.keys()):
                 raise ValueError(
@@ -328,20 +381,28 @@ class OutputChannel:
                     + f"stream's columns: it has {names}, the stream's keys are "
                     + f"{self._stream.keys()}."
                 )
-            self._schema = batch.schema
-        mismatch = _schema_mismatch(self._schema, batch)
+            schema = batch.schema
+        mismatch = _schema_mismatch(schema, batch)
         if mismatch is not None:
             raise ValueError(
                 f"A record batch sent as {_named(self._stream)} does not have that "
                 + f"stream's columns: {mismatch}."
             )
+        self._schema = schema
 
     async def send(self, batch: pa.RecordBatch) -> None:
         """Send one Arrow record batch of the stream's transport columns.
 
-        A batch with no rows is checked and not kept. A send waiting for a reader's
-        room when the channel is closed or failed raises at once and publishes
-        nothing more.
+        A batch with no rows is checked and not kept. Without ``retain``, sends are
+        taken one at a time, so every reader gets the batches in one order. A send
+        waiting for a reader's room when the channel is closed or failed raises at
+        once and publishes nothing more.
+
+        Any abort of a send that has reached one reader and not yet all of them (a
+        close, a failure, a cancellation, any error) fails the channel: readers never
+        complete normally with different inputs. Every reader's next read then raises
+        ``UpstreamFailedError``, caused by the abort (a ``ChannelClosed`` for a close).
+        A send aborted before it reached any reader leaves the channel as it was.
 
         Raises:
             ChannelClosed: If the channel is closed.
@@ -358,20 +419,34 @@ class OutputChannel:
             self._batches.append(batch)
             self._notify()
             return
-        self._sending += 1
-        try:
-            for reader in list(self._readers):
-                # The slowest reader sets the pace; one that closed is not waited for.
-                while reader.open and len(reader.queue) >= self._buffer_size:
-                    await self._changed.wait()
-                    self._raise_if_ended()
-                if reader.open:
-                    reader.queue.append(batch)
-                    # At once, not after the last reader: this reader may be waiting
-                    # for the batch while the send waits for another reader's room.
+        # One send at a time, so every reader gets the batches in one order.
+        async with self._send_lock:
+            self._raise_if_ended()
+            self._sending += 1
+            delivered = False
+            try:
+                for reader in list(self._readers):
+                    # The slowest reader sets the pace; one that closed is not waited
+                    # for.
+                    while reader.open and len(reader.queue) >= self._buffer_size:
+                        await self._changed.wait()
+                        self._raise_if_ended()
+                    if reader.open:
+                        reader.queue.append(batch)
+                        delivered = True
+                        # At once, not after the last reader: this reader may be
+                        # waiting for the batch while the send waits for another
+                        # reader's room.
+                        self._notify()
+            except BaseException as error:
+                # A send that reached a reader and stops before the others (cancelled,
+                # or any error) fails the channel, as a close during it does.
+                if delivered and self._error is None:
+                    self._error = error
                     self._notify()
-        finally:
-            self._sending -= 1
+                raise
+            finally:
+                self._sending -= 1
 
     async def close(self) -> None:
         """Complete the output. A second close does nothing; never waits.
@@ -544,6 +619,7 @@ def _without_metadata(kind: pa.DataType) -> pa.DataType:
 
 
 def _field_without_metadata(field: pa.Field[Any]) -> pa.Field[Any]:  # pyright: ignore[reportExplicitAny]  # any field
+    """``field`` with no field metadata, at its own level and below."""
     return pa.field(field.name, _without_metadata(field.type), nullable=field.nullable)
 
 

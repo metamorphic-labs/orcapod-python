@@ -274,6 +274,8 @@ def test_a_close_with_no_batch_is_the_typed_zero_row_stream() -> None:
 
 
 def test_send_after_close_is_refused_and_result_needs_a_closed_channel() -> None:
+    """A send after ``close()`` raises ``ChannelClosed``, and ``result()`` exists only
+    once the channel is closed."""
     stream = source()
     (batch,) = batches_of(stream)
 
@@ -709,6 +711,131 @@ def test_without_arrow_types_the_names_are_still_the_streams() -> None:
     assert run(write) == 7
 
 
+def test_a_refused_first_batch_sets_no_schema() -> None:
+    """Without Arrow types in the description, a refused first batch sets nothing: a
+    correct batch sent next is taken."""
+    stream = _UntypedStream(
+        source().as_table(columns=ALL),
+        tag_columns=["subject", "trial"],
+        data_tags=["trial"],
+    )
+    (batch,) = batches_of(stream)
+    note = batch.schema.get_field_index("note")
+    narrow = pa.RecordBatch.from_arrays(
+        [
+            *batch.columns[:note],
+            batch.column(note).cast(pa.string()),
+            *batch.columns[note + 1 :],
+        ],
+        schema=batch.schema.set(
+            note, pa.field("note", pa.string(), metadata={"unit": "mV"})
+        ),
+    )
+
+    async def write() -> int:
+        output = OutputChannel(stream)
+        with pytest.raises(ValueError, match="column 'note' is string"):
+            await output.send(narrow)
+        await output.send(batch)
+        await output.close()
+        return output.result().as_table().num_rows
+
+    assert run(write) == 7
+
+
+def test_overlapping_sends_reach_every_reader_in_one_order() -> None:
+    """Two sends started while a reader is full: they are taken one at a time, so both
+    readers get the batches in one order. The first send queues its batch for the fast
+    reader and waits for room in the slow one; the second waits for the first; the
+    readers draining releases both."""
+    stream = source(3)
+    first, second, third = batches_of(stream, 1)
+
+    async def write() -> tuple[list[Any], list[Any]]:
+        output = OutputChannel(stream, retain=False, buffer_size=1)
+        fast, slow = output.open_reader(), output.open_reader()
+        await output.send(first)
+        _ = await fast.receive()
+        sending = [
+            asyncio.ensure_future(output.send(second)),
+            asyncio.ensure_future(output.send(third)),
+        ]
+        await asyncio.sleep(0)
+
+        async def trials(reader: InputChannel, start: list[Any]) -> list[Any]:
+            got: list[Any] = list(start)
+            async for batch in reader:
+                got.extend(batch.column("trial").to_pylist())
+            return got
+
+        readers = asyncio.ensure_future(
+            asyncio.gather(trials(fast, [0]), trials(slow, []))
+        )
+        _ = await asyncio.gather(*sending)
+        await output.close()
+        fast_order, slow_order = await readers
+        return fast_order, slow_order
+
+    fast_order, slow_order = run(write)
+    assert fast_order == slow_order == [0, 1, 2]
+
+
+def test_a_cancelled_send_that_reached_one_reader_fails_both() -> None:
+    """A send cancelled after it queued its batch for the fast reader, while it waits
+    for the slow one, fails the channel: neither reader completes normally, each next
+    read raising ``UpstreamFailedError`` caused by the cancellation."""
+    stream = source(2)
+    first, second = batches_of(stream, 1)
+
+    async def write() -> list[BaseException | None]:
+        output = OutputChannel(stream, retain=False, buffer_size=1)
+        fast, slow = output.open_reader(), output.open_reader()
+        await output.send(first)
+        _ = await fast.receive()
+        sending = asyncio.ensure_future(output.send(second))
+        await asyncio.sleep(0)  # queued for fast, waiting for room in slow
+        _ = sending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await sending
+        await output.close()
+        causes: list[BaseException | None] = []
+        for reader in (fast, slow):
+            with pytest.raises(UpstreamFailedError) as failed:
+                _ = await reader.collect()
+            causes.append(failed.value.__cause__)
+        return causes
+
+    for cause in run(write):
+        assert isinstance(cause, asyncio.CancelledError)
+
+
+def test_a_send_cancelled_before_it_reached_a_reader_leaves_the_channel_usable() -> (
+    None
+):
+    """A send cancelled while it waits for the only reader's room delivered nothing: the
+    channel goes on and completes normally."""
+    stream = source(3)
+    first, second, third = batches_of(stream, 1)
+
+    async def write() -> list[Any]:
+        output = OutputChannel(stream, retain=False, buffer_size=1)
+        reader = output.open_reader()
+        await output.send(first)  # fills the one slot
+        sending = asyncio.ensure_future(output.send(second))
+        await asyncio.sleep(0)
+        _ = sending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await sending
+        got = (await reader.receive()).column("trial").to_pylist()
+        await output.send(third)
+        await output.close()
+        for batch in await reader.collect():
+            got.extend(batch.column("trial").to_pylist())
+        return got
+
+    assert run(write) == [0, 2]
+
+
 # --- Retained output: readers at their own position, send never waits -------------------
 
 
@@ -828,6 +955,8 @@ def test_a_reader_that_closes_early_no_longer_holds_the_producer() -> None:
 
 
 def test_without_retain_a_late_reader_is_refused_and_there_is_no_result() -> None:
+    """Without ``retain``, a reader opened after the first send would miss it, so it is
+    refused, and the output has no result stream."""
     stream = source()
     (batch,) = batches_of(stream)
 
@@ -846,6 +975,7 @@ def test_without_retain_a_late_reader_is_refused_and_there_is_no_result() -> Non
 
 
 def test_a_buffer_must_hold_one_batch() -> None:
+    """``buffer_size`` below 1 is refused when the output channel is made."""
     with pytest.raises(ValueError, match="buffer_size"):
         _ = OutputChannel(source(), retain=False, buffer_size=0)
 
@@ -892,6 +1022,8 @@ def test_a_failed_producer_is_never_a_normal_end(retain: bool) -> None:
 
 
 def test_fail_after_close_changes_nothing() -> None:
+    """``fail()`` on a closed channel does nothing: its readers end normally and the
+    result is the batches sent."""
     stream = source()
     batches = batches_of(stream, 3)
 

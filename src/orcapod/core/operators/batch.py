@@ -16,7 +16,10 @@ from orcapod.channels import (
     WritableChannel,
 )
 from orcapod.core.operators.base import UnaryOperator
-from orcapod.core.operators.static_output_pod import with_open_provenance_flags
+from orcapod.core.operators.static_output_pod import (
+    close_inputs,
+    with_open_provenance_flags,
+)
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.streams import ArrowTableStream
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
@@ -315,13 +318,12 @@ class Batch(UnaryOperator):
             # whether they make a last one.
             if rows:
                 await self._send_processed(waiting, channel.stream, output)
+            await output.close()
         except BaseException as error:
             output.fail(error)
+            await close_inputs(inputs, error)
             raise
-        else:
-            await output.close()
-        finally:
-            await channel.close()
+        await close_inputs(inputs)
 
     def to_config(self) -> dict[str, Any]:
         """Serialize this Batch operator to a config dict.
