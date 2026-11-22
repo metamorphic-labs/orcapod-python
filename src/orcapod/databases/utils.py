@@ -6,15 +6,12 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, cast
 
+import pyarrow as pa
+
 from orcapod.utils import arrow_utils
-from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
-    import pyarrow as pa
-
     from orcapod.protocols.database_protocols import TableCommittingDatabaseProtocol
-else:
-    pa = LazyModule("pyarrow")
 
 
 def coerce_record_id(record_id: str | bytes) -> bytes:
