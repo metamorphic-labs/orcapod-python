@@ -2,14 +2,13 @@
 
 A source slot declared from a source whose ``x`` is ``int | None``, bound to the same
 columns with ``x: int`` (a narrower source, given as the declared schema), feeding a
-``Batch`` node in ``LOG`` mode. The source node's output is F of the bound table with
-the keys its rows have (``SourceJobNode._row_keys``: ``_DeclaredForm.apply`` of a
-row's tag and data tables, as each row is given). Every pairing of declared layout, tag
+``Batch`` node in ``LOG`` mode. The source node hands on its rows as ``main`` gives
+them (``_declared_rows``), built where the successor reads them (``RowsOnRead``).
+Every pairing of declared layout, tag
 order and data-tag roles must keep and store what the row path keeps and stores: the
 same run with the source's output built from its rows
-(``StaticOutputOperatorPod._materialize_upstream``), as on ``main``. The arrangements
-where the row path raises (one data-tag of two, ITL-1366) are spec row e10, tested in
-``test_declared_slot_one_data_tag.py``.
+(``StaticOutputOperatorPod._materialize_upstream``), as on ``main``, also where the
+row path raises (one data-tag of two, ITL-1366).
 """
 
 from __future__ import annotations
@@ -90,9 +89,12 @@ def _row_path(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(SourceNodeBase, "execute", execute)
 
 
-def _raises_on_the_row_path(roles: str) -> bool:
-    """The row path raises only with one data-tag of two (ITL-1366, e10)."""
-    return roles in ("a_data_tag", "b_data_tag")
+def _outcome(layout: tuple[str, ...], tag_order: tuple[str, str], roles: Any) -> Any:
+    """The run's kept columns and raw stored schema, or the error it raised."""
+    try:
+        return _run(layout, tag_order, roles)
+    except ValueError as error:
+        return (type(error), str(error))
 
 
 @pytest.mark.parametrize("roles", list(ROLES), ids=list(ROLES))
@@ -106,15 +108,17 @@ def test_a_narrower_bind_keeps_and_stores_as_the_row_path(
     roles: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Kept columns and the raw stored schema equal the row path's, in order."""
-    got = _run(layout, tag_order, ROLES[roles])
+    """Kept columns and the raw stored schema equal the row path's, in order.
+
+    Where the row path raises (one data-tag of two, ITL-1366, a ``main`` bug), the
+    branch raises the same error.
+    """
+    got = _outcome(layout, tag_order, ROLES[roles])
     with monkeypatch.context() as patch:
         _row_path(patch)
-        try:
-            expected = _run(layout, tag_order, ROLES[roles])
-        except ValueError as error:
-            assert "Duplicate column name" in str(error)
-            assert _raises_on_the_row_path(roles)
-            pytest.skip("the row path raises here: spec row e10")
+        expected = _outcome(layout, tag_order, ROLES[roles])
+    if isinstance(expected[1], str):
+        assert got == expected
+        return
     assert got[0] == expected[0]
     assert got[1].equals(expected[1], check_metadata=True)

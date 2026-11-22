@@ -296,41 +296,48 @@ def _as_written_before_the_fix(root: pathlib.Path) -> None:
         )
 
 
-@pytest.mark.parametrize("chained", [False, True], ids=["leaf", "with_successor"])
 def test_new_rows_over_a_store_written_before_the_fix_raise_naming_the_column(
-    chained: bool, tmp_path: pathlib.Path
+    tmp_path: pathlib.Path,
 ) -> None:
     """Rows of one node never make a column of a type none of them has.
 
     A Delta database written before ITL-928 gives a ``uint32`` tag back as ``int32``:
     rows served from it and rows computed now disagree, and the node says so instead
-    of picking a type. Such a database must be rebuilt.
-
-    The run fails at the node, with the error ``as_table`` raises for such rows (main
-    raised it only on a later read of a node with no successor, and a bare
-    ``ArrowInvalid`` in the run of one with a successor; ITL-1360, difference e9). The
-    node then holds no run.
+    of picking a type. Such a database must be rebuilt. A leaf's run completes (its
+    rows are never built into one table, ``RowsOnRead``), as on ``main``.
     """
-    _build(
-        DeltaTableDatabase(tmp_path),
-        _source_table("uint32").slice(0, 2),
-        chained=chained,
-    ).run()
+    _build(DeltaTableDatabase(tmp_path), _source_table("uint32").slice(0, 2)).run()
     _as_written_before_the_fix(tmp_path)
-    job = _build(DeltaTableDatabase(tmp_path), _source_table("uint32"), chained=chained)
+    job = _build(DeltaTableDatabase(tmp_path), _source_table("uint32"))
+    job.run()
 
     with pytest.raises(InputValidationError) as raised:
-        job.run()
+        job.nodes["double"].as_table()
 
     message = str(raised.value)
-    assert message.startswith("Function node 'double': ")
     assert "'k'" in message
     assert "int32" in message
     assert "uint32" in message
-    # A run that raised defines no rows.
-    assert job.nodes["double"].as_table().num_rows == 0
-    # What is stored is what main stores: the row computed before the disagreement
-    # could be seen stays written, as after any failure, next to the two old rows.
+
+
+def test_rows_over_a_store_written_before_the_fix_fail_at_the_successor(
+    tmp_path: pathlib.Path,
+) -> None:
+    """With a successor, the run fails where the rows are built for it, as on ``main``.
+
+    The node's rows are built into one table where its successor reads them
+    (``at_edge``): the concatenation raises ``ArrowInvalid`` there, as ``main``'s row
+    rebuild does. The computed row is stored, as on ``main``.
+    """
+    _build(
+        DeltaTableDatabase(tmp_path), _source_table("uint32").slice(0, 2), chained=True
+    ).run()
+    _as_written_before_the_fix(tmp_path)
+    job = _build(DeltaTableDatabase(tmp_path), _source_table("uint32"), chained=True)
+
+    with pytest.raises(pa.ArrowInvalid):
+        job.run()
+
     stored = _build(DeltaTableDatabase(tmp_path), _source_table("uint32"))
     records = stored.nodes["double"].get_all_records()
     assert records is not None
@@ -457,3 +464,48 @@ def test_a_second_async_run_holds_the_node_and_sends_its_rows(
     summary = job.run(orchestrator=AsyncPipelineOrchestrator(), observer=observer)
     assert summary.nodes["double"].held == 3
     assert observer.count == 3
+
+
+def test_a_held_nodes_rows_are_built_at_its_successors_edge(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A held node's rows are built where its successor reads them, as on ``main``.
+
+    A direct sync run: ``double`` held (its rows cannot make one table), an independent
+    source, then ``increment`` after ``double``. The independent source runs before
+    ``increment``'s input is built and raises (Codex on PR #485, round 3).
+    """
+    from orcapod.core.operators.static_output_pod import rows_on_read
+    from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
+    from orcapod.pipeline.dag import OrcaDAG
+    from orcapod.pipeline.observer import NoOpObserver
+
+    _build(
+        DeltaTableDatabase(tmp_path), _source_table("uint32").slice(0, 2), chained=True
+    ).run()
+    _as_written_before_the_fix(tmp_path)
+    job = _build(DeltaTableDatabase(tmp_path), _source_table("uint32"), chained=True)
+    job.run(orchestrator=AsyncPipelineOrchestrator())
+    double, increment = job.nodes["double"], job.nodes["increment"]
+    increment.clear_cache()
+    independent = _build(InMemoryArrowDatabase(), _source_table("uint32")).nodes["src"]
+
+    starts: list[str] = []
+
+    class Starts(NoOpObserver):
+        def contextualize(self, *identity_path: str) -> Starts:
+            return self
+
+        def on_node_start(
+            self, node_label: str, node_hash: str, tag_schema: Any = None
+        ) -> None:
+            starts.append(node_label)
+
+    dag: OrcaDAG[Any] = OrcaDAG()
+    dag.add_node(double)
+    dag.add_node(independent)
+    dag.add_edge(double, increment)
+    held = {double: rows_on_read(double.iter_data(), double)}
+    with pytest.raises(pa.ArrowInvalid):
+        SyncPipelineOrchestrator().run(dag, observer=Starts(), held=held)
+    assert starts == ["src"]

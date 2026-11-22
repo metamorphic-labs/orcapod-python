@@ -667,7 +667,8 @@ class RecordBatchInput(Protocol):
         Without ``claim``, the unread channel is held for the returned claim, not for
         the calling task: no task, the reserving one included, can read it until a
         task takes it over with that claim (``reserve(claim)``), after which only
-        that task reads it. A claim is taken over once.
+        that task reads it. A claim is taken over once; a claim freed before it was
+        taken over closes the channel.
 
         Raises:
             RuntimeError: If a read was called on it already, or ``claim`` is not its

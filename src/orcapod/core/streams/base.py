@@ -364,7 +364,10 @@ def keys_of_rows(
 
 
 def stream_arrow_schema(
-    stream: object, keys: tuple[Sequence[str], Sequence[str]] | None = None
+    stream: object,
+    keys: tuple[Sequence[str], Sequence[str]] | None = None,
+    *,
+    from_table: bool = True,
 ) -> pa.Schema:
     """Return ``stream``'s declared Arrow schema: what ``arrow_schema()`` answers (ITL-1347).
 
@@ -389,6 +392,9 @@ def stream_arrow_schema(
         stream: The stream, source or node.
         keys: The tag and data keys of the stream's rows, when they differ from
             ``keys()`` (a source slot gives its bound source's rows); default ``keys()``.
+        from_table: Take the stream's typed zero-row table (``typed_zero_row_input``);
+            ``False`` describes it from its declared Python schema only (a narrower
+            bind, whose rows ``main``'s row path places).
 
     Returns:
         The declared Arrow schema.
@@ -397,7 +403,7 @@ def stream_arrow_schema(
 
     typed = cast(StreamProtocol, stream)
     given_keys = keys
-    table = typed_zero_row_input(stream)
+    table = typed_zero_row_input(stream) if from_table else None
     if table is None and schema_requires_io(stream, ColumnConfig(system_tags=True)):
         # Nothing declared, nothing polled (a poller with no declared schema): the
         # columns are known only from rows, and a description never polls. No column,

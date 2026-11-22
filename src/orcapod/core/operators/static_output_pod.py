@@ -1231,7 +1231,10 @@ def channel_to_stream(
 
     The channel is reserved when this function is called, before the returned
     coroutine is awaited, so nothing can read it in between; the task that runs the
-    coroutine takes the channel over, and any other task's read is refused.
+    coroutine takes the channel over, and any other task's read is refused. If the
+    coroutine never starts (its task is cancelled first, or it is never awaited),
+    the reservation's claim is freed with it and the channel is closed, so no
+    producer waits on it.
 
     Args:
         channel: The input channel, not read yet.
@@ -1351,6 +1354,91 @@ def with_open_provenance_flags(batch: pa.RecordBatch) -> pa.RecordBatch:
         ]
     )
     return pa.RecordBatch.from_arrays(batch.columns, schema=schema)
+
+
+class RowsOnRead:
+    """A node's output held as its rows, its table built on first read (ITL-1347).
+
+    The one rule for every route where building the output from the whole table is
+    not provably ``main``'s result (a narrower bind, a whole-table build that is
+    unavailable, an odd stored table, a held node, a node whose output is still its
+    rows): the node hands on the rows ``main`` would hold, and the table is built from
+    them by ``main``'s own row path (``StaticOutputOperatorPod._materialize_upstream``)
+    when the stream is first read. The sync orchestrator reads each input of a node
+    before running it (``at_edge``), where ``main`` rebuilt it; a stream nobody reads
+    is never built, as ``main`` never rebuilt a leaf's rows. Every attribute is the
+    built stream's.
+    """
+
+    # Not a stream the row-built form already made: a channel opened on it reads it.
+    _orcapod_row_built_output = False
+
+    def __init__(
+        self, rows: Iterable[tuple[TagProtocol, DataProtocol]], node: StreamProtocol
+    ) -> None:
+        """Hold ``node``'s rows; nothing is built.
+
+        Args:
+            rows: The rows ``main`` would hold, in order (read once, here).
+            node: The node (or stream) whose output they are.
+        """
+        self._rows: list[tuple[TagProtocol, DataProtocol]] | None = list(rows)
+        self._node = node
+        self._stream: StreamProtocol | None = None
+
+    def built(self) -> StreamProtocol:
+        """The stream, built from the rows on the first call (``main``'s row path)."""
+        if self._stream is None:
+            rows = self._rows if self._rows is not None else []
+            self._stream = StaticOutputOperatorPod._materialize_upstream(
+                rows, self._node
+            )
+            self._rows = None
+        return self._stream
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.built(), name)
+
+    def __iter__(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
+        return iter(self.built().iter_data())
+
+    def __repr__(self) -> str:
+        return f"RowsOnRead({short_stream_repr(self._node)})"
+
+
+def rows_on_read(
+    rows: Iterable[tuple[TagProtocol, DataProtocol]], node: StreamProtocol
+) -> StreamProtocol:
+    """``RowsOnRead`` of ``rows`` as a stream (it delegates every member to the built one).
+
+    Args:
+        rows: The rows ``main`` would hold, in order (read once, here).
+        node: The node (or stream) whose output they are.
+
+    Returns:
+        The output, built from the rows when first read.
+    """
+    # ``RowsOnRead`` stands for the stream it builds; the checker cannot see that
+    # through its delegation, so the cast goes through object.
+    return cast(StreamProtocol, cast(object, RowsOnRead(rows, node)))
+
+
+def at_edge(stream: StreamProtocol) -> StreamProtocol:
+    """``stream`` as a node's input: a ``RowsOnRead`` output is built here.
+
+    The sync orchestrator reads every input of a node before it runs the node, where
+    ``main`` rebuilt the rows of the node before it, so an error of that build surfaces
+    at the same point, after the same observer events.
+
+    Args:
+        stream: An output a node handed on.
+
+    Returns:
+        The stream to give the node.
+    """
+    if isinstance(stream, RowsOnRead):
+        return stream.built()
+    return stream
 
 
 class _RowsOfStream(ArrowTableStream):

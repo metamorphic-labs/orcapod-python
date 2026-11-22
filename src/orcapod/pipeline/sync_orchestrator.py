@@ -170,7 +170,9 @@ class SyncPipelineOrchestrator:
             raise ValueError(
                 f"FunctionNode expects exactly 1 upstream, got {len(predecessors)}"
             )
-        return outputs[predecessors[0]]
+        from orcapod.core.operators.static_output_pod import at_edge
+
+        return at_edge(outputs[predecessors[0]])
 
     @staticmethod
     def _ordered_inputs(
@@ -185,7 +187,9 @@ class SyncPipelineOrchestrator:
             predecessors,
             key=lambda p: upstream_order.get(id(p), 0),
         )
-        return [outputs[p] for p in sorted_preds]
+        from orcapod.core.operators.static_output_pod import at_edge
+
+        return [at_edge(outputs[p]) for p in sorted_preds]
 
     @staticmethod
     def _gc_outputs(
