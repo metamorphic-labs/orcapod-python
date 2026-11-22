@@ -16,7 +16,7 @@ import uuid
 from collections.abc import Iterator
 from contextlib import ExitStack
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import pyarrow as pa
@@ -26,6 +26,7 @@ from orcapod.databases import (
     ConnectorArrowDatabase,
     DeltaTableDatabase,
     ExtensionAwareDatabase,
+    InMemoryArrowDatabase,
     SpiralDBConnector,
     SQLiteConnector,
 )
@@ -261,8 +262,8 @@ def test_a_spiraldb_table_deleted_and_created_again_in_another_order(
 # ── The shared step ────────────────────────────────────────────────────────────
 
 
-def _held(*names: str) -> list[tuple[str, Any]]:
-    return [(n, pa.int64()) for n in names]
+def _held(*names: str) -> list[Any]:
+    return [pa.field(n, pa.int64()) for n in names]
 
 
 def _table(*names: str) -> pa.Table:
@@ -296,22 +297,50 @@ def test_the_step_matches_names_exactly() -> None:
     assert out.to_pylist() == [{"A": 0, "a": 1, "c": 2}]
 
 
-def test_the_step_compares_a_logical_type_by_its_storage() -> None:
-    """A database holding a logical column reports its storage type."""
+def _annotated(name: str, ext_type: Any) -> Any:
+    """A field held as its storage type, annotated with its logical type (a stored
+    Delta column, a column the extension-aware wrapper encoded)."""
+    return pa.field(
+        name,
+        pa.string(),
+        metadata={
+            b"ARROW:extension:name": ext_type.extension_name.encode(),
+            b"ARROW:extension:metadata": ext_type.__arrow_ext_serialize__(),
+        },
+    )
+
+
+def test_the_step_compares_a_logical_type_by_its_storage_and_identity() -> None:
+    """A database holding a logical column reports its storage type, annotated with
+    the logical type: the same logical type is matched; another one over the same
+    storage type, or a plain column, is not (ITL-1367)."""
     from tests.test_databases.test_extension_aware_database import (
         _make_converter_with_type,
     )
 
-    _, ext_type = _make_converter_with_type("test.itl1367.storage")
-    text = pa.ExtensionArray.from_storage(ext_type, pa.array(["x"], pa.large_string()))
+    _, one = _make_converter_with_type("test.itl1367.one")
+    _, two = _make_converter_with_type("test.itl1367.two")
+    text = pa.ExtensionArray.from_storage(one, pa.array(["x"], pa.large_string()))
     given = pa.table({"text": text, "a": [1]})
-    out = in_held_column_order(given, [("a", pa.int64()), ("text", pa.string())])
+    a = pa.field("a", pa.int64())
+    out = in_held_column_order(given, [a, _annotated("text", one)])
     assert out.column_names == ["a", "text"]
+    assert in_held_column_order(given, [a, _annotated("text", two)]) is given
+    assert in_held_column_order(given, [a, pa.field("text", pa.string())]) is given
+    annotated = pa.Table.from_arrays(
+        [pa.array(["x"]), pa.array([1])],
+        schema=pa.schema([_annotated("text", two), a]),
+    )
+    assert in_held_column_order(annotated, [a, _annotated("text", one)]) is annotated
+    held = [a, _annotated("text", two)]
+    assert in_held_column_order(annotated, held).column_names == ["a", "text"]
 
 
 def test_the_step_compares_types_in_their_large_variants() -> None:
     given = pa.table({"b": pa.array(["x"], pa.string()), "a": [1]})
-    out = in_held_column_order(given, [("a", pa.int64()), ("b", pa.large_string())])
+    out = in_held_column_order(
+        given, [pa.field("a", pa.int64()), pa.field("b", pa.large_string())]
+    )
     assert out.column_names == ["a", "b"]
 
 
@@ -325,7 +354,7 @@ def test_the_step_compares_types_in_their_large_variants() -> None:
         pytest.param(_table("c", "a", "a"), _held("a", "c", "a"), id="a repeated name"),
         pytest.param(
             _table("c", "a"),
-            [("a", pa.int64()), ("c", pa.int32())],
+            [pa.field("a", pa.int64()), pa.field("c", pa.int32())],
             id="a type differs",
         ),
         pytest.param(
@@ -339,15 +368,15 @@ def test_the_step_compares_types_in_their_large_variants() -> None:
                 }
             ),
             [
-                ("a", pa.int64()),
-                ("s", pa.struct([("x", pa.int64()), ("y", pa.int64())])),
+                pa.field("a", pa.int64()),
+                pa.field("s", pa.struct([("x", pa.int64()), ("y", pa.int64())])),
             ],
             id="struct children in another order",
         ),
     ],
 )
 def test_the_step_leaves_anything_else_as_given(
-    given: pa.Table, held: list[tuple[str, Any]] | None
+    given: pa.Table, held: list[Any] | None
 ) -> None:
     assert in_held_column_order(given, held) is given
 
@@ -530,6 +559,202 @@ def test_an_aligned_append_looks_the_stored_table_up_once(tmp_path: Path) -> Non
     _check(
         db.get_all_records(PATH, record_id_column=ID), [ID, "a", "c", "b"], [1, 2, 3]
     )
+
+
+# ── Nothing about a stored table is trusted across calls ───────────────────────
+
+
+def _abc(n: int, order: tuple[str, ...] = ("rid", "a", "b")) -> pa.Table:
+    columns = {
+        "rid": pa.array([bytes([n])], pa.large_binary()),
+        "a": pa.array([10 * n], pa.int64()),
+        "b": pa.array([100 * n], pa.int64()),
+    }
+    return pa.table({name: columns[name] for name in order})
+
+
+def _sqlite(path: Path) -> ConnectorArrowDatabase:
+    return ConnectorArrowDatabase(SQLiteConnector(str(path)))
+
+
+def _recreate_with_text_a(path: Path) -> None:
+    with sqlite3.connect(path) as other:
+        other.execute('DROP TABLE "t"')
+    _sqlite(path).add_records(
+        PATH,
+        pa.table(
+            {
+                "rid": pa.array([bytes([1])], pa.large_binary()),
+                "a": pa.array(["10"], pa.large_string()),
+                "b": pa.array([100], pa.int64()),
+            }
+        ),
+        record_id_column="rid",
+        flush=True,
+    )
+
+
+CHANGES: dict[str, Any] = {
+    "rename": lambda c: c.execute('ALTER TABLE "t" RENAME COLUMN a TO A'),
+    "add": lambda c: c.execute('ALTER TABLE "t" ADD COLUMN extra INTEGER'),
+    "drop": lambda c: c.execute('ALTER TABLE "t" DROP COLUMN b'),
+}
+
+
+@pytest.mark.parametrize("change", [*CHANGES, "retype"])
+@pytest.mark.parametrize("order", [("rid", "a", "b"), ("b", "rid", "a")])
+def test_a_table_changed_between_queue_and_flush_is_refused_as_on_main(
+    tmp_path: Path, change: str, order: tuple[str, ...]
+) -> None:
+    """Another connection renames, adds, drops or retypes a column after rows are
+    queued: the flush checks the table as it is then, by exact name and type, and
+    refuses as main does; the stored rows are untouched (codex review of PR 491,
+    round 2: a remembered table order let such rows through)."""
+    path = tmp_path / "store.db"
+    _sqlite(path).add_records(PATH, _abc(1), record_id_column="rid", flush=True)
+    db = _sqlite(path)
+    db.add_records(PATH, _abc(2, order), record_id_column="rid")
+    if change == "retype":
+        _recreate_with_text_a(path)
+    else:
+        with sqlite3.connect(path) as other:
+            CHANGES[change](other)
+    before = _sqlite(path).get_all_records(PATH, record_id_column="rid")
+    with pytest.raises(ValueError, match="Schema mismatch"):
+        db.flush()
+    after = _sqlite(path).get_all_records(PATH, record_id_column="rid")
+    assert before is not None and after is not None
+    assert after.equals(before)
+    assert after.num_rows == 1
+
+
+def test_a_table_dropped_and_written_again_by_the_same_handle_takes_the_new_order(
+    tmp_path: Path,
+) -> None:
+    """The handle that wrote the dropped table writes the replacement in the order of
+    its new first write, as main does: nothing of the dropped table is remembered."""
+    path = tmp_path / "store.db"
+    db = _sqlite(path)
+    db.add_records(PATH, _abc(1), record_id_column="rid", flush=True)
+    with sqlite3.connect(path) as other:
+        other.execute('DROP TABLE "t"')
+    db.add_records(PATH, _abc(2, ("b", "rid", "a")), record_id_column="rid", flush=True)
+    table = _sqlite(path).get_all_records(PATH, record_id_column="rid")
+    assert table is not None
+    assert table.column_names == ["b", "rid", "a"]
+    assert table.to_pylist() == [{"b": 200, "rid": bytes([2]), "a": 20}]
+
+
+def test_a_queued_row_reads_in_the_order_it_reads_once_committed(
+    tmp_path: Path,
+) -> None:
+    """On SpiralDB (its own column order), a point lookup of a queued row and of the
+    same row once flushed give the same column order."""
+    with open_database("SpiralDB", tmp_path) as db:
+        rows = pa.table(
+            {
+                "rid": pa.array([bytes([1])], pa.large_binary()),
+                "z": pa.array([10]),
+                "a": pa.array([100]),
+            }
+        )
+        db.add_records(PATH, rows, record_id_column="rid", flush=True)
+        second = rows.set_column(0, "rid", pa.array([bytes([2])], pa.large_binary()))
+        db.add_records(PATH, second, record_id_column="rid")
+        queued = db.get_record_by_id(PATH, bytes([2]), record_id_column="rid")
+        db.flush()
+        committed = db.get_record_by_id(PATH, bytes([2]), record_id_column="rid")
+        assert queued is not None and committed is not None
+        assert queued.column_names == committed.column_names == ["rid", "a", "z"]
+        assert queued.to_pylist() == committed.to_pylist()
+
+
+@pytest.mark.parametrize("schema_handling", ["error", "merge", "coerce"])
+@pytest.mark.parametrize("skip_duplicates", [False, True])
+@pytest.mark.parametrize("race", [False, True], ids=["alone", "with another writer"])
+def test_a_refused_reordered_append_leaves_the_next_batch_on_mains_commit(
+    tmp_path: Path, schema_handling: str, skip_duplicates: bool, race: bool
+) -> None:
+    """A reordered append the ITL-1334 check refuses (other field metadata) queues
+    nothing, and leaves nothing behind: the next aligned batch is committed as on
+    main, by append, also when another writer commits an unrelated id meanwhile."""
+    from deltalake import DeltaTable
+
+    db = DeltaTableDatabase(tmp_path)
+    kwargs: dict[str, Any] = {
+        "record_id_column": "rid",
+        "schema_handling": schema_handling,
+        "skip_duplicates": skip_duplicates,
+    }
+    db.add_records(PATH, _abc(1), flush=True, **kwargs)
+    bad = _abc(2, ("b", "rid", "a"))
+    bad = bad.set_column(
+        2, bad.schema.field("a").with_metadata({"units": "wrong"}), bad["a"]
+    )
+    with pytest.raises(InputValidationError):
+        db.add_records(PATH, bad, **kwargs)
+    if race:
+        snapshot = db._snapshot_for_commit
+
+        def interleave(*args: Any) -> Any:
+            taken = snapshot(*args)
+            DeltaTableDatabase(tmp_path).add_records(
+                PATH, _abc(3), flush=True, **kwargs
+            )
+            return taken
+
+        with patch.object(db, "_snapshot_for_commit", side_effect=interleave):
+            db.add_records(PATH, _abc(2), flush=True, **kwargs)
+    else:
+        db.add_records(PATH, _abc(2), flush=True, **kwargs)
+    assert DeltaTable(tmp_path / "t").history()[0]["operation"] == "WRITE"
+    table = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="rid")
+    assert table is not None
+    expected = [1, 2, 3] if race else [1, 2]
+    assert sorted(cast(list[int], table.column("a").to_pylist())) == [
+        10 * n for n in expected
+    ]
+
+
+@pytest.mark.parametrize("backend", ["in-memory", "Delta"])
+@pytest.mark.parametrize("stored", [False, True], ids=["pending", "committed"])
+def test_two_logical_types_over_one_storage_type_are_not_reordered(
+    tmp_path: Path, backend: str, stored: bool
+) -> None:
+    """Through the extension-aware wrapper, a column of one logical type held and a
+    permuted append of another logical type over the same storage type: not taken
+    for one, so refused as on main, never read back as the held logical type."""
+    from tests.test_databases.test_extension_aware_database import (
+        _make_converter_with_type,
+    )
+
+    one = _make_converter_with_type("test.itl1367.held")
+    two = _make_converter_with_type("test.itl1367.other")
+
+    def rows(n: int, pair: Any, order: list[str]) -> pa.Table:
+        text = pa.ExtensionArray.from_storage(
+            pair[1], pa.array([str(n)], pa.large_string())
+        )
+        return _abc(n).append_column(pa.field("text", pair[1]), text).select(order)
+
+    inner = (
+        InMemoryArrowDatabase()
+        if backend == "in-memory"
+        else DeltaTableDatabase(tmp_path / "delta")
+    )
+    ExtensionAwareDatabase(inner, one[0]).add_records(
+        PATH,
+        rows(1, one, ["rid", "a", "b", "text"]),
+        record_id_column="rid",
+        flush=stored,
+    )
+    with pytest.raises(Exception):  # noqa: B017, PT011  # main's own refusal, by backend
+        db2 = ExtensionAwareDatabase(inner, two[0])
+        db2.add_records(
+            PATH, rows(2, two, ["text", "b", "rid", "a"]), record_id_column="rid"
+        )
+        db2.flush()
+        inner.get_all_records(PATH, record_id_column="rid")
 
 
 # ── PostgreSQL (a live server: the PostgreSQL CI job) ──────────────────────────

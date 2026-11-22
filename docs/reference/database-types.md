@@ -83,13 +83,15 @@ as nullable afterwards, as Delta stores it.
 
 An append matches columns by name, exactly as Arrow matches them (`a` and `A` are two
 columns), never by position. Rows whose columns are the held table's columns in another
-order, each of the held type (a logical type compared by its storage type), are put in
-the held order (the rows still pending, else the stored table) by every database before
-they are queued and before the checks that compare them with the held columns (field
-attributes, declared nulls, schema compatibility), whether the table was flushed in
-between or not; the checks that look at the rows alone (a storable type, the record id)
-come first. Rows still queued are matched again, by name, to the stored table when they
-are read with it or written. A table keeps the column
+order, each of the held type and logical type (a logical type held as its storage type
+is compared by both), are put in the held order by every database, whether the table was
+flushed in between or not. The in-memory and Delta databases do it when the rows are
+queued (against the rows still pending, else the stored table), after the checks that
+look at the rows alone and before the checks that compare them with the held columns. A
+connector database (SQLite, PostgreSQL, SpiralDB) does it when the rows are queued only
+against rows it has pending, and against the stored table when it writes or reads them:
+the flush checks them against the table as it is then, by exact name and type, before
+putting them in its order. A table keeps the column
 order the database gave its first write: the first write's order, except in SpiralDB,
 which stores and reads a table's key columns first and then its other columns sorted by
 name, whatever the order written (measured on SpiralDB itself). An append that also

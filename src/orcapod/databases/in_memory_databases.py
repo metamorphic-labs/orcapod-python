@@ -266,9 +266,7 @@ class InMemoryArrowDatabase:
             held_table = self._tables.get(record_key)
         records = in_held_column_order(
             records,
-            None
-            if held_table is None
-            else [(f.name, f.type) for f in held_table.schema],
+            None if held_table is None else list(held_table.schema),
         )
         # The table holds one type per column: rows whose field metadata or nested
         # field attributes differ would read back with the held ones (ITL-1334).

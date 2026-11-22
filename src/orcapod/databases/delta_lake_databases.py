@@ -1784,8 +1784,8 @@ class DeltaTableDatabase:
 
     def _held_column_order(
         self, record_path: tuple[str, ...]
-    ) -> list[tuple[str, pa.DataType]] | None:
-        """Each column the table holds, with its type, in the held order (ITL-1367).
+    ) -> "list[pa.Field[Any]] | None":
+        """The columns the table holds, in the held order (ITL-1367).
 
         The pending batch's order when rows are pending, else the stored table's
         (its log; no data is read), else ``None``. A stored table that cannot be
@@ -1793,14 +1793,14 @@ class DeltaTableDatabase:
         """
         pending = self._pending_batches.get(self._get_record_key(record_path))
         if pending is not None:
-            return [(f.name, f.type) for f in pending.schema]
+            return list(pending.schema)
         try:
             delta_table = self._get_delta_table(record_path)
         except OrcapodDatabaseReadError:
             return None
         if delta_table is None:
             return None
-        return [(name, f.type) for name, f in _held_columns(delta_table).items()]
+        return list(_held_columns(delta_table).values())
 
     def _refuse_untyped_null_columns(
         self, record_path: tuple[str, ...], schema: pa.Schema
@@ -1930,8 +1930,7 @@ class DeltaTableDatabase:
         filtered_table = in_held_column_order(
             filtered_table, self._held_column_order(record_path)
         )
-        if filtered_table.column_names != given_order:
-            self._reordered_keys.add(self._get_record_key(record_path))
+        reordered = filtered_table.column_names != given_order
 
         # Step 4: the rows' field attributes, compared as given: a merge or a
         # coercion casts them to the pending batch's schema, which would give them
@@ -1955,8 +1954,12 @@ class DeltaTableDatabase:
             self._refuse_unmergeable_append(record_path, staged_pending, staged_pending)
             self._pending_batches[self._get_record_key(record_path)] = staged_pending
 
-        # Step 7: Add to pending batch (no overwrite logic needed)
+        # Step 7: Add to pending batch (no overwrite logic needed). The MERGE marker
+        # is set only now, for rows actually queued: rows refused above leave no
+        # trace, and the marker leaves with the rows (flush, refusal at commit).
         self._add_to_pending_batch(record_path, schema_compatible_table)
+        if reordered:
+            self._reordered_keys.add(self._get_record_key(record_path))
 
         # Step 8: Flush if asked to; otherwise commit this table alone once its
         # pending batch reaches batch_size. Only the full table: committing every

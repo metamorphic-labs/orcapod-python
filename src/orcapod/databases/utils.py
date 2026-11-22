@@ -204,29 +204,32 @@ def first_changed_column(
 
 
 def in_held_column_order(
-    records: "pa.Table", held: "Sequence[tuple[str, pa.DataType]] | None"
+    records: "pa.Table", held: "Sequence[pa.Field[Any]] | None"
 ) -> "pa.Table":
     """``records`` with its columns in the order the database holds them (ITL-1367).
 
     An append matches columns by name, never by position: when ``records`` has
-    exactly the held columns in another order, each with the held type, its columns
-    are put in the held order, so every database stores and buffers them as the
-    table already has them, and the table keeps the order of its first write. The
-    fields are kept as given (metadata, nullability): the append checks that follow
-    compare them by name.
+    exactly the held columns in another order, each of the held column's type and
+    logical type, its columns are put in the held order, so every database stores
+    and buffers them as the table already has them, and the table keeps the order of
+    its first write. The fields are kept as given (metadata, nullability): the append
+    checks that follow compare them by name.
 
-    Types are compared as the database compares them: a logical (extension) type as
-    its storage type, in the large variants. Anything else is returned as given, for
-    the database's own append rule: no held table, a column added or missing, a type
-    that differs (a struct whose children are in another order included: its type
-    differs; ITL-1368), and a name that repeats exactly. Names are matched exactly, as
-    Arrow matches them: ``a`` and ``A`` are two columns.
+    A type is compared as the database compares it: a logical (extension) type as
+    its storage type, in the large variants; and the logical identity must be the
+    same too (``_logical_identity``: an extension type's name and metadata, or the
+    ``ARROW:extension`` annotation of a field stored as its storage type), so two
+    logical types over one storage type are never taken for one. Anything else is
+    returned as given, for the database's own append rule: no held table, a column
+    added or missing, a type or logical type that differs (a struct whose children
+    are in another order included: its type differs; ITL-1368), and a name that
+    repeats exactly. Names are matched exactly, as Arrow matches them: ``a`` and
+    ``A`` are two columns.
 
     Args:
         records: The rows to append, the record id column already named as held.
-        held: Each held column's name and type, in the held order (the pending
-            batch, else the stored table), or ``None`` when the database holds no
-            such table.
+        held: The held columns, in the held order (the pending batch, else the
+            stored table), or ``None`` when the database holds no such table.
 
     Returns:
         ``records``, reordered or as given.
@@ -234,7 +237,7 @@ def in_held_column_order(
     if held is None:
         return records
     names = records.column_names
-    held_names = [name for name, _ in held]
+    held_names = [field.name for field in held]
     if names == held_names:
         return records
     # Arrow matches names exactly: ``a`` and ``A`` are two columns. Only a name that
@@ -243,11 +246,35 @@ def in_held_column_order(
         return records
     if set(names) != set(held_names):
         return records
-    held_types = dict(held)
+    held_fields = {field.name: field for field in held}
     for field in records.schema:
-        if _stored_form(field.type) != _stored_form(held_types[field.name]):
+        given = held_fields[field.name]
+        if _stored_form(field.type) != _stored_form(given.type):
+            return records
+        if _logical_identity(field) != _logical_identity(given):
             return records
     return records.select(held_names)
+
+
+_EXTENSION_NAME = b"ARROW:extension:name"
+_EXTENSION_METADATA = b"ARROW:extension:metadata"
+
+
+def _logical_identity(field: "pa.Field[Any]") -> tuple[bytes, bytes] | None:
+    """The logical type a column holds: an extension type's name and metadata, or
+    the ``ARROW:extension`` annotation of a field held as its storage type (a stored
+    Delta column, a column the extension-aware wrapper encoded); ``None`` for a plain
+    column."""
+    if isinstance(field.type, pa.ExtensionType):
+        return (
+            field.type.extension_name.encode(),
+            field.type.__arrow_ext_serialize__(),
+        )
+    metadata = metadata_bytes(field.metadata)
+    name = metadata.get(_EXTENSION_NAME)
+    if name is None:
+        return None
+    return name, metadata.get(_EXTENSION_METADATA, b"")
 
 
 def _stored_form(arrow_type: "pa.DataType") -> "pa.DataType":
