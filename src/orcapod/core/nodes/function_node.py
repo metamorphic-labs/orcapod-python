@@ -3406,6 +3406,10 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 stored_rows - taginfo.num_rows,
             )
 
+        # Presented in the node's layout, whatever order the tables are stored in
+        # (ITL-1370).
+        layout = self._presented_layout()
+        taginfo = arrow_utils.in_presented_order(taginfo, layout)
         taginfo_columns = tuple(taginfo.column_names)
         taginfo_schema = taginfo.schema
         data_tags = self._stored_data_tags(taginfo_schema)
@@ -3608,6 +3612,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 else (taginfo_schema, results_schema)
             ),
         )
+        joined = arrow_utils.in_presented_order(joined, layout)
         # In memory, each row names its data context in the datagram context column.
         joined = joined.append_column(
             pa.field(constants.CONTEXT_KEY, pa.large_string(), nullable=False),
@@ -3660,6 +3665,28 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 "node's pipeline; nothing was read."
             )
         return expected
+
+    def _presented_layout(self) -> list[str]:
+        """The columns of this node's rows in the order it presents them (ITL-1370).
+
+        Its zero-row table (tags, system tags, data, context, source info) when its
+        input can say it; a loaded node's saved tags and data, each data column
+        followed by nothing else. Stored rows are put in this order on read, then
+        every other column by name (``arrow_utils.in_presented_order``), so what the
+        node presents never follows the stored order.
+        """
+        if self._input_stream is not None:
+            zero = self._zero_row_output_table()
+            if zero is not None:
+                return zero.column_names
+        if self._function_pod is None:
+            tags, data = self.keys()
+            return [
+                *tags,
+                *data,
+                *(f"{constants.SOURCE_PREFIX}{name}" for name in data),
+            ]
+        return []
 
     def _stored_tag_keys(self, fetched: _JoinedRecords) -> tuple[str, ...]:
         """Return the user tag columns of the records in *fetched*.

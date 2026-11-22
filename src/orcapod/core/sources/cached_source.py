@@ -39,7 +39,7 @@ from orcapod.protocols.core_protocols import DataProtocol, SourceProtocol, TagPr
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.system_constants import SOURCE_DB_SCHEMA_VERSION, constants
 from orcapod.types import ColumnConfig, Schema
-from orcapod.utils import schema_utils
+from orcapod.utils import arrow_utils, schema_utils
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -524,8 +524,11 @@ class CachedSource(RootSource):
                 for h in stored.column(self.HASH_COLUMN_NAME).to_pylist()
                 if h is not None
             }
-            all_records = stored.drop(
-                [self.HASH_COLUMN_NAME, constants.DATA_CONTEXT_COL]
+            # Presented in the wrapped source's layout, whatever order the cache
+            # table is stored in (ITL-1370).
+            all_records = arrow_utils.in_presented_order(
+                stored.drop([self.HASH_COLUMN_NAME, constants.DATA_CONTEXT_COL]),
+                self._empty_table().column_names,
             )
 
         tag_keys = self._source.keys()[0]

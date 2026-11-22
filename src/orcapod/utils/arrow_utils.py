@@ -695,6 +695,52 @@ def column_arrow_type(schema: pa.Schema, name: str) -> pa.DataType:
     return schema.types[index]
 
 
+def presented_column_order(
+    names: "Sequence[str]", reference: "Sequence[str]"
+) -> list[str]:
+    """The order a reader presents stored columns in, whatever order they are stored
+    in (ITL-1370).
+
+    The names ``reference`` lists, in its order (the reader's own layout: the zero-row
+    table of the source or node it presents, or the columns its writer builds), then
+    every other name, sorted by name. A stored table's column order is the database's
+    (a new table is stored in the canonical order, an older one in the order it was
+    first written), so nothing a user sees may follow it: every reader of stored rows
+    puts them in this order (``in_presented_order``).
+
+    Args:
+        names: The columns read.
+        reference: The reader's layout; names it lists that were not read are skipped.
+
+    Returns:
+        ``names``, reordered.
+    """
+    held = set(names)
+    leading = [name for name in dict.fromkeys(reference) if name in held]
+    placed = set(leading)
+    return leading + sorted(name for name in names if name not in placed)
+
+
+def in_presented_order(table: "pa.Table", reference: "Sequence[str]") -> "pa.Table":
+    """``table`` (stored rows as read) with its columns in ``presented_column_order``.
+
+    The one helper every reader of stored rows uses, so a table stored in the
+    canonical order and one stored in an older order present identically (ITL-1370).
+    Only the order changes: no column is added, dropped, renamed or retyped.
+
+    Args:
+        table: Rows read from a database.
+        reference: The reader's layout.
+
+    Returns:
+        ``table``, its columns reordered (``table`` itself when already in order).
+    """
+    order = presented_column_order(table.column_names, reference)
+    if order == table.column_names:
+        return table
+    return table.select(order)
+
+
 def concat_tables_by_name(tables: "Sequence[pa.Table]") -> "pa.Table":
     """Vertically concatenate tables, matching columns by name rather than position.
 

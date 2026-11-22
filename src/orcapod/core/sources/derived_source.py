@@ -34,7 +34,7 @@ from orcapod.core.streams.base import (
 from orcapod.errors import InputValidationError
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
-from orcapod.utils import schema_utils
+from orcapod.utils import arrow_utils, schema_utils
 from orcapod.utils.lazy_module import LazyModule
 from orcapod.utils.provisional import provisional_class_name
 
@@ -487,7 +487,15 @@ class DerivedSource(RootSource):
             )
         records = without_tag_kind_marks(records)
         self._require_origin_types(records)
-        return records
+        # The origin's layout first, whatever order its tables are stored in: a node
+        # presents its rows so already, and this keeps a derived source's columns
+        # in the origin's order for any origin (ITL-1370).
+        layout = self._empty_origin_table().column_names
+        data = self._origin.keys()[1]
+        return arrow_utils.in_presented_order(
+            records,
+            [*layout, *(f"{constants.SOURCE_PREFIX}{name}" for name in data)],
+        )
 
     def _require_origin_types(self, records: "pa.Table") -> None:
         """Refuse stored rows whose Arrow types are not the origin's (ITL-640).

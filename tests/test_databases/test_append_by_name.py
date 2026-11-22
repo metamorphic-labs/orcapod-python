@@ -14,13 +14,15 @@ import os
 import sqlite3
 import uuid
 from collections.abc import Iterator
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 import pyarrow as pa
 import pytest
+
+import orcapod.databases.utils as database_utils
 
 from orcapod.databases import (
     ConnectorArrowDatabase,
@@ -66,16 +68,34 @@ def _rows(order: list[str], ns: list[int]) -> pa.Table:
     )
 
 
-def _given_order(database: str, first: list[str], stored: bool = True) -> list[str]:
+GENERATIONS = ("canonical", "before ITL-1370")
+
+
+def _first_write(generation: str) -> Any:
+    """The context a table's first write is made in: today's (the canonical order,
+    ITL-1370), or as before ITL-1370 (the order written), which a store may still
+    hold; the shared step's canonical order is switched off for that write."""
+    if generation == "canonical":
+        return nullcontext()
+    return patch.object(
+        database_utils, "canonical_column_order", lambda records, record_id: records
+    )
+
+
+def _given_order(
+    database: str, first: list[str], generation: str = "canonical", stored: bool = True
+) -> list[str]:
     """The order a database gives a table first written in ``first``.
 
-    The first write's order, except in SpiralDB once rows are stored: SpiralDB
-    stores and reads a table's columns in its own order, the key columns, then the
-    value columns sorted by name, whatever the order written (observed live,
-    ITL-1367; its fake does the same). Rows still pending keep the first write's.
+    A new table is written in the canonical order, the record id then every other
+    column by name (ITL-1370); a table written before ITL-1370 keeps the order of its
+    first write. SpiralDB stores and reads every table in its own order, the key
+    columns then the value columns by name, whatever the order written (observed
+    live, ITL-1367; its fake does the same): the canonical order.
     """
-    if database == "SpiralDB" and stored:
-        return [ID, *sorted(n for n in first if n != ID)]
+    canonical = [ID, *sorted(n for n in first if n != ID)]
+    if generation == "canonical" or (database == "SpiralDB" and stored):
+        return canonical
     return first
 
 
@@ -95,24 +115,28 @@ def _add(db: Any, table: pa.Table, flush: bool = False) -> None:
 @pytest.mark.parametrize("first", FIRST_ORDERS)
 @pytest.mark.parametrize("second", SECOND_ORDERS)
 @pytest.mark.parametrize("when", ["after a flush", "same pending batch"])
+@pytest.mark.parametrize("generation", GENERATIONS)
 def test_an_append_in_another_order_is_matched_by_name(
-    tmp_path: Path, database: str, first: str, second: str, when: str
+    tmp_path: Path, database: str, first: str, second: str, when: str, generation: str
 ) -> None:
     first_order, second_order = FIRST_ORDERS[first], SECOND_ORDERS[second]
     with ExitStack() as stack:
         db = stack.enter_context(open_database(database, tmp_path))
-        _add(db, _rows(first_order, [1, 2]), flush=when == "after a flush")
+        with _first_write(generation):
+            _add(db, _rows(first_order, [1, 2]), flush=when == "after a flush")
         _add(db, _rows(second_order, [3, 4]))
         # Before the flush: the pending rows (and the stored ones) read by name.
         _check(
             db.get_all_records(PATH, record_id_column=ID),
-            _given_order(database, first_order, stored=when == "after a flush"),
+            _given_order(
+                database, first_order, generation, stored=when == "after a flush"
+            ),
             [1, 2, 3, 4],
         )
         db.flush()
         _check(
             db.get_all_records(PATH, record_id_column=ID),
-            _given_order(database, first_order),
+            _given_order(database, first_order, generation),
             [1, 2, 3, 4],
         )
 
@@ -120,11 +144,14 @@ def test_an_append_in_another_order_is_matched_by_name(
 @pytest.mark.parametrize("database", DURABLE)
 @pytest.mark.parametrize("first", FIRST_ORDERS)
 @pytest.mark.parametrize("second", SECOND_ORDERS)
+@pytest.mark.parametrize("generation", GENERATIONS)
 def test_an_append_in_another_order_after_reopening_is_matched_by_name(
-    tmp_path: Path, database: str, first: str, second: str
+    tmp_path: Path, database: str, first: str, second: str, generation: str
 ) -> None:
+    """A store written before ITL-1370 (or after) is reopened by today's code: an
+    old-order table keeps its order and takes appends in any order (ITL-1367)."""
     first_order, second_order = FIRST_ORDERS[first], SECOND_ORDERS[second]
-    with open_database(database, tmp_path) as db:
+    with open_database(database, tmp_path) as db, _first_write(generation):
         _add(db, _rows(first_order, [1, 2]), flush=True)
     with open_database(database, tmp_path) as db:
         _add(db, _rows(second_order, [3, 4]))
@@ -133,17 +160,17 @@ def test_an_append_in_another_order_after_reopening_is_matched_by_name(
     with open_database(database, tmp_path) as db:
         _check(
             db.get_all_records(PATH, record_id_column=ID),
-            _given_order(database, first_order),
+            _given_order(database, first_order, generation),
             [1, 2, 3, 4, 5],
         )
 
 
 @pytest.mark.parametrize("database", DATABASES)
-def test_a_new_table_keeps_the_order_the_database_gave_its_first_write(
+def test_a_new_table_is_written_in_the_canonical_order(
     tmp_path: Path, database: str
 ) -> None:
-    """The first write's order is kept, whichever order it is; nothing is sorted by
-    Orcapod (SpiralDB orders a table's columns its own way)."""
+    """A new table is the record id, then every other column by name (ITL-1370),
+    whatever order its first write has, in every database."""
     with open_database(database, tmp_path) as db:
         for n, order in enumerate([["c", "b", "a", ID], [ID, "a", "b", "c"]]):
             path = (f"t{n}",)
@@ -209,7 +236,8 @@ def test_a_table_created_again_in_another_order_is_read_as_it_is_now(
         with sqlite3.connect(tmp_path / "store.db") as other:
             other.execute('DROP TABLE "t"')
         other_db = ConnectorArrowDatabase(SQLiteConnector(str(tmp_path / "store.db")))
-        _add(other_db, _rows(["b", ID, "c", "a"], [3]), flush=True)
+        with _first_write("before ITL-1370"):  # created again, another order
+            _add(other_db, _rows(["b", ID, "c", "a"], [3]), flush=True)
         _add(db, _rows([ID, "a", "c", "b"], [4]), flush=True)
         _check(
             db.get_all_records(PATH, record_id_column=ID),
@@ -230,7 +258,8 @@ def test_rows_queued_before_a_table_is_created_again_are_read_with_it_by_name(
         with sqlite3.connect(tmp_path / "store.db") as other:
             other.execute('DROP TABLE "t"')
         other_db = ConnectorArrowDatabase(SQLiteConnector(str(tmp_path / "store.db")))
-        _add(other_db, _rows(["b", ID, "c", "a"], [3]), flush=True)
+        with _first_write("before ITL-1370"):  # created again, another order
+            _add(other_db, _rows(["b", ID, "c", "a"], [3]), flush=True)
         _check(
             db.get_all_records(PATH, record_id_column=ID), ["b", ID, "c", "a"], [2, 3]
         )
@@ -273,7 +302,7 @@ def _table(*names: str) -> pa.Table:
 
 def test_the_step_reorders_the_held_columns_by_name() -> None:
     given = _table("c", "a", "b")
-    out = in_held_column_order(given, _held("a", "b", "c"))
+    out = in_held_column_order(given, _held("a", "b", "c"), "rid")
     assert out.column_names == ["a", "b", "c"]
     assert out.to_pylist() == [{"a": 1, "b": 2, "c": 0}]
 
@@ -285,13 +314,13 @@ def test_the_step_keeps_the_given_fields() -> None:
         [pa.array([1], pa.int64()), pa.array([2], pa.int64())],
         schema=pa.schema([field, pa.field("a", pa.int64())]),
     )
-    out = in_held_column_order(given, _held("a", "c"))
+    out = in_held_column_order(given, _held("a", "c"), "rid")
     assert out.schema.field("c").equals(field, check_metadata=True)
 
 
 def test_the_step_matches_names_exactly() -> None:
     """``a`` and ``A`` are two columns, as Arrow matches names exactly."""
-    out = in_held_column_order(_table("A", "a", "c"), _held("a", "c", "A"))
+    out = in_held_column_order(_table("A", "a", "c"), _held("a", "c", "A"), "rid")
     assert out.column_names == ["a", "c", "A"]
     assert out.to_pylist() == [{"A": 0, "a": 1, "c": 2}]
 
@@ -305,13 +334,15 @@ def test_the_step_compares_a_logical_type_by_its_storage() -> None:
     _, ext_type = _make_converter_with_type("test.itl1367.storage")
     text = pa.ExtensionArray.from_storage(ext_type, pa.array(["x"], pa.large_string()))
     given = pa.table({"text": text, "a": [1]})
-    out = in_held_column_order(given, [("a", pa.int64()), ("text", pa.string())])
+    out = in_held_column_order(given, [("a", pa.int64()), ("text", pa.string())], "rid")
     assert out.column_names == ["a", "text"]
 
 
 def test_the_step_compares_types_in_their_large_variants() -> None:
     given = pa.table({"b": pa.array(["x"], pa.string()), "a": [1]})
-    out = in_held_column_order(given, [("a", pa.int64()), ("b", pa.large_string())])
+    out = in_held_column_order(
+        given, [("a", pa.int64()), ("b", pa.large_string())], "rid"
+    )
     assert out.column_names == ["a", "b"]
 
 
@@ -349,7 +380,7 @@ def test_the_step_compares_types_in_their_large_variants() -> None:
 def test_the_step_leaves_anything_else_as_given(
     given: pa.Table, held: list[tuple[str, Any]] | None
 ) -> None:
-    assert in_held_column_order(given, held) is given
+    assert in_held_column_order(given, held, "rid") is given
 
 
 @pytest.mark.parametrize("database", ["in-memory", "Delta"])
@@ -528,7 +559,7 @@ def test_an_aligned_append_looks_the_stored_table_up_once(tmp_path: Path) -> Non
         db.flush()
         assert (names.call_count, info.call_count) == (2, 2)
     _check(
-        db.get_all_records(PATH, record_id_column=ID), [ID, "a", "c", "b"], [1, 2, 3]
+        db.get_all_records(PATH, record_id_column=ID), [ID, "a", "b", "c"], [1, 2, 3]
     )
 
 

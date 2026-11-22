@@ -1923,9 +1923,10 @@ class DeltaTableDatabase:
 
         # Columns match by name: rows with the held columns in another order are
         # put in the held order (ITL-1367); a new table is written in the
-        # canonical order (ITL-1370). Looked up only for rows that will be queued. A table whose rows were reordered is committed by MERGE, as main
-        # commits rows that are not in the stored layout: insert-if-missing against
-        # the version the commit loads, never a blind append.
+        # canonical order (ITL-1370). Looked up only for rows that will be queued.
+        # A table whose rows were reordered is committed by MERGE, as main commits
+        # rows that are not in the stored layout: insert-if-missing against the
+        # version the commit loads, never a blind append.
         given_order = filtered_table.column_names
         filtered_table = in_held_column_order(
             filtered_table, self._held_column_order(record_path), self.RECORD_ID_COLUMN

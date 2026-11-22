@@ -10,9 +10,10 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timezone
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from orcapod.core.data_function_types import StoredColumn
+from orcapod.core.data_function_types import DataFunctionTypeDeclaration, StoredColumn
 from orcapod.errors import OrcapodDatabaseReadError, OrcapodDatabaseWriteError
 from orcapod.hashing.arrow_hashers import ARROW_HASH_LABEL
 from orcapod.contexts.stored import (
@@ -30,6 +31,7 @@ from orcapod.system_constants import (
     RESULT_DB_SCHEMA_VERSION,
     constants,
 )
+from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -85,6 +87,35 @@ data function type's own columns (``pf_var_*``, ``pf_exec_*``) are declared by t
 """
 
 
+def result_table_layout(
+    declaration: "DataFunctionTypeDeclaration", output_keys: "Sequence[str]"
+) -> tuple[str, ...]:
+    """The columns of a result table in the order they are presented (ITL-1370).
+
+    The record id, the input data hash, the declared variation and execution
+    columns in declaration order, the outputs in declared order, their source-info
+    columns, the timestamp: the order ``ResultCache.store`` builds a row in. A stored
+    result table is in its database's order; ``get_all_records`` presents it in this
+    one.
+
+    Args:
+        declaration: The data function type's declaration.
+        output_keys: The function's output names, in declared order.
+
+    Returns:
+        The column names.
+    """
+    return (
+        constants.DATA_RECORD_ID,
+        constants.INPUT_DATA_HASH_COL,
+        *(f"{constants.PF_VARIATION_PREFIX}{c.name}" for c in declaration.variation),
+        *(f"{constants.PF_EXECUTION_PREFIX}{c.name}" for c in declaration.execution),
+        *output_keys,
+        *(f"{constants.SOURCE_PREFIX}{key}" for key in output_keys),
+        constants.POD_TIMESTAMP,
+    )
+
+
 class ResultCache:
     """Shared result caching backed by an ``ArrowDatabaseProtocol``.
 
@@ -114,6 +145,7 @@ class ResultCache:
         auto_flush: bool = True,
         delivers_side_effects: bool = False,
         name_path: tuple[str, ...] | None = None,
+        layout: "Sequence[str]" = (),
     ) -> None:
         """Create a result cache over one result table.
 
@@ -133,6 +165,9 @@ class ResultCache:
                 the part that holds no hash. Result tables written before v0.3 are
                 looked for under it, whatever hashes their paths hold (ITL-954).
                 ``None`` looks at the paths computed from ``record_path`` only.
+            layout: The result table's columns in the order ``get_all_records``
+                presents them (``result_table_layout``), whatever order the table is
+                stored in (ITL-1370); other columns follow by name.
         """
         self._result_database = result_database
         self._record_path = record_path
@@ -140,6 +175,7 @@ class ResultCache:
         self._auto_flush = auto_flush
         self._delivers_side_effects = delivers_side_effects
         self._name_path = name_path
+        self._layout = tuple(layout)
         # Set once a read has reported the stored rows it skipped.
         self._skipped_rows_reported = False
         # Set once stored results of other generations have been accounted for.
@@ -439,4 +475,6 @@ class ResultCache:
             )
         if result_table.num_rows == 0:
             return None
-        return result_table.drop([constants.DATA_CONTEXT_COL])
+        return arrow_utils.in_presented_order(
+            result_table.drop([constants.DATA_CONTEXT_COL]), self._layout
+        )
