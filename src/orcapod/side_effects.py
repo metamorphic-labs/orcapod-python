@@ -1335,6 +1335,14 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
         """
         yield from self._current_rows() or ()
 
+    def held_row_count(self) -> int:
+        """The number of rows the last run of this node passed on (``iter_data``'s count).
+
+        Returns:
+            The row count; 0 with no rows from a completed run, as ``iter_data``.
+        """
+        return len(self._current_rows() or ())
+
     @override
     def head(
         self,

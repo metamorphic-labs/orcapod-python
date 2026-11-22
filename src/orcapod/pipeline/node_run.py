@@ -343,7 +343,9 @@ def plan_run(graph: Any, *, load_only: bool, outside: Sequence[Any] = ()) -> Run
         for node in included
         if not any(node is r for r in to_run) and not is_source(node)
     }
-    held_counts = {node: sum(1 for _ in node.iter_data()) for node in current}
+    # Counted from what each node holds: iterating an operator's rows would build a
+    # (Tag, Data) pair per row only to count them (ITL-1351).
+    held_counts = {node: node.held_row_count() for node in current}
     return RunPlan(dag, held_rows, to_run, held_counts)
 
 
