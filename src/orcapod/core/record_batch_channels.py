@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from collections.abc import AsyncIterator
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -569,10 +569,13 @@ def _holds_only_nulls(array: pa.Array[Any], declared: pa.DataType) -> bool:  # p
         # The values of the non-null lists of the slice, in order.
         values = pc.list_flatten(array)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
         if isinstance(declared, pa.MapType):
-            return _holds_only_nulls(
-                values.field(0),
-                declared.key_type,  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
-            ) and _holds_only_nulls(values.field(1), declared.item_type)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+            keys, items = cast(
+                "pa.StructArray", cast(object, values)
+            ).flatten()  # list_flatten of entries is a struct array
+            return _holds_only_nulls(keys, declared.key_type) and _holds_only_nulls(  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+                items,
+                declared.item_type,  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+            )
         return _holds_only_nulls(values, declared.value_type)  # pyright: ignore[reportUnknownArgumentType]
     if isinstance(declared, pa.StructType):
         # Each child with the struct's validity applied, for the slice's rows.

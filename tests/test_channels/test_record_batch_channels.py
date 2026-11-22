@@ -655,7 +655,7 @@ def test_nulls_are_judged_on_the_values_sent() -> None:
         fields=[carried.field(0)],
         mask=pa.array([True, False]),
     )
-    assert masked.to_pylist() == [None, {"a": None}]
+    assert masked.to_pylist() == [None, {"a": None}]  # pyright: ignore[reportAttributeAccessIssue]  # the stubs omit it
     buffered = batch.set_column(index, batch.schema.field(index), masked)
 
     async def write() -> None:
@@ -681,7 +681,7 @@ def test_nulls_are_judged_on_the_values_sent() -> None:
 class _UntypedStream(ArrowTableStream):
     """A stream that cannot say its Arrow types without rows."""
 
-    def _typed_zero_row_table(self) -> pa.Table | None:
+    def _typed_zero_row_table(self) -> pa.Table | None:  # pyright: ignore[reportIncompatibleMethodOverride]  # a kind that cannot type itself without rows
         return None
 
 
