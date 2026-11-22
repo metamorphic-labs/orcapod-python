@@ -938,6 +938,42 @@ def test_a_surplus_repeat_matches_nothing_and_warns_for_no_column() -> None:
     assert len(warned) == 1 and "tag 'k'" in warned[0]
 
 
+def test_repeats_and_three_inputs_are_paired_in_the_canonical_order() -> None:
+    """With repeated origin rows and three inputs, the inputs are paired one after
+    another in Rejoin's canonical order, and a surplus repeat left out at one step is
+    not considered again. ``A`` holds one origin row twice (``k`` = 1 and 2), ``B``
+    once without ``k``, ``C`` once with ``k`` = 2. When ``A`` and ``B`` are put
+    together before ``C`` is met, ``B`` takes ``A``'s first row and ``C`` then matches
+    nothing; otherwise ``A``'s second row is put together with ``C`` and ``B``. The
+    result follows that order (by pipeline hash), never the order of the arguments."""
+
+    def branch(data: str, k: list[int] | None, n: int) -> ArrowTableStream:
+        columns: dict[str, Any] = {} if k is None else {"k": pa.array(k, pa.int64())}
+        columns |= {
+            "g": pa.array([7] * n, pa.int64()),
+            data: pa.array(range(n), pa.int64()),
+            "origin": pa.array(["r"] * n, pa.large_string()),
+        }
+        return ArrowTableStream(
+            pa.table(columns),
+            tag_columns=[name for name in ("k", "g") if name in columns],
+            system_tag_columns=["origin"],
+        )
+
+    inputs = {
+        "A": branch("a", [1, 2], 2),
+        "B": branch("b", None, 1),
+        "C": branch("c", [2], 1),
+    }
+    canonical = sorted(inputs, key=lambda name: inputs[name].pipeline_hash().to_hex())
+    assert len({stream.pipeline_hash() for stream in inputs.values()}) == 3
+    expected = [] if canonical[2] == "C" else [{"k": 2, "g": 7, "a": 1, "b": 0, "c": 0}]
+    for order in itertools.permutations(inputs.values()):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RejoinDifferingColumnWarning)
+            assert Rejoin()(*order).as_table().to_pylist() == expected
+
+
 # ---------------------------------------------------------------------------
 # Equality is Join's; a shared column keeps the first input's values
 # ---------------------------------------------------------------------------
@@ -1228,7 +1264,9 @@ def test_rows_of_different_data_contexts_match_nothing(
 
 def test_rows_keep_their_own_data_context(other_context: contexts.DataContext) -> None:
     """Inputs holding rows of two data contexts: the rows whose contexts agree are put
-    together, each keeping its own in the data context column."""
+    together, each keeping its own in the data context column of the result's table.
+    The rows the result yields one by one report the stream's one data context, as
+    those of any stream whose table holds rows of several do (the inputs here too)."""
     default = contexts.get_default_context().context_key
 
     def mixed(keys: list[str], data: str) -> ArrowTableStream:
@@ -1258,3 +1296,16 @@ def test_rows_keep_their_own_data_context(other_context: contexts.DataContext) -
         )
         assert rows == {1: OTHER_CONTEXT, 2: default}
         assert len(warned) == 1 and "the data context" in warned[0]
+        # The stream reports one data context, the first key in text order, and the
+        # rows it yields one by one report that one.
+        assert result.data_context_key == min(OTHER_CONTEXT, default)
+        assert [data.data_context_key for _, data in result.iter_data()] == (
+            [result.data_context_key] * 2
+        )
+    # So does any stream whose table holds rows of several data contexts.
+    assert a.as_table(columns={"context": True}).column(
+        constants.CONTEXT_KEY
+    ).to_pylist() == [OTHER_CONTEXT, default, OTHER_CONTEXT]
+    assert [data.data_context_key for _, data in a.iter_data()] == (
+        [a.data_context_key] * 3
+    )

@@ -233,16 +233,20 @@ The rules:
   The warning is narrower for such rows: it compares the repeats of an origin row by
   occurrence (the first of one input with the first of another), and a surplus repeat, one
   more than another input holds, matches nothing whatever its values and is never compared,
-  so no warning names a column for it.
+  so no warning names a column for it. With three or more inputs, the inputs are paired one
+  after another in their canonical order, and a surplus repeat left out at one step is not
+  considered again at a later one, so which repeats remain can depend on that order.
 - **The first input's values.** A shared column is kept once, with the values of the first
   input that has it. Rejoin takes its inputs in a canonical order, by pipeline hash, so the
   result does not follow the order of the arguments; inputs with equal pipeline hashes (two
-  branches of the same structure) stay in argument order. Only the bits of values that are
-  equal but not identical (`-0.0` and `0.0`, NaNs of different payloads) can follow it: no
-  row, hash or identity does. A tag of one input only is kept.
+  branches of the same structure) stay in argument order. With unique system tags only the
+  bits of values that are equal but not identical (`-0.0` and `0.0`, NaNs of different
+  payloads) can follow it: no row, hash or identity does. A tag of one input only is kept.
 - **Data contexts.** The data context is one of the shared columns: rows of different data
-  contexts match nothing, and each result row keeps its own. Only the default data context
-  ships, so this matters only for a stream built in another one. A known limitation
+  contexts match nothing. Each result row keeps its own in the data context column of the
+  result's table. A stream reports one data context, and so do the rows it yields one by
+  one (`iter_data`), as for any stream whose table holds rows of several (ITL-1359). Only the default
+  data context ships, so this matters only for a stream built in another one. A known limitation
   (ITL-1339): some operators (`PolarsFilter` and `MergeJoin`, likely `Join` and
   `SemiJoin` too) return their rows in the default data context whatever their input's,
   so in another data context the rows of a branch through one of them match nothing

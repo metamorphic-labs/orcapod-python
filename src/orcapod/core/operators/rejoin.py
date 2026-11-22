@@ -160,7 +160,9 @@ def _pairs_of_repeated_origins(
     the first of one input pairs with the first of the other, the second with the
     second, and so on in row order (the order the rows arrived in, on the async path);
     a row left over matches nothing. The work is linear in the rows: no pair is ever
-    made that is not kept.
+    made that is not kept. A row left over here is not considered again when a later
+    input is rejoined, so with three or more inputs the repeats that remain can depend
+    on the order in which the inputs are taken.
 
     Args:
         left: The rows rejoined so far.
@@ -307,15 +309,21 @@ class Rejoin(Join):
     compares the repeats of an origin row by occurrence (the first of one input with
     the first of another, the second with the second), and a surplus repeat, one more
     than another input holds, matches nothing whatever its values and is never
-    compared, so no warning names a column for it.
+    compared, so no warning names a column for it. With three or more inputs, the
+    inputs are paired one after another in their canonical order, and a surplus repeat
+    left out at one step is not considered again at a later one: which repeats remain
+    can then depend on that order.
 
     A shared column is kept once, with the values of the first input that has it. The
     inputs are taken in a canonical order, by pipeline hash, so the result does not
     follow the order of the arguments; inputs with equal pipeline hashes (two branches
-    of the same structure) stay in argument order. Only the bits of values that are
-    equal but not identical (``-0.0`` and ``0.0``, NaNs of different payloads) can
-    follow it; no row, hash or identity does. A tag of one input is kept. The result
-    keeps the common system-tag columns unchanged, and its rows' data context.
+    of the same structure) stay in argument order. With unique system tags only the
+    bits of values that are equal but not identical (``-0.0`` and ``0.0``, NaNs of
+    different payloads) can follow it; no row, hash or identity does. A tag of one
+    input is kept. The result keeps the common system-tag columns unchanged. Each row
+    keeps its own data context in the data context column of the result's table; like
+    any stream, the result reports one data context, and so do the rows it yields one
+    by one (``iter_data``), also when its table holds rows of several.
 
     Inputs from two different sources with the same schema share their system-tag column
     names but no value: their rejoin is empty, not an error. To combine different rows
@@ -482,8 +490,11 @@ class Rejoin(Join):
         operator's lazy stream reports its pod's context, ITL-1339). Matched rows are
         of one data context each, so a result usually has one; with no result row it is
         the inputs' rows' own. Should rows of several remain (inputs that each hold rows
-        of several data contexts), the stream takes the first key in text order: every
-        row still carries its own in the data context column.
+        of several data contexts), the stream takes the first key in text order. Every
+        row still carries its own in the data context column of the table; the rows
+        the stream yields one by one report the stream's, as those of any stream that
+        holds rows of several data contexts do (``ArrowTableStream.iter_data``,
+        ITL-1359).
 
         Args:
             result: The rejoined rows.
