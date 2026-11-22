@@ -1353,13 +1353,13 @@ data. The rules:
   description: an input channel refers to its stream (`channel_from_stream(stream)`), an
   output channel to the stream it produces, and `OutputChannel.result()` closes it into that
   stream. The conversions are in one place, `core/operators/static_output_pod.py`
-  (`stream_from_batches`, `transport_columns`, `transport_schema`); never build a stream from
-  record batches elsewhere. An operator's record-batch form (`async_execute_batches`, renamed
-  `async_execute` when wired) applies its one `static_process` body: per record batch when the
-  class declares `ROW_BY_ROW = True` (each output row comes from one input row), otherwise as
-  a barrier over the whole input (`to_stream()`); `Batch` with a size has its own form,
-  grouping rows by arrival. A new operator whose output rows each come from one input row
-  declares `ROW_BY_ROW`; write no other per-operator batch code.
+  (`stream_from_batches`, `transport_schema`, and F, `_row_built_form`); never build a stream
+  from record batches elsewhere. An operator's record-batch form (`async_execute_batches`,
+  renamed `async_execute` when wired) applies its one `static_process` body: per record batch
+  when the class declares `ROW_BY_ROW = True` (each output row comes from one input row),
+  otherwise as a barrier over the whole input (`to_stream()`); `Batch` with a size has its own
+  form, grouping rows by arrival. A new operator whose output rows each come from one input
+  row declares `ROW_BY_ROW`; write no other per-operator batch code.
 - The type converter keys synthesized struct classes by the large-normalized struct, so
   `struct<b: string>` and `struct<b: large_string>` are one Python type (a workaround,
   `TODO(ITL-841)`).

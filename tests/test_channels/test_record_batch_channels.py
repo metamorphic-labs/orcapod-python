@@ -21,11 +21,13 @@ from unittest import mock
 import pyarrow as pa
 import pytest
 
+from orcapod.protocols.core_protocols.record_batch_channels import (
+    RecordBatchInput,
+    RecordBatchOutput,
+)
 from orcapod.channels import (
     ChannelClosed,
     ReadableChannel,
-    RecordBatchInput,
-    RecordBatchOutput,
     WritableChannel,
 )
 from orcapod.core.operators import MapData, PolarsFilter, SelectDataColumns

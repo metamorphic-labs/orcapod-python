@@ -1,7 +1,8 @@
 """Channels of Arrow record batches (ITL-1347).
 
 ``InputChannel`` and ``OutputChannel`` carry a stream's rows as Arrow record batches; they
-implement ``RecordBatchInput`` and ``RecordBatchOutput`` of ``orcapod.channels``. The
+implement ``RecordBatchInput`` and ``RecordBatchOutput``
+(``orcapod.protocols.core_protocols.record_batch_channels``). The
 stream is primary and owns the description (keys, schemas, data context, pipeline hash); a
 channel refers to its stream and restates nothing. An input channel is opened from a
 stream (``channel_from_stream``) or from an output channel (``OutputChannel.open_reader``);
@@ -21,8 +22,8 @@ import pyarrow as pa
 
 from orcapod.channels import ChannelClosed
 from orcapod.core.operators.static_output_pod import (
+    StaticOutputOperatorPod,
     stream_from_batches,
-    transport_columns,
     transport_schema,
 )
 from orcapod.core.streams.base import ZERO_ROW_INPUT_COLUMNS
@@ -67,7 +68,7 @@ class _StreamFeed:
         if self._batches is None:
             # On the first read, not when the channel is opened: opening computes
             # nothing.
-            table = transport_columns(
+            table = StaticOutputOperatorPod._row_built_columns(  # pyright: ignore[reportPrivateUsage]  # F, stage 2's
                 self._stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS),
                 self._stream.keys(),
             )
@@ -370,7 +371,7 @@ class OutputChannel:
 def channel_from_stream(stream: StreamProtocol) -> InputChannel:
     """Open an input channel on a complete stream.
 
-    The channel delivers the stream's transport columns (``transport_columns``) as
+    The channel delivers the stream's rows in the row-built form (``_row_built_columns``) as
     Arrow record batches of at most ``SOURCE_BATCH_ROWS`` rows. Several channels may be
     opened on one stream, each with its own position; nothing is computed until the
     first read, and nothing is queued, since the stream is complete.
@@ -397,7 +398,7 @@ def _schema_mismatch(declared: pa.Schema, sent: pa.Schema) -> str | None:
     the same Arrow type and nullability. What a description does not say of a row is
     not compared: a ``null`` column, which rows carry as ``large_string``, and whether
     a system-tag or source-info field is nullable, which follows the values of the
-    complete table (``_flagged_by_values``).
+    complete table (``_flag_by_values``).
     """
     if declared.names != sent.names:
         return f"it has {sent.names}, the stream has {declared.names}"
