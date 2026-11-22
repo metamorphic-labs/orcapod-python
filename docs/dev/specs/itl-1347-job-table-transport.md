@@ -1,8 +1,8 @@
 # Job nodes pass streams of Arrow data, not rows (ITL-1347, with ITL-858)
 
-Status: design for the developer's review. No code changes with it. Written against
+Status: approved by the developer (2026-11-22). No code changes with it. Written against
 `origin/main` 8c6fc4f5 (2026-11-22); the work lands on the integration branch
-`eywalker/job-speed`. Every implementation stage below becomes its own issue after approval.
+`eywalker/job-speed`. Every stage is tracked under ITL-1347, one PR per stage against `eywalker/job-speed`.
 
 Revisions, all on 2026-11-22:
 - The ITL-858 input object was folded in, with the protocol change and its call sites.
@@ -513,11 +513,11 @@ stage.
 
 | # | What differs | On `main` today | On the branch | Why `main` is wrong (bug, reproducer) | Approval needed |
 |---|---|---|---|---|---|
-| e1 | Async `Join` / `SemiJoin` with an empty input and disagreeing key types | Returns nothing (no row is there to read a type from) | Raises the sync path's `InputValidationError`, from the descriptions, before the first batch | **ITL-856.** Reproducer: a zero-row source with an `int16` key joined, async, with a source whose key is `int32` | yes |
-| e2 | An async input row of another data context | The async function node answers it from the cache (the ITL-858 inventory) | A whole-input error before the first batch, as on sync | **ITL-951** (its comment; ITL-858 decision 9). Reproducer: an async function node fed a stream of another data context, with its result stored | yes |
-| e3 | Function calls and stored rows for duplicate inputs, async; `RunSummary` computed counts | About 3× more calls than sync, and more stored rows (4,188 against 4,060 in ITL-1062's measurement) | Misses are deduplicated by base entry id, so calls, stored rows and counts equal sync | **ITL-1062.** Reproducer: ITL-1062's workshop-shaped pipeline with repeated input data, async | yes |
-| e6 | Async values that depend on an earlier validation of the same operator object | `SemiJoin._validated_common_keys` and `Index._element_arrow_type_fallback` hold the last validation's values (ITL-858, section 1.2). One operator object applied to two streams can use the other stream's keys or fallback type | Read from each input's description, with no state | The ITL-858 finding; not filed on its own (question 12). Reproducer: one `SemiJoin` instance validated on stream B, then run async over stream A with other keys. To be confirmed in stage 5 | yes, once confirmed |
-| e7 | What a consumer does after its producer failed (async, failure path) | The producer closes its output in `finally`, so a consumer sees a normal end and may finish, and a `LOG` operator node may store, a partial result before the task group cancels it | Readers raise `UpstreamFailedError`, so nothing is computed or stored from a partial input. The run raises the producer's own error, as today | A candidate race, to be confirmed with a reproducer in stage 5: a `fail_fast` function node raising on row 3 of 6, feeding a `Select` node in `LOG` mode; check the operator cache after the failed run. If `main` never stores in practice, this row is no difference | yes, once confirmed |
+| e1 | Async `Join` / `SemiJoin` with an empty input and disagreeing key types | Returns nothing (no row is there to read a type from) | Raises the sync path's `InputValidationError`, from the descriptions, before the first batch | **ITL-856.** Reproducer: a zero-row source with an `int16` key joined, async, with a source whose key is `int32` | approved (developer, 2026-11-22) |
+| e2 | An async input row of another data context | The async function node answers it from the cache (the ITL-858 inventory) | A whole-input error before the first batch, as on sync | **ITL-951** (its comment; ITL-858 decision 9). Reproducer: an async function node fed a stream of another data context, with its result stored | approved (developer, 2026-11-22) |
+| e3 | Function calls and stored rows for duplicate inputs, async; `RunSummary` computed counts | About 3× more calls than sync, and more stored rows (4,188 against 4,060 in ITL-1062's measurement) | Misses are deduplicated by base entry id, so calls, stored rows and counts equal sync | **ITL-1062.** Reproducer: ITL-1062's workshop-shaped pipeline with repeated input data, async | approved (developer, 2026-11-22) |
+| e6 | Async values that depend on an earlier validation of the same operator object | `SemiJoin._validated_common_keys` and `Index._element_arrow_type_fallback` hold the last validation's values (ITL-858, section 1.2). One operator object applied to two streams can use the other stream's keys or fallback type | Read from each input's description, with no state | The ITL-858 finding; filed as ITL-1358. Reproducer: one `SemiJoin` instance validated on stream B, then run async over stream A with other keys. To be confirmed in stage 5 | ITL-1358 (filed); fixed with stage 5 once a reproducer confirms it |
+| e7 | What a consumer does after its producer failed (async, failure path) | The producer closes its output in `finally`, so a consumer sees a normal end and may finish, and a `LOG` operator node may store, a partial result before the task group cancels it | Readers raise `UpstreamFailedError`, so nothing is computed or stored from a partial input. The run raises the producer's own error, as today | A candidate race, to be confirmed with a reproducer in stage 5: a `fail_fast` function node raising on row 3 of 6, feeding a `Select` node in `LOG` mode; check the operator cache after the failed run. If `main` never stores in practice, this row is no difference | filed by the developer only once a test reproduces it |
 
 **Resolved: refusals after rows have flowed (was c, question 9).** The developer's `Rejoin`
 rule (ITL-1355) removes every data-dependent refusal from `Rejoin`: it checks only what its
@@ -550,9 +550,9 @@ branch introduces: the branch keeps `main`'s behaviour, and they are documented 
   totally fine in Batch for sync and async".
 - **An order-dependent `PolarsFilter` predicate over arrival order (was e5).** It is the same
   class as `Batch`: a window or cumulative predicate (`rank`, `cum_sum`) over an input that
-  arrived out of order selects other rows than sync. Recommendation, pending the developer:
-  keep `main`'s behaviour, document it in the `PolarsFilter` docstring and the concepts
-  page, no fix.
+  arrived out of order selects other rows than sync. Accepted by the developer
+  (2026-11-22), like `Batch`: `main`'s behaviour is kept and documented in the
+  `PolarsFilter` docstring and the concepts page, with no fix.
 - **Async column order (was e4, ITL-1249).** Developer: "generally how column order comes out
   is not as critical". The branch may keep or fix the async column order of
   `ASYNC_ORDER_XFAIL` (`tests/test_core/operators/test_several_items.py:211`); it is neither
@@ -585,7 +585,7 @@ branch introduces: the branch keeps `main`'s behaviour, and they are documented 
 
 ## Protocol change
 
-All of these land on `eywalker/job-speed`, which reaches `main` as one merge (question 7).
+All of these land on `eywalker/job-speed`, which reaches `main` as one merge (decision 7).
 
 ### `StreamProtocol` (`src/orcapod/protocols/core_protocols/streams.py:81`)
 
@@ -1098,7 +1098,7 @@ Not covered:
 The work lands on `eywalker/job-speed`, which the developer merges into `main` as one PR.
 So each signature changes directly in the stage that needs it, with no thin forms of old
 signatures kept between stages (CLAUDE.md: no compatibility shims). `main` still sees one
-breaking change, at the branch merge (question 7).
+breaking change, at the branch merge (decision 7).
 
 ### Stages, with the ITL-858 work merged in
 
@@ -1208,39 +1208,35 @@ Also from the developer:
   order, as on `main`, and `Batch` grouping by arrival is fine on sync and async. Column order
   is not critical either: the async column order (ITL-1249) is not a goal.
 
-The developer approves the spec as a whole before stage 0 starts.
+Answers to the spec's questions (developer, 2026-11-22, approving the spec as a whole):
 
-## Open questions for the developer
-
-5. **Source-info nullability.** It stays decided by a complete Arrow table's values: the one
-   column property `arrow_schema()` does not declare. This keeps stored field flags and the
-   operator node's record hashes. Keep it (proposed), or declare a fixed flag? A fixed flag
-   moves those flags and hashes, so it needs its own decision.
-6. **Batch and buffer sizes.** The proposed defaults:
+5. **Source-info nullability stays decided by a complete Arrow table's values.** It is the
+   one column property `arrow_schema()` does not declare, so stored field flags and the
+   operator node's record hashes stay as they are.
+6. **Batch and buffer sizes**:
    - a source sends Arrow record batches of at most 65,536 rows;
    - an operator sends its result's own record batches;
    - an input channel queues 8 batches.
+7. **Signatures change directly in each stage** on `eywalker/job-speed`, with no thin forms
+   of the old ones. `main` sees one breaking change, at the branch merge.
+8. **`node_outputs` holds each node's output stream** (refining decision 1).
+9. **Resolved by ITL-1355.** `Rejoin` matches on every shared column with `Join`'s equality,
+   never refuses on data, and drops unmatched rows. It lands on `main` separately; stage 5's
+   streaming `Rejoin` builds on it. ITL-1356 makes record ids unique at the source.
+10. **Polars' join order** is filed as ITL-1357, low priority, with a design-issue entry
+    (`docs/dev/design_issues/ITL-1357-JRO1.md`). It is not part of this design. Stage 0
+    measures `maintain_order="left_right"` against today's order, as a report only.
+11. **Async write order** keeps `main`'s completion order (row order is not critical).
+12. **Bugs found while writing this:**
+    - e6 is filed as ITL-1358, with a design-issue entry
+      (`docs/dev/design_issues/ITL-1358-VST1.md`);
+    - e7 is filed only once a test reproduces it; the developer files it;
+    - e5 is accepted as documented behaviour, like `Batch`, with no fix.
 
-   With `retain=False` a reader is bounded at about 0.5 M rows, against 64 rows per channel
-   today. Accept these defaults, or set others?
-7. **Signature changes on the integration branch.** Each stage changes the signatures it
-   needs directly on `eywalker/job-speed`, with no thin forms of the old ones. `main` sees
-   one breaking change, at the branch merge. Accept?
-8. **`node_outputs` as output streams** (refining decision 1): accept?
-9. **Resolved** (developer, 2026-11-22, ITL-1355). `Rejoin` matches on every shared column
-   with `Join`'s equality, never refuses on data, and drops unmatched rows, so it never refuses
-   after rows have flowed. The rule lands on `main` separately; stage 5's streaming `Rejoin`
-   builds on it.
-10. **Polars' join order** is not part of this design. Recommendation: one low-priority Linear
-    issue to record the risk. Making the order explicit is allowed only if stage 0 shows
-    `maintain_order="left_right"` gives exactly today's order everywhere. Shall I open it?
-11. Settled by the developer's answer on row order: async writes keep `main`'s completion
-    order.
-12. **Bugs found while writing this, not filed yet**: e6 (operator state written at
-    validation) and e7 (a consumer after a producer failure; a candidate, to be confirmed).
-    The PolarsFilter case (was e5) is now documented behaviour, not a bug, pending your
-    confirmation. May I file e6, and e7 once confirmed (design-issue entries and Linear
-    issues)?
+**Differences approved as bug fixes**: e1 (ITL-856), e2 (ITL-951) and e3 (ITL-1062).
+
+**Each stage merges** into `eywalker/job-speed` only after the comparison against `main`
+shows no change in any sync result. The coordinator verifies and merges.
 
 ## Future work (not designed here)
 
