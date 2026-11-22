@@ -24,6 +24,7 @@ import warnings
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, cast
+from unittest import mock
 
 import polars as pl
 import pyarrow as pa
@@ -740,8 +741,9 @@ def test_several_shared_tags_several_inputs_in_every_order() -> None:
     for order in itertools.permutations((a, b, c)):
         result, warned = _rejoined(*order)
         assert _units(result) == [0, 3, 4, 5, 7]
+        # Every differing column is named, whatever the order of the inputs.
         assert len(warned) == 1
-        assert any(f"tag {name!r}" in warned[0] for name in ("run", "site", "day"))
+        assert all(f"tag {name!r}" in warned[0] for name in ("run", "site", "day"))
         results.append(result)
     first = results[0]
     assert all(row["site"] == "x" and row["day"] == 5 for row in _user_rows(first))
@@ -845,6 +847,74 @@ def test_an_input_that_repeats_an_origin_row_pairs_each_row_once() -> None:
     ]
     assert sorted(rows) == [(0.0, 0), (100.0, 1000)] and not warned
     assert result.as_table().num_rows == 9
+
+
+def _repeated(n: int, data: str, k: list[int] | None = None) -> ArrowTableStream:
+    """``n`` rows of ONE origin row: tag ``k``, one system tag, data ``data`` = 0..n-1."""
+    table = pa.table(
+        {
+            "k": pa.array(k or [1] * n, pa.int64()),
+            data: pa.array(range(n), pa.int64()),
+            "origin": pa.array(["x"] * n, pa.large_string()),
+        }
+    )
+    return ArrowTableStream(table, tag_columns=["k"], system_tag_columns=["origin"])
+
+
+def _join_sizes(compute: Any) -> tuple[Any, list[int]]:
+    """Run ``compute`` and return its result and the height of every Polars join in it."""
+    sizes: list[int] = []
+    join = pl.DataFrame.join
+
+    def measured(frame: pl.DataFrame, *args: Any, **kwargs: Any) -> pl.DataFrame:
+        joined = join(frame, *args, **kwargs)
+        sizes.append(joined.height)
+        return joined
+
+    with mock.patch.object(pl.DataFrame, "join", measured):
+        return compute(), sizes
+
+
+def test_thousands_of_repeats_of_one_origin_row_are_paired_without_a_cross_product() -> (
+    None
+):
+    """Two inputs that each hold one origin row 3,000 times give 3,000 rows, the n-th
+    of one with the n-th of the other, and no join ever holds more rows than an input
+    (pairing every repeat with every repeat would make 9,000,000)."""
+    n = 3000
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RejoinDifferingColumnWarning)
+        table, sizes = _join_sizes(
+            lambda: Rejoin()(_repeated(n, "a"), _repeated(n, "b")).as_table()
+        )
+    assert table.num_rows == n
+    assert table.column("a").to_pylist() == table.column("b").to_pylist()
+    assert sizes and max(sizes) <= n
+    # Fewer repeats in one input: the rows left over match nothing.
+    table, sizes = _join_sizes(
+        lambda: Rejoin()(_repeated(n, "a"), _repeated(n - 7, "b")).as_table()
+    )
+    assert table.num_rows == n - 7 and max(sizes) <= n
+    assert table.column("a").to_pylist() == table.column("b").to_pylist()
+
+
+def test_repeats_that_differ_in_a_shared_tag_pair_within_equal_values() -> None:
+    """Repeats of one origin row with two values of a shared tag, in opposite orders in
+    the two inputs: each row pairs with the next free row of the same value, in row
+    order, still without a cross product."""
+    n = 2000
+    left = _repeated(n, "a", [1, 2] * (n // 2))
+    right = _repeated(n, "b", [2, 1] * (n // 2))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RejoinDifferingColumnWarning)
+        table, sizes = _join_sizes(lambda: Rejoin()(left, right).as_table())
+    assert table.num_rows == n and max(sizes) <= n
+    rows = sorted(zip(*(table.column(c).to_pylist() for c in ("a", "b", "k"))))
+    # a = 0, 2, 4, ... hold k = 1, as b = 1, 3, 5, ... do; and the other way round.
+    assert rows == sorted(
+        [(i, i + 1, 1) for i in range(0, n, 2)]
+        + [(i, i - 1, 2) for i in range(1, n, 2)]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -999,6 +1069,97 @@ def test_the_warning_is_issued_once_per_operator_and_set_of_columns() -> None:
         for _ in range(2):
             with pytest.raises(RejoinDifferingColumnWarning, match="tag 'run'"):
                 _ = strict.static_process(plain, other_run)
+
+
+def _one_row(data: str, k: int, h: int, origin: str = "r") -> ArrowTableStream:
+    """One row: tags ``k`` and ``h``, one system tag, data column ``data``."""
+    table = pa.table(
+        {
+            "k": pa.array([k], pa.int64()),
+            "h": pa.array([h], pa.int8()),
+            data: pa.array([0.5], pa.float64()),
+            "origin": pa.array([origin], pa.large_string()),
+        }
+    )
+    return ArrowTableStream(
+        table, tag_columns=["k", "h"], system_tag_columns=["origin"]
+    )
+
+
+def _in_canonical_order(*data: str) -> list[str]:
+    """The data column names in the order Rejoin takes inputs holding them (their
+    pipeline hashes do not depend on the values)."""
+    return sorted(data, key=lambda name: _one_row(name, 0, 0).pipeline_hash().to_hex())
+
+
+def _rejoined_async(*inputs: Any) -> tuple[list[Any], list[str]]:
+    """The rows of the async path, and its ``RejoinDifferingColumnWarning``s."""
+    from orcapod.channels import Channel
+
+    async def run() -> list[Any]:
+        readers = []
+        for stream in inputs:
+            channel: Channel[Any] = Channel()
+            for row in stream.iter_data():
+                await channel.writer.send(row)
+            await channel.writer.close()
+            readers.append(channel.reader)
+        out: Channel[Any] = Channel()
+        await Rejoin().async_execute(
+            readers,
+            out.writer,
+            input_pipeline_hashes=[stream.pipeline_hash() for stream in inputs],
+        )
+        return await out.reader.collect()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        rows = asyncio.run(run())
+    return rows, [
+        str(w.message)
+        for w in caught
+        if issubclass(w.category, RejoinDifferingColumnWarning)
+    ]
+
+
+def test_the_warning_names_every_differing_column_of_one_origin_row() -> None:
+    """Three inputs hold one origin row with ``(k, h)`` = (1, 1), (2, 1), (1, 2) in the
+    order Rejoin takes them: the first two differ in ``k``, so the row is gone before
+    the third is met, and the third differs in ``h``. Both are named, on the sync and
+    the async path, in every argument order (the warning is read from the inputs' own
+    rows, not from the rows rejoined so far)."""
+    first, second, third = _in_canonical_order("a", "b", "c")
+    inputs = (_one_row(first, 1, 1), _one_row(second, 2, 1), _one_row(third, 1, 2))
+    for order in itertools.permutations(inputs):
+        result, warned = _rejoined(*order)
+        assert result.as_table().num_rows == 0
+        assert len(warned) == 1 and "tag 'h', tag 'k'" in warned[0]
+        rows, warned = _rejoined_async(*order)
+        assert rows == []
+        assert len(warned) == 1 and "tag 'h', tag 'k'" in warned[0]
+
+
+def test_the_warning_sees_two_inputs_that_differ_where_another_lacks_the_row() -> None:
+    """The first input Rejoin takes holds another origin row only; the second and
+    third hold one origin row and differ in ``k``. Nothing is put together, and the
+    warning still names ``k`` (and not ``h``, which agrees), on both paths."""
+    first, second, third = _in_canonical_order("a", "b", "c")
+    inputs = (
+        _one_row(first, 1, 1, origin="elsewhere"),
+        _one_row(second, 1, 1),
+        _one_row(third, 2, 1),
+    )
+    for order in itertools.permutations(inputs):
+        result, warned = _rejoined(*order)
+        assert result.as_table().num_rows == 0
+        assert len(warned) == 1 and "tag 'k'" in warned[0] and "'h'" not in warned[0]
+        rows, warned = _rejoined_async(*order)
+        assert rows == []
+        assert len(warned) == 1 and "tag 'k'" in warned[0] and "'h'" not in warned[0]
+    # Nothing differs: nothing warns, although nothing is put together either.
+    agreeing = (inputs[0], inputs[1], _one_row(third, 1, 1))
+    for run in (_rejoined, _rejoined_async):
+        assert run(*agreeing)[1] == []
 
 
 def test_a_diamond_through_operators_never_warns() -> None:

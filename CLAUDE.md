@@ -1546,13 +1546,20 @@ data. The rules:
   rows hold, only on what the inputs' columns show (system-tag names, a shared column's
   Arrow type, disjoint data columns): a row that matches nothing is left out, and rows of
   one origin row that differ in another shared column raise `RejoinDifferingColumnWarning`
-  once per operator and set of columns. System tags are assumed unique (no check reads the
-  rows; repeated ones pair in row order, arrival order on the async path, each row at most
-  once). A shared column keeps the
-  values of the first input that has it, in the canonical input order (by pipeline hash;
-  equal hashes stay in argument order, which only the bits of equal floats can follow). The
-  rows are matched on the system tags first, as before ITL-1355, and the pairs filtered, so
-  inputs whose shared columns agree give the same rows in the same order. The result's data
+  once per operator and set of columns. The warning is computed from the inputs' own rows
+  (`_differing_columns`: per shared column, the inputs that have it stacked and counted per
+  origin row), never from the rows rejoined so far, which have lost the origin rows an
+  earlier input lacks or disagrees on. System tags are assumed unique (no input is refused
+  for repeating one). A shared column keeps the values of the first input that has it, in
+  the canonical input order (by pipeline hash; equal hashes stay in argument order, which
+  only the bits of equal floats can follow). With unique system tags the rows are matched
+  on the system tags first, by the same join as before ITL-1355, and the pairs filtered,
+  so inputs whose shared columns agree give the same rows in the same order (Polars' join
+  order depends on the inputs' sizes: never replace that join). When an input repeats an
+  origin row, rows are paired one to one by occurrence number (`_pairs_of_repeated_origins`:
+  the k-th with the k-th among rows equal in every shared column, in row order, arrival
+  order on the async path), in linear time: never join repeats on the system tags alone,
+  which builds their cross product. The result's data
   context is read from its rows (some operators return rows in the default context,
   ITL-1339); N-ary and commutative; identity `"Rejoin"`; async is the barrier, which
   rebuilds each input in its rows' data context.

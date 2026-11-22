@@ -222,10 +222,11 @@ The rules:
   shared column on rows of one origin row (two branches each add a tag `run` with different
   values, or change a tag's value), those rows are left out, and Rejoin names the columns in
   a `RejoinDifferingColumnWarning` (from `orcapod.errors`), once per operator and set of
-  columns. To keep the rows, drop or rename the column in one branch before the rejoin
-  (`drop_tag_columns`, `map_tags`).
+  columns. Every column in which two inputs differ on an origin row is named, whatever the
+  order of the inputs. To keep the rows, drop or rename the column in one branch before the
+  rejoin (`drop_tag_columns`, `map_tags`).
 - **Unique system tags.** System tags are assumed unique in each input, as every source
-  makes them, so each row matches at most once; nothing reads the rows to check it. Should
+  makes them, so each row matches at most once; no input is refused for repeating one. Should
   an input repeat an origin row, each row still matches at most once: among the rows equal
   in every shared column, the first of one input pairs with the first of the other, the
   second with the second, in row order (on the async path, the order the rows arrived in).

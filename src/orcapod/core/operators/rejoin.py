@@ -56,11 +56,11 @@ else:
     pa = LazyModule("pyarrow")
     pl = LazyModule("polars")
 
-# Row-number columns of the frames Polars matches, and the column that names a group of
-# pairs; never a key (keys are columns of the inputs, and no input column starts so).
+# Row-number columns of the frames Polars matches, and the column of a row's occurrence
+# number; never a key (keys are columns of the inputs, and no input column starts so).
 _LEFT_ROW = "__rejoin_left_row"
 _RIGHT_ROW = "__rejoin_right_row"
-_GROUP = "__rejoin_group"
+_OCCURRENCE = "__rejoin_occurrence"
 
 
 def _system_tag_names(stream: StreamProtocol) -> list[str]:
@@ -110,35 +110,123 @@ def _agreeing(
     )
 
 
-def _each_row_once(pairs: "pl.DataFrame") -> "pl.DataFrame":
-    """Keep each row in at most one pair.
+def _repeats_an_origin(table: "pa.Table", keys: Sequence[str]) -> bool:
+    """Whether two rows of ``table`` hold the same system tags."""
+    return bool(polars_key_frame(table, keys).is_duplicated().any())
 
-    System tags are assumed unique in each input (developer, November 22, 2026,
-    ITL-1355), so every row is in one pair already and ``pairs`` is returned as it is.
-    If an input does repeat an origin row, the rows of one origin row that agree pair
-    every left row with every right row; of those, the first left row keeps the first
-    right row, the second the second, and so on in row order (the order the rows
-    arrived in, on the async path), and the rows left over match nothing.
+
+def _numbered(
+    table: "pa.Table",
+    keys: Sequence[str],
+    others: Sequence[str],
+    *,
+    among: Sequence[str],
+    row: str | None = None,
+) -> "pl.DataFrame":
+    """Return the key frame of the rows that have their system tags, each numbered.
+
+    A row with a null system tag matches nothing and is left out. Every other row gets
+    its occurrence number (``_OCCURRENCE``): how many rows before it, in row order, are
+    equal to it in the columns ``among``. With it, rows that repeat an origin row are
+    told apart, and two inputs' rows can be matched one to one in row order by a join
+    on the key columns and that number, without ever pairing every repeat of one input
+    with every repeat of the other.
 
     Args:
-        pairs: Row numbers of the rows that match and agree on every shared column.
+        table: An input's rows.
+        keys: The system-tag columns.
+        others: The other columns to prepare beside them.
+        among: The columns whose equal rows are numbered 0, 1, 2, ...
+        row: The name of the row-number column, or ``None`` for none.
 
     Returns:
-        The pairs to put together, in the order of ``pairs``.
+        The prepared ``keys`` and ``others``, the row numbers when asked for, and the
+        occurrence numbers.
     """
-    left_rows, right_rows = pairs.get_column(_LEFT_ROW), pairs.get_column(_RIGHT_ROW)
-    if not (left_rows.is_duplicated().any() or right_rows.is_duplicated().any()):
-        return pairs
-    # The pairs of one such group share their right rows: its smallest names it.
-    group = pl.col(_RIGHT_ROW).min().over(_LEFT_ROW)
+    frame = polars_key_frame(table, [*keys, *others], row)
+    return frame.filter(
+        pl.all_horizontal(pl.col(name).is_not_null() for name in keys)
+    ).with_columns(pl.int_range(pl.len()).over(list(among)).alias(_OCCURRENCE))
+
+
+def _pairs_of_repeated_origins(
+    left: "pa.Table", right: "pa.Table", keys: Sequence[str], others: Sequence[str]
+) -> "pl.DataFrame":
+    """Pair rows one to one when an input repeats an origin row.
+
+    System tags are assumed unique in each input (developer, November 22, 2026,
+    ITL-1355), so this is not the usual path. Should an input repeat an origin row,
+    each row still matches at most once: among the rows equal in every shared column,
+    the first of one input pairs with the first of the other, the second with the
+    second, and so on in row order (the order the rows arrived in, on the async path);
+    a row left over matches nothing. The work is linear in the rows: no pair is ever
+    made that is not kept.
+
+    Args:
+        left: The rows rejoined so far.
+        right: The next input's rows.
+        keys: The system-tag columns, in both tables.
+        others: The other columns both tables have.
+
+    Returns:
+        The row numbers of the pairs, ``_LEFT_ROW`` and ``_RIGHT_ROW``, in the order
+        of ``left``'s rows.
+    """
+    shared = [*keys, *others]
     return (
-        pairs.with_columns(group.alias(_GROUP))
-        .filter(
-            pl.col(_LEFT_ROW).rank("dense").over(_GROUP)
-            == pl.col(_RIGHT_ROW).rank("dense").over(_GROUP)
+        _numbered(left, keys, others, among=shared, row=_LEFT_ROW)
+        .join(
+            _numbered(right, keys, others, among=shared, row=_RIGHT_ROW),
+            on=[*shared, _OCCURRENCE],
+            how="inner",
+            nulls_equal=True,
+            maintain_order="left",
         )
-        .drop(_GROUP)
+        .select(_LEFT_ROW, _RIGHT_ROW)
     )
+
+
+def _differing_columns(tables: Sequence["pa.Table"], keys: Sequence[str]) -> list[str]:
+    """Return the shared columns in which rows of one origin row differ between inputs.
+
+    Read from the inputs' own rows, not from the rows rejoined so far (which no longer
+    hold an origin row an earlier input lacks or disagrees on): for every column
+    several inputs have besides the system tags, the rows of those inputs are put
+    under one another and counted per origin row. An origin row with two values in
+    the column is one where two inputs differ. Rows that repeat an origin row are
+    compared in row order, the first of each input with the first of the others
+    (``_numbered``). Equality is ``Join``'s, and a null equals a null.
+
+    Args:
+        tables: The inputs' rows.
+        keys: The system-tag columns, in every table.
+
+    Returns:
+        The names of the differing columns, in the order first met.
+    """
+    holders: dict[str, list[int]] = {}
+    for index, table in enumerate(tables):
+        for name in table.column_names:
+            if name not in keys:
+                holders.setdefault(name, []).append(index)
+    # The columns several inputs have, by the inputs that have them.
+    shared: dict[tuple[int, ...], list[str]] = {}
+    for name, indices in holders.items():
+        if len(indices) > 1:
+            shared.setdefault(tuple(indices), []).append(name)
+    origin = [*keys, _OCCURRENCE]
+    differing: list[str] = []
+    for indices, names in shared.items():
+        rows = pl.concat(
+            [_numbered(tables[index], keys, names, among=keys) for index in indices]
+        )
+        origins = rows.select(origin).n_unique()
+        if rows.n_unique() == origins:
+            continue  # every origin row holds one value in each of these columns
+        differing.extend(
+            name for name in names if rows.select([*origin, name]).n_unique() > origins
+        )
+    return differing
 
 
 def _described(name: str, shared_tags: Collection[str]) -> str:
@@ -202,15 +290,17 @@ class Rejoin(Join):
     nothing (provenance is never null). In any other shared column a null equals a
     null, on purpose unlike ``Join``, where a null tag key matches nothing: two rows of
     one origin row that both hold no value in a column agree on it. When rows of one
-    origin row (their system tags match) differ in another shared column, a
-    ``RejoinDifferingColumnWarning`` names the columns, once per operator and set of
-    columns.
+    origin row (their system tags match) differ between two inputs in another shared
+    column, a ``RejoinDifferingColumnWarning`` names the columns, once per operator and
+    set of columns. It is read from the inputs' own rows, so it names every such
+    column whatever the order of the inputs, also when a third input lacks the row.
 
     System tags are assumed unique in each input, as every source makes them, so each
-    row matches at most once; no check reads the rows for it. Should an input repeat an
-    origin row, each row still matches at most once: among the rows equal in every
-    shared column, the first of one input pairs with the first of the other, the second
-    with the second, in row order (the order the rows arrived in, on the async path).
+    row matches at most once; no input is refused for repeating one. Should an input
+    repeat an origin row, each row still matches at most once: among the rows equal in
+    every shared column, the first of one input pairs with the first of the other, the
+    second with the second, in row order (the order the rows arrived in, on the async
+    path), in time linear in the rows.
 
     A shared column is kept once, with the values of the first input that has it. The
     inputs are taken in a canonical order, by pipeline hash, so the result does not
@@ -348,18 +438,15 @@ class Rejoin(Join):
 
         table = tables[0]
         user_tags = set(ordered_streams[0].keys()[0])
-        differing: set[str] = set()
         for next_table, next_stream in zip(tables[1:], ordered_streams[1:]):
             next_tags = set(next_stream.keys()[0])
-            table, differed = self._rejoin_pair(
-                table, next_table, keys, user_tags & next_tags
-            )
-            differing.update(
-                _described(name, user_tags & next_tags) for name in differed
-            )
+            table = self._rejoin_pair(table, next_table, keys, user_tags & next_tags)
             user_tags |= next_tags
-        if differing:
-            self._warn_differing_once(tuple(sorted(differing)))
+        # After the rows are paired: pairing checks that the shared columns' types agree.
+        if differing := _differing_columns(tables, keys):
+            self._warn_differing_once(
+                tuple(sorted(_described(name, user_tags) for name in differing))
+            )
 
         # Lay the columns out as Join does: tags, data, then the hidden columns.
         tag_order = list(tag_schema.keys())
@@ -441,7 +528,7 @@ class Rejoin(Join):
         right: "pa.Table",
         keys: Sequence[str],
         shared_tags: Collection[str],
-    ) -> tuple["pa.Table", list[str]]:
+    ) -> "pa.Table":
         """Pair the rows of two tables that are equal in every column both have.
 
         Every output value is taken from ``left`` or ``right`` by row number; Polars
@@ -449,7 +536,10 @@ class Rejoin(Join):
         the system tags, as they always were (so inputs whose shared columns all agree
         give the same rows in the same order as before ITL-1355), and of those pairs
         only the ones that agree on every other shared column are kept (``_agreeing``).
-        A column both tables have is kept once, from ``left``.
+        With unique system tags each row is in one pair at most. When an input repeats
+        an origin row, that first match would pair every repeat with every repeat, so
+        the rows are paired one to one instead (``_pairs_of_repeated_origins``). A
+        column both tables have is kept once, from ``left``.
 
         Args:
             left: The rows rejoined so far.
@@ -458,8 +548,7 @@ class Rejoin(Join):
             shared_tags: The user tags of both tables.
 
         Returns:
-            The paired rows, and the shared columns (other than system tags) in which
-            rows of one origin row differ.
+            The paired rows.
 
         Raises:
             InputValidationError: If a shared column's Arrow type differs, or has no
@@ -480,25 +569,15 @@ class Rejoin(Join):
                 arrow_utils.column_arrow_type(right.schema, name),
             )
             require_matchable_key("Rejoin", name, shared_type)
-        matched = polars_key_frame(left, keys, _LEFT_ROW).join(
-            polars_key_frame(right, keys, _RIGHT_ROW), on=list(keys), how="inner"
-        )
-        # Nothing matched, or nothing else is shared: there is nothing to compare.
-        pairs = (
-            _agreeing(matched, left, right, keys, others)
-            if others and matched.height
-            else matched
-        )
-        differed = (
-            [
-                name
-                for name in others
-                if _agreeing(matched, left, right, keys, [name]).height < matched.height
-            ]
-            if pairs.height < matched.height
-            else []
-        )
-        pairs = _each_row_once(pairs)
+        if _repeats_an_origin(left, keys) or _repeats_an_origin(right, keys):
+            pairs = _pairs_of_repeated_origins(left, right, keys, others)
+        else:
+            pairs = polars_key_frame(left, keys, _LEFT_ROW).join(
+                polars_key_frame(right, keys, _RIGHT_ROW), on=list(keys), how="inner"
+            )
+            # Nothing matched, or nothing else is shared: there is nothing to compare.
+            if others and pairs.height:
+                pairs = _agreeing(pairs, left, right, keys, others)
         left_rows = pairs.get_column(_LEFT_ROW).to_arrow()
         right_rows = pairs.get_column(_RIGHT_ROW).to_arrow()
         names: list[str] = []
@@ -512,9 +591,8 @@ class Rejoin(Join):
                 arrays.append(right.column(name).combine_chunks().take(right_rows))
         table = pa.Table.from_arrays(arrays, names=names)
         table = arrow_utils.restore_schema_nullability(table, left.schema, right.schema)
-        return (
-            self._shared_key_nullability(table, left.schema, right.schema, shared_tags),
-            differed,
+        return self._shared_key_nullability(
+            table, left.schema, right.schema, shared_tags
         )
 
     async def async_execute(
