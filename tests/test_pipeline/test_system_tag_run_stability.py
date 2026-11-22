@@ -27,7 +27,6 @@ from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.sources.arrow_table_source import ArrowTableSource
 from orcapod.databases import DeltaTableDatabase
 from orcapod.pipeline.job import PipelineJob
-from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 from orcapod.side_effects import SideEffectPod, sink_pod
 
 Key = tuple[tuple[str, Any], ...]
@@ -148,8 +147,8 @@ class TestMaterializationAlignsColumnsByName:
         rows = stream.as_table().to_pylist()
         assert rows == [{"a": 1, "b": 2, "v": 10}, {"a": 3, "b": 4, "v": 20}]
 
-    def test_orchestrator_materialize_as_stream(self) -> None:
-        """The orchestrator materializer emits rows in the first row's column order."""
+    def test_materialize_upstream_keeps_first_row_column_order(self) -> None:
+        """The upstream materializer emits rows in the first row's column order."""
         rows = _rows_with_swapped_tag_order()
         # The rebuilt stream takes the upstream's data context (ITL-1080) and, for an
         # upstream with no producer, its pipeline hash (ITL-1094): here a plain
@@ -162,7 +161,10 @@ class TestMaterializationAlignsColumnsByName:
                 rows
             ).pipeline_hash,
         )
-        stream = SyncPipelineOrchestrator._materialize_as_stream(rows, upstream)
+        stream = StaticOutputOperatorPod._materialize_upstream(
+            rows,
+            upstream,  # pyright: ignore[reportArgumentType]  # a stand-in upstream: the attributes the materializer reads
+        )
         rows = stream.as_table().to_pylist()
         assert rows == [{"a": 1, "b": 2, "v": 10}, {"a": 3, "b": 4, "v": 20}]
 

@@ -446,37 +446,114 @@ class StaticOutputOperatorPod(TraceableBase):
         return StaticOutputOperatorPod._zero_rows_in_row_order(result)
 
     @staticmethod
-    def _row_built_form(table: pa.Table, tag_keys: Sequence[str]) -> pa.Table:
+    def _row_built_columns(
+        table: pa.Table, keys: tuple[Sequence[str], Sequence[str]]
+    ) -> pa.Table:
+        """Return ``table``'s columns as ``_rows_to_table`` lays out the table's rows.
+
+        Every step of F (``_row_built_form``) that each row decides on its own, so it
+        gives the same result on a whole table and on each slice of it:
+
+        1. The columns a row-built table holds: the user tags, the system tags, the data
+           columns that are not data-tags, and the source info of every data column (a
+           data-tag's included). ``table`` holds no context, meta or content-hash column
+           (``ZERO_ROW_INPUT_COLUMNS``).
+        2. In row order: user tags in tag order, system tags in table order, then the data
+           columns and their source info, both in the order of the data keys. A row's
+           ``Data`` lists its source info in the order of its data keys, data-tags first
+           in tag order (``Data._ensure_source_info_table``), so a data-tag's source info
+           comes before the other data columns' even when the data-tag is not the first
+           column of ``table``.
+        3. Normalized to the large types without keeping ``null``: each row's datagram
+           stores a ``null`` column as ``large_string`` (``Datagram._init_from_table``).
+
+        Whether a system-tag or source-info field is nullable depends on its values over
+        the complete table (``_flag_by_values``), so it is not decided here.
+
+        Args:
+            table: A table of user tags, system tags, data and source info.
+            keys: The tag keys and the data keys of the stream ``table`` belongs to
+                (``stream.keys()``).
+
+        Returns:
+            The same arrays, selected and ordered, in their large types.
+        """
+        from orcapod.system_constants import constants
+        from orcapod.utils import arrow_utils
+
+        tag_keys, data_keys = keys
+        names = set(table.column_names)
+        tags = set(tag_keys)
+        system_tags = [
+            n for n in table.column_names if n.startswith(constants.SYSTEM_TAG_PREFIX)
+        ]
+        data = [n for n in data_keys if n not in tags]
+        source_info = [
+            f"{constants.SOURCE_PREFIX}{n}"
+            for n in data_keys
+            if f"{constants.SOURCE_PREFIX}{n}" in names
+        ]
+        return arrow_utils.normalize_table_to_large_types(
+            table.select([*tag_keys, *system_tags, *data, *source_info])
+        )
+
+    @staticmethod
+    def _flag_by_values(table: pa.Table) -> pa.Table:
+        """Flag each system-tag and source-info field nullable only when it holds a null.
+
+        The last step of F (``_row_built_form``), which needs the complete table. A table
+        built from rows takes its system tags and source-info tokens from each row's
+        values, so those fields are non-nullable unless a value is missing, whatever
+        flags the table the rows came from had (a join over inputs tied on pipeline hash
+        declares its system tags nullable). The table built from rows also carries no
+        schema metadata (``arrow_utils.hstack_tables``), so none is kept.
+
+        Args:
+            table: A table of user tags, system tags, data and source info.
+
+        Returns:
+            The same arrays under the new field flags, with no schema metadata.
+        """
+        from orcapod.system_constants import constants
+
+        prefixes = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
+        fields = [
+            field.with_nullable(table.column(i).null_count > 0)
+            if field.name.startswith(prefixes)
+            else field
+            for i, field in enumerate(table.schema)
+        ]
+        # Same arrays, new field flags: no cast, so no value or type can change.
+        return pa.Table.from_arrays(table.columns, schema=pa.schema(fields))
+
+    @staticmethod
+    def _row_built_form(
+        table: pa.Table, keys: tuple[Sequence[str], Sequence[str]]
+    ) -> pa.Table:
         """Return ``table`` as ``_rows_to_table`` builds it from the table's own rows.
 
-        F in the ITL-1347 spec: the same table, without making the rows. ``table`` holds
-        the user tags, system tags, data and source info (``ZERO_ROW_INPUT_COLUMNS``: no
-        context, meta or content-hash column, and each data-tag once, among the tags).
-        Each row's datagram normalizes its table to the large types without keeping
-        ``null`` (``Datagram._init_from_table``), so a ``null`` column becomes
-        ``large_string``. The columns then go in row order and each source-info field is
-        flagged nullable only when a token is null (``_as_row_built_table``). The
-        equality with ``_rows_to_table`` is tested over every operator, source kind and
-        column role (ITL-1347, L0-L2).
+        F in the ITL-1347 spec: the same table, without making the rows. The columns,
+        their order and their types are decided row by row (``_row_built_columns``), the
+        system-tag and source-info field flags by their values over the whole table
+        (``_flag_by_values``). The equality with ``_rows_to_table`` is tested over every
+        operator, source kind and column role (ITL-1347, L0-L2).
 
         Args:
             table: A table of user tags, system tags, data and source info, with rows.
-            tag_keys: The user tag columns, in order.
+            keys: The tag keys and the data keys of the stream ``table`` belongs to
+                (``stream.keys()``).
 
         Returns:
             The table ``_rows_to_table`` would build from its rows.
         """
-        from orcapod.utils import arrow_utils
-
-        return StaticOutputOperatorPod._as_row_built_table(
-            arrow_utils.normalize_table_to_large_types(table), tag_keys
+        return StaticOutputOperatorPod._flag_by_values(
+            StaticOutputOperatorPod._row_built_columns(table, keys)
         )
 
     @staticmethod
     def _output_stream(
         table: pa.Table,
-        tag_keys: Sequence[str],
-        data_tags: Sequence[str],
+        keys: tuple[Sequence[str], Sequence[str]],
         node: StreamProtocol,
     ) -> StreamProtocol:
         """Return the stream a node hands its successors, given the table of its rows.
@@ -488,8 +565,7 @@ class StaticOutputOperatorPod(TraceableBase):
 
         Args:
             table: The node's rows: user tags, system tags, data and source info.
-            tag_keys: The user tag columns of the rows, in order.
-            data_tags: The data-tags among ``tag_keys``.
+            keys: The tag keys and the data keys of the stream the rows come from.
             node: The node (or stream) whose output this is.
 
         Returns:
@@ -497,10 +573,11 @@ class StaticOutputOperatorPod(TraceableBase):
         """
         if table.num_rows == 0:
             return StaticOutputOperatorPod._materialize_upstream([], node)
+        tag_keys, data_keys = keys
         return StaticOutputOperatorPod._as_upstream_stream(
-            StaticOutputOperatorPod._row_built_form(table, tag_keys),
+            StaticOutputOperatorPod._row_built_form(table, keys),
             tag_keys,
-            data_tags,
+            data_tag_names(tag_keys, data_keys),
             node,
         )
 

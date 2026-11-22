@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+from typing import Any
+
 import pyarrow as pa
 import pytest
 
@@ -171,8 +173,10 @@ class TestIterDatasReadOnly:
         from orcapod.pipeline.observer import NoOpObserver
 
         class CapturingObserver(NoOpObserver):
-            def on_data_crash(self, node_label, tag, data, exc):
-                errors.append(exc)
+            def on_data_crash(
+                self, node_label: str, tag: Any, data: Any, error: Exception
+            ) -> None:
+                errors.append(error)
 
         results = list(
             node.execute(

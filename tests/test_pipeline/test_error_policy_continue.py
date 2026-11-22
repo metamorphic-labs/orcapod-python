@@ -14,6 +14,7 @@ from orcapod.core.operators.join import Join
 from orcapod.core.sources import ArrowTableSource
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.pipeline.job import PipelineJob
+from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 
 
@@ -80,7 +81,7 @@ def test_empty_buffer_schema_preserves_nullability():
 
     # Don't run — buffer will be empty
     node = job.nodes["fn"]
-    stream = SyncPipelineOrchestrator._materialize_as_stream([], node)
+    stream = StaticOutputOperatorPod._materialize_upstream([], node)
     tag_schema, data_schema = stream.output_schema()
 
     # "result" is declared as int (required), must NOT become int | None

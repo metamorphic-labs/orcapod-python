@@ -1690,8 +1690,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             if cached_output is not None:
                 output = StaticOutputOperatorPod._output_stream(
                     cached_output.as_table(columns=ZERO_ROW_INPUT_COLUMNS),
-                    cached_output.keys()[0],
-                    stream_data_tags(cached_output),
+                    cached_output.keys(),
                     self,
                 )
                 ctx_obs.on_node_end(node_label, node_hash)
@@ -1703,14 +1702,13 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             # The result's table, as the table built from its rows would be, without
             # making the rows (ITL-1347, stage 2).
             result_table = result_stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
-            tag_keys = result_stream.keys()[0]
+            keys = result_stream.keys()
+            tag_keys = keys[0]
             data_tags = stream_data_tags(result_stream)
 
             # Cache, in row order with or without rows (ITL-1131, ITL-1133).
             if result_table.num_rows:
-                kept_table = StaticOutputOperatorPod._row_built_form(
-                    result_table, tag_keys
-                )
+                kept_table = StaticOutputOperatorPod._row_built_form(result_table, keys)
                 self._cached_output_stream = ArrowTableStream(
                     kept_table, tag_columns=tag_keys, data_tags=data_tags
                 )

@@ -23,7 +23,6 @@ from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.core.base import TraceableBase
 from orcapod.core.datagrams import Data, Tag
-from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.operators.drop_nulls import _without_none  # pyright: ignore[reportPrivateUsage]  # DropNulls' rule for removing None from a type, shared, never copied
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
@@ -1239,9 +1238,7 @@ class SourceNodeBase(TraceableBase, ABC):
         # rows' (a slot's own key order can differ from its source's).
         rows_stream = self._rows_stream()
         table = rows_stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
-        result = StaticOutputOperatorPod._output_stream(
-            table, rows_stream.keys()[0], stream_data_tags(rows_stream), self
-        )
+        result = StaticOutputOperatorPod._output_stream(table, rows_stream.keys(), self)
         if observer is not None:
             observer.on_node_end(node_label, node_hash)
         return result
