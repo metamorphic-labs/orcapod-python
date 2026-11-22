@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import weakref
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Coroutine
 from typing import TYPE_CHECKING, Any, Protocol
 
 from orcapod.channels import ChannelClosed
@@ -59,7 +59,7 @@ class InputChannel:
     delivers is its ``stream``, known before the first batch: the producing node, or
     the stream it was opened from. A channel has no identity of its own and is read
     once; to read again, go back to a stream (the one it was opened from, or the one
-    ``channel_to_stream`` makes of what it delivered).
+    ``to_stream`` makes of what it delivered).
 
     Made by ``stream.open_channel()`` or by ``OutputChannel.open_reader()``, never
     directly.
@@ -281,6 +281,61 @@ class InputChannel:
             f"The input channel of {_named(self._stream)} was closed before its "
             + "producer completed; it has no complete input to give."
         )
+
+    def to_stream(self) -> Coroutine[Any, Any, StreamProtocol]:
+        """Return what the channel delivers, as a stream: the one such conversion.
+
+        It reads the channel to its end (one pass; every error of the read, such as
+        an unbound source's or a failed producer's, is raised here, before any
+        operator runs) and builds a fixed snapshot of what was delivered through the
+        one settlement path (``stream_from_batches``). The only shortcut: a channel
+        opened on a complete stream that ``_output_stream`` built
+        (``ROW_BUILT_OUTPUT``), not read yet, gives that stream, which is exactly what
+        its batches would rebuild; the channel is then closed. A reader of an output
+        channel always collects, whatever its description.
+
+        A plain method that returns the conversion to await: the channel is reserved
+        when it is called, before the conversion is awaited, so nothing can read it
+        in between; the task that runs the conversion takes the channel over, and
+        any other task's read is refused. If the conversion never starts (its task
+        is cancelled first, or it is never awaited), the reservation's claim is freed
+        with it and the channel is closed, so no producer waits on it.
+
+        Returns:
+            The conversion to await: a complete, re-readable stream of the channel's
+            input.
+
+        Raises:
+            RuntimeError: If a read of the channel was already called (a batch
+                received, its end reached, or another consumer still waiting): a
+                stream of part of an input is never made, and a channel is never read
+                again.
+            ChannelClosed: If the channel was closed, before or during the read.
+            UpstreamFailedError: If the producer failed or was cancelled.
+        """
+        claim = self.reserve()  # at call time: nothing can read it before the await
+        return self._to_stream(claim)
+
+    async def _to_stream(self, claim: object) -> StreamProtocol:
+        """Read the reserved channel and return its input as a stream (``to_stream``).
+
+        Args:
+            claim: The reservation's claim, which the task running this conversion
+                takes over.
+        """
+        # Imported here: the operators sit above the streams, and this module is
+        # imported by core/streams/base.py (a module-level import would be circular).
+        from orcapod.core.operators.static_output_pod import (
+            ROW_BUILT_OUTPUT,
+            stream_from_batches,
+        )
+
+        self.reserve(claim)
+        opened_on = self.opened_on
+        if opened_on is not None and getattr(opened_on, ROW_BUILT_OUTPUT, False):
+            await self.close()
+            return opened_on
+        return stream_from_batches(self._stream, await self.collect())
 
     async def collect(self) -> list[pa.RecordBatch]:
         """Read to the end and return every remaining record batch, in arrival order.
