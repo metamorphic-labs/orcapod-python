@@ -39,6 +39,7 @@ from orcapod.core.data_tags import (
 from orcapod.channels import Channel, ChannelClosed, ReadableChannel, WritableChannel
 from orcapod.config import OrcapodConfig
 from orcapod.core.operators.static_output_pod import (
+    DynamicPodStream,
     RowBuiltFormUnavailable,
     StaticOutputOperatorPod,
     rows_on_read,
@@ -1712,8 +1713,11 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             # making the rows (ITL-1347, stage 2).
             result_table = result_stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
             # The order the result's rows have (``result_keys``), never the prediction.
-            result_keys = getattr(result_stream, "result_keys", None)
-            keys = result_keys() if callable(result_keys) else result_stream.keys()
+            keys: tuple[tuple[str, ...], tuple[str, ...]] = (
+                result_stream.result_keys()
+                if isinstance(result_stream, DynamicPodStream)
+                else result_stream.keys()
+            )
             tag_keys = keys[0]
             data_tags = data_tag_names(*keys)
 

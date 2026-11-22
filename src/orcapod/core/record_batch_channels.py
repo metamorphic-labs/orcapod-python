@@ -388,6 +388,7 @@ def _settled_token_types(
     for field, column in zip(batch.schema, batch.columns, strict=True):
         if not field.name.startswith(constants.SOURCE_PREFIX):
             continue
+        kinds: set[pa.DataType]
         if pa.types.is_large_string(field.type):
             kinds = {pa.large_string()}
         else:
