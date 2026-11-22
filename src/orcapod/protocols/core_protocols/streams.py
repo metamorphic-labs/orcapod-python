@@ -183,6 +183,19 @@ class StreamProtocol(TraceableProtocol, PipelineElementProtocol, Protocol):
         """
         ...
 
+    def open_channel(self) -> RecordBatchInput:
+        """Open an input channel on this stream, for async computation (ITL-1347).
+
+        The channel delivers the stream's rows as Arrow record batches, read once and
+        in order; its description is this stream. Several channels may be opened on
+        one stream, each with its own position (``channel_to_stream`` makes a stream of
+        what a channel delivers).
+
+        Returns:
+            The input channel.
+        """
+        ...
+
     def async_iter_data(self) -> AsyncIterator[tuple[TagProtocol, DataProtocol]]:
         """
         Generates asynchronous iterator over (tag, data) pairs in the stream.
@@ -567,4 +580,93 @@ class StreamWithOperationsProtocol(StreamProtocol, Protocol):
         Returns:
             Self: New stream containing batched (tag, data) pairs.
         """
+        ...
+
+
+# ---------------------------------------------------------------------------
+# Channels of Arrow record batches (ITL-1347): the stream is the description
+# ---------------------------------------------------------------------------
+
+
+class RecordBatchInput(Protocol):
+    """A single-pass reader of a stream's Arrow record batches.
+
+    The Arrow-record-batch form of ``ReadableChannel`` (``orcapod.channels``); ``InputChannel`` of
+    ``orcapod.core.streams.record_batch_input`` is the implementation. Its description is
+    its ``stream``, known before the first batch.
+    """
+
+    @property
+    def stream(self) -> StreamProtocol:
+        """The stream whose rows this channel delivers: the description."""
+        ...
+
+    async def receive(self) -> pa.RecordBatch:
+        """Return the next Arrow record batch.
+
+        Raises:
+            ChannelClosed: At the end, and after ``close``.
+            UpstreamFailedError: If the producer failed or was cancelled.
+        """
+        ...
+
+    def __aiter__(self) -> AsyncIterator[pa.RecordBatch]:
+        """Iterate over the remaining record batches, in arrival order."""
+        ...
+
+    async def collect(self) -> list[pa.RecordBatch]:
+        """Read to the end and return every remaining record batch, in arrival order."""
+        ...
+
+    @property
+    def unread(self) -> bool:
+        """Whether no read was called and the channel is not closed.
+
+        A reserved channel (``reserve()``) is not unread, even before its first read.
+        """
+        ...
+
+    @property
+    def opened_on(self) -> StreamProtocol | None:
+        """The complete stream this channel reads, when it was opened on one; else
+        ``None`` (a reader of an output channel, whatever its description)."""
+        ...
+
+    def reserve(self, claim: object | None = None) -> object:
+        """Take the channel for one consumer that will read all of it.
+
+        Without ``claim``, the unread channel is held for the returned claim, not for
+        the calling task: no task, the reserving one included, can read it until a
+        task takes it over with that claim (``reserve(claim)``), after which only
+        that task reads it. A claim is taken over once.
+
+        Raises:
+            RuntimeError: If a read was called on it already, or ``claim`` is not its
+                claim.
+            ChannelClosed: If it was closed.
+        """
+        ...
+
+    async def close(self) -> None:
+        """Stop reading. The producer no longer waits for this reader."""
+        ...
+
+
+class RecordBatchOutput(Protocol):
+    """The producer side of a stream's Arrow record batches.
+
+    The Arrow-record-batch form of ``WritableChannel`` (``orcapod.channels``); ``OutputChannel`` of
+    ``orcapod.core.record_batch_channels`` is the implementation.
+    """
+
+    async def send(self, batch: pa.RecordBatch) -> None:
+        """Send one Arrow record batch of the stream's transport columns."""
+        ...
+
+    async def close(self) -> None:
+        """Complete the output."""
+        ...
+
+    def fail(self, error: BaseException) -> None:
+        """End the output with the producer's failure or cancellation."""
         ...

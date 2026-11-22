@@ -7,6 +7,8 @@ Both share SourceNodeBase which provides schema-based identity.
 
 from __future__ import annotations
 
+from collections import deque
+
 import contextlib
 import dataclasses
 import functools
@@ -27,10 +29,12 @@ from orcapod.core.operators.drop_nulls import _without_none  # pyright: ignore[r
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
+    row_built_columns,
     schema_requires_io,
     typed_arrow_schemas,
     typed_zero_row_table,
 )
+from orcapod.core.streams.record_batch_input import SOURCE_BATCH_ROWS, InputChannel
 from orcapod.core.streams.view import (
     ViewStatus,
     StreamView,
@@ -57,6 +61,9 @@ from orcapod.utils.schema_utils import (
 if TYPE_CHECKING:
     from orcapod.channels import WritableChannel
     from orcapod.protocols.core_protocols import StreamProtocol
+    from orcapod.protocols.core_protocols.streams import (
+        RecordBatchInput,
+    )
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
 
 logger = logging.getLogger(__name__)
@@ -410,6 +417,55 @@ def _require_stream_arrow_types(stream: Any, slot: str) -> None:
     )
     if missing:
         raise _no_arrow_type_error(slot, missing)
+
+
+class _ExecuteOutputFeed:
+    """The record batches of a source node's own ``execute()`` output.
+
+    Built at the first read from the rows ``execute()`` gives, rebuilt as a job does
+    (``StaticOutputOperatorPod._materialize_upstream``): slow, and correct by
+    definition. One binding is read, at that moment. A batch is dropped once
+    delivered.
+    """
+
+    # TODO(ITL-1360): the channel of stage 2's ``execute()`` output stream.
+
+    def __init__(self, node: SourceNodeBase) -> None:
+        """Make the feed; nothing is read until the first ``next``.
+
+        Args:
+            node: The source node whose output it delivers.
+        """
+        self._node = node
+        self._batches: deque[pa.RecordBatch] | None = None
+
+    async def next(self) -> pa.RecordBatch | None:
+        """Return the next record batch of the node's output, or ``None`` at the end."""
+        if self._batches is None:
+            from orcapod.core.operators.static_output_pod import (
+                StaticOutputOperatorPod,
+            )
+
+            rows = self._node.execute()
+            output = StaticOutputOperatorPod._materialize_upstream(rows, self._node)  # pyright: ignore[reportPrivateUsage]  # the job's rebuild of a node's rows
+            table = row_built_columns(
+                output.as_table(columns=ZERO_ROW_INPUT_COLUMNS), output.keys()
+            )
+            self._batches = deque(
+                batch
+                for batch in table.to_batches(max_chunksize=SOURCE_BATCH_ROWS)
+                if batch.num_rows
+            )
+        return self._batches.popleft() if self._batches else None
+
+    def close(self) -> None:
+        """Stop reading: the batches not read are dropped."""
+        self._batches = deque()
+
+    @property
+    def opened_on(self) -> StreamProtocol | None:
+        """``None``: the node is not the stream its batches rebuild."""
+        return None
 
 
 class SourceNodeBase(TraceableBase, ABC):
@@ -1162,6 +1218,20 @@ class SourceNodeBase(TraceableBase, ABC):
             total_rows=table.num_rows,
             display_all_rows=False,
         )
+
+    def open_channel(self) -> RecordBatchInput:
+        """Open an input channel on this node's rows, for async computation (ITL-1347).
+
+        The channel carries exactly this node's own ``execute()`` output: its rows,
+        as the table a job builds from them, in Arrow record batches. Everything
+        (the binding, the declared form, the column order, the source info) is read
+        at the first read, from one binding; opening reads nothing. The description
+        is this node. An unbound node's first read raises what reading it raises.
+
+        Returns:
+            The input channel.
+        """
+        return InputChannel(self, _ExecuteOutputFeed(self))
 
     async def async_iter_data(self):
         """Asynchronous iterator over (tag, data) pairs.
