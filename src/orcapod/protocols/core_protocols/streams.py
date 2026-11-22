@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import (
     AsyncIterator,
+    Coroutine,
     Collection,
     Iterable,
     Iterator,
@@ -219,8 +220,8 @@ class StreamProtocol(TraceableProtocol, PipelineElementProtocol, Protocol):
 
         The channel delivers the stream's rows as Arrow record batches, read once and
         in order; its description is this stream. Several channels may be opened on
-        one stream, each with its own position (``channel_to_stream`` makes a stream of
-        what a channel delivers).
+        one stream, each with its own position (``to_stream()`` makes a stream of what
+        a channel delivers).
 
         Returns:
             The input channel.
@@ -676,6 +677,22 @@ class RecordBatchInput(Protocol):
             RuntimeError: If a read was called on it already, or ``claim`` is not its
                 claim.
             ChannelClosed: If it was closed.
+        """
+        ...
+
+    def to_stream(self) -> Coroutine[Any, Any, StreamProtocol]:
+        """Return what the channel delivers, as a stream: the one such conversion.
+
+        A plain method returning the conversion to await; it reserves the channel
+        when called. The conversion reads the channel to its end, raises every read
+        error before an operator runs, and builds a fixed snapshot through the one
+        settlement path; only an unread channel opened on a stream ``_output_stream``
+        built gives that stream as it is.
+
+        Raises:
+            RuntimeError: If a read of the channel was already called.
+            ChannelClosed: If the channel was closed.
+            UpstreamFailedError: If the producer failed or was cancelled.
         """
         ...
 
