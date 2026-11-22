@@ -66,9 +66,12 @@ from orcapod.utils import arrow_utils
 
 # The ``semijoin_shared_data_column`` case shares a data column name on purpose; SemiJoin
 # warns that it is not a match key (ITL-1088), which is tested in test_semijoin_tag_keys.
-pytestmark = pytest.mark.filterwarnings(
-    "ignore::orcapod.errors.SemiJoinIgnoredColumnWarning"
-)
+# The ``rejoin_differing_*`` cases change a shared tag in one branch on purpose; Rejoin
+# warns that such rows are left out (ITL-1355), which is tested in test_rejoin.
+pytestmark = [
+    pytest.mark.filterwarnings("ignore::orcapod.errors.SemiJoinIgnoredColumnWarning"),
+    pytest.mark.filterwarnings("ignore::orcapod.errors.RejoinDifferingColumnWarning"),
+]
 
 Row: TypeAlias = tuple[TagProtocol, DataProtocol]
 Column: TypeAlias = "pa.Array[Any] | pa.ChunkedArray[Any]"
@@ -452,7 +455,75 @@ def _branches(
     return tuple(source.select_data_columns([*data_tags, *names]) for names in data)
 
 
+def _changed_branches(
+    *branches: tuple[Sequence[str], dict[str, Column]],
+) -> tuple[StreamProtocol, ...]:
+    """Branches of ``source_a`` built by hand, some with a shared tag changed (ITL-1355).
+
+    Each branch has the source's tags ``k`` and ``ta``, its system tags and the named
+    data columns; ``changed`` replaces tag columns by name. Rejoin leaves out the rows
+    of one origin row that differ in a shared column.
+    """
+    origin = source_a().as_table(columns={"system_tags": True})
+    system_tags = [name for name in origin.column_names if name.startswith("_tag")]
+    streams: list[StreamProtocol] = []
+    for data, changed in branches:
+        table = origin
+        for name, values in changed.items():
+            index = table.column_names.index(name)
+            table = table.set_column(index, table.schema.field(index), values)
+        streams.append(
+            ArrowTableStream(
+                table.select(["k", "ta", *data, *system_tags]), tag_columns=["k", "ta"]
+            )
+        )
+    return tuple(streams)
+
+
+def _float_tag_branch(values: Sequence[float], data: str) -> ArrowTableStream:
+    """A branch whose shared tag ``f`` is a float, with data column ``data`` (ITL-1355)."""
+    table = pa.table(
+        {
+            "k": pa.array([1, 2, 3], pa.int16()),
+            "f": pa.array(values, pa.float64()),
+            data: pa.array([10, 20, 30], pa.int32()),
+            "_tag_source_id::x": pa.array(["s", "s", "s"], pa.large_string()),
+            "_tag_record_id::x": pa.array(["r1", "r2", "r3"], pa.large_string()),
+        }
+    )
+    return ArrowTableStream(table, tag_columns=["k", "f"])
+
+
 CASES = [
+    # Rejoin leaves out rows of one origin row that differ in a shared column; equal
+    # floats of different bits match (ITL-1355). A null system tag is not here: rows
+    # holding one cannot be rebuilt into a table by the barrier of any operator (their
+    # system-tag field is nullable, the other rows' is not), before Rejoin sees them;
+    # the sync path is tested in test_rejoin.
+    Case(
+        "rejoin_differing_tag",
+        Rejoin,
+        lambda: _changed_branches(
+            (("i8", "s"), {}), (("l8", "nul"), {"ta": pa.array([5, 9, 6], pa.int8())})
+        ),
+    ),
+    Case(
+        "rejoin_3_differing_tags",
+        Rejoin,
+        lambda: _changed_branches(
+            (("i8",), {}),
+            (("s", "p"), {"ta": pa.array([5, 9, 6], pa.int8())}),
+            (("l8",), {"k": pa.array([1, 2, 4], pa.int16())}),
+        ),
+    ),
+    Case(
+        "rejoin_equal_floats_of_different_bits",
+        Rejoin,
+        lambda: (
+            _float_tag_branch([0.0, float("nan"), 1.5], "x"),
+            _float_tag_branch([-0.0, -float("nan"), 1.5], "y"),
+        ),
+    ),
     # Rejoin: the branches of one source put back together (ITL-1336), over many narrow
     # types, with plain tags and with data-tags, two and three inputs.
     Case(

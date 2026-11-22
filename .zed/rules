@@ -1494,17 +1494,43 @@ data. The rules:
 - Join requires non-overlapping data columns; raises InputValidationError on collision.
 - `Rejoin` (provisional, developer, November 21, 2026, ITL-1336) is the operator a diamond
   (one stream split into branches, then put back together) is expected to use; `Join` is
-  unchanged and still extends every input's system-tag names. Rejoin matches EVERY system-tag
-  column and keeps those columns unchanged (a result row has its origin row's provenance):
-  every input that states its system-tag columns states the same ones (a branch through
-  `Join`, `GroupBy` or `Batch` is refused); an input that states none is checked on its table
-  when computed. At most one row per origin row in each input (a first rule, refused naming the
-  input and the values); a null system-tag value is refused; a shared user tag, and every
-  system tag Polars matched, must agree on matched rows bit for bit (so the result never
-  follows argument order); the inputs' rows must share one data context, read from the
-  rows, which the result keeps (rows of another are refused; some operators return rows
-  in the default context, ITL-1339); data columns disjoint; N-ary and commutative; identity
-  `"Rejoin"`; async is the barrier, which rebuilds each input in its rows' data context.
+  unchanged and still extends every input's system-tag names. Rejoin keeps the system-tag
+  columns unchanged (a result row has its origin row's provenance): every input that states
+  its system-tag columns states the same ones (a branch through `Join`, `GroupBy` or `Batch`
+  is refused); an input that states none is checked on its table when computed. It is an
+  inner join on EVERY column its inputs share (developer, November 22, 2026, ITL-1355): the
+  system tags, a shared user tag, a shared data-tag's source info and the data context,
+  with `Join`'s equality (NaN equals NaN, `-0.0` equals `0.0`); a null system tag matches
+  nothing, a null in any other shared column equals a null (on purpose unlike `Join`,
+  where a null tag key matches nothing). Rejoin never refuses on what
+  rows hold, only on what the inputs' columns show (system-tag names, a shared column's
+  Arrow type, disjoint data columns): a row that matches nothing is left out, and rows of
+  one origin row that differ in another shared column raise `RejoinDifferingColumnWarning`
+  once per operator and set of columns. The warning is computed from the inputs' own rows
+  (`_differing_columns`: per shared column, the inputs that have it stacked and counted per
+  origin row), never from the rows rejoined so far, which have lost the origin rows an
+  earlier input lacks or disagrees on. System tags are assumed unique (no input is refused
+  for repeating one); the warning compares repeats by occurrence, and a surplus repeat is
+  never compared, so it warns for none (developer, November 22, 2026: no code for it). With
+  repeats and three or more inputs the fold is pairwise in the canonical order and a surplus
+  repeat left out at one step is not considered again, so which repeats remain can follow
+  that order (documented; no order-free N-ary rule for repeats without a design). A
+  shared column keeps the values of the first input that has it, in
+  the canonical input order (by pipeline hash; equal hashes stay in argument order, which
+  only the bits of equal floats can follow). With unique system tags the rows are matched
+  on the system tags first, by the same join as before ITL-1355, and the pairs filtered,
+  so inputs whose shared columns agree give the same rows in the same order (Polars' join
+  order depends on the inputs' sizes: never replace that join). When an input repeats an
+  origin row, rows are paired one to one by occurrence number (`_pairs_of_repeated_origins`:
+  the k-th with the k-th among rows equal in every shared column, in row order, arrival
+  order on the async path), in linear time: never join repeats on the system tags alone,
+  which builds their cross product. The result's data
+  context is read from its rows (some operators return rows in the default context,
+  ITL-1339); a result whose table holds rows of several data contexts keeps each in the
+  data context column, while the rows it yields one by one report the stream's one
+  context, as for any `ArrowTableStream` (`iter_data`'s limit, not Rejoin's: ITL-1359); N-ary and
+  commutative; identity `"Rejoin"`; async is the barrier, which rebuilds each input in its
+  rows' data context.
 - `Join` and `SemiJoin` give Polars only their key columns and row numbers (ITL-1284): Polars
   decides which rows match, and every output column is taken from the input tables by row
   number (`take`), so every value is the input's, bit for bit (they used to carry every column
