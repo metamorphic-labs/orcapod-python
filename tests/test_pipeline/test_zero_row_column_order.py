@@ -37,6 +37,7 @@ from orcapod.core.operators import (
     GroupBy,
     Index,
     Join,
+    MapColumns,
     MapData,
     MapTags,
     MergeJoin,
@@ -167,6 +168,17 @@ STEPS: dict[str, Step] = {
     "drop_columns": lambda a, g: DropColumns(["id", "l"])(a, label="op"),
     "map_tags": lambda a, g: MapTags({"id": "ident"})(a, label="op"),
     "map_data": lambda a, g: MapData({"x": "xx"})(a, label="op"),
+    # ``drop_unmapped`` drops user columns only, never a system tag (ITL-1363).
+    "map_tags_drop": lambda a, g: MapTags({"id": "ident"}, drop_unmapped=True)(
+        a, label="op"
+    ),
+    "map_data_drop": lambda a, g: MapData({"x": "xx", "l": "ll"}, drop_unmapped=True)(
+        a, label="op"
+    ),
+    "map_columns": lambda a, g: MapColumns({"id": "ident", "x": "xx"})(a, label="op"),
+    "map_columns_drop": lambda a, g: MapColumns(
+        {"id": "ident", "x": "xx"}, drop_unmapped=True
+    )(a, label="op"),
     "filter": lambda a, g: PolarsFilter(constraints={"id": 1})(a, label="op"),
     "drop_nulls": lambda a, g: DropNulls(["n"])(a, label="op"),
     "drop_nulls_all": lambda a, g: DropNulls()(a, label="op"),
@@ -542,8 +554,12 @@ class TestOutputSchemaPrediction:
 
 # ── data-tags (ITL-1023) ─────────────────────────────────────────────
 
-# Not supported with data-tags yet: MergeJoin (ITL-1018).
-DATA_TAG_STEPS = [step for step in STEPS if step != "merge_join"]
+# Not supported with data-tags yet: MergeJoin (ITL-1018), MapColumns (ITL-1022).
+DATA_TAG_STEPS = [
+    step
+    for step in STEPS
+    if step not in ("merge_join", "map_columns", "map_columns_drop")
+]
 
 
 @pytest.fixture
