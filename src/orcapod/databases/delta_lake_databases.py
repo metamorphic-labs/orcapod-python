@@ -148,8 +148,8 @@ def _allows_http(storage_options: Mapping[str, str]) -> bool:
 def _comparable_storage_type(arrow_type: pa.DataType) -> pa.DataType:
     """Return ``arrow_type`` reduced to what the append check compares.
 
-    Extension types are replaced by their storage type and every nested field is
-    made nullable, at every depth. The result is used only to compare a batch
+    Extension types are replaced by their storage type, a dictionary by its value
+    type, and every nested field is made nullable, at every depth. The result is used only to compare a batch
     with a stored table (ITL-884); it is never stored, so dropping nested
     non-null flags here changes no schema or hash.
 
@@ -161,6 +161,11 @@ def _comparable_storage_type(arrow_type: pa.DataType) -> pa.DataType:
     """
     if isinstance(arrow_type, pa.ExtensionType):
         return _comparable_storage_type(arrow_type.storage_type)
+    if pa.types.is_dictionary(arrow_type):
+        # The Delta writer decodes a dictionary: its values are what is stored.
+        return _comparable_storage_type(
+            arrow_utils.normalize_to_large_types(arrow_type.value_type)
+        )
     if pa.types.is_struct(arrow_type):
         return pa.struct(
             [pa.field(f.name, _comparable_storage_type(f.type)) for f in arrow_type]
@@ -192,7 +197,8 @@ def _without_null_types(arrow_type: pa.DataType) -> pa.DataType | None:
     """Return ``arrow_type`` without the parts typed ``null``, or ``None`` if none is left.
 
     A ``null``-typed value fits a column of any type, and Delta has no ``null``
-    type to compare it with, so the append check leaves it out at every depth: a
+    type, so the storability check (``delta_unstorable_reason``) leaves it out at
+    every depth: a
     ``null`` struct field is dropped (its siblings are still compared, inside lists
     and maps too), and a type that is ``null``, or whose list items or map keys or
     values are entirely ``null``, is not compared.
@@ -658,6 +664,59 @@ def _append_refusal(
             "the database"
         )
     return None
+
+
+def _with_nulls_resolved(incoming: Any, held: Any) -> Any:
+    """``incoming`` with each ``null``-typed part replaced by the type ``held`` has at
+    the same path, so the parts beside it are still compared (ITL-1334).
+
+    Struct fields are matched by name; list items and map keys and items followed.
+    A ``null`` part at a path ``held`` has no type for stays ``null`` (refused by
+    ``add_records`` before this is reached).
+
+    Args:
+        incoming: A type reduced by ``_comparable_storage_type``.
+        held: The type the table holds, reduced the same way, or ``None``.
+
+    Returns:
+        ``incoming``, its ``null`` parts resolved.
+    """
+    t = pa.types
+    if held is None:
+        return incoming
+    if t.is_null(incoming):
+        return held
+    if t.is_struct(incoming) and t.is_struct(held):
+        known = {f.name: f.type for f in held}
+        return pa.struct(
+            [
+                f.with_type(_with_nulls_resolved(f.type, known.get(f.name)))
+                for f in incoming
+            ]
+        )
+    if t.is_map(incoming) and t.is_map(held):
+        return pa.map_(  # pyright: ignore[reportCallIssue]  # pyarrow takes key/item fields
+            incoming.key_field.with_type(
+                _with_nulls_resolved(incoming.key_type, held.key_type)
+            ),
+            incoming.item_field.with_type(
+                _with_nulls_resolved(incoming.item_type, held.item_type)
+            ),
+            keys_sorted=incoming.keys_sorted,
+        )
+    lists = (t.is_list, t.is_large_list, t.is_fixed_size_list)
+    if any(k(incoming) for k in lists) and any(k(held) for k in lists):
+        # cast: the type guards above narrow the types in the stubs' terms.
+        list_type: Any = incoming
+        item = list_type.value_field.with_type(
+            _with_nulls_resolved(list_type.value_type, cast(Any, held).value_type)
+        )
+        if t.is_large_list(list_type):
+            return pa.large_list(item)
+        if t.is_list(list_type):
+            return pa.list_(item)
+        return pa.list_(item, list_type.list_size)
+    return incoming
 
 
 def _untyped_null_paths(incoming: Any, given: Any, path: str) -> list[str]:
@@ -1704,7 +1763,6 @@ class DeltaTableDatabase:
         # A column Delta cannot hold is refused before anything is buffered (ITL-1334).
         self.require_storable(records.schema)
         self._refuse_untyped_null_columns(record_path, records.schema)
-        self._refuse_unmergeable_append(record_path, records)
 
         # Step 2: Deduplicate within input table (keep last occurrence)
         deduplicated_table = self._deduplicate_within_table(records)
@@ -1727,10 +1785,15 @@ class DeltaTableDatabase:
             record_path, filtered_table, schema_handling
         )
 
-        # Step 5: Add to pending batch (no overwrite logic needed)
+        # Step 5: what the flush would refuse is refused now, on the rows that are
+        # queued: after duplicates are dropped and any requested schema handling
+        # (ITL-1334).
+        self._refuse_unmergeable_append(record_path, schema_compatible_table)
+
+        # Step 6: Add to pending batch (no overwrite logic needed)
         self._add_to_pending_batch(record_path, schema_compatible_table)
 
-        # Step 6: Flush if asked to; otherwise commit this table alone once its
+        # Step 7: Flush if asked to; otherwise commit this table alone once its
         # pending batch reaches batch_size. Only the full table: committing every
         # pending table here would commit another table's rows, such as pipeline
         # records whose results are still pending, out of their writer's order
@@ -2307,16 +2370,24 @@ class DeltaTableDatabase:
     def flush(self) -> None:
         """Flush all pending batches.
 
-        Every pending batch is attempted, even after one fails. A batch that fails
-        stays queued, so a later flush tries it again, and each failure is logged.
+        Every pending batch is attempted, even after one fails, and each failure is
+        logged. What happens to a failed batch depends on why it failed:
+
+        - Refused by its stored table (``InputValidationError``): the table, as
+          another writer committed it after the rows were queued, cannot take them
+          (``_append_refusal``). The batch is dropped from the queue, since every later
+          flush would refuse it too; the error says how many rows were not written.
+          Correct the rows and add them again (ITL-1334).
+        - Any other failure (a table that cannot be loaded, a failed write): the batch
+          stays queued, so a later flush tries it again.
 
         Raises:
             OrcapodDatabaseReadError: If a batch's existing table could not be loaded. It is
                 raised as itself; every other batch that failed in this flush is
                 added to it as a note.
             InputValidationError: If no batch failed with ``OrcapodDatabaseReadError`` but a
-                batch's column types differ from its stored table's. Other failed
-                batches are added to it as notes.
+                batch was refused by its stored table (dropped from the queue, above).
+                Other failed batches are added to it as notes.
             RuntimeError: If batches failed with other errors only, naming the
                 failed batches, with the first failure as its ``__cause__``.
         """
@@ -2497,6 +2568,11 @@ class DeltaTableDatabase:
             # too, so they leave the queue, as rows refused when added never enter
             # it (ITL-1334).
             logger.error(f"Refused batch for {record_key}: {e}")
+            # The refusal was decided against a version this handle may not have
+            # cached: what it cached of the table is dropped, so its next read loads
+            # the version another writer committed.
+            self._delta_table_cache.pop(record_key, None)
+            self._snapshots.pop(record_key, None)
             e.add_note(
                 f"The {pending_batch.num_rows} rows queued for this table were not "
                 "written and are no longer queued."
@@ -2804,33 +2880,27 @@ class DeltaTableDatabase:
     def _incompatible_append_column(
         delta_table: deltalake.DeltaTable, batch: pa.Schema, written: pa.Schema
     ) -> tuple[str, pa.DataType, pa.DataType] | None:
-        """Find a column whose type in ``batch`` differs from the stored table's.
+        """Find a column whose type in ``batch`` is not the type the table holds.
 
-        Delta's merge either casts such a batch to the stored type (``int32`` or
-        ``float64`` rows into an ``int64`` column) or, when an extension type is
-        involved, writes data files the table can no longer read. ``null``-typed
-        parts of the batch fit any stored type and are not compared (see
-        ``_without_null_types``). The batch's types
-        are first converted exactly as the Delta writer converts them (see
-        ``_as_delta_writer_stores``), then both sides are compared with extension
-        types reduced to storage, large-normalized and nullability ignored, so a
-        type Delta stores differently (``uint64`` as ``int64``, ``timestamp[ns]``
-        as ``timestamp[us]``) is not reported. Columns and nested
-        struct fields present on only one side are allowed (schema evolution);
-        see ``_types_conflict``. The stored schema comes from the loaded log; no
-        data is read.
+        One rule (ITL-1334): each column the stored table has is compared by its own
+        type with the type the table holds for it, its recorded type or else its
+        stored type (a column without a record holds a type Delta keeps exactly, so
+        its stored type is what was written). A conversion the Delta writer would make
+        is never taken as agreement: ``timestamp[ms]`` rows are refused by a
+        ``timestamp[us]`` column, whose read would give them back as microseconds.
+        Both sides are compared with extension types reduced to storage,
+        large-normalized and nested nullability ignored; struct fields are matched
+        by name, and a field on one side only is schema evolution
+        (``_types_conflict``). A ``null``-typed part takes the held type at its path
+        (``_with_nulls_resolved``), so its typed siblings, a map's keys beside
+        ``null`` items included, are still compared.
 
-        A stored column whose Arrow type is recorded (ITL-928, see
-        ``delta_arrow_types``) is compared by that type with the batch's own type
-        instead. A stored column without one was written before types were
-        recorded: besides the check above, the form the batch is written in
-        (``written``) must be the stored type, so a ``timestamp[ns]`` batch, now
-        written as ``int64``, is refused by a column stored as ``timestamp[us]``.
+        One exception keeps tables written before types were recorded (ITL-928)
+        appendable: an unsigned integer column into a column without a record that
+        holds its written form (the signed integer of the same width), its values
+        then checked by ``first_column_out_of_stored_range``.
 
-        A column the stored table does not have is not compared (schema evolution). A
-        type the Delta writer does not convert (``float16``) is compared as it is, so
-        a ``float16`` column is refused by a stored ``float32`` one, not failed by the
-        conversion.
+        The stored schema comes from the loaded log; no data is read.
 
         Args:
             delta_table: The loaded stored table.
@@ -2839,7 +2909,7 @@ class DeltaTableDatabase:
             written: ``batch`` as it is written (``written_field`` of each column).
 
         Returns:
-            ``(column, stored_type, incoming_type)`` for the first column whose
+            ``(column, held_type, incoming_type)`` for the first column whose
             compared types differ, or ``None`` when the batch can be appended.
         """
         stored = _stored_arrow_schema(delta_table)
@@ -2852,41 +2922,25 @@ class DeltaTableDatabase:
                 arrow_utils.normalize_to_large_types(arrow_type, keep_null=True)
             )
 
-        def conflict(
-            stored_schema: pa.Schema, rows: pa.Schema
-        ) -> tuple[str, pa.DataType, pa.DataType] | None:
-            for f in rows:
-                index = stored_schema.get_field_index(f.name)
-                if index < 0 or recorded.get(f.name) is not None:
-                    continue
-                reduced = _without_null_types(_comparable_storage_type(f.type))
-                if reduced is None:
-                    continue
-                try:
-                    converted = (
-                        _as_delta_writer_stores(pa.schema([pa.field(f.name, reduced)]))
-                        .field(0)
-                        .type
-                    )
-                except Exception:  # noqa: BLE001  # deltalake raises a bare Exception
-                    # A type the writer does not take as it is (float16).
-                    converted = reduced
-                stored_type = comparable(stored_schema.field(index).type)
-                incoming_type = comparable(converted)
-                if _types_conflict(stored_type, incoming_type):
-                    return f.name, stored_type, incoming_type
-            return None
-
         for field in batch:
-            stored_original = recorded.get(field.name)
-            if stored_original is None:
+            index = stored.get_field_index(field.name)
+            if index < 0:
+                continue  # a new column: schema evolution
+            record = recorded.get(field.name)
+            held = comparable(
+                record if record is not None else stored.field(index).type
+            )
+            incoming = _with_nulls_resolved(comparable(field.type), held)
+            if not _types_conflict(held, incoming):
                 continue
-            reduced = _without_null_types(comparable(field.type))
-            if reduced is not None and _types_conflict(
-                comparable(stored_original), reduced
-            ):
-                return field.name, stored_original, field.type
-        return conflict(stored, batch) or conflict(stored, written)
+            if record is None and pa.types.is_unsigned_integer(field.type):
+                as_written = _with_nulls_resolved(
+                    comparable(written.field(field.name).type), held
+                )
+                if not _types_conflict(held, as_written):
+                    continue
+            return field.name, held, incoming
+        return None
 
     @property
     def base_path(self) -> tuple[str, ...]:

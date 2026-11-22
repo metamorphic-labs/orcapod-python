@@ -9,6 +9,7 @@ later flush fails on them again.
 
 from __future__ import annotations
 
+import datetime as dt
 from pathlib import Path
 from typing import Any, cast
 
@@ -37,6 +38,8 @@ def _rows(ids: list[bytes], **columns: tuple[Any, list[Any]]) -> pa.Table:
 
 
 def _struct(*fields: Any) -> Any:
+    """A struct of exactly the fields given, in their order, each with its own name,
+    type, nullability and metadata."""
     return pa.struct(list(fields))
 
 
@@ -89,6 +92,17 @@ REFUSED: dict[str, tuple[pa.Table, pa.Table, str]] = {
         _rows([b"3", b"4"], x=(pa.float64(), [3.0, 4.0]), y=(I64, [3, 4])),
         r"'x': it is stored as int64 but the new rows have double",
     ),
+    "a timestamp unit the stored column does not have": (
+        _rows([b"1", b"2"], x=(pa.timestamp("us"), [1, 2])),
+        _rows([b"3", b"4"], x=(pa.timestamp("ms"), [3, 4])),
+        r"'x': it is stored as timestamp\[us\] but the new rows have timestamp\[ms\]",
+    ),
+    "a map key type beside null items": (
+        _rows([b"1"], x=(pa.map_(pa.large_string(), I64), [[("a", 1)]])),
+        _rows([b"3"], x=(pa.map_(I64, pa.null()), [[(5, None)]])),
+        r"'x': it is stored as map<large_string, int64> but the new rows have "
+        r"map<int64, int64>",
+    ),
     "float16 into a float32 column": (
         _rows([b"1", b"2"], x=(pa.float32(), [1.0, 2.0])),
         _rows([b"3", b"4"], x=(pa.float16(), [3.0, 4.0])),
@@ -101,6 +115,9 @@ REFUSED: dict[str, tuple[pa.Table, pa.Table, str]] = {
 def test_an_append_the_flush_would_refuse_is_refused_when_added(
     tmp_path: Path, case: str
 ) -> None:
+    """The refusal names the column (and the field), nothing is queued, a later flush
+    has nothing to fail on, and the stored rows read back unchanged, on the same and
+    on a fresh database object."""
     first, second, match = REFUSED[case]
     db = DeltaTableDatabase(tmp_path)
     db.add_records(PATH, first, record_id_column="id", flush=True)
@@ -114,35 +131,62 @@ def test_an_append_the_flush_would_refuse_is_refused_when_added(
         assert back.sort_by("id").to_pylist() == first.sort_by("id").to_pylist()
 
 
-# The controls: what the flush takes is not refused.
-KEPT: dict[str, tuple[pa.Table, pa.Table]] = {
+# The controls: what the flush takes is not refused. (stored rows, appended rows, the
+# columns compared, the rows read back in id order.)
+KEPT: dict[str, tuple[pa.Table, pa.Table, list[str], list[dict[str, Any]]]] = {
     "a nullable struct field omitted": (
         _rows([b"1"], x=(_struct(pa.field("a", I64), B), [{"a": 1, "b": 2}])),
         _rows([b"3"], x=(_struct(B), [{"b": 3}])),
+        ["x"],
+        [{"x": {"a": 1, "b": 2}}, {"x": {"a": None, "b": 3}}],
     ),
     "a nullable column omitted": (
         _rows([b"1"], x=(I64, [1]), y=(I64, [1])),
         _rows([b"3"], y=(I64, [3])),
+        ["x", "y"],
+        [{"x": 1, "y": 1}, {"x": None, "y": 3}],
     ),
     "a nullable type without nulls into a non-nullable column": (
         _rows([b"1"], x=(pa.field("x", I64, nullable=False), [1])),
         _rows([b"3"], x=(I64, [3])),
+        ["x"],
+        [{"x": 1}, {"x": 3}],
     ),
     "a new float16 column": (
         _rows([b"1"], y=(I64, [1])),
-        _rows([b"3"], y=(I64, [3]), x=(pa.float16(), [None])),
+        _rows([b"3", b"4"], y=(I64, [3, 4]), x=(pa.float16(), [1.5, None])),
+        ["x", "y"],
+        [{"x": None, "y": 1}, {"x": 1.5, "y": 3}, {"x": None, "y": 4}],
+    ),
+    "a null item of a map takes its type from the stored map": (
+        _rows([b"1"], x=(pa.map_(pa.large_string(), I64), [[("a", 1)]])),
+        _rows([b"3"], x=(pa.map_(pa.large_string(), pa.null()), [[("b", None)]])),
+        ["x"],
+        [{"x": [("a", 1)]}, {"x": [("b", None)]}],
+    ),
+    "the same timestamp unit": (
+        _rows([b"1"], x=(pa.timestamp("us"), [1])),
+        _rows([b"3"], x=(pa.timestamp("us"), [3])),
+        ["x"],
+        [
+            {"x": dt.datetime(1970, 1, 1, 0, 0, 0, 1)},
+            {"x": dt.datetime(1970, 1, 1, 0, 0, 0, 3)},
+        ],
     ),
 }
 
 
 @pytest.mark.parametrize("case", sorted(KEPT))
 def test_an_append_the_flush_takes_is_kept(tmp_path: Path, case: str) -> None:
-    first, second = KEPT[case]
+    """Both batches read back on a fresh object, value for value (a null kept as a
+    null), with the stored column's type: a new ``float16`` column as ``float16``."""
+    first, second, columns, expected = KEPT[case]
     db = DeltaTableDatabase(tmp_path)
     db.add_records(PATH, first, record_id_column="id", flush=True)
     db.add_records(PATH, second, record_id_column="id", flush=True)
     back = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="id")
-    assert back is not None and back.num_rows == 2
+    assert back is not None
+    assert back.sort_by("id").select(columns).to_pylist() == expected
     if case == "a new float16 column":
         assert back.schema.field("x").type == pa.float16()
 
@@ -292,6 +336,8 @@ def test_a_null_child_of_an_evolving_struct_appends(
 def test_a_null_path_no_schema_types_is_refused_naming_every_path(
     tmp_path: Path,
 ) -> None:
+    """Every ``null`` part no schema types is named (``x.b``, ``x.c``), not only the
+    first; ``x.a``, which the stored table types, is not."""
     db = DeltaTableDatabase(tmp_path)
     db.add_records(
         PATH,
@@ -311,3 +357,111 @@ def test_a_null_path_no_schema_types_is_refused_naming_every_path(
             ),
             record_id_column="id",
         )
+
+
+def test_the_check_runs_on_the_rows_coerced_to_the_pending_batch(
+    tmp_path: Path,
+) -> None:
+    """``schema_handling="coerce"`` casts the rows to the pending batch's types before
+    they are checked against the stored table, so ``int32`` rows behind a stored and a
+    pending ``int64`` column append; without it, the same rows are refused."""
+    db = DeltaTableDatabase(tmp_path)
+    db.add_records(PATH, _rows([b"1"], x=(I64, [1])), record_id_column="id", flush=True)
+    db.add_records(PATH, _rows([b"2"], x=(I64, [2])), record_id_column="id")
+    with pytest.raises(ValueError, match="Schema mismatch"):
+        db.add_records(PATH, _rows([b"3"], x=(pa.int32(), [3])), record_id_column="id")
+    db.add_records(
+        PATH,
+        _rows([b"3"], x=(pa.int32(), [3])),
+        record_id_column="id",
+        schema_handling="coerce",
+        flush=True,
+    )
+    back = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="id")
+    assert back is not None
+    assert back.schema.field("x").type == I64
+    assert back.sort_by("id").column("x").to_pylist() == [1, 2, 3]
+
+
+@pytest.mark.parametrize(
+    ("values", "kept"),
+    [([None, 7], 7), ([7, None], None)],
+    ids=["null first", "null last"],
+)
+def test_values_are_checked_on_the_rows_kept_after_duplicates(
+    tmp_path: Path, values: list[Any], kept: Any
+) -> None:
+    """A repeated id keeps its last row: a null in a dropped row is not refused, a null
+    in the kept row is, before anything is queued."""
+    db = DeltaTableDatabase(tmp_path)
+    db.add_records(
+        PATH,
+        _rows([b"1"], x=(pa.field("x", I64, nullable=False), [1])),
+        record_id_column="id",
+        flush=True,
+    )
+    repeated = _rows([b"2", b"2"], x=(I64, values))
+    if kept is None:
+        with pytest.raises(InputValidationError, match="'x'.*hold a null"):
+            db.add_records(PATH, repeated, record_id_column="id")
+        assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
+        expected = [1]
+    else:
+        db.add_records(PATH, repeated, record_id_column="id", flush=True)
+        expected = [1, kept]
+    db.flush()
+    back = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="id")
+    assert back is not None
+    assert back.sort_by("id").column("x").to_pylist() == expected
+
+
+def test_rows_skip_duplicates_skips_are_not_checked(tmp_path: Path) -> None:
+    """``skip_duplicates=True`` skips a stored id; its null is never written, so it is
+    not refused."""
+    db = DeltaTableDatabase(tmp_path)
+    db.add_records(
+        PATH,
+        _rows([b"1"], x=(pa.field("x", I64, nullable=False), [1])),
+        record_id_column="id",
+        flush=True,
+    )
+    db.add_records(
+        PATH,
+        _rows([b"1", b"2"], x=(I64, [None, 2])),
+        record_id_column="id",
+        skip_duplicates=True,
+        flush=True,
+    )
+    back = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="id")
+    assert back is not None
+    assert back.sort_by("id").column("x").to_pylist() == [1, 2]
+
+
+def test_a_flush_refusal_drops_what_the_handle_cached_of_the_table(
+    tmp_path: Path,
+) -> None:
+    """A handle that read the table, then had its queued rows refused against a
+    version another writer committed, reads that version afterwards: its rows and
+    its new column, not the version it had cached."""
+    db = DeltaTableDatabase(tmp_path)
+    db.add_records(PATH, _rows([b"1"], x=(I64, [1])), record_id_column="id", flush=True)
+    assert db.get_all_records(PATH, record_id_column="id") is not None  # cached
+    db.add_records(
+        PATH,
+        _rows([b"2"], x=(I64, [2]), y=(pa.float64(), [2.0])),
+        record_id_column="id",
+    )
+    DeltaTableDatabase(tmp_path).add_records(
+        PATH,
+        _rows([b"9"], x=(I64, [9]), y=(I64, [9])),
+        record_id_column="id",
+        flush=True,
+    )
+    with pytest.raises(InputValidationError, match="'y'"):
+        db.flush()
+    back = db.get_all_records(PATH, record_id_column="id")
+    assert back is not None
+    assert back.sort_by("id").select(["x", "y"]).to_pylist() == [
+        {"x": 1, "y": None},
+        {"x": 9, "y": 9},
+    ]
