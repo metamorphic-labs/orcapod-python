@@ -26,6 +26,7 @@ from orcapod.config import OrcapodConfig
 from orcapod.core.base import TraceableBase
 from orcapod.core.datagrams import Data, Tag
 from orcapod.core.operators.drop_nulls import _without_none  # pyright: ignore[reportPrivateUsage]  # DropNulls' rule for removing None from a type, shared, never copied
+from orcapod.core.sources.base import table_is_rows
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
@@ -1836,7 +1837,7 @@ class SourceJobNode(SourceNodeBase):
             )
         if self._declared_form is not None:
             return None
-        if not getattr(type(self._bound_source), "TABLE_IS_ROWS", False):
+        if not table_is_rows(self._bound_source):
             # Not a library source kind whose table is its rows (a side-effect or
             # function pod stream, an operator's result, a raw stream, a poller): its
             # rows, as main iterated them.

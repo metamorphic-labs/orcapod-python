@@ -415,8 +415,26 @@ def stream_arrow_schema(
         # reads). A source's tokens are strings, so each data column's source info is
         # a string field.
         tag_schema, data_schema = typed.output_schema(columns={"system_tags": True})
-        converter = StaticOutputOperatorPod._upstream_context(typed).type_converter  # pyright: ignore[reportPrivateUsage]  # the one place that resolves an upstream's context
-        table = arrow_utils.make_empty_table({**tag_schema, **data_schema}, converter)
+        stated = getattr(stream, "arrow_schemas", None)
+        if isinstance(stated, tuple):
+            # The Arrow types the stream declares itself (a slot): never a conversion
+            # of its Python types, which may have no Arrow type of their own.
+            tag_arrow, data_arrow = cast("tuple[pa.Schema, pa.Schema]", stated)
+            fields = [
+                *tag_arrow,
+                *(
+                    pa.field(name, pa.large_string())
+                    for name in tag_schema
+                    if name not in tag_arrow.names
+                ),
+                *(f for f in data_arrow if f.name not in tag_arrow.names),
+            ]
+            table = pa.schema(fields).empty_table()
+        else:
+            converter = StaticOutputOperatorPod._upstream_context(typed).type_converter  # pyright: ignore[reportPrivateUsage]  # the one place that resolves an upstream's context
+            table = arrow_utils.make_empty_table(
+                {**tag_schema, **data_schema}, converter
+            )
         for name in data_schema:
             table = table.append_column(
                 pa.field(f"{constants.SOURCE_PREFIX}{name}", pa.large_string()),
