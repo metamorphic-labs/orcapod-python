@@ -40,6 +40,8 @@ from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.streams.base import ZERO_ROW_INPUT_COLUMNS
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import ProvisionalHashWarning
+from orcapod.pipeline import AsyncPipelineOrchestrator
+from orcapod.pipeline.observer import NoOpObserver
 from orcapod.operators import MergeJoin, Rejoin, SelectDataColumns
 from orcapod.side_effects import SideEffectJobNode
 from orcapod.system_constants import constants
@@ -390,3 +392,52 @@ def test_a_poller_fetching_in_another_order_hands_on_its_rows(
         *source_order,
     ]
     assert "poller" in outputs
+
+
+@function_pod(output_keys="z")
+def plus_one(d1_doubled: int) -> int:
+    return d1_doubled + 1
+
+
+class _ClearsOnRunStart(NoOpObserver):
+    """Clears ``node`` when the run starts and counts ``label``'s data starts."""
+
+    def __init__(self, node: Any, label: str) -> None:
+        self._node = node
+        self._label = label
+        self.data_starts = 0
+
+    def contextualize(self, *identity_path: str) -> _ClearsOnRunStart:
+        return self
+
+    def on_run_start(self, run_id: str, pipeline_uri: str = "") -> None:
+        self._node.clear_cache()
+
+    def on_data_start(self, node_label: str, tag: Any, data: Any) -> None:
+        if node_label == self._label:
+            self.data_starts += 1
+
+
+def test_an_async_held_node_sends_the_rows_the_plan_took() -> None:
+    """The async run sends a held node's rows as planned, not as read again later.
+
+    An observer clears the held node when the run starts; the rows the plan took still
+    feed the node after it, as on ``main`` (Codex on PR #485).
+    """
+    from orcapod.sources import DictSource
+
+    job = PipelineJob(name="held_snapshot", database=InMemoryArrowDatabase())
+    with job:
+        source = DictSource(
+            [{"k": i, "d1": i} for i in range(3)],
+            tag_columns=["k"],
+            tag_only_columns=True,
+            source_id="s",
+        )
+        plus_one.pod(doubled.pod(source, label="twice"), label="plus")
+    job.run()
+    job.nodes["plus"].clear_cache()
+    observer = _ClearsOnRunStart(job.nodes["twice"], "plus")
+    summary = job.run(orchestrator=AsyncPipelineOrchestrator(), observer=observer)
+    assert summary.nodes["twice"].held == 3
+    assert observer.data_starts == 3

@@ -17,8 +17,6 @@ from unittest import mock
 import pyarrow as pa
 import pytest
 
-from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
-
 from orcapod import PipelineJob, function_pod
 from orcapod.core.nodes import OperatorJobNode
 from orcapod.core.nodes.source_node import SourceJobNode
@@ -752,18 +750,14 @@ def test_a_direct_async_run_drains_the_inputs_of_a_held_node(
         (grouped, summed),
     ):
         dag.add_edge(upstream, downstream)
-    held = {
-        rowwise: StaticOutputOperatorPod._materialize_upstream(  # pyright: ignore[reportPrivateUsage]  # a held node's output stream, as the run plan builds it
-            list(rowwise.iter_data()), rowwise
-        )
-    }
+    held = {rowwise: list(rowwise.iter_data())}
     summed.clear_cache()
     grouped.clear_cache()
     orchestrator = AsyncPipelineOrchestrator(buffer_size=2, error_policy=error_policy)
 
     async def run() -> None:
         """Run the whole graph with ``rowwise`` held, under a time limit."""
-        await asyncio.wait_for(orchestrator.run_async(dag, held=held), timeout=30)
+        await asyncio.wait_for(orchestrator.run_async(dag, held_rows=held), timeout=30)
 
     asyncio.run(run())
     assert summed.as_table().num_rows == 2
