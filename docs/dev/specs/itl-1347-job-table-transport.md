@@ -520,7 +520,7 @@ stage.
 | e3 | Function calls and stored rows for duplicate inputs, async; `RunSummary` computed counts | About 3× more calls than sync, and more stored rows (4,188 against 4,060 in ITL-1062's measurement) | Misses are deduplicated by base entry id, so calls, stored rows and counts equal sync | **ITL-1062.** Reproducer: ITL-1062's workshop-shaped pipeline with repeated input data, async | approved (developer, 2026-11-22) |
 | e6 | Async values that depend on an earlier validation of the same operator object | `SemiJoin._validated_common_keys` and `Index._element_arrow_type_fallback` hold the last validation's values (ITL-858, section 1.2). One operator object applied to two streams can use the other stream's keys or fallback type | Read from each input's description, with no state | The ITL-858 finding; filed as ITL-1358. Reproducer: one `SemiJoin` instance validated on stream B, then run async over stream A with other keys. To be confirmed in stage 5 | ITL-1358 (filed); fixed with stage 5 once a reproducer confirms it |
 | e7 | What a consumer does after its producer failed (async, failure path) | The producer closes its output in `finally`, so a consumer sees a normal end and may finish, and a `LOG` operator node may store, a partial result before the task group cancels it | Readers raise `UpstreamFailedError` at the failure point instead of seeing a normal end, so no consumer finishes, or stores its result, as if its input were complete. Batches a consumer processed before the failure are still processed, and a streaming node may already have passed them on or a function node stored results for them, as on `main`; there is no rollback. A barrier operator never computes over a partial input. The run raises the producer's own error, as today | A candidate race, to be confirmed with a reproducer in stage 5: a `fail_fast` function node raising on row 3 of 6, feeding a `Select` node in `LOG` mode; check the operator cache after the failed run. If `main` never stores in practice, this row is no difference | filed by the developer only once a test reproduces it |
-| e8 | Meta columns of an async side-effect node's rows | An async side-effect node passes on and holds the rows it receives as they are, so a computed row keeps its `__computed` meta column (from the cached function pod), and the node's `as_table(all_info=True)` shows it. On sync, its input is rebuilt from rows (`_rows_to_table` drops meta), so the column is absent | Async drops input meta columns as sync does. With table transport this follows from the transport columns, which hold no meta column | A `main` bug: the async and sync paths give the node different columns. Found by the stage 0 harness on `job-speed` 0e15d0db, which does not change side-effect nodes; the stage 0 differential checks it on pinned `main`. Reproducer: a function node (with a result store) feeding a `tap_pod`, async against sync, comparing the side-effect node's `as_table(all_info=True)` columns | approval needed |
+| e8 | Meta columns of an async side-effect node's rows | An async side-effect node passes on and holds the rows it receives as they are, so a computed row keeps its `__computed` meta column (from the cached function pod), and the node's `as_table(all_info=True)` shows it. On sync, its input is rebuilt from rows (`_rows_to_table` drops meta), so the column is absent | Async drops input meta columns as sync does. With table transport this follows from the transport columns, which hold no meta column | A `main` bug: the async and sync paths give the node different columns. Found by the stage 0 harness on `job-speed` 0e15d0db, which does not change side-effect nodes; the stage 0 differential checks it on pinned `main`. Reproducer: a function node (with a result store) feeding a `tap_pod`, async against sync, comparing the side-effect node's `as_table(all_info=True)` columns | approved (developer, 2026-11-22) |
 
 **Resolved: refusals after rows have flowed (was c, question 9).** The developer's `Rejoin`
 rule (ITL-1355) removes every data-dependent refusal from `Rejoin`: it checks only what its
@@ -1065,12 +1065,14 @@ Not covered:
      beyond that must be a listed row.
    - **Arrival-dependent results and everything downstream of them.** An accepted
      arrival-dependent node is a `Batch`, or a `PolarsFilter` with an order-dependent
-     predicate, whose input arrives in another order than on sync. Its rows legitimately
+     predicate, whose input arrives in another order than on sync in **either** async run:
+     the branch's or `main`'s. Its rows legitimately
      differ from sync, and so do the rows of every node downstream of it. The differential
      determines that set mechanically, from the job's graph: the arrival-dependent node and
      all its descendants. That set, and nothing else, is excluded from the row comparison
-     against sync and against `main`'s async run. Instead, every node in the set is checked
-     against a sync recomputation over exactly the inputs it received:
+     against sync and against `main`'s async run. Instead, every node in the set is checked,
+     in each async run separately (the branch's and `main`'s), against a sync recomputation
+     over exactly the inputs it received in that run:
      - **recorded arrivals**: the differential records, for each node in the set, the rows of
        each of its inputs in the order the node received them on the async path (it wraps
        the node's input channels; the library is not changed);
@@ -1087,6 +1089,10 @@ Not covered:
        first `Batch`) is checked against its own recorded arrivals in the same way, never
        against an order the sync recomputation would choose. Each node's check uses only
        its own recorded inputs, so a valid arrival order anywhere in the set passes;
+     - **edge conservation**: for every edge into or inside the set, the node's recorded input
+       rows equal its producer's output rows in the same run, as a multiset with
+       multiplicity. So a row lost or duplicated between two excluded nodes fails, even
+       though each node agrees with its own recomputation;
      - **everything outside the set** is compared as usual.
 
      A difference anywhere else fails the gate.
@@ -1266,7 +1272,8 @@ Answers to the spec's questions (developer, 2026-11-22, approving the spec as a 
     - e7 is filed only once a test reproduces it; the developer files it;
     - e5 is accepted as documented behaviour, like `Batch`, with no fix.
 
-**Differences approved as bug fixes**: e1 (ITL-856), e2 (ITL-951) and e3 (ITL-1062).
+**Differences approved as bug fixes**: e1 (ITL-856), e2 (ITL-951), e3 (ITL-1062) and e8 (the
+async side-effect node drops the `__computed` meta column, as sync does).
 
 **Each stage merges** into `eywalker/job-speed` only after the comparison against `main`
 shows no change in any sync result. The coordinator verifies and merges.
