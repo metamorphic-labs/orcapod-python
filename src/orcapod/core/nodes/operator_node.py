@@ -39,9 +39,9 @@ from orcapod.core.data_tags import (
 from orcapod.channels import Channel, ChannelClosed, ReadableChannel, WritableChannel
 from orcapod.config import OrcapodConfig
 from orcapod.core.operators.static_output_pod import (
-    DynamicPodStream,
     RowBuiltFormUnavailable,
     StaticOutputOperatorPod,
+    produced_stream,
     rows_on_read,
 )
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
@@ -49,6 +49,7 @@ from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
     StreamBase,
     check_head_size,
+    reads_as_its_class,
     short_stream_repr,
 )
 from orcapod.core.streams.view import (
@@ -1708,37 +1709,55 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
 
             # Compute
             result_stream = self._operator.process(*input_streams)
+            produced = produced_stream(result_stream)
 
-            # The result's table, as the table built from its rows would be, without
-            # making the rows (ITL-1347, stage 2).
-            result_table = result_stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
-            # The order the result's rows have (``result_keys``), never the prediction.
-            keys: tuple[tuple[str, ...], tuple[str, ...]] = (
-                result_stream.result_keys()
-                if isinstance(result_stream, DynamicPodStream)
-                else result_stream.keys()
-            )
-            tag_keys = keys[0]
-            data_tags = data_tag_names(*keys)
-
-            # Cache, in row order with or without rows (ITL-1131, ITL-1133).
-            if result_table.num_rows:
-                try:
-                    kept_table = StaticOutputOperatorPod._row_built_form(
-                        result_table, keys
-                    )
-                except RowBuiltFormUnavailable as error:
-                    StaticOutputOperatorPod._raise_as_rows_do(
-                        result_stream.iter_data(), error
-                    )
-                self._cached_output_stream = ArrowTableStream(
-                    kept_table, tag_columns=tag_keys, data_tags=data_tags
+            output: StreamProtocol
+            if not reads_as_its_class(produced, ArrowTableStream):
+                # A result that is not exactly a stream over its table (a custom
+                # stream kind, a replaced reader): main's own row path, its rows read
+                # once, its table built where a successor reads it (ITL-1347).
+                rows = list(result_stream.iter_data())
+                self._cached_output_stream = StaticOutputOperatorPod._kept_output(
+                    result_stream, rows
                 )
+                output = rows_on_read(rows, self)
             else:
-                kept_table = None
-                self._cached_output_stream = (
-                    StaticOutputOperatorPod._zero_rows_in_row_order(result_stream)
-                )
+                # The result's table, as the table built from its rows would be,
+                # without making the rows (ITL-1347, stage 2). An exact
+                # ``ArrowTableStream``'s ``keys()`` are the keys its rows are read with
+                # (``iter_data``), so they are the order of the result's rows, to any
+                # depth of composition, never the prediction.
+                result_table = result_stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+                keys = produced.keys()
+                tag_keys = keys[0]
+                data_tags = data_tag_names(*keys)
+
+                # Cache, in row order with or without rows (ITL-1131, ITL-1133).
+                if result_table.num_rows:
+                    try:
+                        kept_table = StaticOutputOperatorPod._row_built_form(
+                            result_table, keys
+                        )
+                    except RowBuiltFormUnavailable as error:
+                        StaticOutputOperatorPod._raise_as_rows_do(
+                            result_stream.iter_data(), error
+                        )
+                    self._cached_output_stream = ArrowTableStream(
+                        kept_table, tag_columns=tag_keys, data_tags=data_tags
+                    )
+                    # The output stream, built once the node holds its run (as the
+                    # sync orchestrator built a successor's input after ``execute``
+                    # returned).
+                    output = StaticOutputOperatorPod._as_upstream_stream(
+                        kept_table, tag_keys, data_tags, self
+                    )
+                else:
+                    self._cached_output_stream = (
+                        StaticOutputOperatorPod._zero_rows_in_row_order(result_stream)
+                    )
+                    # Its zero-row form is derived where a successor reads it, as on
+                    # main: the operator is not called again here (``RowsOnRead``).
+                    output = rows_on_read([], self)
 
             self._update_modified_time()
 
@@ -1751,16 +1770,6 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             ):
                 self._store_output_stream(self._cached_output_stream)
 
-            # The output stream, built once the node holds its run (as the sync
-            # orchestrator built a successor's input after ``execute`` returned).
-            if kept_table is not None:
-                output = StaticOutputOperatorPod._as_upstream_stream(
-                    kept_table, tag_keys, data_tags, self
-                )
-            else:
-                # Its zero-row form is derived where a successor reads it, as on main:
-                # the operator is not called again here (``RowsOnRead``).
-                output = rows_on_read([], self)
             ctx_obs.on_node_end(node_label, node_hash)
             return output
         except BaseException:

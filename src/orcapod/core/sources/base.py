@@ -6,6 +6,7 @@ from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.core.streams.base import (
     StreamBase,
+    reads_as_its_class,
     typed_arrow_schemas,
     typed_zero_row_table,
 )
@@ -47,25 +48,15 @@ def saved_tag_only_columns(config: dict[str, Any]) -> bool | list[str]:
     return config["tag_only_columns"]
 
 
-_ROW_READERS = (
-    "iter_data",
-    "as_table",
-    "__iter__",
-    "async_iter_data",
-    "keys",
-    "output_schema",
-)
-"""The members a source's rows and table are read through."""
-
-
 def table_is_rows(source: object) -> bool:
     """Whether ``source``'s ``as_table()`` and ``iter_data()`` provably read the same data.
 
-    True only when the class that declares ``TABLE_IS_ROWS = True`` (a library source
-    kind) reads ``source``: ``source``'s own class, or a subclass that overrides none of
-    the members the rows and the table are read through (``_ROW_READERS``). A subclass
-    that changes how it reads (a filtering ``iter_data``) is not that kind any more, and
-    a job node bound to it hands on its rows, as ``main`` iterated them (ITL-1347).
+    Positive and exact (ITL-1347): true only when ``source``'s class itself declares
+    ``TABLE_IS_ROWS = True`` (a library source kind) and ``source`` reads as that class
+    (``reads_as_its_class``: its exact type, no member replaced on the instance). Any
+    subclass, a mixin, a replaced reader or a property that changes what the source
+    reads through is not proven, and a job node bound to it hands on its rows, as
+    ``main`` iterated them.
 
     Args:
         source: The object bound to a source slot.
@@ -73,12 +64,8 @@ def table_is_rows(source: object) -> bool:
     Returns:
         Whether F of its table is the table its rows give.
     """
-    for klass in type(source).__mro__:
-        if "TABLE_IS_ROWS" in vars(klass):
-            return bool(vars(klass)["TABLE_IS_ROWS"])
-        if any(name in vars(klass) for name in _ROW_READERS):
-            return False
-    return False
+    kind = type(source)
+    return vars(kind).get("TABLE_IS_ROWS") is True and reads_as_its_class(source, kind)
 
 
 class RootSource(StreamBase):
@@ -130,11 +117,13 @@ class RootSource(StreamBase):
     TABLE_IS_ROWS: ClassVar[bool] = False
     """Whether ``as_table()`` and ``iter_data()`` read the same data, with no effect.
 
-    Declared ``True`` only by the library source kinds that read one stream either way
-    (ITL-1347): a job node bound to one hands on F of its table, which equals the table
-    built from its rows. Any other bound stream (a side-effect or function pod stream,
-    an operator's result, a raw stream, a source kind that polls or delivers on a read)
-    hands on its rows (``RowsOnRead``), as ``main`` iterated them.
+    Declared ``True`` only by the library source kinds that read one stream either way,
+    each on its own class: it is read for the exact class only, never inherited
+    (``table_is_rows``; ITL-1347). A job node bound to an instance of exactly such a
+    class hands on F of its table, which equals the table built from its rows. Any
+    other bound stream (a subclass, a side-effect or function pod stream, an operator's
+    result, a raw stream, a source kind that polls or delivers on a read) hands on its
+    rows (``RowsOnRead``), as ``main`` iterated them.
     """
 
     def __init__(
