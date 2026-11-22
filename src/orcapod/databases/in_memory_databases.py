@@ -9,7 +9,8 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from orcapod.databases._row_index import KeyIndex, compact_tail, matching_rows
-from orcapod.databases.utils import coerce_record_id
+from orcapod.databases.utils import coerce_record_id, first_changed_column
+from orcapod.errors import InputValidationError
 
 if TYPE_CHECKING:
     from orcapod.pipeline.serialization import DatabaseRegistry
@@ -249,10 +250,26 @@ class InMemoryArrowDatabase:
                 f"got {rid_type}. Encode the column to bytes before calling add_records()."
             )
 
+        record_key = self._get_record_key(record_path)
+        # The table holds one type per column: rows whose field metadata or nested
+        # field attributes differ would read back with the held ones (ITL-1334).
+        held = [
+            table.schema
+            for table in (
+                self._tables.get(record_key),
+                self._pending_batches.get(record_key),
+            )
+            if table is not None
+        ]
+        changed = first_changed_column(held, records.schema)
+        if changed is not None:
+            raise InputValidationError(
+                f"Cannot append to the table at {record_path!r}: column "
+                f"{changed[0]!r}: {changed[1]}. Nothing was written."
+            )
+
         # Deduplicate within the incoming batch (keep last)
         records = self._deduplicate_within_table(records)
-
-        record_key = self._get_record_key(record_path)
 
         if skip_duplicates:
             records = self._filter_existing_records(record_key, records)

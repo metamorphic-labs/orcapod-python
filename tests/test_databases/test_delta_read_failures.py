@@ -259,10 +259,18 @@ class TestFlushRaisesStoreErrorsThemselves:
     """``flush`` raises database errors as themselves, with the other failures noted."""
 
     def test_store_read_error_is_raised_with_a_note_per_other_failed_batch(
-        self, base, stored
+        self, base, stored, caplog
     ):
-        """The ``OrcapodDatabaseReadError`` is raised and the refused batch is noted on it."""
+        """The ``OrcapodDatabaseReadError`` is raised and the refused batch is noted on
+        it, with its discard notice: how many rows of which table were not written and
+        are no longer queued, in the raised error and in the log (ITL-1334)."""
         other = ("results", "u")
+        db = DeltaTableDatabase(base_path=base)
+        # Queued first, while nothing is stored at ``other``; then another writer
+        # stores x as int64 there, so the flush refuses these rows (ITL-1334).
+        db.add_records(
+            other, rows([b"b", b"d"], pa.array([2.0, 4.0])), record_id_column="rid"
+        )
         stored.add_records(
             other,
             rows([b"a"], pa.array([1], pa.int64())),
@@ -270,15 +278,12 @@ class TestFlushRaisesStoreErrorsThemselves:
             flush=True,
         )
         unsupported_reader_feature(base)
-        db = DeltaTableDatabase(base_path=base)
-        # Queued first: refused at flush, because x is stored as int64.
-        db.add_records(other, rows([b"b"], pa.array([2.0])), record_id_column="rid")
         # Queued second: its table's log cannot be loaded.
         db.add_records(
             PATH, rows([b"c"], pa.array([3], pa.int64())), record_id_column="rid"
         )
 
-        with pytest.raises(OrcapodDatabaseReadError) as info:
+        with caplog.at_level("ERROR"), pytest.raises(OrcapodDatabaseReadError) as info:
             db.flush()
 
         # The OrcapodDatabaseReadError wins over the earlier refusal, because it is the one
@@ -288,7 +293,16 @@ class TestFlushRaisesStoreErrorsThemselves:
         assert len(notes) == 1
         assert "results/u" in notes[0]
         assert "InputValidationError" in notes[0]
-        # Both failed batches stay queued, so the next flush fails the same way.
+        discarded = (
+            "The 2 rows queued for table 'results/u' were not written and are no "
+            "longer queued"
+        )
+        assert discarded in notes[0]
+        assert any(discarded in record.getMessage() for record in caplog.records)
+        # The batch the stored table refuses leaves the queue (every later flush
+        # would refuse it too); the one whose table cannot be read stays queued, so
+        # the next flush fails the same way (ITL-1334).
+        assert db._pending_batches.keys() == {"results/t"}  # pyright: ignore[reportPrivateUsage]
         with pytest.raises(OrcapodDatabaseReadError):
             db.flush()
 

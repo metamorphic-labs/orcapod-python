@@ -17,7 +17,11 @@ import pyarrow as pa
 import pytest
 
 from orcapod.databases import DeltaTableDatabase
-from orcapod.errors import OrcapodDatabaseReadError
+from orcapod.errors import (
+    InputValidationError,
+    OrcapodDatabaseReadError,
+    UnstorableColumnError,
+)
 
 PATH = ("table",)
 SCOPE = "scope"
@@ -417,36 +421,38 @@ def test_read_before_flush_matches_read_after_flush_across_schema_change(
     ids=["int64_vs_int32", "int64_vs_string", "timestamp_unit", "decimal_precision"],
 )
 @pytest.mark.parametrize("method", list(READS_AC))
-def test_read_of_stored_and_pending_rows_with_different_types_raises(
+def test_rows_of_another_type_than_the_stored_column_are_refused_when_added(
     tmp_path: Path, method: str, stored_x: pa.Array[Any], pending_x: pa.Array[Any]
 ) -> None:
-    """A column whose stored and pending types differ is never widened: the read raises."""
+    """They used to be queued, make reads of stored and pending rows raise and fail
+    the flush; now nothing is queued, and the read gives the stored rows as stored
+    (ITL-1334). A timestamp unit counts: Delta stores ``ms`` as ``us``, which would
+    give the rows back in another unit."""
     db = DeltaTableDatabase(tmp_path)
     db.add_records(PATH, _table("a", stored_x), flush=True)
-    db.add_records(PATH, _table("c", pending_x))
+    with pytest.raises(InputValidationError, match="'x': it is stored as"):
+        db.add_records(PATH, _table("c", pending_x))
 
-    with pytest.raises(pa.ArrowTypeError, match="Field x has incompatible types"):
-        _ = READS_AC[method](db)
+    back = READS_AC[method](db)
+    assert back is not None and back.num_rows == 1
+    assert back.schema.field("x").type == stored_x.type
 
 
-def test_pending_null_typed_column_reads_back_but_does_not_flush(
+def test_a_new_null_typed_column_is_refused_before_it_is_pending(
     tmp_path: Path,
 ) -> None:
-    """A new all-null ``null``-typed column reads back as ``null``; Delta cannot store it.
-
-    The flush fails and the batch stays pending, so the read is unchanged after it.
-    """
+    """A new all-null ``null``-typed column has no type Delta can store: it is refused
+    naming the column, before anything is pending (it used to stay pending and fail the
+    flush without naming it; ITL-1334)."""
     db = DeltaTableDatabase(tmp_path)
     db.add_records(PATH, _without_x(_table("a", pa.array([1]))), flush=True)
-    db.add_records(PATH, _table("c", pa.nulls(1)))
-
-    before = _read_sorted(db, "get_all_records")
-    assert before.schema.field("x").type == pa.null()
-    assert before.column("x").to_pylist() == [None, None]
-
-    with pytest.raises(RuntimeError, match="Failed to flush"):
-        db.flush()
-    assert _read_sorted(db, "get_all_records").equals(before)
+    with pytest.raises(UnstorableColumnError, match="'x'"):
+        db.add_records(PATH, _table("c", pa.nulls(1)))
+    db.flush()
+    stored = db.get_all_records(PATH, record_id_column="rid")
+    assert stored is not None
+    assert stored.column_names == ["rid", "v"]
+    assert stored.column("rid").to_pylist() == [b"a"]
 
 
 @pytest.mark.parametrize(

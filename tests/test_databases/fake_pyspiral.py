@@ -613,7 +613,16 @@ class FakeTable:
                 raise ValueError(
                     "fake SpiralDB: column set differs from existing table"
                 )
-            incoming = incoming.cast(existing.schema)
+            # Column by column, only where the type changes: pyarrow refuses to cast a
+            # fixed-size list with non-null items to its own type when a null row
+            # hides null item slots (ITL-1334).
+            incoming = pa.Table.from_arrays(
+                [
+                    column if column.type == field.type else column.cast(field.type)
+                    for column, field in zip(incoming.columns, existing.schema)
+                ],
+                schema=existing.schema,
+            )
             if not keys.names:
                 incoming = pa.concat_tables([existing, incoming])
             else:
@@ -653,7 +662,29 @@ def _cast_storage(
     if pa.types.is_timestamp(col.type) and pa.types.is_timestamp(target):
         # dropping the tz keeps the UTC instant (what SpiralDB was seen to do)
         return pc.cast(col, pa.timestamp(col.type.unit, tz="UTC")).cast(target)
+    if pa.types.is_map(col.type) and pa.types.is_map(target):
+        # pyarrow 23 aborts the process (not an exception) casting some map arrays
+        # ("Map array keys array should have no nulls"), so a map is rebuilt from its
+        # parts: offsets, keys and items cast on their own, validity kept (ITL-1334).
+        # (cast: pyarrow's stubs type ``chunked_array``'s ``type`` too narrowly.)
+        return pa.chunked_array(
+            [_cast_map_chunk(chunk, target) for chunk in col.chunks],
+            type=cast(Any, target),
+        )
     return col.cast(target)
+
+
+def _cast_map_chunk(chunk: Any, target: Any) -> Any:
+    """Return the map array ``chunk`` with its keys and items cast to ``target``'s."""
+    keys = _cast_storage(pa.chunked_array([chunk.keys]), target.key_type)
+    items = _cast_storage(pa.chunked_array([chunk.items]), target.item_type)
+    return pa.MapArray.from_arrays(
+        chunk.offsets,
+        keys.combine_chunks(),
+        items.combine_chunks(),
+        type=target,
+        mask=chunk.is_null() if chunk.null_count else None,
+    )
 
 
 class FakeProject:
