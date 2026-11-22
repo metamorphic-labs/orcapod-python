@@ -349,7 +349,7 @@ def passed_rows_output_stream(
         The node's output stream.
     """
     from orcapod.core.operators.static_output_pod import (
-        SourceInfoTypesDisagree,
+        RowBuiltFormUnavailable,
         StaticOutputOperatorPod,
     )
 
@@ -360,7 +360,7 @@ def passed_rows_output_stream(
         table = table.take(pa.array(passed, type=pa.int64()))
     try:
         return StaticOutputOperatorPod._output_stream(table, input_stream.keys(), node)  # pyright: ignore[reportPrivateUsage]  # F with the node's identity
-    except SourceInfoTypesDisagree as error:
+    except RowBuiltFormUnavailable as error:
         StaticOutputOperatorPod._raise_as_rows_do(rows, error)  # pyright: ignore[reportPrivateUsage]  # the rows' own error
 
 
@@ -2676,7 +2676,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             or raises what it raises.
         """
         from orcapod.core.operators.static_output_pod import (
-            SourceInfoTypesDisagree,
+            RowBuiltFormUnavailable,
             StaticOutputOperatorPod,
         )
 
@@ -2718,7 +2718,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             formed = StaticOutputOperatorPod._flag_by_values(  # pyright: ignore[reportPrivateUsage]  # F's whole-table steps
                 StaticOutputOperatorPod._type_source_info_by_values(combined)  # pyright: ignore[reportPrivateUsage]
             )
-        except (pa.ArrowInvalid, SourceInfoTypesDisagree):
+        except (pa.ArrowException, RowBuiltFormUnavailable):
             return None
         first_tag, first_data = rows[0]
         return StaticOutputOperatorPod._as_upstream_stream(  # pyright: ignore[reportPrivateUsage]  # the node's identity
