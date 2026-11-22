@@ -98,9 +98,10 @@ def test_a_held_run_counts_every_held_node_as_its_rows_and_builds_none(
     orchestrator: str, load_only: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     db = InMemoryArrowDatabase()
-    _job(db).run()
+    # The held rows come from runs on the orchestrator under test (CodeRabbit, #476).
+    _job(db).run(orchestrator=ORCHESTRATORS[orchestrator]())
     job = _job(db)
-    job.run(load_only=load_only)
+    job.run(orchestrator=ORCHESTRATORS[orchestrator](), load_only=load_only)
 
     plans: list[Any] = []  # pyright: ignore[reportExplicitAny]  # RunPlan
     plan_run = job_module.plan_run
