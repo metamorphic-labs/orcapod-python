@@ -233,22 +233,23 @@ def test_a_held_node_hands_on_the_stream_built_from_its_rows(
 
 
 def _without_exceptions(schema: pa.Schema) -> dict[str, tuple[Any, bool, Any]]:
-    """Fields by name as (type, nullable, metadata), the spec's two exceptions applied.
+    """Fields by name as (type, nullable, metadata), the spec's exceptions applied.
 
-    A source-info field's flag is decided by a table's tokens (stated nullable), and a
-    ``null`` column is ``large_string`` in rows (ITL-1319). Columns are matched by name:
-    the declared (zero-row) form can list them in another order than the rows do (a
-    data-tag's source info, an operator's tags under another layout), as on ``main``,
-    and column order is not a result (developer, 2026-11-22).
+    A system-tag or source-info field's flag is decided by a table's values (stated
+    nullable), and a ``null`` column is ``large_string`` in rows (ITL-1319). Columns are
+    matched by name: an operator node's declared tag order can differ from its rows'
+    under another physical layout, as on ``main``, and column order is not a result
+    (developer, 2026-11-22).
     """
-    fields: dict[str, tuple[Any, bool, Any]] = {}
-    for field in schema:
-        kind = pa.large_string() if pa.types.is_null(field.type) else field.type
-        nullable = (
-            True if field.name.startswith(constants.SOURCE_PREFIX) else field.nullable
+    prefixes = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
+    return {
+        field.name: (
+            pa.large_string() if pa.types.is_null(field.type) else field.type,
+            True if field.name.startswith(prefixes) else field.nullable,
+            field.metadata,
         )
-        fields[field.name] = (kind, nullable, field.metadata)
-    return fields
+        for field in schema
+    }
 
 
 @pytest.mark.parametrize("arrangement", arrangements(MAIN)[::4], ids=lambda a: a.id)

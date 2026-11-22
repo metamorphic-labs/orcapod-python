@@ -23,6 +23,7 @@ from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.core.base import TraceableBase
 from orcapod.core.datagrams import Data, Tag
+from orcapod.core.data_tags import data_tag_names
 from orcapod.core.operators.drop_nulls import _without_none  # pyright: ignore[reportPrivateUsage]  # DropNulls' rule for removing None from a type, shared, never copied
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
@@ -1194,13 +1195,13 @@ class SourceNodeBase(TraceableBase, ABC):
         """The Arrow schema of the columns this stream passes between job nodes.
 
         See ``stream_arrow_schema`` (ITL-1347): never reads, computes or polls a row.
-        The user tags are in the order of the node's rows (``_row_tag_keys``).
+        The columns are in the order of the node's rows (``_row_keys``).
         """
-        return stream_arrow_schema(self, self._row_tag_keys())
+        return stream_arrow_schema(self, self._row_keys())
 
-    def _row_tag_keys(self) -> tuple[str, ...]:
-        """The order of the user tags in this node's rows: its own key order."""
-        return self.keys()[0]
+    def _row_keys(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """The tag and data keys of this node's rows: its own keys."""
+        return self.keys()
 
     @property
     def arrow_types_declared(self) -> bool:
@@ -1700,17 +1701,23 @@ class SourceJobNode(SourceNodeBase):
             return self._bound_source.identity_structure()
         return super().identity_structure()
 
-    def _row_tag_keys(self) -> tuple[str, ...]:
-        """The order of the user tags in this node's rows, known without reading a row.
+    def _row_keys(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """The tag and data keys of this node's rows, known without reading a row.
 
-        The bound source's key order; the declared order for a narrower source given
-        as the declared schema (``_DeclaredForm``); the slot's own when unbound.
+        The bound source's keys; for a narrower source given as the declared schema
+        (``_DeclaredForm``), the declared order with the data-tags first among the data
+        keys, as the stream over its table lists them (``_declared_stream``); the slot's
+        own when unbound.
         """
         if self._bound_source is None:
-            return self.keys()[0]
-        if self._declared_form is not None:
-            return self._declared_form.tag_order
-        return self._bound_source.keys()[0]
+            return self.keys()
+        form = self._declared_form
+        if form is not None:
+            data_tags = data_tag_names(form.tag_order, form.data_order)
+            others = tuple(n for n in form.data_order if n not in data_tags)
+            return form.tag_order, (*data_tags, *others)
+        tag_keys, data_keys = self._bound_source.keys()
+        return tuple(tag_keys), tuple(data_keys)
 
     def _rows_stream(self) -> StreamProtocol:
         """The stream whose rows are this node's rows (``iter_data``).

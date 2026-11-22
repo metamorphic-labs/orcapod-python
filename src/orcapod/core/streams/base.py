@@ -185,25 +185,26 @@ def typed_zero_row_input(stream: object) -> pa.Table | None:
 
 
 def stream_arrow_schema(
-    stream: object, tag_keys: Sequence[str] | None = None
+    stream: object, keys: tuple[Sequence[str], Sequence[str]] | None = None
 ) -> pa.Schema:
     """Return ``stream``'s declared Arrow schema: what ``arrow_schema()`` answers (ITL-1347).
 
     The schema of the columns a job node passes on, without reading, computing or
     polling a row: the stream's zero-row input (``typed_zero_row_input``, the Arrow types
-    its rows have) in row order (user tags, system tags, data, source info;
-    ``StaticOutputOperatorPod._in_row_order``), with no context and no meta column. A
+    its rows have) with the columns of F, in F's order
+    (``StaticOutputOperatorPod._row_built_names``: user tags, system tags, data, source
+    info, data and source info in data-key order), with no context and no meta column. A
     stream that cannot type itself without rows answers with its Python schema
     converted by its data context (``arrow_types_declared`` is then false). Each
-    source-info field is stated nullable: a table decides its flag from its tokens. A
-    ``null`` column keeps the zero-row ``null`` type; rows carry ``large_string``
-    (ITL-1319). ITL-1307 later reads it from ``Schema`` instead, here.
+    system-tag and source-info field is stated nullable: a table decides its flag from
+    its values (F's last step). A ``null`` column keeps the zero-row ``null`` type; rows
+    carry ``large_string`` (ITL-1319). ITL-1307 later reads it from ``Schema`` instead,
+    here.
 
     Args:
         stream: The stream, source or node.
-        tag_keys: The order of the user tags in the stream's rows, when it differs from
-            ``keys()`` (a source slot gives its bound source's rows); default
-            ``keys()``.
+        keys: The tag and data keys of the stream's rows, when they differ from
+            ``keys()`` (a source slot gives its bound source's rows); default ``keys()``.
 
     Returns:
         The declared Arrow schema.
@@ -212,8 +213,8 @@ def stream_arrow_schema(
     from orcapod.system_constants import constants
 
     typed = cast(StreamProtocol, stream)
-    if tag_keys is None:
-        tag_keys = typed.keys()[0]
+    if keys is None:
+        keys = typed.keys()
     table = typed_zero_row_input(stream)
     if table is None:
         tag_schema, data_schema = typed.output_schema(
@@ -221,9 +222,11 @@ def stream_arrow_schema(
         )
         converter = StaticOutputOperatorPod._upstream_context(typed).type_converter  # pyright: ignore[reportPrivateUsage]  # the one place that resolves an upstream's context
         table = arrow_utils.make_empty_table({**tag_schema, **data_schema}, converter)
-    schema = StaticOutputOperatorPod._in_row_order(table, tag_keys).schema  # pyright: ignore[reportPrivateUsage]  # the one statement of the row order
+    names = StaticOutputOperatorPod._row_built_names(table.column_names, keys)  # pyright: ignore[reportPrivateUsage]  # the one statement of F's columns
+    schema = table.select(names).schema
+    prefixes = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
     for index, field in enumerate(schema):
-        if field.name.startswith(constants.SOURCE_PREFIX):
+        if field.name.startswith(prefixes):
             schema = schema.set(index, field.with_nullable(True))  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
     return schema
 

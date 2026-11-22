@@ -478,24 +478,46 @@ class StaticOutputOperatorPod(TraceableBase):
         Returns:
             The same arrays, selected and ordered, in their large types.
         """
-        from orcapod.system_constants import constants
         from orcapod.utils import arrow_utils
 
+        return arrow_utils.normalize_table_to_large_types(
+            table.select(
+                StaticOutputOperatorPod._row_built_names(table.column_names, keys)
+            )
+        )
+
+    @staticmethod
+    def _row_built_names(
+        names: Sequence[str], keys: tuple[Sequence[str], Sequence[str]]
+    ) -> list[str]:
+        """Return the columns of a table built from rows, in row order (F steps 1-2).
+
+        The user tags in tag order, the system tags in the order of ``names``, the data
+        columns that are not data-tags, then the source info of every data column; data
+        and source info in the order of the data keys (a row's ``Data`` lists its source
+        info so, data-tags first in tag order: ``Data._ensure_source_info_table``).
+
+        Args:
+            names: The column names of a table of user tags, system tags, data and
+                source info.
+            keys: The tag keys and the data keys of the stream the table belongs to.
+
+        Returns:
+            The names a table built from rows holds, in its order.
+        """
+        from orcapod.system_constants import constants
+
         tag_keys, data_keys = keys
-        names = set(table.column_names)
+        present = set(names)
         tags = set(tag_keys)
-        system_tags = [
-            n for n in table.column_names if n.startswith(constants.SYSTEM_TAG_PREFIX)
-        ]
+        system_tags = [n for n in names if n.startswith(constants.SYSTEM_TAG_PREFIX)]
         data = [n for n in data_keys if n not in tags]
         source_info = [
             f"{constants.SOURCE_PREFIX}{n}"
             for n in data_keys
-            if f"{constants.SOURCE_PREFIX}{n}" in names
+            if f"{constants.SOURCE_PREFIX}{n}" in present
         ]
-        return arrow_utils.normalize_table_to_large_types(
-            table.select([*tag_keys, *system_tags, *data, *source_info])
-        )
+        return [*tag_keys, *system_tags, *data, *source_info]
 
     @staticmethod
     def _flag_by_values(table: pa.Table) -> pa.Table:
