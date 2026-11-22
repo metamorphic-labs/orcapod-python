@@ -620,7 +620,22 @@ class RecordBatchInput(Protocol):
 
     @property
     def unread(self) -> bool:
-        """Whether nothing has been read from the channel: no batch, no end, no close."""
+        """Whether no read was called and the channel is not closed."""
+        ...
+
+    @property
+    def opened_on(self) -> StreamProtocol | None:
+        """The complete stream this channel reads, when it was opened on one; else
+        ``None`` (a reader of an output channel, whatever its description)."""
+        ...
+
+    def reserve(self) -> None:
+        """Take the channel for one consumer that will read all of it.
+
+        Raises:
+            RuntimeError: If a read was called on it already.
+            ChannelClosed: If it was closed.
+        """
         ...
 
     async def close(self) -> None:

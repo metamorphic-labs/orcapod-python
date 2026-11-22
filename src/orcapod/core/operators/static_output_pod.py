@@ -1085,9 +1085,12 @@ async def channel_to_stream(channel: RecordBatchInput) -> StreamProtocol:
     It reads the channel to its end (one pass; every error of the read, such as an
     unbound source's or a failed producer's, is raised here, before any operator runs)
     and builds a fixed snapshot of what was delivered through the one settlement path
-    (``stream_from_batches``). The only shortcut: a channel not read yet whose stream
-    ``_output_stream`` built (``ROW_BUILT_OUTPUT``) gives that stream, which is exactly
-    what its batches would rebuild; the channel is then closed.
+    (``stream_from_batches``). The only shortcut: a channel opened on a complete
+    stream that ``_output_stream`` built (``ROW_BUILT_OUTPUT``), not read yet, gives
+    that stream, which is exactly what its batches would rebuild; the channel is then
+    closed. A reader of an output channel always collects, whatever its description.
+    The channel is reserved for this call when it is made: no other consumer may
+    read it.
 
     Args:
         channel: The input channel, not read yet.
@@ -1096,22 +1099,18 @@ async def channel_to_stream(channel: RecordBatchInput) -> StreamProtocol:
         A complete, re-readable stream of the channel's input.
 
     Raises:
-        RuntimeError: If the channel has already been read (a batch received, or its
-            end reached): a stream of part of an input is never made, and a channel
-            is never read again.
-        ChannelClosed: If the channel was closed before its producer completed.
+        RuntimeError: If a read of the channel was already called (a batch received,
+            its end reached, or another consumer still waiting): a stream of part of
+            an input is never made, and a channel is never read again.
+        ChannelClosed: If the channel was closed, before or during the read.
         UpstreamFailedError: If the producer failed or was cancelled.
     """
-    if not channel.unread:
-        raise RuntimeError(
-            "channel_to_stream() gives everything an input channel delivers, as a "
-            + "stream; this channel has been read already."
-        )
-    stream = channel.stream
-    if getattr(stream, ROW_BUILT_OUTPUT, False):
+    channel.reserve()  # one consumer, from this call on
+    opened_on = channel.opened_on
+    if opened_on is not None and getattr(opened_on, ROW_BUILT_OUTPUT, False):
         await channel.close()
-        return stream
-    return stream_from_batches(stream, await channel.collect())
+        return opened_on
+    return stream_from_batches(channel.stream, await channel.collect())
 
 
 def stream_from_batches(

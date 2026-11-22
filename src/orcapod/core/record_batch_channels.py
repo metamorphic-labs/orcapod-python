@@ -81,6 +81,11 @@ class _OutputFeed:
             await output._changed.wait()  # pyright: ignore[reportPrivateUsage]
         return None
 
+    @property
+    def opened_on(self) -> StreamProtocol | None:
+        """``None``: a reader of an output reads what its producer sends."""
+        return None
+
     def close(self) -> None:
         """Stop reading and unregister from the output.
 

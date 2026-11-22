@@ -34,6 +34,7 @@ from orcapod.channels import (
 )
 from orcapod.core.operators import MapData, PolarsFilter, SelectDataColumns, SemiJoin
 from orcapod.core.operators.static_output_pod import (
+    ROW_BUILT_OUTPUT,
     StaticOutputOperatorPod,
     channel_to_stream,
     stream_from_batches,
@@ -182,6 +183,256 @@ def test_a_bound_source_node_sends_its_rows_in_their_own_column_order() -> None:
     assert same(pa.Table.from_batches(batches), expected)
 
 
+def _keyed_source(
+    tag_only: tuple[str, ...], *, source_id: str = "keyed", offset: int = 0
+) -> ArrowTableSource:
+    """Tags ``k, j`` (data-tags unless named in ``tag_only``), data ``x, y``; every
+    field non-nullable, so a slot may declare ``x: int | None`` (a narrower bind)."""
+    table = pa.table(
+        {
+            "x": pa.array([1 + offset, 2 + offset], pa.int64()),
+            "k": pa.array([5 + offset, 6 + offset], pa.int64()),
+            "j": pa.array([3 + offset, 4 + offset], pa.int64()),
+            "y": pa.array([7.5, 8.5], pa.float64()),
+        }
+    )
+    table = table.cast(pa.schema([f.with_nullable(False) for f in table.schema]))
+    return ArrowTableSource(
+        table, tag_columns=["k", "j"], tag_only_columns=tag_only, source_id=source_id
+    )
+
+
+def _declared_node(source: ArrowTableSource) -> SourceJobNode:
+    """A slot that declares tags ``j, k`` and data ``y, x: int | None`` (the source's
+    data-tags first), bound to ``source``: the declared form."""
+    data_tags = [t for t in ("j", "k") if t in source.keys()[1]]
+    return SourceJobNode(
+        "keyed",
+        tag_schema=Schema({"j": int, "k": int}),
+        data_schema=Schema(
+            {**{t: int for t in data_tags}, "y": float, "x": int | None}
+        ),
+        bound_source=source,
+    )
+
+
+@pytest.mark.parametrize(
+    ("bind", "tag_only"),
+    [
+        ("transparent", ()),
+        ("transparent", ("j",)),
+        ("transparent", ("k",)),
+        # A declared slot with one of two data-tags fails on main already, in its
+        # own execute() rows (duplicate column); reported separately.
+        ("declared", ()),
+    ],
+    ids=["transparent-both", "transparent-k", "transparent-j", "declared-both"],
+)
+def test_a_source_nodes_channel_carries_its_execute_output(
+    bind: str, tag_only: tuple[str, ...]
+) -> None:
+    """A source node's batches, and the stream rebuilt from them, are its own
+    ``execute()`` output (schema, order, values, content hash), with data-tags in each
+    tag position (the declared slot orders the tags j, k against the source's k, j);
+    the node's own output channel takes them."""
+    source = _keyed_source(tag_only)
+    node = (
+        SourceJobNode.from_stream(source, name="keyed")
+        if bind == "transparent"
+        else _declared_node(source)
+    )
+    expected = StaticOutputOperatorPod._materialize_upstream(node.execute(), node)  # pyright: ignore[reportPrivateUsage]  # the job's rebuild of the rows
+    wanted = expected.as_table(columns=ALL)
+    assert any(
+        name.startswith("_source_") and name.removeprefix("_source_") in ("j", "k")
+        for name in wanted.column_names
+    )  # data-tag tokens are there
+
+    async def read() -> tuple[list[pa.RecordBatch], Any]:
+        batches = await node.open_channel().collect()
+        output = OutputChannel(node)
+        for batch in batches:
+            await output.send(batch)  # the node's description takes them
+        await output.close()
+        return batches, await channel_to_stream(node.open_channel())
+
+    batches, rebuilt = run(read)
+    assert same(pa.Table.from_batches(batches), R(expected))
+    assert same(rebuilt.as_table(columns=ALL), wanted)
+    assert rebuilt.content_hash() == expected.content_hash()
+
+
+def test_a_rebind_before_the_first_read_is_read_whole() -> None:
+    """A channel opened on a source node, then the node rebound: the first read reads
+    the new binding only (rows, order and source info from one binding)."""
+    node = SourceJobNode.from_stream(_keyed_source(()), name="keyed")
+    channel = node.open_channel()
+    node.bound_source = _keyed_source((), source_id="other", offset=10)
+    expected = StaticOutputOperatorPod._materialize_upstream(node.execute(), node)  # pyright: ignore[reportPrivateUsage]  # the job's rebuild of the rows
+    batches = run(channel.collect)
+    assert same(pa.Table.from_batches(batches), R(expected))
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=ValueError,
+    reason="ITL-1365: a source node whose plain tags are declared in another order "
+    "than their columns (x, j, k, y with tags k, j) describes itself in the slot's "
+    "order (keys() j, k; its zero-row input too, as on main), while its rows are in "
+    "the bound source's order, so its own description refuses its batches",
+)
+def test_a_source_nodes_description_takes_its_rows_in_their_own_order() -> None:
+    """Plain tags declared ``k, j`` over physical columns ``x, j, k, y``: the node's
+    own output channel takes the batches its channel delivers."""
+    stream = ArrowTableSource(
+        pa.table(
+            {
+                "x": pa.array([1, 2], pa.int64()),
+                "j": pa.array([3, 4], pa.int64()),
+                "k": pa.array([5, 6], pa.int64()),
+                "y": pa.array([7.5, 8.5], pa.float64()),
+            }
+        ),
+        tag_columns=["k", "j"],
+        tag_only_columns=True,
+        source_id="ordered",
+    )
+    node = SourceJobNode.from_stream(stream, name="ordered")
+
+    async def read() -> None:
+        output = OutputChannel(node)
+        for batch in await node.open_channel().collect():
+            await output.send(batch)
+
+    run(read)
+
+
+def test_a_flagged_stream_is_given_as_it_is_only_by_its_own_channel() -> None:
+    """The shortcut belongs to a channel opened on a stream ``_output_stream`` built:
+    such a channel gives that stream. A reader of an output channel whose description
+    is that same stream reads its producer: other rows, or its failure."""
+    stream = source(2)
+    batches = batches_of(stream, 1)
+
+    async def flagged_stream() -> Any:
+        output = OutputChannel(stream)
+        for batch in batches:
+            await output.send(batch)
+        await output.close()
+        return await channel_to_stream(output.open_reader())
+
+    flagged = run(flagged_stream)
+    assert getattr(flagged, ROW_BUILT_OUTPUT, False)
+
+    async def read() -> None:
+        direct = flagged.open_channel()
+        assert await channel_to_stream(direct) is flagged
+        other = OutputChannel(flagged)
+        reader = other.open_reader()
+        await other.send(batches[0])
+        await other.close()
+        rebuilt = await channel_to_stream(reader)
+        assert rebuilt is not flagged
+        assert rebuilt.as_table().num_rows == 1
+        failed = OutputChannel(flagged)
+        failing = failed.open_reader()
+        failed.fail(OSError("disk gone"))
+        with pytest.raises(UpstreamFailedError):
+            _ = await channel_to_stream(failing)
+        op = SemiJoin()
+        semi_output = OutputChannel(op(stream, flagged))
+        broken = OutputChannel(flagged)
+        broken_reader = broken.open_reader()
+        broken.fail(OSError("disk gone"))
+        with pytest.raises(UpstreamFailedError):
+            await op.async_execute_batches(
+                [stream.open_channel(), broken_reader], semi_output
+            )
+
+    run(read)
+
+
+@pytest.mark.parametrize("retain", [True, False], ids=["retained", "bounded"])
+def test_a_reader_has_one_consumer(retain: bool) -> None:
+    """A receive waiting on a reader holds it: a second consumer of the same reader
+    (a conversion, or another receive) is refused, naming it, and the waiting
+    receive gets the batch."""
+    stream = source(1)
+    (batch,) = batches_of(stream)
+
+    async def read() -> int:
+        output = OutputChannel(stream, retain=retain)
+        reader = output.open_reader()
+        waiting = asyncio.ensure_future(reader.receive())
+        await asyncio.sleep(0)
+        assert not reader.unread
+        with pytest.raises(RuntimeError, match="read already|another consumer"):
+            _ = await channel_to_stream(reader)
+        with pytest.raises(RuntimeError, match="another consumer"):
+            _ = await reader.receive()
+        await output.send(batch)
+        await output.close()
+        return (await waiting).num_rows
+
+    assert run(read) == 1
+
+
+def test_a_closed_reader_cannot_be_converted() -> None:
+    """A reader closed before any read: ``channel_to_stream`` raises ``ChannelClosed``,
+    as documented, not the error of a channel already read."""
+    stream = source(1)
+
+    async def read() -> None:
+        reader = OutputChannel(stream).open_reader()
+        await reader.close()
+        with pytest.raises(ChannelClosed, match="closed before its producer"):
+            _ = await channel_to_stream(reader)
+
+    run(read)
+
+
+class _ClosingFetch(FakeDynamicSource):
+    """A dynamic source whose fetch raises ``ChannelClosed`` (its own input closed
+    early); its schema is declared, so nothing before the read fetches."""
+
+    async def fetch(self, cursor: Any = None) -> Any:
+        self.fetch_cursors.append(cursor)
+        raise ChannelClosed("underlying input closed early")
+
+
+def test_a_channel_closed_inside_the_read_is_a_read_error() -> None:
+    """A ``ChannelClosed`` raised by the feed's own read (the source's) is not the end
+    of the input: iteration, ``collect`` and ``channel_to_stream`` raise it, and a
+    barrier fails before its body."""
+    declared = Schema({"id": int, "val": int})
+
+    def polling() -> PollingSource[Any]:
+        fake = _ClosingFetch(
+            batches=[_batch(1, 10), _batch(2, 20)], schema_override=declared
+        )
+        return PollingSource(
+            fake, tag_columns="id", record_id_columns="id", source_id="closing"
+        )
+
+    async def read() -> None:
+        with pytest.raises(ChannelClosed, match="underlying input"):
+            _ = await polling().open_channel().collect()
+        channel = polling().open_channel()
+        with pytest.raises(ChannelClosed, match="underlying input"):
+            _ = await channel_to_stream(channel)
+        assert not channel.unread
+        left = source()
+        right = polling()
+        op = SemiJoin()
+        output = OutputChannel(op(left, right))
+        with pytest.raises(ChannelClosed, match="underlying input"):
+            await op.async_execute_batches(
+                [left.open_channel(), right.open_channel()], output
+            )
+
+    run(read)
+
+
 def test_a_delivered_batch_is_not_kept_by_the_feed() -> None:
     """Once delivered, a batch is not held by the channel: a consumer that drops it
     frees it, also while the channel is still open."""
@@ -277,10 +528,14 @@ def test_a_polling_source_is_read_once_through_a_channel() -> None:
 
     async def read() -> None:
         channel = polling.open_channel()
+        other = polling.open_channel()
         assert len(fake.fetch_cursors) == 0  # opening reads nothing
         snapshot = await channel_to_stream(channel)
         fetched = len(fake.fetch_cursors)
-        assert fetched > 0
+        assert fetched == 1  # exactly one fetch for the channel's first read
+        assert len(await other.collect()) >= 1
+        assert len(fake.fetch_cursors) == 2  # and one for the other channel's
+        fetched = len(fake.fetch_cursors)
         rows = snapshot.as_table().num_rows
         assert snapshot.as_table().num_rows == rows  # a fixed snapshot
         assert len(fake.fetch_cursors) == fetched  # read again: no fetch

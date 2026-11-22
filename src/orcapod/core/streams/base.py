@@ -347,21 +347,13 @@ class CompleteStreamFeed:
     stream is complete, so nothing is queued and no producer waits on a reader.
     """
 
-    def __init__(
-        self,
-        stream: StreamProtocol,
-        keys: tuple[Sequence[str], Sequence[str]] | None = None,
-    ) -> None:
+    def __init__(self, stream: StreamProtocol) -> None:
         """Make a feed of ``stream``'s rows; nothing is read until the first ``next``.
 
         Args:
             stream: The complete stream to read.
-            keys: The tag and data keys of the rows read, when they differ from
-                ``stream.keys()`` (a source node gives its bound source's rows);
-                default ``stream.keys()``.
         """
         self._stream = stream
-        self._keys = keys
         self._batches: deque[pa.RecordBatch] | None = None
 
     async def next(self) -> pa.RecordBatch | None:
@@ -371,10 +363,10 @@ class CompleteStreamFeed:
         batches with no rows are skipped.
         """
         if self._batches is None:
-            keys = self._keys if self._keys is not None else self._stream.keys()
-            table = row_built_columns(
-                self._stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS), keys
-            )
+            # The table first: reading it is the stream's one read (an unpolled
+            # source polls here), and its keys are then known without another.
+            table = self._stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+            table = row_built_columns(table, self._stream.keys())
             self._batches = deque(
                 batch
                 for batch in table.to_batches(max_chunksize=SOURCE_BATCH_ROWS)
@@ -385,6 +377,11 @@ class CompleteStreamFeed:
     def close(self) -> None:
         """Stop reading: the batches not read are dropped."""
         self._batches = deque()
+
+    @property
+    def opened_on(self) -> StreamProtocol | None:
+        """The complete stream this feed reads."""
+        return self._stream
 
 
 def typed_arrow_schemas(

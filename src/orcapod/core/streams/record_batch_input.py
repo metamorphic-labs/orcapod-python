@@ -45,6 +45,11 @@ class BatchFeed(Protocol):
         """Stop reading: nothing waits for this reader any more."""
         ...
 
+    @property
+    def opened_on(self) -> StreamProtocol | None:
+        """The complete stream the feed reads, or ``None`` (a reader of an output)."""
+        ...
+
 
 class InputChannel:
     """A single-pass, back-pressured reader of a stream's Arrow record batches.
@@ -69,9 +74,14 @@ class InputChannel:
         self._stream = stream
         self._feed = feed
         self._received = 0
+        # The producer's end was reached (the feed returned ``None``).
         self._ended = False
         # Closed by its consumer before the producer completed.
         self._closed = False
+        # A read was called: the channel has a consumer (reserved at call time).
+        self._started = False
+        # A read is in progress.
+        self._reading = False
 
     @property
     def stream(self) -> StreamProtocol:
@@ -80,8 +90,35 @@ class InputChannel:
 
     @property
     def unread(self) -> bool:
-        """Whether nothing has been read from the channel: no batch, no end, no close."""
-        return not self._received and not self._ended
+        """Whether no read was called and the channel is not closed."""
+        return not self._started and not self._ended and not self._closed
+
+    @property
+    def opened_on(self) -> StreamProtocol | None:
+        """The complete stream this channel reads, when it was opened on one.
+
+        ``None`` for a reader of an output channel, whatever its description: only a
+        complete stream's own feed delivers exactly that stream.
+        """
+        return self._feed.opened_on
+
+    def reserve(self) -> None:
+        """Take the channel for one consumer that will read all of it.
+
+        Raises:
+            RuntimeError: If a read was called on it already (by any consumer, also
+                one still waiting), so all of the input can no longer be given.
+            ChannelClosed: If it was closed.
+        """
+        if self._closed:
+            raise self._closed_early()
+        if self._started or self._ended:
+            raise RuntimeError(
+                f"The input channel of {_named(self._stream)} has been read already, "
+                + "or is being read by another consumer; all of its input can no "
+                + "longer be given."
+            )
+        self._started = True
 
     async def receive(self) -> pa.RecordBatch:
         """Return the next Arrow record batch.
@@ -93,18 +130,29 @@ class InputChannel:
             ChannelClosed: At the end, and after ``close``. After a ``close`` that came
                 before the producer completed, the error says so, and iteration
                 (``async for``) raises it instead of ending: no consumer loop takes
-                part of an input for all of it.
+                part of an input for all of it. A ``ChannelClosed`` raised by the
+                feed's own read is a read error too: only the feed's end ends it.
+            RuntimeError: If another consumer's read of this channel is in progress.
             UpstreamFailedError: If the producer failed or was cancelled.
         """
         if self._closed:
             raise self._closed_early()
         if self._ended:
             raise ChannelClosed()
+        if self._reading:
+            raise RuntimeError(
+                f"The input channel of {_named(self._stream)} is being read by another "
+                + "consumer; a channel has one consumer."
+            )
+        self._started = True
+        self._reading = True
         try:
             batch = await self._feed.next()
         except asyncio.CancelledError:
             await self.close()
             raise
+        finally:
+            self._reading = False
         if batch is None:
             if self._closed:  # woken by its own early close
                 raise self._closed_early()
@@ -127,9 +175,11 @@ class InputChannel:
         try:
             return await self.receive()
         except ChannelClosed:
-            if self._closed:
-                raise  # closed before its producer completed: not the end
-            raise StopAsyncIteration
+            # Only the producer's end ends the iteration: an early close, or a
+            # ChannelClosed raised by the feed's own read, is a read error.
+            if self._ended and not self._closed:
+                raise StopAsyncIteration
+            raise
 
     def _closed_early(self) -> ChannelClosed:
         """The error of a read after a close that came before the producer completed."""
