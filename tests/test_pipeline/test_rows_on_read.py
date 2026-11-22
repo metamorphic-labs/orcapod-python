@@ -468,8 +468,9 @@ def test_a_subclass_that_overrides_a_reader_is_not_a_table_is_rows_kind(
         table, tag_columns=["k"], tag_only_columns=True, source_id="s"
     )
     assert table_is_rows(plain)
+    # Exact, never by inspection: a subclass that overrides nothing is not proven.
     subclass = type("Plain", (ArrowTableSource,), {})
-    assert table_is_rows(
+    assert not table_is_rows(
         subclass(table, tag_columns=["k"], tag_only_columns=True, source_id="s")
     )
 
@@ -536,6 +537,190 @@ def test_an_operator_result_keeps_its_own_column_order() -> None:
     assert stored is not None
     assert [n for n in stored.column_names if not n.startswith("__")] == expected
     assert job.nodes["b"].as_table(columns={"source": True}).column_names == expected
+
+
+# ── final check: the eager route is positive and exact ────────────────────────
+
+
+def _only_above_ten(rows: Any) -> Any:
+    return (row for row in rows if row[1]["x"] > 10)
+
+
+class _FilteringStream(ArrowTableStream):
+    def iter_data(self) -> Any:
+        return _only_above_ten(super().iter_data())
+
+
+class _ReadsThroughAProperty(ArrowTableSource):
+    """Reads through a ``_stream`` property that hands on a filtering stream."""
+
+    @property
+    def _stream(self) -> Any:
+        return getattr(self, "saved_stream")
+
+    @_stream.setter
+    def _stream(self, base: Any) -> None:
+        self.saved_stream = _FilteringStream(
+            base.as_table(columns={"source": True, "system_tags": True}),
+            tag_columns=["k"],
+        )
+
+
+def _bound_selection(source: Any) -> list[int]:
+    """Bind ``source`` to a slot feeding a selection; return what the sync run keeps."""
+    table = pa.table({"k": pa.array([1, 2]), "x": pa.array([10, 20])})
+    job = PipelineJob(name="exact", database=InMemoryArrowDatabase())
+    with job:
+        ArrowTableSource(
+            table, tag_columns=["k"], tag_only_columns=True, source_id="s"
+        ).select_data_columns(["x"], label="selected")
+    job.bind(sources={"s": source})
+    job.run()
+    return job.nodes["selected"].as_table()["x"].to_pylist()
+
+
+@pytest.mark.parametrize("how", ["instance_reader", "property", "plain_subclass"])
+def test_only_an_exact_unshadowed_library_source_is_eager(how: str) -> None:
+    """An ``iter_data`` replaced on the instance and a ``_stream`` property both read
+    the rows the reader gives (``[20]``, as ``main``); a plain subclass is not proven
+    either, and gives ``main``'s rows (Codex on PR #485, final check)."""
+    from orcapod.core.sources.base import table_is_rows
+
+    table = pa.table({"k": pa.array([1, 2]), "x": pa.array([10, 20])})
+    kwargs: dict[str, Any] = {
+        "tag_columns": ["k"],
+        "tag_only_columns": True,
+        "source_id": "s",
+    }
+    if how == "instance_reader":
+        source: Any = ArrowTableSource(table, **kwargs)
+        read = source.iter_data
+        source.iter_data = lambda: _only_above_ten(read())
+        expected = [20]
+    elif how == "property":
+        source = _ReadsThroughAProperty(table, **kwargs)
+        expected = [20]
+    else:
+        source = type("Plain", (ArrowTableSource,), {})(table, **kwargs)
+        expected = [10, 20]
+    assert not table_is_rows(source)
+    assert _bound_selection(source) == expected
+
+
+def test_an_exact_library_source_is_eager() -> None:
+    """The exact class, with nothing replaced on the instance, takes the eager route."""
+    from orcapod.core.sources.base import table_is_rows
+
+    table = pa.table({"k": pa.array([1, 2]), "x": pa.array([10, 20])})
+    source = ArrowTableSource(
+        table, tag_columns=["k"], tag_only_columns=True, source_id="s"
+    )
+    source.as_table()
+    list(source.iter_data())
+    assert table_is_rows(source)
+    assert _bound_selection(source) == [10, 20]
+
+
+def _swapped(stream: Any, first: str, second: str, tags: list[str]) -> Any:
+    """``stream``'s table with ``first`` and ``second`` swapped, over ``tags``."""
+    from orcapod.core.streams.base import ZERO_ROW_INPUT_COLUMNS
+
+    table = stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+    names = list(table.column_names)
+    a, b = names.index(first), names.index(second)
+    names[a], names[b] = names[b], names[a]
+    return ArrowTableStream(table.select(names), tag_columns=tags)
+
+
+@pytest.mark.parametrize("replay", [False, True], ids=["log", "replay"])
+@pytest.mark.parametrize("layout", ["data", "tags"])
+def test_a_composed_operator_result_keeps_its_own_order(
+    layout: str, replay: bool
+) -> None:
+    """An operator whose ``static_process`` returns ANOTHER operator's result keeps,
+    stores and hands on the order of the rows that result yields, to any depth: data
+    ``y, x`` (laid out so) and tags ``b, a`` (declared so), as ``main`` built them from
+    the rows; REPLAY of the stored table too (Codex on PR #485, final check)."""
+    from orcapod.operators import SelectDataColumns
+
+    class Reordered(SelectDataColumns):
+        def unary_static_process(self, stream: Any) -> Any:
+            if layout == "data":
+                return _swapped(stream, "x", "y", ["a", "b"])
+            return _swapped(stream, "x", "x", ["b", "a"])
+
+    class Composed(SelectDataColumns):
+        def unary_static_process(self, stream: Any) -> Any:
+            return Reordered(["x", "y"]).process(stream)
+
+    database = InMemoryArrowDatabase()
+    job = PipelineJob(name="composed", database=database)
+    with job:
+        source = DictSource(
+            [{"a": 1, "b": 5, "x": 1, "y": 2}, {"a": 2, "b": 6, "x": 3, "y": 4}],
+            tag_columns=["a", "b"],
+            tag_only_columns=True,
+            source_id="s",
+        )
+        Batch(batch_size=2)(Composed(["x", "y"])(source, label="composed"), label="b")
+    node: Any = job.nodes["composed"]
+    node.attach_databases(
+        pipeline_database=database.at("log"), cache_mode=CacheMode.LOG
+    )
+    job.run()
+    if replay:
+        node.attach_databases(
+            pipeline_database=database.at("log"), cache_mode=CacheMode.REPLAY
+        )
+        node.clear_cache()
+        job.run()
+    # ``main`` 321284ae, measured: the stored table keeps its tags in the slot's order,
+    # and REPLAY hands on the stored table's order.
+    data = ["a", "b", "y", "x", "_source_y", "_source_x"]
+    stored_tags = ["a", "b", "x", "y", "_source_x", "_source_y"]
+    result_tags = ["b", "a", "x", "y", "_source_x", "_source_y"]
+    if layout == "data":
+        kept, in_store = data, data
+    else:
+        kept, in_store = (stored_tags if replay else result_tags), stored_tags
+    assert node.as_table(columns={"source": True}).column_names == kept
+    stored = node.get_all_records(columns={"source": True})
+    assert stored is not None
+    assert [n for n in stored.column_names if not n.startswith("__")] == in_store
+    assert job.nodes["b"].as_table(columns={"source": True}).column_names == kept
+
+
+def test_a_result_of_another_stream_kind_takes_mains_row_path() -> None:
+    """A result that is not exactly an ``ArrowTableStream`` is read as ``main`` read
+    it: its rows (here, the ones its iterator yields), never its table."""
+    from orcapod.core.streams.base import ZERO_ROW_INPUT_COLUMNS
+    from orcapod.operators import SelectDataColumns
+
+    class Filtering(SelectDataColumns):
+        def unary_static_process(self, stream: Any) -> Any:
+            table = stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+            return _FilteringStream(table, tag_columns=["k"])
+
+    database = InMemoryArrowDatabase()
+    job = PipelineJob(name="other_kind", database=database)
+    with job:
+        source = ArrowTableSource(
+            pa.table({"k": pa.array([1, 2]), "x": pa.array([10, 20])}),
+            tag_columns=["k"],
+            tag_only_columns=True,
+            source_id="s",
+        )
+        Batch(batch_size=2)(Filtering(["x"])(source, label="filtered"), label="b")
+    node: Any = job.nodes["filtered"]
+    node.attach_databases(
+        pipeline_database=database.at("log"), cache_mode=CacheMode.LOG
+    )
+    job.run()
+    assert node.as_table()["x"].to_pylist() == [20]
+    stored = node.get_all_records()
+    assert stored is not None
+    assert stored["x"].to_pylist() == [20]
+    assert job.nodes["b"].as_table()["x"].to_pylist() == [[20]]
 
 
 @pytest.mark.parametrize(

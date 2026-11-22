@@ -49,8 +49,8 @@ class DeltaTableSource(RootSource):
     """
 
     SOURCE_KIND: ClassVar[str] = "delta_table"
-    TABLE_IS_ROWS: ClassVar[bool] = True
     """Config type key and default source-id kind of this source (one vocabulary)."""
+    TABLE_IS_ROWS: ClassVar[bool] = True
     TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = True
 
     def __init__(

@@ -1628,6 +1628,25 @@ class _RowsOfStream(ArrowTableStream):
         return self._input_pipeline_hash
 
 
+def produced_stream(stream: StreamProtocol) -> StreamProtocol:
+    """Return the stream whose rows ``stream`` yields, through any depth of composition.
+
+    An operator's result is a ``DynamicPodStream`` whose rows are those of the stream
+    its ``static_process`` returned, which may itself be another operator's
+    ``DynamicPodStream``: this follows them all to the stream that holds the rows
+    (ITL-1347).
+
+    Args:
+        stream: An operator's result, or any stream.
+
+    Returns:
+        The stream that holds ``stream``'s rows.
+    """
+    while isinstance(stream, DynamicPodStream):
+        stream = stream.produced_stream()
+    return stream
+
+
 class DynamicPodStream(StreamBase):
     """Recomputable stream wrapping a ``StaticOutputOperatorPod`` invocation."""
 
@@ -1856,19 +1875,17 @@ class DynamicPodStream(StreamBase):
         )
         return self._cached_stream.iter_data()
 
-    def result_keys(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        """The keys of the stream the operator returned: the order its rows have.
+    def produced_stream(self) -> StreamProtocol:
+        """The stream the operator returned for the current inputs (computed if stale).
 
-        The prediction (``keys``) never reorders a result: an operator node keeps,
-        stores and hands on its result in the order its rows have, as ``main`` built
-        it from them (ITL-1347).
+        Its rows are this stream's rows; ``produced_stream`` (the module function)
+        follows it through every ``DynamicPodStream`` to the stream that holds them.
         """
         self._refresh()
         assert self._cached_stream is not None, (
             "StreamProtocol has not been updated or is empty."
         )
-        tag_keys, data_keys = self._cached_stream.keys()
-        return tuple(tag_keys), tuple(data_keys)
+        return self._cached_stream
 
     def head(
         self,
