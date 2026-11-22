@@ -5,6 +5,8 @@ from collections.abc import Collection, Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, ClassVar
 
+import pyarrow as pa
+
 from orcapod.core.data_tags import (
     stored_data_tags,
     stream_data_tags,
@@ -35,16 +37,11 @@ from orcapod.errors import InputValidationError
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
 from orcapod.utils import schema_utils
-from orcapod.utils.lazy_module import LazyModule
 from orcapod.utils.provisional import provisional_class_name
 
 if TYPE_CHECKING:
-    import pyarrow as pa
-
     from orcapod.core.nodes.function_node import FunctionJobNode
     from orcapod.core.nodes.operator_node import OperatorJobNode
-else:
-    pa = LazyModule("pyarrow")
 
 
 def validate_tags_as_data(

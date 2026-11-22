@@ -6,6 +6,7 @@ from datetime import datetime
 from collections.abc import Iterator
 from typing import Any, ClassVar, TYPE_CHECKING
 
+import pyarrow as pa
 from typing_extensions import override
 
 from orcapod import contexts
@@ -40,13 +41,9 @@ from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.system_constants import SOURCE_DB_SCHEMA_VERSION, constants
 from orcapod.types import ColumnConfig, Schema
 from orcapod.utils import schema_utils
-from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
-    import pyarrow as pa
     from orcapod.protocols.database_protocols import DatabaseRegistryProtocol
-else:
-    pa = LazyModule("pyarrow")
 
 logger = logging.getLogger(__name__)
 

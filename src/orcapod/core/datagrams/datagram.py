@@ -23,8 +23,9 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Collection, Iterator, Mapping
-from typing import TYPE_CHECKING, Any, Self, cast
+from typing import Any, Self, cast
 
+import pyarrow as pa
 from uuid_utils import uuid7
 
 from orcapod.hashing.orcapod_table import OrcapodTable
@@ -38,12 +39,6 @@ from orcapod.semantic_types.canonical_order import canonical_python_value
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, DataType, DataValue, Schema, SchemaLike
 from orcapod.utils import arrow_utils
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
 
 logger = logging.getLogger(__name__)
 

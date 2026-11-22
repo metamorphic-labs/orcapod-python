@@ -2,15 +2,10 @@
 from __future__ import annotations
 
 from collections.abc import Collection
-from typing import TYPE_CHECKING
+
+import polars as pl
 
 from orcapod.system_constants import constants
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import polars as pl
-else:
-    pl = LazyModule("polars")
 
 
 def drop_columns_with_prefix(

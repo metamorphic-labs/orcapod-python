@@ -25,7 +25,10 @@ import uuid
 from abc import abstractmethod
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
+from typing import Any, Literal, NamedTuple, cast
+
+import polars as pl
+import pyarrow as pa
 
 from orcapod import contexts
 from orcapod.core.function_pod import (
@@ -116,16 +119,8 @@ from orcapod.types import (
     Schema,
 )
 from orcapod.utils import arrow_utils, schema_utils
-from orcapod.utils.lazy_module import LazyModule
 
 logger = logging.getLogger(__name__)
-
-if TYPE_CHECKING:
-    import polars as pl
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
-    pl = LazyModule("polars")
 
 # Pipeline entry ID column name used when fetching records from the pipeline
 # database. Always present in the table returned by _fetch_joined_records.

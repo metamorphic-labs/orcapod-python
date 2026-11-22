@@ -5,17 +5,14 @@ from collections import defaultdict
 from collections.abc import Collection, Mapping
 from typing import TYPE_CHECKING, Any, cast
 
+import pyarrow as pa
+import pyarrow.compute as pc
+
 from orcapod.databases._row_index import KeyIndex, compact_tail, matching_rows
 from orcapod.databases.utils import coerce_record_id
-from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
-    import pyarrow as pa
-    import pyarrow.compute as pc
     from orcapod.pipeline.serialization import DatabaseRegistry
-else:
-    pa = LazyModule("pyarrow")
-    pc = LazyModule("pyarrow.compute")
 
 logger = logging.getLogger(__name__)
 

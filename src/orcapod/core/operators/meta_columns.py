@@ -14,7 +14,8 @@ a source-info column for each (``_source___x``); other streams hide them from
 from __future__ import annotations
 
 from collections.abc import Collection, Sequence
-from typing import TYPE_CHECKING
+
+import pyarrow as pa
 
 from orcapod.channels import WritableChannel
 from orcapod.core.data_tags import stream_data_tags, with_data_tags_first
@@ -22,12 +23,6 @@ from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
 from orcapod.system_constants import constants
 from orcapod.types import Schema
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
 
 _META_SOURCE_PREFIX = f"{constants.SOURCE_PREFIX}{constants.META_PREFIX}"
 

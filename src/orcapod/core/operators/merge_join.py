@@ -1,4 +1,7 @@
-from typing import Any, ClassVar, TYPE_CHECKING, cast
+from typing import Any, ClassVar, cast
+
+import numpy as np
+import pyarrow as pa
 
 from orcapod.core.operators.base import (
     BinaryOperator,
@@ -26,14 +29,6 @@ from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
 from orcapod.utils import arrow_utils, schema_utils
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import numpy as np
-    import pyarrow as pa
-else:
-    np = LazyModule("numpy")
-    pa = LazyModule("pyarrow")
 
 
 def _output_types(

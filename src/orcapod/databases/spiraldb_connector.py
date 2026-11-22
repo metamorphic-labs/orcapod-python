@@ -26,6 +26,8 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
+import pyarrow as pa
+
 from orcapod.databases.spiraldb_nullability import (
     apply_nullability_record,
     check_no_nulls,
@@ -46,12 +48,10 @@ from orcapod.types import ColumnInfo
 from orcapod.utils import arrow_utils
 
 if TYPE_CHECKING:
-    import pyarrow as pa
     import spiral as sp
 else:
     from orcapod.utils.lazy_module import LazyModule
 
-    pa = LazyModule("pyarrow")
     sp = LazyModule("spiral")
 
 logger = logging.getLogger(__name__)

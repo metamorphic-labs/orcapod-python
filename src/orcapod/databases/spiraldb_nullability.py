@@ -31,15 +31,11 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable, Mapping
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any, Protocol
+
+import pyarrow as pa
 
 from orcapod.errors import NullabilityRecordError, NullInNonNullableColumnError
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
 
 RECORD_KEY = "__orcapod_nullability__"
 _FORMAT = "orcapod.nullability"

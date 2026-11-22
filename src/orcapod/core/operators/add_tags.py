@@ -7,6 +7,8 @@ from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar
 
+import pyarrow as pa
+
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.datagrams import Tag
@@ -19,14 +21,9 @@ from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagPr
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, ContentHash, Schema
 from orcapod.utils import schema_utils
-from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
-    import pyarrow as pa
-
     from orcapod.protocols.semantic_types_protocols import TypeConverterProtocol
-else:
-    pa = LazyModule("pyarrow")
 
 TagConstant = bool | int | float | str | bytes
 """A value ``AddTags`` accepts: its exact Python type is the tag's declared type."""

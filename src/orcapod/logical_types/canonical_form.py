@@ -27,15 +27,11 @@ type inside a list, struct or map, so a nested identifier is never made live.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
+
+import pyarrow as pa
 
 from orcapod.logical_types.identifier import LogicalTypeIdentifierError
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
 
 EXTENSION_NAME_KEY = b"ARROW:extension:name"
 EXTENSION_METADATA_KEY = b"ARROW:extension:metadata"

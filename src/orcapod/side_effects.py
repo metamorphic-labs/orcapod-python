@@ -15,6 +15,7 @@ import logging
 from collections.abc import Callable, Collection, Iterator, Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
+import pyarrow as pa
 from typing_extensions import override
 
 from orcapod.core.base import TraceableBase
@@ -59,10 +60,8 @@ from orcapod.system_constants import (
 from orcapod.types import ColumnConfig
 from orcapod.utils import arrow_utils
 from orcapod.utils.database_errors import flush_best_effort
-from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
-    import pyarrow as pa
     from orcapod.channels import ReadableChannel, WritableChannel
     from orcapod.protocols.core_protocols import (
         DataProtocol,
@@ -74,8 +73,6 @@ if TYPE_CHECKING:
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
     from orcapod.contexts import DataContext
     from orcapod.types import ContentHash, Schema
-else:
-    pa = LazyModule("pyarrow")
 
 logger = logging.getLogger(__name__)
 

@@ -7,6 +7,8 @@ from collections.abc import Collection, Iterator, Sequence
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
+import pyarrow as pa
+
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod import contexts
 from orcapod.config import OrcapodConfig
@@ -48,16 +50,11 @@ from orcapod.protocols.core_protocols import (
     TrackerManagerProtocol,
 )
 from orcapod.types import ColumnConfig, ContentHash, Schema
-from orcapod.utils.lazy_module import LazyModule
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    import pyarrow as pa
-
     from orcapod.protocols.hashing_protocols import SemanticHasherProtocol
-else:
-    pa = LazyModule("pyarrow")
 
 
 class StaticOutputOperatorPod(TraceableBase):
