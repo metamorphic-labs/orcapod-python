@@ -22,7 +22,7 @@ from orcapod.core.base import TraceableBase
 from orcapod.core.nodes.staleness import RunHoldingNode
 from orcapod.core.nodes.function_node import (
     _build_record_id_preimage,
-    rows_as_output_stream,
+    passed_rows_output_stream,
     run_job_node,
 )
 from orcapod.core.streams.base import (
@@ -1261,37 +1261,46 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
                 self.clear_cache()
                 raise
             self._hold(rows, load_only=True)
-            return self._output_stream(rows)
+            return self._output_stream(input_stream, rows, None)
         try:
-            results = self._deliver_rows(input_stream, run_id=run_id)
+            results, passed = self._deliver_rows(input_stream, run_id=run_id)
         except BaseException:
             # A run that raised defines no rows: the node is stale, and so is every
             # node below it (ITL-1095).
             self.clear_cache()
             raise
         self._hold(results)
-        return self._output_stream(results)
+        return self._output_stream(input_stream, results, passed)
 
     def _output_stream(
-        self, rows: list[tuple[TagProtocol, DataProtocol]]
+        self,
+        input_stream: StreamProtocol,
+        rows: list[tuple[TagProtocol, DataProtocol]],
+        passed: list[int] | None,
     ) -> StreamProtocol:
         """The output stream of a run that passed ``rows`` on.
 
-        What the sync orchestrator built from a node's rows for its successors
-        (``StaticOutputOperatorPod._materialize_upstream``, through
-        ``rows_as_output_stream``).
+        What the sync orchestrator built from a node's rows for its successors: F of
+        the input's table at the rows' positions (``passed_rows_output_stream``).
         """
         # A side-effect job node is a ``StreamBase``; the checker cannot match its
         # mixin members against ``StreamProtocol``, so the cast goes through object.
-        return rows_as_output_stream(rows, cast("StreamProtocol", cast(object, self)))
+        return passed_rows_output_stream(
+            input_stream, rows, passed, cast("StreamProtocol", cast(object, self))
+        )
 
     def _deliver_rows(
         self, input_stream: StreamProtocol, *, run_id: str | None
-    ) -> list[tuple[TagProtocol, DataProtocol]]:
-        """Deliver every row of ``input_stream``; return the rows passed on."""
+    ) -> tuple[list[tuple[TagProtocol, DataProtocol]], list[int]]:
+        """Deliver every row of ``input_stream``.
+
+        Returns:
+            The rows passed on, and their positions in ``input_stream``.
+        """
         self._refuse_log_of_another_data_context()
         results: list[tuple[TagProtocol, DataProtocol]] = []
-        for tag, data in input_stream.iter_data():
+        passed: list[int] = []
+        for index, (tag, data) in enumerate(input_stream.iter_data()):
             result = _execute_side_effect_row(
                 fn=self._pod._fn,
                 tag=tag,
@@ -1308,7 +1317,8 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
             )
             if result is not None:
                 results.append(result)
-        return results
+                passed.append(index)
+        return results, passed
 
     def _hold(
         self, rows: list[tuple[TagProtocol, DataProtocol]], *, load_only: bool = False

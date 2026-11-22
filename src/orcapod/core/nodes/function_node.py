@@ -322,6 +322,46 @@ def rows_as_output_stream(
     return StaticOutputOperatorPod._materialize_upstream(rows, node)  # pyright: ignore[reportPrivateUsage]  # the one definition of a rebuilt upstream
 
 
+def passed_rows_output_stream(
+    input_stream: StreamProtocol,
+    rows: Sequence[tuple[TagProtocol, DataProtocol]],
+    passed: Sequence[int] | None,
+    node: StreamProtocol,
+) -> StreamProtocol:
+    """Return the output stream of a node that passes on some of its input rows.
+
+    ``rows`` are input rows themselves (a side-effect node passes a row on unchanged),
+    so for an input over an Arrow table the output is F of the input's table taken at
+    the rows' positions (``passed``; all rows when ``None``), with ``node``'s identity:
+    the table a row-by-row rebuild of ``rows`` gives (``rows_as_output_stream``), made
+    without making the rows again (ITL-1361, stage 4). Any other input takes the row
+    path.
+
+    Args:
+        input_stream: The node's input.
+        rows: The rows passed on, in order.
+        passed: Their positions in ``input_stream``, or ``None`` for every row.
+        node: The node.
+
+    Returns:
+        The node's output stream.
+    """
+    from orcapod.core.operators.static_output_pod import (
+        SourceInfoTypesDisagree,
+        StaticOutputOperatorPod,
+    )
+
+    if not rows or not isinstance(input_stream, ArrowTableStream):
+        return StaticOutputOperatorPod._materialize_upstream(rows, node)  # pyright: ignore[reportPrivateUsage]  # the one definition of a rebuilt upstream
+    table = input_stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+    if passed is not None:
+        table = table.take(pa.array(passed, type=pa.int64()))
+    try:
+        return StaticOutputOperatorPod._output_stream(table, input_stream.keys(), node)  # pyright: ignore[reportPrivateUsage]  # F with the node's identity
+    except SourceInfoTypesDisagree as error:
+        StaticOutputOperatorPod._raise_as_rows_do(rows, error)  # pyright: ignore[reportPrivateUsage]  # the rows' own error
+
+
 def _executor_supports_concurrent(
     data_function: DataFunctionProtocol,
 ) -> bool:
