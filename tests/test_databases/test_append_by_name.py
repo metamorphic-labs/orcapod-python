@@ -310,30 +310,78 @@ def _annotated(name: str, ext_type: Any) -> Any:
     )
 
 
-def test_the_step_compares_a_logical_type_by_its_storage_and_identity() -> None:
-    """A database holding a logical column reports its storage type, annotated with
-    the logical type: the same logical type is matched; another one over the same
-    storage type, or a plain column, is not (ITL-1367)."""
+class _Unit(pa.ExtensionType):
+    """An extension type whose metadata is a unit: two units over ``int64`` are one
+    type to pyarrow's own equality, two types here."""
+
+    def __init__(self, unit: str) -> None:
+        self.unit = unit
+        super().__init__(pa.int64(), "test.itl1367.unit")
+
+    def __arrow_ext_serialize__(self) -> bytes:
+        return self.unit.encode()
+
+    @classmethod
+    def __arrow_ext_deserialize__(cls, storage_type: Any, serialized: bytes) -> Any:
+        return cls(serialized.decode())
+
+
+def _unit_column(unit: str, nest: str) -> Any:
+    """``a``: an ``int64`` in ``unit``, at the top, in a struct or in a list."""
+    array = pa.ExtensionArray.from_storage(_Unit(unit), pa.array([1], pa.int64()))
+    if nest == "struct":
+        return pa.StructArray.from_arrays([array], names=["m"])
+    if nest == "list":
+        return pa.LargeListArray.from_arrays(pa.array([0, 1], pa.int64()), array)
+    return array
+
+
+@pytest.mark.parametrize("nest", ["top", "struct", "list"])
+def test_the_step_matches_a_logical_type_only_to_itself_at_every_depth(nest: str):
+    """One rule for "may reorder": every field equal at every depth. A logical type
+    is equal only to its own name and metadata, also inside a struct or a list; an
+    annotation in field metadata only to the same annotation. Anything else is left
+    as given, so the database's own refusal applies (codex review of PR 491, round
+    3)."""
+    held_table = pa.table({"b": [0], "a": _unit_column("m", nest)})
+    held = list(held_table.schema)
+    same = pa.table({"a": _unit_column("m", nest), "b": [1]})
+    assert in_held_column_order(same, held).column_names == ["b", "a"]
+    other = pa.table({"a": _unit_column("s", nest), "b": [1]})
+    assert in_held_column_order(other, held) is other
+
+
+def test_the_step_matches_a_field_annotation_only_to_itself() -> None:
     from tests.test_databases.test_extension_aware_database import (
         _make_converter_with_type,
     )
 
     _, one = _make_converter_with_type("test.itl1367.one")
     _, two = _make_converter_with_type("test.itl1367.two")
-    text = pa.ExtensionArray.from_storage(one, pa.array(["x"], pa.large_string()))
-    given = pa.table({"text": text, "a": [1]})
     a = pa.field("a", pa.int64())
-    out = in_held_column_order(given, [a, _annotated("text", one)])
-    assert out.column_names == ["a", "text"]
+
+    def annotated(ext_type: Any) -> pa.Table:
+        return pa.Table.from_arrays(
+            [pa.array(["x"]), pa.array([1])],
+            schema=pa.schema([_annotated("text", ext_type), a]),
+        )
+
+    given = annotated(one)
+    held_one = [a, _annotated("text", one)]
+    assert in_held_column_order(given, held_one).column_names == ["a", "text"]
     assert in_held_column_order(given, [a, _annotated("text", two)]) is given
     assert in_held_column_order(given, [a, pa.field("text", pa.string())]) is given
-    annotated = pa.Table.from_arrays(
-        [pa.array(["x"]), pa.array([1])],
-        schema=pa.schema([_annotated("text", two), a]),
+    live = pa.table(
+        {
+            "text": pa.ExtensionArray.from_storage(
+                one, pa.array(["x"], pa.large_string())
+            ),
+            "a": [1],
+        }
     )
-    assert in_held_column_order(annotated, [a, _annotated("text", one)]) is annotated
-    held = [a, _annotated("text", two)]
-    assert in_held_column_order(annotated, held).column_names == ["a", "text"]
+    assert (
+        in_held_column_order(live, held_one) is live
+    )  # a live type is not its storage
 
 
 def test_the_step_compares_types_in_their_large_variants() -> None:
@@ -413,8 +461,9 @@ def _table_with_id(rid: bytes, order: list[str]) -> pa.Table:
 def test_a_logical_column_is_matched_by_name_through_the_extension_database(
     tmp_path: Path, stored: bool
 ) -> None:
-    """Delta stores a logical column as its storage type; an append of it in another
-    order is put in the held order whether the held rows are committed or pending."""
+    """A logical column appended in another order through the extension-aware
+    wrapper, the held rows pending or committed: every value is read back by name
+    (Delta matches a stored table by name itself; a pending batch is aligned)."""
     from tests.test_databases.test_extension_aware_database import (
         _make_converter_with_type,
     )
@@ -439,8 +488,9 @@ def test_a_logical_column_is_matched_by_name_through_the_extension_database(
     db.flush()
     committed = db.get_record_by_id(PATH, bytes([2]), record_id_column=ID)
     assert committed is not None
-    assert pending.column_names == committed.column_names
-    assert committed.to_pylist() == [{ID: bytes([2]), "text": "2", "n": 2}]
+    row = {ID: bytes([2]), "text": "2", "n": 2}
+    assert pending.select([ID, "text", "n"]).to_pylist() == [row]
+    assert committed.select([ID, "text", "n"]).to_pylist() == [row]
 
 
 # ── Delta: the commit a reordered append takes ─────────────────────────────────
@@ -645,11 +695,10 @@ def test_a_table_dropped_and_written_again_by_the_same_handle_takes_the_new_orde
     assert table.to_pylist() == [{"b": 200, "rid": bytes([2]), "a": 20}]
 
 
-def test_a_queued_row_reads_in_the_order_it_reads_once_committed(
-    tmp_path: Path,
-) -> None:
-    """On SpiralDB (its own column order), a point lookup of a queued row and of the
-    same row once flushed give the same column order."""
+def test_a_queued_row_is_read_from_memory(tmp_path: Path) -> None:
+    """A point lookup of a queued row answers from memory, in the order the row is
+    queued, with no lookup of the stored table (as main): the stored table is not
+    even listed. Presentation order is a reader's business (ITL-1370)."""
     with open_database("SpiralDB", tmp_path) as db:
         rows = pa.table(
             {
@@ -661,12 +710,16 @@ def test_a_queued_row_reads_in_the_order_it_reads_once_committed(
         db.add_records(PATH, rows, record_id_column="rid", flush=True)
         second = rows.set_column(0, "rid", pa.array([bytes([2])], pa.large_binary()))
         db.add_records(PATH, second, record_id_column="rid")
-        queued = db.get_record_by_id(PATH, bytes([2]), record_id_column="rid")
+        with patch.object(
+            db._connector, "get_table_names", side_effect=AssertionError("listed")
+        ):
+            queued = db.get_record_by_id(PATH, bytes([2]), record_id_column="rid")
+        assert queued is not None
+        assert queued.column_names == ["rid", "z", "a"]
         db.flush()
         committed = db.get_record_by_id(PATH, bytes([2]), record_id_column="rid")
-        assert queued is not None and committed is not None
-        assert queued.column_names == committed.column_names == ["rid", "a", "z"]
-        assert queued.to_pylist() == committed.to_pylist()
+        assert committed is not None
+        assert committed.select(["rid", "z", "a"]).to_pylist() == queued.to_pylist()
 
 
 @pytest.mark.parametrize("schema_handling", ["error", "merge", "coerce"])
@@ -755,6 +808,87 @@ def test_two_logical_types_over_one_storage_type_are_not_reordered(
         )
         db2.flush()
         inner.get_all_records(PATH, record_id_column="rid")
+
+
+@pytest.mark.parametrize(
+    ("schema_handling", "a"),
+    [
+        ("merge", pa.nulls(1)),
+        ("coerce", pa.nulls(1)),
+        ("coerce", pa.array([30], pa.int32())),
+    ],
+    ids=["merge null", "coerce null", "coerce int32"],
+)
+def test_a_delta_batch_queued_in_another_order_keeps_its_order(
+    tmp_path: Path, schema_handling: str, a: Any
+) -> None:
+    """Delta aligns an append only to its own pending batch, never to the stored
+    table: a batch queued in another order than the stored table stays in its order,
+    so a later append in that order, relying on ``schema_handling`` to merge or coerce
+    a column, behaves as on main (codex review of PR 491, round 3)."""
+    db = DeltaTableDatabase(tmp_path)
+    kwargs: dict[str, Any] = {
+        "record_id_column": "rid",
+        "schema_handling": schema_handling,
+    }
+    db.add_records(PATH, _abc(1), flush=True, **kwargs)
+    db.add_records(PATH, _abc(2, ("b", "rid", "a")), **kwargs)
+    third = _abc(3, ("b", "rid", "a")).set_column(2, "a", a)
+    db.add_records(PATH, third, **kwargs)
+    db.flush()
+    table = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="rid")
+    assert table is not None
+    got = sorted(table.select(["rid", "a", "b"]).to_pylist(), key=str)
+    assert got == [
+        {"rid": bytes([1]), "a": 10, "b": 100},
+        {"rid": bytes([2]), "a": 20, "b": 200},
+        {"rid": bytes([3]), "a": a.to_pylist()[0], "b": 300},
+    ]
+
+
+def test_a_delta_table_created_again_in_another_order_takes_mains_commit(
+    tmp_path: Path,
+) -> None:
+    """A Delta table created again in another order while this handle holds the old
+    one: an aligned batch is committed by append as on main, also with another writer
+    committing an unrelated id meanwhile (no state of this PR forces a MERGE)."""
+    import shutil
+
+    from deltalake import DeltaTable, write_deltalake
+
+    order = ("b", "__record_id", "a")
+
+    def rows(n: int) -> pa.Table:
+        return _abc(n).rename_columns(["__record_id", "a", "b"]).select(order)
+
+    db = DeltaTableDatabase(tmp_path)
+    db.add_records(
+        PATH,
+        rows(1).select(["__record_id", "a", "b"]),
+        flush=True,
+        record_id_column="__record_id",
+    )
+    shutil.rmtree(tmp_path / "t")
+    write_deltalake(tmp_path / "t", rows(1), mode="overwrite")
+    db.add_records(PATH, rows(2), record_id_column="__record_id")
+    snapshot = db._snapshot_for_commit
+
+    def interleave(*args: Any) -> Any:
+        taken = snapshot(*args)
+        DeltaTableDatabase(tmp_path).add_records(
+            PATH, rows(3), flush=True, record_id_column="__record_id"
+        )
+        return taken
+
+    with patch.object(db, "_snapshot_for_commit", side_effect=interleave):
+        db.flush()
+    history = [entry["operation"] for entry in DeltaTable(tmp_path / "t").history()]
+    assert "MERGE" not in history
+    table = DeltaTableDatabase(tmp_path).get_all_records(
+        PATH, record_id_column="__record_id"
+    )
+    assert table is not None
+    assert sorted(cast(list[int], table.column("a").to_pylist())) == [10, 20, 30]
 
 
 # ── PostgreSQL (a live server: the PostgreSQL CI job) ──────────────────────────

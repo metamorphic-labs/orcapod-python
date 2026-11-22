@@ -209,27 +209,22 @@ def in_held_column_order(
     """``records`` with its columns in the order the database holds them (ITL-1367).
 
     An append matches columns by name, never by position: when ``records`` has
-    exactly the held columns in another order, each of the held column's type and
-    logical type, its columns are put in the held order, so every database stores
-    and buffers them as the table already has them, and the table keeps the order of
-    its first write. The fields are kept as given (metadata, nullability): the append
-    checks that follow compare them by name.
+    exactly the held columns in another order, and each of its fields equals the held
+    field of its name, its columns are put in the held order. Equal is one rule
+    (``_same_field``): the same type at every depth (in the large variants, a logical
+    type with its own name and metadata, at any depth) and no change the append
+    check reports (``appended_field_change``: field metadata and nested field
+    attributes at every depth). Names are matched exactly, as Arrow matches them:
+    ``a`` and ``A`` are two columns.
 
-    A type is compared as the database compares it: a logical (extension) type as
-    its storage type, in the large variants; and the logical identity must be the
-    same too (``_logical_identity``: an extension type's name and metadata, or the
-    ``ARROW:extension`` annotation of a field stored as its storage type), so two
-    logical types over one storage type are never taken for one. Anything else is
-    returned as given, for the database's own append rule: no held table, a column
-    added or missing, a type or logical type that differs (a struct whose children
-    are in another order included: its type differs; ITL-1368), and a name that
-    repeats exactly. Names are matched exactly, as Arrow matches them: ``a`` and
-    ``A`` are two columns.
+    Anything else is returned exactly as given, so the database's own rule applies
+    as before: no held table, a column added or missing, a field that differs in any
+    way (a struct whose children are in another order included: ITL-1368), a name that
+    repeats.
 
     Args:
         records: The rows to append, the record id column already named as held.
-        held: The held columns, in the held order (the pending batch, else the
-            stored table), or ``None`` when the database holds no such table.
+        held: The held columns, in the held order, or ``None`` when nothing is held.
 
     Returns:
         ``records``, reordered or as given.
@@ -240,50 +235,54 @@ def in_held_column_order(
     held_names = [field.name for field in held]
     if names == held_names:
         return records
-    # Arrow matches names exactly: ``a`` and ``A`` are two columns. Only a name that
-    # repeats exactly cannot be matched.
     if len(set(names)) != len(names) or len(set(held_names)) != len(held_names):
         return records
     if set(names) != set(held_names):
         return records
     held_fields = {field.name: field for field in held}
-    for field in records.schema:
-        given = held_fields[field.name]
-        if _stored_form(field.type) != _stored_form(given.type):
-            return records
-        if _logical_identity(field) != _logical_identity(given):
-            return records
+    if not all(_same_field(field, held_fields[field.name]) for field in records.schema):
+        return records
     return records.select(held_names)
 
 
-_EXTENSION_NAME = b"ARROW:extension:name"
-_EXTENSION_METADATA = b"ARROW:extension:metadata"
+def _same_field(given: "pa.Field[Any]", held: "pa.Field[Any]") -> bool:
+    """Whether rows of ``given`` would be held as ``held`` holds them: the same type at
+    every depth, in the large variants (a logical type is equal only to itself: its
+    name, metadata and storage), and no change ``appended_field_change`` reports."""
+    large = arrow_utils.normalize_to_large_types
+    if not _same_type(
+        large(given.type, keep_null=True), large(held.type, keep_null=True)
+    ):
+        return False
+    return appended_field_change(held, given) is None
 
 
-def _logical_identity(field: "pa.Field[Any]") -> tuple[bytes, bytes] | None:
-    """The logical type a column holds: an extension type's name and metadata, or
-    the ``ARROW:extension`` annotation of a field held as its storage type (a stored
-    Delta column, a column the extension-aware wrapper encoded); ``None`` for a plain
-    column."""
-    if isinstance(field.type, pa.ExtensionType):
+def _same_type(given: Any, held: Any) -> bool:
+    """Arrow type equality at every depth, with an extension type equal only to one
+    of its own name and serialized metadata: pyarrow compares a Python extension type
+    by its class and storage, not by its metadata (two units over ``int64`` are
+    equal to it)."""
+    t = pa.types
+    if isinstance(given, pa.ExtensionType) or isinstance(held, pa.ExtensionType):
         return (
-            field.type.extension_name.encode(),
-            field.type.__arrow_ext_serialize__(),
+            isinstance(given, pa.ExtensionType)
+            and isinstance(held, pa.ExtensionType)
+            and given.extension_name == held.extension_name
+            and given.__arrow_ext_serialize__() == held.__arrow_ext_serialize__()
+            and _same_type(given.storage_type, held.storage_type)
         )
-    metadata = metadata_bytes(field.metadata)
-    name = metadata.get(_EXTENSION_NAME)
-    if name is None:
-        return None
-    return name, metadata.get(_EXTENSION_METADATA, b"")
-
-
-def _stored_form(arrow_type: "pa.DataType") -> "pa.DataType":
-    """``arrow_type`` as a database compares it: a logical (extension) type as its
-    storage type, a dictionary as its value type, in the large variants. A database
-    that holds such a column reports that type, so the comparison sees what the
-    database sees."""
-    if isinstance(arrow_type, pa.ExtensionType):
-        arrow_type = arrow_type.storage_type
-    if pa.types.is_dictionary(arrow_type):
-        arrow_type = cast(Any, arrow_type).value_type
-    return arrow_utils.normalize_to_large_types(arrow_type, keep_null=True)
+    if given != held:
+        return False
+    if t.is_struct(given):
+        return all(
+            _same_type(given.field(i).type, held.field(i).type)
+            for i in range(given.num_fields)
+        )
+    if t.is_map(given):
+        return _same_type(given.key_type, held.key_type) and _same_type(
+            given.item_type, held.item_type
+        )
+    lists = (t.is_list, t.is_large_list, t.is_fixed_size_list)
+    if any(kind(given) for kind in lists):
+        return _same_type(cast(Any, given).value_type, cast(Any, held).value_type)
+    return True

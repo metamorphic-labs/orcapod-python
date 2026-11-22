@@ -468,8 +468,10 @@ class ConnectorArrowDatabase:
         (ITL-1367): nothing about a stored table is trusted across calls, since
         another connection may rename, add, drop, retype or create again a column
         between two calls. The stored table is looked up fresh where queued and
-        stored rows meet, a flush and a read (``_stored_columns``), and the queued
-        rows are matched to it there, by name, after the flush's own check.
+        stored rows meet, a flush (``_stored_columns``, main's own lookup) and a read
+        that combines them (the rows it reads), and the queued rows are matched to it
+        there, by name, after the flush's own check. A point lookup of a queued row
+        answers from memory, as main does.
         """
         pending = self._pending_batches.get(self._get_record_key(record_path))
         if pending is not None:
@@ -658,13 +660,6 @@ class ConnectorArrowDatabase:
             pending = self._pending_batches[record_key]
             filtered = pending.filter(pc.field(self.RECORD_ID_COLUMN) == record_id)
             if filtered.num_rows > 0:
-                # In the stored table's order, as the row reads once committed: the
-                # rows were queued in the order of the batch (ITL-1367).
-                stored = self._stored_columns(
-                    self._path_to_table_name(self._path_prefix + record_path)
-                )
-                if stored is not None:
-                    filtered = in_held_column_order(filtered, stored)
                 return self._handle_record_id_column(filtered, record_id_column)
 
         # Check committed
