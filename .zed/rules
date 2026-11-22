@@ -980,6 +980,25 @@ generation of hashing; rows of the current data context are the current entries.
   Operator cache    — odb_v1 (OPERATOR_DB_SCHEMA_VERSION)
   Cached source     — sdb_v1 (SOURCE_DB_SCHEMA_VERSION)
 
+- Stored column order (developer, November 22, 2026, ITL-1367 and ITL-1370: "I agree
+  that this is indeed the simplest and ultimately the most consistent"): a stored table's
+  column order is the database's, never a writer's. A new table is written in the
+  canonical order, the record id then every other column by name (code point), by the one
+  shared step every database calls, databases/utils.in_held_column_order
+  (canonical_column_order); it is the order SpiralDB itself stores. A table that exists
+  keeps its order (one written before ITL-1370 keeps its first write's): an append is
+  matched to it by exact name, never by position, when its names, storage types and
+  logical types equal the held ones; anything else keeps the database's own rule. A
+  connector database trusts nothing about a stored table across calls: it aligns an append
+  only to its own pending batch and checks rows against the table read at flush and at a
+  read. No hash, record id, path or layout version follows a stored column order, and no
+  table is rewritten. Every reader of stored rows presents them in its own layout,
+  whatever order they are stored in, through one helper, arrow_utils.in_presented_order
+  (the reader's layout, then any other column by name): CachedSource, DerivedSource,
+  the function node's stored view (_presented_layout), the operator node's stored read
+  (_in_row_order_on_read), the result cache (result_table_layout), the status and log
+  observers and ObservabilityReader. A new reader of stored rows uses it too; never
+  present a stored table in its stored order.
 - The layout version is the last component of a table path. Every layout marker starts at v1
   for the first release, 0.4.0 (developer, November 18, 2026, ITL-1259; 0.3.0 was withdrawn,
   so nothing released uses v2). A change to the common bookkeeping columns of a table kind
@@ -1216,10 +1235,11 @@ data. The rules:
   order, user tags, system tags, data, source info, stated once in
   StaticOutputOperatorPod._in_row_order; a node that keeps a run with no rows keeps
   _zero_rows_in_row_order, and an operator's own empty result built from its input
-  goes through _as_row_built_table. An operator node keeps and stores the row order on every
-  path (_kept_output: a job run, sync or async, and node.run() on its own; ITL-1133),
-  and reads a stored operator cache in row order (_in_row_order_on_read). Never change
-  the order of any other populated table: stored tables depend on it.
+  goes through _as_row_built_table. An operator node keeps the row order on every path
+  (_kept_output: a job run, sync or async, and node.run() on its own; ITL-1133); what it
+  stores is in its database's order and is presented in row order on read
+  (_in_row_order_on_read; "Stored column order"). Never change the order of any other
+  populated table a user sees: presentation follows it (no hash and no stored table does).
 - Data-tags come first among the data columns (developer, November 17, 2026, ITL-1205):
   a stream lists its data-tags first in its data keys and data schema, in tag order, then
   its other data columns in table order. A table built from rows lays a data-tag out among

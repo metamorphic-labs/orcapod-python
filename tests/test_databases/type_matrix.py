@@ -1064,10 +1064,15 @@ they are queued and before the checks that compare them with the held columns (f
 attributes, declared nulls, schema compatibility), whether the table was flushed in
 between or not; the checks that look at the rows alone (a storable type, the record id)
 come first. Rows still queued are matched again, by name, to the stored table when they
-are read with it or written. A table keeps the column
-order the database gave its first write: the first write's order, except in SpiralDB,
-which stores and reads a table's key columns first and then its other columns sorted by
-name, whatever the order written (measured on SpiralDB itself). An append that also
+are read with it or written. A new table is written in the canonical column order, in
+every database: the record id, then every other column sorted by name (by code point,
+so upper case before `_` before lower case). It is the order SpiralDB stores and reads
+every table in, whatever the order written (measured on SpiralDB itself), so the order
+written and the order read are the same in every database. A table written before
+Orcapod used the canonical order keeps the order of its first write and takes appends in
+any order. No hash, record id or stored path depends on a stored table's column order,
+and what Orcapod shows of stored rows (a node, a cached or derived source, an observer)
+is in the reader's own column order, whatever order they are stored in. An append that also
 adds, omits or retypes a column keeps each database's own rule. The order of a struct's
 fields is not covered: a struct whose fields are in another order is another type here.
 """

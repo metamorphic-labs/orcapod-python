@@ -115,9 +115,10 @@ def _table(table: pa.Table | None) -> tuple[list[str], list[str]] | None:
 
 
 # Function result rows are named by a fresh uuid7 each run (``__data_id``, the result
-# table's record id, and the source-info tokens of the outputs, which name it): not
-# hashes, different in any two runs, so compared by column only.
-_RUN_SCOPED = ("fn.as_table", "fn.get_all_records", "fn.as_source")
+# table's record id, and the source-info tokens of the outputs, which name it) and
+# carry the time they were computed (``__pod_ts``): not hashes, different in any two
+# runs, so compared by column only.
+_RUN_SCOPED = ("fn.as_table", "fn.get_all_records", "fn.as_source", "cached outputs")
 
 
 def _observe(database: Any) -> dict[str, Any]:
@@ -300,3 +301,79 @@ def test_the_before_context_is_the_identity(tmp_path: Path) -> None:
         database.add_records(("t",), table, flush=True, record_id_column=RECORD_ID)
     stored = database.get_all_records(("t",), record_id_column=RECORD_ID)
     assert stored is not None and stored.column_names == ["b", RECORD_ID, "a"]
+
+
+def _loaded_presentation(database: Any, root: Path) -> dict[str, Any]:
+    """What a loaded job's nodes present of their stored rows (no source bound)."""
+    with _job(database, [1, 2]) as (job, _):
+        job.save(str(root / "job.json"))
+    loaded = PipelineJob.load(str(root / "job.json"), database=database)
+    seen: dict[str, Any] = {}
+    fn = loaded.nodes["fn"].get_all_records()
+    assert fn is not None
+    seen["fn"] = fn.column_names
+    for label in ("fn", "joined"):
+        seen[f"{label} source"] = _table(loaded.nodes[label].as_source().as_table())
+    return seen
+
+
+@pytest.mark.filterwarnings("ignore")
+def test_a_loaded_job_presents_both_stores_identically(
+    database_kind: str, tmp_path: Path
+) -> None:
+    """A loaded node knows its columns from the saved job, not from a live input:
+    its stored rows present the same whatever order they are stored in."""
+    (tmp_path / "before").mkdir()
+    (tmp_path / "today").mkdir()
+    with _before_itl_1370():
+        before = _loaded_presentation(
+            _database(database_kind, tmp_path / "before" / "db"), tmp_path / "before"
+        )
+    today = _loaded_presentation(
+        _database(database_kind, tmp_path / "today" / "db"), tmp_path / "today"
+    )
+    assert (
+        before["fn"]
+        == today["fn"]
+        == ["z_tag", "a_tag", "w_out", "c_out", "_context_key"]
+    )
+    assert before["fn source"][0] == today["fn source"][0]
+    assert before["joined source"] == today["joined source"]
+    assert today["joined source"][0] == ["z_tag", "a_tag", "y", "b", "x", "e"]
+
+
+def _observer_columns(database: Any) -> tuple[list[str], list[str]]:
+    from orcapod.pipeline.composite_observer import CompositeObserver
+    from orcapod.pipeline.logging_observer import LoggingObserver
+    from orcapod.pipeline.status_observer import StatusObserver
+
+    job = PipelineJob(name="observed", database=InMemoryArrowDatabase())
+    with job:
+        compute.pod(_source("left", ["y", "b"], [1, 2]), label="fn")
+    logs = LoggingObserver(log_database=database.at("observed", "_log"))
+    status = StatusObserver(status_database=database.at("observed", "_status"))
+    job.run(observer=CompositeObserver(logs, status))
+    log_table, status_table = logs.get_logs(), status.get_status()
+    assert log_table is not None and status_table is not None
+    return log_table.column_names, status_table.column_names
+
+
+def test_the_observers_present_both_stores_identically(
+    database_kind: str, tmp_path: Path
+) -> None:
+    """The status and log tables an observer stores present in the observer's own
+    order (its fixed columns, then the rest by name), however they are stored."""
+    with _before_itl_1370():
+        before = _observer_columns(_database(database_kind, tmp_path / "before"))
+    today = _observer_columns(_database(database_kind, tmp_path / "today"))
+    assert before == today
+    logs, status = today
+    assert logs[:3] == ["_log_id", "_log_run_id", "_log_timestamp"]
+    assert status[:6] == [
+        "_status_id",
+        "_status_run_id",
+        "_status_pipeline_uri",
+        "_status_state",
+        "_status_timestamp",
+        "_status_error_summary",
+    ]

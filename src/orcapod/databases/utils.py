@@ -210,7 +210,8 @@ def canonical_column_order(records: "pa.Table", record_id_column: str) -> "pa.Ta
     (Python's ``sorted`` on ``str``): the order SpiralDB stores every table in, so all
     five databases store and read one order. Nothing else depends on it: no hash, path
     or record id reads a stored table's column order, and every reader presents its
-    rows in row order whatever the stored order (``utils.arrow_utils.in_presented_order``).
+    rows in its own layout whatever the stored order
+    (``utils.arrow_utils.in_presented_order``).
     Names that repeat are returned as given, for the database's own rule.
 
     Args:
