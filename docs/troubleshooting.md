@@ -237,8 +237,11 @@ is not affected.
 RAY_ENABLE_UV_RUN_RUNTIME_ENV=0 uv run python my_pipeline.py
 ```
 
-or start the driver with the environment's Python (`.venv/bin/python my_pipeline.py`). The
-workers then use the driver's environment, which is what they do on a local cluster anyway.
+or start the driver with the environment's Python (`.venv/bin/python my_pipeline.py`). Ray then
+sends neither the project nor `uv run` to the workers. On a local cluster the workers use the
+driver's environment, as they did anyway. On a remote cluster (`RayExecutor(ray_address=...)`)
+they use what is installed on the cluster, or the `runtime_env` given to `RayExecutor`: Orcapod
+and what the pipeline imports must be there.
 `RayExecutor` raising instead of hanging is ITL-1213.
 
 ### A node's table is empty
