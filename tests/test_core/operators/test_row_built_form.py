@@ -25,8 +25,11 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
 
+from orcapod.core.operators import DropNulls, SelectDataColumns
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+from orcapod.core.streams import ArrowTableStream
 from orcapod.core.streams.base import ZERO_ROW_INPUT_COLUMNS, row_built_columns
+from orcapod.system_constants import constants
 from tests.test_core.operators.test_async_sync_equivalence import (
     AFTER_OPERATOR_CASES,
     CASES,
@@ -128,3 +131,63 @@ def test_row_built_columns_is_the_same_on_every_slice() -> None:
         part = row_built_columns(table.slice(start, 1), keys)
         assert part.schema.equals(whole.schema, check_metadata=True)
         assert part.equals(whole.slice(start, 1))
+
+
+def _raw_stream() -> ArrowTableStream:
+    """A raw stream with provenance fields no source writes (Codex on PR #483).
+
+    A system-tag field with field metadata, a list-valued source-info column whose item
+    field is named ``member`` and non-nullable, and a meta (``__``) data column with
+    its own source info.
+    """
+    system_tag = f"{constants.SYSTEM_TAG_PREFIX}source_id::abc"
+    member = pa.field("member", pa.large_string(), nullable=False)
+    table = pa.table(
+        {
+            "k": pa.array([1, 2], pa.int64()),
+            "j": pa.array(["a", "b"], pa.large_string()),
+            system_tag: pa.array(["s1", "s2"], pa.large_string()),
+            "x": pa.array([1.0, float("nan")]),
+            "z": pa.array([3, None], pa.int8()),
+            "__note": pa.array(["a", "b"]),
+            "_source_x": pa.array([["a", "b"], ["c"]], pa.large_list(member)),
+            "_source_z": pa.array(["t1", "t2"], pa.large_string()),
+            "_source___note": pa.array(["n1", "n2"], pa.large_string()),
+        }
+    )
+    position = table.schema.get_field_index(system_tag)
+    schema = table.schema.set(
+        position, table.schema.field(position).with_metadata({b"m": b"v"})
+    )
+    return ArrowTableStream(
+        pa.Table.from_arrays(table.columns, schema=schema), tag_columns=["k", "j"]
+    )
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        pytest.param(_raw_stream, id="raw"),
+        pytest.param(
+            lambda: SelectDataColumns(["z", "x"])(_raw_stream()), id="select-z-x"
+        ),
+        pytest.param(lambda: DropNulls(["j", "k"])(_raw_stream()), id="drop-nulls"),
+    ],
+)
+def test_row_built_form_of_a_raw_stream(make: Any) -> None:
+    """F equals R on a raw stream: provenance fields as rows build them, no meta.
+
+    R takes a system tag and a source-info token from its values, so the system-tag
+    field has no metadata and a list token's item field is nullable ``item``; a meta
+    column is not data, so neither it nor its source info is passed on.
+    """
+    stream = make()
+    built, _, _ = StaticOutputOperatorPod._rows_to_table(list(stream.iter_data()))  # pyright: ignore[reportPrivateUsage]  # R, the oracle
+    formed = StaticOutputOperatorPod._row_built_form(  # pyright: ignore[reportPrivateUsage]  # F, under test
+        stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS), stream.keys()
+    )
+    assert "__note" not in formed.column_names
+    assert "_source___note" not in formed.column_names
+    assert formed.column_names == built.column_names
+    assert formed.schema.equals(built.schema, check_metadata=True)
+    assert_same_values(formed, built)

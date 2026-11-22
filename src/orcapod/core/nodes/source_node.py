@@ -1187,9 +1187,15 @@ class SourceNodeBase(TraceableBase, ABC):
         """Yield ``(tag, data)`` pairs, or raise if data is unavailable."""
         ...
 
-    def _rows_stream(self) -> "StreamProtocol":
-        """The stream whose rows are this node's rows (``iter_data``): this node itself."""
-        return cast("StreamProtocol", self)
+    def _rows_table(self) -> tuple[pa.Table, tuple[tuple[str, ...], tuple[str, ...]]]:
+        """The table of this node's rows (``iter_data``) and the rows' keys.
+
+        Here this node's own table (``ZERO_ROW_INPUT_COLUMNS``) and keys.
+        """
+        stream = cast("StreamProtocol", self)
+        tag_keys, data_keys = stream.keys()
+        table = stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+        return table, (tuple(tag_keys), tuple(data_keys))
 
     def arrow_schema(self) -> pa.Schema:
         """The Arrow schema of the columns this stream passes between job nodes.
@@ -1235,11 +1241,10 @@ class SourceNodeBase(TraceableBase, ABC):
         node_hash = self.content_hash().to_string()
         if observer is not None:
             observer.on_node_start(node_label, node_hash)
-        # The stream this node's rows come from: its table and its tag order are the
-        # rows' (a slot's own key order can differ from its source's).
-        rows_stream = self._rows_stream()
-        table = rows_stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
-        result = StaticOutputOperatorPod._output_stream(table, rows_stream.keys(), self)
+        # The table and keys of this node's rows: a slot's own key order can differ
+        # from its source's.
+        table, keys = self._rows_table()
+        result = StaticOutputOperatorPod._output_stream(table, keys, self)
         if observer is not None:
             observer.on_node_end(node_label, node_hash)
         return result
@@ -1719,12 +1724,14 @@ class SourceJobNode(SourceNodeBase):
         tag_keys, data_keys = self._bound_source.keys()
         return tuple(tag_keys), tuple(data_keys)
 
-    def _rows_stream(self) -> StreamProtocol:
-        """The stream whose rows are this node's rows (``iter_data``).
+    def _rows_table(self) -> tuple[pa.Table, tuple[tuple[str, ...], tuple[str, ...]]]:
+        """The table of this node's rows (``iter_data``) and the rows' keys.
 
-        The bound source, or, for a narrower source, the source's table given as the
-        declared schema (``_declared_stream``), whose rows are those ``_declared_rows``
-        gives one by one.
+        The bound source's table and keys; for a narrower source, the source's table
+        given as the declared schema (``_DeclaredForm.apply``, which serves a whole
+        table as it serves each row in ``_declared_rows``) with the declared keys
+        (``_row_keys``). Its data-tags keep their source info, as each declared row
+        does.
 
         Raises:
             UnboundSourceError: When no concrete source is attached.
@@ -1734,18 +1741,11 @@ class SourceJobNode(SourceNodeBase):
                 f"SourceJobNode '{self._name}' has no concrete source bound. "
                 "Call job.bind(sources={'<name>': source}) before running."
             )
+        table = self._bound_source.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
         if self._declared_form is None:
-            return self._bound_source
-        table = self._bound_source.as_table(
-            columns={
-                "meta": True,
-                "source": True,
-                "system_tags": True,
-                "context": True,
-                "sort_by_tags": False,
-            }
-        )
-        return self._declared_stream(self._bound_source, self._declared_form, table)
+            tag_keys, data_keys = self._bound_source.keys()
+            return table, (tuple(tag_keys), tuple(data_keys))
+        return self._declared_form.apply(table), self._row_keys()
 
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         """Delegate to concrete source, or raise if unbound.
