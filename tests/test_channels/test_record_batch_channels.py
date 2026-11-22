@@ -657,6 +657,28 @@ def test_a_conversion_that_never_starts_releases_its_reader(never: str) -> None:
     run(read)
 
 
+def test_a_dropped_reader_whose_claim_is_freed_later_releases_its_producer() -> None:
+    """A reader of a bounded output is reserved, then the reader object is dropped
+    before its claim: when the claim is freed, the reader's place in the output is
+    released all the same, so sends past its queue complete."""
+    stream = source(4)
+    batches = batches_of(stream, 1)
+
+    async def read() -> None:
+        output = OutputChannel(stream, retain=False, buffer_size=1)
+        reader = output.open_reader()
+        claim = reader.reserve()
+        del reader
+        gc.collect()  # the channel is gone; its claim is not
+        del claim
+        gc.collect()
+        for batch in batches:  # would wait forever on a reader still registered
+            await asyncio.wait_for(output.send(batch), 1)
+        await output.close()
+
+    run(read)
+
+
 def test_a_closed_reader_cannot_be_converted() -> None:
     """A reader closed before any read: ``channel_to_stream`` raises ``ChannelClosed``,
     as documented, not the error of a channel already read."""

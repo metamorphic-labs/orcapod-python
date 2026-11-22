@@ -156,8 +156,11 @@ class InputChannel:
         self._owner = None  # held for the claim until a task takes it over
         new_claim = _Claim()
         self._claim = weakref.ref(new_claim)
+        # The release holds the feed (the reader's place in its producer, which never
+        # refers to the channel), so it is released even if the channel object has
+        # been freed first.
         self._claim_release = weakref.finalize(
-            new_claim, _abandon_channel, weakref.ref(self)
+            new_claim, _release_claim, self._feed, weakref.ref(self)
         )
         return new_claim
 
@@ -169,9 +172,10 @@ class InputChannel:
         self._claim = None
 
     def _abandon(self) -> None:
-        """Close the channel whose claim was freed before any task took it over.
+        """Mark the channel closed: its claim was freed before any task took it over.
 
-        Synchronous (it runs when the claim is freed): what ``close`` does.
+        Synchronous (it runs when the claim is freed); its feed is closed by the
+        claim's release itself (``_release_claim``).
         """
         self._claim_release = None
         self._claim = None
@@ -179,7 +183,6 @@ class InputChannel:
             self._closed = True
         self._ended = True
         self._owner = None
-        self._feed.close()
 
     def _belong_to_caller(self) -> None:
         """Bind the channel to the calling task on its first read; refuse any other.
@@ -310,12 +313,18 @@ class _Claim:
     """
 
 
-def _abandon_channel(channel_ref: weakref.ref[InputChannel]) -> None:
-    """Close a channel whose claim was freed before any task took it over.
+def _release_claim(feed: BatchFeed, channel_ref: weakref.ref[InputChannel]) -> None:
+    """Release a reader whose claim was freed before any task took it over.
+
+    The reader's feed (its place in its producer) is closed in every case, so no
+    producer waits on it, also when the channel object was freed first; the channel,
+    if it still exists, is marked closed.
 
     Args:
+        feed: The reader's feed.
         channel_ref: The channel, held weakly.
     """
+    feed.close()
     channel = channel_ref()
     if channel is not None:
         channel._abandon()  # pyright: ignore[reportPrivateUsage]  # the claim's release
