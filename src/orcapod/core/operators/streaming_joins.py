@@ -535,13 +535,36 @@ class StreamingJoinKernel(ABC):
 
     @abstractmethod
     def _push(self, input_index: int, table: pa.Table) -> list[pa.Table]:
-        """Take an input's rows (in its layout, never empty); return output tables."""
+        """Take an input's rows; return the output tables they decide.
+
+        Args:
+            input_index: The input, in call order.
+            table: Its rows in its layout (``_as_input_table``), never empty.
+
+        Returns:
+            The output tables, possibly none.
+        """
 
     @abstractmethod
     def _close(self, input_index: int) -> list[pa.Table]:
-        """Note an input's end; return output tables."""
+        """Note an input's end; return the output tables that decides.
+
+        Args:
+            input_index: The input, in call order; open until this call.
+
+        Returns:
+            The output tables, possibly none.
+        """
 
     def _require_open(self, input_index: int) -> None:
+        """Refuse an input that does not exist or has closed already.
+
+        Args:
+            input_index: The input, in call order.
+
+        Raises:
+            ValueError: If the kernel has no such input, or it has closed.
+        """
         if not 0 <= input_index < len(self.inputs):
             raise ValueError(
                 f"{type(self).__name__}: no input {input_index} "
@@ -684,6 +707,19 @@ class StreamingJoin(StreamingJoinKernel):
         return finish
 
     def _push(self, input_index: int, table: pa.Table) -> list[pa.Table]:
+        """Feed an input's rows into its step and forward what each step emits.
+
+        The input at canonical position 0 is the first step's left side, the input at
+        position ``p`` the right side of step ``p - 1``. The rows a step emits are its
+        successor's left side, up to the last step, whose rows are the output.
+
+        Args:
+            input_index: The input, in call order.
+            table: Its rows, never empty.
+
+        Returns:
+            The last step's output, possibly none.
+        """
         if not self._links:
             return [table]
         position = self._position[input_index]
@@ -700,6 +736,18 @@ class StreamingJoin(StreamingJoinKernel):
         return [] if result is None else [result]
 
     def _close(self, input_index: int) -> list[pa.Table]:
+        """End an input's side of its step, and every side that can no longer receive.
+
+        A step that can never emit again (``_BinaryLink.exhausted``) closes its
+        successor's left side, and releases every earlier step, whose rows could only
+        reach it. Closing never emits a row.
+
+        Args:
+            input_index: The input, in call order.
+
+        Returns:
+            No table.
+        """
         if not self._links:
             return []
         position = self._position[input_index]

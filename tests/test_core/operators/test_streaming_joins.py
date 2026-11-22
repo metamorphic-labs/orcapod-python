@@ -50,7 +50,29 @@ from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.system_constants import constants
 
 from .several_items import MAIN, MIXED, P, PLAIN, Q, R, DATA_TAGS, Arrangement
-from .several_items import TAGS_FIRST, make_source
+from .several_items import DATA_FIRST_REVERSED, INTERLEAVED, TAGS_FIRST, Spec
+from .several_items import make_source
+
+# How each source presents its columns besides its tag roles: the declared tag order,
+# tags first; the reversed tag order, data first in reverse; tags and data interleaved.
+VARIANTS = (
+    "declared/tags_first",
+    "reversed/data_first_reversed",
+    "declared/interleaved",
+)
+
+
+def _arranged(spec: Spec, variant: str, roles: str) -> ArrowTableSource:
+    """``spec`` as a source in one of ``VARIANTS``, with the given tag roles."""
+    order, layout = variant.split("/")
+    tags = spec.tags if order == "declared" else tuple(reversed(spec.tags))
+    layouts = {
+        "tags_first": TAGS_FIRST,
+        "data_first_reversed": DATA_FIRST_REVERSED,
+        "interleaved": INTERLEAVED,
+    }
+    return make_source(spec, Arrangement(tags, layouts[layout], roles))
+
 
 SEEDS = range(12)
 # The fields whose flags a complete table decides by its values.
@@ -368,14 +390,12 @@ def test_join_three_inputs_every_argument_order(order: tuple[int, ...]) -> None:
     _check(_join_kernel, Join().static_process, inputs, seeds=range(6))
 
 
+@pytest.mark.parametrize("variant", VARIANTS)
 @pytest.mark.parametrize("roles", [PLAIN, DATA_TAGS, MIXED])
-def test_join_four_inputs_in_each_tag_role(roles: str) -> None:
+def test_join_four_inputs_in_each_tag_role(roles: str, variant: str) -> None:
     # Data-tags shared by several inputs keep their members' tokens pending through
     # the chain and fold them when the last step emits (``join_v1``).
-    sources = [
-        make_source(spec, Arrangement(spec.tags, TAGS_FIRST, roles))
-        for spec in (MAIN, P, Q, R)
-    ]
+    sources = [_arranged(spec, variant, roles) for spec in (MAIN, P, Q, R)]
     for inputs in (sources, list(reversed(sources))):
         _check(_join_kernel, Join().static_process, inputs, seeds=range(6))
 
@@ -444,10 +464,11 @@ def test_merge_join_colliding_columns_in_both_argument_orders(
         _check(_merge_kernel, MergeJoin().static_process, inputs)
 
 
+@pytest.mark.parametrize("variant", VARIANTS)
 @pytest.mark.parametrize("roles", [PLAIN, DATA_TAGS, MIXED])
-def test_merge_join_in_each_tag_role(roles: str) -> None:
-    main = make_source(MAIN, Arrangement(MAIN.tags, TAGS_FIRST, roles))
-    partner = make_source(P, Arrangement(P.tags, TAGS_FIRST, roles))
+def test_merge_join_in_each_tag_role(roles: str, variant: str) -> None:
+    main = _arranged(MAIN, variant, roles)
+    partner = _arranged(P, variant, roles)
     for inputs in ((main, partner), (partner, main)):
         _check(_merge_kernel, MergeJoin().static_process, inputs)
 
@@ -476,9 +497,10 @@ def test_semi_join_every_key_type(pool: str, shared: str) -> None:
     _check(_semi_kernel, SemiJoin().static_process, (left, right))
 
 
+@pytest.mark.parametrize("variant", VARIANTS)
 @pytest.mark.parametrize("roles", [PLAIN, DATA_TAGS, MIXED])
-def test_semi_join_in_each_tag_role(roles: str) -> None:
-    main = make_source(MAIN, Arrangement(MAIN.tags, TAGS_FIRST, roles))
+def test_semi_join_in_each_tag_role(roles: str, variant: str) -> None:
+    main = _arranged(MAIN, variant, roles)
     for partner_spec in (P, Q):
         partner = make_source(partner_spec, rows=[0, 2])
         _check(_semi_kernel, SemiJoin().static_process, (main, partner))
@@ -542,6 +564,28 @@ def test_a_batch_must_hold_its_inputs_columns_and_types() -> None:
                 table.column("d1").cast(pa.int32()),
             ).to_batches()[0],
         )
+
+
+def test_a_rejected_batch_changes_nothing() -> None:
+    # A batch refused for one column leaves the kernel as it was: the corrected batch
+    # is taken, as on a fresh kernel.
+    left = _with_null_column("x", True, "v", tag=False)
+    right = _with_null_column("x", False, "w", tag=False)
+    sent = _sent(left).combine_chunks()
+    wrong = sent.set_column(
+        sent.column_names.index("v"), "v", sent.column("v").cast(pa.int32())
+    )
+    for operator, kernel in ((MergeJoin(), StreamingMergeJoin),):
+        instance = kernel(operator, (left, right))
+        with pytest.raises(ValueError, match="'v'"):
+            instance.push(0, wrong.to_batches()[0])
+        out = instance.push(0, sent.to_batches()[0])
+        out += instance.push(1, _sent(right).combine_chunks().to_batches()[0])
+        out += instance.close(0) + instance.close(1)
+        expected = _transport(
+            operator.static_process(_row_built(left), _row_built(right))
+        )
+        assert_same_rows(out, instance, expected)
 
 
 def test_an_input_closes_once_and_takes_no_batch_after() -> None:
