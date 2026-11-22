@@ -1018,9 +1018,11 @@ current data context are the current entries.
   keeps its order (one written before ITL-1370 keeps its first write's): an append is
   matched to it by exact name, never by position, when its names, storage types and
   logical types equal the held ones; anything else keeps the database's own rule. A
-  connector database trusts nothing about a stored table across calls: it aligns an append
-  only to its own pending batch and checks rows against the table read at flush and at a
-  read. No hash, record id, path or layout version follows a stored column order, and no
+  database with nothing pending for a table queues an append in the canonical order
+  (Delta then matches merge and coerce to the queued rows by name; a Delta table not in
+  canonical order commits by merge). A connector database trusts nothing about a stored
+  table across calls: it aligns an append only to its own pending batch and checks rows
+  against the table read at flush and at a read. No hash, record id, path or layout version follows a stored column order, and no
   table is rewritten. Every reader of stored rows presents them in its own layout,
   whatever order they are stored in, through one helper, `arrow_utils.in_presented_order`
   (the reader's layout, then any other column by name): `CachedSource`, `DerivedSource`,
