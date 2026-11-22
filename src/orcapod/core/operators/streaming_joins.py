@@ -341,6 +341,9 @@ class _BinaryLink:
         this, other = self.sides[side], self.sides[1 - side]
         if this.schema is None:
             this.schema = table.schema
+        if other.closed and not other.rows:
+            # Nothing can pair with these rows, and none is held: no key to prepare.
+            return None
         if self.keys:
             # A row whose key holds a top-level null matches nothing: never held, so a
             # closed side holding only such rows is exhausted.

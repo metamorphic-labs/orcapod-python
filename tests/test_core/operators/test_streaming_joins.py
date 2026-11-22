@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import itertools
 import random
+import re
 import struct
 import warnings
 from collections import Counter
@@ -158,16 +159,41 @@ def _value(value: Any) -> Any:
     return value
 
 
+def _integer_type(arrow_type: pa.DataType) -> pa.DataType:
+    """``arrow_type`` with every temporal type, at any depth, as its integer storage."""
+    types = pa.types
+    if (
+        types.is_timestamp(arrow_type)
+        or types.is_time64(arrow_type)
+        or types.is_duration(arrow_type)
+        or types.is_date64(arrow_type)
+    ):
+        return pa.int64()
+    if types.is_time32(arrow_type) or types.is_date32(arrow_type):
+        return pa.int32()
+    if types.is_large_list(arrow_type) or types.is_list(arrow_type):
+        item = arrow_type.value_field
+        inner = item.with_type(_integer_type(item.type))
+        return (
+            pa.large_list(inner) if types.is_large_list(arrow_type) else pa.list_(inner)
+        )
+    if types.is_fixed_size_list(arrow_type):
+        item = arrow_type.value_field
+        return pa.list_(item.with_type(_integer_type(item.type)), arrow_type.list_size)
+    if types.is_struct(arrow_type):
+        return pa.struct(
+            [field.with_type(_integer_type(field.type)) for field in arrow_type]
+        )
+    return arrow_type
+
+
 def _exact(column: pa.ChunkedArray[Any]) -> pa.ChunkedArray[Any]:
-    """A temporal column as its integer storage: Python values drop nanoseconds."""
-    arrow_type = column.type
-    if pa.types.is_timestamp(arrow_type) or pa.types.is_time64(arrow_type):
-        return column.cast(pa.int64())
-    if pa.types.is_duration(arrow_type) or pa.types.is_date64(arrow_type):
-        return column.cast(pa.int64())
-    if pa.types.is_time32(arrow_type) or pa.types.is_date32(arrow_type):
-        return column.cast(pa.int32())
-    return column
+    """A column with its temporal values, at any depth, as their integer storage.
+
+    Python values drop nanoseconds, so a temporal value is compared as its integer.
+    """
+    target = _integer_type(column.type)
+    return column if target == column.type else column.cast(target)
 
 
 def _rows(table: pa.Table) -> Counter[tuple[Any, ...]]:
@@ -914,7 +940,7 @@ def test_join_still_refuses_merged_source_info_when_a_later_input_ends_empty() -
         name: [
             stream("v", [] if name == "v" else [["a"], ["b"]]),
             stream("w", [] if name == "w" else [["c"], ["d", "e"]]),
-            stream("z", [] if name == "z" else [["f"], ["g", "h"]]),
+            stream("z", [] if name == "z" else [["f"], ["g", "h", "i"]]),
         ]
         for name in ("v", "w", "z")
     }
@@ -1018,7 +1044,7 @@ def test_with_several_offending_pairs_the_first_observed_is_refused(
     # form (module docstring).
     left = _tokens_stream("v", [1, 2], [["a"], ["b"]])
     right = _tokens_stream("w", [2, 1], [["c", "d"], ["e", "f", "g"]])
-    form = r"cannot merge source info of lists of different lengths: \[\d+, \d+\]"
+    form = r"cannot merge source info of lists of different lengths: \[(\d+), (\d+)\]"
     with pytest.raises(ValueError, match=form):
         operator.static_process(_row_built(left), _row_built(right))
     inputs = (left, right)
@@ -1026,8 +1052,14 @@ def test_with_several_offending_pairs_the_first_observed_is_refused(
         instance = kernel(operator, inputs)
         instance.push(whole, _sent(inputs[whole]).combine_chunks().to_batches()[0])
         first_row = _sent(inputs[1 - whole]).combine_chunks().slice(0, 1)
-        with pytest.raises(ValueError, match=form):
+        with pytest.raises(ValueError, match=form) as error:
             instance.push(1 - whole, first_row.to_batches()[0])
+        # Each schedule exposes one pair: the left input whole, then the right's first
+        # row (k=2: lengths 1 and 2); the right whole, then the left's first row (k=1:
+        # lengths 1 and 3). The order of the two lengths follows the merge's sides.
+        lengths = re.search(form, str(error.value))
+        assert lengths is not None
+        assert sorted(map(int, lengths.groups())) == ([1, 2] if whole == 0 else [1, 3])
 
 
 def test_join_releases_every_step_once_an_input_ends_with_only_null_keys() -> None:
@@ -1070,3 +1102,16 @@ def test_join_releases_every_step_once_an_input_ends_with_only_null_keys() -> No
                     index, _sent(sources[index]).combine_chunks().to_batches()[0]
                 )
         assert kernel.held_rows == 0, null_input
+
+
+def test_the_oracle_tells_nested_temporal_values_apart() -> None:
+    # Python values drop nanoseconds; the oracle compares temporal values, at any
+    # depth, as their integers.
+    for arrow_type, wrap in (
+        (pa.large_list(pa.time64("ns")), lambda v: [v]),
+        (pa.struct([("t", pa.timestamp("ns", tz="UTC"))]), lambda v: {"t": v}),
+    ):
+        one = pa.table({"x": pa.array([wrap(1)], arrow_type)})
+        two = pa.table({"x": pa.array([wrap(2)], arrow_type)})
+        assert _rows(one) != _rows(two)
+        assert _rows(one) == _rows(pa.table({"x": pa.array([wrap(1)], arrow_type)}))
