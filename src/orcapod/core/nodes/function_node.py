@@ -2656,16 +2656,17 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                     self._row_processed, ctx_obs, node_label, node_hash
                 )
 
-            # The output stream, built before the run is committed: rows that cannot
-            # make one table fail the run (ITL-1360, e9).
+            self._commit_or_end_node(
+                self._commit_at_node_end, ctx_obs, node_label, node_hash
+            )
+            # The output stream, built once the run is committed (a failed write is
+            # reported first, as on main) and before the node takes the run: rows that
+            # cannot make one table fail the run (ITL-1360, e9).
             try:
                 result_stream = self._output_stream(output)
             except InputValidationError:
                 ctx_obs.on_node_end(node_label, node_hash)
                 raise
-            self._commit_or_end_node(
-                self._commit_at_node_end, ctx_obs, node_label, node_hash
-            )
             # The node's rows are those of this run's inputs, whatever else it caches.
             self._set_run_rows(emitted_entry_ids, failed=failed_rows)
             # Mark this node as freshly computed before the observer hears the end, so
