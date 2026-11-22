@@ -405,9 +405,11 @@ class StreamBase(TraceableBase):
         """Put this stream back together with other branches of one stream.
 
         Pairs the rows that come from the same origin row, by matching every system-tag
-        column, and keeps those columns unchanged (``Rejoin``, provisional). For a
-        diamond (one stream split into branches, then put back together); to combine
-        different rows on their tags, use ``join``.
+        column, and keeps those columns unchanged (``Rejoin``, provisional). Rows must
+        also be equal in every other column the streams share (a tag several have, the
+        data context); a row that matches nothing is left out. For a diamond (one
+        stream split into branches, then put back together); to combine different rows
+        on their tags, use ``join``.
 
         Args:
             *other_streams: The other branches, one or more.
