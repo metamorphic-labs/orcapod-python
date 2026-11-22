@@ -18,7 +18,7 @@ from orcapod.channels import (
 from orcapod.core.operators.base import UnaryOperator
 from orcapod.core.operators.static_output_pod import (
     close_inputs,
-    with_open_provenance_flags,
+    concatenate_batches,
 )
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.streams import ArrowTableStream
@@ -301,14 +301,15 @@ class Batch(UnaryOperator):
             async for batch in channel:
                 if not batch.num_rows:
                     continue  # nothing to batch, nothing to hold
-                # Arrived batches may differ in their provenance flags: open them so
-                # they concatenate (the flags are set again by the values).
-                waiting.append(with_open_provenance_flags(batch))
+                waiting.append(batch)
                 rows += batch.num_rows
                 full = rows - rows % self.batch_size
                 if not full:
                     continue
-                arrived = pa.Table.from_batches(waiting)
+                # Arrived batches may differ in their provenance fields: put them
+                # under one another as a complete table settles them.
+                arrived = concatenate_batches(waiting)
+                assert arrived is not None  # they hold rows
                 await self._send_processed(
                     arrived.slice(0, full).to_batches(), channel.stream, output
                 )

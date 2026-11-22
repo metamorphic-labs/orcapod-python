@@ -22,9 +22,8 @@ import pyarrow.compute as pc
 
 from orcapod.channels import ChannelClosed
 from orcapod.core.operators.static_output_pod import (
-    SourceInfoTypesDisagree,
+    settle_token_types,
     stream_from_batches,
-    transport_schema,
 )
 from orcapod.core.streams.base import row_built_names
 from orcapod.core.streams.record_batch_input import InputChannel
@@ -152,7 +151,7 @@ class OutputChannel:
         self._schema: pa.Schema | None = None
         self._schema_known = False
         # Each source-info column's token type as the batches accepted so far settle it
-        # (``_settled_token_types``): a later batch must settle with it.
+        # (``settle_token_types``): a later batch must settle with it.
         self._token_types: dict[str, pa.DataType] = {}
         self._changed = asyncio.Event()
 
@@ -188,8 +187,15 @@ class OutputChannel:
 
     def _check_schema(self, batch: pa.RecordBatch) -> None:
         """Raise unless ``batch`` has the schema of this channel's record batches."""
+        names = batch.schema.names
+        if len(set(names)) != len(names):
+            repeated = sorted({name for name in names if names.count(name) > 1})
+            raise ValueError(
+                f"A record batch sent as {_named(self._stream)} has a column more than "
+                + f"once: {repeated}."
+            )
         if not self._schema_known:
-            self._schema = transport_schema(self._stream)
+            self._schema = _description(self._stream)
             self._schema_known = True
         schema = self._schema
         if schema is None:
@@ -211,7 +217,7 @@ class OutputChannel:
                 f"A record batch sent as {_named(self._stream)} does not have that "
                 + f"stream's columns: {mismatch}."
             )
-        token_types = _settled_token_types(batch, self._token_types)
+        token_types = settle_token_types(batch, self._token_types)
         self._schema = schema
         self._token_types = token_types
 
@@ -356,53 +362,28 @@ class OutputChannel:
         return self._result
 
 
+def _description(stream: StreamProtocol) -> pa.Schema | None:
+    """The Arrow schema the stream declares for its record batches, or ``None``.
+
+    ``stream.arrow_schema()``: never computes, reads or polls a row. ``None`` when its
+    types are not declared (``arrow_types_declared`` is false: an unbound slot, a
+    source not polled yet, a narrower bind whose rows decide), or when its columns
+    are known only from rows (an empty schema): the first batch then sets the types,
+    and the names are checked against the stream's keys.
+
+    Args:
+        stream: The describing stream.
+    """
+    if not stream.arrow_types_declared:
+        return None
+    schema = stream.arrow_schema()
+    return schema if len(schema) else None
+
+
 def _named(stream: Any) -> str:  # pyright: ignore[reportExplicitAny]  # any stream or node
     """How an error names a stream: its label, or what it prints as."""
     label = getattr(stream, "label", None)
     return repr(label) if label else repr(stream)
-
-
-def _settled_token_types(
-    batch: pa.RecordBatch, accepted: dict[str, pa.DataType]
-) -> dict[str, pa.DataType]:
-    """Each source-info column's token type, settled with the batches already accepted.
-
-    A source-info column's type follows its tokens over the complete table
-    (``StaticOutputOperatorPod._type_source_info_by_values``): the description leaves it
-    open, but the channel's batches must settle together, or their result could not be
-    built. A batch whose tokens give a column a type the accepted batches do not is
-    refused at send, with the error the complete table would raise.
-
-    Args:
-        batch: The batch being sent.
-        accepted: Each column's token type from the batches accepted so far.
-
-    Returns:
-        The token types with this batch accepted.
-
-    Raises:
-        SourceInfoTypesDisagree: If the batch's tokens give a column two types, or a
-            type other than the accepted batches'.
-    """
-    settled = dict(accepted)
-    for field, column in zip(batch.schema, batch.columns, strict=True):
-        if not field.name.startswith(constants.SOURCE_PREFIX):
-            continue
-        kinds: set[pa.DataType]
-        if pa.types.is_large_string(field.type):
-            kinds = {pa.large_string()}
-        else:
-            kinds = {
-                arrow_utils.source_info_arrow_type(value)
-                for value in column.to_pylist()
-            }
-        if field.name in settled:
-            kinds.add(settled[field.name])
-        if len(kinds) > 1:
-            raise SourceInfoTypesDisagree(field.name)
-        if kinds:
-            (settled[field.name],) = kinds
-    return settled
 
 
 def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:

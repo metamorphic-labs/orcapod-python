@@ -537,7 +537,9 @@ class CompleteStreamFeed:
             # The table first: reading it is the stream's one read (an unpolled
             # source polls here), and its keys are then known without another.
             table = self._stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
-            table = row_built_columns(table, self._stream.keys())
+            # The rows' keys: a source whose keys() states its declared order has
+            # rows in its table's order (``keys_of_rows``).
+            table = row_built_columns(table, keys_of_rows(table, self._stream.keys()))
             self._batches = deque(
                 batch
                 for batch in table.to_batches(max_chunksize=SOURCE_BATCH_ROWS)
