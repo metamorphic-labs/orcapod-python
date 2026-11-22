@@ -441,9 +441,35 @@ class StaticOutputOperatorPod(TraceableBase):
         Returns:
             A stream over the rows, in row order.
         """
+        return StaticOutputOperatorPod._kept_output_with_rows(result, rows)[0]
+
+    @staticmethod
+    def _kept_output_with_rows(
+        result: StreamProtocol,
+        rows: Sequence[tuple[TagProtocol, DataProtocol]],
+    ) -> tuple[StreamProtocol, list[tuple[TagProtocol, DataProtocol]]]:
+        """Return what ``_kept_output`` returns, and ``rows`` with the table built from them.
+
+        With rows, the second value is a ``RowsWithTable``: the same rows, carrying the
+        table ``_rows_to_table(rows)`` the kept stream is built over. An operator node's
+        ``execute`` returns it, so the sync orchestrator gives each successor that table
+        (``_materialize_upstream``) instead of building it from the rows again (ITL-1347,
+        stage 1). Without rows, the rows are returned as a plain list.
+
+        Args:
+            result: The operator's result of the run.
+            rows: ``result``'s rows, in order.
+
+        Returns:
+            The kept stream, and the rows.
+        """
         if rows:
-            return StaticOutputOperatorPod._materialize_to_stream(rows)
-        return StaticOutputOperatorPod._zero_rows_in_row_order(result)
+            row_table = StaticOutputOperatorPod._rows_to_table(rows)
+            return (
+                StaticOutputOperatorPod._stream_over_row_table(row_table),
+                RowsWithTable(rows, row_table),
+            )
+        return StaticOutputOperatorPod._zero_rows_in_row_order(result), list(rows)
 
     @staticmethod
     def _flag_source_info_nullability(table: pa.Table) -> pa.Table:
@@ -558,7 +584,23 @@ class StaticOutputOperatorPod(TraceableBase):
         Raises:
             ValueError: If ``rows`` is empty.
         """
-        table, tag_keys, data_tags = StaticOutputOperatorPod._rows_to_table(rows)
+        return StaticOutputOperatorPod._stream_over_row_table(
+            StaticOutputOperatorPod._rows_to_table(rows)
+        )
+
+    @staticmethod
+    def _stream_over_row_table(
+        row_table: tuple[pa.Table, tuple[str, ...], tuple[str, ...]],
+    ) -> StreamProtocol:
+        """The stream ``_materialize_to_stream`` builds, over ``_rows_to_table``'s result.
+
+        Args:
+            row_table: The table, user tag keys and data-tags ``_rows_to_table`` returns.
+
+        Returns:
+            A stream over the table's rows, in order.
+        """
+        table, tag_keys, data_tags = row_table
         # No ``source_info`` argument: the table's own ``_source_*`` columns
         # pass through, one value per row.
         return ArrowTableStream(table, tag_columns=tag_keys, data_tags=data_tags)
@@ -596,6 +638,13 @@ class StaticOutputOperatorPod(TraceableBase):
         """
         from orcapod.utils import arrow_utils
 
+        if rows and not zero_rows and isinstance(rows, RowsWithTable):
+            # The rows' own table, built once by the node that returned them: the
+            # same ``_rows_to_table(rows)`` as below, not built again (ITL-1347).
+            table, tag_keys, data_tags = rows.row_table
+            return StaticOutputOperatorPod._as_upstream_stream(
+                table, tag_keys, data_tags, upstream
+            )
         if rows:
             table, tag_keys, data_tags = StaticOutputOperatorPod._rows_to_table(rows)
             if zero_rows:
@@ -771,6 +820,31 @@ class StaticOutputOperatorPod(TraceableBase):
                 await output.send((tag, data))
         finally:
             await output.close()
+
+
+class RowsWithTable(list[tuple[TagProtocol, DataProtocol]]):
+    """Rows of an operator node's run, carrying the table built from them.
+
+    ``row_table`` is ``StaticOutputOperatorPod._rows_to_table`` of exactly these rows: the
+    table, the user tag keys and the data-tags. An operator node builds it once for the
+    output it keeps and returns its rows in this form, so whoever rebuilds the rows as a
+    stream (``_materialize_upstream``) takes the table instead of building it again
+    (ITL-1347, stage 1). It is a list in every other respect.
+
+    Args:
+        rows: The rows, in order.
+        row_table: ``_rows_to_table(rows)``.
+    """
+
+    __slots__ = ("row_table",)
+
+    def __init__(
+        self,
+        rows: Sequence[tuple[TagProtocol, DataProtocol]],
+        row_table: tuple[pa.Table, tuple[str, ...], tuple[str, ...]],
+    ) -> None:
+        super().__init__(rows)
+        self.row_table = row_table
 
 
 class _RowsOfStream(ArrowTableStream):

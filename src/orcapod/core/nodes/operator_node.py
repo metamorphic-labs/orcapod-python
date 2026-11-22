@@ -1695,9 +1695,12 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             # Materialize
             output = list(result_stream.iter_data())
 
-            # Cache, in row order with or without rows (ITL-1131, ITL-1133)
-            self._cached_output_stream = StaticOutputOperatorPod._kept_output(
-                result_stream, output
+            # Cache, in row order with or without rows (ITL-1131, ITL-1133). The rows
+            # returned carry the table the kept stream is built over, so the sync
+            # orchestrator gives it to each successor without building it again
+            # (ITL-1347, stage 1).
+            self._cached_output_stream, output = (
+                StaticOutputOperatorPod._kept_output_with_rows(result_stream, output)
             )
 
             self._update_modified_time()
