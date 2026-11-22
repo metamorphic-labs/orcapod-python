@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from abc import abstractmethod
+from collections import deque
 from collections.abc import (
     AsyncIterator,
     Callable,
@@ -22,6 +23,7 @@ import pyarrow as pa
 
 from orcapod.core.base import TraceableBase
 from orcapod.core.data_tags import data_tag_names
+from orcapod.core.streams.record_batch_input import SOURCE_BATCH_ROWS, InputChannel
 from orcapod.core.streams.view import (
     SCHEMA_NEEDS_POLL_NOTE,
     ViewStatus,
@@ -35,6 +37,7 @@ from orcapod.protocols.core_protocols import (
     StreamProtocol,
     TagProtocol,
 )
+from orcapod.protocols.core_protocols.streams import RecordBatchInput
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
 from orcapod.utils import arrow_utils
@@ -423,6 +426,54 @@ def stream_arrow_schema(
         if field.name.startswith(prefixes):
             schema = schema.set(index, field.with_nullable(True))  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
     return schema
+
+
+class CompleteStreamFeed:
+    """The record batches of a complete stream, read at one reader's own position.
+
+    The feed of a channel opened on a stream (``StreamBase.open_channel()``). Nothing
+    is read until the first ``next``; then the stream's table is read once (a fixed
+    snapshot: a stream that changes later is not read again), in the row-built form
+    (``row_built_columns``), and cut into record batches of at most
+    ``SOURCE_BATCH_ROWS`` rows. A batch is dropped by the feed once delivered. The
+    stream is complete, so nothing is queued and no producer waits on a reader.
+    """
+
+    def __init__(self, stream: StreamProtocol) -> None:
+        """Make a feed of ``stream``'s rows; nothing is read until the first ``next``.
+
+        Args:
+            stream: The complete stream to read.
+        """
+        self._stream = stream
+        self._batches: deque[pa.RecordBatch] | None = None
+
+    async def next(self) -> pa.RecordBatch | None:
+        """Return the stream's next record batch, or ``None`` at the end.
+
+        The stream's table is read on the first call, not when the channel is opened;
+        batches with no rows are skipped.
+        """
+        if self._batches is None:
+            # The table first: reading it is the stream's one read (an unpolled
+            # source polls here), and its keys are then known without another.
+            table = self._stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+            table = row_built_columns(table, self._stream.keys())
+            self._batches = deque(
+                batch
+                for batch in table.to_batches(max_chunksize=SOURCE_BATCH_ROWS)
+                if batch.num_rows
+            )
+        return self._batches.popleft() if self._batches else None
+
+    def close(self) -> None:
+        """Stop reading: the batches not read are dropped."""
+        self._batches = deque()
+
+    @property
+    def opened_on(self) -> StreamProtocol | None:
+        """The complete stream this feed reads."""
+        return self._stream
 
 
 def typed_arrow_schemas(
@@ -1249,6 +1300,21 @@ class StreamBase(TraceableBase):
     def iter_data(
         self,
     ) -> Iterator[tuple[TagProtocol, DataProtocol]]: ...
+
+    def open_channel(self) -> RecordBatchInput:
+        """Open an input channel on this stream, for async computation (ITL-1347).
+
+        The channel delivers this stream's rows as Arrow record batches of at most
+        ``SOURCE_BATCH_ROWS`` rows, in the row-built form, read once and in order; its
+        description is this stream (``channel.stream``). Several channels may be
+        opened on one stream, each with its own position, and the stream stays as it
+        is. Nothing is read until the channel is first read; then the stream is read
+        once, a fixed snapshot.
+
+        Returns:
+            The input channel.
+        """
+        return InputChannel(self, CompleteStreamFeed(self))
 
     async def async_iter_data(
         self,

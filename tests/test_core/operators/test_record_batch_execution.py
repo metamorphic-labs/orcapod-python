@@ -4,7 +4,7 @@ Every operator has one body, ``static_process``. Its Arrow-record-batch form
 (``async_execute_batches``) reads input channels opened from streams and writes an
 output channel, which closes into a stream. An operator whose output rows each come
 from one input row is applied to every record batch as it arrives; every other
-operator reads all of its inputs first (``InputChannel.to_stream``) and then runs the
+operator reads all of its inputs first (``channel_to_stream``) and then runs the
 sync call; ``Batch`` batches consecutive arrivals.
 
 For every case of the async/sync matrix (``test_async_sync_equivalence.CASES``) the
@@ -27,19 +27,22 @@ import polars as pl
 import pyarrow as pa
 import pytest
 
+import orcapod.contexts as contexts
 import orcapod.core.operators as operators
 from orcapod.core.operators import AddTags, Batch, PolarsFilter, SelectDataColumns
 from orcapod.core.operators.static_output_pod import (
     StaticOutputOperatorPod,
     stream_from_batches,
 )
-from orcapod.core.record_batch_channels import (
-    InputChannel,
-    OutputChannel,
-    channel_from_stream,
-)
+from orcapod.core.record_batch_channels import OutputChannel
+from orcapod.protocols.core_protocols.streams import RecordBatchInput
 from orcapod.channels import ChannelClosed
 from orcapod.core.streams import ArrowTableStream
+from orcapod.databases import InMemoryArrowDatabase
+from orcapod.pipeline import SyncPipelineOrchestrator
+from orcapod.pipeline.job import PipelineJob
+from orcapod.system_constants import constants
+from tests.test_core.operators.test_rejoin import other_context  # noqa: F401  # the fixture
 from orcapod.errors import UpstreamFailedError
 from orcapod.protocols.core_protocols import StreamProtocol
 from tests.test_core.operators.test_async_sync_equivalence import (
@@ -83,11 +86,11 @@ def _cut(table: pa.Table, sizes: tuple[int, ...] | None) -> list[pa.RecordBatch]
 
 async def _channel(
     stream: StreamProtocol, sizes: tuple[int, ...] | None
-) -> InputChannel:
+) -> RecordBatchInput:
     """An input channel delivering ``stream``'s rows in record batches of ``sizes``."""
-    batches = await channel_from_stream(stream).collect()
+    batches = await stream.open_channel().collect()
     if sizes is None or not batches:
-        return channel_from_stream(stream)
+        return stream.open_channel()
     rows = pa.Table.from_batches(batches)
     feed = OutputChannel(stream)
     for batch in _cut(rows, sizes):
@@ -263,7 +266,7 @@ def test_a_row_by_row_operator_sends_each_batch_as_it_arrives(case: Case) -> Non
     assert expected is not None
 
     async def go() -> list[pa.RecordBatch]:
-        rows = pa.Table.from_batches(await channel_from_stream(source).collect())
+        rows = pa.Table.from_batches(await source.open_channel().collect())
         inputs = _cut(rows, (1,))
         wanted = [
             case.make_op()(stream_from_batches(source, [batch])).as_table().num_rows
@@ -279,11 +282,15 @@ def test_a_row_by_row_operator_sends_each_batch_as_it_arrives(case: Case) -> Non
             await asyncio.wait_for(feed.send(batch), TIMEOUT)
             if rows_wanted:
                 # This row's result arrives before the next row is sent.
-                result = await asyncio.wait_for(results.receive(), TIMEOUT)
+                # asyncio.timeout, not wait_for: on Python 3.11 wait_for reads in
+                # another task, and a reader has one consumer.
+                async with asyncio.timeout(TIMEOUT):
+                    result = await results.receive()
                 assert result.num_rows == rows_wanted
                 received.append(result)
         await feed.close()
-        assert await asyncio.wait_for(results.collect(), TIMEOUT) == []
+        async with asyncio.timeout(TIMEOUT):
+            assert await results.collect() == []
         await asyncio.wait_for(task, TIMEOUT)
         return received
 
@@ -321,15 +328,17 @@ def test_batch_sends_each_full_batch_before_the_input_ends() -> None:
         output = OutputChannel(op(source))
         results = output.open_reader()
         task = asyncio.ensure_future(op.async_execute_batches([reader], output))
-        rows = pa.Table.from_batches(await channel_from_stream(source).collect())
+        rows = pa.Table.from_batches(await source.open_channel().collect())
         one_row = _cut(rows, (1,))
         await feed.send(one_row[0])
         await feed.send(one_row[1])
-        first = await asyncio.wait_for(results.receive(), TIMEOUT)
+        async with asyncio.timeout(TIMEOUT):
+            first = await results.receive()
         assert not task.done()
         await feed.send(one_row[2])
         await feed.close()
-        rest = await asyncio.wait_for(results.collect(), TIMEOUT)
+        async with asyncio.timeout(TIMEOUT):
+            rest = await results.collect()
         await task
         return first.num_rows, sum(batch.num_rows for batch in rest)
 
@@ -386,28 +395,28 @@ BARRIER_ORACLE_CASES: dict[
 def test_a_barrier_operator_sees_its_input_as_a_job_gives_it(label: str) -> None:
     """The record-batch form is held to what a job's sync path gives an operator: the
     upstream rebuilt from its rows (``_materialize_upstream``: ``null`` as
-    ``large_string``, the columns in row order), not the raw stream it came from. A
+    ``large_string``, the columns in row order), not the raw stream it came from, in
+    every layout: ``channel_to_stream`` rebuilds what the channel delivered. A
     predicate that reads a ``null`` column's type or the column order follows that
     form (documented behaviour, e5); in a job neither case reaches an operator: a
     source refuses a ``null`` column, and a job refuses an expression that selects
     columns by position."""
     make_stream, make_op = BARRIER_ORACLE_CASES[label]
     stream = make_stream()
-    oracle = _outcome(
+    job_sync = _outcome(
         lambda: make_op()(
             StaticOutputOperatorPod._materialize_upstream(  # pyright: ignore[reportPrivateUsage]  # the job's sync input
                 list(stream.iter_data()), stream
             )
         )
     )
-    assert _outcome(lambda: run_on_channels(make_op(), [stream], None)) == oracle
-    for layout in ("one_row_per_batch", "mixed_sizes"):
+    # The raw stream gives another outcome: the case tells the two oracles apart.
+    assert _outcome(lambda: make_op()(stream)) != job_sync
+    for layout in LAYOUTS:
         assert (
             _outcome(lambda: run_on_channels(make_op(), [stream], LAYOUTS[layout]))
-            == oracle
+            == job_sync
         )
-    # The raw stream gives another outcome: the case tells the two oracles apart.
-    assert _outcome(lambda: make_op()(stream)) != oracle
 
 
 # --- Arrivals from another producer -------------------------------------------------------
@@ -519,7 +528,7 @@ def test_a_meta_column_does_not_travel() -> None:
     assert expected is not None
 
     async def go() -> tuple[list[str], StreamProtocol]:
-        batches = await channel_from_stream(raw).collect()
+        batches = await raw.open_channel().collect()
         output = OutputChannel(raw)
         for batch in batches:
             await output.send(batch)
@@ -549,7 +558,7 @@ def test_an_input_closed_early_fails_a_streaming_operator(
     op = make_op()
 
     async def go() -> None:
-        rows = pa.Table.from_batches(await channel_from_stream(source).collect())
+        rows = pa.Table.from_batches(await source.open_channel().collect())
         first, second = _cut(rows, (1,))[:2]
         feed = OutputChannel(source, retain=False, buffer_size=4)
         reader = feed.open_reader()
@@ -664,9 +673,10 @@ def test_a_failing_close_of_the_output_fails_it() -> None:
         output = _FailingClose(op(source))
         results = output.open_reader()
         with pytest.raises(OSError, match="flush failed"):
-            await op.async_execute_batches([channel_from_stream(source)], output)
+            await op.async_execute_batches([source.open_channel()], output)
         with pytest.raises(UpstreamFailedError):
-            _ = await asyncio.wait_for(results.collect(), TIMEOUT)
+            async with asyncio.timeout(TIMEOUT):
+                _ = await results.collect()
 
     asyncio.run(go())
 
@@ -678,7 +688,7 @@ def test_every_input_is_closed_when_one_close_fails() -> None:
     op = operators.SemiJoin()
 
     async def go() -> None:
-        first, second = channel_from_stream(left), channel_from_stream(right)
+        first, second = left.open_channel(), right.open_channel()
 
         async def failing_close() -> None:
             raise OSError("cannot close")
@@ -723,3 +733,59 @@ def test_drop_tag_columns_over_three_tags_sends_its_result() -> None:
     assert expected is not None
     result = run_on_channels(operators.DropTagColumns(["a"]), [stream], None)
     assert_same_table(result.as_table(columns=ALL), expected)
+
+
+# --- A barrier over a job's own nodes ------------------------------------------------------
+
+
+def test_rejoin_over_job_nodes_with_rows_of_two_data_contexts(
+    other_context: contexts.DataContext,  # noqa: F811  # the fixture, by name
+) -> None:
+    """``Rejoin`` of a job's source node with a renaming branch held from the run, rows
+    in two data contexts: reading the source node's channel rebuilds its rows in the
+    row-built form (never its raw table with its own context column), so the result
+    has both rows, as the sync run does."""
+    table = pa.table(
+        {
+            "k": pa.array([1, 2], pa.int64()),
+            "x": pa.array([1.0, 2.0], pa.float64()),
+            "y": pa.array([3, 4], pa.int64()),
+            "source_id::a": pa.array(["s", "s"], pa.large_string()),
+            "record_id::a": pa.array(["r0", "r1"], pa.large_string()),
+            constants.CONTEXT_KEY: pa.array(
+                [contexts.get_default_context().context_key, other_context.context_key],
+                pa.large_string(),
+            ),
+        }
+    )
+    table = table.cast(
+        pa.schema(
+            [
+                f.with_nullable(False) if f.name.endswith("::a") else f
+                for f in table.schema
+            ]
+        )
+    )
+    raw = ArrowTableStream(
+        table, tag_columns=["k"], system_tag_columns=["source_id::a", "record_id::a"]
+    )
+    job = PipelineJob(name="rejoin-contexts", database=InMemoryArrowDatabase())
+    with job:
+        branch = operators.MapData({"x": "u", "y": "v"})(raw, label="branch")
+        _ = operators.Rejoin()(raw, branch, label="rejoin")
+    _ = job.run(orchestrator=SyncPipelineOrchestrator())
+    rejoin = job.nodes["rejoin"]
+    assert rejoin.as_table().num_rows == 2
+    upstreams = rejoin.upstreams
+
+    async def go() -> StreamProtocol:
+        op = operators.Rejoin()
+        output = OutputChannel(op(*upstreams))
+        await op.async_execute_batches([u.open_channel() for u in upstreams], output)
+        return output.result()
+
+    result = asyncio.run(go())
+    assert result.as_table().num_rows == 2
+    assert sorted(map(str, result.as_table().to_pylist())) == sorted(
+        map(str, rejoin.as_table().to_pylist())
+    )
