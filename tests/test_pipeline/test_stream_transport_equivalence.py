@@ -237,27 +237,55 @@ def test_a_held_node_hands_on_the_stream_built_from_its_rows(
     assert set(outputs) == {"noted"}
 
 
-def _without_exceptions(schema: pa.Schema) -> dict[str, tuple[Any, bool, Any]]:
-    """Fields by name as (type, nullable, metadata), the spec's exceptions applied.
+def _without_exceptions(schema: pa.Schema) -> list[tuple[str, Any, bool, Any]]:
+    """Fields in order as (name, type, nullable, metadata), the spec's exceptions applied.
 
     A system-tag or source-info field's flag is decided by a table's values (stated
-    nullable), and a ``null`` column is ``large_string`` in rows (ITL-1319). Columns are
-    matched by name: an operator node's declared tag order can differ from its rows'
-    under another physical layout, as on ``main``, and column order is not a result
-    (developer, 2026-11-22).
+    nullable), and a ``null`` column is ``large_string`` in rows (ITL-1319). Column
+    order counts on the sync path (Codex on PR #485).
     """
     prefixes = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
-    return {
-        field.name: (
+    return [
+        (
+            field.name,
             pa.large_string() if pa.types.is_null(field.type) else field.type,
             True if field.name.startswith(prefixes) else field.nullable,
             field.metadata,
         )
         for field in schema
-    }
+    ]
 
 
-@pytest.mark.parametrize("arrangement", arrangements(MAIN)[::4], ids=lambda a: a.id)
+def _tag_schema_out_of_key_order(arrangement: Arrangement) -> bool:
+    """Whether the source's tag schema lists its tags in another order than its keys.
+
+    ITL-1365: ``ArrowTableStream`` builds its tag schema in the table's layout order,
+    while its keys and rows follow the declared tag order; an operator predicts its
+    keys from that schema, so its ``arrow_schema()`` lists the tags in the layout
+    order and its rows do not.
+    """
+    source = make_source(MAIN, arrangement)
+    return tuple(source.output_schema()[0]) != tuple(source.keys()[0])
+
+
+def _l7_arrangements() -> list[Any]:
+    return [
+        pytest.param(
+            arrangement,
+            id=arrangement.id,
+            marks=pytest.mark.xfail(
+                strict=True,
+                raises=AssertionError,
+                reason="ITL-1365: a tag schema in layout order, keys in declared order",
+            ),
+        )
+        if _tag_schema_out_of_key_order(arrangement)
+        else pytest.param(arrangement, id=arrangement.id)
+        for arrangement in arrangements(MAIN)[::4]
+    ]
+
+
+@pytest.mark.parametrize("arrangement", _l7_arrangements())
 def test_declared_arrow_schema_equals_the_output(
     arrangement: Arrangement, outputs: dict[str, Any]
 ) -> None:
@@ -441,3 +469,78 @@ def test_an_async_held_node_sends_the_rows_the_plan_took() -> None:
     summary = job.run(orchestrator=AsyncPipelineOrchestrator(), observer=observer)
     assert summary.nodes["twice"].held == 3
     assert observer.data_starts == 3
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
+def test_describing_a_poller_that_has_not_polled_reads_nothing() -> None:
+    """L7: ``arrow_schema()`` of a poller that has not polled never fetches.
+
+    It answers from the declared schema, the same every time, with each data column's
+    source info, and ``arrow_types_declared`` stays false (Codex on PR #485).
+    """
+    from orcapod.core.sources import PollingSource
+    from orcapod.types import Schema
+    from tests.test_hashing.test_logical_type_forms import (
+        _TableImpl,  # pyright: ignore[reportPrivateUsage]  # the one test polling implementation
+    )
+
+    fetches: list[int] = []
+
+    class Counting(_TableImpl):
+        async def fetch(self, cursor: Any = None) -> Any:
+            fetches.append(1)
+            return await super().fetch(cursor)
+
+        def schema(self) -> Any:
+            return Schema({"k": str, "a": int, "b": int})
+
+    table = pa.table(
+        {
+            "k": pa.array(["1"], pa.large_string()),
+            "a": pa.array([1]),
+            "b": pa.array([2]),
+        }
+    )
+    poller = PollingSource(
+        Counting(table, table.schema),
+        tag_columns=["k"],
+        record_id_columns=["k"],
+        source_id="unpolled",
+    )
+    first = poller.arrow_schema()
+    second = poller.arrow_schema()
+    assert fetches == []
+    assert first.equals(second, check_metadata=True)
+    assert [n for n in first.names if n.startswith(constants.SOURCE_PREFIX)] == [
+        "_source_a",
+        "_source_b",
+    ]
+    assert not poller.arrow_types_declared
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="ITL-1365: a tag schema in layout order, keys in declared order",
+)
+def test_an_operator_stream_declares_its_tags_in_its_rows_order() -> None:
+    """A plain operator stream's ``arrow_schema()`` lists its tags as its rows do.
+
+    Tags declared ``b, a`` over a table laid out ``a, b`` (Codex on PR #485).
+    """
+    from orcapod.core.sources import ArrowTableSource
+
+    table = pa.table(
+        {
+            "a": pa.array([1, 2]),
+            "b": pa.array([3, 4]),
+            "w": pa.array([5, 6]),
+            "x": pa.array([7, 8]),
+        }
+    )
+    source = ArrowTableSource(
+        table, tag_columns=["b", "a"], tag_only_columns=True, source_id="s"
+    )
+    stream = SelectDataColumns(["x"])(source)
+    built, _, _ = StaticOutputOperatorPod._rows_to_table(list(stream.iter_data()))  # pyright: ignore[reportPrivateUsage]  # the rows' order
+    assert stream.arrow_schema().names[:2] == built.column_names[:2]
