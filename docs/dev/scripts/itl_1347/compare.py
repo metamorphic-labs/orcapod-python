@@ -14,7 +14,9 @@
   values differ between them (identifiers and timestamps a run makes, such as a ``uuid7``
   datagram id or a write time) to ``volatile.json``. Only those columns are ever left out.
 
-Exit status 0 when equal; otherwise every difference is printed and the status is 1.
+Exit status 0 when equal, 3 when the comparison completed and found differences (every
+difference is printed). Any other status (Python's 1 on an uncaught error) means the
+comparison could not complete.
 """
 
 from __future__ import annotations
@@ -37,6 +39,11 @@ def _read(path: Path) -> pa.Table:
 # state of the file a function is defined in (``-dirty``, ``-untracked``), which changes
 # whenever a file is added to the checkout during a run. Left out like volatile columns.
 ENVIRONMENT_COLUMNS = frozenset({"__pf_var_git_hash"})
+
+
+# The exit status of a completed comparison that found differences. It is distinct from
+# Python's 1 for an uncaught error, so a caller can tell the two apart.
+DIFFERENCES_FOUND = 3
 
 
 def _events_by_node(events: list[Any]) -> dict[str, list[str]]:
@@ -238,7 +245,7 @@ def main(argv: list[str]) -> int:
     for line in problems:
         print(line)
     print("EQUAL" if not problems else f"{len(problems)} DIFFERENCES")
-    return 0 if not problems else 1
+    return 0 if not problems else DIFFERENCES_FOUND
 
 
 if __name__ == "__main__":

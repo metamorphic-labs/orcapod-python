@@ -19,9 +19,10 @@ own process, one after another. For each fixture:
 
 Writes ``OUT/report.json`` (every comparison with its differences; ``--compare-only``
 writes ``OUT/report_compare_only.json`` and leaves ``report.json`` as it is) and prints a
-summary. The exit status is the gate: 1 if a dump process failed, 2 if sync on the branch
-differs from sync on base, else 0. The async comparisons are printed for review against
-the spec's named differences and do not set the status.
+summary. The exit status is the gate: 1 if a dump process failed or a comparison could not
+complete (its stderr is kept in the report), 2 if sync on the branch differs from sync on
+base, else 0. Completed async differences are printed for review against the spec's
+named differences and do not set the status.
 """
 
 from __future__ import annotations
@@ -93,10 +94,15 @@ def _compare(a: Path, b: Path, mode: str, volatile: Path) -> dict[str, Any]:
         text=True,
         check=False,
     )
+    # compare.py exits 0 (equal) or 3 (completed, with differences); anything else means
+    # the comparison could not complete, and its stderr is kept.
+    completed = done.returncode in (0, 3)
     return {
         "a": str(a),
         "b": str(b),
         "mode": mode,
+        "completed": completed,
+        "stderr_tail": "" if completed else done.stderr[-2000:],
         "equal": done.returncode == 0,
         "output": done.stdout.splitlines()[-40:],
     }
@@ -205,14 +211,19 @@ def main(argv: list[str]) -> int:
     report_name = "report_compare_only.json" if args.compare_only else "report.json"
     (out / report_name).write_text(json.dumps(report, indent=1))
     failed_runs = [r for r in report["runs"] if r["returncode"] != 0]
+    incomplete = [c for c in report["comparisons"] if not c["completed"]]
     for c in report["comparisons"]:
-        status = "EQUAL" if c["equal"] else "DIFFERENT"
+        status = (
+            "EQUAL" if c["equal"] else "DIFFERENT" if c["completed"] else "INCOMPLETE"
+        )
         print(f"{status:9} {c['fixture']:8} t={c['threads']:7} {c['check']}")
     print(f"{len(failed_runs)} dump processes failed")
-    # The exit status is the gate. A failed dump makes the run incomplete (1). A sync
-    # difference against main fails the governing rule (2). The async comparisons are
-    # printed for review against the spec's named differences, and do not set it.
-    if failed_runs:
+    print(f"{len(incomplete)} comparisons could not complete")
+    # The exit status is the gate. A failed dump or a comparison that could not complete
+    # makes the run incomplete (1). A sync difference against main fails the governing
+    # rule (2). Completed async differences are printed for review against the spec's
+    # named differences, and do not set it.
+    if failed_runs or incomplete:
         return 1
     if any(
         not c["equal"] and c["check"].startswith("sync") for c in report["comparisons"]
