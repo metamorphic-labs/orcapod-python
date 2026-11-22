@@ -1013,9 +1013,9 @@ Not covered:
 
      Each is compared with sync as a multiset, and the warning is checked to be issued once per
      operator and set of columns.
-     `Batch` and order-dependent `PolarsFilter` predicates behind an out-of-order input are
-     checked on their invariants instead (every input row in exactly one batch; the
-     predicate applied to the arrival order), as the developer accepted.
+     `Batch` and order-dependent `PolarsFilter` predicates behind an out-of-order input, and
+     their descendants, are checked instead by per-node consistency over their recorded
+     arrivals (see the differential), as the developer accepted.
    - **L7 (descriptions)**: the declared-against-materialized guard.
    - **L8 (channels)**: unit tests of `InputChannel`, `OutputChannel` and the conversions,
      one per row of the semantics table:
@@ -1069,13 +1069,24 @@ Not covered:
      differ from sync, and so do the rows of every node downstream of it. The differential
      determines that set mechanically, from the job's graph: the arrival-dependent node and
      all its descendants. That set, and nothing else, is excluded from the row comparison
-     against sync and against `main`'s async run. Instead, three checks run:
-     - **the node's invariants**: every input row is in exactly one batch, and the predicate
-       holds on the kept rows in their arrival order;
-     - **downstream consistency**: each descendant is computed again, on the sync path, from
-       the async run's own output of the arrival-dependent node (the kept table of that
-       node, fed to the same downstream sub-graph). The descendant's async rows must equal
-       that recomputation as a multiset;
+     against sync and against `main`'s async run. Instead, every node in the set is checked
+     against a sync recomputation over exactly the inputs it received:
+     - **recorded arrivals**: the differential records, for each node in the set, the rows of
+       each of its inputs in the order the node received them on the async path (it wraps
+       the node's input channels; the library is not changed);
+     - **per-node consistency**: the node is computed again on the sync path, over those
+       inputs as Arrow tables in that recorded order. Its async output must equal that
+       recomputation as a multiset of rows. For a `Batch` this fixes the groups to the
+       consecutive `batch_size` segments of its own arrival sequence, with their boundaries
+       and member order (lists are compared in order). Interleaved groups such as [A, C] and
+       [B, D] from arrivals A, B, C, D fail. For an order-dependent `PolarsFilter` it fixes
+       the kept rows to exactly those the predicate selects over the arrival sequence: no
+       selected row missing, none extra;
+     - **every arrival-dependent descendant too**: a later `Batch` or order-dependent
+       `PolarsFilter` in the set (for example behind a concurrent function node fed by the
+       first `Batch`) is checked against its own recorded arrivals in the same way, never
+       against an order the sync recomputation would choose. Each node's check uses only
+       its own recorded inputs, so a valid arrival order anywhere in the set passes;
      - **everything outside the set** is compared as usual.
 
      A difference anywhere else fails the gate.
@@ -1101,8 +1112,8 @@ Not covered:
    - a `Select` operator node in `LOG` mode, so its stored table is checked.
 
    Each case asserts the rows equal sync as a multiset. `Batch` and the order-dependent
-   `PolarsFilter`, and their descendants, are checked as above: invariants plus downstream
-   consistency. The same holds against `main`'s async run. The `Rejoin`
+   `PolarsFilter`, and their descendants, are checked as above: per-node consistency over
+   recorded arrivals. The same holds against `main`'s async run. The `Rejoin`
    case runs ITL-1355's non-match cases with the late branch behind the function node:
    - a differing shared value;
    - NaN and `-0.0` / `0.0` in a shared column;
@@ -1192,7 +1203,7 @@ In `changelog.d/<issue>.md`, under `### Breaking changes and migration`:
 | **Memory with retained output** | `retain=True` is the default (`materialize_results=True`), so whole outputs are held as Arrow tables. During the transition a node could hold both its old rows and its new Arrow table. A large source, fully retained, could exceed today's footprint | A retained output channel's `result()` is the node's kept output: one copy, enforced by a test that they are the same object. Sources retain only when `materialize_results=True`. Arrow tables are far smaller than datagram objects | Stage 0 records peak RSS (`resource.getrusage`) for the baseline; every stage's benchmark reports it before and after |
 | **Back-pressure and deadlock cycles** | Channels now count Arrow record batches. Diamonds, `SemiJoin` over one source, `Join`'s internal chain and slow fan-out readers could block a producer, as ITL-1075 did with rows | The read-to-the-end rule and `close()` on input channels. `retain=True` on node outputs means `send` never waits. REPLAY and `SemiJoin` keep reading their inputs | The ITL-1075 deadlock tests, run with one-row batches and `buffer_size=1`, plus a diamond and fan-out matrix under a pytest timeout (L8) |
 | **Error propagation** | `UpstreamFailedError` could become the error a run raises instead of the producer's own. A consumer could take a producer's failure as a normal end and store a partial result | `fail()` in the producer's `finally`. The failure selection skips `UpstreamFailedError`. `LOG` stores only after a complete run | L8, and the existing error tests (`test_async_error_policy.py`, `test_store_write_failure.py`), asserting the raised type and message equal `main`'s. The differential's failing-row cases |
-| **Async ordering** | Arrow record batches change the granularity of what async nodes see, so arrival order can differ from `main`'s. `Batch` groups by arrival, so with record batches its groups may differ from `main`'s async groups too | Accepted by the developer (row order is not critical; `Batch` grouping by arrival is fine). Every other result is order-independent and compared as a multiset | L6 and the arrival-order graphs (as multisets; `Batch` and its descendants on invariants and downstream consistency) |
+| **Async ordering** | Arrow record batches change the granularity of what async nodes see, so arrival order can differ from `main`'s. `Batch` groups by arrival, so with record batches its groups may differ from `main`'s async groups too | Accepted by the developer (row order is not critical; `Batch` grouping by arrival is fine). Every other result is order-independent and compared as a multiset | L6 and the arrival-order graphs (as multisets; `Batch` and its descendants by per-node consistency over recorded arrivals) |
 | **Observer `RowView` cost and fidelity** | With a status or logging observer attached, every row's tag datagram is built again, so part of the cost returns. A lazy view could also differ from a real datagram (`isinstance`, equality, `as_dict()` values, pickling in a logger) | A `RowView` builds the real datagram on first access and then delegates every call to it. ITL-1348 makes that construction cheaper | The differential's recording observer compares every value it reads. A benchmark row "warm run with a status observer" shows the remaining cost |
 | **Test migration size** | Stage 5 touches 42 files with 171 `async_execute` lines, 329 `Channel(` lines and 84 `input_pipeline_hashes` lines, and stage 2a touches 18 files with 88 `execute` calls. A large diff is hard to review, and a test could be weakened by accident | A shared helper (`tests/stream_helpers.py`). Plumbing changes go in their own commit, before any behaviour change. Assertions are not edited, only how inputs are fed and outputs read | A per-file count of `assert` statements before and after, reported on the PR. The coordinator's full-suite run and CodeRabbit |
 | **Estimates that stage 0 may disprove** | The savings come from profile shares that overlap. The datagram cost may sit mostly in function nodes' stored-hit loading, or in observers, rather than on edges. Stage 1's 4–8 s may be less | Stage 0 measures the split per node kind and per caller before stage 1 merges. If a stage's measured share differs from its estimate by more than half, the plan is revisited with the developer | Stage 0's numbers against the stage table. Each stage's before-and-after benchmark (best of 3, with the load average) |
