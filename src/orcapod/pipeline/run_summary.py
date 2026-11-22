@@ -376,27 +376,18 @@ def warn_row_failures(summary: RunSummary, caller: FrameType) -> None:
     """Issue the run's ``RowFailuresWarning``, shown after every run with failed rows.
 
     Python's default filter shows a warning once per text and line, so a second identical
-    failing run from the same line (re-running a notebook cell) would show nothing. A
-    fresh registry for each run keeps every run's warning, while the user's filters
-    (``ignore``, ``error``) still apply.
+    failing run from the same line (re-running a notebook cell) would show nothing.
+    ``warn_at_frame`` keeps every run's warning, while the user's filters (``ignore``,
+    ``error``) still apply.
 
     Args:
         summary: The run's summary, with failed rows.
         caller: The frame that called ``run``; the warning is shown at its line.
     """
-    import warnings
-
     from orcapod.errors import RowFailuresWarning
+    from orcapod.utils.warning_utils import warn_at_frame
 
-    warnings.warn_explicit(
-        summary.failures_message(),
-        RowFailuresWarning,
-        caller.f_code.co_filename,
-        caller.f_lineno,
-        module=caller.f_globals.get("__name__"),
-        registry=None,
-        module_globals=caller.f_globals,
-    )
+    warn_at_frame(summary.failures_message(), RowFailuresWarning, caller)
 
 
 class RunCountingObserver:
