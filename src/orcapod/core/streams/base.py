@@ -34,6 +34,7 @@ from orcapod.protocols.core_protocols import (
     StreamProtocol,
     TagProtocol,
 )
+from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
 from orcapod.utils import arrow_utils
 
@@ -182,6 +183,154 @@ def typed_zero_row_input(stream: object) -> pa.Table | None:
             ]
         ).with_metadata(table.schema.metadata or {})
     )
+
+
+def row_built_columns(
+    table: pa.Table, keys: tuple[Sequence[str], Sequence[str]]
+) -> pa.Table:
+    """Return ``table``'s columns as a table built from its rows lays them out.
+
+    Every step of F (``StaticOutputOperatorPod._row_built_form``) that each row decides on its own, so it
+    gives the same result on a whole table and on each slice of it:
+
+    1. The columns a row-built table holds: the user tags, the system tags, the data
+       columns that are not data-tags, and the source info of every data column (a
+       data-tag's included). ``table`` holds no context, meta or content-hash column
+       (``ZERO_ROW_INPUT_COLUMNS``).
+    2. In row order: user tags in tag order, system tags in table order, then the data
+       columns and their source info, both in the order of the data keys. A row's
+       ``Data`` lists its source info in the order of its data keys, data-tags first
+       in tag order (``Data._ensure_source_info_table``), so a data-tag's source info
+       comes before the other data columns' even when the data-tag is not the first
+       column of ``table``.
+    3. Normalized to the large types without keeping ``null``: each row's datagram
+       stores a ``null`` column as ``large_string`` (``Datagram._init_from_table``).
+    4. The system-tag and source-info fields as a row builds them from its values
+       (``row_built_provenance``): no field metadata, and a source-info list of the
+       form its tokens give.
+
+    Whether a system-tag or source-info field is nullable depends on its values over
+    the complete table (``StaticOutputOperatorPod._flag_by_values``), so it is not
+    decided here.
+
+    Args:
+        table: A table of user tags, system tags, data and source info.
+        keys: The tag keys and the data keys of the stream ``table`` belongs to
+            (``stream.keys()``).
+
+    Returns:
+        The same values, selected and ordered, in their large types.
+    """
+    return row_built_provenance(
+        arrow_utils.normalize_table_to_large_types(
+            table.select(row_built_names(table.column_names, keys))
+        )
+    )
+
+
+def _source_info_value_type(kind: pa.DataType) -> pa.DataType:
+    """The Arrow type a row gives a source-info column of type ``kind``.
+
+    A row's ``Data`` types its tokens from their Python values
+    (``arrow_utils.source_info_arrow_type``): a string as ``large_string``, a list as
+    ``large_list`` of its element's type, with the item field named ``item`` and
+    nullable. A type of any other kind is left as it is.
+    """
+    if (
+        pa.types.is_list(kind)
+        or pa.types.is_large_list(kind)
+        or pa.types.is_fixed_size_list(kind)
+    ):
+        return pa.large_list(_source_info_value_type(kind.value_type))  # pyright: ignore[reportAttributeAccessIssue, reportUnknownArgumentType, reportUnknownMemberType]  # a list type has a value type
+    if (
+        pa.types.is_string(kind)
+        or pa.types.is_large_string(kind)
+        or pa.types.is_null(kind)
+    ):
+        return pa.large_string()
+    return kind
+
+
+def row_built_provenance(table: pa.Table) -> pa.Table:
+    """Give ``table``'s system-tag and source-info fields the form a row builds.
+
+    A row rebuilds its system tags and its source info from their values, so their
+    fields carry no field metadata, and a source-info column has the type its tokens
+    give (``_source_info_value_type``): a list's item field named ``item`` and
+    nullable at every depth. The values are unchanged: a type that differs only in
+    its item fields is cast. The fields' nullability is left as it is
+    (``StaticOutputOperatorPod._flag_by_values`` decides it). Other fields are not
+    touched.
+
+    Args:
+        table: A table of user tags, system tags, data and source info.
+
+    Returns:
+        The same values under the rebuilt fields.
+    """
+    fields: list[pa.Field[pa.DataType]] = []
+    columns: list[Any] = []
+    changed = False
+    for field, column in zip(table.schema, table.columns, strict=True):
+        if field.name.startswith(constants.SOURCE_PREFIX):
+            kind = _source_info_value_type(field.type)
+            if kind != field.type:
+                column = column.cast(kind)
+            new_field = pa.field(field.name, kind, nullable=field.nullable)
+        elif field.name.startswith(constants.SYSTEM_TAG_PREFIX):
+            new_field = field.remove_metadata()
+        else:
+            new_field = field
+        changed = changed or not new_field.equals(field, check_metadata=True)
+        fields.append(new_field)
+        columns.append(column)
+    if not changed:
+        return table
+    return pa.Table.from_arrays(
+        columns,
+        schema=pa.schema(
+            fields, cast("dict[bytes | str, bytes | str] | None", table.schema.metadata)
+        ),
+    )
+
+
+def row_built_names(
+    names: Sequence[str], keys: tuple[Sequence[str], Sequence[str]]
+) -> list[str]:
+    """Return the columns of a table built from rows, in row order (F steps 1-2).
+
+    The table built from rows is ``StaticOutputOperatorPod._rows_to_table``'s; this and
+    ``row_built_columns`` are module functions so that a stream applies them without
+    importing the operators (ITL-1347).
+
+    The user tags in tag order, the system tags in the order of ``names``, the data
+    columns that are not data-tags or meta columns, then the source info of every
+    such data column and data-tag; data
+    and source info in the order of the data keys (a row's ``Data`` lists its source
+    info so, data-tags first in tag order: ``Data._ensure_source_info_table``).
+
+    Args:
+        names: The column names of a table of user tags, system tags, data and
+            source info.
+        keys: The tag keys and the data keys of the stream the table belongs to.
+
+    Returns:
+        The names a table built from rows holds, in its order.
+    """
+    tag_keys, data_keys = keys
+    present = set(names)
+    tags = set(tag_keys)
+    system_tags = [n for n in names if n.startswith(constants.SYSTEM_TAG_PREFIX)]
+    # A meta (``__``) column is never data: a row's ``Data`` holds it apart, and no
+    # node passes it on (ITL-1080).
+    data_keys = [n for n in data_keys if not n.startswith(constants.META_PREFIX)]
+    data = [n for n in data_keys if n not in tags]
+    source_info = [
+        f"{constants.SOURCE_PREFIX}{n}"
+        for n in data_keys
+        if f"{constants.SOURCE_PREFIX}{n}" in present
+    ]
+    return [*tag_keys, *system_tags, *data, *source_info]
 
 
 def typed_arrow_schemas(

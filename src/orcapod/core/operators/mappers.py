@@ -66,6 +66,8 @@ class MapData(UnaryOperator):
     """
 
     # Data-tags (ITL-1023): handled.
+    # Each output row comes from one input row (ITL-1347).
+    ROW_BY_ROW: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def __init__(
@@ -332,6 +334,8 @@ class MapTags(UnaryOperator):
     PROVISIONAL: ClassVar[bool] = True
 
     # Data-tags (ITL-1023): handled.
+    # Each output row comes from one input row (ITL-1347).
+    ROW_BY_ROW: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def __init__(
@@ -618,6 +622,8 @@ class MapColumns(UnaryOperator):
     """
 
     # Provisional: its identity is not frozen with data context v1 (ITL-1279).
+    # Each output row comes from one input row (ITL-1347).
+    ROW_BY_ROW: ClassVar[bool] = True
     PROVISIONAL: ClassVar[bool] = True
 
     def __init__(
