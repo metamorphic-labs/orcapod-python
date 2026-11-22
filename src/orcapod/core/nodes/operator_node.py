@@ -1712,10 +1712,15 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             produced = produced_stream(result_stream)
 
             output: StreamProtocol
-            if not reads_as_its_class(produced, ArrowTableStream):
+            if (
+                not reads_as_its_class(produced, ArrowTableStream)
+                or produced.data_context_key != self.data_context_key
+            ):
                 # A result that is not exactly a stream over its table (a custom
-                # stream kind, a replaced reader): main's own row path, its rows read
-                # once, its table built where a successor reads it (ITL-1347).
+                # stream kind, a replaced reader), or whose rows report another data
+                # context than the node's: main's own row path, its rows read once and
+                # handed on unchanged, its table built where a successor reads it
+                # (ITL-1347).
                 rows = list(result_stream.iter_data())
                 self._cached_output_stream = StaticOutputOperatorPod._kept_output(
                     result_stream, rows

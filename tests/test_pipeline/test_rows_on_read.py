@@ -723,6 +723,102 @@ def test_a_result_of_another_stream_kind_takes_mains_row_path() -> None:
     assert job.nodes["b"].as_table()["x"].to_pylist() == [[20]]
 
 
+# ── CodeRabbit on 352ce7b9: every wrapper proven, and the rows' data context ─────
+
+
+@pytest.mark.parametrize("how", ["subclass", "instance_reader"])
+def test_a_dynamic_stream_that_is_not_proven_stops_the_chain(how: str) -> None:
+    """A ``DynamicPodStream`` subclass, or one whose ``iter_data`` is replaced on the
+    instance, inside an operator's result is read through its own rows (``[20]``),
+    as ``main`` read them: the chain is followed only through proven wrappers."""
+    from orcapod.core.operators.static_output_pod import DynamicPodStream
+    from orcapod.operators import SelectDataColumns
+
+    class FilteringDynamic(DynamicPodStream):
+        def iter_data(self) -> Any:
+            return _only_above_ten(super().iter_data())
+
+    class Inner(SelectDataColumns):
+        pass
+
+    class Outer(SelectDataColumns):
+        def unary_static_process(self, stream: Any) -> Any:
+            if how == "subclass":
+                return FilteringDynamic(Inner(["x", "y"]), (stream,))
+            inner: Any = Inner(["x", "y"]).process(stream)
+            read = inner.iter_data
+            inner.iter_data = lambda: _only_above_ten(read())
+            return inner
+
+    database = InMemoryArrowDatabase()
+    job = PipelineJob(name="unproven", database=database)
+    with job:
+        source = ArrowTableSource(
+            pa.table({"k": [1, 2], "x": [10, 20], "y": [1, 2], "z": [5, 6]}),
+            tag_columns=["k"],
+            tag_only_columns=True,
+            source_id="s",
+        )
+        Batch(batch_size=2)(Outer(["x", "y"])(source, label="outer"), label="b")
+    node: Any = job.nodes["outer"]
+    node.attach_databases(
+        pipeline_database=database.at("log"), cache_mode=CacheMode.LOG
+    )
+    job.run()
+    assert node.as_table()["x"].to_pylist() == [20]
+    stored = node.get_all_records()
+    assert stored is not None
+    assert stored["x"].to_pylist() == [20]
+    assert job.nodes["b"].as_table()["x"].to_pylist() == [[20]]
+
+
+OTHER_CONTEXT = "std:v1:test-rows-on-read-other"
+
+
+def test_a_result_in_another_data_context_hands_on_its_own_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operator node over a stream of another data context hands on the result's
+    rows as ``main`` returned them (in their own data context); what it keeps is in its
+    own data context, as on ``main``."""
+    import dataclasses
+
+    import orcapod.contexts as contexts
+    from orcapod.core.nodes.operator_node import OperatorJobNode
+    from orcapod.operators import SelectDataColumns
+    from orcapod.system_constants import constants
+
+    other = dataclasses.replace(
+        contexts.get_default_context(), context_key=OTHER_CONTEXT
+    )
+    registry = contexts._get_registry()  # pyright: ignore[reportPrivateUsage]  # the test registers a second context
+    original = registry.get_context
+
+    def get_context(key: Any = None) -> contexts.DataContext:  # pyright: ignore[reportExplicitAny]  # the registry's own argument
+        return other if key == OTHER_CONTEXT else original(key)
+
+    monkeypatch.setattr(registry, "get_context", get_context)
+
+    def stream() -> ArrowTableStream:
+        table = pa.table(
+            {
+                "k": ["a", "b"],
+                "x": [1, 2],
+                "y": [3, 4],
+                constants.CONTEXT_KEY: pa.array([OTHER_CONTEXT] * 2, pa.large_string()),
+            }
+        )
+        return ArrowTableStream(table, tag_columns=["k"], data_context=other)
+
+    node = OperatorJobNode(SelectDataColumns(["x"]), [stream()])
+    output: Any = node.execute(stream())
+    assert [data.data_context_key for _, data in output.iter_data()] == [
+        OTHER_CONTEXT
+    ] * 2
+    kept = node.as_table(columns={"context": True})[constants.CONTEXT_KEY]
+    assert kept.to_pylist() == [node.data_context_key] * 2
+
+
 @pytest.mark.parametrize(
     "kind",
     [pa.time64("ns"), pa.decimal256(76, 40)],
