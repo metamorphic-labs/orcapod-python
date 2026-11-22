@@ -20,6 +20,7 @@ Principles
 
 from __future__ import annotations
 
+import itertools
 import logging
 import uuid
 from collections.abc import Collection, Iterator, Mapping
@@ -46,6 +47,70 @@ else:
     pa = LazyModule("pyarrow")
 
 logger = logging.getLogger(__name__)
+
+
+def _data_and_meta_tables(table: pa.Table) -> tuple[pa.Table, pa.Table | None]:
+    """Split a normalized table into what a datagram holds as data and as meta.
+
+    Args:
+        table: A table in the large types of a datagram
+            (``arrow_utils.normalize_table_to_large_types``), of any number of rows.
+
+    Returns:
+        The table without its data-context and meta columns, and the table of its meta
+        columns, ``None`` when it has none.
+
+    Raises:
+        ValueError: If no column is left as data.
+    """
+    names = table.column_names
+    context_cols = [c for c in names if c == constants.CONTEXT_KEY]
+    meta_col_names = [c for c in names if c.startswith(constants.META_PREFIX)]
+    data_table = table.drop_columns(context_cols + meta_col_names)
+    if len(data_table.column_names) == 0:
+        raise ValueError("Data table must contain at least one data column.")
+    return data_table, table.select(meta_col_names) if meta_col_names else None
+
+
+def _one_row_tables(*tables: pa.Table) -> Iterator[tuple[pa.Table, ...]]:
+    """Yield, for each row of tables of one length, the one-row table of each.
+
+    The tables may be chunked in any way, each in its own: the rows are read batch by
+    batch (``Table.to_batches`` cuts at the chunk boundaries of every column), and a
+    row is a slice of its batch, so no value is copied and the cost of a row does not
+    grow with the number of chunks, as ``Table.slice(i, 1)`` on a table of many chunks
+    does (a table built from rows has one chunk per row).
+
+    Args:
+        *tables: Tables with the same number of rows.
+
+    Yields:
+        One tuple per row, in row order: the one-row table of each of ``tables``, with
+        that table's schema.
+    """
+    schemas = [table.schema for table in tables]
+    bounds = list(itertools.accumulate((t.num_columns for t in tables), initial=0))
+    arrays = [column for table in tables for column in table.columns]
+    side_by_side = pa.Table.from_arrays(
+        arrays, names=[str(i) for i in range(len(arrays))]
+    )
+    row = 0
+    for batch in side_by_side.to_batches():
+        columns = batch.columns
+        parts = [
+            pa.RecordBatch.from_arrays(columns[start:stop], schema=schema)
+            for start, stop, schema in zip(bounds, bounds[1:], schemas)
+        ]
+        for i in range(batch.num_rows):
+            yield tuple(
+                pa.Table.from_batches([part.slice(i, 1)])
+                if part.num_columns
+                # A table with no column still has its rows; a batch made of none
+                # of them has not.
+                else table.slice(row, 1)
+                for part, table in zip(parts, tables)
+            )
+            row += 1
 
 
 def context_key_field() -> pa.Field[Any]:
@@ -182,26 +247,41 @@ class Datagram(ContentIdentifiableBase):
         if constants.CONTEXT_KEY in table.column_names and data_context is None:
             data_context = table[constants.CONTEXT_KEY].to_pylist()[0]
 
-        context_cols = [c for c in table.column_names if c == constants.CONTEXT_KEY]
+        data_table, meta_table = _data_and_meta_tables(table)
+        self._init_from_row(
+            data_table, meta_table, meta_info, data_context, record_uuid
+        )
 
+    def _init_from_row(
+        self,
+        data_table: pa.Table,
+        meta_table: pa.Table | None,
+        meta_info: Mapping[str, DataValue] | None,
+        data_context: str | contexts.DataContext | None,
+        record_uuid: uuid.UUID | None,
+    ) -> None:
+        """Set the state of a datagram held as Arrow, from one prepared row.
+
+        The one place that state is set: ``_init_from_table`` prepares its row itself,
+        and ``_rows_of_table`` prepares all rows of a table at once (ITL-1348).
+
+        Args:
+            data_table: The row's data columns, normalized, as
+                ``_data_and_meta_tables`` returns them.
+            meta_table: The row's meta columns, or ``None``.
+            meta_info: Meta values to add to those of ``meta_table``.
+            data_context: The row's data context.
+            record_uuid: The datagram's id, if it has one.
+        """
         super().__init__(data_context=data_context)
         self._datagram_uuid = record_uuid
 
-        meta_col_names = [
-            c for c in table.column_names if c.startswith(constants.META_PREFIX)
-        ]
-        self._data_table = table.drop_columns(context_cols + meta_col_names)
+        self._data_table = data_table
         self._data_dict = None
         self._data_python_schema = None  # computed lazily
         self._data_arrow_schema = None  # computed lazily
 
-        if len(self._data_table.column_names) == 0:
-            raise ValueError("Data table must contain at least one data column.")
-
         # Build meta table
-        meta_table: "pa.Table | None" = (
-            table.select(meta_col_names) if meta_col_names else None
-        )
         if meta_info is not None:
             normalized_meta = {
                 k
@@ -243,6 +323,75 @@ class Datagram(ContentIdentifiableBase):
             self._meta_python_schema = Schema.empty()
             self._meta_table = None
         self._context_table = None
+
+    @classmethod
+    def _rows_of_table(
+        cls,
+        table: pa.Table,
+        data_context: str | contexts.DataContext | None,
+        *,
+        apart_prefix: str | None = None,
+        beside: pa.Table | None = None,
+    ) -> Iterator[tuple[Self, pa.Table | None, pa.Table | None]]:
+        """Yield a datagram for each row of ``table``, prepared once for all rows.
+
+        The datagram of row ``i`` has the state ``_init_from_table`` gives the one-row
+        table ``table.slice(i, 1)``. What that does to every row alike is done here
+        once for the whole table (ITL-1348): the normalization to the large types of a
+        datagram, and the split into data, meta and data-context columns. A row is
+        then a slice of each, however the table is chunked.
+
+        Args:
+            table: The rows, of any Arrow types a datagram accepts.
+            data_context: The data context of every row; ``None`` reads each row's
+                own from the table's data-context column, if it has one.
+            apart_prefix: A prefix whose data columns the datagrams do not hold: a
+                subclass that keeps a column group of its own (a tag's system tags)
+                gets them beside each datagram instead.
+            beside: A table of the same rows that is no part of the datagrams (a
+                data's source info), to be read row by row with them.
+
+        Yields:
+            The datagram, built without calling ``__init__``; the one-row table of
+            its columns named with ``apart_prefix`` (``None`` when there is none);
+            and the row of ``beside`` (``None`` when not given).
+
+        Raises:
+            ValueError: If the table has rows and none of its columns is data.
+        """
+        if table.num_rows == 0:
+            return
+        table = arrow_utils.normalize_table_to_large_types(table)
+        row_contexts: list[Any | None] | None = None
+        if constants.CONTEXT_KEY in table.column_names and data_context is None:
+            row_contexts = table[constants.CONTEXT_KEY].to_pylist()
+        data_table, meta_table = _data_and_meta_tables(table)
+        apart_table: pa.Table | None = None
+        if apart_prefix is not None:
+            apart = [c for c in data_table.column_names if c.startswith(apart_prefix)]
+            if apart:
+                apart_table = data_table.select(apart)
+                data_table = data_table.drop_columns(apart)
+        # The optional tables that are there, and where each is in a row's tuple.
+        optional = [meta_table, apart_table, beside]
+        places = list(
+            itertools.accumulate((t is not None for t in optional), initial=1)
+        )
+        rows = _one_row_tables(data_table, *(t for t in optional if t is not None))
+        for i, parts in enumerate(rows):
+            meta_row, apart_row, beside_row = (
+                parts[place] if t is not None else None
+                for t, place in zip(optional, places)
+            )
+            row = cls.__new__(cls)
+            row._init_from_row(
+                parts[0],
+                meta_row,
+                None,
+                data_context if row_contexts is None else row_contexts[i],
+                None,
+            )
+            yield row, apart_row, beside_row
 
     # ------------------------------------------------------------------
     # Internal helpers (lazy loading)
