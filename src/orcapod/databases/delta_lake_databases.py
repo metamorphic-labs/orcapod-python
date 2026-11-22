@@ -1616,7 +1616,10 @@ class DeltaTableDatabase:
                 )
 
     def _refuse_unmergeable_append(
-        self, record_path: tuple[str, ...], records: pa.Table
+        self,
+        record_path: tuple[str, ...],
+        records: pa.Table,
+        pending: pa.Table | None = None,
     ) -> None:
         """Refuse, before anything is buffered, rows a flush would refuse (ITL-1334).
 
@@ -1629,11 +1632,15 @@ class DeltaTableDatabase:
         Args:
             record_path: The table the rows are for.
             records: The rows about to be added.
+            pending: The batch pending for the table as it would be queued with them
+                (``schema_handling="merge"`` re-types it), or ``None`` for the one
+                queued now.
 
         Raises:
             InputValidationError: For the first such column, naming it and the path.
         """
-        pending = self._pending_batches.get(self._get_record_key(record_path))
+        if pending is None:
+            pending = self._pending_batches.get(self._get_record_key(record_path))
         refusal = None
         if pending is not None:
             held = {f.name: f for f in pending.schema}
@@ -1780,15 +1787,21 @@ class DeltaTableDatabase:
             # self._check_all_conflicts(record_path, deduplicated_table)
             filtered_table = deduplicated_table
 
-        # Step 4: Handle schema compatibility
-        schema_compatible_table = self._handle_schema_compatibility(
+        # Step 4: Handle schema compatibility (the pending batch is only staged)
+        schema_compatible_table, staged_pending = self._handle_schema_compatibility(
             record_path, filtered_table, schema_handling
         )
 
         # Step 5: what the flush would refuse is refused now, on the rows that are
-        # queued: after duplicates are dropped and any requested schema handling
-        # (ITL-1334).
-        self._refuse_unmergeable_append(record_path, schema_compatible_table)
+        # queued: after duplicates are dropped and any requested schema handling, the
+        # rows already queued included when a merge re-types them. Nothing queued
+        # changes unless both pass (ITL-1334).
+        self._refuse_unmergeable_append(
+            record_path, schema_compatible_table, staged_pending
+        )
+        if staged_pending is not None:
+            self._refuse_unmergeable_append(record_path, staged_pending, staged_pending)
+            self._pending_batches[self._get_record_key(record_path)] = staged_pending
 
         # Step 6: Add to pending batch (no overwrite logic needed)
         self._add_to_pending_batch(record_path, schema_compatible_table)
@@ -1880,16 +1893,24 @@ class DeltaTableDatabase:
 
     def _handle_schema_compatibility(
         self, record_path: tuple[str, ...], table: pa.Table, schema_handling: str
-    ) -> pa.Table:
-        """Handle schema differences between input and pending batch."""
+    ) -> tuple[pa.Table, pa.Table | None]:
+        """Handle schema differences between input and pending batch.
+
+        Nothing queued is changed here: a ``"merge"`` returns the pending batch cast to
+        the unified schema, for the caller to queue once the rows are accepted.
+
+        Returns:
+            The input as it is to be queued, and the re-typed pending batch (``None``
+            when the pending batch stays as it is).
+        """
         record_key = self._get_record_key(record_path)
         pending_batch = self._pending_batches.get(record_key)
         if pending_batch is None:
-            return table
+            return table, None
 
         if pending_batch.schema.equals(table.schema):
             # TODO: perform more careful check
-            return table
+            return table, None
 
         if schema_handling == "error":
             raise ValueError(
@@ -1900,18 +1921,15 @@ class DeltaTableDatabase:
                 # Unify schemas and cast both input table and pending batch
                 unified_schema = pa.unify_schemas([pending_batch.schema, table.schema])
 
-                # Cast the pending batch to unified schema (excluding tracking columns)
-                self._pending_batches[record_key] = pending_batch.cast(unified_schema)
-
-                # Cast and return the input table
-                return table.cast(unified_schema)
+                # The input and the pending batch, cast to the unified schema.
+                return table.cast(unified_schema), pending_batch.cast(unified_schema)
             except Exception as e:
                 # TODO: perform more careful error check
                 raise ValueError(f"Cannot merge schemas: {e}")
         elif schema_handling == "coerce":
             try:
                 # Coerce input table to match existing pending batch schema
-                return table.cast(pending_batch.schema)
+                return table.cast(pending_batch.schema), None
             except Exception as e:
                 raise ValueError(f"Cannot coerce schema: {e}")
         else:

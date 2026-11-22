@@ -465,3 +465,24 @@ def test_a_flush_refusal_drops_what_the_handle_cached_of_the_table(
         {"x": 1, "y": None},
         {"x": 9, "y": 9},
     ]
+
+
+def test_a_refused_merge_leaves_the_queued_rows_as_they_were(tmp_path: Path) -> None:
+    """``schema_handling="merge"`` re-types the queued rows only when the new rows are
+    accepted: a refused merge leaves them as queued, so the flush writes them."""
+    db = DeltaTableDatabase(tmp_path)
+    db.add_records(PATH, _rows([b"1"], x=(I64, [1])), record_id_column="id", flush=True)
+    db.add_records(PATH, _rows([b"2"], x=(pa.null(), [None])), record_id_column="id")
+    with pytest.raises(InputValidationError, match="'x': it is stored as int64"):
+        db.add_records(
+            PATH,
+            _rows([b"3"], x=(pa.float64(), [3.0])),
+            record_id_column="id",
+            schema_handling="merge",
+        )
+    pending = db._pending_batches["t"]  # pyright: ignore[reportPrivateUsage]
+    assert pending.schema.field("x").type == pa.null()
+    db.flush()
+    back = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="id")
+    assert back is not None
+    assert back.sort_by("id").column("x").to_pylist() == [1, None]
