@@ -5,6 +5,12 @@ A diamond (one stream split into branches, then put back together) is expected t
 number of system-tag columns stays constant however many diamonds are stacked, where
 ``Join`` (unchanged) doubles them. The sources here have two tags and several data
 columns; diamonds go through filters, renames, ``AddTags`` and function pods.
+
+Rejoin is an inner join on every column its inputs share (ITL-1355): the system tags, a
+tag several inputs have, a shared data-tag's source info and the data context, compared
+as ``Join`` compares keys. It refuses only what the inputs' columns show; rows that match
+nothing are left out, and a ``RejoinDifferingColumnWarning`` names the shared columns in
+which rows of one origin row differ.
 """
 
 from __future__ import annotations
@@ -12,7 +18,10 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import itertools
+import math
+import struct
 import warnings
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -26,7 +35,11 @@ from orcapod.core.operators import GroupBy, Join, Rejoin
 from orcapod.core.sources import DictSource
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
-from orcapod.errors import InputValidationError, ProvisionalHashWarning
+from orcapod.errors import (
+    InputValidationError,
+    ProvisionalHashWarning,
+    RejoinDifferingColumnWarning,
+)
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.job import PipelineJob
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
@@ -257,15 +270,14 @@ def test_inputs_without_system_tags_are_refused() -> None:
         _ = stream.as_table()
 
 
-def test_a_shared_tag_that_differs_is_refused() -> None:
-    """Two branches that each add tag ``run``, with different values: refused, naming it."""
-    source = _source()
-    a = source.select_data_columns(["rate"]).add_tags(run=1)
-    b = source.select_data_columns(["depth"]).add_tags(run=2)
-    with pytest.raises(InputValidationError, match="tag 'run' has different values"):
-        _ = a.rejoin(b).as_table()
-    same = source.select_data_columns(["depth"]).add_tags(run=1)
-    assert {row["run"] for row in _user_rows(a.rejoin(same))} == {1}
+def test_a_shared_tags_type_that_differs_is_refused() -> None:
+    """A tag two inputs have in different Arrow types is refused, naming it and both
+    types: the inputs' columns show it, before any row is matched."""
+    origin = _origin()
+    a = _branch(origin, ["rate"])
+    b = _branch(origin, ["depth"], unit=pa.array(range(8), pa.int32()))
+    with pytest.raises(InputValidationError, match="Arrow type of column 'unit'"):
+        _ = Rejoin()(a, b).as_table()
 
 
 def test_overlapping_data_columns_are_refused() -> None:
@@ -274,28 +286,6 @@ def test_overlapping_data_columns_are_refused() -> None:
         _ = source.select_data_columns(["rate", "area"]).rejoin(
             source.select_data_columns(["depth", "area"])
         )
-
-
-def test_two_rows_of_one_origin_row_in_one_input_are_refused() -> None:
-    """A first rule: at most one row per origin row in each input; the error names the
-    input and the system-tag values."""
-    source = _source()
-    table = source.as_table(columns={"system_tags": True}).select(
-        ["subject", "unit", "rate"] + [name for name in _system_tags(source)]
-    )
-    doubled = pa.concat_tables([table, table.slice(0, 1)])
-    duplicated = ArrowTableStream(doubled, tag_columns=["subject", "unit"])
-    other = ArrowTableStream(
-        source.as_table(columns={"system_tags": True}).select(
-            ["subject", "unit", "depth"] + _system_tags(source)
-        ),
-        tag_columns=["subject", "unit"],
-    )
-    with pytest.raises(InputValidationError) as caught:
-        _ = Rejoin()(duplicated, other).as_table()
-    message = str(caught.value)
-    assert "holds two rows of one origin row" in message
-    assert "units" in message  # the source id among the system-tag values
 
 
 def test_two_sources_with_one_schema_rejoin_to_nothing() -> None:
@@ -416,31 +406,6 @@ def test_join_is_unchanged() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_a_null_in_a_system_tag_is_refused() -> None:
-    """Provenance is never null: an input with a null in a system-tag column is refused,
-    naming the column, instead of silently losing the row (the reviewer's case)."""
-    source = _source()
-    full = source.as_table(columns={"system_tags": True})
-    names = _system_tags(source)
-    source_id = next(name for name in names if "source_id" in name)
-    values = full.column(source_id).to_pylist()
-    nulled = full.set_column(
-        full.schema.get_field_index(source_id),
-        pa.field(source_id, pa.large_string(), nullable=True),
-        pa.array([None, None, *values[2:]], pa.large_string()),
-    )
-    a = ArrowTableStream(
-        nulled.select(["subject", "unit", "rate", *names]),
-        tag_columns=["subject", "unit"],
-    )
-    b = ArrowTableStream(
-        nulled.select(["subject", "unit", "depth", *names]),
-        tag_columns=["subject", "unit"],
-    )
-    with pytest.raises(InputValidationError, match="null in system-tag column"):
-        _ = Rejoin()(a, b).as_table()
-
-
 def _tied(k: list[float]) -> ArrowTableStream:
     """A raw stream with data-tags ``k`` (float) and ``g``, and fixed system tags."""
     table = pa.table(
@@ -452,26 +417,6 @@ def _tied(k: list[float]) -> ArrowTableStream:
         }
     )
     return ArrowTableStream(table, tag_columns=["k", "g"], data_tags=["k", "g"])
-
-
-@pytest.mark.parametrize(
-    ("left", "right"),
-    [([0.0, 0.0], [-0.0, -0.0]), ([float("nan")] * 2, [-float("nan")] * 2)],
-    ids=["signed_zero", "nan_payload"],
-)
-def test_equal_values_in_different_bits_are_refused_in_both_orders(
-    left: list[float], right: list[float]
-) -> None:
-    """Inputs with equal pipeline hashes keep the caller's order; a shared tag equal in
-    value but not in bits would make the output's bits follow it. Refused in both
-    orders, naming the tag (the reviewer's case)."""
-    a, b = _tied(left), _tied(right)
-    assert a.pipeline_hash() == b.pipeline_hash()
-    for inputs in ((a, b), (b, a)):
-        with pytest.raises(InputValidationError, match="tag 'k' has different values"):
-            _ = Rejoin()(*inputs).as_table()
-    same = Rejoin()(a, _tied(left)).as_table()
-    assert same.num_rows == 2
 
 
 def test_stated_system_tags_are_compared_even_beside_an_input_that_states_none() -> (
@@ -499,18 +444,6 @@ def _float_provenance(origin: list[float], data: str) -> ArrowTableStream:
         }
     )
     return ArrowTableStream(table, tag_columns=["g"], system_tag_columns=["origin"])
-
-
-def test_system_tags_matched_by_equality_must_be_the_same_bits() -> None:
-    """Polars matches -0.0 with 0.0; a system tag matched that way is refused, in
-    both argument orders, naming the system tag (CodeRabbit on PR 472)."""
-    a = _float_provenance([0.0, 1.0], "x")
-    b = _float_provenance([-0.0, 1.0], "y")
-    for inputs in ((a, b), (b, a)):
-        with pytest.raises(InputValidationError, match="system tag '_tag_origin'"):
-            _ = Rejoin()(*inputs).as_table()
-    same = Rejoin()(a, _float_provenance([0.0, 1.0], "y")).as_table()
-    assert same.num_rows == 2
 
 
 OTHER_CONTEXT = "std:v1:test-other"
@@ -593,18 +526,6 @@ def test_the_result_keeps_the_inputs_data_context(
     assert len(rows) == 3
     assert {tag.data_context_key for tag, _ in rows} == {OTHER_CONTEXT}
     assert {data.data_context_key for _, data in rows} == {OTHER_CONTEXT}
-
-
-def test_inputs_of_different_data_contexts_are_refused(
-    other_context: contexts.DataContext,
-) -> None:
-    """Rows of one origin row carry one data context: inputs that do not are refused,
-    naming both keys, in either argument order."""
-    a = _in_context(other_context, "x")
-    b = _in_context(contexts.get_default_context(), "y")
-    for inputs in ((a, b), (b, a)):
-        with pytest.raises(InputValidationError, match="different data contexts"):
-            _ = Rejoin()(*inputs).as_table()
 
 
 def _wide_in_context(context: contexts.DataContext) -> ArrowTableStream:
@@ -699,14 +620,459 @@ def test_stacked_rejoins_in_a_non_default_context_are_accepted(
         assert {data.data_context_key for _, data in rows} == {OTHER_CONTEXT}, name
 
 
-def test_rows_of_different_data_contexts_are_refused_whatever_the_streams_report(
+# ---------------------------------------------------------------------------
+# Rows that match nothing are left out (ITL-1355)
+# ---------------------------------------------------------------------------
+
+
+def _origin() -> pa.Table:
+    """The source's rows with their system tags."""
+    return _source().as_table(columns={"system_tags": True})
+
+
+def _branch(
+    origin: pa.Table,
+    data: Sequence[str],
+    *,
+    tags: Sequence[str] = ("subject", "unit"),
+    data_tags: Sequence[str] = (),
+    **columns: Any,
+) -> ArrowTableStream:
+    """A branch of ``origin`` built by hand: its system tags, the named tags and data.
+
+    ``columns`` replaces or adds columns (a tag a branch changed, a tag it added, the
+    source info of a data-tag, the data context column).
+    """
+    table = origin
+    for name, values in columns.items():
+        array = values if isinstance(values, pa.Array) else pa.array(values)
+        if name in table.column_names:
+            table = table.set_column(table.column_names.index(name), name, array)
+        else:
+            table = table.append_column(name, array)
+    system_tags = [
+        name
+        for name in origin.column_names
+        if name.startswith(constants.SYSTEM_TAG_PREFIX)
+    ]
+    hidden = [
+        name
+        for name in table.column_names
+        if name.startswith(constants.SOURCE_PREFIX) or name == constants.CONTEXT_KEY
+    ]
+    return ArrowTableStream(
+        table.select([*tags, *data, *system_tags, *hidden]),
+        tag_columns=list(tags),
+        data_tags=list(data_tags),
+    )
+
+
+def _rejoined(*inputs: Any) -> tuple[Any, list[str]]:
+    """The rejoin of ``inputs`` computed, and its ``RejoinDifferingColumnWarning``s."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        stream = Rejoin()(*inputs)
+        _ = stream.as_table()
+    return stream, [
+        str(w.message)
+        for w in caught
+        if issubclass(w.category, RejoinDifferingColumnWarning)
+    ]
+
+
+def _units(stream: Any) -> list[int]:
+    return sorted(stream.as_table().column("unit").to_pylist())
+
+
+def test_a_shared_tag_that_differs_matches_nothing() -> None:
+    """Two branches that each add tag ``run``, with different values: no row is put
+    together, nothing is refused, and one warning names the tag. With the same value
+    the rows are put together and nothing warns."""
+    source = _source()
+    a = source.select_data_columns(["rate"]).add_tags(run=1)
+    b = source.select_data_columns(["depth"]).add_tags(run=2)
+    for inputs in ((a, b), (b, a)):
+        result, warned = _rejoined(*inputs)
+        assert result.as_table().num_rows == 0
+        assert set(result.as_table().column_names) == {
+            "subject",
+            "unit",
+            "run",
+            "rate",
+            "depth",
+        }
+        assert len(warned) == 1 and "tag 'run'" in warned[0]
+    same = source.select_data_columns(["depth"]).add_tags(run=1)
+    result, warned = _rejoined(a, same)
+    assert {row["run"] for row in _user_rows(result)} == {1}
+    assert len(_user_rows(result)) == 8 and not warned
+
+
+def test_several_shared_tags_several_inputs_in_every_order() -> None:
+    """Three branches sharing ``subject``, ``unit`` and, two by two, the added tags
+    ``run``, ``site`` and ``day``: a row is put together only when every column two
+    inputs share is equal, whatever the order of the inputs."""
+    origin = _origin()
+    run_a = [1, 1, 1, 1, 2, 2, 2, 2]
+    run_b = [1, 1, 9, 1, 2, 2, 2, 2]  # unit 2 differs from a
+    site_a = ["x"] * 8
+    site_c = ["x", "y", "x", "x", "x", "x", "x", "x"]  # unit 1 differs from a
+    day_b = [5, 5, 5, 5, 5, 5, 7, 5]
+    day_c = [5, 5, 5, 5, 5, 5, 5, 5]  # unit 6 differs from b
+    a = _branch(
+        origin,
+        ["rate"],
+        tags=["subject", "unit", "run", "site"],
+        run=run_a,
+        site=site_a,
+    )
+    b = _branch(
+        origin, ["depth"], tags=["day", "run", "unit", "subject"], run=run_b, day=day_b
+    )
+    c = _branch(
+        origin,
+        ["area"],
+        tags=["site", "subject", "day", "unit"],
+        site=site_c,
+        day=day_c,
+    )
+    results = []
+    for order in itertools.permutations((a, b, c)):
+        result, warned = _rejoined(*order)
+        assert _units(result) == [0, 3, 4, 5, 7]
+        assert len(warned) == 1
+        assert any(f"tag {name!r}" in warned[0] for name in ("run", "site", "day"))
+        results.append(result)
+    first = results[0]
+    assert all(row["site"] == "x" and row["day"] == 5 for row in _user_rows(first))
+    for result in results[1:]:
+        assert _user_rows(result) == _user_rows(first)
+        assert result.keys() == first.keys()
+        assert result.pipeline_hash() == first.pipeline_hash()
+    assert _system_tags(first) == _system_tags(_source())
+    # Two of them, in both orders: only the columns those two share count.
+    for pair, kept in (
+        ((a, b), [0, 1, 3, 4, 5, 6, 7]),
+        ((b, c), [0, 1, 2, 3, 4, 5, 7]),
+    ):
+        for order in (pair, pair[::-1]):
+            assert _units(_rejoined(*order)[0]) == kept
+
+
+def test_a_null_in_a_system_tag_matches_nothing() -> None:
+    """Provenance is never null: rows with a null in a system-tag column match nothing
+    and are left out, in both inputs; the other rows are put together. Nothing is
+    refused and nothing warns (no shared column differs)."""
+    origin = _origin()
+    source_id = next(name for name in _system_tags(_source()) if "source_id" in name)
+    values = origin.column(source_id).to_pylist()
+    nulled: dict[str, Any] = {
+        source_id: pa.array([None, None, *values[2:]], pa.large_string())
+    }
+    a = _branch(origin, ["rate"], **nulled)
+    b = _branch(origin, ["depth"], **nulled)
+    whole = _branch(origin, ["area"])
+    for inputs in ((a, b), (b, a), (a, whole), (whole, a), (a, whole, b)):
+        result, warned = _rejoined(*inputs)
+        assert _units(result) == [2, 3, 4, 5, 6, 7]
+        assert not warned
+
+
+def test_a_null_in_another_shared_column_equals_a_null() -> None:
+    """Only a system tag's null matches nothing. Rows of one origin row that both hold
+    no value in a shared tag, or in a shared data-tag's source info, are put together."""
+    origin = _origin()
+    holes = pa.array(
+        ["s0", None, "s2", None, "s1", "s2", "s0", "s1"], pa.large_string()
+    )
+    a = _branch(origin, ["rate"], subject=holes)
+    b = _branch(origin, ["depth"], subject=holes)
+    result, warned = _rejoined(a, b)
+    assert _units(result) == list(range(8)) and not warned
+    assert result.as_table().column("subject").to_pylist() == holes.to_pylist()
+    # A null against a value differs.
+    c = _branch(origin, ["depth"])
+    result, warned = _rejoined(a, c)
+    assert _units(result) == [0, 2, 4, 5, 6, 7]
+    assert len(warned) == 1 and "tag 'subject'" in warned[0]
+    # A raw stream's data-tag has no source info at all: null on both sides.
+    tied = Rejoin()(_tied([1.0, 2.0]), _tied([1.0, 2.0])).as_table()
+    assert tied.num_rows == 2
+
+
+def test_a_shared_data_tags_source_info_that_differs_matches_nothing() -> None:
+    """A data-tag in two inputs is one column with one source info: rows of one origin
+    row whose tokens differ are left out, and the warning names the data-tag."""
+    origin = _origin()
+    tokens = [f"units::row_{i}::unit" for i in range(8)]
+    changed = [*tokens[:6], "elsewhere::row_6::unit", None]
+    a = _branch(origin, ["rate"], data_tags=["unit"], _source_unit=tokens)
+    b = _branch(origin, ["depth"], data_tags=["unit"], _source_unit=changed)
+    for inputs in ((a, b), (b, a)):
+        result, warned = _rejoined(*inputs)
+        assert _units(result) == [0, 1, 2, 3, 4, 5]
+        assert len(warned) == 1
+        assert "the source info of data-tag 'unit'" in warned[0]
+    result, warned = _rejoined(
+        a, _branch(origin, ["depth"], data_tags=["unit"], _source_unit=tokens)
+    )
+    assert _units(result) == list(range(8)) and not warned
+
+
+def test_an_input_that_repeats_an_origin_row_pairs_each_row_once() -> None:
+    """System tags are assumed unique, so nothing reads the rows for it. Should an
+    input repeat an origin row, each row still matches at most once: the repeats pair
+    with the other input's in row order, and a row left over matches nothing."""
+    origin = _origin()
+    twice = pa.concat_tables([origin, origin.slice(0, 1)])
+    left = _branch(
+        twice, ["rate"], rate=pa.array([*origin.column("rate").to_pylist(), 100.0])
+    )
+    once = _branch(origin, ["depth"])
+    for inputs in ((left, once), (once, left)):
+        result, warned = _rejoined(*inputs)
+        assert _units(result) == list(range(8)) and not warned
+        rates = {row["unit"]: row["rate"] for row in result.as_table().to_pylist()}
+        assert rates[0] == 0.0  # the first of the two rows; the other matches nothing
+    right = _branch(
+        twice, ["depth"], depth=pa.array([*origin.column("depth").to_pylist(), 1000])
+    )
+    result, warned = _rejoined(left, right)
+    rows = [
+        (row["rate"], row["depth"])
+        for row in result.as_table().to_pylist()
+        if row["unit"] == 0
+    ]
+    assert sorted(rows) == [(0.0, 0), (100.0, 1000)] and not warned
+    assert result.as_table().num_rows == 9
+
+
+# ---------------------------------------------------------------------------
+# Equality is Join's; a shared column keeps the first input's values
+# ---------------------------------------------------------------------------
+
+
+def _bits(value: Any) -> bytes:
+    """The eight bytes of a float: its sign and its NaN payload count."""
+    return struct.pack("<d", value)
+
+
+def _first(*streams: Any) -> Any:
+    """The first input in Rejoin's canonical order: by pipeline hash; inputs with equal
+    pipeline hashes stay in the order given."""
+    return sorted(streams, key=lambda stream: stream.pipeline_hash().to_hex())[0]
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [([0.0, 0.0], [-0.0, -0.0]), ([float("nan")] * 2, [-float("nan")] * 2)],
+    ids=["signed_zero", "nan_payload"],
+)
+def test_equal_values_in_different_bits_match_and_the_first_inputs_are_kept(
+    left: list[float], right: list[float]
+) -> None:
+    """``-0.0`` equals ``0.0`` and NaN equals NaN, as in ``Join``: the rows are put
+    together and nothing warns. The shared tag keeps the first input's bits. These two
+    inputs have one pipeline hash, so the first is the first argument."""
+    a, b = _tied(left), _tied(right)
+    assert a.pipeline_hash() == b.pipeline_hash()
+    for inputs in ((a, b), (b, a)):
+        result, warned = _rejoined(*inputs)
+        table = result.as_table()
+        assert table.num_rows == 2 and not warned
+        kept = [_bits(value) for value in table.column("k").to_pylist()]
+        assert kept == [
+            _bits(value) for value in inputs[0].as_table().column("k").to_pylist()
+        ]
+    assert _bits(left[0]) != _bits(right[0])
+    assert math.isnan(left[0]) or left[0] == right[0]
+
+
+def test_the_first_input_is_the_first_by_pipeline_hash_whatever_the_argument_order() -> (
+    None
+):
+    """Inputs of different pipeline hashes are taken in the order of those hashes: the
+    shared column keeps the same input's bits in both argument orders. Here the shared
+    column is a float system tag, ``-0.0`` in one input and ``0.0`` in the other."""
+    a = _float_provenance([0.0, 1.0], "x")
+    b = _float_provenance([-0.0, 1.0], "y")
+    assert a.pipeline_hash() != b.pipeline_hash()
+    first = _first(a, b)
+    wanted = _bits(
+        first.as_table(columns={"system_tags": True})
+        .column("_tag_origin")
+        .to_pylist()[0]
+    )
+    for inputs in ((a, b), (b, a)):
+        result, warned = _rejoined(*inputs)
+        table = result.as_table(columns={"system_tags": True})
+        assert table.num_rows == 2 and not warned
+        by_g = dict(
+            zip(table.column("g").to_pylist(), table.column("_tag_origin").to_pylist())
+        )
+        assert _bits(by_g[1]) == wanted
+
+
+def test_three_inputs_keep_the_bits_of_the_first_that_has_the_column() -> None:
+    """A tag only the second and third inputs have keeps the second's values."""
+    origin = _origin()
+    zeros, minus = [0.0] * 8, [-0.0] * 8
+    a = _branch(origin, ["rate"])
+    b = _branch(origin, ["depth"], tags=["subject", "unit", "level"], level=zeros)
+    c = _branch(origin, ["area"], tags=["subject", "unit", "level"], level=minus)
+    holders = [
+        stream
+        for stream in sorted((a, b, c), key=lambda s: s.pipeline_hash().to_hex())
+        if stream is not a
+    ]
+    wanted = _bits(holders[0].as_table().column("level").to_pylist()[0])
+    for order in itertools.permutations((a, b, c)):
+        result, warned = _rejoined(*order)
+        levels = result.as_table().column("level").to_pylist()
+        assert len(levels) == 8 and not warned
+        assert {_bits(value) for value in levels} == {wanted}
+
+
+# ---------------------------------------------------------------------------
+# The warning
+# ---------------------------------------------------------------------------
+
+
+def test_the_warning_is_issued_once_per_operator_and_set_of_columns() -> None:
+    """One operator warns once for one set of differing columns, again for another
+    set, and never when nothing differs; an error filter raises it each time."""
+    origin = _origin()
+    plain = _branch(
+        origin,
+        ["rate"],
+        tags=["subject", "unit", "run", "site"],
+        run=[1] * 8,
+        site=["x"] * 8,
+    )
+    same = _branch(
+        origin,
+        ["depth"],
+        tags=["subject", "unit", "run", "site"],
+        run=[1] * 8,
+        site=["x"] * 8,
+    )
+    other_run = _branch(
+        origin,
+        ["depth"],
+        tags=["subject", "unit", "run", "site"],
+        run=[2] * 8,
+        site=["x"] * 8,
+    )
+    both = _branch(
+        origin,
+        ["depth"],
+        tags=["subject", "unit", "run", "site"],
+        run=[2, *[1] * 7],
+        site=[*["x"] * 7, "y"],
+    )
+    rejoin = Rejoin()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        for inputs in (
+            (plain, same),
+            (plain, other_run),
+            (other_run, plain),
+            (plain, both),
+            (plain, both),
+            (plain, other_run),
+        ):
+            _ = rejoin.static_process(*inputs)
+    messages = [
+        str(w.message)
+        for w in caught
+        if issubclass(w.category, RejoinDifferingColumnWarning)
+    ]
+    assert len(messages) == 2
+    assert "tag 'run'" in messages[0] and "site" not in messages[0]
+    assert "tag 'run'" in messages[1] and "tag 'site'" in messages[1]
+    assert "orcapod.errors.RejoinDifferingColumnWarning" in messages[0]
+
+    strict = Rejoin()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RejoinDifferingColumnWarning)
+        _ = strict.static_process(plain, same)  # nothing differs: nothing raised
+        for _ in range(2):
+            with pytest.raises(RejoinDifferingColumnWarning, match="tag 'run'"):
+                _ = strict.static_process(plain, other_run)
+
+
+def test_a_diamond_through_operators_never_warns() -> None:
+    """Branches that changed no shared column: every row is put together, no warning."""
+    source = _source(data_tags=True)
+    a = source.select_data_columns(["subject", "unit", "rate"]).polars_filter(
+        pl.col("rate") > 2
+    )
+    b = cast(
+        Any, double.pod(source.select_data_columns(["subject", "unit", "rate"]))
+    ).map_data({"doubled": "twice"})
+    c = source.select_data_columns(["subject", "unit", "depth", "area"]).add_tags(
+        cohort="A"
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RejoinDifferingColumnWarning)
+        for order in itertools.permutations((a, b, c)):
+            assert Rejoin()(*order).as_table().num_rows == 5
+
+
+# ---------------------------------------------------------------------------
+# Data contexts
+# ---------------------------------------------------------------------------
+
+
+def test_rows_of_different_data_contexts_match_nothing(
     other_context: contexts.DataContext,
 ) -> None:
-    """Mixed contexts are refused from the rows: two lazy branches both report the
-    default context, yet one's rows are of another."""
-    a = _in_context(other_context, "x").select_data_columns(["x"])
-    b = _in_context(contexts.get_default_context(), "y").select_data_columns(["y"])
-    assert a.data_context_key == b.data_context_key
+    """Rows of one origin row in different data contexts are not put together: the
+    result is empty, nothing is refused, and the warning names the data context."""
+    a = _in_context(other_context, "x")
+    b = _in_context(contexts.get_default_context(), "y")
     for inputs in ((a, b), (b, a)):
-        with pytest.raises(InputValidationError, match="different data contexts"):
-            _ = Rejoin()(*inputs).as_table()
+        result, warned = _rejoined(*inputs)
+        assert result.as_table().num_rows == 0
+        assert len(warned) == 1 and "the data context" in warned[0]
+    # Whatever the streams report: two lazy branches both report the default context.
+    lazy_a = a.select_data_columns(["x"])
+    lazy_b = b.select_data_columns(["y"])
+    assert lazy_a.data_context_key == lazy_b.data_context_key
+    for inputs in ((lazy_a, lazy_b), (lazy_b, lazy_a)):
+        result, warned = _rejoined(*inputs)
+        assert result.as_table().num_rows == 0 and len(warned) == 1
+
+
+def test_rows_keep_their_own_data_context(other_context: contexts.DataContext) -> None:
+    """Inputs holding rows of two data contexts: the rows whose contexts agree are put
+    together, each keeping its own in the data context column."""
+    default = contexts.get_default_context().context_key
+
+    def mixed(keys: list[str], data: str) -> ArrowTableStream:
+        table = pa.table(
+            {
+                "g": pa.array([1, 2, 3], pa.int64()),
+                "h": pa.array(["a", "b", "c"], pa.large_string()),
+                data: pa.array([0.5, 0.25, 0.125], pa.float64()),
+                "origin": pa.array(["r1", "r2", "r3"], pa.large_string()),
+                constants.CONTEXT_KEY: pa.array(keys, pa.large_string()),
+            }
+        )
+        return ArrowTableStream(
+            table, tag_columns=["g", "h"], system_tag_columns=["origin"]
+        )
+
+    a = mixed([OTHER_CONTEXT, default, OTHER_CONTEXT], "x")
+    b = mixed([OTHER_CONTEXT, default, default], "y")
+    for inputs in ((a, b), (b, a)):
+        result, warned = _rejoined(*inputs)
+        table = result.as_table(columns={"context": True})
+        rows = dict(
+            zip(
+                table.column("g").to_pylist(),
+                table.column(constants.CONTEXT_KEY).to_pylist(),
+            )
+        )
+        assert rows == {1: OTHER_CONTEXT, 2: default}
+        assert len(warned) == 1 and "the data context" in warned[0]

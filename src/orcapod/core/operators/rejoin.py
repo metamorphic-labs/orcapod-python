@@ -9,11 +9,17 @@ branches that come from the same origin row, by matching every system-tag column
 keeps those columns unchanged: a result row has its origin row's provenance, and stacked
 diamonds keep a constant number of system-tag columns.
 
+It is an inner join on every column its inputs share (developer, November 22, 2026,
+ITL-1355): the system tags, a tag several inputs have, the source info of a shared
+data-tag and the data context. Rows that match nothing are left out; nothing is refused
+for what the rows hold.
+
 Provisional (``PROVISIONAL_OPERATORS``): its identity is not frozen with data context v1.
 """
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Collection, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -31,7 +37,7 @@ from orcapod.core.operators.meta_columns import (
 )
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.streams import ArrowTableStream
-from orcapod.errors import InputValidationError
+from orcapod.errors import InputValidationError, RejoinDifferingColumnWarning
 from orcapod.protocols.core_protocols import (
     DataProtocol,
     StreamProtocol,
@@ -41,6 +47,7 @@ from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, ContentHash, Schema
 from orcapod.utils import arrow_utils, schema_utils
 from orcapod.utils.lazy_module import LazyModule
+from orcapod.utils.warning_utils import outside_orcapod_stacklevel
 
 if TYPE_CHECKING:
     import polars as pl
@@ -49,9 +56,11 @@ else:
     pa = LazyModule("pyarrow")
     pl = LazyModule("polars")
 
-# Row-number columns of the frames Polars matches; never a key (keys are system tags).
+# Row-number columns of the frames Polars matches, and the column that names a group of
+# pairs; never a key (keys are columns of the inputs, and no input column starts so).
 _LEFT_ROW = "__rejoin_left_row"
 _RIGHT_ROW = "__rejoin_right_row"
+_GROUP = "__rejoin_group"
 
 
 def _system_tag_names(stream: StreamProtocol) -> list[str]:
@@ -62,47 +71,86 @@ def _system_tag_names(stream: StreamProtocol) -> list[str]:
     )
 
 
-_FLOAT_BITS = {16: "uint16", 32: "uint32", 64: "uint64"}
+def _agreeing(
+    pairs: "pl.DataFrame",
+    left: "pa.Table",
+    right: "pa.Table",
+    keys: Sequence[str],
+    names: Sequence[str],
+) -> "pl.DataFrame":
+    """Keep the pairs of rows that also hold equal values in ``names``.
 
+    Equality is that of ``Join``'s keys (the prepared columns of ``arrow_keys``, matched
+    by Polars: NaN equals NaN, ``-0.0`` equals ``0.0``), except that here a null equals
+    a null (in ``Join`` a null key matches nothing): two rows of one origin row that
+    both hold no value in a column agree on it.
 
-def _bits(array: "pa.Array[Any]") -> "pa.Array[Any]":
-    """An array whose equality is bit for bit: each float as its integer bits.
+    Args:
+        pairs: Row numbers of matched rows, ``_LEFT_ROW`` and ``_RIGHT_ROW``.
+        left: The table ``_LEFT_ROW`` numbers.
+        right: The table ``_RIGHT_ROW`` numbers.
+        keys: The columns the pairs already match on (the system tags).
+        names: The other shared columns to compare.
 
-    ``-0.0`` and ``0.0``, or two NaNs of different payloads, are then different values;
-    every other type already compares exactly. Lists, fixed-size lists and structs are
-    rebuilt over their converted children, with their own validity.
+    Returns:
+        The pairs that agree on ``names``, in the order of ``pairs``.
     """
-    arrow_type = array.type
-    if pa.types.is_floating(arrow_type):
-        return array.view(getattr(pa, _FLOAT_BITS[arrow_type.bit_width])())
-    if isinstance(array, pa.ExtensionArray):
-        return _bits(array.storage)
-    mask = array.is_null() if array.null_count else None
-    if isinstance(array, pa.ListArray):
-        return pa.ListArray.from_arrays(array.offsets, _bits(array.values), mask=mask)
-    if isinstance(array, pa.LargeListArray):
-        return pa.LargeListArray.from_arrays(
-            array.offsets, _bits(array.values), mask=mask
-        )
-    if isinstance(array, pa.FixedSizeListArray):
-        return pa.FixedSizeListArray.from_arrays(
-            _bits(array.values), arrow_type.list_size, mask=mask
-        )
-    if isinstance(array, pa.StructArray):
-        children = [_bits(array.field(i)) for i in range(arrow_type.num_fields)]
-        names = [arrow_type.field(i).name for i in range(arrow_type.num_fields)]
-        return pa.StructArray.from_arrays(children, names=names, mask=mask)
-    return array
+    columns = [*keys, *names]
+    agreeing = polars_key_frame(left, columns, _LEFT_ROW).join(
+        polars_key_frame(right, columns, _RIGHT_ROW),
+        on=columns,
+        how="inner",
+        nulls_equal=True,
+    )
+    return pairs.join(
+        agreeing.select(_LEFT_ROW, _RIGHT_ROW),
+        on=[_LEFT_ROW, _RIGHT_ROW],
+        how="semi",
+        maintain_order="left",
+    )
 
 
-def _same_bits(left: "pa.Array[Any]", right: "pa.Array[Any]") -> bool:
-    """Whether two arrays of one type hold the same value, bit for bit, on every row.
+def _each_row_once(pairs: "pl.DataFrame") -> "pl.DataFrame":
+    """Keep each row in at most one pair.
 
-    The matched rows of a rejoin come from one origin row, so a column they share holds
-    one value; equal values in different bits (``-0.0`` and ``0.0``) mean a branch
-    changed it, and the rejoin would otherwise keep one input's bits by argument order.
+    System tags are assumed unique in each input (developer, November 22, 2026,
+    ITL-1355), so every row is in one pair already and ``pairs`` is returned as it is.
+    If an input does repeat an origin row, the rows of one origin row that agree pair
+    every left row with every right row; of those, the first left row keeps the first
+    right row, the second the second, and so on in row order (the order the rows
+    arrived in, on the async path), and the rows left over match nothing.
+
+    Args:
+        pairs: Row numbers of the rows that match and agree on every shared column.
+
+    Returns:
+        The pairs to put together, in the order of ``pairs``.
     """
-    return _bits(left).equals(_bits(right))
+    left_rows, right_rows = pairs.get_column(_LEFT_ROW), pairs.get_column(_RIGHT_ROW)
+    if not (left_rows.is_duplicated().any() or right_rows.is_duplicated().any()):
+        return pairs
+    # The pairs of one such group share their right rows: its smallest names it.
+    group = pl.col(_RIGHT_ROW).min().over(_LEFT_ROW)
+    return (
+        pairs.with_columns(group.alias(_GROUP))
+        .filter(
+            pl.col(_LEFT_ROW).rank("dense").over(_GROUP)
+            == pl.col(_RIGHT_ROW).rank("dense").over(_GROUP)
+        )
+        .drop(_GROUP)
+    )
+
+
+def _described(name: str, shared_tags: Collection[str]) -> str:
+    """How a warning names a shared column that is not a system tag."""
+    if name in shared_tags:
+        return f"tag {name!r}"
+    if name == constants.CONTEXT_KEY:
+        return "the data context"
+    if name.startswith(constants.SOURCE_PREFIX):
+        tag = name.removeprefix(constants.SOURCE_PREFIX)
+        return f"the source info of data-tag {tag!r}"
+    return f"column {name!r}"
 
 
 def _require_same_system_tags(names: Sequence[Sequence[str]]) -> None:
@@ -140,17 +188,37 @@ class Rejoin(Join):
     The inputs must share their system-tag columns: the same names, which they have when
     each branch went through operators that keep system tags (filters, column selection
     and renaming, ``AddTags``, function pods) and no ``Join``, ``GroupBy`` or ``Batch``.
-    Rows are matched on every system-tag column, so each result row pairs the rows of the
-    branches that come from one origin row, at most one per input: an input holding two
-    rows of one origin row is refused. That is a deliberate first rule, which no operator
-    that keeps system tags breaks today; it can be relaxed later if a branch may duplicate
-    rows. A user tag in several inputs must have the same value on matched rows, bit for
-    bit (so the result never depends on the order of the inputs); a tag of one input is
-    kept. Provenance is never null: an input with a null system-tag value is refused;
-    matched system-tag values are compared bit for bit too. The inputs share one data
-    context, which the result keeps; inputs of different data contexts are refused.
     Data columns must be disjoint, as in ``Join``, and a data-tag in several inputs is
-    one column. The result keeps the common system-tag columns unchanged.
+    one column. These are the only refusals: each is read from the inputs' columns,
+    none from their rows.
+
+    Rejoin is an inner join on every column its inputs share (developer, November 22,
+    2026, ITL-1355): the system-tag columns, a user tag several inputs have, the source
+    info of a shared data-tag and the data context. A result row puts together the rows
+    of the branches that come from one origin row and are equal in all of them; a row
+    that matches nothing is left out. So a tag two branches set to different values, or
+    rows of different data contexts, give no row: a non-match, not an error. Equality is
+    ``Join``'s: NaN equals NaN and ``-0.0`` equals ``0.0``. A null system tag matches
+    nothing (provenance is never null). In any other shared column a null equals a
+    null, on purpose unlike ``Join``, where a null tag key matches nothing: two rows of
+    one origin row that both hold no value in a column agree on it. When rows of one
+    origin row (their system tags match) differ in another shared column, a
+    ``RejoinDifferingColumnWarning`` names the columns, once per operator and set of
+    columns.
+
+    System tags are assumed unique in each input, as every source makes them, so each
+    row matches at most once; no check reads the rows for it. Should an input repeat an
+    origin row, each row still matches at most once: among the rows equal in every
+    shared column, the first of one input pairs with the first of the other, the second
+    with the second, in row order (the order the rows arrived in, on the async path).
+
+    A shared column is kept once, with the values of the first input that has it. The
+    inputs are taken in a canonical order, by pipeline hash, so the result does not
+    follow the order of the arguments; inputs with equal pipeline hashes (two branches
+    of the same structure) stay in argument order. Only the bits of values that are
+    equal but not identical (``-0.0`` and ``0.0``, NaNs of different payloads) can
+    follow it; no row, hash or identity does. A tag of one input is kept. The result
+    keeps the common system-tag columns unchanged, and its rows' data context.
 
     Inputs from two different sources with the same schema share their system-tag column
     names but no value: their rejoin is empty, not an error. To combine different rows
@@ -232,14 +300,16 @@ class Rejoin(Join):
         return tag_schema, data_schema
 
     def static_process(self, *streams: StreamProtocol) -> StreamProtocol:
-        """Rejoin the streams on their system-tag columns.
+        """Rejoin the streams on every column they share.
 
         Raises:
-            InputValidationError: If the inputs cannot be rejoined or are of different
-                data contexts, an input holds two rows of one origin row, a shared
-                column (a system tag, a tag, a shared data-tag's source info, the data
-                context) differs bit for bit on matched rows, or a shared tag's Arrow
-                type differs.
+            InputValidationError: If the inputs' system-tag columns differ or are
+                absent, or a shared column's Arrow type differs or cannot be matched.
+                Never for what the rows hold.
+
+        Warns:
+            RejoinDifferingColumnWarning: Once per operator and set of columns, when
+                rows of one origin row differ in another shared column (ITL-1355).
         """
         if len(streams) == 1:
             return without_input_meta(streams[0], streams)
@@ -275,51 +345,21 @@ class Rejoin(Join):
             for name in tables[0].column_names
             if name.startswith(constants.SYSTEM_TAG_PREFIX)
         )
-        # The rows of one origin row carry one data context: so must the inputs. It
-        # is read from the rows, which carry it, never from what a stream reports (an
-        # operator's lazy stream reports its pod's context, ITL-1339).
-        context_keys = sorted(
-            {
-                # The context column is text and never null.
-                str(key)
-                for table in tables
-                for key in table.column(constants.CONTEXT_KEY).unique().to_pylist()
-            }
-        )
-        if len(context_keys) > 1:
-            raise InputValidationError(
-                f"Rejoin: the inputs' rows are of different data contexts "
-                f"{context_keys}; rejoined rows must share one (a branch through some "
-                "operators comes back in the default data context: ITL-1339)"
-            )
-        data_context = (
-            context_keys[0] if context_keys else ordered_streams[0].data_context_key
-        )
-        for stream, table in zip(ordered_streams, tables):
-            for name in keys:
-                if table.column(name).null_count:
-                    raise InputValidationError(
-                        f"Rejoin: input {stream} has a null in system-tag column "
-                        f"{name!r}; provenance is never null, so the input is refused"
-                    )
-            frame = polars_key_frame(table, keys)
-            duplicated = frame.is_duplicated()
-            if duplicated.any():
-                # The system-tag values are text (a source id and a record id): name them.
-                values = dict(zip(keys, frame.filter(duplicated).row(0)))
-                raise InputValidationError(
-                    f"Rejoin: input {stream} holds two rows of one origin row, the "
-                    f"system-tag values {values}; a first rule pairs at most one row per "
-                    "origin row in each input, so such rows are refused (to be relaxed if "
-                    "a branch may duplicate rows)"
-                )
 
         table = tables[0]
         user_tags = set(ordered_streams[0].keys()[0])
+        differing: set[str] = set()
         for next_table, next_stream in zip(tables[1:], ordered_streams[1:]):
             next_tags = set(next_stream.keys()[0])
-            table = self._rejoin_pair(table, next_table, keys, user_tags & next_tags)
+            table, differed = self._rejoin_pair(
+                table, next_table, keys, user_tags & next_tags
+            )
+            differing.update(
+                _described(name, user_tags & next_tags) for name in differed
+            )
             user_tags |= next_tags
+        if differing:
+            self._warn_differing_once(tuple(sorted(differing)))
 
         # Lay the columns out as Join does: tags, data, then the hidden columns.
         tag_order = list(tag_schema.keys())
@@ -334,8 +374,66 @@ class Rejoin(Join):
             result_table,
             tag_columns=tuple(tag_order),
             data_tags=data_tag_names(tag_schema, data_schema),
-            data_context=data_context,
+            data_context=self._rows_data_context(result_table, tables)
+            or ordered_streams[0].data_context_key,
         )
+
+    @staticmethod
+    def _rows_data_context(
+        result: "pa.Table", inputs: Sequence["pa.Table"]
+    ) -> str | None:
+        """The data context the result's rows are of, read from the rows.
+
+        It is read from the rows, which carry it, never from what a stream reports (an
+        operator's lazy stream reports its pod's context, ITL-1339). Matched rows are
+        of one data context each, so a result usually has one; with no result row it is
+        the inputs' rows' own. Should rows of several remain (inputs that each hold rows
+        of several data contexts), the stream takes the first key in text order: every
+        row still carries its own in the data context column.
+
+        Args:
+            result: The rejoined rows.
+            inputs: The inputs' rows.
+
+        Returns:
+            The data context key, or ``None`` when no input has a row.
+        """
+        for tables in ([result], inputs):
+            found = {
+                # The context column is text and never null.
+                str(key)
+                for table in tables
+                for key in table.column(constants.CONTEXT_KEY).unique().to_pylist()
+            }
+            if found:
+                return min(found)
+        return None
+
+    def _warn_differing_once(self, described: tuple[str, ...]) -> None:
+        """Issue ``RejoinDifferingColumnWarning`` once per set of differing columns.
+
+        Args:
+            described: The differing columns, each as the warning names it, sorted.
+        """
+        warned: set[tuple[str, ...]] | None = getattr(self, "_warned_differing", None)
+        if warned is None:
+            warned = set()
+            self._warned_differing: set[tuple[str, ...]] = warned
+        if described in warned:
+            return
+        # Recorded only once the warning is issued: under an error filter it raises,
+        # and a retry must raise again.
+        warnings.warn(
+            "Rejoin left out rows that come from one origin row (their system tags "
+            + f"match) and differ in {', '.join(described)}. Rejoin puts rows together "
+            + "only when every column its inputs share is equal; a branch changed "
+            + "this one. To keep the rows, drop or rename the column in one branch "
+            + "before the rejoin (drop_tag_columns, map_tags); to silence this, filter "
+            + "orcapod.errors.RejoinDifferingColumnWarning.",
+            RejoinDifferingColumnWarning,
+            stacklevel=outside_orcapod_stacklevel(),
+        )
+        warned.add(described)
 
     def _rejoin_pair(
         self,
@@ -343,14 +441,15 @@ class Rejoin(Join):
         right: "pa.Table",
         keys: Sequence[str],
         shared_tags: Collection[str],
-    ) -> "pa.Table":
-        """Pair the rows of two tables of one origin, by their system-tag columns.
+    ) -> tuple["pa.Table", list[str]]:
+        """Pair the rows of two tables that are equal in every column both have.
 
         Every output value is taken from ``left`` or ``right`` by row number; Polars
-        only decides which rows match (``arrow_keys``). A column both tables have (a
-        system tag, a shared tag, a shared data-tag's source info, the data context) is
-        kept once, from ``left``, after checking that the matched rows hold the same
-        bits.
+        only decides which rows match (``arrow_keys``). The rows are first matched on
+        the system tags, as they always were (so inputs whose shared columns all agree
+        give the same rows in the same order as before ITL-1355), and of those pairs
+        only the ones that agree on every other shared column are kept (``_agreeing``).
+        A column both tables have is kept once, from ``left``.
 
         Args:
             left: The rows rejoined so far.
@@ -359,23 +458,47 @@ class Rejoin(Join):
             shared_tags: The user tags of both tables.
 
         Returns:
-            The paired rows.
+            The paired rows, and the shared columns (other than system tags) in which
+            rows of one origin row differ.
 
         Raises:
-            InputValidationError: If a shared tag or a shared column differs on matched
-                rows, or a shared tag's Arrow type differs.
+            InputValidationError: If a shared column's Arrow type differs, or has no
+                rule for matching rows.
         """
-        for name in sorted(shared_tags):
-            tag_type = require_shared_arrow_type(
+        # Every column both tables have besides the system tags: the shared tags, the
+        # source info of a shared data-tag, the data context.
+        others = [
+            name
+            for name in right.column_names
+            if name in left.column_names and name not in keys
+        ]
+        for name in sorted(others):
+            shared_type = require_shared_arrow_type(
                 "Rejoin",
                 name,
                 arrow_utils.column_arrow_type(left.schema, name),
                 arrow_utils.column_arrow_type(right.schema, name),
             )
-            require_matchable_key("Rejoin", name, tag_type)
-        pairs = polars_key_frame(left, keys, _LEFT_ROW).join(
+            require_matchable_key("Rejoin", name, shared_type)
+        matched = polars_key_frame(left, keys, _LEFT_ROW).join(
             polars_key_frame(right, keys, _RIGHT_ROW), on=list(keys), how="inner"
         )
+        # Nothing matched, or nothing else is shared: there is nothing to compare.
+        pairs = (
+            _agreeing(matched, left, right, keys, others)
+            if others and matched.height
+            else matched
+        )
+        differed = (
+            [
+                name
+                for name in others
+                if _agreeing(matched, left, right, keys, [name]).height < matched.height
+            ]
+            if pairs.height < matched.height
+            else []
+        )
+        pairs = _each_row_once(pairs)
         left_rows = pairs.get_column(_LEFT_ROW).to_arrow()
         right_rows = pairs.get_column(_RIGHT_ROW).to_arrow()
         names: list[str] = []
@@ -384,33 +507,14 @@ class Rejoin(Join):
             names.append(name)
             arrays.append(left.column(name).combine_chunks().take(left_rows))
         for name in right.column_names:
-            right_values = right.column(name).combine_chunks().take(right_rows)
             if name not in left.column_names:
                 names.append(name)
-                arrays.append(right_values)
-                continue
-            # Polars matched the system tags by equality; they too must be the same
-            # bits (a float system tag of -0.0 matches 0.0).
-            left_values = arrays[names.index(name)]
-            if not _same_bits(left_values, right_values):
-                if name in shared_tags:
-                    what = f"tag {name!r}"
-                elif name in keys:
-                    what = f"system tag {name!r}"
-                elif name == constants.CONTEXT_KEY:
-                    what = f"the data context column {name!r}"
-                else:
-                    what = f"column {name!r} (a shared data-tag's source info)"
-                raise InputValidationError(
-                    f"Rejoin: {what} has different values on rows of one origin row in "
-                    "two inputs (compared bit for bit: -0.0 is not 0.0, NaNs of "
-                    "different payloads differ); a branch changed it, so the rows cannot "
-                    "be put back together (rename it in one branch, or use Join)"
-                )
+                arrays.append(right.column(name).combine_chunks().take(right_rows))
         table = pa.Table.from_arrays(arrays, names=names)
         table = arrow_utils.restore_schema_nullability(table, left.schema, right.schema)
-        return self._shared_key_nullability(
-            table, left.schema, right.schema, shared_tags
+        return (
+            self._shared_key_nullability(table, left.schema, right.schema, shared_tags),
+            differed,
         )
 
     async def async_execute(
