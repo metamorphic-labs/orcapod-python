@@ -22,8 +22,11 @@ These tests are about the hand-off between nodes, so they wrap the nodes' ``exec
 
 from __future__ import annotations
 
+import subprocess
+import sys
 import warnings
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
@@ -263,6 +266,53 @@ def test_declared_arrow_schema_equals_the_output(
     _run(job)
     for label, stream in outputs.items():
         node = job.nodes[label]
+        output = stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+        assert _without_exceptions(node.arrow_schema()) == _without_exceptions(
+            output.schema
+        ), label
+        assert node.arrow_types_declared, label
+
+
+def test_a_loaded_job_describes_its_nodes(
+    tmp_path: Path, outputs: dict[str, Any]
+) -> None:
+    """L7 for a loaded job: each loaded node's ``arrow_schema()`` equals its output.
+
+    A loaded node describes itself from the Arrow type texts its saved file holds
+    (ITL-640). The job is run and saved in another process, so that the loaded job
+    holds no run of this process.
+    """
+    script = (
+        "import sys, warnings\n"
+        "from pathlib import Path\n"
+        "from orcapod.databases import DeltaTableDatabase\n"
+        "from tests.test_core.operators.several_items import MAIN, arrangements\n"
+        "from tests.test_pipeline.test_stream_transport_equivalence import build_job\n"
+        "warnings.simplefilter('ignore')\n"
+        "root = Path(sys.argv[1])\n"
+        "job = build_job(arrangements(MAIN)[0], DeltaTableDatabase(root / 'store'))\n"
+        "job.run()\n"
+        "job.save(root / 'job.json')\n"
+    )
+    repository = Path(__file__).resolve().parents[2]
+    subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path)], check=True, cwd=repository
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ProvisionalHashWarning)
+        loaded = PipelineJob.load(tmp_path / "job.json")
+        # In-memory sources are not saved: bind them again.
+        loaded.bind(
+            sources={
+                "s": make_source(MAIN, arrangements(MAIN)[0]),
+                "p": make_source(P),
+                "q": make_source(Q),
+            }
+        )
+        loaded.run(load_only=True)
+    assert {"joined", "doubled", "noted", "semi", "batched"} <= set(outputs)
+    for label, stream in outputs.items():
+        node = loaded.nodes[label]
         output = stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
         assert _without_exceptions(node.arrow_schema()) == _without_exceptions(
             output.schema
