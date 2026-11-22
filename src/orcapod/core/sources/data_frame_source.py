@@ -44,6 +44,7 @@ class DataFrameSource(RootSource):
 
     # The config type key; also the kind prefix of the default source id.
     SOURCE_KIND: ClassVar[str] = "data_frame"
+    TABLE_IS_ROWS: ClassVar[bool] = True
 
     def __init__(
         self,

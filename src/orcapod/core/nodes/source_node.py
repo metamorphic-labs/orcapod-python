@@ -17,7 +17,7 @@ import logging
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Collection, Iterator, Mapping
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 
@@ -1253,15 +1253,13 @@ class SourceNodeBase(TraceableBase, ABC):
     def _rows_table(
         self,
     ) -> tuple[pa.Table, tuple[tuple[str, ...], tuple[str, ...]]] | None:
-        """The table of this node's rows (``iter_data``) and the rows' keys.
+        """The table of this node's rows (``iter_data``) and the rows' keys, or ``None``.
 
-        Here this node's own table (``ZERO_ROW_INPUT_COLUMNS``) and keys. ``None`` where
-        F of a table is not provably the rows' own table: the node then hands on its
-        rows (``RowsOnRead``).
+        ``None`` here: a node that carries no data of its own hands on its rows
+        (``RowsOnRead``), which raise what reading it raises. A bound job node gives
+        its bound source's table when F of it is provably the rows' own table.
         """
-        stream = cast("StreamProtocol", self)
-        table = stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
-        return table, keys_of_rows(table, stream.keys())
+        return None
 
     def arrow_schema(self) -> pa.Schema:
         """The Arrow schema of the columns this stream passes between job nodes.
@@ -1823,8 +1821,10 @@ class SourceJobNode(SourceNodeBase):
     ) -> tuple[pa.Table, tuple[tuple[str, ...], tuple[str, ...]]] | None:
         """The bound source's table and the keys of its rows (``keys_of_rows``).
 
-        ``None`` for a narrower bind: its rows are given as the declared schema one by
-        one (``_declared_rows``), so the node hands on those rows (``RowsOnRead``).
+        ``None`` for a narrower bind (its rows are given as the declared schema one by
+        one, ``_declared_rows``) and for a bound stream that is not a library source
+        kind whose table is its rows (``TABLE_IS_ROWS``): the node then hands on those
+        rows (``RowsOnRead``).
 
         Raises:
             UnboundSourceError: When no concrete source is attached.
@@ -1835,6 +1835,11 @@ class SourceJobNode(SourceNodeBase):
                 "Call job.bind(sources={'<name>': source}) before running."
             )
         if self._declared_form is not None:
+            return None
+        if not getattr(type(self._bound_source), "TABLE_IS_ROWS", False):
+            # Not a library source kind whose table is its rows (a side-effect or
+            # function pod stream, an operator's result, a raw stream, a poller): its
+            # rows, as main iterated them.
             return None
         table = self._bound_source.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
         return table, keys_of_rows(table, self._bound_source.keys())

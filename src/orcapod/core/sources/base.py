@@ -93,6 +93,16 @@ class RootSource(StreamBase):
     identifier, config or stored path.
     """
 
+    TABLE_IS_ROWS: ClassVar[bool] = False
+    """Whether ``as_table()`` and ``iter_data()`` read the same data, with no effect.
+
+    Declared ``True`` only by the library source kinds that read one stream either way
+    (ITL-1347): a job node bound to one hands on F of its table, which equals the table
+    built from its rows. Any other bound stream (a side-effect or function pod stream,
+    an operator's result, a raw stream, a source kind that polls or delivers on a read)
+    hands on its rows (``RowsOnRead``), as ``main`` iterated them.
+    """
+
     def __init__(
         self,
         source_id: str | None = None,

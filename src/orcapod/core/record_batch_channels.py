@@ -191,9 +191,10 @@ class OutputChannel:
         if schema is None:
             # No Arrow types in the description: the first batch that passes sets them
             # (they must be in the large variants), but the names are still the
-            # stream's. A refused batch sets nothing.
+            # stream's, in no guaranteed order (an undeclared description gives names
+            # only). A refused batch sets nothing.
             names = batch.schema.names
-            if names != row_built_names(names, self._stream.keys()):
+            if set(names) != set(row_built_names(names, self._stream.keys())):
                 raise ValueError(
                     f"A record batch sent as {_named(self._stream)} does not have that "
                     + f"stream's columns: it has {names}, the stream's keys are "
