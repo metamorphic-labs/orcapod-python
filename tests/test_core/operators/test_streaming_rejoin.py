@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
+import math
 import random
 import warnings
 from collections.abc import Sequence
@@ -37,6 +38,7 @@ from orcapod.system_constants import constants
 
 from .test_streaming_joins import (
     _arrivals,  # pyright: ignore[reportPrivateUsage]  # the shared harness
+    _rows,  # pyright: ignore[reportPrivateUsage]  # the shared harness
     _check,  # pyright: ignore[reportPrivateUsage]  # the shared harness
     _row_built,  # pyright: ignore[reportPrivateUsage]  # the shared harness
     _run,  # pyright: ignore[reportPrivateUsage]  # the shared harness
@@ -428,3 +430,217 @@ def test_three_inputs_miss_a_difference_the_middle_input_lacks() -> None:
     for seed in range(4):
         assert _kernel_warnings(inputs, seed) == []
     _check(_kernel, Rejoin().static_process, inputs, range(4))
+
+
+def test_a_match_that_takes_a_closed_inputs_last_row_releases_the_chain() -> None:
+    # Canonical order first, middle, last: the last input sends its only row (x) and
+    # closes; the first sends x and y; the middle sends x, which matches through to
+    # the last input's x. The last step then holds nothing on a closed side and can
+    # never emit again, so the first step's y, and any row the first input sends
+    # after, are not held.
+    names = sorted(
+        "abc",
+        key=lambda n: _hand_branch(n, origin=["x"], tag=[1]).pipeline_hash().to_hex(),
+    )
+    first = _hand_branch(names[0], origin=["x", "y"], tag=[1, 2])
+    middle = _hand_branch(names[1], origin=["x"], tag=[1])
+    last = _hand_branch(names[2], origin=["x"], tag=[1])
+    inputs = [first, middle, last]
+    assert sorted(inputs, key=lambda s: s.pipeline_hash().to_hex()) == inputs
+    kernel = StreamingRejoin(Rejoin(), inputs)
+    assert kernel.push(2, _sent(last).combine_chunks().to_batches()[0]) == []
+    assert kernel.close(2) == []
+    assert kernel.push(0, _sent(first).combine_chunks().to_batches()[0]) == []
+    emitted = kernel.push(1, _sent(middle).combine_chunks().to_batches()[0])
+    assert sum(batch.num_rows for batch in emitted) == 1
+    assert kernel.held_rows == 0
+    more = _hand_branch(names[0], origin=["z"], tag=[3])
+    assert kernel.push(0, _sent(more).combine_chunks().to_batches()[0]) == []
+    assert kernel.held_rows == 0
+
+
+# ---------------------------------------------------------------------------
+# Documented differences from the sync path (StreamingRejoin's docstring)
+# ---------------------------------------------------------------------------
+
+
+def _in_canonical_order(make: Any, candidates: Sequence[tuple[str, ...]]) -> list[Any]:
+    """The first ``make(names)`` whose streams are already in canonical order."""
+    for names in candidates:
+        inputs = make(names)
+        if sorted(inputs, key=lambda s: s.pipeline_hash().to_hex()) == inputs:
+            return inputs
+    raise AssertionError("no arrangement in canonical order")
+
+
+def _pushed(
+    inputs: Sequence[StreamProtocol], schedule: Sequence[tuple[int, int, int]]
+) -> tuple[pa.Table, list[str]]:
+    """The kernel's rows and warnings for ``schedule``: (input, first row, row count),
+    each input's rows in its own order, then every input closed."""
+    rows = [_sent(stream).combine_chunks() for stream in inputs]
+    out: list[pa.RecordBatch] = []
+
+    def run() -> None:
+        kernel = StreamingRejoin(Rejoin(), inputs)
+        for index, start, count in schedule:
+            out.extend(
+                kernel.push(index, rows[index].slice(start, count).to_batches()[0])
+            )
+        for index in range(len(inputs)):
+            out.extend(kernel.close(index))
+
+    caught = _warnings_of(run)
+    return pa.Table.from_batches(out), caught
+
+
+def test_repeats_with_three_inputs_can_pair_by_arrival() -> None:
+    # The spec's named risk ("Duplicates ... 'match once' pairs duplicates in arrival
+    # order, which can differ between sync and async (risks; ITL-1356 removes the
+    # case)"). One origin row repeated: the first two inputs pair their repeats on
+    # tag k (orders [1, 2] and [2, 1]); the third, without k, pairs by occurrence
+    # with the rows rejoined so far. The sync path ranks those in its table order,
+    # among the rows that survived the first step; the kernel ranks them as they
+    # arrive. Two schedules that keep each input's row order: one gives the sync
+    # rows, one does not. The exact alternative is option X: survival-aware ranking
+    # with per-step counters, rows of a repeated origin held until every earlier row
+    # of that origin has a final fate at the step before.
+    def keyed(data: str, k: list[int]) -> ArrowTableStream:
+        return _repeated(len(k), data, k)
+
+    def plain(data: str) -> ArrowTableStream:
+        return ArrowTableStream(
+            pa.table(
+                {
+                    data: pa.array([10, 20], pa.int64()),
+                    "origin": pa.array(["x", "x"], pa.large_string()),
+                }
+            ),
+            tag_columns=[],
+            system_tag_columns=["origin"],
+        )
+
+    inputs = _in_canonical_order(
+        lambda n: [keyed(n[0], [1, 2]), keyed(n[1], [2, 1]), plain(n[2])],
+        list(itertools.permutations("abcdefgh", 3)),
+    )
+    want = _rows(_transport(Rejoin().static_process(*map(_row_built, inputs))))
+    whole, _ = _pushed(inputs, [(0, 0, 2), (1, 0, 2), (2, 0, 2)])
+    one_by_one, _ = _pushed(inputs, [(0, 0, 2), (1, 0, 1), (1, 1, 1), (2, 0, 2)])
+    assert _rows(whole) == want
+    assert _rows(one_by_one) != want
+    assert whole.num_rows == one_by_one.num_rows == 2
+
+
+def test_the_warning_for_repeats_of_two_inputs_can_depend_on_arrival() -> None:
+    # Best effort with repeated origins: the sync path compares repeats by occurrence
+    # whatever their matches, the kernel only rows that matched nothing. One origin,
+    # k = [1, 2] against [2, 1]: the rows are the sync rows in both schedules; the
+    # warning is the sync path's when the rows alternate, and missed when the first
+    # input's rows are all held first. The alternative is option B: pairwise
+    # detection with every input's keys kept to the end.
+    inputs = [
+        _hand_branch("a", origin=["o", "o"], tag=[1, 2]),
+        _hand_branch("b", origin=["o", "o"], tag=[2, 1]),
+    ]
+    want_rows = _rows(_transport(Rejoin().static_process(*map(_row_built, inputs))))
+    assert len(_sync_warnings(inputs)) == 1
+    buffered, buffered_warnings = _pushed(inputs, [(0, 0, 2), (1, 0, 1), (1, 1, 1)])
+    alternating, alternating_warnings = _pushed(
+        inputs, [(0, 0, 1), (1, 0, 1), (0, 1, 1), (1, 1, 1)]
+    )
+    assert _rows(buffered) == _rows(alternating) == want_rows
+    assert buffered_warnings == []
+    assert alternating_warnings == _sync_warnings(inputs)
+
+
+def test_the_warning_misses_adjacent_inputs_when_an_earlier_input_lacks_the_row() -> (
+    None
+):
+    # Best effort with three inputs: the first input (canonical order) has only origin
+    # y; the next two have origin x with different k. They are adjacent, but their x
+    # rows are never compared: the step that would compare them sees the rows
+    # rejoined so far, which lack x. The sync path warns; the rows are identical. The
+    # alternative is option B: pairwise detection with every input's keys kept.
+    inputs = _in_canonical_order(
+        lambda n: [
+            _hand_branch(n[0], origin=["y"], tag=[1]),
+            _hand_branch(n[1], origin=["x"], tag=[1]),
+            _hand_branch(n[2], origin=["x"], tag=[2]),
+        ],
+        list(itertools.permutations("abcdef", 3)),
+    )
+    assert len(_sync_warnings(inputs)) == 1
+    for seed in range(4):
+        assert _kernel_warnings(inputs, seed) == []
+    _check(_kernel, Rejoin().static_process, inputs, range(4))
+
+
+def test_two_inputs_with_unique_origins_warn_as_the_sync_path_for_every_schedule() -> (
+    None
+):
+    # The guarantee: two inputs, unique origins, every arrival schedule.
+    left = _hand_branch("a", origin=["r1", "r2", "r3", "r4"], tag=[1, 2, 3, None])
+    right = _hand_branch("b", origin=["r4", "r3", "r2", "r5"], tag=[None, 7, 2, 1])
+    for inputs in ((left, right), (right, left)):
+        want = _sync_warnings(inputs)
+        assert len(want) == 1
+        for seed in range(24):
+            assert _kernel_warnings(inputs, seed) == want
+
+
+# ---------------------------------------------------------------------------
+# Cost: one join per batch, no whole-table copy
+# ---------------------------------------------------------------------------
+
+
+_POOLS: list[Any] = []
+
+
+def test_each_batch_costs_one_join_and_copies_no_held_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # N repeats held in N one-row chunks, then their N partners one row at a time:
+    # each partner batch runs one Polars join against the held rows (O(held) per
+    # batch, as in the Join kernels) and takes its values from the held chunks by row
+    # number; no held table is copied, so a batch allocates far less Arrow memory
+    # than the held rows occupy.
+    n = 400
+    left, right = _repeated(n, "a"), _repeated(n, "b")
+    kernel = StreamingRejoin(Rejoin(), (left, right))
+    for batch in _sent(left).combine_chunks().to_batches(max_chunksize=1):
+        kernel.push(0, batch)
+    held_bytes = _sent(left).nbytes
+    joins = 0
+    original = pl.DataFrame.join
+
+    def counted(self: pl.DataFrame, *args: Any, **kwargs: Any) -> pl.DataFrame:
+        nonlocal joins
+        joins += 1
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(pl.DataFrame, "join", counted)
+    previous = pa.default_memory_pool()
+    large: list[int] = []
+    for index, batch in enumerate(
+        _sent(right).combine_chunks().to_batches(max_chunksize=1)
+    ):
+        before_joins = joins
+        # A pool of its own per batch: its peak counts every Arrow allocation of the
+        # batch, also one freed before the batch returns. Pools are kept for the
+        # process: arrays allocated in one may outlive the test.
+        pool = pa.proxy_memory_pool(previous)
+        _POOLS.append(pool)
+        pa.set_memory_pool(pool)
+        try:
+            emitted = kernel.push(1, batch)
+        finally:
+            pa.set_memory_pool(previous)
+        assert sum(b.num_rows for b in emitted) == 1
+        assert joins - before_joins == 1
+        if (pool.max_memory() or 0) >= held_bytes / 4:
+            large.append(index)
+    # Only the compactions copy the remaining rows: when half the rows held were
+    # removed since the last one, so at most log2(n) times in the run.
+    assert len(large) <= math.ceil(math.log2(n)), large
+    assert kernel.held_rows == 0

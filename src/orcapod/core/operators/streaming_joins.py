@@ -1026,12 +1026,46 @@ def _with_system_tags(table: pa.Table, keys: Sequence[str]) -> pa.Table:
     return table.filter(_has_whole_key(table, keys))
 
 
+def _take_rows(table: pa.Table, rows: np.ndarray[Any, np.dtype[np.int64]]) -> pa.Table:
+    """The rows of ``table`` with these numbers, in this order, without combining chunks.
+
+    Arrow's ``take`` on a chunked column concatenates its chunks first, a copy of the
+    whole column. Here only the chunks that hold a wanted row are read: each one's rows
+    are taken from it alone, and the small result is put in the order asked for.
+
+    Args:
+        table: A table, of any number of chunks.
+        rows: Row numbers in ``table``.
+
+    Returns:
+        The rows, as one chunk.
+    """
+    batches = table.to_batches()
+    if len(batches) <= 1:
+        return table.take(pa.array(rows, pa.int64()))
+    lengths = np.fromiter((b.num_rows for b in batches), np.int64, len(batches))
+    starts = np.concatenate([np.zeros(1, np.int64), np.cumsum(lengths)[:-1]])
+    chunks = np.searchsorted(starts, rows, side="right") - 1
+    order = np.argsort(chunks, kind="stable")
+    sorted_rows, sorted_chunks = rows[order], chunks[order]
+    edges = np.flatnonzero(np.diff(sorted_chunks)) + 1
+    parts: list[pa.Table] = []
+    for group in np.split(np.arange(len(sorted_rows)), edges):
+        chunk = int(sorted_chunks[group[0]])
+        local = sorted_rows[group] - starts[chunk]
+        parts.append(
+            pa.Table.from_batches([batches[chunk]]).take(pa.array(local, pa.int64()))
+        )
+    taken = pa.concat_tables(parts).combine_chunks()
+    return taken.take(pa.array(np.argsort(order, kind="stable"), pa.int64()))
+
+
 def _occurrences(frame: pl.DataFrame, among: Sequence[str]) -> pl.DataFrame:
     """Number each row among the rows before it equal to it in ``among`` (0, 1, ...).
 
     With it, rows that repeat an origin row are matched one to one in the order they
     arrived (``Rejoin``'s occurrence rule), and no join ever pairs every repeat of one
-    side with every repeat of the other: the work stays linear in the rows.
+    side with every repeat of the other: the pairs made are only the pairs kept.
     """
     return frame.with_columns(
         pl.int_range(pl.len()).over(list(among)).alias(_OCCURRENCE)
@@ -1213,18 +1247,22 @@ class _RejoinLink:
         left_rows: np.ndarray[Any, np.dtype[np.int64]],
         right_rows: np.ndarray[Any, np.dtype[np.int64]],
     ) -> pa.Table:
-        """The matched pairs as ``Rejoin._rejoin_pair`` builds them, by row number."""
-        left_take = pa.array(left_rows, pa.int64())
-        right_take = pa.array(right_rows, pa.int64())
+        """The matched pairs as ``Rejoin._rejoin_pair`` builds them, by row number.
+
+        Values are taken from the chunks that hold them (``_take_rows``): no held
+        table is copied.
+        """
+        left_taken = _take_rows(left, left_rows)
+        right_taken = _take_rows(right, right_rows)
         names: list[str] = []
         arrays: list[Any] = []
         for name in left.column_names:
             names.append(name)
-            arrays.append(left.column(name).combine_chunks().take(left_take))
+            arrays.append(left_taken.column(name))
         for name in right.column_names:
             if name not in left.column_names:
                 names.append(name)
-                arrays.append(right.column(name).combine_chunks().take(right_take))
+                arrays.append(right_taken.column(name))
         assert self.sides[0].schema is not None
         assert self.sides[1].schema is not None
         return self._finish(
@@ -1281,26 +1319,54 @@ class StreamingRejoin(StreamingJoinKernel):
     - once one side closes, the other side's remaining rows are dropped, and an arriving
       row either matches at once or is dropped.
 
+    Cost: one vectorized join per arriving batch against the other side's remaining rows
+    (and their occurrence numbers), so O(held rows) per batch, as in the ``Join``
+    kernels; values are taken from the held tables' chunks by row number, never by
+    copying a whole held table. A long run of one-row batches against a large buffer is
+    quadratic in the rows.
+
+    Rows: they equal the sync path's as a multiset, for every arrival schedule, when
+    origins are unique (system tags unique in each input, as every source makes them),
+    and also with repeated origins for two inputs (and at the first step of a chain):
+    the k-th repeat of one input pairs with the k-th of the other, in each input's row
+    order, as on the sync path. With three or more inputs and repeated origins, the
+    pairing of repeats at a later step can depend on arrival and differ from the sync
+    path, which ranks the rows rejoined so far in its table order among the rows that
+    survived the earlier step. The approved spec names this risk ("Duplicates ... 'match
+    once' pairs duplicates in arrival order, which can differ between sync and async
+    (risks; ITL-1356 removes the case)"); the developer's rule for ``Rejoin`` is that
+    system tags are unique by construction. The exact alternative (option X) is
+    survival-aware ranking: per-step counters, and rows of a repeated origin held until
+    every earlier row of that origin has a final fate at the step before.
+
     The data context: a job's rows carry their producer's data context, which ``Rejoin``
     matches on. Transport batches carry none, so each input's rows are given the data
     context of its stream (``StaticOutputOperatorPod._upstream_context``): inputs of two
     data contexts match nothing, and a link holds their rows to the end.
 
     The warning: rows of one origin row (system tags equal) that differ in another
-    shared column are noted per batch; when the last input closes, the kernel issues
+    shared column are noted per batch, between an arriving row that matched nothing and
+    the other side's remaining rows; when the last input closes, the kernel issues
     ``RejoinDifferingColumnWarning`` once for the columns noted, through the operator
-    (``Rejoin._warn_differing_once``), as the sync path issues it once for its run. With
-    two inputs the columns are the sync path's. A difference from the sync path
-    (accepted provisionally, November 22, 2026): with three or more inputs the warning
-    is detected per link, the rows rejoined so far against the next input, so a
-    difference between two inputs that are not adjacent in the chain, for an origin row
-    the input between them lacks, is not warned about; the sync path compares every pair
-    of inputs. The rows are identical either way. The alternative is pairwise detection,
-    which would keep every input's shared-column keys for every row until all inputs
-    close.
+    (``Rejoin._warn_differing_once``), as the sync path issues it once for its run.
 
-    ``Rejoin`` refuses nothing for what rows hold, so every refusal is raised before the
-    first batch.
+    - Guaranteed: with two inputs and unique origins, the warning is the sync path's
+      (the same columns, once) for every arrival schedule.
+    - Best effort otherwise (provisional, November 22, 2026; the rows are never
+      affected): the kernel reports only differences between rows the chain actually
+      compares, so a difference can be missed, and with repeated origins it can depend
+      on arrival. With three or more inputs a step compares the rows rejoined so far
+      with the next input: a difference between two inputs for an origin row that an
+      input before the later of them lacks is not seen (whether or not the two are
+      adjacent in the chain). With repeated origins a repeat already matched is no
+      longer compared, while the sync path compares repeats by occurrence whatever
+      their matches. The sync path compares every pair of inputs over all their rows;
+      the alternative (option B) is pairwise detection, which would keep every input's
+      shared-column keys for every row until all inputs close.
+
+    ``Rejoin`` refuses nothing for what rows hold: every refusal it raises for its inputs'
+    columns and types comes before the first batch, except the base class's check of an
+    input that ends empty, which can refuse at the last close (``StreamingJoinKernel``).
 
     Args:
         operator: The ``Rejoin``.
@@ -1389,7 +1455,28 @@ class StreamingRejoin(StreamingJoinKernel):
         while result is not None and step < len(self._links) - 1:
             step += 1
             result = self._links[step].push(0, result)
+        # A match can take the last row a closed side held: that step is exhausted.
+        self._release_exhausted()
         return [] if result is None else [result]
+
+    def _release_exhausted(self) -> None:
+        """Release what a step that can never emit again makes useless.
+
+        Such a step (a side closed holding no row, ``_RejoinLink.exhausted``) closes its
+        successor's left side, and every earlier step is released: its rows could only
+        reach this one. A step is exhausted by a close, or by a match that takes the
+        last row a closed side held.
+        """
+        for step, link in enumerate(self._links):
+            if not link.exhausted:
+                continue
+            for earlier in self._links[:step]:
+                earlier.release()
+            if (
+                step + 1 < len(self._links)
+                and not self._links[step + 1].sides[0].closed
+            ):
+                self._links[step + 1].close(0)
 
     def _close(self, input_index: int) -> list[pa.Table]:
         """End an input's side, every side that can no longer receive, and warn last.
@@ -1409,16 +1496,7 @@ class StreamingRejoin(StreamingJoinKernel):
         position = self._position[input_index]
         step, side = (0, 0) if position == 0 else (position - 1, 1)
         self._links[step].close(side)
-        for step, link in enumerate(self._links):
-            if not link.exhausted:
-                continue
-            for earlier in self._links[:step]:
-                earlier.release()
-            if (
-                step + 1 < len(self._links)
-                and not self._links[step + 1].sides[0].closed
-            ):
-                self._links[step + 1].close(0)
+        self._release_exhausted()
         if all(self._closed):
             differing = {name for link in self._links for name in link.differing}
             if differing:
