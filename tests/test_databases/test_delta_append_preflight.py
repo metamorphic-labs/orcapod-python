@@ -482,6 +482,9 @@ def test_a_refused_merge_leaves_the_queued_rows_as_they_were(tmp_path: Path) -> 
         )
     pending = db._pending_batches["t"]  # pyright: ignore[reportPrivateUsage]
     assert pending.schema.field("x").type == pa.null()
+    assert pending.select(["__record_id", "x"]).to_pylist() == [
+        {"__record_id": b"2", "x": None}
+    ]
     db.flush()
     back = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="id")
     assert back is not None

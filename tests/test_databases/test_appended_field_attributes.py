@@ -116,6 +116,18 @@ def _values(table: pa.Table | None) -> list[dict[str, Any]]:
     return table.sort_by("id").select(["id", "x", "y"]).to_pylist()
 
 
+def _queued_values(db: Any) -> list[dict[str, Any]]:
+    """The rows queued for the table, as ``_values`` gives them (``[]`` for none)."""
+    queued = db._pending_batches.get("t")  # the queue is the subject here
+    if queued is None:
+        return []
+    return _values(
+        queued.rename_columns(
+            ["id" if n == db.RECORD_ID_COLUMN else n for n in queued.column_names]
+        )
+    )
+
+
 @pytest.mark.parametrize("pending", [False, True], ids=["stored", "pending"])
 @pytest.mark.parametrize("change", sorted(CHANGES))
 @pytest.mark.parametrize("where", sorted(WHERE))
@@ -139,6 +151,9 @@ def test_an_append_with_other_field_attributes_is_refused(
         else:
             with pytest.raises(InputValidationError, match=f"'x': {path}"):
                 db.add_records(PATH, second, record_id_column="id")
+        # The queue holds exactly what it held before: the first rows when they
+        # were not flushed, nothing otherwise.
+        assert _queued_values(db) == (_values(first) if pending else [])
         db.flush()  # nothing of the refused rows was buffered
         back = db.get_all_records(PATH, record_id_column="id")
         assert _values(back) == _values(first)
@@ -225,8 +240,14 @@ def test_delta_compares_attributes_before_schema_handling_casts(
         assert pending.schema.field("x").equals(
             queued.schema.field("x"), check_metadata=True
         )
+        # The queued rows are the ones queued before the refusal, value for value.
+        assert _queued_values(db) == _values(queued)
         db.flush()
+    # Read back: exactly the rows written before the refusal (rows 5 and 6 with
+    # the stored rows 1 and 2), with their attributes.
+    written = pa.concat_tables([first, queued]) if stored else first
     with open_database("Delta", tmp_path) as fresh:
         back = fresh.get_all_records(PATH, record_id_column="id")
         assert back is not None
+        assert _values(back) == _values(written)
         _assert_kept_field(first, back)
