@@ -18,6 +18,7 @@ from orcapod.databases._row_index import (
 )
 from orcapod.databases.utils import (
     appended_field_change,
+    in_held_column_order,
     coerce_record_id,
     metadata_bytes,
 )
@@ -1773,6 +1774,26 @@ class DeltaTableDatabase:
                         "nothing was written."
                     )
 
+    def _held_column_order(
+        self, record_path: tuple[str, ...]
+    ) -> list[tuple[str, pa.DataType]] | None:
+        """Each column the table holds, with its type, in the held order (ITL-1367).
+
+        The pending batch's order when rows are pending, else the stored table's
+        (its log; no data is read), else ``None``. A stored table that cannot be
+        loaded gives ``None``: the append is then left to the flush to report.
+        """
+        pending = self._pending_batches.get(self._get_record_key(record_path))
+        if pending is not None:
+            return [(f.name, f.type) for f in pending.schema]
+        try:
+            delta_table = self._get_delta_table(record_path)
+        except OrcapodDatabaseReadError:
+            return None
+        if delta_table is None:
+            return None
+        return [(name, f.type) for name, f in _held_columns(delta_table).items()]
+
     def _refuse_untyped_null_columns(
         self, record_path: tuple[str, ...], schema: pa.Schema
     ) -> None:
@@ -1871,6 +1892,10 @@ class DeltaTableDatabase:
             rename_map = {record_id_column: self.RECORD_ID_COLUMN}
             total_name_map = {k: rename_map.get(k, k) for k in records.column_names}
             records = records.rename_columns(total_name_map)
+
+        # Columns match by name: rows with the held columns in another order are
+        # put in the held order (ITL-1367).
+        records = in_held_column_order(records, self._held_column_order(record_path))
 
         # A column Delta cannot hold is refused before anything is buffered (ITL-1334).
         self.require_storable(records.schema)

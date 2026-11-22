@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, cast
 from orcapod.databases.utils import (
     coerce_record_id,
     first_changed_column,
+    in_held_column_order,
 )
 from orcapod.errors import (
     InputValidationError,
@@ -408,6 +409,10 @@ class ConnectorArrowDatabase:
         self._connector.validate_records(records)
 
         record_key = self._get_record_key(record_path)
+        # Columns match by name: rows with the held columns in another order are
+        # put in the held order, so the connector always receives the stored order
+        # (ITL-1367).
+        records = in_held_column_order(records, self._held_column_order(record_path))
         self._refuse_changed_columns(record_path, records.schema)
 
         records = self._deduplicate_within_table(records)
@@ -453,6 +458,27 @@ class ConnectorArrowDatabase:
 
         if flush:
             self.flush()
+
+    def _held_column_order(
+        self, record_path: tuple[str, ...]
+    ) -> list[tuple[str, pa.DataType]] | None:
+        """Each column the table holds, with its type, in the held order (ITL-1367).
+
+        The pending batch's order when rows are pending, else the stored table's as
+        the connector reports it now (``get_column_info``, the types ``flush``
+        compares), else ``None``. It is read on every call, never cached, so a table
+        dropped and created again in another order is read as it is now.
+        """
+        pending = self._pending_batches.get(self._get_record_key(record_path))
+        if pending is not None:
+            return [(f.name, f.type) for f in pending.schema]
+        table_name = self._path_to_table_name(self._path_prefix + record_path)
+        if table_name not in self._connector.get_table_names():
+            return None
+        return [
+            (c.name, normalize_to_large_types(c.arrow_type, keep_null=True))
+            for c in self._connector.get_column_info(table_name)
+        ]
 
     def _refuse_changed_columns(
         self, record_path: tuple[str, ...], schema: pa.Schema

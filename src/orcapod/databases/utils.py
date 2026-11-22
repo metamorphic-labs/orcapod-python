@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from orcapod.utils import arrow_utils
@@ -201,3 +201,51 @@ def first_changed_column(
             if reason is not None:
                 return field.name, reason
     return None
+
+
+def in_held_column_order(
+    records: "pa.Table", held: "Sequence[tuple[str, pa.DataType]] | None"
+) -> "pa.Table":
+    """``records`` with its columns in the order the database holds them (ITL-1367).
+
+    An append matches columns by name, never by position: when ``records`` has
+    exactly the held columns in another order, each with the held type, its columns
+    are put in the held order, so every database stores and buffers them as the
+    table already has them, and the table keeps the order of its first write. The
+    fields are kept as given (metadata, nullability): the append checks that follow
+    compare them by name.
+
+    Anything else is returned as given, for the database's own append rule: no held
+    table, a column added or missing, a type that differs (a struct whose children
+    are in another order included: its type differs), and names that repeat or that
+    differ in case only, which a database matching names without case could pair
+    otherwise.
+
+    Args:
+        records: The rows to append, the record id column already named as held.
+        held: Each held column's name and type, in the held order (the pending
+            batch, else the stored table), or ``None`` when the database holds no
+            such table.
+
+    Returns:
+        ``records``, reordered or as given.
+    """
+    if held is None:
+        return records
+    names = records.column_names
+    held_names = [name for name, _ in held]
+    if names == held_names:
+        return records
+    if len({n.casefold() for n in names}) != len(names):
+        return records
+    if len({n.casefold() for n in held_names}) != len(held_names):
+        return records
+    if set(names) != set(held_names):
+        return records
+    large = arrow_utils.normalize_to_large_types
+    held_types = dict(held)
+    for field in records.schema:
+        given = large(field.type, keep_null=True)
+        if given != large(held_types[field.name], keep_null=True):
+            return records
+    return records.select(held_names)

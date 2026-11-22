@@ -81,6 +81,16 @@ would add a non-nullable struct field (the stored rows have no value for it) or 
 struct field inside a map (Delta cannot). A nested field the append makes nullable reads
 as nullable afterwards, as Delta stores it.
 
+An append matches columns by name, never by position. Rows whose columns are the held
+table's columns in another order, each of the held type, are put in the held order (the
+rows still pending, else the stored table) by every database before anything is checked
+or written, whether the table was flushed in between or not. A table keeps the column
+order the database gave its first write: the first write's order, except in SpiralDB,
+which stores and reads a table's key columns first and then its other columns sorted by
+name, whatever the order written (measured on SpiralDB itself). An append that also
+adds, omits or retypes a column keeps each database's own rule. The order of a struct's
+fields is not covered: a struct whose fields are in another order is another type here.
+
 ## Integer
 
 | Type | in-memory | Delta | SQLite | PostgreSQL | SpiralDB |
