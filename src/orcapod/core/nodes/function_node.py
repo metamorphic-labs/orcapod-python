@@ -282,6 +282,27 @@ def _with_datagram_id(data: Data, datagram_id: uuid.UUID) -> Data:
     )
 
 
+def rows_as_output_stream(
+    rows: Sequence[tuple[TagProtocol, DataProtocol]], node: StreamProtocol
+) -> StreamProtocol:
+    """Return ``rows`` as ``node``'s output stream: the rows, built when read.
+
+    For the job nodes whose output is still their rows (function and side-effect
+    nodes, until ITL-1347 stages 3 and 4): ``RowsOnRead``, built by ``main``'s row path
+    where a successor reads it. One place imports the operator module for them.
+
+    Args:
+        rows: The node's output rows, in order.
+        node: The node.
+
+    Returns:
+        The node's output stream.
+    """
+    from orcapod.core.operators.static_output_pod import rows_on_read
+
+    return rows_on_read(rows, node)
+
+
 def _executor_supports_concurrent(
     data_function: DataFunctionProtocol,
 ) -> bool:
@@ -2456,6 +2477,19 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
     # Data processing
     # ------------------------------------------------------------------
 
+    def _output_stream(
+        self, rows: list[tuple[TagProtocol, DataProtocol]]
+    ) -> StreamProtocol:
+        """The output stream of a run whose output rows are ``rows``.
+
+        The rows, their table built when read by ``main``'s row path
+        (``RowsOnRead``): the sync orchestrator builds it where a successor reads it,
+        as ``main`` rebuilt the rows there, and a leaf's is never built (ITL-1347).
+        """
+        from orcapod.core.operators.static_output_pod import rows_on_read
+
+        return rows_on_read(rows, self)
+
     def execute_data(
         self,
         tag: TagProtocol,
@@ -2485,7 +2519,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         error_policy: Literal["continue", "fail_fast"] = "continue",
         run_id: str | None = None,
         load_only: bool = False,
-    ) -> list[tuple[TagProtocol, DataProtocol]]:
+    ) -> StreamProtocol:
         """Execute all data from a stream: compute, persist, and cache.
 
         For each data: fire ``on_data_start``, check the in-memory cache
@@ -2511,8 +2545,10 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 this way.
 
         Returns:
-            Materialized list of (tag, output_data) pairs, excluding
-            ``None`` outputs and failed data.
+            The node's output stream: its output rows (no row for a ``None`` output or
+            a failed row) as the table ``_rows_to_table`` builds from them, with this
+            node's identity (``StaticOutputOperatorPod._materialize_upstream``). The sync
+            orchestrator hands it to every successor (ITL-1347, stage 2).
 
         Raises:
             RuntimeError: If the node was loaded by ``PipelineJob.load`` and so
@@ -2524,7 +2560,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         from orcapod.pipeline.observer import NoOpObserver
 
         if load_only:
-            return self._execute_load_only(input_stream, observer)
+            return self._output_stream(self._execute_load_only(input_stream, observer))
         if self._function_pod is None:
             raise self._cannot_compute_error()
 
@@ -2653,7 +2689,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             self.clear_cache()
             raise
 
-        return output
+        return self._output_stream(output)
 
     def _empty_data_cache_hit(
         self, tag: TagProtocol, data: EmptyData, base_entry_id: bytes

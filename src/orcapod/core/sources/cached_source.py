@@ -80,6 +80,7 @@ class CachedSource(RootSource):
 
     SOURCE_KIND: ClassVar[str] = "cached"
     """Config type key and default source-id kind of this source (one vocabulary)."""
+    TABLE_IS_ROWS: ClassVar[bool] = True
 
     HASH_COLUMN_NAME = "_record_hash"
 

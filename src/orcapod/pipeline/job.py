@@ -990,15 +990,28 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         counter = RunCountingObserver()
         effective_orchestrator = orchestrator or SyncPipelineOrchestrator()
         with self._executing(prepared, plan, commit_every_rows, load_only=load_only):
-            _ = effective_orchestrator.run(
-                plan.dag,
-                observer=_with_counter(observer, counter),
-                run_id=prepared.run_id,
-                pipeline_uri=prepared.pipeline_uri,
-                materialize_results=materialize_results,
-                load_only=load_only,
-                held_rows=plan.held_rows,
-            )
+            if isinstance(effective_orchestrator, SyncPipelineOrchestrator):
+                # Held nodes give their output streams on the sync path (ITL-1347).
+                _ = effective_orchestrator.run(
+                    plan.dag,
+                    observer=_with_counter(observer, counter),
+                    run_id=prepared.run_id,
+                    pipeline_uri=prepared.pipeline_uri,
+                    materialize_results=materialize_results,
+                    load_only=load_only,
+                    held=plan.held,
+                )
+            else:
+                # The async path sends the rows the plan took (until stage 5).
+                _ = effective_orchestrator.run(
+                    plan.dag,
+                    observer=_with_counter(observer, counter),
+                    run_id=prepared.run_id,
+                    pipeline_uri=prepared.pipeline_uri,
+                    materialize_results=materialize_results,
+                    load_only=load_only,
+                    held_rows=plan.held_rows,
+                )
         summary = self._finish_run(
             prepared,
             counter,

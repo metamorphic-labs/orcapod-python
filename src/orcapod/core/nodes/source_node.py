@@ -26,12 +26,17 @@ from orcapod.config import OrcapodConfig
 from orcapod.core.base import TraceableBase
 from orcapod.core.datagrams import Data, Tag
 from orcapod.core.operators.drop_nulls import _without_none  # pyright: ignore[reportPrivateUsage]  # DropNulls' rule for removing None from a type, shared, never copied
+from orcapod.core.sources.base import table_is_rows
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
+    keys_of_rows,
+    system_tags_as_rows_give,
     row_built_columns,
+    stream_arrow_schema,
     schema_requires_io,
     typed_arrow_schemas,
+    typed_zero_row_input,
     typed_zero_row_table,
 )
 from orcapod.core.streams.record_batch_input import SOURCE_BATCH_ROWS, InputChannel
@@ -422,13 +427,10 @@ def _require_stream_arrow_types(stream: Any, slot: str) -> None:
 class _ExecuteOutputFeed:
     """The record batches of a source node's own ``execute()`` output.
 
-    Built at the first read from the rows ``execute()`` gives, rebuilt as a job does
-    (``StaticOutputOperatorPod._materialize_upstream``): slow, and correct by
-    definition. One binding is read, at that moment. A batch is dropped once
-    delivered.
+    Built at the first read from the output stream ``execute()`` gives (ITL-1347,
+    stage 2: the table a job hands on, already in the row-built form). One binding is
+    read, at that moment. A batch is dropped once delivered.
     """
-
-    # TODO(ITL-1360): the channel of stage 2's ``execute()`` output stream.
 
     def __init__(self, node: SourceNodeBase) -> None:
         """Make the feed; nothing is read until the first ``next``.
@@ -442,12 +444,7 @@ class _ExecuteOutputFeed:
     async def next(self) -> pa.RecordBatch | None:
         """Return the next record batch of the node's output, or ``None`` at the end."""
         if self._batches is None:
-            from orcapod.core.operators.static_output_pod import (
-                StaticOutputOperatorPod,
-            )
-
-            rows = self._node.execute()
-            output = StaticOutputOperatorPod._materialize_upstream(rows, self._node)  # pyright: ignore[reportPrivateUsage]  # the job's rebuild of a node's rows
+            output = self._node.execute()
             table = row_built_columns(
                 output.as_table(columns=ZERO_ROW_INPUT_COLUMNS), output.keys()
             )
@@ -1255,27 +1252,78 @@ class SourceNodeBase(TraceableBase, ABC):
         """Yield ``(tag, data)`` pairs, or raise if data is unavailable."""
         ...
 
+    def _rows_table(
+        self,
+    ) -> tuple[pa.Table, tuple[tuple[str, ...], tuple[str, ...]]] | None:
+        """The table of this node's rows (``iter_data``) and the rows' keys, or ``None``.
+
+        ``None`` here: a node that carries no data of its own hands on its rows
+        (``RowsOnRead``), which raise what reading it raises. A bound job node gives
+        its bound source's table when F of it is provably the rows' own table.
+        """
+        return None
+
+    def arrow_schema(self) -> pa.Schema:
+        """The Arrow schema of the columns this stream passes between job nodes.
+
+        See ``stream_arrow_schema`` (ITL-1347): never reads, computes or polls a row.
+        The columns are in the order of the node's rows (``_row_keys``).
+        """
+        return stream_arrow_schema(self, self._row_keys())
+
+    def _row_keys(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """The tag and data keys of this node's rows: its own keys."""
+        return self.keys()
+
+    @property
+    def arrow_types_declared(self) -> bool:
+        """Whether ``arrow_schema()`` holds the rows' own Arrow types (ITL-1089, ITL-1347)."""
+        return typed_zero_row_table(self) is not None
+
     def execute(
         self,
         *,
         observer: ExecutionObserverProtocol | None = None,
-    ) -> list[tuple[TagProtocol, DataProtocol]]:
-        """Execute this source node: materialize and return data.
+    ) -> StreamProtocol:
+        """Execute this source node: read its source once and return its output stream.
+
+        The source's table, as the table built from its rows would be
+        (``StaticOutputOperatorPod._output_stream``), with this node's identity, built
+        without making rows (ITL-1347, stage 2). The sync orchestrator hands it to every
+        successor.
 
         Args:
             observer: Optional execution observer.
 
         Returns:
-            List of (tag, data) tuples.
+            The node's output stream.
 
         Raises:
             UnboundSourceError: When no concrete data is available.
         """
+        from orcapod.core.operators.static_output_pod import (
+            RowBuiltFormUnavailable,
+            StaticOutputOperatorPod,
+            rows_on_read,
+        )
+
         node_label = self.label
         node_hash = self.content_hash().to_string()
         if observer is not None:
             observer.on_node_start(node_label, node_hash)
-        result = list(self.iter_data())
+        # The table and keys of this node's rows, when F of the table is provably the
+        # rows' own table; otherwise (a narrower bind) the rows, built when read.
+        rows_table = self._rows_table()
+        result: StreamProtocol
+        if rows_table is None:
+            result = rows_on_read(self.iter_data(), self)
+        else:
+            table, keys = rows_table
+            try:
+                result = StaticOutputOperatorPod._output_stream(table, keys, self)
+            except RowBuiltFormUnavailable:
+                # The rows decide (read once, here), built when read, as on main.
+                result = rows_on_read(self.iter_data(), self)
         if observer is not None:
             observer.on_node_end(node_label, node_hash)
         return result
@@ -1736,6 +1784,75 @@ class SourceJobNode(SourceNodeBase):
         if self._bound_source is not None:
             return self._bound_source.identity_structure()
         return super().identity_structure()
+
+    def _row_keys(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """The tag and data keys of this node's rows, known without reading a row.
+
+        The bound source's rows have the keys of its table (``keys_of_rows``, over its
+        typed zero-row table, which reads no row). A narrower bind (``_DeclaredForm``)
+        and an unbound slot answer with the slot's own keys: their description reports
+        its types undeclared (``arrow_types_declared``).
+        """
+        if self._bound_source is None or self._declared_form is not None:
+            return self.keys()
+        table = typed_zero_row_input(self._bound_source)
+        if table is None:
+            return self.keys()
+        return keys_of_rows(table, self._bound_source.keys())
+
+    def arrow_schema(self) -> pa.Schema:
+        """The Arrow schema of the columns this stream passes between job nodes.
+
+        See ``stream_arrow_schema``. A narrower bind hands on its rows as ``main`` gives
+        them (``RowsOnRead``), so its description is the declared Python schema's
+        (``arrow_types_declared`` is false): no second placement rule.
+        """
+        if self._declared_form is not None:
+            return stream_arrow_schema(self, self.keys(), from_table=False)
+        return stream_arrow_schema(self, self._row_keys())
+
+    @property
+    def arrow_types_declared(self) -> bool:
+        """False for a narrower bind (see ``arrow_schema``), else as every source node."""
+        if self._declared_form is not None:
+            return False
+        return super().arrow_types_declared
+
+    def _rows_table(
+        self,
+    ) -> tuple[pa.Table, tuple[tuple[str, ...], tuple[str, ...]]] | None:
+        """The bound source's table and the keys of its rows (``keys_of_rows``).
+
+        ``None`` for a narrower bind (its rows are given as the declared schema one by
+        one, ``_declared_rows``) and for a bound stream that is not a library source
+        kind whose table is its rows (``TABLE_IS_ROWS``): the node then hands on those
+        rows (``RowsOnRead``).
+
+        Raises:
+            UnboundSourceError: When no concrete source is attached.
+        """
+        if self._bound_source is None:
+            raise UnboundSourceError(
+                f"SourceJobNode '{self._name}' has no concrete source bound. "
+                "Call job.bind(sources={'<name>': source}) before running."
+            )
+        if self._declared_form is not None:
+            return None
+        if (
+            not table_is_rows(self._bound_source)
+            or self._bound_source.data_context_key != self.data_context_key
+        ):
+            # Not a library source kind whose table is its rows (a side-effect or
+            # function pod stream, an operator's result, a raw stream, a poller), or
+            # one whose rows report another data context than the node's: its rows,
+            # as main iterated them (the edge table is built in the node's context).
+            return None
+        table = self._bound_source.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+        if not system_tags_as_rows_give(table.schema):
+            # System tags the rows would type otherwise (a narrow integer, a
+            # nullable field): the rows decide, as on main.
+            return None
+        return table, keys_of_rows(table, self._bound_source.keys())
 
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         """Delegate to concrete source, or raise if unbound.

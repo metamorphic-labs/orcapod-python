@@ -3,9 +3,15 @@ from __future__ import annotations
 import asyncio
 import logging
 from abc import abstractmethod
-from collections.abc import Collection, Iterator, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Collection,
+    Iterable,
+    Iterator,
+    Sequence,
+)
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, cast
 
 import pyarrow as pa
 
@@ -37,6 +43,7 @@ from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
     StreamBase,
     check_head_size,
+    reads_as_its_class,
     short_stream_repr,
     typed_zero_row_input,
     typed_zero_row_table,
@@ -64,6 +71,23 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from orcapod.protocols.hashing_protocols import SemanticHasherProtocol
+
+
+class RowBuiltFormUnavailable(ValueError):
+    """F cannot be built from the whole table (``_row_built_form``).
+
+    The one signal that a node's output must come from its rows instead: the caller
+    builds the rows (``StaticOutputOperatorPod._rows_to_table``, through
+    ``_raise_as_rows_do``), which raises the error a table built from rows raises, so
+    the run fails as it does when rows are handed on, with the same observer events.
+    """
+
+
+class SourceInfoTypesDisagree(RowBuiltFormUnavailable):
+    """Two rows give one source-info column different types (``_row_built_form``).
+
+    A table built from such rows cannot be concatenated.
+    """
 
 
 class StaticOutputOperatorPod(TraceableBase):
@@ -494,26 +518,80 @@ class StaticOutputOperatorPod(TraceableBase):
         return pa.Table.from_arrays(table.columns, schema=pa.schema(fields))
 
     @staticmethod
+    def _type_source_info_by_values(table: pa.Table) -> pa.Table:
+        """Type each source-info column from its tokens, as the rows of a table built from rows do.
+
+        A step of F (``_row_built_form``) on the complete table, beside
+        ``_flag_by_values``. A row's ``Data`` types each source-info token from its
+        value (``arrow_utils.source_info_arrow_type``, the one rule): a string or
+        ``None`` as ``large_string``, a list as ``large_list`` of its first informative
+        element's type, so a list of ``None`` or of empty lists shows fewer levels than
+        its column may declare. The rows' tables are then concatenated, which needs
+        every row to give a column one type. This step gives each column that type,
+        built from the same values. A ``large_string`` column is every row's type
+        already and is left as it is.
+
+        Args:
+            table: A table of user tags, system tags, data and source info, after the
+                per-slice steps (``streams.base.row_built_columns``).
+
+        Returns:
+            The table with each source-info column of the type its tokens give.
+
+        Raises:
+            SourceInfoTypesDisagree: If two rows give one source-info column different
+                types, where the rows' tables cannot be concatenated. The caller builds
+                the rows (``_rows_to_table``), which raises the error a table built from
+                rows raises.
+        """
+        from orcapod.system_constants import constants
+        from orcapod.utils import arrow_utils
+
+        columns = list(table.columns)
+        fields = list(table.schema)
+        changed = False
+        for index, field in enumerate(fields):
+            if not field.name.startswith(constants.SOURCE_PREFIX):
+                continue
+            if pa.types.is_large_string(field.type):
+                continue
+            values = table.column(index).to_pylist()
+            kinds = {arrow_utils.source_info_arrow_type(value) for value in values}
+            if len(kinds) != 1:
+                raise SourceInfoTypesDisagree(field.name)
+            (kind,) = kinds
+            if kind == field.type:
+                continue
+            columns[index] = pa.chunked_array([pa.array(values, type=kind)])
+            fields[index] = pa.field(field.name, kind, nullable=field.nullable)
+            changed = True
+        if not changed:
+            return table
+        return pa.Table.from_arrays(
+            columns,
+            schema=pa.schema(
+                fields,
+                cast("dict[bytes | str, bytes | str] | None", table.schema.metadata),
+            ),
+        )
+
+    @staticmethod
     def _row_built_form(
         table: pa.Table, keys: tuple[Sequence[str], Sequence[str]]
     ) -> pa.Table:
         """Return ``table`` as ``_rows_to_table`` builds it from the table's own rows.
 
-        F in the ITL-1347 spec: the same table, without making the rows. The columns,
-        their order and their types are decided row by row
-        (``streams.base.row_built_columns``), the system-tag and source-info field flags
-        by their values over the whole table (``_flag_by_values``). The equality with
-        ``_rows_to_table`` is tested over every operator, source kind and column role
-        (ITL-1347, L0-L2).
+        F in the ITL-1347 spec: the same table, without making the rows. Two steps:
 
-        Its domain: F equals ``_rows_to_table`` for every stream whose source-info tokens
-        are strings or non-empty lists of tokens, which is every stream a source or an
-        operator makes (a token list has one element per member of a batch, group or
-        merge). The one exception is a hand-built raw ``ArrowTableStream`` whose
-        source-info column is a list type holding only empty lists: a row types its
-        tokens from their values, so ``_rows_to_table`` loses the list levels the
-        empty lists do not show, while F keeps the column's type. Such a stream reaches
-        a job only when bound to a slot with a copied source-id and record-id pair.
+        - per slice (``streams.base.row_built_columns``), what each row decides on its
+          own: the columns, their order, their large types, and the provenance fields'
+          form (no system-tag field metadata, source-info lists of nullable items);
+        - on the complete table, what depends on the values of every row: each
+          source-info column's type, from its tokens (``_type_source_info_by_values``),
+          then the system-tag and source-info field flags (``_flag_by_values``).
+
+        The equality with ``_rows_to_table`` is tested over every operator, source kind,
+        column role and raw-stream provenance shape (ITL-1347, L0-L2).
 
         Args:
             table: A table of user tags, system tags, data and source info, with rows.
@@ -522,8 +600,47 @@ class StaticOutputOperatorPod(TraceableBase):
 
         Returns:
             The table ``_rows_to_table`` would build from its rows.
+
+        Raises:
+            RowBuiltFormUnavailable: If the whole table cannot be built: the rows'
+                tokens give a source-info column two types
+                (``SourceInfoTypesDisagree``), or an Arrow conversion fails. The node
+                then builds its rows (``_raise_as_rows_do``).
         """
-        return StaticOutputOperatorPod._flag_by_values(row_built_columns(table, keys))
+        try:
+            return StaticOutputOperatorPod._flag_by_values(
+                StaticOutputOperatorPod._type_source_info_by_values(
+                    row_built_columns(table, keys)
+                )
+            )
+        except RowBuiltFormUnavailable:
+            raise
+        except pa.ArrowException as error:
+            # Values the whole table cannot be built from (a token the rows' own
+            # conversion refuses too): the rows decide, as on ``main``.
+            raise RowBuiltFormUnavailable(str(error)) from error
+
+    @staticmethod
+    def _raise_as_rows_do(
+        rows: Iterable[tuple[TagProtocol, DataProtocol]],
+        error: RowBuiltFormUnavailable,
+    ) -> NoReturn:
+        """Build ``rows`` into a table to raise the error a table built from them raises.
+
+        Called when ``_row_built_form`` finds rows whose source-info tokens cannot make
+        one table (``RowBuiltFormUnavailable``): the rows' own concatenation
+        (``_rows_to_table``) raises exactly what a run that hands rows on raises.
+
+        Args:
+            rows: The rows of the table F was given, in order.
+            error: The disagreement F found, raised if the rows do concatenate.
+
+        Raises:
+            pyarrow.ArrowInvalid: As ``_rows_to_table`` raises it.
+            RowBuiltFormUnavailable: ``error``, if the rows build after all.
+        """
+        StaticOutputOperatorPod._rows_to_table(list(rows))
+        raise error
 
     @staticmethod
     def _output_stream(
@@ -547,19 +664,16 @@ class StaticOutputOperatorPod(TraceableBase):
             The output stream, with ``node``'s identity.
         """
         if table.num_rows == 0:
-            stream = StaticOutputOperatorPod._materialize_upstream([], node)
-        else:
-            tag_keys, data_keys = keys
-            stream = StaticOutputOperatorPod._as_upstream_stream(
-                StaticOutputOperatorPod._row_built_form(table, keys),
-                tag_keys,
-                data_tag_names(tag_keys, data_keys),
-                node,
-            )
-        # The one place a stream is marked as a complete, immutable output in the
-        # row-built form (ITL-1347): ``InputChannel.to_stream`` may give it as it is.
-        setattr(stream, ROW_BUILT_OUTPUT, True)
-        return stream
+            # No row: the zero-row input is derived where a successor reads it, as on
+            # main (``RowsOnRead``): nothing is prepared before then.
+            return rows_on_read([], node)
+        tag_keys, data_keys = keys
+        return StaticOutputOperatorPod._as_upstream_stream(
+            StaticOutputOperatorPod._row_built_form(table, keys),
+            tag_keys,
+            data_tag_names(tag_keys, data_keys),
+            node,
+        )
 
     @staticmethod
     def _flag_source_info_nullability(table: pa.Table) -> pa.Table:
@@ -674,7 +788,23 @@ class StaticOutputOperatorPod(TraceableBase):
         Raises:
             ValueError: If ``rows`` is empty.
         """
-        table, tag_keys, data_tags = StaticOutputOperatorPod._rows_to_table(rows)
+        return StaticOutputOperatorPod._stream_over_row_table(
+            StaticOutputOperatorPod._rows_to_table(rows)
+        )
+
+    @staticmethod
+    def _stream_over_row_table(
+        row_table: tuple[pa.Table, tuple[str, ...], tuple[str, ...]],
+    ) -> StreamProtocol:
+        """The stream ``_materialize_to_stream`` builds, over ``_rows_to_table``'s result.
+
+        Args:
+            row_table: The table, user tag keys and data-tags ``_rows_to_table`` returns.
+
+        Returns:
+            A stream over the table's rows, in order.
+        """
+        table, tag_keys, data_tags = row_table
         # No ``source_info`` argument: the table's own ``_source_*`` columns
         # pass through, one value per row.
         return ArrowTableStream(table, tag_columns=tag_keys, data_tags=data_tags)
@@ -721,6 +851,8 @@ class StaticOutputOperatorPod(TraceableBase):
             )
         typed = StaticOutputOperatorPod._zero_row_input(upstream)
         if typed is not None:
+            # A complete output with no row, in the row-built form (``ROW_BUILT_OUTPUT``).
+            setattr(typed, ROW_BUILT_OUTPUT, True)
             return typed
         # Build an empty table preserving declared field nullability.
         tag_schema, data_schema = upstream.output_schema(
@@ -779,7 +911,7 @@ class StaticOutputOperatorPod(TraceableBase):
             # otherwise it would fall back to a root's schema-only hash and an
             # operator would name its system tags after that. A source's pipeline
             # hash is that schema-only hash already.
-            return _RowsOfStream(
+            stream: StreamProtocol = _RowsOfStream(
                 table,
                 tag_columns=tag_keys,
                 pipeline_hash=upstream.pipeline_hash(),
@@ -787,16 +919,23 @@ class StaticOutputOperatorPod(TraceableBase):
                 upstreams=upstream.upstreams,
                 data_context=context,
             )
-        # No ``source_info`` argument: the table's own ``_source_*`` columns
-        # pass through, one value per row.
-        return ArrowTableStream(
-            table,
-            tag_columns=tag_keys,
-            data_tags=data_tags,
-            producer=upstream.producer,
-            upstreams=upstream.upstreams,
-            data_context=context,
-        )
+        else:
+            # No ``source_info`` argument: the table's own ``_source_*`` columns
+            # pass through, one value per row.
+            stream = ArrowTableStream(
+                table,
+                tag_columns=tag_keys,
+                data_tags=data_tags,
+                producer=upstream.producer,
+                upstreams=upstream.upstreams,
+                data_context=context,
+            )
+        # Every complete node output in the row-built form ends here (the rows'
+        # rebuild, F's output, a stored-table output) or, with no row, in
+        # ``_materialize_upstream``'s zero-row input: the places that mark it
+        # (ITL-1347): ``InputChannel.to_stream`` may give it as it is.
+        setattr(stream, ROW_BUILT_OUTPUT, True)
+        return stream
 
     @staticmethod
     def _materialize_input_stream(
@@ -1051,12 +1190,18 @@ def transport_schema(stream: StreamProtocol) -> pa.Schema | None:
 
     Returns:
         The schema, or ``None`` for a stream that cannot say its Arrow types without
-        rows (an unbound input slot, a source that has not polled yet).
+        rows (an unbound input slot, a source that has not polled yet, a description
+        whose types are undeclared: ``arrow_types_declared`` false).
     """
     # TODO(ITL-1360): ``stream.arrow_schema()``, once every stream has it.
     from orcapod.core.streams.base import row_built_names, row_built_provenance
     from orcapod.utils import arrow_utils
 
+    if not getattr(stream, "arrow_types_declared", True):
+        # The rows decide the types (and the column order) of a description whose
+        # types are undeclared (a narrower bind, ``RowsOnRead``): the first batch sets
+        # them.
+        return None
     typed = StaticOutputOperatorPod._zero_row_input(stream)  # pyright: ignore[reportPrivateUsage]  # the zero-row form of an input
     if typed is None:
         return None
@@ -1076,11 +1221,13 @@ def transport_schema(stream: StreamProtocol) -> pa.Schema | None:
 
 
 ROW_BUILT_OUTPUT = "_orcapod_row_built_output"
-"""The attribute that marks a stream ``_output_stream`` built (ITL-1347).
+"""The attribute that marks a complete node output in the row-built form (ITL-1347).
 
-Set in that one place, never inferred from a class: such a stream is a complete,
-immutable output already in the row-built form, so a consumer of its record batches
-would rebuild exactly it, and ``InputChannel.to_stream`` may give it without reading.
+Set where every such output is made (``_as_upstream_stream``, and the zero-row input
+of ``_materialize_upstream``), never inferred from a class: such a stream is a
+complete, immutable output already in the row-built form, so a consumer of its record
+batches would rebuild exactly it, and ``InputChannel.to_stream`` may give it without
+reading.
 """
 
 
@@ -1169,6 +1316,201 @@ def with_open_provenance_flags(batch: pa.RecordBatch) -> pa.RecordBatch:
     return pa.RecordBatch.from_arrays(batch.columns, schema=schema)
 
 
+class RowsOnRead:
+    """A node's output held as its rows, its table built on first read (ITL-1347).
+
+    The one rule for every route where building the output from the whole table is
+    not provably ``main``'s result (a narrower bind, a bound stream that is not a
+    library source kind, a whole-table build that is unavailable, an odd stored table,
+    a held node, a result with no row, a node whose output is still its rows): the node
+    hands on the rows ``main`` would hold, and the table is built from them by
+    ``main``'s own row path (``StaticOutputOperatorPod._materialize_upstream``) when
+    the table is first read. The sync orchestrator reads each input of a node before
+    running it (``at_edge``), where ``main`` rebuilt it; a stream nobody reads is never
+    built, as ``main`` never rebuilt a leaf's rows.
+
+    It is a stream (``StreamProtocol``), structurally: every member of the protocol is
+    the built stream's, except those that read nothing. Its rows (``iter_data``,
+    iteration) are the rows it holds, unchanged, as ``main`` returned them. Its
+    description (``arrow_schema``) is the node's declared one and builds nothing
+    (``arrow_types_declared`` is false). Opening a channel builds nothing; the
+    channel's first read does.
+    """
+
+    # Not a stream the row-built form already made: a channel opened on it reads it.
+    _orcapod_row_built_output = False
+
+    def __init__(
+        self, rows: Iterable[tuple[TagProtocol, DataProtocol]], node: StreamProtocol
+    ) -> None:
+        """Hold ``node``'s rows; nothing is built.
+
+        Args:
+            rows: The rows ``main`` would hold, in order (read once, here).
+            node: The node (or stream) whose output they are.
+        """
+        self._rows: list[tuple[TagProtocol, DataProtocol]] = list(rows)
+        self._node = node
+        self._stream: StreamProtocol | None = None
+
+    def built(self) -> StreamProtocol:
+        """The stream, built from the rows on the first call (``main``'s row path)."""
+        if self._stream is None:
+            self._stream = StaticOutputOperatorPod._materialize_upstream(
+                self._rows, self._node
+            )
+        return self._stream
+
+    def release_built(self) -> None:
+        """Drop the built stream and keep only the rows.
+
+        The sync orchestrator calls this on an output it retains once every successor
+        has read it: ``main`` held only the rows, so the retained output holds one
+        representation, and a later read builds the same table again from them.
+        """
+        self._stream = None
+
+    def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
+        """The rows it holds, unchanged (their meta columns included), as ``main``."""
+        return iter(self._rows)
+
+    def __iter__(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
+        return self.iter_data()
+
+    async def async_iter_data(
+        self,
+    ) -> AsyncIterator[tuple[TagProtocol, DataProtocol]]:
+        """The rows it holds, unchanged."""
+        for row in self._rows:
+            yield row
+
+    def arrow_schema(self) -> pa.Schema:
+        """The node's own description (``arrow_schema()``); builds nothing.
+
+        The rows decide the Arrow types (``arrow_types_declared`` is false): the
+        description gives the node's names and declared types, with no guaranteed
+        order.
+        """
+        describe = getattr(self._node, "arrow_schema", None)
+        if callable(describe):
+            return cast(pa.Schema, describe())
+        from orcapod.core.streams.base import stream_arrow_schema
+
+        return stream_arrow_schema(self._node, from_table=False)
+
+    @property
+    def arrow_types_declared(self) -> bool:
+        """False: the rows decide the types (see ``arrow_schema``)."""
+        return False
+
+    def open_channel(self) -> Any:
+        """Open an input channel on this stream; its first read builds the table."""
+        from orcapod.core.streams.base import CompleteStreamFeed
+        from orcapod.core.streams.record_batch_input import InputChannel
+
+        return InputChannel(
+            cast(StreamProtocol, cast(object, self)),
+            CompleteStreamFeed(cast(StreamProtocol, cast(object, self))),
+        )
+
+    # The members that tell what the output is without reading it: the node's, which
+    # the built stream takes too (``_as_upstream_stream``), or the built stream's once
+    # it is built. A protocol check (``isinstance``) reads them and builds nothing.
+    @property
+    def producer(self) -> Any:
+        return self._node.producer
+
+    @property
+    def upstreams(self) -> tuple[StreamProtocol, ...]:
+        return self._node.upstreams
+
+    @property
+    def data_context_key(self) -> str:
+        return self._node.data_context_key
+
+    @property
+    def label(self) -> Any:
+        source = self._stream if self._stream is not None else self._node
+        return getattr(source, "label", None)
+
+    @property
+    def last_modified(self) -> Any:
+        source = self._stream if self._stream is not None else self._node
+        return getattr(source, "last_modified", None)
+
+    def __getattr__(self, name: str) -> Any:
+        # Every other member (``join``, ``as_polars_df``, ...) is the built stream's.
+        return getattr(self.built(), name)
+
+    def __repr__(self) -> str:
+        return f"RowsOnRead({short_stream_repr(self._node)})"
+
+
+def _stream_protocol_members() -> list[str]:
+    """The members ``StreamProtocol`` declares, its bases' included.
+
+    What ``isinstance(x, StreamProtocol)`` looks for on the class: declaring each one
+    there lets ``RowsOnRead`` pass the check on every supported Python.
+    """
+    names: set[str] = set()
+    protocol = cast(type, cast(object, StreamProtocol))
+    for base in protocol.__mro__:
+        if base is object or base.__name__ in ("Protocol", "Generic"):
+            continue
+        names.update(name for name in vars(base) if not name.startswith("_"))
+    return sorted(names)
+
+
+def _delegated(name: str) -> Any:
+    """A method of ``RowsOnRead`` that is the built stream's (``RowsOnRead.built``)."""
+
+    def delegate(self: RowsOnRead, *args: Any, **kwargs: Any) -> Any:
+        return getattr(self.built(), name)(*args, **kwargs)
+
+    delegate.__name__ = name
+    return delegate
+
+
+for _name in _stream_protocol_members():
+    if _name not in vars(RowsOnRead):
+        setattr(RowsOnRead, _name, _delegated(_name))
+
+
+def rows_on_read(
+    rows: Iterable[tuple[TagProtocol, DataProtocol]], node: StreamProtocol
+) -> StreamProtocol:
+    """``RowsOnRead`` of ``rows`` as a stream (it delegates every member to the built one).
+
+    Args:
+        rows: The rows ``main`` would hold, in order (read once, here).
+        node: The node (or stream) whose output they are.
+
+    Returns:
+        The output, built from the rows when first read.
+    """
+    # ``RowsOnRead`` stands for the stream it builds; the checker cannot see that
+    # through its delegation, so the cast goes through object.
+    return cast(StreamProtocol, cast(object, RowsOnRead(rows, node)))
+
+
+def at_edge(stream: StreamProtocol) -> StreamProtocol:
+    """``stream`` as a node's input: a ``RowsOnRead`` output is built here.
+
+    The sync orchestrator reads every input of a node before it runs the node, where
+    ``main`` rebuilt the rows of the node before it, so an error of that build surfaces
+    at the same point, after the same observer events.
+
+    Args:
+        stream: An output a node handed on.
+
+    Returns:
+        The stream to give the node.
+    """
+    if isinstance(stream, RowsOnRead):
+        return stream.built()
+    return stream
+
+
 class _RowsOfStream(ArrowTableStream):
     """Rows standing in for the stream they came from, with its pipeline hash.
 
@@ -1222,6 +1564,31 @@ class _RowsOfStream(ArrowTableStream):
             The input pipeline hash the operator node passed.
         """
         return self._input_pipeline_hash
+
+
+def produced_stream(stream: StreamProtocol) -> StreamProtocol:
+    """Return the stream whose rows ``stream`` yields, through any depth of composition.
+
+    An operator's result is a ``DynamicPodStream`` whose rows are those of the stream
+    its ``static_process`` returned, which may itself be another operator's
+    ``DynamicPodStream``: this follows them all to the stream that holds the rows
+    (ITL-1347). A wrapper is followed only when it reads as ``DynamicPodStream`` itself
+    (``reads_as_its_class``: its rows are then exactly those of the stream it holds); a
+    subclass or a wrapper with a member replaced on the instance is where the chain
+    stops, so the caller, which proves the stream it is given, takes the row path.
+
+    Args:
+        stream: An operator's result, or any stream.
+
+    Returns:
+        The stream that holds ``stream``'s rows, or the first wrapper not proven to
+        read through the stream it holds.
+    """
+    while isinstance(stream, DynamicPodStream) and reads_as_its_class(
+        stream, DynamicPodStream
+    ):
+        stream = stream.produced_stream()
+    return stream
 
 
 class DynamicPodStream(StreamBase):
@@ -1451,6 +1818,18 @@ class DynamicPodStream(StreamBase):
             "StreamProtocol has not been updated or is empty."
         )
         return self._cached_stream.iter_data()
+
+    def produced_stream(self) -> StreamProtocol:
+        """The stream the operator returned for the current inputs (computed if stale).
+
+        Its rows are this stream's rows; ``produced_stream`` (the module function)
+        follows it through every ``DynamicPodStream`` to the stream that holds them.
+        """
+        self._refresh()
+        assert self._cached_stream is not None, (
+            "StreamProtocol has not been updated or is empty."
+        )
+        return self._cached_stream
 
     def head(
         self,

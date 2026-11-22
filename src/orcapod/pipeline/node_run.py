@@ -14,7 +14,7 @@ the commit ``job.run()`` makes.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -25,6 +25,7 @@ from orcapod.pipeline.run_summary import (
     run_node_summaries,
 )
 from orcapod.pipeline.restrictions import restrictions_in_force, source_name
+from orcapod.pipeline.result import StreamsOnRead
 from orcapod.utils.database_errors import flush_best_effort
 
 if TYPE_CHECKING:
@@ -242,6 +243,13 @@ def check_sources(streams: Iterable[Any]) -> tuple[str, ...]:
     return tuple(unchecked)
 
 
+def _rows_on_read(rows: Sequence[Any], node: Any) -> Any:
+    """A held node's output: its rows, built where a successor reads them (``RowsOnRead``)."""
+    from orcapod.core.operators.static_output_pod import rows_on_read
+
+    return rows_on_read(rows, node)
+
+
 @dataclass(frozen=True)
 class RunPlan:
     """What a run does with each node of its graph (ITL-1095).
@@ -249,18 +257,22 @@ class RunPlan:
     Attributes:
         dag: The nodes the run touches: those it runs, and the predecessors that feed
             them (a source slot is read; any other one is held).
-        held_rows: The rows of each held node of ``dag``: the rows of its current run,
-            or of a stream outside the job; they feed the nodes after it as if it had
-            just run.
+        held: The output stream of each held node of ``dag``: of its current run, or
+            of a stream outside the job; it feeds the nodes after it as if the node had
+            just run (the sync orchestrator). Built when read (``RowsOnRead``).
+        held_rows: The rows of each held node, as the plan took them; ``held`` is
+            built from them. The async orchestrator sends them (it carries rows until
+            ITL-1347 stage 5).
         to_run: The nodes the run runs, in dependency order.
         held_counts: Every node of the whole graph that holds a current run, with its
             row count, for the summary.
     """
 
     dag: Any
-    held_rows: dict[Any, list[Any]]
+    held: Mapping[Any, Any]
     to_run: list[Any]
     held_counts: dict[Any, int]
+    held_rows: dict[Any, list[Any]]
 
 
 def plan_run(graph: Any, *, load_only: bool, outside: Sequence[Any] = ()) -> RunPlan:
@@ -332,15 +344,22 @@ def plan_run(graph: Any, *, load_only: bool, outside: Sequence[Any] = ()) -> Run
     for node in to_run:
         for upstream in graph.predecessors(node):
             dag.add_edge(upstream, node)
+    # A held node's output stream: what the sync orchestrator built from its rows for
+    # the nodes after it, exactly (ITL-1347, stage 2).
     held_rows = {
         node: list(node.iter_data())
         for node in included
         if not any(node is r for r in to_run) and not is_source(node)
     }
+    # The rows main held, built where a successor reads them (``RowsOnRead``,
+    # ``at_edge``), never while planning; an async run reads only the rows.
+    # The plan keeps no output it handed out (``keep=False``): the orchestrator drops
+    # each once the node's successors ran.
+    held = StreamsOnRead(held_rows, _rows_on_read, keep=False)
     # Counted from what each node holds: iterating an operator's rows would build a
     # (Tag, Data) pair per row only to count them (ITL-1351).
     held_counts = {node: node.held_row_count() for node in current}
-    return RunPlan(dag, held_rows, to_run, held_counts)
+    return RunPlan(dag, held, to_run, held_counts, held_rows)
 
 
 def commit_run(databases: Sequence[ArrowDatabaseProtocol], ran: Sequence[Any]) -> None:
@@ -425,7 +444,7 @@ def run_with_dependencies(
     counter = RunCountingObserver()
     try:
         _ = SyncPipelineOrchestrator().run(
-            plan.dag, observer=counter, load_only=load_only, held_rows=plan.held_rows
+            plan.dag, observer=counter, load_only=load_only, held=plan.held
         )
     except BaseException as run_error:
         if isinstance(run_error, Exception) and not load_only:

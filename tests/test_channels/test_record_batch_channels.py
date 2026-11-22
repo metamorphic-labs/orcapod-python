@@ -175,7 +175,7 @@ def test_a_bound_source_node_sends_its_rows_in_their_own_column_order() -> None:
     )
     node = SourceJobNode.from_stream(stream, name="ordered")
     assert node.keys()[0] != stream.keys()[0]  # the slot's order is another
-    rows = node.execute()
+    rows = list(node.iter_data())  # the rows execute() returned before ITL-1347 stage 2
     expected = StaticOutputOperatorPod._rows_to_table(rows)[0]
     batches = run(node.open_channel().collect)
     assert pa.Table.from_batches(batches).schema.names == expected.schema.names
@@ -240,7 +240,9 @@ def test_a_source_nodes_channel_carries_its_execute_output(
         if bind == "transparent"
         else _declared_node(source)
     )
-    expected = StaticOutputOperatorPod._materialize_upstream(node.execute(), node)  # pyright: ignore[reportPrivateUsage]  # the job's rebuild of the rows
+    expected = StaticOutputOperatorPod._materialize_upstream(
+        list(node.iter_data()), node
+    )  # pyright: ignore[reportPrivateUsage]  # the job's rebuild of the rows
     wanted = expected.as_table(columns=ALL)
     assert any(
         name.startswith("_source_") and name.removeprefix("_source_") in ("j", "k")
@@ -267,7 +269,9 @@ def test_a_rebind_before_the_first_read_is_read_whole() -> None:
     node = SourceJobNode.from_stream(_keyed_source(()), name="keyed")
     channel = node.open_channel()
     node.bound_source = _keyed_source((), source_id="other", offset=10)
-    expected = StaticOutputOperatorPod._materialize_upstream(node.execute(), node)  # pyright: ignore[reportPrivateUsage]  # the job's rebuild of the rows
+    expected = StaticOutputOperatorPod._materialize_upstream(
+        list(node.iter_data()), node
+    )  # pyright: ignore[reportPrivateUsage]  # the job's rebuild of the rows
     batches = run(channel.collect)
     assert same(pa.Table.from_batches(batches), R(expected))
 
@@ -1903,3 +1907,50 @@ def test_stream_from_batches_is_the_one_conversion() -> None:
         made = stream_from_batches(stream, batches_of(stream, rows))
         assert same(made.as_table(columns=ALL), R(stream))
     assert stream_from_batches(stream, []).as_table().num_rows == 0
+
+
+def test_a_batch_with_a_duplicate_column_is_refused() -> None:
+    """Without Arrow types the names are compared as a multiset: a duplicate is refused
+    (Codex on PR #485, round 5)."""
+    table = source().as_table(columns=ALL)
+    stream = _UntypedStream(
+        table, tag_columns=["subject", "trial"], data_tags=["trial"]
+    )
+    (batch,) = batches_of(stream)
+    name = next(n for n in batch.schema.names if not n.startswith(("_", "subject")))
+    doubled = batch.append_column(batch.schema.field(name), batch.column(name))
+
+    async def write() -> None:
+        output = OutputChannel(stream)
+        await output.send(doubled)
+
+    with pytest.raises(ValueError, match="the stream's keys are"):
+        run(write)
+
+
+def test_a_batch_whose_tokens_cannot_settle_with_accepted_ones_is_refused() -> None:
+    """A second batch with list tokens where the first had string tokens is refused at
+    send, with the error the complete table would raise (Codex on PR #485, round 5)."""
+    from orcapod.core.operators.static_output_pod import SourceInfoTypesDisagree
+
+    stream = source()
+    (batch,) = batches_of(stream)
+    column = next(n for n in batch.schema.names if n.startswith("_source_"))
+    position = batch.schema.get_field_index(column)
+    tokens = pa.large_list(pa.large_string())
+    listed = pa.RecordBatch.from_arrays(
+        [
+            *batch.columns[:position],
+            pa.array([["t"]] * batch.num_rows, tokens),
+            *batch.columns[position + 1 :],
+        ],
+        schema=batch.schema.set(position, pa.field(column, tokens, nullable=True)),
+    )
+
+    async def write() -> None:
+        output = OutputChannel(stream)
+        await output.send(batch)
+        await output.send(listed)
+
+    with pytest.raises(SourceInfoTypesDisagree, match=column):
+        run(write)

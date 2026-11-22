@@ -172,6 +172,7 @@ class PostgreSQLTableSource(DBTableSource):
 
     SOURCE_KIND: ClassVar[str] = "postgresql_table"
     """Config type key and default source-id kind of this source (one vocabulary)."""
+    TABLE_IS_ROWS: ClassVar[bool] = True
 
     def __init__(
         self,

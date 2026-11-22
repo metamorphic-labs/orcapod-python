@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import functools
+import inspect
 import logging
 from abc import abstractmethod
 from collections import deque
@@ -22,6 +24,7 @@ import polars as pl
 import pyarrow as pa
 
 from orcapod.core.base import TraceableBase
+from orcapod.core.data_tags import data_tag_names
 from orcapod.core.streams.record_batch_input import SOURCE_BATCH_ROWS, InputChannel
 from orcapod.core.streams.view import (
     SCHEMA_NEEDS_POLL_NOTE,
@@ -45,6 +48,59 @@ from orcapod.utils import arrow_utils
 # from types import MappingProxyType
 
 logger = logging.getLogger(__name__)
+
+
+def reads_as_its_class(obj: object, cls: type) -> bool:
+    """Whether ``obj`` is exactly ``cls`` and reads only through ``cls``'s own members.
+
+    Exact, never by inspection of what a subclass overrides: ``type(obj) is cls``, and
+    ``obj`` holds no attribute of its own that shadows a method or a property of
+    ``cls`` (an ``iter_data`` replaced on the instance). A ``functools.cached_property``
+    keeps its value in the instance by design and is not a shadow. A subclass, however
+    small, is never ``cls`` here (ITL-1347).
+
+    Args:
+        obj: The object to check.
+        cls: The class whose reading is proven.
+
+    Returns:
+        Whether ``obj`` reads as ``cls`` does.
+    """
+    if type(obj) is not cls:
+        return False
+    own = getattr(obj, "__dict__", None)
+    if not own:
+        return True
+    missing = object()
+    for name in own:
+        member = inspect.getattr_static(cls, name, missing)
+        if member is missing or isinstance(member, functools.cached_property):
+            continue
+        if callable(member) or hasattr(type(member), "__get__"):
+            return False
+    return True
+
+
+def system_tags_as_rows_give(schema: pa.Schema) -> bool:
+    """Whether every system-tag field is what the row rebuild gives: non-null text.
+
+    ``main`` rebuilt a node's table from its rows, whose system tags are typed from
+    their values: a ``large_string`` field, non-nullable (the only kind library code
+    makes). A whole table is its rows only when its system tags are already so; a
+    narrow integer, a nullable field or any other type is decided by the rows
+    (ITL-1347).
+
+    Args:
+        schema: The table's schema.
+
+    Returns:
+        Whether every system-tag field is non-nullable ``large_string``.
+    """
+    return all(
+        field.type == pa.large_string() and not field.nullable
+        for field in schema
+        if field.name.startswith(constants.SYSTEM_TAG_PREFIX)
+    )
 
 
 def schema_requires_io(stream: object, config: ColumnConfig) -> bool:
@@ -334,6 +390,121 @@ def row_built_names(
         if f"{constants.SOURCE_PREFIX}{n}" in present
     ]
     return [*tag_keys, *system_tags, *data, *source_info]
+
+
+def keys_of_rows(
+    table: pa.Table, keys: tuple[Sequence[str], Sequence[str]]
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return the tag and data keys a source's rows have, given its table and ``keys()``.
+
+    A source's rows come from a stream over its table (``ArrowTableStream``), whose rows
+    list their tags in the stream's tag order and their data with the data-tags first,
+    in tag order, then the other data columns in the table's order. A source whose
+    ``keys()`` states its declared order (a ``PollingSource`` whose fetched table has
+    another column order) has rows in the table's order all the same, as a table built
+    from its rows does (Codex on PR #485).
+
+    Args:
+        table: The source's table, as its rows are read from it.
+        keys: The source's ``keys()``.
+
+    Returns:
+        The tag keys, and the data keys in the order of the rows.
+    """
+    tag_keys, data_keys = (tuple(keys[0]), tuple(keys[1]))
+    data_tags = data_tag_names(tag_keys, data_keys)
+    data = set(data_keys) - set(tag_keys)
+    in_table = tuple(name for name in table.column_names if name in data)
+    return tag_keys, (*data_tags, *in_table)
+
+
+def stream_arrow_schema(
+    stream: object,
+    keys: tuple[Sequence[str], Sequence[str]] | None = None,
+    *,
+    from_table: bool = True,
+) -> pa.Schema:
+    """Return ``stream``'s declared Arrow schema: what ``arrow_schema()`` answers (ITL-1347).
+
+    The schema of the columns a job node passes on, without reading, computing or
+    polling a row: the stream's zero-row input (``typed_zero_row_input``, the Arrow types
+    its rows have) with the columns of F, in F's order
+    (``row_built_names``: user tags, system tags, data, source
+    info, data and source info in data-key order), with no context and no meta column. A
+    stream that cannot type itself without rows answers with its Python schema
+    converted by its data context (``arrow_types_declared`` is then false), and one
+    whose schema is known only by polling (nothing declared, nothing polled:
+    ``schema_requires_io``) answers with no column. Each
+    system-tag and source-info field is stated nullable: a table decides its flag from
+    its values (F's last step). A source-info field's type is stated as the declared
+    token type; a complete table decides it from its tokens
+    (``StaticOutputOperatorPod._type_source_info_by_values``), so consumers must not
+    rely on it. A ``null`` column keeps the zero-row ``null`` type; rows
+    carry ``large_string`` (ITL-1319). ITL-1307 later reads it from ``Schema`` instead,
+    here.
+
+    Args:
+        stream: The stream, source or node.
+        keys: The tag and data keys of the stream's rows, when they differ from
+            ``keys()`` (a source slot gives its bound source's rows); default ``keys()``.
+        from_table: Take the stream's typed zero-row table (``typed_zero_row_input``);
+            ``False`` describes it from its declared Python schema only (a narrower
+            bind, whose rows ``main``'s row path places).
+
+    Returns:
+        The declared Arrow schema.
+    """
+    from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+
+    typed = cast(StreamProtocol, stream)
+    given_keys = keys
+    table = typed_zero_row_input(stream) if from_table else None
+    if table is None and schema_requires_io(stream, ColumnConfig(system_tags=True)):
+        # Nothing declared, nothing polled (a poller with no declared schema): the
+        # columns are known only from rows, and a description never polls. No column,
+        # as a head says (``SCHEMA_NEEDS_POLL_NOTE``); ``arrow_types_declared`` is false.
+        return pa.schema([])
+    if table is None:
+        # Only what the stream declares: asking for its source-info columns would make
+        # a source that has not polled poll (a description never computes, polls or
+        # reads). A source's tokens are strings, so each data column's source info is
+        # a string field.
+        tag_schema, data_schema = typed.output_schema(columns={"system_tags": True})
+        stated = getattr(stream, "arrow_schemas", None)
+        if isinstance(stated, tuple):
+            # The Arrow types the stream declares itself (a slot): never a conversion
+            # of its Python types, which may have no Arrow type of their own.
+            tag_arrow, data_arrow = cast("tuple[pa.Schema, pa.Schema]", stated)
+            fields = [
+                *tag_arrow,
+                *(
+                    pa.field(name, pa.large_string())
+                    for name in tag_schema
+                    if name not in tag_arrow.names
+                ),
+                *(f for f in data_arrow if f.name not in tag_arrow.names),
+            ]
+            table = pa.schema(fields).empty_table()
+        else:
+            converter = StaticOutputOperatorPod._upstream_context(typed).type_converter  # pyright: ignore[reportPrivateUsage]  # the one place that resolves an upstream's context
+            table = arrow_utils.make_empty_table(
+                {**tag_schema, **data_schema}, converter
+            )
+        for name in data_schema:
+            table = table.append_column(
+                pa.field(f"{constants.SOURCE_PREFIX}{name}", pa.large_string()),
+                pa.array([], pa.large_string()),
+            )
+    # The rows' keys: the data in the order of the stream's table (a poller that
+    # fetched its columns in another order than it declares lists them so).
+    keys = given_keys if given_keys is not None else keys_of_rows(table, typed.keys())
+    names = row_built_names(table.column_names, keys)
+    schema = row_built_provenance(table.select(names)).schema
+    prefixes = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
+    for index, field in enumerate(schema):
+        if field.name.startswith(prefixes):
+            schema = schema.set(index, field.with_nullable(True))  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
+    return schema
 
 
 class CompleteStreamFeed:
@@ -1120,6 +1291,18 @@ class StreamBase(TraceableBase):
         from orcapod.core.operators import Index
 
         return Index(column, i, out=out, fail_on_miss=fail_on_miss)(self, label=label)
+
+    def arrow_schema(self) -> pa.Schema:
+        """The Arrow schema of the columns this stream passes between job nodes.
+
+        See ``stream_arrow_schema`` (ITL-1347): never reads, computes or polls a row.
+        """
+        return stream_arrow_schema(self)
+
+    @property
+    def arrow_types_declared(self) -> bool:
+        """Whether ``arrow_schema()`` holds the rows' own Arrow types (ITL-1089, ITL-1347)."""
+        return typed_zero_row_table(self) is not None
 
     @abstractmethod
     def keys(

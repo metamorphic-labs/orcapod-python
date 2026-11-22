@@ -194,9 +194,13 @@ A run checks its sources first (ITL-1102), which polls them.
 **ITL-1307 later.** When `Schema` carries its Arrow schema, `arrow_schema()` reads the two
 schemas plus the system-tag and source-info fields, in one place (`StreamBase`).
 
-Two exceptions keep today's bytes:
-- **Source-info nullability** is decided by a complete Arrow table's values (F step 5).
-  `arrow_schema()` states those fields nullable (question 5).
+Three exceptions keep today's bytes:
+- **Source-info and system-tag nullability** is decided by a complete Arrow table's values
+  (F step 5). `arrow_schema()` states those fields nullable (question 5).
+- **Source-info types** are decided by a complete Arrow table's tokens, as each row types
+  its tokens from their values (`_type_source_info_by_values`): a list of `None` or of
+  empty lists shows fewer list levels than its column declares. `arrow_schema()` states the
+  declared token type; consumers must not rely on it (Codex on PR #485).
 - **`null` columns.** Rows carry `large_string`, and a zero-row Arrow table carries `null`, as
   today (ITL-1319).
 
@@ -511,7 +515,33 @@ rows; they are kept as `main` has them, and documented below.
 
 **No row changes a sync-path result.** On the sync path the branch equals `main` byte for
 byte. Stages 1–4 hold this by construction and by L0–L5, and a lemma that fails stops its
-stage.
+stage. Where building a node's output from its whole table is not provably `main`'s result
+(a narrower bind, a whole-table build that is unavailable, an odd stored table, a held
+node, a node whose output is still its rows), the node hands on its rows and the table is
+built from them by `main`'s row path where a successor reads them (`RowsOnRead`,
+`at_edge`): `main`'s order, error and moment by construction (Codex on PR #485, round 3).
+"Provably" is one precondition, positive and exact, never an inspection of overrides
+(Codex on PR #485, final check and round 7): **the stream that holds the rows is exactly a
+class whose whole-table read is its rows, nothing on the instance shadows one of that
+class's methods or properties** (`reads_as_its_class`), **its rows report the node's data
+context, and every system-tag field of its table is what the rows give, non-null
+`large_string`** (`system_tags_as_rows_give`). It is applied in two places:
+
+- a bound source: its class is a library source kind that itself declares
+  `TABLE_IS_ROWS` (`table_is_rows`);
+- an operator's result: the stream it yields its rows from, followed through every
+  `DynamicPodStream` that is itself proven (`produced_stream`; a subclass or a wrapper
+  with a replaced member stops the chain), is `ArrowTableStream` in the node's data
+  context (its rows report that context, as `main`'s rows did), and its own `keys()` (the
+  keys `iter_data` reads its rows with, tags in its tag-column order) give the order.
+
+Any subclass, replaced reader, other stream kind, other data context or other system-tag
+type takes `main`'s row path. A retained output held as its rows (`RowsOnRead`) keeps
+only its rows once every successor has read it (`release_built`), as `main` retained
+only the rows.
+An observer or callback that changes the job, its nodes or its bound sources during a run
+is unsupported; what the run then does is undefined and is not part of the equality with
+`main` (ITL-1369; developer, November 22, 2026).
 
 | # | What differs | On `main` today | On the branch | Why `main` is wrong (bug, reproducer) | Approval needed |
 |---|---|---|---|---|---|

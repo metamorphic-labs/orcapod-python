@@ -191,6 +191,7 @@ class DerivedSource(RootSource):
     # The config type key (names the class a saved config is rebuilt with) and
     # the kind prefix of the plain form's default source id.
     SOURCE_KIND: ClassVar[str] = "derived"
+    TABLE_IS_ROWS: ClassVar[bool] = True
     PROVISIONAL = True
     """Provisional in data context v1, both forms (ITL-1331, ``PROVISIONAL_SOURCES``)."""
 

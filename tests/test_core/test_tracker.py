@@ -251,7 +251,7 @@ class TestSourceNode:
         """execute() on SourceJobNode returns all data rows."""
         stream = _make_source()
         node = self._make_job_node(stream)
-        result = node.execute()
+        result = list(node.execute().iter_data())
         assert len(result) == stream.as_table().num_rows
 
     def test_data_context_key(self):

@@ -172,6 +172,41 @@ class StreamProtocol(TraceableProtocol, PipelineElementProtocol, Protocol):
         """
         ...
 
+    def arrow_schema(self) -> "pa.Schema":
+        """The Arrow schema of the columns the stream passes between job nodes.
+
+        The user tags, system tags, data and source-info columns, in row order (user
+        tags, system tags, data, source info; data and source info in data-key order),
+        with the Arrow types, nullability and field metadata of the rows; no context and
+        no meta column (ITL-1347). Known without reading, computing or polling a row.
+        Three properties are decided by the values of a complete table, not by the
+        description: whether a system-tag or source-info field is nullable (stated
+        nullable here), and a source-info field's type (stated as the declared token
+        type; a list of ``None`` or of empty lists shows fewer levels, so consumers must
+        not rely on it). And a ``null`` column keeps the ``null`` type a zero-row table
+        has (rows carry ``large_string``; ITL-1319).
+
+        Returns:
+            The declared Arrow schema.
+        """
+        ...
+
+    @property
+    def arrow_types_declared(self) -> bool:
+        """Whether ``arrow_schema()`` holds the rows' own Arrow types.
+
+        ``False`` when the stream cannot type itself without rows (an unbound slot, a
+        ``PollingSource`` never polled; ITL-1089), or its rows decide its types (a
+        narrower bind, an output held as its rows). Its schema is then the best
+        description available without reading a row: a slot's or source's explicit
+        Arrow declaration when it states one, otherwise its Python schema converted;
+        a source whose schema is known only by polling, and which has not polled, has
+        an empty schema. So a ``False`` description is not guaranteed to hold the
+        stream's column names, and the names it holds come in no guaranteed order; no
+        consumer relies on either (ITL-1347).
+        """
+        ...
+
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         """
         Generates explicit iterator over (tag, data) pairs in the stream.

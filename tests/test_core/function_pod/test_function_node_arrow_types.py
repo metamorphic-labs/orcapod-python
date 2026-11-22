@@ -303,7 +303,8 @@ def test_new_rows_over_a_store_written_before_the_fix_raise_naming_the_column(
 
     A Delta database written before ITL-928 gives a ``uint32`` tag back as ``int32``:
     rows served from it and rows computed now disagree, and the node says so instead
-    of picking a type. Such a database must be rebuilt.
+    of picking a type. Such a database must be rebuilt. A leaf's run completes (its
+    rows are never built into one table, ``RowsOnRead``), as on ``main``.
     """
     _build(DeltaTableDatabase(tmp_path), _source_table("uint32").slice(0, 2)).run()
     _as_written_before_the_fix(tmp_path)
@@ -317,6 +318,30 @@ def test_new_rows_over_a_store_written_before_the_fix_raise_naming_the_column(
     assert "'k'" in message
     assert "int32" in message
     assert "uint32" in message
+
+
+def test_rows_over_a_store_written_before_the_fix_fail_at_the_successor(
+    tmp_path: pathlib.Path,
+) -> None:
+    """With a successor, the run fails where the rows are built for it, as on ``main``.
+
+    The node's rows are built into one table where its successor reads them
+    (``at_edge``): the concatenation raises ``ArrowInvalid`` there, as ``main``'s row
+    rebuild does. The computed row is stored, as on ``main``.
+    """
+    _build(
+        DeltaTableDatabase(tmp_path), _source_table("uint32").slice(0, 2), chained=True
+    ).run()
+    _as_written_before_the_fix(tmp_path)
+    job = _build(DeltaTableDatabase(tmp_path), _source_table("uint32"), chained=True)
+
+    with pytest.raises(pa.ArrowInvalid):
+        job.run()
+
+    stored = _build(DeltaTableDatabase(tmp_path), _source_table("uint32"))
+    records = stored.nodes["double"].get_all_records()
+    assert records is not None
+    assert records.num_rows == 3
 
 
 def test_new_rows_over_a_store_written_after_the_fix_keep_the_tag_type(
@@ -376,3 +401,111 @@ def test_a_null_typed_row_is_compared_as_null() -> None:
 
     with pytest.raises(InputValidationError, match="'k': null and int64"):
         _concat_row_tables(rows)
+
+
+@pytest.mark.parametrize("materialize_results", [True, False])
+def test_an_async_run_over_a_store_written_before_the_fix_finishes(
+    materialize_results: bool, tmp_path: pathlib.Path
+) -> None:
+    """e9 is sync only: an async run over such a store finishes and holds its rows.
+
+    The async orchestrator builds a node's output stream when it is read
+    (``StreamsOnRead``), so the run finishes as on ``main`` with either value of
+    ``materialize_results``; reading the node's rows as one table raises, as it does
+    on ``main``.
+    """
+    from orcapod.pipeline import AsyncPipelineOrchestrator
+
+    _build(DeltaTableDatabase(tmp_path), _source_table("uint32").slice(0, 2)).run()
+    _as_written_before_the_fix(tmp_path)
+    job = _build(DeltaTableDatabase(tmp_path), _source_table("uint32"))
+    job.run(
+        orchestrator=AsyncPipelineOrchestrator(),
+        materialize_results=materialize_results,
+    )
+
+    node = job.nodes["double"]
+    assert len(list(node.iter_data())) == 3
+    with pytest.raises(InputValidationError, match="'k'"):
+        node.as_table()
+
+
+def test_a_second_async_run_holds_the_node_and_sends_its_rows(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The plan builds no held stream for an async run: it sends the held rows as on main.
+
+    Over a store written before ITL-928, the held ``double`` holds rows that cannot
+    make one table; a second async run (``increment`` cleared) holds it and sends its
+    three rows on, as on ``main`` (Codex on PR #485, round 2).
+    """
+    from orcapod.pipeline import AsyncPipelineOrchestrator
+    from orcapod.pipeline.observer import NoOpObserver
+
+    class DataStarts(NoOpObserver):
+        def __init__(self) -> None:
+            self.count = 0
+
+        def contextualize(self, *identity_path: str) -> DataStarts:
+            return self
+
+        def on_data_start(self, node_label: str, tag: Any, data: Any) -> None:
+            if node_label == "increment":
+                self.count += 1
+
+    _build(
+        DeltaTableDatabase(tmp_path), _source_table("uint32").slice(0, 2), chained=True
+    ).run()
+    _as_written_before_the_fix(tmp_path)
+    job = _build(DeltaTableDatabase(tmp_path), _source_table("uint32"), chained=True)
+    job.run(orchestrator=AsyncPipelineOrchestrator())
+    job.nodes["increment"].clear_cache()
+    observer = DataStarts()
+    summary = job.run(orchestrator=AsyncPipelineOrchestrator(), observer=observer)
+    assert summary.nodes["double"].held == 3
+    assert observer.count == 3
+
+
+def test_a_held_nodes_rows_are_built_at_its_successors_edge(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A held node's rows are built where its successor reads them, as on ``main``.
+
+    A direct sync run: ``double`` held (its rows cannot make one table), an independent
+    source, then ``increment`` after ``double``. The independent source runs before
+    ``increment``'s input is built and raises (Codex on PR #485, round 3).
+    """
+    from orcapod.core.operators.static_output_pod import rows_on_read
+    from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
+    from orcapod.pipeline.dag import OrcaDAG
+    from orcapod.pipeline.observer import NoOpObserver
+
+    _build(
+        DeltaTableDatabase(tmp_path), _source_table("uint32").slice(0, 2), chained=True
+    ).run()
+    _as_written_before_the_fix(tmp_path)
+    job = _build(DeltaTableDatabase(tmp_path), _source_table("uint32"), chained=True)
+    job.run(orchestrator=AsyncPipelineOrchestrator())
+    double, increment = job.nodes["double"], job.nodes["increment"]
+    increment.clear_cache()
+    independent = _build(InMemoryArrowDatabase(), _source_table("uint32")).nodes["src"]
+
+    starts: list[str] = []
+
+    class Starts(NoOpObserver):
+        def contextualize(self, *identity_path: str) -> Starts:
+            return self
+
+        def on_node_start(
+            self, node_label: str, node_hash: str, tag_schema: Any = None
+        ) -> None:
+            starts.append(node_label)
+
+    dag: OrcaDAG[Any] = OrcaDAG()
+    dag.add_node(double)
+    dag.add_node(independent)
+    dag.add_edge(double, increment)
+    held = {double: rows_on_read(double.iter_data(), double)}
+    with pytest.raises(pa.ArrowInvalid):
+        SyncPipelineOrchestrator().run(dag, observer=Starts(), held=held)
+    assert starts == ["src"]

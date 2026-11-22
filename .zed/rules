@@ -1501,6 +1501,10 @@ data. The rules:
   are not concerned. The refusal is for now: how an operator node logs and replays is to be
   redesigned to load its cache and then apply the restriction (TODO(ITL-1219)).
 - Empty data → ArrowTableSource raises ValueError("Table is empty").
+- An observer only watches (developer, November 22, 2026, ITL-1369): an observer or callback
+  that changes the job, its nodes or its bound sources during a run is unsupported; what the
+  run then does is undefined and is not part of the equality with main. Preventing it (a
+  guard, then a read-only view) is ITL-1369; never chase a case that needs such a change.
 - A side-effect job node delivers only when it runs (developer, November 13, 2026, ITL-1091):
   job.run(), node.run() (state-driven, ITL-1095: a node holding a current run delivers
   nothing, so clear_cache() it first to deliver again; otherwise the job run's work for that
