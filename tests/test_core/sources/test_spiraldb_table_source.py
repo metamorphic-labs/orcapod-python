@@ -24,13 +24,14 @@ from __future__ import annotations
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
 import pyarrow as pa
 import pytest
 
 from orcapod.core.sources import SpiralDBTableSource
 from orcapod.databases import SpiralDBConnector
+from orcapod.databases.spiraldb_connector import SpiralDBTable
 from tests.test_databases import fake_pyspiral
 
 _TABLE_NAME = "spike_data"
@@ -228,7 +229,10 @@ class TestErrorCases:
     def test_a_table_without_a_key_schema_raises(self, tag_columns):
         """Rows are identified by their primary key, so a key schema is required."""
         _make_table()
-        with patch.object(SpiralDBConnector, "get_pk_columns", return_value=[]):
+        # The source reads the key from its one lookup of the table (ITL-1350).
+        with patch.object(
+            SpiralDBTable, "key_columns", new_callable=PropertyMock, return_value=[]
+        ):
             with pytest.raises(ValueError, match="no primary key"):
                 SpiralDBTableSource(
                     _PROJECT_ID,
