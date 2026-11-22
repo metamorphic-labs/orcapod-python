@@ -16,6 +16,7 @@ from orcapod.channels import (
     WritableChannel,
 )
 from orcapod.core.operators.base import UnaryOperator
+from orcapod.core.operators.static_output_pod import with_open_provenance_flags
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.streams import ArrowTableStream
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
@@ -295,7 +296,11 @@ class Batch(UnaryOperator):
             waiting: list[pa.RecordBatch] = []
             rows = 0
             async for batch in channel:
-                waiting.append(batch)
+                if not batch.num_rows:
+                    continue  # nothing to batch, nothing to hold
+                # Arrived batches may differ in their provenance flags: open them so
+                # they concatenate (the flags are set again by the values).
+                waiting.append(with_open_provenance_flags(batch))
                 rows += batch.num_rows
                 full = rows - rows % self.batch_size
                 if not full:

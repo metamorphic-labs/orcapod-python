@@ -359,6 +359,214 @@ def test_what_a_description_does_not_say_is_accepted() -> None:
     assert table.schema.field("_source_x").nullable  # one token is null
 
 
+def test_a_batch_in_another_representation_is_refused() -> None:
+    """Type strictness at ``send``: exactly the description's types in their large
+    variants (``string`` for a ``large_string`` column is refused, never converted),
+    the description's field metadata, and only nulls where the description has
+    ``null``."""
+    stream = source()
+    (batch,) = batches_of(stream)
+    note = batch.schema.get_field_index("note")
+    narrow = batch.set_column(note, "note", batch.column("note").cast(pa.string()))
+    tagged = pa.RecordBatch.from_arrays(
+        batch.columns,
+        schema=batch.schema.set(
+            note, batch.schema.field(note).with_metadata({"unit": "mV"})
+        ),
+    )
+    nulls = ArrowTableStream(
+        pa.table(
+            {
+                "k": pa.array([1, 2], pa.int64()),
+                "x": pa.array([1.5, 2.5], pa.float64()),
+                "unknown": pa.array([None, None], pa.null()),
+            }
+        ),
+        tag_columns=["k"],
+    )
+    (null_batch,) = batches_of(nulls)
+    unknown = null_batch.schema.get_field_index("unknown")
+    filled = null_batch.set_column(
+        unknown,
+        null_batch.schema.field(unknown),
+        pa.array(["a value", None], pa.large_string()),
+    )
+
+    async def write() -> None:
+        output = OutputChannel(stream)
+        with pytest.raises(ValueError, match="column 'note' is string"):
+            await output.send(narrow)
+        with pytest.raises(ValueError, match="column 'note' has field metadata"):
+            await output.send(tagged)
+        await output.send(batch)
+        null_output = OutputChannel(nulls)
+        with pytest.raises(ValueError, match="'unknown' holds values"):
+            await null_output.send(filled)
+        await null_output.send(null_batch)
+
+    run(write)
+
+
+def test_a_batch_with_no_rows_is_checked_and_not_kept() -> None:
+    """A zero-row batch is not held, retained or queued, and no reader gets it."""
+    stream = source(3)
+    (batch,) = batches_of(stream)
+    empty = batch.slice(0, 0)
+
+    async def write() -> tuple[list[int], list[int], int]:
+        kept = OutputChannel(stream)
+        queued = OutputChannel(stream, retain=False, buffer_size=1)
+        reader = queued.open_reader()
+        for output in (kept, queued):
+            for _ in range(3):
+                await output.send(empty)  # never waits, also with one slot
+            with pytest.raises(ValueError):
+                await output.send(empty.rename_columns(["x"] * empty.num_columns))
+        await kept.send(batch)
+        await kept.close()
+        await queued.close()
+        late = kept.open_reader()
+        return (
+            [b.num_rows for b in await late.collect()],
+            [b.num_rows for b in await reader.collect()],
+            kept.result().as_table().num_rows,
+        )
+
+    assert run(write) == ([3], [], 3)
+
+
+@pytest.mark.parametrize("ending", ["close", "fail"])
+def test_a_waiting_send_ends_when_the_channel_ends(ending: str) -> None:
+    """A send waiting for a reader's room when the channel is closed or failed raises
+    at once (``ChannelClosed``, or the failure) and its batch is never delivered."""
+    stream = source(2)
+    first, second = batches_of(stream, 1)
+    boom = OSError("disk gone")
+
+    async def write() -> tuple[type[object], list[int]]:
+        output = OutputChannel(stream, retain=False, buffer_size=1)
+        reader = output.open_reader()
+        await output.send(first)  # fills the one slot
+        waiting = asyncio.ensure_future(output.send(second))
+        await asyncio.sleep(0)
+        assert not waiting.done()
+        if ending == "close":
+            await output.close()
+        else:
+            output.fail(boom)
+        raised = await asyncio.wait_for(
+            asyncio.gather(waiting, return_exceptions=True), 1
+        )
+        delivered: list[int] = []
+        try:
+            async for batch in reader:
+                delivered.append(batch.num_rows)
+        except UpstreamFailedError:
+            pass
+        return type(raised[0]), delivered
+
+    raised, delivered = run(write)
+    if ending == "close":
+        assert raised is ChannelClosed
+        assert delivered == [1]  # the batch sent before the close, not the waiting one
+    else:
+        assert raised is UpstreamFailedError
+        assert delivered == []  # a failure is seen at once
+
+
+@pytest.mark.parametrize("ending", ["close", "fail"])
+def test_a_send_scheduled_before_the_end_of_a_retained_output_publishes_nothing(
+    ending: str,
+) -> None:
+    """Retained: a send that has not run when the channel ends raises, and the result
+    and every reader hold only what was sent before."""
+    stream = source(2)
+    first, second = batches_of(stream, 1)
+
+    async def write() -> tuple[type[object], list[int]]:
+        output = OutputChannel(stream)
+        await output.send(first)
+        scheduled = asyncio.ensure_future(output.send(second))
+        if ending == "close":
+            await output.close()
+        else:
+            output.fail(OSError("disk gone"))
+        (raised,) = await asyncio.gather(scheduled, return_exceptions=True)
+        rows = [first.num_rows]
+        if ending == "close":
+            rows = [b.num_rows for b in await output.open_reader().collect()]
+            assert output.result().as_table().num_rows == 1
+        return type(raised), rows
+
+    raised, rows = run(write)
+    assert raised is (ChannelClosed if ending == "close" else UpstreamFailedError)
+    assert rows == [1]
+
+
+def test_to_stream_of_a_channel_closed_before_its_end_raises() -> None:
+    """A reader closed while ``to_stream()`` (or ``collect()``) reads never makes part
+    of an input into a stream."""
+    stream = source(2)
+    first, second = batches_of(stream, 1)
+
+    async def write() -> None:
+        for read in ("to_stream", "collect"):
+            output = OutputChannel(stream, retain=False, buffer_size=4)
+            reader = output.open_reader()
+            reading = asyncio.ensure_future(getattr(reader, read)())
+            await output.send(first)
+            await asyncio.sleep(0)
+            await reader.close()
+            await output.send(second)
+            await output.close()
+            with pytest.raises(ChannelClosed, match="closed before its producer"):
+                _ = await reading
+
+    run(write)
+
+
+def test_a_cancelled_read_closes_the_reader_and_frees_the_producer() -> None:
+    """Cancelling a waiting ``receive()`` closes that reader: the producer is not held
+    by a consumer that stopped reading."""
+    stream = source(3)
+    batches = batches_of(stream, 1)
+
+    async def write() -> None:
+        output = OutputChannel(stream, retain=False, buffer_size=1)
+        reader = output.open_reader()
+        waiting = asyncio.ensure_future(reader.receive())
+        await asyncio.sleep(0)
+        _ = waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            _ = await waiting
+        for batch in batches:  # would wait forever on the abandoned reader
+            await asyncio.wait_for(output.send(batch), 1)
+        with pytest.raises(ChannelClosed):
+            _ = await reader.receive()
+
+    run(write)
+
+
+def test_a_closed_reader_is_unregistered() -> None:
+    """``close()`` removes the reader from its output channel: readers opened and
+    closed leave nothing for a send to walk."""
+    stream = source(2)
+    batches = batches_of(stream, 1)
+
+    async def write() -> int:
+        output = OutputChannel(stream, retain=False)
+        for _ in range(100):
+            await output.open_reader().close()
+        staying = output.open_reader()
+        for batch in batches:
+            await output.send(batch)
+        await output.close()
+        assert len(await staying.collect()) == 2
+        return len(output._readers)  # pyright: ignore[reportPrivateUsage]  # registration is what is tested
+
+    assert run(write) == 1
+
+
 # --- Retained output: readers at their own position, send never waits -------------------
 
 
@@ -523,8 +731,9 @@ def test_a_failed_producer_is_never_a_normal_end(retain: bool) -> None:
         output.fail(boom)
         output.fail(RuntimeError("a second failure changes nothing"))
         await output.close()  # nor does a close
-        with pytest.raises(ChannelClosed):
+        with pytest.raises(UpstreamFailedError) as refused:
             await output.send(batches[1])
+        assert refused.value.__cause__ is boom
         with pytest.raises(RuntimeError, match="has no result"):
             _ = output.result()
         errors: list[BaseException] = []

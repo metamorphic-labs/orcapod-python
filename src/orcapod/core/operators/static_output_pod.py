@@ -949,6 +949,12 @@ class StaticOutputOperatorPod(TraceableBase):
         the sync call, so an input with no rows gives the typed zero-row result of
         the sync path, with no row to send.
 
+        The result is held to what a job's sync path gives: the operator over each
+        upstream rebuilt from its rows (``_materialize_upstream``: ``null`` as
+        ``large_string``, the columns in row order), not over the raw stream the rows
+        came from. A predicate that reads a ``null`` column's type or the column order
+        follows that form (documented behaviour, e5).
+
         The output is closed when the operator is done. If it fails or is cancelled,
         the output fails instead, so no reader takes it for complete; every input is
         closed in either case.
@@ -1041,7 +1047,9 @@ def transport_schema(stream: StreamProtocol) -> pa.Schema | None:
     """Return the schema ``stream``'s record batches have, from its description.
 
     Never computes, reads or polls a row: it is the schema of the stream's zero-row
-    input, as its record batches carry it (``_row_built_columns``).
+    input in the row-built form (``_row_built_columns``), except that a ``null`` type
+    is kept, as the description declares it (record batches carry it as
+    ``large_string``, holding only nulls).
 
     Args:
         stream: The describing stream.
@@ -1054,9 +1062,20 @@ def transport_schema(stream: StreamProtocol) -> pa.Schema | None:
     typed = StaticOutputOperatorPod._zero_row_input(stream)  # pyright: ignore[reportPrivateUsage]  # the zero-row form of an input
     if typed is None:
         return None
-    return StaticOutputOperatorPod._row_built_columns(  # pyright: ignore[reportPrivateUsage]  # F, stage 2's
-        typed.as_table(columns=ZERO_ROW_INPUT_COLUMNS), stream.keys()
-    ).schema
+    from orcapod.utils import arrow_utils
+
+    zero_rows = typed.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+    built = StaticOutputOperatorPod._row_built_columns(zero_rows, stream.keys())  # pyright: ignore[reportPrivateUsage]  # F, stage 2's
+    return pa.schema(
+        [
+            field.with_type(
+                arrow_utils.normalize_to_large_types(
+                    zero_rows.schema.field(field.name).type, keep_null=True
+                )
+            )
+            for field in built.schema
+        ]
+    )
 
 
 def stream_from_batches(
@@ -1084,11 +1103,11 @@ def stream_from_batches(
     """
     if not batches:
         return StaticOutputOperatorPod._materialize_upstream([], stream)  # pyright: ignore[reportPrivateUsage]  # the zero-row input of an operator
-    table = pa.Table.from_batches([_with_open_provenance_flags(b) for b in batches])
+    table = pa.Table.from_batches([with_open_provenance_flags(b) for b in batches])
     return StaticOutputOperatorPod._output_stream(table, stream.keys(), stream)  # pyright: ignore[reportPrivateUsage]  # F and the identity, stage 2's
 
 
-def _with_open_provenance_flags(batch: pa.RecordBatch) -> pa.RecordBatch:
+def with_open_provenance_flags(batch: pa.RecordBatch) -> pa.RecordBatch:
     """Flag every system-tag and source-info field of ``batch`` nullable.
 
     Record batches of one channel differ at most in these flags: each is built from its

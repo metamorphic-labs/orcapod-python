@@ -20,20 +20,22 @@ from __future__ import annotations
 import asyncio
 import itertools
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
+import polars as pl
 import pyarrow as pa
 import pytest
 
 import orcapod.core.operators as operators
-from orcapod.core.operators import Batch
+from orcapod.core.operators import AddTags, Batch, PolarsFilter, SelectDataColumns
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.record_batch_channels import (
     InputChannel,
     OutputChannel,
     channel_from_stream,
 )
+from orcapod.core.streams import ArrowTableStream
 from orcapod.protocols.core_protocols import StreamProtocol
 from tests.test_core.operators.test_async_sync_equivalence import (
     AFTER_OPERATOR_CASES,
@@ -319,3 +321,211 @@ def test_batch_sends_each_full_batch_before_the_input_ends() -> None:
         return first.num_rows, sum(batch.num_rows for batch in rest)
 
     assert asyncio.run(go()) == (1, 1)
+
+
+# --- The oracle of a barrier operator: what a job's sync path gives it ------------------
+
+
+def _outcome(make: Callable[[], StreamProtocol]) -> tuple[str, Any]:
+    """The rows a stream gives, or the kind of error that refuses it."""
+    try:
+        return ("rows", make().as_table().to_pylist())
+    except Exception as error:  # noqa: BLE001  # the refusal is the outcome compared
+        return ("refused", type(error).__name__)
+
+
+BARRIER_ORACLE_CASES: dict[
+    str, tuple[Callable[[], StreamProtocol], Callable[[], StaticOutputOperatorPod]]
+] = {
+    # A null column reaches an operator as large_string (a row's datagram stores it so).
+    "null_column": (
+        lambda: ArrowTableStream(
+            pa.table(
+                {
+                    "k": pa.array([1, 2, 3], pa.int64()),
+                    "x": pa.array([None, None, None], pa.null()),
+                    "y": pa.array([1, 2, 3], pa.int64()),
+                }
+            ),
+            tag_columns=["k"],
+        ),
+        lambda: PolarsFilter([(pl.col("x") + 1).is_null()]),
+    ),
+    # A predicate that selects by position reads the columns in row order.
+    "position_predicate": (
+        lambda: ArrowTableStream(
+            pa.table(
+                {
+                    "x": pa.array([2, -4], pa.int64()),
+                    "k": pa.array([-1, 2], pa.int64()),
+                    "z": pa.array([10, 20], pa.int64()),
+                    "j": pa.array([5, 6], pa.int64()),
+                }
+            ),
+            tag_columns=["k", "j"],
+        ),
+        lambda: PolarsFilter([pl.first() > 0]),
+    ),
+}
+
+
+@pytest.mark.parametrize("label", list(BARRIER_ORACLE_CASES))
+def test_a_barrier_operator_sees_its_input_as_a_job_gives_it(label: str) -> None:
+    """The record-batch form is held to what a job's sync path gives an operator: the
+    upstream rebuilt from its rows (``_materialize_upstream``: ``null`` as
+    ``large_string``, the columns in row order), not the raw stream it came from. A
+    predicate that reads a ``null`` column's type or the column order follows that
+    form (documented behaviour, e5); in a job neither case reaches an operator: a
+    source refuses a ``null`` column, and a job refuses an expression that selects
+    columns by position."""
+    make_stream, make_op = BARRIER_ORACLE_CASES[label]
+    stream = make_stream()
+    oracle = _outcome(
+        lambda: make_op()(
+            StaticOutputOperatorPod._materialize_upstream(  # pyright: ignore[reportPrivateUsage]  # the job's sync input
+                list(stream.iter_data()), stream
+            )
+        )
+    )
+    assert _outcome(lambda: run_on_channels(make_op(), [stream], None)) == oracle
+    for layout in ("one_row_per_batch", "mixed_sizes"):
+        assert (
+            _outcome(lambda: run_on_channels(make_op(), [stream], LAYOUTS[layout]))
+            == oracle
+        )
+    # The raw stream gives another outcome: the case tells the two oracles apart.
+    assert _outcome(lambda: make_op()(stream)) != oracle
+
+
+# --- Arrivals from another producer -------------------------------------------------------
+
+
+def test_batch_takes_arrivals_whose_provenance_flags_differ() -> None:
+    """``AddTags`` feeding ``Batch(2)`` row by row: each arriving batch is built from its
+    own rows, so a source-info field is nullable in one (a null token) and not in the
+    next. ``Batch`` puts them together and gives the sync result."""
+    raw = ArrowTableStream(
+        pa.table(
+            {
+                "k": pa.array([1, 2, 3, 4], pa.int64()),
+                "x": pa.array([1.5, 2.5, 3.5, 4.5], pa.float64()),
+                "_source_x": pa.array(
+                    [None, "s::r1::x", "s::r2::x", None], pa.large_string()
+                ),
+            }
+        ),
+        tag_columns=["k"],
+    )
+    expected = R(Batch(batch_size=2)(AddTags({"cohort": "A"})(raw)))
+    assert expected is not None
+    add, batch = AddTags({"cohort": "A"}), Batch(batch_size=2)
+
+    async def go() -> tuple[StreamProtocol, set[bool]]:
+        tagged = add(raw)
+        middle = OutputChannel(tagged)
+        output = OutputChannel(batch(tagged))
+        reader = middle.open_reader()
+        _ = await asyncio.wait_for(
+            asyncio.gather(
+                add.async_execute_batches([await _channel(raw, (1,))], middle),
+                batch.async_execute_batches([reader], output),
+            ),
+            TIMEOUT,
+        )
+        flags = {
+            b.schema.field("_source_x").nullable
+            for b in await middle.open_reader().collect()
+        }
+        return output.result(), flags
+
+    result, flags = asyncio.run(go())
+    assert flags == {True, False}  # the arrivals did differ
+    assert_same_table(result.as_table(columns=ALL), expected)
+    assert result.as_table(columns=ALL).to_pylist() == expected.to_pylist()
+
+
+# --- The row-built form, F (stage 2, ITL-1360) ----------------------------------------------
+
+SYSTEM_TAG = "_tag_source_id::abc"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="TODO(ITL-1360): F (stage 2's _row_built_form) keeps system-tag field "
+    "metadata and a list's item field, where a table built from rows has neither",
+)
+def test_the_provenance_columns_have_the_row_built_schema() -> None:
+    """A raw stream whose system-tag field carries metadata and whose list-valued
+    source info has a non-nullable item named ``member``: the channel result's
+    provenance fields are those of the table built from the sync rows."""
+    schema = pa.schema(
+        [
+            pa.field("k", pa.int64()),
+            pa.field(SYSTEM_TAG, pa.large_string(), metadata={"m": "1"}),
+            pa.field("x", pa.int64()),
+            pa.field("z", pa.int64()),
+            pa.field("y", pa.int64()),
+            pa.field(
+                "_source_x",
+                pa.large_list(pa.field("member", pa.large_string(), nullable=False)),
+            ),
+        ]
+    )
+    raw = ArrowTableStream(
+        pa.table(
+            [
+                pa.array([1, 2], pa.int64()),
+                pa.array(["s", "s"], pa.large_string()),
+                pa.array([1, 2], pa.int64()),
+                pa.array([3, 4], pa.int64()),
+                pa.array([5, 6], pa.int64()),
+                pa.array([["a"], ["b"]], schema.field("_source_x").type),
+            ],
+            schema=schema,
+        ),
+        tag_columns=["k"],
+    )
+    expected = R(SelectDataColumns(["x", "z"])(raw))
+    assert expected is not None
+    for layout in ("one_batch", "one_row_per_batch"):
+        result = run_on_channels(SelectDataColumns(["x", "z"]), [raw], LAYOUTS[layout])
+        assert_same_table(result.as_table(columns=ALL), expected)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=(AssertionError, KeyError),
+    reason="TODO(ITL-1360): F (stage 2's _row_built_columns) carries a raw stream's "
+    "meta (__) columns and their source info as data (the data keys name a meta "
+    "column, which the zero-row table a description is read from lacks)",
+)
+def test_a_meta_column_does_not_travel() -> None:
+    """A raw stream with a meta column: neither it nor a source-info column of it is
+    in the record batches or in the stream rebuilt from them, as in the table built
+    from the stream's rows."""
+    raw = ArrowTableStream(
+        pa.table(
+            {
+                "k": pa.array([1, 2], pa.int64()),
+                "x": pa.array([1, 2], pa.int64()),
+                "z": pa.array([3, 4], pa.int64()),
+                "__note": pa.array(["a", "b"], pa.large_string()),
+            }
+        ),
+        tag_columns=["k"],
+    )
+    expected = R(raw)
+    assert expected is not None
+
+    async def go() -> tuple[list[str], StreamProtocol]:
+        batches = await channel_from_stream(raw).collect()
+        output = OutputChannel(raw)
+        for batch in batches:
+            await output.send(batch)
+        await output.close()
+        return batches[0].schema.names, output.result()
+
+    wire, rebuilt = asyncio.run(go())
+    assert wire == expected.schema.names
+    assert rebuilt.as_table(columns=ALL).schema.names == expected.schema.names
