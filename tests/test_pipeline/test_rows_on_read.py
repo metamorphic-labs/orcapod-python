@@ -281,7 +281,7 @@ def test_a_bound_tap_stream_delivers_every_row_as_main_does() -> None:
     """
     from orcapod.side_effects import tap_pod
 
-    tap = tap_pod(_deliver)
+    tap: Any = tap_pod(_deliver)
     DELIVERED.clear()
     raw = _with_source_x([[None, [[]]], [None, [[]]]], _UNCONVERTIBLE)
     tapped: Any = tap.process(raw)
@@ -374,7 +374,8 @@ def test_an_operator_with_an_empty_result_is_not_called_again() -> None:
             calls.append(rows)
             if rows == 0:
                 raise ValueError("cannot process empty input")
-            return super().unary_static_process(stream).polars_filter(x=-1)
+            result: Any = super().unary_static_process(stream)
+            return result.polars_filter(x=-1)
 
     job = PipelineJob(name="empty_result", database=InMemoryArrowDatabase())
     with job:

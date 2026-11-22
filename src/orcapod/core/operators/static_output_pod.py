@@ -1496,7 +1496,8 @@ def _stream_protocol_members() -> list[str]:
     there lets ``RowsOnRead`` pass the check on every supported Python.
     """
     names: set[str] = set()
-    for base in StreamProtocol.__mro__:
+    protocol = cast(type, cast(object, StreamProtocol))
+    for base in protocol.__mro__:
         if base is object or base.__name__ in ("Protocol", "Generic"):
             continue
         names.update(name for name in vars(base) if not name.startswith("_"))
