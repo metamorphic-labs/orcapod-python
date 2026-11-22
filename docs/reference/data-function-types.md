@@ -135,14 +135,17 @@ Every result table has, besides its type's record:
 | `__pod_ts` | `timestamp[us, tz=UTC]` | yes | when the result was stored; the newest wins when two rows share an input |
 | `__data_context` | `large_string` | no | the data context that wrote the row (`std:v1:default`) |
 
-The database keeps the row's record id, a UUID of 16 bytes, as its record id column.
+The database keeps the row's record id, a UUID of 16 bytes, as its record id column. Like
+every table Orcapod creates, the table is stored with its record id first and every other
+column sorted by name (see [Data types per database](database-types.md)); the declared
+order above is the order the function node presents them in.
 
 ```python
 stored = types_store.get_all_records(next(p for p in types_store.list_sources() if "_result" in p))
 print([name for name in stored.column_names if not name.startswith("__pf_")])
-# ['__input_data_hash', 'total', 'label', '_source_total', '_source_label', '__pod_ts', '__data_context']
+# ['__data_context', '__input_data_hash', '__pod_ts', '_source_label', '_source_total', 'label', 'total']
 print([name for name in stored.column_names if name.startswith("__pf_var_")])
-# ['__pf_var_function_name', '__pf_var_function_version', '__pf_var_function_module', '__pf_var_function_signature_hash', '__pf_var_function_content_hash', '__pf_var_git_hash']
+# ['__pf_var_function_content_hash', '__pf_var_function_module', '__pf_var_function_name', '__pf_var_function_signature_hash', '__pf_var_function_version', '__pf_var_git_hash']
 ```
 
 ## Where it is declared, and how a released declaration is kept

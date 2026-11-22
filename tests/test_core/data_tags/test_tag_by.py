@@ -422,12 +422,14 @@ def test_in_a_job_a_function_node_stores_the_new_tag_marked(
         (1, "s0", "s0s0"),
         (2, "s1", "s1s1"),
     ]
+    # A stored table's column order is the database's (ITL-1370): the marked
+    # data-tags are a set.
     marked = {
-        stored_data_tags(database.get_all_records(path).schema)  # pyright: ignore[reportOptionalMemberAccess]  # every listed table has records
+        frozenset(stored_data_tags(database.get_all_records(path).schema))  # pyright: ignore[reportOptionalMemberAccess]  # every listed table has records
         for path in database.list_table_paths()
         if "_result" not in path
     }
-    assert ("unit", "session") in marked
+    assert frozenset({"unit", "session"}) in marked
 
     job.save(tmp_path / "job.json")
     loaded = PipelineJob.load(tmp_path / "job.json")
@@ -459,4 +461,5 @@ def test_a_logged_tag_by_node_stores_its_new_tag_marked(
     assert len(paths) == 1
     stored = database.get_all_records(paths[0])
     assert stored is not None
-    assert stored_data_tags(stored.schema) == ("unit", "trial")
+    # A set: a stored table's column order is the database's (ITL-1370).
+    assert set(stored_data_tags(stored.schema)) == {"unit", "trial"}
