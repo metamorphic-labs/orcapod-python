@@ -3334,20 +3334,36 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             table.select([*tag_keys, *system_tags])
         )
         data_side = table.select(list(data_keys))
-        hasher = self.data_context.arrow_hasher
+        # A row view stands for the row's datagram (``_RowView``): the checker cannot
+        # see that through its delegation, so the cast goes through object.
         return [
             (
-                cast(TagProtocol, _RowView(lazy, index, 0)),
-                cast(DataProtocol, _RowView(lazy, index, 1)),
-                hasher.hash_table(
-                    _with_input_data_hash(
-                        tag_side.slice(index, 1),
-                        hasher.hash_table(data_side.slice(index, 1)),
-                    )
-                ).to_prefixed_digest(),
+                cast(TagProtocol, cast(object, _RowView(lazy, index, 0))),
+                cast(DataProtocol, cast(object, _RowView(lazy, index, 1))),
+                self._base_entry_id_of_slices(
+                    tag_side.slice(index, 1), data_side.slice(index, 1)
+                ),
             )
             for index in range(table.num_rows)
         ]
+
+    def _base_entry_id_of_slices(self, tag_row: pa.Table, data_row: pa.Table) -> bytes:
+        """One row's base entry id from its one-row tag and data slices.
+
+        ``compute_base_entry_id`` of the row, from its table (``_input_entries``): the
+        tag side with its system tags, and the hash of its data columns.
+
+        Args:
+            tag_row: The row's user tags and system tags, flags as a row has them.
+            data_row: The row's data columns.
+
+        Returns:
+            The base entry id.
+        """
+        hasher = self.data_context.arrow_hasher
+        return hasher.hash_table(
+            _with_input_data_hash(tag_row, hasher.hash_table(data_row))
+        ).to_prefixed_digest()
 
     def compute_pipeline_entry_id(
         self,

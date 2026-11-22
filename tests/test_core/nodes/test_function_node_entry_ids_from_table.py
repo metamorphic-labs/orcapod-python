@@ -15,9 +15,8 @@ from typing import Any
 
 import pytest
 
-from orcapod.core.data_function import PythonDataFunction
 from orcapod.core.data_tags import stream_data_tags
-from orcapod.core.function_pod import FunctionPod
+from orcapod import function_pod
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.streams import ArrowTableStream
@@ -31,15 +30,15 @@ from tests.test_core.operators.test_async_sync_equivalence import (
 )
 
 
+@function_pod(output_keys="c")
 def _constant(i8: int) -> int:
     return i8
 
 
 def _node() -> FunctionJobNode:
     """A function node; only its data context's hasher is used by the ids."""
-    pod = FunctionPod(PythonDataFunction(_constant, output_keys="c"))
     return FunctionJobNode(
-        pod,
+        _constant.pod,  # pyright: ignore[reportArgumentType]  # a function pod; the checker does not match it to FunctionPodProtocol
         source_a().select_data_columns(["i8"]),
         pipeline_database=InMemoryArrowDatabase(),
     )
