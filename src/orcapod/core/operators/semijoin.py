@@ -32,6 +32,29 @@ from orcapod.utils.warning_utils import outside_orcapod_stacklevel
 _LEFT_ROW = "__semi_join_left_row"
 
 
+def _has_whole_key(
+    table: "pa.Table", keys: Sequence[str]
+) -> "pa.ChunkedArray[Any] | pa.BooleanArray":
+    """Whether each row's key holds no top-level null, as a boolean mask.
+
+    A row whose key holds a top-level null matches nothing in a semi-join: Polars
+    already applies that to scalar keys but treats a null struct or list as equal to
+    another, so such rows are dropped before the match (the sync path and the
+    streaming kernel alike).
+
+    Args:
+        table: The rows.
+        keys: The key columns, at least one.
+
+    Returns:
+        One boolean per row.
+    """
+    valid = table.column(keys[0]).is_valid()
+    for name in keys[1:]:
+        valid = pc.and_(valid, table.column(name).is_valid())
+    return valid
+
+
 class SemiJoin(BinaryOperator):
     """
     Binary operator that performs a semi-join between two streams.
@@ -218,10 +241,7 @@ class SemiJoin(BinaryOperator):
         # Polars already applies that to scalar keys but treats a null struct or
         # list as equal to another, so drop right rows with a null key.
         right_keys = right_table.select(list(common_keys))
-        valid = right_keys.column(0).is_valid()
-        for index in range(1, right_keys.num_columns):
-            valid = pc.and_(valid, right_keys.column(index).is_valid())
-        right_keys = right_keys.filter(valid)
+        right_keys = right_keys.filter(_has_whole_key(right_keys, common_keys))
 
         # Polars, unlike Arrow's hash join, accepts nested (list, struct) keys.
         # It decides which left rows match from the prepared keys and the left
