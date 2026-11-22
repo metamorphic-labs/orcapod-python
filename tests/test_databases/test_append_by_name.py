@@ -35,7 +35,11 @@ from orcapod.databases import (
     SQLiteConnector,
 )
 from orcapod.databases.utils import in_held_column_order
-from orcapod.errors import InputValidationError, UnstorableColumnError
+from orcapod.errors import (
+    InputValidationError,
+    OrcapodDatabaseReadError,
+    UnstorableColumnError,
+)
 from tests.test_databases.type_matrix import open_database
 
 PATH = ("t",)
@@ -284,13 +288,16 @@ def test_the_step_reorders_the_held_columns_by_name() -> None:
 
 
 def test_the_step_keeps_the_given_fields() -> None:
-    """Metadata and nullability go on to the append checks as given."""
+    """The rows are reordered and their fields kept as given: metadata, and a
+    nullability the held column does not have (the append checks judge it)."""
     field = pa.field("c", pa.int64(), nullable=False, metadata={"unit": "m"})
     given = pa.Table.from_arrays(
         [pa.array([1], pa.int64()), pa.array([2], pa.int64())],
         schema=pa.schema([field, pa.field("a", pa.int64())]),
     )
-    out = in_held_column_order(given, _held("a", "c"))
+    held = [pa.field("a", pa.int64()), field.with_nullable(True)]
+    out = in_held_column_order(given, held)
+    assert out.column_names == ["a", "c"]
     assert out.schema.field("c").equals(field, check_metadata=True)
 
 
@@ -804,13 +811,30 @@ def test_two_logical_types_over_one_storage_type_are_not_reordered(
         record_id_column="rid",
         flush=stored,
     )
-    with pytest.raises(Exception):  # noqa: B017, PT011  # main's own refusal, by backend
-        db2 = ExtensionAwareDatabase(inner, two[0])
-        db2.add_records(
-            PATH, rows(2, two, ["text", "b", "rid", "a"]), record_id_column="rid"
-        )
-        db2.flush()
-        inner.get_all_records(PATH, record_id_column="rid")
+    second = ExtensionAwareDatabase(inner, two[0])
+    permuted = rows(2, two, ["text", "b", "rid", "a"])
+    # Main's verdict, measured on main 321284ae, the same here.
+    if backend == "in-memory" and not stored:
+        with pytest.raises(pa.ArrowInvalid):
+            second.add_records(PATH, permuted, record_id_column="rid")
+    elif backend == "in-memory":
+        second.add_records(PATH, permuted, record_id_column="rid")
+        with pytest.raises(pa.ArrowInvalid):
+            second.flush()
+    elif not stored:
+        with pytest.raises(ValueError, match="Schema mismatch"):
+            second.add_records(PATH, permuted, record_id_column="rid")
+    else:
+        # Pre-existing on main and equal here (ITL-1371's family): Delta takes the
+        # rows by name and the stored table can no longer be read as one type.
+        second.add_records(PATH, permuted, record_id_column="rid", flush=True)
+        with pytest.raises(OrcapodDatabaseReadError):
+            inner.get_all_records(PATH, record_id_column="rid")
+        return
+    inner.flush()
+    stored_rows = inner.get_all_records(PATH, record_id_column="rid")
+    assert stored_rows is not None
+    assert stored_rows.column("rid").to_pylist() == [bytes([1])]
 
 
 @pytest.mark.parametrize(
@@ -918,6 +942,9 @@ def _container_columns() -> dict[str, tuple[Any, Any]]:
         encoded: Any = pa.RunEndEncodedArray
         return encoded.from_arrays(pa.array([1], pa.int32()), pa.array([1]))
 
+    def view_struct() -> Any:
+        return pa.array([{"x": "a"}], pa.struct([("x", pa.string_view())]))
+
     def interval() -> Any:
         return pa.array([(1, 0, 0)], pa.month_day_nano_interval())
 
@@ -956,6 +983,9 @@ def _container_columns() -> dict[str, tuple[Any, Any]]:
         ),
         "run-end encoded": (run_end(), run_end()),
         "interval": (interval(), interval()),
+        # Equal on both sides: a view type is not eligible even though the large
+        # normalization would turn it into ``large_string`` (CodeRabbit on PR 491).
+        "string view in a struct": (view_struct(), view_struct()),
     }
 
 
@@ -971,6 +1001,38 @@ def test_a_column_of_a_type_the_comparison_does_not_handle_is_never_reordered(
     held = list(pa.table({"b": [0], "a": held_values}).schema)
     given = pa.table({"a": given_values, "b": [1]})
     assert in_held_column_order(given, held) is given
+
+
+class _KeyNotNullSQLite(SQLiteConnector):
+    """A SQLite connector whose reads give the primary key ``NOT NULL``, as a
+    PostgreSQL connector does (the CI failure of PR 491's PostgreSQL job)."""
+
+    def iter_batches(self, query: str, params: Any = None, batch_size: int = 1000):  # type: ignore[override]
+        for batch in super().iter_batches(query, params, batch_size):
+            schema = batch.schema
+            index = schema.get_field_index("__record_id")
+            if index >= 0:
+                schema = schema.set(index, schema.field(index).with_nullable(False))
+            yield pa.RecordBatch.from_arrays(batch.columns, schema=schema)
+
+
+@pytest.mark.parametrize("order", [["id", "a", "c", "b"], ["b", "c", "id", "a"]])
+def test_queued_rows_combine_with_a_stored_key_read_back_not_null(
+    tmp_path: Path, order: list[str]
+) -> None:
+    """A store reads its primary key back ``NOT NULL`` while the queued rows declare
+    it nullable: a read that combines them takes the column nullable, the arrays
+    unchanged, in either column order; a read before and after the flush give the
+    same rows (as the PostgreSQL CI job checks against a live server)."""
+    db = ConnectorArrowDatabase(_KeyNotNullSQLite(str(tmp_path / "store.db")))
+    _add(db, _rows([ID, "a", "c", "b"], [1, 2]), flush=True)
+    _add(db, _rows(order, [3, 4]))
+    before = db.get_all_records(PATH, record_id_column=ID)
+    _check(before, [ID, "a", "c", "b"], [1, 2, 3, 4])
+    db.flush()
+    _check(
+        db.get_all_records(PATH, record_id_column=ID), [ID, "a", "c", "b"], [1, 2, 3, 4]
+    )
 
 
 # ── PostgreSQL (a live server: the PostgreSQL CI job) ──────────────────────────

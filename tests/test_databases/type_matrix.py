@@ -1064,7 +1064,9 @@ flushed in between or not. The in-memory database matches them to the rows still
 else the stored table; Delta to the rows still pending (it matches a stored table by name
 itself); a connector database (SQLite, PostgreSQL, SpiralDB) to the rows it has pending,
 and to the stored table when it writes or reads them, checking them first against the
-table as it is then, by exact name and type. A table keeps the column
+table as it is then, by exact name and type (a column with field metadata stays in its
+queued order at a flush; SpiralDB, which keeps field metadata, matches a write by name
+itself). A table keeps the column
 order the database gave its first write: the first write's order, except in SpiralDB,
 which stores and reads a table's key columns first and then its other columns sorted by
 name, whatever the order written (measured on SpiralDB itself). An append that also
