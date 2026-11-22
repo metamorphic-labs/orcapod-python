@@ -1668,6 +1668,49 @@ class DeltaTableDatabase:
                 "The stored rows are unchanged and nothing was written."
             )
 
+    def _refuse_changed_attributes(
+        self, record_path: tuple[str, ...], schema: pa.Schema
+    ) -> None:
+        """Refuse rows whose field attributes differ from the held columns', compared
+        before any ``schema_handling`` casts them (ITL-1334).
+
+        A ``"merge"`` or ``"coerce"`` casts the rows to the pending batch's schema,
+        which would give them the pending columns' field metadata and nested
+        attributes: the rows would then be stored, and read back, with another
+        column's attributes. So the field tree of each column (``_column_change``) is
+        compared as given, against the pending batch and the stored table, in every
+        mode, as an append without schema handling is.
+
+        Args:
+            record_path: The table the rows are for.
+            schema: The schema of the rows as given.
+
+        Raises:
+            InputValidationError: For the first such column, naming it and the path.
+        """
+        held: list[dict[str, pa.Field[Any]]] = []
+        pending = self._pending_batches.get(self._get_record_key(record_path))
+        if pending is not None:
+            held.append({f.name: f for f in pending.schema})
+        try:
+            delta_table = self._get_delta_table(record_path)
+        except OrcapodDatabaseReadError:
+            delta_table = None
+        if delta_table is not None:
+            held.append(_held_columns(delta_table))
+        for given in held:
+            for field in schema:
+                if field.name not in given:
+                    continue
+                change = _column_change(given[field.name], field)
+                if change is not None:
+                    raise InputValidationError(
+                        f"Cannot append to the stored table "
+                        f"{self._get_table_uri(record_path)!r}: column "
+                        f"{field.name!r}: {change}. The stored rows are unchanged and "
+                        "nothing was written."
+                    )
+
     def _refuse_untyped_null_columns(
         self, record_path: tuple[str, ...], schema: pa.Schema
     ) -> None:
@@ -1787,12 +1830,17 @@ class DeltaTableDatabase:
             # self._check_all_conflicts(record_path, deduplicated_table)
             filtered_table = deduplicated_table
 
-        # Step 4: Handle schema compatibility (the pending batch is only staged)
+        # Step 4: the rows' field attributes, compared as given: a merge or a
+        # coercion casts them to the pending batch's schema, which would give them
+        # its field metadata and nested attributes instead (ITL-1334).
+        self._refuse_changed_attributes(record_path, filtered_table.schema)
+
+        # Step 5: Handle schema compatibility (the pending batch is only staged)
         schema_compatible_table, staged_pending = self._handle_schema_compatibility(
             record_path, filtered_table, schema_handling
         )
 
-        # Step 5: what the flush would refuse is refused now, on the rows that are
+        # Step 6: what the flush would refuse is refused now, on the rows that are
         # queued: after duplicates are dropped and any requested schema handling, the
         # rows already queued included when a merge re-types them. Nothing queued
         # changes unless both pass (ITL-1334).
@@ -1803,10 +1851,10 @@ class DeltaTableDatabase:
             self._refuse_unmergeable_append(record_path, staged_pending, staged_pending)
             self._pending_batches[self._get_record_key(record_path)] = staged_pending
 
-        # Step 6: Add to pending batch (no overwrite logic needed)
+        # Step 7: Add to pending batch (no overwrite logic needed)
         self._add_to_pending_batch(record_path, schema_compatible_table)
 
-        # Step 7: Flush if asked to; otherwise commit this table alone once its
+        # Step 8: Flush if asked to; otherwise commit this table alone once its
         # pending batch reaches batch_size. Only the full table: committing every
         # pending table here would commit another table's rows, such as pipeline
         # records whose results are still pending, out of their writer's order

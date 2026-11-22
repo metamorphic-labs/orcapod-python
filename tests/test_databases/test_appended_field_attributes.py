@@ -181,3 +181,52 @@ def test_an_append_with_the_same_field_attributes_is_kept(
             db.add_records(PATH, second, record_id_column="id", flush=True)
             back = db.get_all_records(PATH, record_id_column="id")
             assert _values(back) == _values(first) + _values(second), where
+
+
+def _cast_leaf(field: Any, leaf: Any) -> Any:
+    """``field`` with its int64 leaf (the column, or the struct child ``a``) of type
+    ``leaf``, its attributes kept."""
+    if pa.types.is_struct(field.type):
+        return field.with_type(pa.struct([field.type.field(0).with_type(leaf)]))
+    return field.with_type(leaf)
+
+
+@pytest.mark.parametrize("stored", [False, True], ids=["pending", "stored and pending"])
+@pytest.mark.parametrize("change", sorted(CHANGES))
+@pytest.mark.parametrize("where", ["column", "struct child"])
+@pytest.mark.parametrize("mode", ["coerce", "merge"])
+def test_delta_compares_attributes_before_schema_handling_casts(
+    tmp_path: Path, mode: str, where: str, change: str, stored: bool
+) -> None:
+    """A ``"coerce"`` or ``"merge"`` casts the rows to the pending batch's schema,
+    which gave them its field metadata: ``unit=s`` rows were queued and stored as
+    ``unit=m`` (CodeRabbit on PR 471). The rows' attributes are compared as given,
+    so the append is refused and nothing queued changes. Each case casts: ``int32``
+    rows coerced to ``int64``, ``null``-typed rows merged with ``int64``."""
+    build, path, first_values, _ = WHERE[where]
+    first_unit, second_unit = CHANGES[change]
+    first = _rows([b"1", b"2"], build(first_unit), first_values)
+    leaf = pa.int32() if mode == "coerce" else pa.null()
+    values = (
+        ([3, 4] if where == "column" else [{"a": 3}, {"a": 4}])
+        if mode == "coerce"
+        else ([None, None] if where == "column" else [{"a": None}, {"a": None}])
+    )
+    second = _rows([b"3", b"4"], _cast_leaf(build(second_unit), leaf), values)
+    with open_database("Delta", tmp_path) as db:
+        db.add_records(PATH, first, record_id_column="id", flush=stored)
+        queued = first
+        if stored:
+            queued = _rows([b"5", b"6"], build(first_unit), first_values)
+            db.add_records(PATH, queued, record_id_column="id")
+        with pytest.raises(InputValidationError, match=f"'x': {path}"):
+            db.add_records(PATH, second, record_id_column="id", schema_handling=mode)
+        pending = db._pending_batches["t"]  # pyright: ignore[reportPrivateUsage]
+        assert pending.schema.field("x").equals(
+            queued.schema.field("x"), check_metadata=True
+        )
+        db.flush()
+    with open_database("Delta", tmp_path) as fresh:
+        back = fresh.get_all_records(PATH, record_id_column="id")
+        assert back is not None
+        _assert_kept_field(first, back)
