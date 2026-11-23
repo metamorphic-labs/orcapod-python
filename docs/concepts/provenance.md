@@ -184,7 +184,19 @@ pairs. A label the job does not have is refused with `ValueError`.
 ## Limits
 
 - Job nodes only. A plain stream keeps no stored records, so it cannot be traced this way.
-- `why_missing` does not read a `PollingSource`, because reading one polls it. Such a
-  source's records are assumed to exist.
+- A source is never read. A source cell is known from the token of the row read from
+  it, with the value that row holds. Some sources keep their rows in memory: the
+  in-memory, file and database sources, when their class does not change how they
+  read. Their rows are also compared with what the run held, and a disagreement raises
+  `ProvenanceInconsistencyError`. Other sources (cached, polling, derived and your own)
+  are not read:
+    - a step that needs their rows is reported with status `unavailable`, such as a
+      `GroupBy` whose input is the source itself;
+    - `why_missing` does not blame the first step after them, since it cannot tell
+      whether the source holds the record.
+- A link is never guessed. Two rows that cannot be told apart by their system tags,
+  tokens and values are refused with `ProvenanceInconsistencyError`.
+- The `row` argument compares values strictly: `False` never selects `0`, and a NaN
+  key selects the NaN group.
 - A node the trace passes must hold its run. After a full run every node does; after
   `node.run()` the nodes above it do.

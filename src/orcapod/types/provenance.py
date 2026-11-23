@@ -153,8 +153,10 @@ class TraceStep:
         tags: The row's user tags, in the node's tag order.
         member: For a member of a group or batch, its position in the folded lists;
             else ``None``.
-        status: ``"traced"``; or ``"not_computed"`` when the node holds no run, so
-            nothing below it can be read (``run()`` it first).
+        status: ``"traced"``; ``"not_computed"`` when the node holds no run, so
+            nothing below it can be read (``run()`` it first); or ``"unavailable"``
+            when it is a source that is not read (a cached, polling, derived or
+            user-defined source), so the cell's value is not known.
         function: For a function step, which function produced the value and how.
         source: For a source step, the source cell.
         inputs: The steps the value came from, at the nodes feeding this one.
@@ -214,8 +216,10 @@ class TraceStep:
             tags = f" ({_tags_text(self.tags)})" if self.tags else ""
             head = f"{pad}{where}{name}{tags}: {self.column} = {_value_text(self.value)}{through}"
         out = [head]
-        if self.status != "traced":
+        if self.status == "not_computed":
             out.append(f"{pad}  not computed: run() the job first")
+        elif self.status == "unavailable":
+            out.append(f"{pad}  not read: the source's rows are not held")
         if self.function is not None:
             out.append(f"{pad}  {self.function.text()}")
         for step in self.inputs:
@@ -244,17 +248,28 @@ class Trace:
 
     @property
     def status(self) -> str:
-        """``"traced"``, or ``"not_computed"`` when a node on the way holds no run."""
-        if any(step.status != "traced" for step in self.root.walk()):
+        """``"traced"``; ``"not_computed"`` when a node on the way holds no run; or
+        ``"unavailable"`` when a source cell on the way is not read."""
+        statuses = {step.status for step in self.root.walk()}
+        if "not_computed" in statuses:
             return "not_computed"
+        if "unavailable" in statuses:
+            return "unavailable"
         return "traced"
 
     def source_cells(self) -> tuple[SourceCell, ...]:
-        """Return every source cell the value came from, once each, sorted."""
-        cells = {step.source for step in self.root.walk() if step.source is not None}
-        return tuple(
-            sorted(cells, key=lambda c: (c.source_id, c.record_id, c.column, c.node))
-        )
+        """Return every source cell the value came from, once each, sorted.
+
+        Cells are told apart by where they are (source, record, column), never by
+        their values, so any value (a list, a struct) is fine.
+        """
+        cells: dict[tuple[str, str, str, str], SourceCell] = {}
+        for step in self.root.walk():
+            cell = step.source
+            if cell is not None:
+                key = (cell.source_id, cell.record_id, cell.column, cell.node)
+                cells.setdefault(key, cell)
+        return tuple(cells[key] for key in sorted(cells))
 
     def function_runs(self) -> tuple[tuple[str, FunctionRun], ...]:
         """Return every function step's run, as ``(node label, run)``, in trace order."""
@@ -305,7 +320,8 @@ class Absence:
         source: The source id.
         record_id: The record id.
         missing: ``False`` if the node holds a row from the record.
-        status: ``"read"``; or ``"not_computed"`` when a node on the way holds no run.
+        status: ``"read"``; ``"not_computed"`` when a node on the way holds no run; or
+            ``"unavailable"`` when a fold on the way reads a source that is not read here.
         reached_function: For the first function node on the way from the source:
             ``True`` if its stored pipeline entries hold an input row from the record,
             ``False`` if none does (the record never reached it, in any run); ``None``
@@ -316,6 +332,8 @@ class Absence:
         removed_by: The step that removed the record's rows, or ``None``.
         because: Why, in words.
         path: The nodes from the source to the asked node, in topological order.
+        edges: The streams of the job's graph between the nodes holding a row from the
+            record, and into the step that removed it, as ``(upstream, downstream)``.
     """
 
     node: str
@@ -329,19 +347,22 @@ class Absence:
     removed_by: Step | None
     because: str
     path: tuple[str, ...] = ()
+    edges: tuple[tuple[str, str], ...] = ()
 
     def highlight(self) -> Highlight:
         """Return the path, the removing step included, for ``job.diagram``."""
         kept = set(self.present_in)
         if self.removed_by is not None:
             kept.add(self.removed_by.label)
-        on_path = [label for label in self.path if label in kept]
-        edges = frozenset(zip(on_path, on_path[1:]))
-        return Highlight(nodes=frozenset(kept), edges=edges, note=self.headline())
+        return Highlight(
+            nodes=frozenset(kept), edges=frozenset(self.edges), note=self.headline()
+        )
 
     def headline(self) -> str:
         """Return the answer as one line."""
         record = f"{self.source} {self.record_id}"
+        if self.status == "unavailable":
+            return f"{record}: not known: a step on the way reads a source that is not read here"
         if self.status != "read":
             return f"{record}: not computed: run() the job first"
         if not self.missing:

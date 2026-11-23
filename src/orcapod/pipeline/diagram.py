@@ -1253,7 +1253,15 @@ class PipelineDiagram:
     ) -> str:
         layout = _layout(nodes, edges, direction)
         inputs = _inputs(nodes, edges)
-        return _svg(self.title, nodes, inputs, layout, direction == "LR", standalone)
+        return _svg(
+            self._picture_title(), nodes, inputs, layout, direction == "LR", standalone
+        )
+
+    def _picture_title(self) -> str:
+        """The picture's title: the diagram's, with the highlight's note."""
+        if self._highlight is not None and self._highlight.note:
+            return f"{self.title}: {self._highlight.note}"
+        return self.title
 
     def _views(self) -> dict[str, Any] | None:
         """The other layouts, for the view's direction and collapse controls.
@@ -1311,7 +1319,7 @@ class PipelineDiagram:
         """
         layout = _layout(self._nodes, self._edges, self._direction)
         svg = _svg(
-            self.title,
+            self._picture_title(),
             self._nodes,
             self._inputs(),
             layout,
