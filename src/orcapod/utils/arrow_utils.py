@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import defaultdict
-from collections.abc import Callable, Mapping, Collection, Sequence
+from collections.abc import Callable, Iterator, Mapping, Collection, Sequence
 from typing import Any, TYPE_CHECKING, cast
 
 from orcapod.system_constants import constants
@@ -12,6 +12,7 @@ from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
     import pyarrow as pa
+    from orcapod.logical_types.identifier import LogicalTypeIdentifier
     from orcapod.protocols.semantic_types_protocols import TypeConverterProtocol
 else:
     pa = LazyModule("pyarrow")
@@ -319,6 +320,34 @@ def normalize_schema_to_large_types(
         return schema
 
 
+def _extension_identifiers(arrow_type: pa.DataType) -> Iterator[LogicalTypeIdentifier]:
+    """Yield Python extension identifiers in Arrow type-tree order, including repeats."""
+    if isinstance(arrow_type, pa.ExtensionType):
+        from orcapod.logical_types.identifier import arrow_type_identifier
+
+        yield arrow_type_identifier(arrow_type)
+    if isinstance(arrow_type, pa.BaseExtensionType):
+        yield from _extension_identifiers(arrow_type.storage_type)
+    elif pa.types.is_dictionary(arrow_type):
+        # Dictionary values are not exposed as child fields.
+        yield from _extension_identifiers(arrow_type.value_type)
+    else:
+        for i in range(arrow_type.num_fields):
+            yield from _extension_identifiers(arrow_type.field(i).type)
+
+
+def describe_arrow_type(arrow_type: pa.DataType) -> str:
+    """Render an Arrow type and the full identifiers of any Python extensions."""
+    identifiers = ", ".join(
+        identifier.text for identifier in _extension_identifiers(arrow_type)
+    )
+    return (
+        f"{arrow_type} (logical identifiers: {identifiers})"
+        if identifiers
+        else str(arrow_type)
+    )
+
+
 def shared_arrow_type(
     left_type: "pa.DataType", right_type: "pa.DataType"
 ) -> "pa.DataType | None":
@@ -332,7 +361,9 @@ def shared_arrow_type(
     (``normalize_to_large_types`` with ``keep_null=True``: ``string`` to
     ``large_string``, ``binary`` to ``large_binary``, ``list`` to
     ``large_list``, recursively), which the Arrow hasher treats as identical.
-    If the normalized types are equal, that is the shared type. Any other
+    The normalized types must be equal and carry the same logical type
+    identifier at each position. Arrow equality can ignore a Python extension
+    type's serialized metadata, including inside nested types. Any other
     difference (integer or float width, timestamp unit, decimal precision,
     struct fields, nullability of a nested field, logical type) means there is
     no shared type: nothing is widened, promoted or picked. The result does
@@ -348,7 +379,11 @@ def shared_arrow_type(
     """
     normalized_left = normalize_to_large_types(left_type, keep_null=True)
     normalized_right = normalize_to_large_types(right_type, keep_null=True)
-    if normalized_left == normalized_right:
+    if normalized_left is normalized_right or (
+        normalized_left == normalized_right
+        and tuple(_extension_identifiers(normalized_left))
+        == tuple(_extension_identifiers(normalized_right))
+    ):
         return normalized_left
     return None
 

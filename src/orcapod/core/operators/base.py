@@ -55,9 +55,11 @@ def require_shared_arrow_type(
     """
     shared = arrow_utils.shared_arrow_type(left_type, right_type)
     if shared is None:
+        left_description = arrow_utils.describe_arrow_type(left_type)
+        right_description = arrow_utils.describe_arrow_type(right_type)
         raise InputValidationError(
             f"{operator} inputs disagree on the Arrow type of column {name!r}: "
-            + f"{left_type} in one input and {right_type} in the other. {operator} "
+            + f"{left_description} in one input and {right_description} in the other. {operator} "
             + "never widens or promotes a type; cast one input explicitly so both "
             + "have the same Arrow type."
         )
