@@ -36,7 +36,7 @@ from orcapod.databases.utils import (
     identity_node,
     logical_identity_change,
 )
-from orcapod.errors import InputValidationError
+from orcapod.errors import InputValidationError, OrcapodDatabaseReadError
 from orcapod.logical_types.identifier import LogicalTypeIdentifier
 from orcapod.logical_types.registry import make_arrow_extension_type
 from orcapod.logical_types.registry import LogicalTypeRegistry
@@ -1370,9 +1370,12 @@ def test_delta_identity_is_refused_before_an_undecodable_stored_type(
     tmp_path: Path, skip_duplicates: bool
 ) -> None:
     """A stored struct child annotated with an identifier the registered type cannot
-    read: every path that would decode the stored types (the duplicate scan, the
-    held columns) comes after the identity rule, which reads the Delta log only, so
-    another identifier is refused naming both, with either duplicate setting."""
+    read: the identity rule reads the Delta log only and comes before every path that
+    decodes the stored types (the duplicate scan, the held columns), so another
+    identifier is refused naming both. With ``skip_duplicates`` the duplicate scan
+    must read the stored ids, which decodes: that read failure is raised as it is (a
+    read failure fails the run whatever the error policy), with the identity refusal
+    noted on it."""
 
     class Current(pa.ExtensionType):
         def __init__(self) -> None:
@@ -1399,14 +1402,19 @@ def test_delta_identity_is_refused_before_an_undecodable_stored_type(
     )
     pa.register_extension_type(cast(Any, Current()))
     try:
-        with pytest.raises(InputValidationError) as refused:
+        expected = OrcapodDatabaseReadError if skip_duplicates else InputValidationError
+        with pytest.raises(expected) as refused:
             DeltaTableDatabase(tmp_path / "delta").add_records(
                 PATH,
                 rows([b"22", b"333"], b"itl1371.other", b"new"),
                 record_id_column="id",
                 skip_duplicates=skip_duplicates,
             )
-        message = str(refused.value)
+        message = (
+            "\n".join([str(refused.value), *refused.value.__notes__])
+            if (skip_duplicates)
+            else str(refused.value)
+        )
         assert "x.v is of logical type 'itl1371.other;6e6577'" in message
         assert "the stored column's 'itl1371.current;6f6c64'" in message
     finally:
@@ -1505,3 +1513,84 @@ def test_every_chunk_identifier_is_compared(state: str) -> None:
         b"2",
         b"3",
     ]
+
+
+def test_a_null_record_id_is_never_taken_for_a_stored_one() -> None:
+    """The duplicate test reads record ids as ``_filter_existing_records`` does: a
+    null id is never a stored record, so an append of null ids with another
+    identifier is refused even when a null id is committed."""
+
+    def rows(meta: bytes, ids: list[bytes | None]) -> pa.Table:
+        return pa.table(
+            {
+                "id": pa.array(ids, pa.large_binary()),
+                "x": _wrapped(meta, ["v"] * len(ids)),
+            }
+        )
+
+    db = InMemoryArrowDatabase()
+    db.add_records(PATH, rows(b"m", [None]), record_id_column="id", flush=True)
+    with pytest.raises(InputValidationError, match="itl1371.a;6e"):
+        db.add_records(
+            PATH, rows(b"n", [None]), record_id_column="id", skip_duplicates=True
+        )
+
+
+def test_a_map_and_a_struct_do_not_pair_their_places() -> None:
+    """Places pair only within one role: a map's key never pairs with a struct field
+    named ``key``, so a held map and a given struct of other key identifiers are not
+    reported as a logical type change at ``x.key`` (their kinds differ; that is the
+    database's other checks' to say)."""
+
+    def annotated(meta: bytes, name: str = "key") -> "pa.Field[Any]":
+        return pa.field(
+            name,
+            pa.large_string(),
+            nullable=False,
+            metadata={NAME: b"itl1371.a", META: meta},
+        )
+
+    item = pa.field("item", pa.int64())
+    map_field = pa.field("x", pa.map_(annotated(b"m"), item))  # pyright: ignore[reportArgumentType]  # pyarrow takes key/item fields
+    struct_field = pa.field("x", pa.struct([annotated(b"n"), item]))
+    assert _change(map_field, struct_field) is None
+    other_map = pa.field("x", pa.map_(annotated(b"n"), item))  # pyright: ignore[reportArgumentType]  # pyarrow takes key/item fields
+    reason = _change(map_field, other_map)
+    assert reason is not None and reason.startswith("x.key is of logical type")
+
+
+def test_delta_merge_source_keeps_the_held_identifier_bytes(tmp_path: Path) -> None:
+    """A list-typed extension column appended to a stored table goes to the MERGE (a
+    batch with an id already stored) in the stored layout with its identifier: the bytes Arrow holds (the ones the
+    identity rule compared), not its serializer asked again, which may answer
+    otherwise. The stored identifier stays the one written."""
+    import deltalake
+
+    class ListExt(pa.ExtensionType):
+        def __init__(self, payload: bytes) -> None:
+            self.payload = payload
+            super().__init__(pa.large_list(pa.large_string()), "itl1371.lists")
+
+        def __arrow_ext_serialize__(self) -> bytes:
+            return self.payload
+
+        @classmethod
+        def __arrow_ext_deserialize__(cls, storage_type: Any, serialized: bytes) -> Any:
+            return cls(serialized)
+
+    def rows(ext: Any, ids: list[bytes]) -> pa.Table:
+        storage = pa.array([["v"]] * len(ids), pa.large_list(pa.large_string()))
+        return pa.table(
+            {"id": pa.array(ids, pa.large_binary()), "x": ext.wrap_array(storage)}
+        )
+
+    db = DeltaTableDatabase(tmp_path / "delta")
+    db.add_records(PATH, rows(ListExt(b"m"), [b"1"]), record_id_column="id", flush=True)
+    second = ListExt(b"m")
+    given = rows(second, [b"1", b"22"])
+    second.payload = b"changed"  # the serializer now answers otherwise
+    db.add_records(PATH, given, record_id_column="id", flush=True)
+    stored = deltalake.DeltaTable(str(tmp_path / "delta" / "t")).schema().fields[1]
+    assert metadata_bytes(stored.metadata)[META] == b"m"
+    stored_rows = db.get_all_records(PATH, record_id_column="id")
+    assert stored_rows is not None and stored_rows.num_rows == 2

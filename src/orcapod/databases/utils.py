@@ -233,8 +233,9 @@ class IdentityNode:
             struct child, ``[]`` for a list item, ``.key`` and ``.item`` for a map,
             ``|name`` for a union member, ``<storage>`` for an extension type held
             directly as another's storage, ``.name`` for the other children of a
-            nested type). Labels may repeat: Arrow allows two struct children or
-            union members of one name.
+            nested type; every label but a struct child's starts with ``_ROLE``, so
+            places pair only within one role). Labels may repeat: Arrow allows two
+            struct children or union members of one name.
     """
 
     known: bool
@@ -244,6 +245,14 @@ class IdentityNode:
 
 
 UNKNOWN = IdentityNode(known=False, identifier=None)
+
+# Child labels pair places of one role: a struct field is labelled ``.<name>``; a
+# place of any other role carries ``_ROLE`` first, so a map's key, say, never pairs
+# with a struct field named ``key``. Messages show labels without it.
+_ROLE = "\x00"
+MAP_KEY = f"{_ROLE}.key"
+MAP_ITEM = f"{_ROLE}.item"
+LIST_ITEM = f"{_ROLE}[]"
 
 
 def _annotation(metadata: Mapping[Any, Any] | None) -> RawIdentifier | None:
@@ -368,11 +377,11 @@ def _children_of(arrow_type: Any) -> "tuple[tuple[str, IdentityNode], ...]":
     if t.is_dictionary(arrow_type):
         return _children_of(arrow_type.value_type)
     if isinstance(arrow_type, pa.BaseExtensionType):
-        return (("<storage>", identity_node(pa.field("storage", arrow_type))),)
+        return ((f"{_ROLE}<storage>", identity_node(pa.field("storage", arrow_type))),)
     if t.is_map(arrow_type):
         return (
-            (".key", identity_node(arrow_type.key_field)),
-            (".item", identity_node(arrow_type.item_field)),
+            (MAP_KEY, identity_node(arrow_type.key_field)),
+            (MAP_ITEM, identity_node(arrow_type.item_field)),
         )
     if (
         t.is_list(arrow_type)
@@ -381,8 +390,10 @@ def _children_of(arrow_type: Any) -> "tuple[tuple[str, IdentityNode], ...]":
         or t.is_list_view(arrow_type)
         or t.is_large_list_view(arrow_type)
     ):
-        return (("[]", identity_node(arrow_type.value_field)),)
-    prefix = "|" if t.is_union(arrow_type) else "."
+        return ((LIST_ITEM, identity_node(arrow_type.value_field)),)
+    if t.is_struct(arrow_type):
+        return tuple((f".{child.name}", identity_node(child)) for child in arrow_type)
+    prefix = f"{_ROLE}|" if t.is_union(arrow_type) else f"{_ROLE}."
     children = (arrow_type.field(i) for i in range(arrow_type.num_fields))
     return tuple((f"{prefix}{child.name}", identity_node(child)) for child in children)
 
@@ -465,7 +476,9 @@ def logical_identity_change(
             f"stored column's {_identifier_text(held.identifier)}"
         )
     for label, held_child, child in matched_pairs(held.children, incoming.children):
-        found = logical_identity_change(held_child, child, f"{path}{label}")
+        found = logical_identity_change(
+            held_child, child, f"{path}{label.replace(_ROLE, '')}"
+        )
         if found is not None:
             return found
     return None
@@ -492,10 +505,12 @@ def given_identities(
     out: list[tuple[str, list[IdentityNode]]] = []
     for field, column in zip(given.schema, given.columns):
         nodes = [identity_node(field)]
+        seen = set(nodes)
         for chunk in column.chunks:
             if _has_extension_part(chunk.type):
                 node = identity_node(field.with_type(chunk.type))
-                if node not in nodes:
+                if node not in seen:
+                    seen.add(node)
                     nodes.append(node)
         out.append((field.name, nodes))
     return out

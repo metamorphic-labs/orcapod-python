@@ -290,7 +290,10 @@ class InMemoryArrowDatabase:
             given_ids = set(records[self.RECORD_ID_COLUMN].to_pylist())
             held_ids = self._pending_record_ids[record_key]
             committed = self._committed_id_index(record_key)
-            if all(i in held_ids or i in committed for i in given_ids):
+            # As _filter_existing_records: a null id is never a committed record.
+            if all(
+                i in held_ids or (i is not None and i in committed) for i in given_ids
+            ):
                 identity = None
         changed = identity or first_changed_column(held, records.schema)
         if changed is not None:

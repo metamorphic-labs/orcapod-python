@@ -34,6 +34,9 @@ from orcapod.databases.storage_utils import (
     parse_base_path,
 )
 from orcapod.databases.utils import (
+    LIST_ITEM,
+    MAP_ITEM,
+    MAP_KEY,
     UNKNOWN,
     IdentityNode,
     appended_field_change,
@@ -669,9 +672,9 @@ def _delta_identity_node(
             for f in delta_type.fields
         )
     elif isinstance(delta_type, ArrayType):
-        children = (("[]", UNKNOWN),)
+        children = ((LIST_ITEM, UNKNOWN),)
     elif isinstance(delta_type, MapType):
-        children = ((".key", UNKNOWN), (".item", UNKNOWN))
+        children = ((MAP_KEY, UNKNOWN), (MAP_ITEM, UNKNOWN))
     as_bytes = metadata_bytes(metadata)
     name = as_bytes.get(_EXTENSION_KEYS[0])
     identifier = None if name is None else (name, as_bytes.get(_EXTENSION_KEYS[1], b""))
@@ -961,8 +964,14 @@ def _merge_source_in_stored_layout(
         # would be dropped from the table (ITL-1334).
         metadata = dict(field.metadata or {})
         if isinstance(field.type, pa.ExtensionType):
-            metadata[b"ARROW:extension:name"] = field.type.extension_name.encode()
-            metadata[b"ARROW:extension:metadata"] = field.type.__arrow_ext_serialize__()
+            # The bytes Arrow holds, the ones the identity rule compared (ITL-1371),
+            # not the serializer asked again, which may answer otherwise.
+            identifier = identity_node(field).identifier or (
+                field.type.extension_name.encode(),
+                field.type.__arrow_ext_serialize__(),
+            )
+            metadata[b"ARROW:extension:name"] = identifier[0]
+            metadata[b"ARROW:extension:metadata"] = identifier[1]
         batch = batch.set_column(
             index,
             pa.field(
@@ -1870,6 +1879,16 @@ class DeltaTableDatabase:
         if pending is not None:
             held.append({f.name: f for f in pending.schema})
         if delta_table is not None:
+            # The identity rule on this very table, from its log, before its recorded
+            # types are decoded: the table loaded here may not be the one
+            # ``_identity_refusal`` saw (it could not load one), ITL-1371.
+            found = identity_refusal(_stored_identities(delta_table), schema)
+            if found is not None:
+                raise InputValidationError(
+                    f"Cannot append to the stored table "
+                    f"{self._get_table_uri(record_path)!r}: column {found[0]!r}: "
+                    f"{found[1]}. The stored rows are unchanged and nothing was written."
+                )
             held.append(_held_columns(delta_table))
         for given in held:
             for field in schema:
@@ -2001,8 +2020,10 @@ class DeltaTableDatabase:
                     record_path, deduplicated_table
                 )
             except OrcapodDatabaseReadError as error:
+                # A read failure fails the run whatever the error policy: it is
+                # raised as it is, naming the identifiers it kept from refusing.
                 if identity is not None:
-                    raise InputValidationError(identity) from error
+                    error.add_note(f"Also refused: {identity}")
                 raise
             if filtered_table.num_rows == 0:
                 logger.debug("All records were duplicates, nothing to insert")
