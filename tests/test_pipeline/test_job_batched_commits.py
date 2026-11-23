@@ -4,7 +4,7 @@
 pipeline records every N rows and when it finishes, instead of after every row. These
 tests check, on a ``DeltaTableDatabase`` whose table history counts commits:
 
-- the commit count (one per N rows per table, appends only),
+- the commit count (one per N rows per table: a create, then MERGEs; ITL-1377),
 - the option's validation,
 - that a node or cached pod used on its own still commits after every row,
 - a failed commit: ``OrcapodDatabaseWriteError`` naming the node and no row, earlier batches kept,
@@ -118,14 +118,18 @@ def stored_rows(table: Path) -> int:
 def test_each_table_is_committed_once_per_batch(
     tmp_path: Path, orchestrator: str, n_rows: int, every: int | None, commits: int
 ) -> None:
-    """250 rows at 100 per commit (the default) give 3 commits per table, all appends."""
+    """250 rows at 100 per commit (the default) give 3 commits per table.
+
+    The first creates the table; every later one is a MERGE, the commit Delta checks
+    against rows another writer added meanwhile (ITL-1377).
+    """
     job = build_job(DeltaTableDatabase(tmp_path), n_rows)
     if every is None:
         job.run(orchestrator=ORCHESTRATORS[orchestrator]())
     else:
         job.run(orchestrator=ORCHESTRATORS[orchestrator](), commit_every_rows=every)
     for kind, table in table_dirs(tmp_path).items():
-        assert operations(table) == ["WRITE"] * commits, kind
+        assert operations(table) == ["WRITE"] + ["MERGE"] * (commits - 1), kind
         assert stored_rows(table) == n_rows, kind
     assert job.nodes["dbl"].as_table().num_rows == n_rows
 
@@ -148,7 +152,7 @@ def test_a_node_run_on_its_own_commits_every_row(tmp_path: Path) -> None:
     job = build_job(DeltaTableDatabase(tmp_path), 5)
     job.nodes["dbl"].run()
     result_table = table_dirs(tmp_path)["result"]
-    assert operations(result_table) == ["WRITE"] * 5
+    assert operations(result_table) == ["WRITE"] + ["MERGE"] * 4
 
 
 def test_a_cached_pod_used_on_its_own_commits_every_row(tmp_path: Path) -> None:
@@ -166,7 +170,7 @@ def test_a_cached_pod_used_on_its_own_commits_every_row(tmp_path: Path) -> None:
     for tag, data in source.iter_data():
         cached.process_data(tag, data)
     (table,) = {log.parent for log in tmp_path.rglob("_delta_log")}
-    assert operations(table) == ["WRITE"] * 4
+    assert operations(table) == ["WRITE"] + ["MERGE"] * 3
 
 
 class FailingCommits:

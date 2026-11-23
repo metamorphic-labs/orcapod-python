@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import sys
+import time
 from collections import defaultdict
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
@@ -69,6 +71,35 @@ logger = logging.getLogger(__name__)
 
 # Directory that marks its parent directory as a Delta table.
 _DELTA_LOG_DIRECTORY = "_delta_log"
+
+# How many times a flush tries to commit a table's pending rows when other writers
+# keep committing first; after the last attempt it raises the last conflict
+# (ITL-1377).
+_COMMIT_ATTEMPTS = 10
+
+
+class _LostCommitRace(Exception):
+    """Another writer committed to the table first; load it again and retry.
+
+    Attributes:
+        error: The error the lost commit raised, raised as itself when no attempt
+            is left.
+    """
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__(str(error))
+        self.error = error
+
+
+def _sleep_before_retry(attempt: int) -> None:
+    """Wait a random time before attempt ``attempt + 1``, longer after each loss.
+
+    Writers that lost to each other start again at different moments, so they do
+    not keep colliding. The wait only spaces attempts: what is committed is decided
+    against the table each attempt loads.
+    """
+    time.sleep(random.uniform(0, min(0.5, 0.005 * 2**attempt)))
+
 
 # deltalake storage option -> where s3fs takes the same setting.
 _S3FS_OPTION_OF: dict[str, tuple[str, ...]] = {
@@ -2594,105 +2625,36 @@ class DeltaTableDatabase:
             original_table = arrow_utils.normalize_table_view_types(
                 pending_batch.combine_chunks()
             )
-            # A column whose type Delta would not give back is written in its
-            # integer form with its type recorded (ITL-928).
-            combined_table = to_delta_layout(original_table)
 
             # Ensure parent directory exists (local only)
             if not self._is_cloud:
-                import os
-
                 os.makedirs(table_uri, exist_ok=True)
 
-            # Check if Delta table exists at this URI. Only TableNotFoundError
-            # means "absent": a table that exists but cannot be loaded must never
-            # be replaced by the mode="overwrite" write below (ITL-884).
-            from deltalake.exceptions import TableNotFoundError
-
-            try:
-                delta_table = deltalake.DeltaTable(
-                    table_uri, storage_options=self._storage_options or None
-                )
-            except TableNotFoundError:
-                delta_table = None
-            except Exception as load_error:
-                raise OrcapodDatabaseReadError(
-                    table_uri, abs_path_components
-                ) from load_error
-
-            # Set when the rows were appended through ``delta_table``, which the
-            # writer then moves to the version it committed (ITL-1173).
-            appended = False
-            if delta_table is None:
-                # TODO: reconsider mode="overwrite" here
-                deltalake.write_deltalake(
-                    table_uri,
-                    combined_table,
-                    mode="overwrite",
-                    schema_mode="merge" if self.allow_schema_evolution else "overwrite",
-                    storage_options=self._storage_options or None,
-                    # Name the statistics columns once, at creation (ITL-1187).
-                    configuration=statistics_configuration(combined_table.schema),
-                )
-                base = _CommittedSnapshot(version=-1, ids=set())
-                inserted_ids = self._non_null_ids(combined_table)
-                logger.debug(
-                    f"Created new Delta table for {record_key} with {len(combined_table)} records"
-                )
-            else:
-                # The add-time check, against the version just loaded: another
-                # writer may have committed since the rows were buffered (ITL-1334).
-                refusal = _append_refusal(delta_table, original_table)
-                if refusal is not None:
-                    column, reason = refusal
-                    raise InputValidationError(
-                        f"Cannot append to the stored table {table_uri!r}: column "
-                        f"{column!r}: {reason}. The stored rows are unchanged and "
-                        "nothing was written."
+            # Every commit can fail because another writer committed first: a create
+            # finds the table created, a MERGE finds rows added since it loaded the
+            # table. Each attempt loads the table again and decides against what is
+            # committed then, so an id another writer committed meanwhile is never
+            # stored a second time (ITL-1377, ITL-1384).
+            attempt = 1
+            while True:
+                try:
+                    delta_table, base, inserted_ids = self._commit_once(
+                        record_key, table_uri, abs_path_components, original_table
                     )
-                # Delta's MERGE matches struct fields by position: the rows are given
-                # the stored struct layout by name first, so an evolved struct (fields
-                # reordered, omitted or added) keeps every value under its name; and a
-                # recorded column's record describes the column after this append
-                # (ITL-1334).
-                combined_table = _with_merged_records(
-                    delta_table,
-                    original_table,
-                    _conformed_to_stored(delta_table, combined_table, table_uri),
-                )
-                base = self._snapshot_for_commit(
-                    record_key, delta_table, table_uri, abs_path_components
-                )
-                assert base.ids is not None
-                incoming_ids = self._non_null_ids(combined_table)
-                inserted_ids = incoming_ids - base.ids
-                if len(inserted_ids) == len(incoming_ids) and self._stores_as_is(
-                    delta_table, combined_table
-                ):
-                    # Every pending id is new in the version just loaded and the rows
-                    # have the stored schema: append (ITL-919). A MERGE reads the whole
-                    # stored table on each commit; it remains for every other batch.
-                    # Written through the table just loaded: given a URI, the writer
-                    # would load the table again (ITL-1173).
-                    deltalake.write_deltalake(
-                        delta_table, combined_table, mode="append"
+                    break
+                except _LostCommitRace as lost:
+                    # What this handle cached of the table describes a version
+                    # another writer has moved past.
+                    self._delta_table_cache.pop(record_key, None)
+                    self._snapshots.pop(record_key, None)
+                    if attempt >= _COMMIT_ATTEMPTS:
+                        raise lost.error
+                    logger.debug(
+                        f"Commit to {record_key} lost to another writer "
+                        f"(attempt {attempt}); retrying"
                     )
-                    appended = True
-                else:
-                    # Some pending ids are stored already: insert only the others.
-                    delta_table.merge(
-                        source=_merge_source_in_stored_layout(
-                            delta_table, combined_table
-                        ),
-                        predicate=f"target.{self.RECORD_ID_COLUMN} = source.{self.RECORD_ID_COLUMN}",
-                        source_alias="source",
-                        target_alias="target",
-                        merge_schema=self.allow_schema_evolution,
-                    ).when_not_matched_insert_all().execute()
-
-                logger.debug(
-                    f"Appended batch of {len(combined_table)} records to {record_key}"
-                )
+                    _sleep_before_retry(attempt)
+                    attempt += 1
 
         except InputValidationError as e:
             # The stored table refuses these rows (``_append_refusal``,
@@ -2725,7 +2687,7 @@ class DeltaTableDatabase:
         try:
             committed = (
                 delta_table
-                if appended and delta_table is not None
+                if delta_table is not None
                 else deltalake.DeltaTable(
                     table_uri, storage_options=self._storage_options or None
                 )
@@ -2739,6 +2701,135 @@ class DeltaTableDatabase:
             logger.warning(f"Could not reload {record_key} after committing: {e}")
             self._delta_table_cache.pop(record_key, None)
             self._snapshots.pop(record_key, None)
+
+    def _commit_once(
+        self,
+        record_key: str,
+        table_uri: str,
+        abs_path_components: tuple[str, ...],
+        original_table: pa.Table,
+    ) -> tuple[deltalake.DeltaTable | None, _CommittedSnapshot, set[bytes]]:
+        """Commit ``original_table`` to the table as it is now, in one attempt.
+
+        A table that does not exist is created, and the create fails if another
+        writer created it first. Rows for an existing table are committed by a
+        MERGE that inserts only the ids the table does not hold: Delta refuses
+        that commit when another writer added rows after the table was loaded,
+        which a plain append never is (ITL-1377).
+
+        Args:
+            record_key: The table's absolute record key.
+            table_uri: The table's location.
+            abs_path_components: The table's absolute path, for errors.
+            original_table: The pending rows, view types converted.
+
+        Returns:
+            The table the rows were merged through (moved to the version it
+            committed), or ``None`` for a table this attempt created; the snapshot
+            of the version the commit built on; and the non-null ids it inserted.
+
+        Raises:
+            _LostCommitRace: If another writer committed first; the caller loads
+                the table again and retries.
+            OrcapodDatabaseReadError: If the table exists but cannot be loaded, or
+                its stored ids cannot be read.
+            InputValidationError: If the stored table refuses the rows.
+        """
+        from deltalake.exceptions import CommitFailedError, TableNotFoundError
+
+        # A column whose type Delta would not give back is written in its integer
+        # form with its type recorded (ITL-928).
+        combined_table = to_delta_layout(original_table)
+        # Only TableNotFoundError means "absent": a table that exists but cannot be
+        # loaded is never created over (ITL-884).
+        try:
+            delta_table = deltalake.DeltaTable(
+                table_uri, storage_options=self._storage_options or None
+            )
+        except TableNotFoundError:
+            delta_table = None
+        except Exception as load_error:
+            raise OrcapodDatabaseReadError(
+                table_uri, abs_path_components
+            ) from load_error
+
+        if delta_table is None:
+            try:
+                # mode="error": a table another writer created after the load above
+                # is never replaced; this attempt fails instead (ITL-1384).
+                deltalake.write_deltalake(
+                    table_uri,
+                    combined_table,
+                    mode="error",
+                    storage_options=self._storage_options or None,
+                    # Name the statistics columns once, at creation (ITL-1187).
+                    configuration=statistics_configuration(combined_table.schema),
+                )
+            except Exception as create_error:
+                if self._table_exists_at(table_uri):
+                    raise _LostCommitRace(create_error) from create_error
+                raise
+            logger.debug(
+                f"Created new Delta table for {record_key} with {len(combined_table)} records"
+            )
+            return (
+                None,
+                _CommittedSnapshot(version=-1, ids=set()),
+                self._non_null_ids(combined_table),
+            )
+
+        # The add-time check, against the version just loaded: another writer may
+        # have committed since the rows were buffered (ITL-1334).
+        refusal = _append_refusal(delta_table, original_table)
+        if refusal is not None:
+            column, reason = refusal
+            raise InputValidationError(
+                f"Cannot append to the stored table {table_uri!r}: column "
+                f"{column!r}: {reason}. The stored rows are unchanged and "
+                "nothing was written."
+            )
+        # Delta's MERGE matches struct fields by position: the rows are given the
+        # stored struct layout by name first, so an evolved struct (fields
+        # reordered, omitted or added) keeps every value under its name; and a
+        # recorded column's record describes the column after this append
+        # (ITL-1334).
+        combined_table = _with_merged_records(
+            delta_table,
+            original_table,
+            _conformed_to_stored(delta_table, combined_table, table_uri),
+        )
+        base = self._snapshot_for_commit(
+            record_key, delta_table, table_uri, abs_path_components
+        )
+        assert base.ids is not None
+        inserted_ids = self._non_null_ids(combined_table) - base.ids
+        try:
+            # Insert only the ids the table does not hold. Every commit to an
+            # existing table is this MERGE, also when every id is new: it is the
+            # commit Delta checks against rows another writer added meanwhile
+            # (ITL-1377). The table object moves to the version it committed, so
+            # it is not loaded again (ITL-1173).
+            delta_table.merge(
+                source=_merge_source_in_stored_layout(delta_table, combined_table),
+                predicate=f"target.{self.RECORD_ID_COLUMN} = source.{self.RECORD_ID_COLUMN}",
+                source_alias="source",
+                target_alias="target",
+                merge_schema=self.allow_schema_evolution,
+            ).when_not_matched_insert_all().execute()
+        except CommitFailedError as conflict:
+            raise _LostCommitRace(conflict) from conflict
+        logger.debug(f"Merged batch of {len(combined_table)} records to {record_key}")
+        return delta_table, base, inserted_ids
+
+    def _table_exists_at(self, table_uri: str) -> bool:
+        """Whether a Delta table can be loaded at ``table_uri`` now."""
+        try:
+            deltalake.DeltaTable(
+                table_uri, storage_options=self._storage_options or None
+            )
+        except Exception:
+            return False
+        return True
 
     def _rows_with_ids(
         self,
@@ -2771,47 +2862,6 @@ class DeltaTableDatabase:
         id_index = rows.column(self.RECORD_ID_COLUMN)
         positions = {p for r in set(record_ids) for p in id_index.get(r, ())}
         return rows_at(rows.table, sorted(positions))
-
-    @staticmethod
-    def _stores_as_is(delta_table: deltalake.DeltaTable, batch: pa.Table) -> bool:
-        """Whether ``batch`` has exactly the stored schema once the Delta writer converts it.
-
-        Only such a batch is appended: an append stores it unchanged, as the MERGE
-        would. A batch that needs a cast (a ``null``-typed column, a nullability
-        difference) or evolves the schema goes through the MERGE, which handles it.
-
-        Args:
-            delta_table: The loaded stored table.
-            batch: The rows about to be committed.
-
-        Returns:
-            Whether an append stores ``batch`` exactly as the MERGE would.
-        """
-        # Delta stores a logical column as its storage type (ITL-984): compare that,
-        # or a batch with a logical list never equals the stored plain list.
-        schema = pa.schema(
-            [
-                f.with_type(f.type.storage_type)
-                if isinstance(f.type, pa.ExtensionType)
-                else f
-                for f in batch.schema
-            ]
-        )
-        try:
-            incoming = _as_delta_writer_stores(schema)
-        except Exception:
-            # A type Delta cannot store directly (null): leave it to the MERGE.
-            return False
-        # A changed recorded type must reach the log: the MERGE writes it (ITL-1334).
-        stored_records = {
-            f.name: recorded_type(f.metadata) for f in delta_table.schema().fields
-        }
-        if any(
-            recorded_type(f.metadata) != stored_records.get(f.name)
-            for f in batch.schema
-        ):
-            return False
-        return incoming.equals(_stored_arrow_schema(delta_table), check_metadata=False)
 
     @classmethod
     def _non_null_ids(cls, table: pa.Table) -> set[bytes]:
