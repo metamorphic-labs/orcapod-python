@@ -346,9 +346,9 @@ def test_an_empty_output_is_derived_at_the_edge(
     )
     job = PipelineJob(name="empty_edge", database=InMemoryArrowDatabase())
     with job:
-        ArrowTableSource(table, tag_columns=["k"], source_id="s").select_data_columns(
-            ["x"], label="selected"
-        )
+        ArrowTableSource(
+            table, tag_columns=["k"], tag_only_columns=True, source_id="s"
+        ).select_data_columns(["x"], label="selected")
     slot = next(label for label in job.nodes if label != "selected")
     observer = _NodeEvents()
     original = StaticOutputOperatorPod._materialize_upstream  # pyright: ignore[reportPrivateUsage]  # the row path, watched

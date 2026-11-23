@@ -653,7 +653,8 @@ def test_empty_source_info_lists_are_typed_from_their_tokens(layout: str) -> Non
 def test_a_system_tag_with_a_null_is_refused_by_the_job_sync_path() -> None:
     """Pins a stream no job can run: a raw stream whose system-tag column holds a string
     and a null. The job's sync path refuses it (the rows' system-tag fields differ in
-    their flags), while the channel gives both rows; a job never sees such a stream,
+    their flags), and so does the channel, which builds such a stream from
+    its rows (CodeRabbit on PR #510); a job never sees such a stream,
     because a source with a nullable system tag cannot be bound to a slot
     (``SourceSpecMismatchError``)."""
     raw = ArrowTableStream(
@@ -671,8 +672,8 @@ def test_a_system_tag_with_a_null_is_refused_by_the_job_sync_path() -> None:
         "refused",
         "ArrowInvalid",
     )
-    channel = run_on_channels(SelectDataColumns(["x"]), [raw], None)
-    assert channel.as_table(columns=ALL).column(SYSTEM_TAG).to_pylist() == ["s", None]
+    with pytest.raises(pa.ArrowInvalid):
+        run_on_channels(SelectDataColumns(["x"]), [raw], None)
 
 
 # --- Ending the output and closing the inputs ------------------------------------------------
