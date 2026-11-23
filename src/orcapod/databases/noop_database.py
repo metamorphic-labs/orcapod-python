@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from contextlib import AbstractContextManager, nullcontext
 from typing import TYPE_CHECKING, Any
 
@@ -122,6 +122,12 @@ class NoOpArrowDatabase:
         self, record_path: tuple[str, ...], record_id: bytes, dependency: PendingCommit
     ) -> AbstractContextManager[None]:
         """Accept the bookkeeping dependency without retaining the pipeline record."""
+        return nullcontext()
+
+    def guard_table_schema(
+        self, record_path: tuple[str, ...], check: Callable[[pa.Schema], None]
+    ) -> AbstractContextManager[None]:
+        """Discard records without committing a table."""
         return nullcontext()
 
     def list_table_paths(self, prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:

@@ -53,6 +53,7 @@ from orcapod.databases.utils import (
 )
 from orcapod.errors import (
     InputValidationError,
+    StoredTableSchemaError,
     OrcapodDatabaseReadError,
     TableListingNotSupportedError,
     TypeIdentityError,
@@ -2866,6 +2867,14 @@ class DeltaTableDatabase:
         """Commit a durable result table even if no pipeline records are stored."""
         self.flush_batch(record_path)
 
+    def guard_table_schema(
+        self, record_path: tuple[str, ...], check: Callable[[pa.Schema], None]
+    ) -> AbstractContextManager[None]:
+        """Check the schema in the snapshot opened at commit."""
+        return self._pending_commits.guard_schema(
+            self._get_record_key(record_path), check
+        )
+
     def flush_batch(self, record_path: tuple[str, ...]) -> None:
         """
         Flush pending batch for a specific source path.
@@ -2933,6 +2942,14 @@ class DeltaTableDatabase:
                     table_uri, abs_path_components
                 ) from load_error
 
+            check = self._pending_commits.schema_check(record_key)
+            if check is not None:
+                check(
+                    pending_batch.schema
+                    if delta_table is None
+                    else pa.schema(_held_columns(delta_table).values())
+                )
+
             # Set when the rows were appended through ``delta_table``, which the
             # writer then moves to the version it committed (ITL-1173).
             appended = False
@@ -2941,7 +2958,7 @@ class DeltaTableDatabase:
                 deltalake.write_deltalake(
                     table_uri,
                     combined_table,
-                    mode="overwrite",
+                    mode="overwrite" if check is None else "error",
                     schema_mode="merge" if self.allow_schema_evolution else "overwrite",
                     storage_options=self._storage_options or None,
                     # Name the statistics columns once, at creation (ITL-1187).
@@ -3007,7 +3024,7 @@ class DeltaTableDatabase:
                     f"Appended batch of {len(combined_table)} records to {record_key}"
                 )
 
-        except InputValidationError as e:
+        except (InputValidationError, StoredTableSchemaError) as e:
             # The stored table refuses these rows (``_append_refusal``,
             # ``_conformed_to_stored``): they would be refused by every later flush
             # too, so they leave the queue, as rows refused when added never enter
@@ -3020,14 +3037,19 @@ class DeltaTableDatabase:
             # The discard notice is part of the message, so it survives wherever the
             # error is reported: the log, and the note ``flush`` puts on another
             # batch's error when that one is raised instead.
-            refused = InputValidationError(
-                f"{e} The {pending_batch.num_rows} rows queued for table "
-                f"{record_key!r} were not written and are no longer queued: correct "
-                "them and add them again."
+            discarded = (
+                f"The {pending_batch.num_rows} rows queued for table "
+                f"{record_key!r} were not written and are no longer queued."
             )
             self._pending_commits.forget(record_key, pending_ids)
             self._pending_commits.finish(record_key, committed=False)
-            logger.error(f"Refused batch for {record_key}: {refused}")
+            logger.error("Refused batch for %s: %s %s", record_key, e, discarded)
+            if isinstance(e, StoredTableSchemaError):
+                e.add_note(discarded)
+                raise
+            refused = InputValidationError(
+                f"{e} {discarded.removesuffix('.')}: correct them and add them again."
+            )
             raise refused from e
         except BaseException as exc:
             logger.error(f"Error flushing batch for {record_key}: {exc}")

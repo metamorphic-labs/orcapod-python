@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from contextlib import AbstractContextManager
 from typing import Any, cast
 
@@ -547,7 +547,11 @@ class ConnectorArrowDatabase:
         if table_name not in self._connector.get_table_names():
             return None
         return [
-            pa.field(c.name, normalize_to_large_types(c.arrow_type, keep_null=True))
+            pa.field(
+                c.name,
+                normalize_to_large_types(c.arrow_type, keep_null=True),
+                nullable=c.nullable,
+            )
             for c in self._connector.get_column_info(table_name)
         ]
 
@@ -692,6 +696,14 @@ class ConnectorArrowDatabase:
             self._get_record_key(record_path), record_id, dependency
         )
 
+    def guard_table_schema(
+        self, record_path: tuple[str, ...], check: Callable[[pa.Schema], None]
+    ) -> AbstractContextManager[None]:
+        """Check the schema at the connector's commit."""
+        return self._pending_commits.guard_schema(
+            self._get_record_key(record_path), check
+        )
+
     def flush(self) -> None:
         """Commit all pending batches to the connector via upsert."""
         for record_key in list(self._pending_batches):
@@ -730,6 +742,9 @@ class ConnectorArrowDatabase:
             # Looked up now, as the check needs: nothing about the stored table is
             # trusted from an earlier call (ITL-1367).
             existing = self._stored_columns(table_name)
+            check = self._pending_commits.schema_check(record_key)
+            if check is not None:
+                check(pending.schema if existing is None else pa.schema(existing))
             if existing is not None:
                 # A connector reads text and binary back in their large variants,
                 # which are the same types (ITL-1162).

@@ -424,6 +424,90 @@ def test_the_same_node_refuses_a_restored_prerelease_schema(
     )
 
 
+@pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
+@pytest.mark.parametrize("backend", ["memory", "delta"])
+def test_commit_refuses_legacy_schema_restored_after_queueing(
+    orchestrator: str, backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The commit checks the table it publishes to, even after a successful preflight."""
+    seed = InMemoryArrowDatabase()
+    first, _ = job_and_node(seed)
+    _ = first.run()
+    path = pipeline_path(seed)
+    current = pipeline_rows(seed)
+    legacy = current.drop([RUN_ID, RECORDED_AT])
+    if backend == "delta":
+        store: ArrowDatabaseProtocol = DeltaTableDatabase(tmp_path)
+        store.add_records(path, legacy, record_id_column=RECORD_ID, flush=True)
+        uri = str(tmp_path.joinpath(*path))
+        deltalake.write_deltalake(
+            uri, current, mode="overwrite", schema_mode="overwrite"
+        )
+        for result_path in seed.list_table_paths():
+            if result_path != path:
+                results = seed.get_all_records(result_path, record_id_column=RECORD_ID)
+                assert results is not None
+                store.add_records(
+                    result_path, results, record_id_column=RECORD_ID, flush=True
+                )
+    else:
+        store = seed
+
+    writer, node = job_and_node(store, count=3)
+    assert writer.nodes["summarize"] is node
+    assert execute_standalone(node, source(3), orchestrator) == 3
+    assert pipeline_rows(store).num_rows == 3
+    if backend == "delta":
+        delta = deltalake.DeltaTable(str(tmp_path.joinpath(*path)))
+        assert delta.to_pyarrow_table().num_rows == 2
+        _ = delta.restore(0)
+    else:
+        monkeypatch.setitem(
+            seed._tables,
+            "/".join(path),
+            legacy,  # pyright: ignore[reportPrivateUsage]  # simulate replacing a table underneath the queue
+        )
+
+    with pytest.raises(OrcapodDatabaseError, match="Rebuild the pipeline table"):
+        store.flush_batch(path)
+    assert pipeline_rows(store).equals(legacy)
+    store.flush_batch(path)  # The refused batch must not be retried.
+    assert pipeline_rows(store).equals(legacy)
+
+
+@pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
+@pytest.mark.parametrize("existing", [False, True], ids=["new", "existing"])
+def test_pipeline_schema_opens_do_not_grow_with_rows(
+    orchestrator: str, existing: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Preflight opens one metadata snapshot and the flush uses its own snapshot."""
+    original = deltalake.DeltaTable.__init__
+    counts: list[tuple[int, int]] = []
+    for count in (3, 63):
+        store = DeltaTableDatabase(tmp_path / str(count))
+        if existing:
+            initial, _ = job_and_node(store)
+            _ = initial.run()
+        job, node = job_and_node(store, count=count)
+        opens: list[bool] = []
+
+        def observe(table: deltalake.DeltaTable, uri: str, **options: object) -> None:
+            """Count pipeline log opens, distinguishing preflight from reads and commits."""
+            if Path(uri).name == PIPELINE_DB_SCHEMA_VERSION:
+                opens.append(options.get("without_files") is True)
+            original(table, uri, **options)  # pyright: ignore[reportArgumentType]  # forward Delta's unchanged keyword arguments
+
+        with monkeypatch.context() as patch:
+            patch.setattr(deltalake.DeltaTable, "__init__", observe)
+            _ = job.run(
+                orchestrator=ORCHESTRATORS[orchestrator](), commit_every_rows=100
+            )
+        assert node.as_table().num_rows == count
+        counts.append((sum(opens), len(opens)))
+    assert counts[0][0] == counts[1][0] == 1
+    assert counts[0][1] == counts[1][1]
+
+
 @function_pod(output_keys="total")
 def nullable_total(x: int, y: int) -> int | None:
     """Return a null output value for these positive inputs."""

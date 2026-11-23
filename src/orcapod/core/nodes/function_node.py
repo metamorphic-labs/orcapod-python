@@ -26,6 +26,7 @@ from abc import abstractmethod
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from datetime import datetime, timezone
+from functools import partial
 from typing import Any, Literal, NamedTuple, cast
 
 import polars as pl
@@ -74,6 +75,7 @@ from orcapod.errors import (
     OrcapodDatabaseError,
     TypeIdentityError,
     OrcapodDatabaseWriteError,
+    StoredTableSchemaError,
     UnstorableColumnError,
 )
 from orcapod.contexts.stored import (
@@ -1419,7 +1421,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
     _stale_tables_checked: bool = False
     # Set once the rows of the current tables were counted by data context.
     _current_tables_checked: bool = False
-    # Preflight the first miss before invoking user code. Each append checks again.
+    # Preflight the first miss before invoking user code. Each commit checks again.
     _pipeline_preflight_checked: bool = False
     # Set once a database that cannot list its tables was reported.
     _unlisted_store_reported: bool = False
@@ -2420,6 +2422,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         database = self._require_pipeline_database()
         path = self._versioned_pipeline_path
         pod = self._ephemeral_cached_pod if is_ephemeral else self._cached_function_pod
+        dependency = None
         if self._commit_every_rows is not None and isinstance(pod, CachedFunctionPod):
             result_database = pod.result_database
             try:
@@ -2433,11 +2436,14 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                     flush=True,
                     table_flush=True,
                 ) from exc
-            if dependency is not None:
-                with database.guard_record(path, record_id, dependency):
-                    database.add_record(path, record_id, record, skip_duplicates=True)
-                return
-        database.add_record(path, record_id, record, skip_duplicates=True)
+        check = partial(self._check_pipeline_write_schema, database, path)
+        result_guard = (
+            contextlib.nullcontext()
+            if dependency is None
+            else database.guard_record(path, record_id, dependency)
+        )
+        with database.guard_table_schema(path, check), result_guard:
+            database.add_record(path, record_id, record, skip_duplicates=True)
 
     def _row_processed(self) -> None:
         """Count a processed row; commit once a batch is full (only inside a job run)."""
@@ -2829,7 +2835,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         if isinstance(data, EmptyData):
             return self._empty_data_cache_hit(tag, data, base_entry_id)
 
-        self._require_current_pipeline_write_schema(before_compute=True)
+        self._preflight_pipeline_write_schema()
         ephemeral_result = bool(self._node_config.is_result_ephemeral)
 
         if ephemeral_result:
@@ -2970,7 +2976,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         if isinstance(data, EmptyData):
             return self._empty_data_cache_hit(tag, data, base_entry_id)
 
-        self._require_current_pipeline_write_schema(before_compute=True)
+        self._preflight_pipeline_write_schema()
         ephemeral_result = bool(self._node_config.is_result_ephemeral)
 
         if ephemeral_result:
@@ -3208,7 +3214,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             input_data.data_context_key, self._stored_data_context_key
         )
         self._account_for_stale_tables()
-        self._require_current_pipeline_write_schema()
+        self._preflight_pipeline_write_schema()
 
         # Determine the next recomputation index by querying all existing rows
         # for this base_entry_id. No await is used here, so within a single-threaded
@@ -3289,54 +3295,54 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 tag=tag.as_dict(),
             ) from exc
 
-    def _require_current_pipeline_write_schema(
-        self, *, before_compute: bool = False
-    ) -> None:
-        """Check the table schema before each append and before the first computation.
-
-        Args:
-            before_compute: Preflight before executing a function on a cache miss.
-                Only this early check can reuse a prior check from the same run.
-        """
+    def _preflight_pipeline_write_schema(self) -> None:
+        """Refuse an incompatible table before the first computation in this run."""
         database = self._pipeline_database
-        if database is None or (before_compute and self._pipeline_preflight_checked):
+        if database is None or self._pipeline_preflight_checked:
             return
         path = self._versioned_pipeline_path
         existing = database.get_table_schema(path)
         if existing is not None:
-            issues: list[str] = []
-            for expected in _PIPELINE_RECORDING_FIELDS:
-                index = existing.get_field_index(expected.name)
-                if index < 0:
-                    issues.append(f"missing {expected.name}")
-                    continue
-                actual = existing.field(index)
-                actual_type = arrow_utils.normalize_to_large_types(
-                    actual.type, keep_null=True
-                )
-                if actual_type != expected.type:
-                    issues.append(
-                        f"{expected.name} has type {actual_type}, expected {expected.type}"
-                    )
-                if actual.nullable != expected.nullable:
-                    actual_nullability = (
-                        "nullable" if actual.nullable else "non-nullable"
-                    )
-                    expected_nullability = (
-                        "nullable" if expected.nullable else "non-nullable"
-                    )
-                    issues.append(
-                        f"{expected.name} is {actual_nullability}, expected {expected_nullability}"
-                    )
-            if issues:
-                raise OrcapodDatabaseError(
-                    f"Cannot append a pipeline record to the "
-                    f"{describe_database_table(database, path)}: "
-                    f"{', '.join(issues)}. Rebuild the pipeline table "
-                    "with the current version of Orcapod.",
-                    node_label=self.label,
-                )
+            self._check_pipeline_write_schema(database, path, existing)
         self._pipeline_preflight_checked = True
+
+    def _check_pipeline_write_schema(
+        self,
+        database: ArrowDatabaseProtocol,
+        path: tuple[str, ...],
+        schema: pa.Schema,
+    ) -> None:
+        """Report missing or incompatible recording columns and name their table."""
+        issues: list[str] = []
+        for expected in _PIPELINE_RECORDING_FIELDS:
+            index = schema.get_field_index(expected.name)
+            if index < 0:
+                issues.append(f"missing {expected.name}")
+                continue
+            actual = schema.field(index)
+            actual_type = arrow_utils.normalize_to_large_types(
+                actual.type, keep_null=True
+            )
+            if actual_type != expected.type:
+                issues.append(
+                    f"{expected.name} has type {actual_type}, expected {expected.type}"
+                )
+            if actual.nullable != expected.nullable:
+                actual_nullability = "nullable" if actual.nullable else "non-nullable"
+                expected_nullability = (
+                    "nullable" if expected.nullable else "non-nullable"
+                )
+                issues.append(
+                    f"{expected.name} is {actual_nullability}, expected {expected_nullability}"
+                )
+        if issues:
+            raise StoredTableSchemaError(
+                f"Cannot append a pipeline record to the "
+                f"{describe_database_table(database, path)}: "
+                f"{', '.join(issues)}. Rebuild the pipeline table "
+                "with the current version of Orcapod.",
+                node_label=self.label,
+            )
 
     # ------------------------------------------------------------------
     # Records and sources
@@ -4446,9 +4452,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                                 run_entry_ids.append(base_entry_id)
                                 await output.send((cached_tag, cached_data))
                             else:
-                                self._require_current_pipeline_write_schema(
-                                    before_compute=True
-                                )
+                                self._preflight_pipeline_write_schema()
                                 correlation_key = uuid.uuid4().bytes
                                 input_store[correlation_key] = (
                                     tag,

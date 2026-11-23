@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from contextlib import AbstractContextManager
 from typing import Any, Protocol, TYPE_CHECKING, runtime_checkable
 
@@ -36,6 +36,12 @@ class ArrowDatabaseProtocol(Protocol):
         self, record_path: tuple[str, ...], record_id: bytes, dependency: PendingCommit
     ) -> AbstractContextManager[None]:
         """Bind a record to its result's token before enqueue can publish it."""
+        ...
+
+    def guard_table_schema(
+        self, record_path: tuple[str, ...], check: Callable[[pa.Schema], None]
+    ) -> AbstractContextManager[None]:
+        """Keep the check with queued records and apply it to the schema at commit."""
         ...
 
     def fail_pending_result(self, record_path: tuple[str, ...]) -> None:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import asyncio
 from collections import defaultdict
 from contextlib import AbstractContextManager
@@ -453,6 +455,11 @@ class ProtocolDatabase(DatabaseWithoutCommitGuards):
         self, record_path: tuple[str, ...], record_id: bytes, dependency: PendingCommit
     ) -> AbstractContextManager[None]:
         return self._inner.guard_record(record_path, record_id, dependency)
+
+    def guard_table_schema(
+        self, record_path: tuple[str, ...], check: Callable[[pa.Schema], None]
+    ) -> AbstractContextManager[None]:
+        return self._inner.guard_table_schema(record_path, check)
 
     def fail_pending_result(self, record_path: tuple[str, ...]) -> None:
         self._inner.fail_pending_result(record_path)

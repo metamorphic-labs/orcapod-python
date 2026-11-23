@@ -971,6 +971,10 @@ class OrcapodDatabaseError(RuntimeError):
             self.tag = dict(tag)
 
 
+class StoredTableSchemaError(OrcapodDatabaseError):
+    """A table's layout does not permit committing the queued records."""
+
+
 class OrcapodDatabaseWriteError(OrcapodDatabaseError):
     """Raised when a node's results or records could not be written to the database.
 
