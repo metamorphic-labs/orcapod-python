@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from datetime import date, datetime, timedelta, timezone
 from types import MappingProxyType
@@ -209,12 +210,37 @@ def _condition_value_to_config(value: object) -> object:
     return value
 
 
+_ISO_OFFSET = re.compile(r"([+-])(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,6}))?)?$")
+"""The UTC offset at the end of an ISO datetime text, seconds and microseconds included."""
+
+
+def _datetime_from_iso(text: str) -> datetime:
+    """Return the datetime ``isoformat()`` wrote, with its offset exactly.
+
+    ``datetime.fromisoformat`` reads an offset of zero whole seconds and a fraction
+    (``+00:00:00.000001``) as zero, which would move the instant of a value kept under
+    its own offset (``_frozen``'s fallback); the offset is read from the text instead.
+    """
+    value = datetime.fromisoformat(text)
+    match = _ISO_OFFSET.search(text)
+    if value.tzinfo is None or match is None:
+        return value
+    sign, hours, minutes, seconds, fraction = match.groups()
+    offset = timedelta(
+        hours=int(hours),
+        minutes=int(minutes),
+        seconds=int(seconds or 0),
+        microseconds=int((fraction or "0").ljust(6, "0")),
+    )
+    return value.replace(tzinfo=timezone(-offset if sign == "-" else offset))
+
+
 def _condition_value_from_config(saved: object) -> object:
     """Return the condition value that ``_condition_value_to_config`` wrote."""
     if isinstance(saved, dict) and len(saved) == 1:
         ((key, text),) = saved.items()
         if key == _DATETIME_KEY:
-            return datetime.fromisoformat(text)
+            return _datetime_from_iso(text)
         if key == _DATE_KEY:
             return date.fromisoformat(text)
         if key == _BYTES_KEY:
@@ -758,7 +784,9 @@ class ColumnRef:
             key = _condition_hash_key(value)
             if key not in seen:
                 seen.add(key)
-                unique.append(value)
+                # One zero whatever was given first: -0.0 and 0.0 are one member, and
+                # the member kept (shown, saved) is 0.0, as the canonical form encodes it.
+                unique.append(0.0 if type(value) is float and value == 0.0 else value)
         if not unique:
             raise ValueError(
                 f"column {name!r}: is_in needs at least one value (no value matches "
@@ -1380,10 +1408,13 @@ def _same_term(a: Term, b: Term) -> bool:
         return False
     if a.operator == "is_in":
         first, second = a.value, b.value
+        # As sets of hash keys, consistent with _same_condition_value (typed values,
+        # NaN, signed zero, aware datetimes by instant): linear, not quadratic.
         return (
             isinstance(first, tuple)
             and isinstance(second, tuple)
-            and _same_members(first, second, _same_condition_value)
+            and {_condition_hash_key(v) for v in first}
+            == {_condition_hash_key(v) for v in second}
         )
     if isinstance(a.value, ColumnOperand) or isinstance(b.value, ColumnOperand):
         return a.value == b.value
@@ -1494,6 +1525,14 @@ def _canonically_sorted(nodes: Iterable[Node]) -> list[Node]:
     return sorted(nodes, key=lambda node: json.dumps(_canonical_node(node)))
 
 
+def _canonical_display(value: object) -> object:
+    """Return ``value`` as ``canonical_text`` shows it: ``-0.0`` as ``0.0``, as the
+    canonical form encodes it (every other value as it is)."""
+    if type(value) is float and value == 0.0:
+        return 0.0
+    return value
+
+
 def _node_text(node: Node, canonical: bool = False) -> str:
     """Return ``node`` as words (display only); ``canonical`` sorts children and
     ``is_in`` values as ``canonical_form`` does."""
@@ -1507,9 +1546,14 @@ def _node_text(node: Node, canonical: bool = False) -> str:
         if node.operator == "is_in" and isinstance(value, tuple):
             if canonical:
                 value = tuple(
-                    sorted(value, key=lambda v: json.dumps(_canonical_value(v)))
+                    _canonical_display(v)
+                    for v in sorted(
+                        value, key=lambda v: json.dumps(_canonical_value(v))
+                    )
                 )
             return f"{path} in [{', '.join(repr(v) for v in value)}]"
+        if canonical:
+            value = _canonical_display(value)
         if node.operator == EQUALS:
             return f"{path}={value!r}"
         return f"{path} {node.operator} {value!r}"
@@ -1593,6 +1637,11 @@ def _condition_from_config(saved: object) -> Condition:
                 f"a saved is_in term holds a list of values; got {values!r}"
             )
         return ref.is_in([_condition_value_from_config(v) for v in values])
+    if "other" in saved and "value" in saved:
+        raise ValueError(
+            "a saved comparison holds one operand, a 'value' or an 'other' column; got "
+            f"both: {dict(saved)!r}"
+        )
     if "other" in saved:
         other = _path_from_config(saved["other"])
         operand: object = ColumnRef(other.column, other.fields)

@@ -12,7 +12,8 @@ built the same day).
   Python kinds (`7` against a `double` column is still refused). What enters the identity
   is the literal as written (F11). New decision 15.
 - 4: `Filter` is eligible for the job-speed table transport (F13).
-- 5: conditions are checked when built, so nothing is refused later by the job (F07); the
+- 5: conditions are checked when built, and checked the same way inside and outside a job
+  (F07; a value its column cannot hold is refused when the filter meets its input); the
   node-naming gap of streams built before a job is out of scope. `Filter` and
   `RestrictedAggregationWarning` (F12). Pushdown rewritten (F08): what a version 1 without
   pushdown costs on a large table, the smallest safe pushdown, and `explain()`, which
@@ -255,8 +256,11 @@ Checked when the filter is applied to a stream (`InputValidationError`, naming t
   logical types). Null tests are accepted on every type.
 
 The Python-type checks run at graph build, from `output_schema()`; the Arrow-level checks
-(range, zone) run when the filter is applied, from the input table's Arrow schema, so
-validation never derives a zero-row table (the rule `Join` follows).
+(range, zone, a struct field's type) run when the filter is applied, from the input table's
+Arrow schema, so validation never derives a zero-row table (the rule `Join` follows). So
+`filter(x=300)` on an `int8` column passes the graph build and is refused
+(`InputValidationError`) when the filter first meets its input: in a job, when the job runs
+it; outside a job, when the stream is read. The two places refuse the same conditions.
 
 ### 2.3 Nulls: SQL three-valued logic (Kleene)
 
@@ -439,8 +443,11 @@ needs a new data context version.
   that caches (`LOG` or `REPLAY`) over a restricted source is refused
   (`refuse_restricted_operator_cache`); with `CacheMode.OFF` it runs.
 - **Checked when built (F07)**: a `Condition` is checked and given its canonical form when it
-  is built, and the operator's schema checks run at graph build; nothing a `Filter` accepts
-  outside a job is refused when a job records it. (F07's other part, that a stream built
+  is built, and the operator's Python-type checks run at graph build; nothing a `Filter`
+  accepts outside a job is refused when a job records it. The Arrow-level checks (2.2:
+  range, zone, struct field types) run when the filter is applied, in a job and outside
+  one alike, so a value its column cannot hold is refused at that point, never later
+  inside a job only. (F07's other part, that a stream built
   before a job gets nodes named `<label>:<hash>` and its source is not listed in
   `job.nodes`, is a job-capture gap outside `Filter`'s scope, for its own issue.)
 - **`RestrictedAggregationWarning` (F12)**: a `where`-restricted source feeding `GroupBy`,
@@ -478,9 +485,14 @@ needs a new data context version.
   *Cost of version 1 without pushdown*: a `filter` over a SpiralDB source reads the whole
   table into memory, then filters. Time and memory grow with the table, not with the
   result; a table above the source's `max_rows` cannot be filtered at all. The workaround,
-  `where` on the source plus the same `filter` in the pipeline, is correct but makes the
-  source restricted, with its rules (`RestrictedAggregationWarning`, no caching operator node
-  over it).
+  `where` on the source plus the same `filter` in the pipeline, is correct only when the
+  restriction keeps every row the filter would keep (a superset): equalities on integer,
+  string, bytes, bool, date and timestamp columns, on a source without a `limit`. It is not
+  for a float value that is a NaN or a signed zero (under the table system's IEEE equality
+  `where(x=float("nan"))` keeps no NaN row, which the filter alone keeps), nor with a
+  `limit` (the restriction then chooses which rows are read). It makes the source
+  restricted, with its rules (`RestrictedAggregationWarning`, no caching operator node over
+  it).
 
   *The smallest safe pushdown* rests on one invariant: **the source may return more rows
   than match, never fewer, and the `Filter` always evaluates its whole condition on what is
@@ -493,7 +505,11 @@ needs a new data context version.
     bool, date and timestamp columns; never a float column (NaN, signed zero), a struct
     field, or a logical type;
   - only when the source has no `limit` (a limit after a pushed condition chooses other
-    rows), and never into a `CachedSource` or a source over another.
+    rows), and never into a `CachedSource` or a source over another;
+  - at most one equality per column, and never one for a column that has two equalities
+    in the condition (a contradiction is kept, ITL-1374) or that the source already
+    restricts to another value: such a column is not pushed. Pushdown never raises for a
+    valid filter; the `Filter` keeps its whole condition, so the rows are a full read's.
   `is_in` and comparisons follow when SpiralDB's scan takes them (piece E). Record ids are
   unchanged by a restriction (a positional id is never renumbered), so the rows read carry
   the ids a full read gives them.
