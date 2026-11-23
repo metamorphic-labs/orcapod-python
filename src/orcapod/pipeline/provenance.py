@@ -137,7 +137,8 @@ def _folding(node: Any) -> Any:
     from orcapod.core.operators.group_by import GroupBy
 
     producer = getattr(node, "producer", None)
-    return producer if isinstance(producer, (GroupBy, Batch)) else None
+    # Exact types: a subclass may fold otherwise (``fold`` then reports it unread).
+    return producer if type(producer) in (GroupBy, Batch) else None
 
 
 def _library_class(obj: Any) -> bool:
@@ -184,7 +185,7 @@ def _merge_slot(node: Any, index: int) -> int | None:
     """
     from orcapod.core.operators.merge_join import MergeJoin
 
-    if isinstance(getattr(node, "producer", None), MergeJoin):
+    if type(getattr(node, "producer", None)) is MergeJoin:
         return index
     return None
 
@@ -299,13 +300,17 @@ def _pairs(row: Mapping[str, Any], columns: Sequence[str]) -> set[tuple[Any, Any
 
 
 def _positional_pairs(
-    row: Row, node: Any, index: int, source_node: Any
+    row: Row, node: Any, index: int, source_node: Any, reader: _Reader
 ) -> set[tuple[Any, Any]]:
     """The ``(source id, record id)`` a row of ``node`` holds for its input ``index``,
     a source node: read in the system-tag columns at that input's position (never by
     source id, which two inputs can share)."""
     mapping = _column_map(
-        _system_tags(row), node, index, _declared_system_tags(source_node)
+        _system_tags(row),
+        node,
+        index,
+        _declared_system_tags(source_node),
+        _slot(row, node, index, reader),
     )
     return _pairs(row, list(mapping))
 
@@ -335,7 +340,7 @@ def _positions(node: Any) -> list[int]:
     from orcapod.core.operators.merge_join import MergeJoin
 
     upstreams = list(node.upstreams)
-    if isinstance(getattr(node, "producer", None), MergeJoin):
+    if type(getattr(node, "producer", None)) is MergeJoin:
         return list(range(len(upstreams)))
     hexes = [u.pipeline_hash().to_hex() for u in upstreams]
     ranked = sorted(range(len(hexes)), key=lambda i: hexes[i])
@@ -346,18 +351,33 @@ def _positions(node: Any) -> list[int]:
 
 
 def _column_map(
-    out_columns: Sequence[str], node: Any, index: int, up_columns: Sequence[str]
+    out_columns: Sequence[str],
+    node: Any,
+    index: int,
+    up_columns: Sequence[str],
+    position: str | frozenset[str] | None = None,
 ) -> dict[str, str]:
     """Map the output's system-tag columns to those of input ``index`` they come from.
 
     A column passes unchanged, or gains one extension naming that input by its pipeline
     hash: ``::<hash>:<position>`` (a join: the position must be that input's own) or
     ``::<hash>`` (a fold).
+
+    Args:
+        out_columns: The output's system-tag columns.
+        node: The node.
+        index: The input.
+        up_columns: The input's system-tag columns.
+        position: The input's position in the names: one (``_slot`` resolved it for a
+            row), or a set (any of tied inputs' positions, for a mapping of names
+            only); by default the input's canonical position.
     """
     sep = constants.BLOCK_SEPARATOR
     upstream = node.upstreams[index]
     digest = upstream.pipeline_hash().to_hex()
-    position = str(_positions(node)[index]) if len(node.upstreams) > 1 else None
+    if position is None:
+        position = str(_positions(node)[index]) if len(node.upstreams) > 1 else None
+    allowed = {position} if isinstance(position, str) else position
     mapping: dict[str, str] = {}
     for out in out_columns:
         for up in up_columns:
@@ -372,7 +392,7 @@ def _column_map(
             hash_part, colon, at = extension.partition(constants.FIELD_SEPARATOR)
             if not digest.startswith(hash_part):
                 continue
-            if colon and at != position:
+            if colon and (allowed is None or at not in allowed):
                 continue
             mapping[out] = up
             break
@@ -383,8 +403,96 @@ _Lookups = dict[Any, Any]
 """Indexes built once per call: column maps, and rows by their system-tag values."""
 
 
+def _tied(node: Any, index: int) -> list[int]:
+    """The inputs of a commutative join with the pipeline hash of input ``index``
+    (itself included): their slots in the system-tag names are canonical, decided by
+    the values they hold, not by argument order."""
+    from orcapod.core.operators import Join
+
+    if type(getattr(node, "producer", None)) is not Join or len(node.upstreams) < 2:
+        return [index]
+    hexes = [u.pipeline_hash().to_hex() for u in node.upstreams]
+    return [j for j, h in enumerate(hexes) if h == hexes[index]]
+
+
+def _tied_positions(node: Any, index: int) -> frozenset[str] | None:
+    """The positions tied inputs share (any of them), or ``None`` when not tied."""
+    tied = _tied(node, index)
+    if len(tied) < 2:
+        return None
+    positions = _positions(node)
+    return frozenset(str(positions[j]) for j in tied)
+
+
+def _fits(node: Any, index: int, row: Row, position: str, reader: Any) -> bool:
+    """Whether the system tags of ``row`` at ``position`` can be input ``index``'s: a
+    held row of that input has those values, or, for a source, they name a record of
+    it (its held snapshot, or else its stored ids)."""
+    upstream = node.upstreams[index]
+    if _kind(upstream) == "source":
+        mapping = _column_map(
+            _system_tags(row), node, index, _declared_system_tags(upstream), position
+        )
+        pairs = _pairs(row, list(mapping))
+        if not pairs:
+            return False
+        snapshot = reader.held(upstream)
+        if snapshot is not None:
+            held = {p for r in snapshot for p in _pairs(r, _system_tags(r))}
+            return pairs <= held
+        ids = _static_source_ids(upstream)
+        return all(sid in ids for sid, _ in pairs)
+    up_rows = reader.held(upstream)
+    if not up_rows:
+        return False
+    mapping = _column_map(
+        _system_tags(row), node, index, _system_tags(up_rows[0]), position
+    )
+    if not mapping:
+        return False
+    return any(all(r[u] == row[o] for o, u in mapping.items()) for r in up_rows)
+
+
+def _slot(row: Row, node: Any, index: int, reader: Any) -> str | None:
+    """The position of input ``index`` in the system-tag names of ``row``.
+
+    The canonical position, except for inputs of a commutative ``Join`` with tied
+    pipeline hashes: their slots hold the tied inputs in an order decided by values
+    (source and record ids), so each input's slot is the one whose values only it
+    can have. A tie no values decide is refused.
+
+    Raises:
+        ProvenanceInconsistencyError: If tied inputs cannot be told apart.
+    """
+    import itertools
+
+    tied = _tied(node, index)
+    if len(tied) < 2:
+        return None
+    key = ("slot", id(node), id(row), index)
+    if key in reader.lookups:
+        return reader.lookups[key]
+    positions = _positions(node)
+    slots = sorted(str(positions[j]) for j in tied)
+    fits = {j: {p for p in slots if _fits(node, j, row, p, reader)} for j in tied}
+    found = [
+        permutation
+        for permutation in itertools.permutations(slots)
+        if all(permutation[k] in fits[j] for k, j in enumerate(tied))
+    ]
+    if len(found) != 1:
+        raise ProvenanceInconsistencyError(
+            f"node {node.label!r}: inputs {sorted(node.upstreams[j].label for j in tied)} "
+            f"have one pipeline hash and {len(found)} ways to hold this row's values; "
+            "the link is ambiguous"
+        )
+    for k, j in enumerate(tied):
+        reader.lookups[("slot", id(node), id(row), j)] = found[0][k]
+    return reader.lookups[key]
+
+
 def _input_rows(
-    row: Row, node: Any, index: int, up_rows: list[Row], lookups: _Lookups
+    row: Row, node: Any, index: int, up_rows: list[Row], reader: _Reader
 ) -> list[Row]:
     """The rows of input ``index`` that ``row`` names by its system tags (row-wise).
 
@@ -393,10 +501,12 @@ def _input_rows(
     """
     if not up_rows:
         return []
+    lookups = reader.lookups
     out_columns, up_columns = tuple(_system_tags(row)), tuple(_system_tags(up_rows[0]))
-    map_key = ("map", id(node), index, out_columns, up_columns)
+    position = _slot(row, node, index, reader)
+    map_key = ("map", id(node), index, out_columns, up_columns, position)
     if map_key not in lookups:
-        lookups[map_key] = _column_map(out_columns, node, index, up_columns)
+        lookups[map_key] = _column_map(out_columns, node, index, up_columns, position)
     mapping: dict[str, str] = lookups[map_key]
     if not mapping:
         return []
@@ -731,8 +841,12 @@ def _input_columns(node: Any, index: int, column: str) -> list[str] | None:
       ``Rejoin``, ``MergeJoin`` (a column of one input) and ``Index`` / ``Pick``
       (a column they do not select from): the same name, from an input that has it;
     - ``SemiJoin``: the same name, from its left input only;
-    - ``MapData``, ``MapColumns`` and ``MapTags`` (a data-tag renamed in both roles):
-      the renamed column's old name; a name renamed away is no longer that column.
+    - ``MapData``, ``MapColumns`` and ``MapTags``: the renames each applies to the
+      input's columns (its own plan, ``_plan_group``: a ``strict=False`` entry that
+      names no column of its role is no rename); a name renamed away is no longer
+      that column.
+
+    Only these exact classes: a subclass may do anything, so its link is unavailable.
 
     Returns:
         The input columns (empty when this input gives none); ``None`` for an operator
@@ -760,44 +874,68 @@ def _input_columns(node: Any, index: int, column: str) -> list[str] | None:
         SemiJoin,
         TagBy,
     )
+    from orcapod.core.operators.mappers import _plan_group  # pyright: ignore[reportPrivateUsage]  # the mappers' own rename plan, ITL-1432
 
-    producer = getattr(node, "producer", None)
-    data = set(_keys(node.upstreams[index])[1])
+    producer: Any = getattr(node, "producer", None)
+    kind = type(producer)
+    tags, data_columns = _keys(node.upstreams[index])
+    data = [c for c in data_columns if not c.startswith(constants.META_PREFIX)]
     same = [column] if column in data else []
-    if isinstance(producer, SemiJoin):
+    if kind is SemiJoin:
         return same if index == 0 else []
-    if isinstance(producer, (MapData, MapColumns)) or (
-        isinstance(producer, MapTags) and not producer.tag_only
-    ):
+    if kind in (MapData, MapColumns, MapTags):
         name_map = cast(dict[str, str], producer.name_map)
-        old = {new: previous for previous, new in name_map.items()}
+        if kind is MapTags:
+            # A tag rename reaches the data only for a data-tag, in both roles.
+            renamed = (
+                {}
+                if producer.tag_only
+                else _plan_group([c for c in tags if c in data], name_map, False)[0]
+            )
+            dropped: list[str] = []
+        else:
+            renamed, dropped = _plan_group(data, name_map, producer.drop_unmapped)
+        old = {new: previous for previous, new in renamed.items()}
         if column in old:
-            return [old[column]] if old[column] in data else []
-        return [] if column in name_map else same
-    if isinstance(
-        producer,
-        (
-            Filter,
-            PolarsFilter,
-            DropNulls,
-            SelectDataColumns,
-            SelectTagColumns,
-            SelectColumns,
-            DropDataColumns,
-            DropTagColumns,
-            DropColumns,
-            AddTags,
-            TagBy,
-            MapTags,
-            Join,
-            Rejoin,
-            MergeJoin,
-            Index,
-            Pick,
-        ),
+            return [old[column]]
+        if column in renamed or column in dropped:
+            return []
+        return same
+    if kind in (
+        Filter,
+        PolarsFilter,
+        DropNulls,
+        SelectDataColumns,
+        SelectTagColumns,
+        SelectColumns,
+        DropDataColumns,
+        DropTagColumns,
+        DropColumns,
+        AddTags,
+        TagBy,
+        Join,
+        Rejoin,
+        MergeJoin,
+        Index,
+        Pick,
     ):
         return same
     return None
+
+
+def _input_order(node: Any) -> list[int]:
+    """The order a trace lists a row-wise node's inputs in: the argument order for an
+    ordered operator (``MergeJoin``); for a commutative one (``Join``, ``Rejoin``) by
+    pipeline hash, then by label, so swapping its arguments changes nothing."""
+    from orcapod.core.operators import Join, Rejoin
+
+    upstreams = list(node.upstreams)
+    if type(getattr(node, "producer", None)) in (Join, Rejoin):
+        return sorted(
+            range(len(upstreams)),
+            key=lambda i: (upstreams[i].pipeline_hash().to_hex(), upstreams[i].label),
+        )
+    return list(range(len(upstreams)))
 
 
 def _merged_key(node: Any, column: str) -> bool:
@@ -805,7 +943,7 @@ def _merged_key(node: Any, column: str) -> bool:
     one merged token, whose value is every input's (as a tag join key)."""
     from orcapod.core.operators import Join, MergeJoin, Rejoin
 
-    if not isinstance(getattr(node, "producer", None), (Join, MergeJoin, Rejoin)):
+    if type(getattr(node, "producer", None)) not in (Join, MergeJoin, Rejoin):
         return False
     sharing = [
         u for u in node.upstreams if column in _keys(u)[0] and column in _keys(u)[1]
@@ -927,10 +1065,15 @@ class _Tracer:
         if not isinstance(token, str):
             return []
         sid, record_id, source_column = _parse_token(token)
-        if (sid, record_id) not in _positional_pairs(row, node, index, upstream):
-            return []
-        if source_column not in set(_keys(upstream)[1]):
-            return []
+        if (sid, record_id) not in _positional_pairs(
+            row, node, index, upstream, self.reader
+        ) or source_column not in set(_keys(upstream)[1]):
+            # The operator maps the cell to this input, yet the token names another
+            # record or column: what the node holds contradicts the mapping.
+            raise ProvenanceInconsistencyError(
+                f"node {node.label!r}: the token {token!r} is not a cell of input "
+                f"{upstream.label!r}, which the operator takes it from"
+            )
         self.edges.add((upstream.label, node.label))
         return [
             self.leaf(upstream, token, value, held=True, member=member, within=within)
@@ -954,7 +1097,8 @@ class _Tracer:
         if _folding(node) is not None:
             return self.fold_step(node, cell, member, tags, operator)
         inputs: list[TraceStep] = []
-        for index, upstream in enumerate(node.upstreams):
+        for index in _input_order(node):
+            upstream = node.upstreams[index]
             inputs.extend(self.input_steps(node, index, upstream, cell))
         if not inputs and cell.whole_token is not None:
             # No input claims the cell: its origin is not known here.
@@ -989,12 +1133,12 @@ class _Tracer:
         from orcapod.core.operators.index import Index
         from orcapod.core.operators.pick import Pick
 
-        producer = getattr(node, "producer", None)
+        producer: Any = getattr(node, "producer", None)
         column = cell.column
-        if isinstance(producer, (Index, Pick)) and column == (
+        if type(producer) in (Index, Pick) and column == (
             producer.out or producer.column
         ):
-            selected = producer.i if isinstance(producer, Index) else producer.key
+            selected = producer.i if type(producer) is Index else producer.key
             return self.from_input(
                 node, index, upstream, cell, producer.column, selected
             )
@@ -1042,7 +1186,7 @@ class _Tracer:
         up_rows = self.reader.held(upstream)
         if up_rows is None:
             return [self.unread(upstream, cell.column, None, "not_computed")]
-        matched = _input_rows(cell.row, node, index, up_rows, self.reader.lookups)
+        matched = _input_rows(cell.row, node, index, up_rows, self.reader)
         good: list[_Cell] = []
         for r in matched:
             whole = r.get(input_column)
@@ -1057,6 +1201,12 @@ class _Tracer:
             except ProvenanceInconsistencyError:
                 continue
         if not good:
+            if matched:
+                raise ProvenanceInconsistencyError(
+                    f"node {node.label!r}: {cell.column!r} is a part of "
+                    f"{input_column!r} of {upstream.label!r}, whose held row holds "
+                    "another value"
+                )
             return []
         chosen = _one(
             [c.row for c in good],
@@ -1095,7 +1245,7 @@ class _Tracer:
             return []
         if _kind(upstream) == "source":
             if key:
-                pairs = _positional_pairs(cell.row, node, index, upstream)
+                pairs = _positional_pairs(cell.row, node, index, upstream, self.reader)
                 if len(pairs) != 1:
                     return []
                 ((sid, record_id),) = pairs
@@ -1121,14 +1271,18 @@ class _Tracer:
             if isinstance(token, str) and _parse_token(token)[2] not in columns:
                 # A source token keeps the source's own column name (a rename does not
                 # change it): it must be the column the operator maps from.
-                return []
+                raise ProvenanceInconsistencyError(
+                    f"node {node.label!r}: the token {token!r} of {cell.column!r} "
+                    f"names another column than {columns!r}, which the operator maps "
+                    "it from"
+                )
             return self.to_source(
                 node, index, cell.row, token, cell.value, path[depth:], slot
             )
         up_rows = self.reader.held(upstream)
         if up_rows is None:
             return [self.unread(upstream, cell.column, None, "not_computed")]
-        matched = _input_rows(cell.row, node, index, up_rows, self.reader.lookups)
+        matched = _input_rows(cell.row, node, index, up_rows, self.reader)
         prefix = constants.SOURCE_PREFIX
         found: list[TraceStep] = []
         for up_column in columns:
@@ -1143,6 +1297,12 @@ class _Tracer:
                 except ProvenanceInconsistencyError:
                     continue
             if not good:
+                if any(up_column in r for r in matched):
+                    raise ProvenanceInconsistencyError(
+                        f"node {node.label!r}: {cell.column!r} comes from "
+                        f"{up_column!r} of {upstream.label!r}, whose held row has "
+                        "another token or value"
+                    )
                 continue
             chosen = _one(
                 [c.row for c in good],
@@ -1218,7 +1378,7 @@ class _Tracer:
                 member,
                 inputs=(self.unread(upstream, column, None, "not_computed"),),
             )
-        matched = _input_rows(row, node, 0, up_rows, self.reader.lookups)
+        matched = _input_rows(row, node, 0, up_rows, self.reader)
         if has_store:
             pairs = [
                 (r, e)
@@ -1523,7 +1683,8 @@ def _emitted_ids(source_node: Any, nodes: Sequence[Any], reader: _Reader) -> set
             continue
         for r in reader.held(consumer) or []:
             ids |= {
-                sid for sid, _ in _positional_pairs(r, consumer, index, source_node)
+                sid
+                for sid, _ in _positional_pairs(r, consumer, index, source_node, reader)
             }
     return ids
 
@@ -1737,12 +1898,12 @@ def _carried(
         if _kind(upstream) == "source":
             pairs = wanted.get(id(upstream), set())
             for r in rows:
-                if _positional_pairs(r, n, index, upstream) & pairs:
+                if _positional_pairs(r, n, index, upstream, reader) & pairs:
                     kept[id(r)] = r
             continue
         up = carried.get(id(upstream)) or []
         for r in rows:
-            if id(r) not in kept and _input_rows(r, n, index, up, reader.lookups):
+            if id(r) not in kept and _input_rows(r, n, index, up, reader):
                 kept[id(r)] = r
     return list(kept.values())
 
@@ -1772,7 +1933,11 @@ def _source_columns(
             up_columns = _source_columns(source_node, upstream, up_names, reader)
         if up_columns is None:
             return None
-        found |= set(_column_map(names, node, index, sorted(up_columns)))
+        found |= set(
+            _column_map(
+                names, node, index, sorted(up_columns), _tied_positions(node, index)
+            )
+        )
     return found
 
 

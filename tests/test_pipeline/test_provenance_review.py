@@ -523,7 +523,8 @@ def test_no_user_code_runs(monkeypatch: pytest.MonkeyPatch) -> None:
     calls.clear()
     node = job.nodes["SelectDataColumns"]
     trace = node.trace({"k": "a", "g": "1"}, "x")
-    assert [c.value for c in trace.source_cells()] == [1]
+    # A subclass of a known operator may do anything: its link is not traced.
+    assert trace.status == "unavailable" and trace.source_cells() == ()
     answer = node.why_missing("spied", "row_1")
     assert calls == []
     # A user-defined source is not read, so the step after it is not blamed.
@@ -1089,3 +1090,151 @@ def test_a_shared_data_tag_at_merge_join_traces_to_both_inputs(a_first: bool) ->
         ("a", "row_0", "x"),
         ("b", "row_0", "x"),
     ]
+
+
+# ---------------------------------------------------------------------------
+# Eighth review (head 6502920c)
+# ---------------------------------------------------------------------------
+
+
+def _xy_source(source_id: str = "a") -> DictSource:
+    return DictSource(
+        [{"k": "a", "x": 1, "y": 2}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id=source_id,
+    )
+
+
+@pytest.mark.parametrize(
+    "mapper",
+    [
+        lambda: __import__("orcapod.operators", fromlist=["MapTags"]).MapTags(
+            {"x": "y"}, strict=False
+        ),
+        lambda: __import__("orcapod.operators", fromlist=["MapData"]).MapData(
+            {"ghost": "y"}, strict=False
+        ),
+        lambda: __import__("orcapod.operators", fromlist=["MapColumns"]).MapColumns(
+            {"ghost": "y"}, strict=False
+        ),
+    ],
+    ids=["MapTags", "MapData", "MapColumns"],
+)
+def test_a_non_strict_rename_that_applies_to_nothing_is_no_rename(mapper: Any) -> None:
+    """A strict=False entry naming no column of its role is ignored by the mapper:
+    x and y pass unchanged, and trace to x and y."""
+    job = PipelineJob(name="nonstrict", database=InMemoryArrowDatabase())
+    with job:
+        mapper()(_xy_source())
+    job.run()
+    (label,) = [k for k in job.nodes if k.startswith("Map")]
+    for column, value in (("x", 1), ("y", 2)):
+        trace = job.nodes[label].trace({"k": "a"}, column)
+        assert [(c.column, c.value) for c in trace.source_cells()] == [(column, value)]
+
+
+def test_a_subclass_of_a_known_operator_is_not_traced() -> None:
+    from orcapod.operators import Pick
+
+    class OwnSelect(SelectDataColumns):
+        pass
+
+    class OwnPick(Pick):
+        pass
+
+    schema = {"k": str, "x": dict[str, int], "y": int}
+    source = DictSource(
+        [{"k": "a", "x": {"a": 7}, "y": 0}],
+        data_schema=schema,
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="a",
+    )
+    job = PipelineJob(name="subclasses", database=InMemoryArrowDatabase())
+    with job:
+        OwnSelect(["y"])(source)
+        OwnPick("x", "a", out="picked")(source)
+    job.run()
+    assert job.nodes["OwnSelect"].trace({"k": "a"}, "y").status == "unavailable"
+    assert job.nodes["OwnPick"].trace({"k": "a"}, "picked").status == "unavailable"
+
+
+def test_a_held_token_that_contradicts_the_mapping_raises() -> None:
+    """A select maps x to x; a held row whose x token names y is refused."""
+    source = table_source(rows_kgxy(("a", "1", 1, 1)), TWO_BY_TWO, ["k", "g"], "s")
+    job = PipelineJob(name="contradict", database=InMemoryArrowDatabase())
+    with job:
+        SelectDataColumns(["x"])(source)
+    job.run()
+    node = job.nodes["SelectDataColumns"]
+    table = node.as_table(columns={"system_tags": True, "source": True})
+    changed = table.set_column(
+        table.schema.get_field_index("_source_x"),
+        "_source_x",
+        pa.array(["s::row_0::y"], pa.large_string()),
+    )
+    vars(node)["_cached_output_stream"] = ArrowTableStream(
+        changed, tag_columns=["k", "g"]
+    )
+    with pytest.raises(ProvenanceInconsistencyError, match="another column"):
+        node.trace({"k": "a", "g": "1"}, "x")
+
+
+_TIED_JOIN = """
+import warnings
+warnings.filterwarnings("ignore")
+from orcapod import PipelineJob
+from orcapod.databases import InMemoryArrowDatabase
+from orcapod.operators import Join
+from orcapod.sources import DictSource
+a = DictSource([{"k": "none", "i": 0}, {"k": "shared", "i": 1}], tag_columns=["k", "i"], source_id="a")
+b = DictSource([{"k": "shared", "i": 1}], tag_columns=["k", "i"], source_id="b")
+job = PipelineJob(name="tied", database=InMemoryArrowDatabase())
+with job:
+    Join()(b, a) if REVERSED else Join()(a, b)
+job.run()
+node = job.nodes["Join"]
+trace = node.trace({"k": "shared", "i": 1}, "k")
+print(sorted((c.source_id, c.record_id) for c in trace.source_cells()))
+print(node.why_missing("a", "row_0").missing, node.why_missing("a", "row_1").missing)
+print(trace.text())
+"""
+
+
+@pytest.mark.parametrize("reversed_args", [False, True])
+def test_tied_join_inputs_are_resolved_by_value(reversed_args: bool) -> None:
+    """Two sources of one schema (one pipeline hash) at a commutative Join: the held
+    slots are canonical by value, not by argument order; each is resolved by the
+    values it holds, in both argument orders and whatever the process's hash seed."""
+    import os
+    import subprocess
+    import sys
+
+    outputs = set()
+    for seed in ("1", "2", "7"):
+        result = subprocess.run(
+            [sys.executable, "-c", _TIED_JOIN.replace("REVERSED", str(reversed_args))],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PYTHONHASHSEED": seed},
+            check=True,
+        )
+        cells, missing, _ = result.stdout.split("\n", 2)
+        assert cells == "[('a', 'row_1'), ('b', 'row_0')]"
+        assert missing == "True False"
+        outputs.add(result.stdout)
+    assert len(outputs) == 1  # the same answer and text for every seed
+
+
+def test_a_commutative_join_lists_its_inputs_in_one_order() -> None:
+    a = DictSource([{"k": "x", "p": 1}], tag_columns=["k"], source_id="a")
+    b = DictSource([{"k": "x", "q": 2}], tag_columns=["k"], source_id="b")
+    texts = []
+    for swap in (False, True):
+        job = PipelineJob(name=f"order{swap}", database=InMemoryArrowDatabase())
+        with job:
+            Join()(b, a) if swap else Join()(a, b)
+        job.run()
+        texts.append(job.nodes["Join"].trace({"k": "x"}, "k").text())
+    assert texts[0] == texts[1]
