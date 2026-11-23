@@ -623,3 +623,162 @@ def test_tracing_many_members_scales_linearly() -> None:
     small, large = _batch_trace_seconds(200), _batch_trace_seconds(800)
     # Linear work grows about 4x; scanning per member grows about 16x.
     assert large / small < 8
+
+
+# ---------------------------------------------------------------------------
+# Third review (head bf2e471f)
+# ---------------------------------------------------------------------------
+
+
+class _Armed(DictSource):
+    """A source whose own methods raise once armed: after the run, provenance must not
+    call them (``output_schema``, ``keys``, the ``source_id`` property)."""
+
+    armed = False
+
+    def output_schema(self, *args: Any, **kwargs: Any) -> Any:
+        if self.armed:
+            raise RuntimeError("user output_schema")
+        return super().output_schema(*args, **kwargs)
+
+    def keys(self, *args: Any, **kwargs: Any) -> Any:
+        if self.armed:
+            raise RuntimeError("user keys")
+        return super().keys(*args, **kwargs)
+
+    @property
+    def source_id(self) -> str:
+        if self.armed:
+            raise RuntimeError("user source_id")
+        return super().source_id
+
+
+def test_no_source_method_runs_after_the_run() -> None:
+    source = _Armed(
+        [{"k": "x", "i": 0, "x": 1, "y": 2}, {"k": "x", "i": 1, "x": 4, "y": 5}],
+        tag_columns=["k", "i"],
+        tag_only_columns=True,
+        source_id="s",
+    )
+    job = PipelineJob(name="armed", database=InMemoryArrowDatabase())
+    with job:
+        selected = SelectDataColumns(["x"])(source)
+        totals.pod(GroupBy(["k"])(selected), label="totals")
+    job.run()
+    source.armed = True
+    node = job.nodes["SelectDataColumns"]
+    trace = node.trace({"k": "x", "i": 0}, "x")
+    assert [(c.source_id, c.record_id, c.value) for c in trace.source_cells()] == [
+        ("s", "row_0", 1)
+    ]
+    assert not node.why_missing("s", "row_0").missing
+    total = job.nodes["totals"].trace({"k": "x"}, "total")
+    assert [c.value for c in total.source_cells()] == [1, 4]
+    assert not job.nodes["totals"].why_missing("s", "row_1").missing
+
+
+@pytest.mark.parametrize("cache_first", [True, False])
+def test_two_inputs_carrying_one_id_are_told_apart_by_position(
+    cache_first: bool,
+) -> None:
+    """A cache labelled with the id of another real source keeps the ids of the source
+    it wraps; at a MergeJoin of the two, each input is read at its own position."""
+    inner = DictSource(
+        [{"k": "x", "i": 0, "x": 1, "y": 2}],
+        tag_columns=["k", "i"],
+        tag_only_columns=True,
+        source_id="s",
+    )
+    cache = CachedSource(
+        inner, cache_database=InMemoryArrowDatabase(), source_id="other", label="cache"
+    )
+    other = DictSource(
+        [{"k": "x", "i": 0, "x": 101, "y": 0}, {"k": "x", "i": 0, "x": 102, "y": 0}],
+        tag_columns=["k", "i"],
+        tag_only_columns=True,
+        source_id="other",
+        label="plain",
+    )
+    job = PipelineJob(name="collide", database=InMemoryArrowDatabase())
+    with job:
+        MergeJoin()(cache, other) if cache_first else MergeJoin()(other, cache)
+    job.run()
+    node = job.nodes["MergeJoin"]
+    value = [1, 101] if cache_first else [101, 1]
+    trace = node.trace({"x": value}, "x")
+    leaves = sorted((c.source_id, c.record_id, c.value) for c in trace.source_cells())
+    assert leaves == [("other", "row_0", 101), ("s", "row_0", 1)]
+    assert node.why_missing("s", "row_1").missing  # only the other source has row_1
+    assert not node.why_missing("other", "row_1").missing
+    assert not node.why_missing("s", "row_0").missing
+
+
+def test_date_versions_of_one_record_are_both_source_cells(tmp_path: Path) -> None:
+    from datetime import date
+
+    cache = DeltaTableDatabase(tmp_path / "cache")
+    first = DictSource(
+        [{"k": "a", "g": "1", "d": date(2025, 1, 1), "y": 0}],
+        tag_columns=["k", "g"],
+        tag_only_columns=True,
+        source_id="v",
+    )
+    CachedSource(
+        first, cache_database=cache, cache_path=("shared",), source_id="v"
+    ).as_table()
+    second = DictSource(
+        [{"k": "a", "g": "1", "d": date(2025, 1, 2), "y": 0}],
+        tag_columns=["k", "g"],
+        tag_only_columns=True,
+        source_id="v",
+    )
+    cached = CachedSource(
+        second, cache_database=cache, cache_path=("shared",), source_id="v"
+    )
+    job = PipelineJob(name="dates", database=InMemoryArrowDatabase())
+    with job:
+        GroupBy(["g"])(SelectDataColumns(["d"])(cached))
+    job.run()
+    trace = job.nodes["GroupBy"].trace({"g": "1"}, "d")
+    assert sorted(c.value for c in trace.source_cells()) == [
+        date(2025, 1, 1),
+        date(2025, 1, 2),
+    ]
+
+
+def test_a_source_output_schema_is_not_called_through_a_schema_prediction() -> None:
+    """Only ``output_schema`` armed: a node's columns come from what it holds, not
+    from a schema prediction that re-enters the bound source."""
+
+    class SchemaOnly(DictSource):
+        armed = False
+
+        def output_schema(self, *args: Any, **kwargs: Any) -> Any:
+            if self.armed:
+                raise RuntimeError("user output_schema")
+            return super().output_schema(*args, **kwargs)
+
+    source = SchemaOnly(
+        [{"k": "x", "i": 0, "x": 1, "y": 2}],
+        tag_columns=["k", "i"],
+        tag_only_columns=True,
+        source_id="s",
+    )
+    job = PipelineJob(name="schema", database=InMemoryArrowDatabase())
+    with job:
+        SelectDataColumns(["x"])(source)
+    job.run()
+    source.armed = True
+    trace = job.nodes["SelectDataColumns"].trace({"k": "x", "i": 0}, "x")
+    assert [c.value for c in trace.source_cells()] == [1]
+
+
+def test_a_source_root_without_the_record_says_so() -> None:
+    source = table_source(rows_kgxy(("a", "1", 1, 0)), TWO_BY_TWO, ["k", "g"], "src")
+    job = PipelineJob(name="root", database=InMemoryArrowDatabase())
+    with job:
+        SelectDataColumns(["x"])(source)
+    job.run()
+    answer = job.nodes["src"].why_missing("src", "row_9")
+    assert answer.missing and answer.status == "read"
+    assert answer.because == "source 'src' holds no record 'row_9'"

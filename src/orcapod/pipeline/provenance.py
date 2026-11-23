@@ -141,13 +141,6 @@ def _folding(node: Any) -> Any:
     return producer if isinstance(producer, (GroupBy, Batch)) else None
 
 
-def _source_id(node: Any) -> str:
-    """The id a source node's tokens and system tags carry."""
-    bound = getattr(node, "bound_source", None)
-    found = getattr(bound, "source_id", None)
-    return found if isinstance(found, str) else node.label
-
-
 def _library_class(obj: Any) -> bool:
     """Whether ``obj`` is an instance of an Orcapod class itself, not of a subclass
     defined elsewhere: only such an object's methods are called (no user code)."""
@@ -155,33 +148,41 @@ def _library_class(obj: Any) -> bool:
 
 
 def _keys(node: Any) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """A node's tag and data column names, without calling a source.
+    """A node's tag and data column names, from what it declares or holds.
 
-    A job's source node answers from the schema it declares (``SourceNodeBase``),
-    never from its bound source, whose ``output_schema`` may be user code.
+    Never a schema prediction, which can reach a bound source's own ``output_schema``
+    (user code): a source node answers from the schema it declares
+    (``SourceNodeBase``); an operator node from the ``ArrowTableStream`` its run holds;
+    a function node from the tag and data rows its run holds. A node that holds none
+    has no columns here.
     """
-    if _kind(node) == "source":
+    from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+
+    kind = _kind(node)
+    if kind == "source":
         from orcapod.core.nodes.source_node import SourceNodeBase
 
         tags, data = SourceNodeBase.output_schema(node)
         return tuple(tags), tuple(data)
-    tags, data = node.keys()
+    if kind == "function":
+        pair = next(iter(node._held_pairs()), None)  # pyright: ignore[reportPrivateUsage]  # the rows the node's run holds
+        if pair is None:
+            return (), ()
+        tag, data = pair
+        return tuple(tag.keys()), tuple(data.keys())
+    stream = vars(node).get("_cached_output_stream")
+    if type(stream) is not ArrowTableStream:
+        return (), ()
+    tags, data = stream.keys()
     return tuple(tags), tuple(data)
 
 
-def _source_ids_of(node: Any) -> set[str]:
-    """The ids a source node's rows can carry: its own, and that of the source a
-    ``CachedSource`` wraps (which keeps the wrapped source's tokens and system tags)."""
-    from orcapod.core.sources.cached_source import CachedSource
+def _declared_system_tags(node: Any) -> list[str]:
+    """A source node's system-tag columns, from the schema it declares."""
+    from orcapod.core.nodes.source_node import SourceNodeBase
 
-    ids = {_source_id(node)}
-    bound = getattr(node, "bound_source", None)
-    while type(bound) is CachedSource:
-        bound = vars(bound).get("_source")
-        found = getattr(bound, "source_id", None) if _library_class(bound) else None
-        if isinstance(found, str):
-            ids.add(found)
-    return ids
+    tags, _ = SourceNodeBase.output_schema(node, columns={"system_tags": True})
+    return sorted(c for c in tags if c.startswith(constants.SYSTEM_TAG_PREFIX))
 
 
 def _source_snapshot(node: Any) -> pa.Table | None:
@@ -258,13 +259,26 @@ def _record_ids(row: Mapping[str, Any], source: str | set[str]) -> set[Any]:
     }
 
 
-def _names_source(row: Mapping[str, Any], sources: set[str]) -> bool:
-    """Whether a row's source-id system tags name one of ``sources`` (not a fold)."""
-    return any(
-        row[c] in sources
-        for c in row
-        if c.startswith(constants.SYSTEM_TAG_SOURCE_ID_PREFIX)
+def _pairs(row: Mapping[str, Any], columns: Sequence[str]) -> set[tuple[Any, Any]]:
+    """The ``(source id, record id)`` pairs a row holds in the given system-tag
+    columns, each record-id column with the source-id column of the same name."""
+    return {
+        (row.get(_source_id_column(c)), row[c])
+        for c in columns
+        if c.startswith(constants.SYSTEM_TAG_RECORD_ID_PREFIX) and c in row
+    }
+
+
+def _positional_pairs(
+    row: Row, node: Any, index: int, source_node: Any
+) -> set[tuple[Any, Any]]:
+    """The ``(source id, record id)`` a row of ``node`` holds for its input ``index``,
+    a source node: read in the system-tag columns at that input's position (never by
+    source id, which two inputs can share)."""
+    mapping = _column_map(
+        _system_tags(row), node, index, _declared_system_tags(source_node)
     )
+    return _pairs(row, list(mapping))
 
 
 def _hash_text(value: Any) -> str | None:
@@ -697,7 +711,7 @@ class _Tracer:
         """The leaves of a cell for its input ``index``, a source node: the cell's
         tokens that name that source, each checked against the row's system tags."""
         upstream = node.upstreams[index]
-        source_ids = _source_ids_of(upstream)
+        mine = _positional_pairs(cell.row, node, index, upstream)
         token, value = cell.token, cell.value
         pairs: list[tuple[str, Any, int | None]] = []
         if isinstance(token, list):
@@ -717,13 +731,8 @@ class _Tracer:
         out: list[TraceStep] = []
         for t, v, k in pairs:
             sid, record_id, _ = _parse_token(t)
-            if sid not in source_ids:
+            if (sid, record_id) not in mine:
                 continue
-            if record_id not in _record_ids(cell.row, sid):
-                raise ProvenanceInconsistencyError(
-                    f"node {node.label!r}: the token {t!r} names a record the row's "
-                    "system tags do not"
-                )
             self.edges.add((upstream.label, node.label))
             out.append(self.leaf(upstream, t, v, held=True, member=k))
         return out
@@ -757,6 +766,9 @@ class _Tracer:
             for up_cell, link_member in self.links(node, upstream, cell, matched):
                 self.edges.add((upstream.label, node.label))
                 inputs.append(self.step(upstream, up_cell, link_member))
+        if not inputs and cell.token is not None:
+            # No input claims the cell's token: its origin is not known here.
+            inputs.append(self.unread(node, cell.column, None, "unavailable"))
         return TraceStep(
             node.label,
             kind,
@@ -1130,13 +1142,13 @@ def trace(node: Any, row: Mapping[str, Any], column: str) -> Trace:
         ProvenanceInconsistencyError: If a link cannot be proven from what the job
             holds and stores, or is ambiguous.
     """
-    if column not in _keys(node)[1]:
-        raise ValueError(f"{column!r} is not a data column of node {node.label!r}")
     tracer = _Tracer()
     rows = tracer.reader.held(node)
     if rows is None:
         status = "unavailable" if _kind(node) == "source" else "not_computed"
         return Trace(root=tracer.unread(node, column, None, status))
+    if column not in _keys(node)[1]:
+        raise ValueError(f"{column!r} is not a data column of node {node.label!r}")
     root = tracer.step(node, _Cell(_select_row(node, rows, row), column))
     return Trace(root=root, edges=tuple(sorted(tracer.edges)))
 
@@ -1158,10 +1170,40 @@ def _ancestry(node: Any) -> dict[int, Any]:
     return found
 
 
-def _source_ids(node: Any) -> list[str]:
-    return sorted(
-        {_source_id(n) for n in _ancestry(node).values() if _kind(n) == "source"}
-    )
+def _source_labels(node: Any) -> list[str]:
+    """The labels of the source nodes ``node`` reads, sorted."""
+    return sorted({n.label for n in _ancestry(node).values() if _kind(n) == "source"})
+
+
+def _consumers(source_node: Any, nodes: Sequence[Any]) -> list[tuple[Any, int]]:
+    """The nodes of ``nodes`` reading ``source_node`` directly, with its input index."""
+    return [
+        (n, i)
+        for n in nodes
+        for i, u in enumerate(getattr(n, "upstreams", ()))
+        if u is source_node
+    ]
+
+
+def _emitted_ids(source_node: Any, nodes: Sequence[Any], reader: _Reader) -> set[Any]:
+    """The source ids a source node's rows carry, read from held rows only: its
+    snapshot, and its direct consumers' rows at its input position. A cache keeps the
+    ids of the source it wraps."""
+    ids: set[Any] = set()
+    snapshot = reader.held(source_node)
+    if snapshot is not None:
+        for r in snapshot:
+            ids |= {sid for sid, _ in _pairs(r, _system_tags(r))}
+    for consumer, index in _consumers(source_node, nodes):
+        if _folding(consumer) is not None:
+            continue  # its rows hold folds, not ids
+        if _kind(consumer) != "source" and consumer.is_stale:
+            continue
+        for r in reader.held(consumer) or []:
+            ids |= {
+                sid for sid, _ in _positional_pairs(r, consumer, index, source_node)
+            }
+    return ids
 
 
 def _topological(nodes: list[Any]) -> list[Any]:
@@ -1192,9 +1234,14 @@ class _NotHeld(Exception):
 def why_missing(node: Any, source: str, record_id: str) -> Absence:
     """Say whether rows of one source record reach a job node, and if not, why.
 
+    A source is named by the id its rows carry (as in source-info tokens and the
+    source-id system tag), or by its source node's label. Rows are matched to a source
+    by the system tags at that source's input position, never by id alone: two inputs
+    can carry one id (a cache keeps the id of the source it wraps).
+
     Args:
         node: A job node.
-        source: The source id (as in source-info tokens and the source-id system tag).
+        source: The source id, or the source node's label.
         record_id: The record id (``row_<n>``, or the key columns as JSON).
 
     Returns:
@@ -1205,26 +1252,47 @@ def why_missing(node: Any, source: str, record_id: str) -> Absence:
         ProvenanceInconsistencyError: If a group's members cannot be proven.
     """
     ancestry = _ancestry(node)
-    # A source is named by its own id, or by the id of the source a cache wraps.
-    sources = [
-        n
-        for n in ancestry.values()
-        if _kind(n) == "source" and source in _source_ids_of(n)
-    ]
+    reader = _Reader()
+    if _kind(node) == "source" and reader.held(node) is None:
+        # A source node whose rows are not held: nothing here says which records,
+        # or which ids, it holds.
+        return Absence(
+            node.label,
+            source,
+            record_id,
+            True,
+            "unavailable",
+            None,
+            None,
+            (),
+            None,
+            f"source {node.label!r} is not read here, so whether it holds the record "
+            "is not known",
+            (node.label,),
+        )
+    all_nodes = list(ancestry.values())
+    wanted: dict[int, set[tuple[Any, Any]]] = {}
+    sources: list[Any] = []
+    for n in all_nodes:
+        if _kind(n) != "source":
+            continue
+        emitted = _emitted_ids(n, all_nodes, reader)
+        if n.label == source or source in emitted:
+            ids = {source} | (emitted if n.label == source else set())
+            wanted[id(n)] = {(sid, record_id) for sid in ids}
+            sources.append(n)
     if not sources:
         raise ValueError(f"no source with id {source!r} feeds node {node.label!r}")
-    ids: set[str] = set().union(*(_source_ids_of(n) for n in sources))
     path = _topological(
-        [n for n in ancestry.values() if any(id(s) in _ancestry(n) for s in sources)]
+        [n for n in all_nodes if any(id(s) in _ancestry(n) for s in sources)]
     )
     labels = tuple(n.label for n in path)
     on_path = {id(n) for n in path}
-    reader = _Reader()
     # Per node: the held rows from the record; ``None`` for a source not read.
     carried: dict[int, list[Row] | None] = {}
     try:
         for n in path:
-            carried[id(n)] = _carried(n, ids, record_id, reader, carried, on_path)
+            carried[id(n)] = _carried(n, wanted, reader, carried, on_path)
     except _NotHeld as unread:
         because = (
             "a node on the way holds no run"
@@ -1271,7 +1339,7 @@ def why_missing(node: Any, source: str, record_id: str) -> Absence:
     present = tuple(n.label for n in path if holds(n))
     missing = not holds(node)
     function_node = next((n for n in path if _kind(n) == "function"), None)
-    reached = _reached(function_node, ids, record_id, reader, carried)
+    reached = _reached(function_node, sources, wanted, reader, carried)
 
     removed_by: Step | None = None
     because = ""
@@ -1304,18 +1372,22 @@ def why_missing(node: Any, source: str, record_id: str) -> Absence:
 
 def _carried(
     n: Any,
-    source: set[str],
-    record_id: str,
+    wanted: dict[int, set[tuple[Any, Any]]],
     reader: _Reader,
     carried: dict[int, list[Row] | None],
     on_path: set[int],
 ) -> list[Row] | None:
-    """The rows ``n`` holds from the record (``None``: a source not read)."""
+    """The rows ``n`` holds from the record (``None``: a source not read).
+
+    ``wanted`` gives, per matching source node, the ``(source id, record id)`` pairs
+    that name the record.
+    """
     if _kind(n) == "source":
         snapshot = reader.held(n)
         if snapshot is None:
             return None
-        return [r for r in snapshot if record_id in _record_ids(r, source)]
+        pairs = wanted.get(id(n), set())
+        return [r for r in snapshot if _pairs(r, _system_tags(r)) & pairs]
     rows = reader.held(n)
     if rows is None:
         raise _NotHeld
@@ -1323,67 +1395,104 @@ def _carried(
     if _folding(n) is not None:
         upstream = n.upstreams[0]
         assignment = reader.fold(n)
-        up = carried.get(id(upstream))
         if assignment is None:
-            # A fold read straight from a source that offers no snapshot: its members
-            # are not held, and the folded rows cannot name the record.
+            # A fold read straight from a source that offers no snapshot (or with a
+            # user fold rule): its members are not held.
             raise _NotHeld(
-                "unavailable" if _kind(upstream) == "source" else "not_computed"
+                "unavailable"
+                if _kind(upstream) == "source" or not _library_class(_folding(n))
+                else "not_computed"
             )
-        hits = None if up is None else {id(r) for r in up}
+        hits = {id(r) for r in carried.get(id(upstream)) or []}
         for r in rows:
-            members = assignment[id(r)]
-            if any(
-                (record_id in _record_ids(m, source))
-                if hits is None
-                else (id(m) in hits)
-                for m in members
-            ):
+            if any(id(m) in hits for m in assignment[id(r)]):
                 kept[id(r)] = r
         return list(kept.values())
     for index, upstream in enumerate(n.upstreams):
         if id(upstream) not in on_path:
             continue
-        up = carried.get(id(upstream))
-        if up is None or _kind(upstream) == "source":
+        if _kind(upstream) == "source":
+            pairs = wanted.get(id(upstream), set())
             for r in rows:
-                if record_id in _record_ids(r, source):
+                if _positional_pairs(r, n, index, upstream) & pairs:
                     kept[id(r)] = r
             continue
+        up = carried.get(id(upstream)) or []
         for r in rows:
             if id(r) not in kept and _input_rows(r, n, index, up, reader.lookups):
                 kept[id(r)] = r
     return list(kept.values())
 
 
+def _source_columns(
+    source_node: Any, node: Any, names: Sequence[str], reader: _Reader
+) -> set[str] | None:
+    """The system-tag columns of ``node`` (named ``names``) that come from
+    ``source_node``, followed through the column names of the held nodes between.
+
+    Returns:
+        The column names; ``None`` when a node between holds no run.
+    """
+    if node is source_node:
+        return set(_declared_system_tags(source_node))
+    found: set[str] = set()
+    for index, upstream in enumerate(node.upstreams):
+        if id(source_node) not in _ancestry(upstream):
+            continue
+        if upstream is source_node:
+            up_columns: set[str] | None = set(_declared_system_tags(source_node))
+        else:
+            table = reader.table(upstream)
+            if table is None:
+                return None
+            up_names = _system_tags(dict.fromkeys(table.column_names))
+            up_columns = _source_columns(source_node, upstream, up_names, reader)
+        if up_columns is None:
+            return None
+        found |= set(_column_map(names, node, index, sorted(up_columns)))
+    return found
+
+
 def _reached(
     function_node: Any,
-    source: set[str],
-    record_id: str,
+    sources: list[Any],
+    wanted: dict[int, set[tuple[Any, Any]]],
     reader: _Reader,
     carried: dict[int, list[Row] | None],
 ) -> bool | None:
     """The stored answer of the first function node on the way.
 
-    Entries that name the source by its own system tags answer for every run. After a
-    fold they name groups, by folded system tags: an entry for a group that holds the
-    record now proves it reached the function; otherwise the stored answer is
-    unavailable (``None``), never a guess.
+    The entries' system-tag columns that come from each matching source (by position)
+    name its records directly, which answers for every run. After a fold they hold
+    folded values: an entry for a group that holds the record now proves it reached
+    the function; otherwise the stored answer is unavailable (``None``), never a guess.
     """
     if function_node is None or function_node._pipeline_database is None:  # pyright: ignore[reportPrivateUsage]
         return None
     entries, _ = reader.provenance(function_node)
     if not entries:
         return None
-    if any(_names_source(e, source) for e in entries):
-        return any(record_id in _record_ids(e, source) for e in entries)
+    names = _system_tags(entries[0])
+    direct = False
+    for source_node in sources:
+        columns = _source_columns(source_node, function_node, names, reader)
+        if not columns:
+            continue
+        pairs = wanted[id(source_node)]
+        ids = {sid for sid, _ in pairs}
+        named = [_pairs(e, sorted(columns)) for e in entries]
+        if any(sid in ids for found in named for sid, _ in found):
+            direct = True
+            if any(found & pairs for found in named):
+                return True
+    if direct:
+        return False
     up = carried.get(id(function_node.upstreams[0]))
     if not up:
         return None
-    columns = _system_tags(entries[0])
-    keys = {tuple(r.get(c) for c in columns) for r in up}
+    keys = {tuple(r.get(c) for c in names) for r in up}
     return (
-        True if any(tuple(e.get(c) for c in columns) in keys for e in entries) else None
+        True if any(tuple(e.get(c) for c in names) in keys for e in entries) else None
     )
 
 
@@ -1398,6 +1507,8 @@ def _blame(
 ) -> tuple[Step | None, str, set[tuple[str, str]]]:
     """Why the record's rows do not reach ``node``: walk back from ``node`` to the step
     that received a row from the record and passed none on."""
+    if _kind(node) == "source":
+        return None, f"source {node.label!r} holds no record {record_id!r}", set()
     current = node
     while True:
         ups = [u for u in current.upstreams if id(u) in on_path]
@@ -1425,7 +1536,7 @@ def _blame(
         )
         return step, step.text, edges
     others = [
-        ", ".join(_source_ids(u))
+        ", ".join(_source_labels(u))
         for i, u in enumerate(current.upstreams)
         if i != position
     ]
@@ -1478,6 +1589,6 @@ def _blame(
             ):
                 because = (
                     f"no row with {_key_text(key)} in {other.label!r} "
-                    f"(reads {', '.join(_source_ids(other))})"
+                    f"(reads {', '.join(_source_labels(other))})"
                 )
     return step, because, edges

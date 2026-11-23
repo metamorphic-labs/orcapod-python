@@ -40,6 +40,27 @@ def _value_text(value: Any) -> str:
     return f"<{type(value).__name__}>"
 
 
+def _value_key(value: Any) -> Any:
+    """A hashable, typed key for a cell value: two values have one key only when they
+    are one value of one type (a list or a mapping by its items). Used to tell versions
+    of a record apart; never a placeholder (a ``date`` keys by its own value)."""
+    if isinstance(value, list):
+        return ("list", tuple(_value_key(v) for v in cast(list[Any], value)))
+    if isinstance(value, dict):
+        items = cast(dict[Any, Any], value)
+        return (
+            "dict",
+            tuple(sorted(((repr(k), _value_key(v)) for k, v in items.items()))),
+        )
+    if isinstance(value, float) and value != value:
+        return ("builtins", "float", "nan")  # every NaN is one value
+    try:
+        hash(value)
+    except TypeError:
+        return (type(value).__qualname__, repr(value))
+    return (type(value).__module__, type(value).__qualname__, value)
+
+
 def _tags_text(tags: tuple[tuple[str, Any], ...]) -> str:
     return ", ".join(f"{name}={_value_text(value)}" for name, value in tags)
 
@@ -267,10 +288,10 @@ class Trace:
         """Return every source cell the value came from, once each, sorted.
 
         Cells are told apart by where they are (source, record, column) and by their
-        value's text, so two versions of one record are both listed; no value is
-        hashed, so any value (a list, a struct) is fine.
+        value (typed: ``_value_key``), so two versions of one record are both listed;
+        a list or a struct is keyed by its items, so any value is fine.
         """
-        cells: dict[tuple[str, str, str, str, str], SourceCell] = {}
+        cells: dict[tuple[Any, ...], SourceCell] = {}
         for step in self.root.walk():
             cell = step.source
             if cell is not None:
@@ -280,10 +301,11 @@ class Trace:
                     cell.record_id,
                     cell.column,
                     cell.node,
-                    _value_text(cell.value),
+                    _value_key(cell.value),
                 )
                 cells.setdefault(key, cell)
-        return tuple(cells[key] for key in sorted(cells))
+        ordered = sorted(cells, key=lambda k: (k[:4], repr(k[4])))
+        return tuple(cells[key] for key in ordered)
 
     def function_runs(self) -> tuple[tuple[str, FunctionRun], ...]:
         """Return every function step's run, as ``(node label, run)``, in trace order."""
